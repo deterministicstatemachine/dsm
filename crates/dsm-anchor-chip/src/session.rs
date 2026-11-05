@@ -6,26 +6,31 @@
 //! writes the board's own pairing key (derived from the sealed secret) into slot 1, moves the
 //! session there, invalidates slot 0, revokes from slot 1 every command a second birth would use
 //! (counter initialization, pairing-key writes and invalidation, resident-key generation, storage
-//! and erasure, and last the access-configuration write itself), reboots the chip so the revocation
-//! is in force, and verifies it. Each step is checked before it is taken, so a power cut anywhere
-//! leaves a sequence the next boot completes.
+//! and erasure, and last the access-configuration write itself), and reboots the chip so the
+//! revocation is in force. Each step is checked before it is taken, so a power cut anywhere leaves a
+//! sequence the next boot completes. Every boot then proves the cage: the chip must report each
+//! revocation and refuse each command as unauthorized.
 
+use alloc::format;
 use alloc::rc::Rc;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use anchor_core::durable::StoreError;
 use anchor_core::rmem::SlotMemory;
 use anchor_core::tropic::{Tropic, TropicError};
+use anchor_core::try_run::TryStep;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::SpiDevice;
-use rp235x_hal as hal;
 use tropic01::keys::{SH0PRIV_PROD0, SH0PUB_PROD0};
 use tropic01::{
     ActiveSession, EccCurve, EccOrigin, Error as Fault, MCounterIndex, NoSession, StartupReq,
     Tropic01, X25519Dalek,
 };
 use x25519_dalek::{PublicKey, StaticSecret};
+
+use crate::Board;
 
 const COUNTER: MCounterIndex = MCounterIndex::Index0;
 /// The resident Ed25519 key's ECC slot (`σ^chip`).
@@ -39,21 +44,40 @@ pub const RMEM_SLOT_BYTES: usize = 444;
 /// R-memory data slots, numbered from 0 (`tropic01::R_MEM_DATA_SLOT_MAX` is the last).
 pub const RMEM_SLOTS: u16 = tropic01::R_MEM_DATA_SLOT_MAX + 1;
 
-/// The access-configuration lanes: each register carries one bit per pairing slot in each lane.
-const LANES: [u8; 4] = [0, 8, 16, 24];
+/// The lanes of an access-configuration register: one bit per pairing slot in each. Most registers
+/// have four, one for each range of what they guard. `I_CONFIG_WRITE` has two, the functionality
+/// objects' and the configuration objects', and the rest of it means nothing to touch.
+///
+/// Highest first: lane 0 of `I_CONFIG_WRITE` is what permits writing that register at all (it gates
+/// the configuration objects), so it is the last bit the cage clears and the one a resumed cage
+/// reads to see whether it is finished.
+fn lanes_of(register: u16) -> &'static [u8] {
+    if register == I_CONFIG_WRITE {
+        &[8, 0]
+    } else {
+        &[24, 16, 8, 0]
+    }
+}
+/// `CFG_UAP_I_CONFIG_WRITE`.
+const I_CONFIG_WRITE: u16 = 0x040;
+/// `CFG_UAP_PAIRING_KEY_WRITE`.
+const PAIRING_KEY_WRITE: u16 = 0x020;
+/// `CFG_UAP_PAIRING_KEY_INVALIDATE`.
+const PAIRING_KEY_INVALIDATE: u16 = 0x028;
 /// The commands a second birth would use, revoked from the board's own slot. `I_CONFIG_WRITE` is
 /// last, so the slot can no longer loosen its own cage once it is closed.
 const CAGE: [u16; 7] = [
     0x150, // MCOUNTER_INIT
-    0x020, // PAIRING_KEY_WRITE
-    0x028, // PAIRING_KEY_INVALIDATE
+    PAIRING_KEY_WRITE,
+    PAIRING_KEY_INVALIDATE,
     0x130, // ECC_KEY_GENERATE
     0x134, // ECC_KEY_STORE
     0x13C, // ECC_KEY_ERASE
-    0x040, // I_CONFIG_WRITE
+    I_CONFIG_WRITE,
 ];
 
-type ChipFault<SPI, CS> = Fault<
+/// The driver's fault over this SPI device and chip-select.
+pub type ChipFault<SPI, CS> = Fault<
     <SPI as embedded_hal::spi::ErrorType>::Error,
     <CS as embedded_hal::digital::ErrorType>::Error,
 >;
@@ -61,13 +85,15 @@ type ChipFault<SPI, CS> = Fault<
 /// A session start the chip refused, with the chip handed back.
 type StartRefused<SPI, CS> = (Tropic01<SPI, CS, NoSession>, ChipFault<SPI, CS>);
 
-/// A probe of a command the closed birth denies: proven closed only by the chip's refusal. A
-/// command it accepts is an open cage; a transport failure proves nothing and is reported.
+/// A probe of a command the closed birth denies: proven closed only by the chip refusing it as
+/// unauthorized. Any other refusal means the command got past the access check, which is an open
+/// cage, as is a command it accepts; a transport failure proves nothing and is reported.
 fn denied<R, ES, EG>(probe: Result<R, Fault<ES, EG>>) -> Result<(), TropicError> {
     match probe {
         Ok(_accepted) => Err(TropicError::CageOpen),
+        Err(Fault::Unauthorized) => Ok(()),
         Err(e) => match fault(e) {
-            TropicError::Refused => Ok(()),
+            TropicError::Refused => Err(TropicError::CageOpen),
             other => Err(other),
         },
     }
@@ -125,28 +151,28 @@ impl<F: core::fmt::Debug> core::fmt::Debug for OpenRefused<F> {
 }
 
 /// The chip and its one session.
-pub struct ChipSession<SPI: SpiDevice, CS: OutputPin> {
+pub struct ChipSession<SPI: SpiDevice, CS: OutputPin, B: Board> {
     session: Option<Tropic01<SPI, CS, ActiveSession>>,
     /// The board's own pairing secret (derived from the sealed secret).
     pairing: [u8; 32],
     /// The pairing slot the session runs on.
     slot: u8,
-    rosc: hal::rosc::RingOscillator<hal::rosc::Enabled>,
+    board: B,
 }
 
-impl<SPI: SpiDevice, CS: OutputPin> ChipSession<SPI, CS> {
+impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     /// Open the chip on the board's own slot if it holds the board's key, else on the factory
     /// slot (an unborn chip).
     pub fn open(
         chip: Tropic01<SPI, CS, NoSession>,
         pairing: [u8; 32],
-        rosc: hal::rosc::RingOscillator<hal::rosc::Enabled>,
+        board: B,
     ) -> Result<Self, OpenRefused<ChipFault<SPI, CS>>> {
         let mut this = Self {
             session: None,
             pairing,
             slot: OWN_SLOT,
-            rosc,
+            board,
         };
         match this.start(chip, OWN_SLOT) {
             Ok(session) => {
@@ -167,19 +193,13 @@ impl<SPI: SpiDevice, CS: OutputPin> ChipSession<SPI, CS> {
         }
     }
 
-    fn random_byte(&self, _position: usize) -> u8 {
-        (0..8).fold(0u8, |acc, _bit| {
-            (acc << 1) | u8::from(self.rosc.get_random_bit())
-        })
-    }
-
     fn start(
         &self,
         chip: Tropic01<SPI, CS, NoSession>,
         slot: u8,
     ) -> Result<Tropic01<SPI, CS, ActiveSession>, StartRefused<SPI, CS>> {
-        let eh = StaticSecret::from(core::array::from_fn::<u8, 32, _>(|position| {
-            self.random_byte(position)
+        let eh = StaticSecret::from(core::array::from_fn::<u8, 32, _>(|_position| {
+            self.board.random_byte()
         }));
         let (shipub, shipriv) = if slot == FACTORY_SLOT {
             (
@@ -198,6 +218,7 @@ impl<SPI: SpiDevice, CS: OutputPin> ChipSession<SPI, CS> {
         &mut self,
         op: impl FnOnce(&mut Tropic01<SPI, CS, ActiveSession>) -> Result<R, ChipFault<SPI, CS>>,
     ) -> Result<R, ChipFault<SPI, CS>> {
+        self.board.alive();
         match self.session.as_mut() {
             Some(session) => op(session),
             None => Err(Fault::HandshakeFailed),
@@ -216,14 +237,15 @@ impl<SPI: SpiDevice, CS: OutputPin> ChipSession<SPI, CS> {
         };
         if reboot == Reboot::Latch {
             chip.startup_req(StartupReq::Reboot).map_err(fault)?;
-            // ~100 ms per poll at 150 MHz, up to ~10 s for the chip to answer again.
+            // Up to ~10 s for the chip to answer again.
             let mut polls = 0u32;
             loop {
                 match chip.get_info_chip_id() {
                     Ok(_id) => break,
                     Err(e) if polls >= 100 => return Err(fault(e)),
                     Err(_booting) => {
-                        cortex_m::asm::delay(15_000_000);
+                        self.board.alive();
+                        self.board.wait_100ms();
                         polls += 1;
                     }
                 }
@@ -277,6 +299,133 @@ impl<SPI: SpiDevice, CS: OutputPin> ChipSession<SPI, CS> {
         }
     }
 
+    /// Whether this chip can take a birth, checked before anything is written to it: the counter at
+    /// `h0`, the board's slot free or already the board's, and the cage not begun. A counter a used
+    /// chip left elsewhere is set to `h0`, which only an uncaged chip allows. A chip refused here is
+    /// left exactly as it was found.
+    pub fn ready_for_birth(&mut self, h0: u32) -> Result<(), TropicError> {
+        let own = PublicKey::from(&StaticSecret::from(self.pairing));
+        if self.slot == FACTORY_SLOT {
+            match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).map(|k| *k)) {
+                Ok(key) if key == *own.as_bytes() => {}
+                Ok(_other) => return Err(TropicError::Refused),
+                Err(Fault::InvalidKey | Fault::SlotEmpty) => {}
+                Err(e) => return Err(fault(e)),
+            }
+            let writable = self
+                .with(|s| s.i_config_read(PAIRING_KEY_WRITE.into()))
+                .map_err(fault)?;
+            if writable & (1u32 << (8 + FACTORY_SLOT)) == 0 {
+                return Err(TropicError::Refused);
+            }
+        }
+        let config = self
+            .with(|s| s.i_config_read(I_CONFIG_WRITE.into()))
+            .map_err(fault)?;
+        if config & (1u32 << self.slot) == 0 {
+            return Err(TropicError::Refused);
+        }
+        let live = self.with(|s| s.mcounter_get(COUNTER)).map_err(fault)?;
+        if live != h0 {
+            self.with(|s| s.mcounter_init(COUNTER, h0)).map_err(fault)?;
+        }
+        Ok(())
+    }
+
+    /// Go through what a birth asks of this chip with its permanent parts substituted: the counter
+    /// moved and set back, each permanent command checked to be one the chip would take from the slot
+    /// that will send it, and the reboot that latches the cage, session and all.
+    fn rehearse_birth(&mut self, h0: u32) -> Vec<TryStep> {
+        let mut steps = Vec::new();
+        steps.push(TryStep::new(
+            "the chip's counter moves one step and is set back to its start",
+            self.rehearse_counter(h0),
+        ));
+        steps.push(TryStep::new(
+            "the chip would take the board's pairing key",
+            self.rehearse_key_write(),
+        ));
+        steps.push(TryStep::new(
+            "the chip would let the board close it",
+            self.rehearse_cage(),
+        ));
+        steps.push(TryStep::new(
+            "the chip reboots and opens a session again",
+            self.reopen(self.slot, Reboot::Latch)
+                .map_err(|e| format!("{e:?}")),
+        ));
+        steps
+    }
+
+    fn rehearse_counter(&mut self, h0: u32) -> Result<(), String> {
+        let read = |this: &mut Self| {
+            this.with(|s| s.mcounter_get(COUNTER))
+                .map_err(|e| format!("{:?}", fault(e)))
+        };
+        let before = read(self)?;
+        if before != h0 {
+            return Err(format!("the counter holds {before}, not its start {h0}"));
+        }
+        self.with(|s| s.mcounter_update(COUNTER))
+            .map_err(|e| format!("the update: {:?}", fault(e)))?;
+        let moved = read(self)?;
+        self.with(|s| s.mcounter_init(COUNTER, h0))
+            .map_err(|e| format!("setting it back: {:?}", fault(e)))?;
+        let back = read(self)?;
+        if moved != h0 - 1 || back != h0 {
+            return Err(format!(
+                "from {h0} the counter went to {moved}, then {back}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// In place of the key write: the slot is free or already this board's, and the session that
+    /// will write it holds the right to.
+    fn rehearse_key_write(&mut self) -> Result<(), String> {
+        let own = PublicKey::from(&StaticSecret::from(self.pairing));
+        if self.slot != FACTORY_SLOT {
+            return Ok(());
+        }
+        match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).map(|k| *k)) {
+            Ok(key) if key == *own.as_bytes() => {}
+            Ok(_other) => return Err("another board's key holds the slot".to_string()),
+            Err(Fault::InvalidKey | Fault::SlotEmpty) => {}
+            Err(e) => return Err(format!("{:?}", fault(e))),
+        }
+        let writable = self
+            .with(|s| s.i_config_read(PAIRING_KEY_WRITE.into()))
+            .map_err(|e| format!("{:?}", fault(e)))?;
+        if writable & (1u32 << (8 + FACTORY_SLOT)) == 0 {
+            return Err("the factory slot may not write the board's slot".to_string());
+        }
+        Ok(())
+    }
+
+    /// In place of the cage: the chip answers for every register the cage writes, and the slot that
+    /// will write them still may. A bit already clear is one the cage need not write.
+    fn rehearse_cage(&mut self) -> Result<(), String> {
+        for register in CAGE {
+            self.with(|s| s.i_config_read(register.into()))
+                .map_err(|e| format!("register {register:#x}: {:?}", fault(e)))?;
+        }
+        let writes = self
+            .with(|s| s.i_config_read(I_CONFIG_WRITE.into()))
+            .map_err(|e| format!("{:?}", fault(e)))?;
+        if writes & own_bits(I_CONFIG_WRITE) != own_bits(I_CONFIG_WRITE) {
+            return Err(format!(
+                "the access rules hold {writes:#x}: the board's slot may no longer write them"
+            ));
+        }
+        let invalidates = self
+            .with(|s| s.i_config_read(PAIRING_KEY_INVALIDATE.into()))
+            .map_err(|e| format!("{:?}", fault(e)))?;
+        if invalidates & (1u32 << OWN_SLOT) == 0 {
+            return Err("the board's slot may not invalidate the factory slot".to_string());
+        }
+        Ok(())
+    }
+
     fn close_birth(&mut self, h0: u32) -> Result<(), TropicError> {
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot == FACTORY_SLOT {
@@ -290,19 +439,28 @@ impl<SPI: SpiDevice, CS: OutputPin> ChipSession<SPI, CS> {
             }
             self.reopen(OWN_SLOT, Reboot::Keep)?;
         }
-        match self.with(|s| s.pairing_key_invalidate(u16::from(FACTORY_SLOT).into())) {
-            Ok(()) | Err(Fault::SlotInvalid | Fault::SlotEmpty | Fault::InvalidKey) => {}
-            Err(e) => return Err(fault(e)),
-        }
-        let config_open = self
-            .with(|s| s.i_config_read(0x040u16.into()))
+        // Lane 0 of I_CONFIG_WRITE is cleared last: while it holds, the cage is not finished. Once
+        // it is clear these commands are revoked, so a later boot must not take them again.
+        let config = self
+            .with(|s| s.i_config_read(I_CONFIG_WRITE.into()))
             .map_err(fault)?;
-        if config_open & own_bits() != 0 {
+        if config & (1u32 << OWN_SLOT) != 0 {
+            // The factory slot goes before the cage begins. A cut in the cage can leave invalidation
+            // already revoked, and the slot already gone: lane 0 of its register says which.
+            let invalidate = self
+                .with(|s| s.i_config_read(PAIRING_KEY_INVALIDATE.into()))
+                .map_err(fault)?;
+            if invalidate & (1u32 << OWN_SLOT) != 0 {
+                match self.with(|s| s.pairing_key_invalidate(u16::from(FACTORY_SLOT).into())) {
+                    Ok(()) | Err(Fault::SlotInvalid | Fault::SlotEmpty | Fault::InvalidKey) => {}
+                    Err(e) => return Err(fault(e)),
+                }
+            }
             for register in CAGE {
                 let held = self
                     .with(|s| s.i_config_read(register.into()))
                     .map_err(fault)?;
-                for lane in LANES {
+                for lane in lanes_of(register) {
                     let bit = lane + OWN_SLOT;
                     if held & (1u32 << bit) != 0 {
                         self.with(|s| s.i_config_write(register.into(), bit))
@@ -310,13 +468,23 @@ impl<SPI: SpiDevice, CS: OutputPin> ChipSession<SPI, CS> {
                     }
                 }
             }
+            self.reopen(OWN_SLOT, Reboot::Latch)?;
         }
-        self.reopen(OWN_SLOT, Reboot::Latch)?;
-        // The closed birth holds: each command it denies is refused.
+        // The closed birth holds. First what the chip reports, which disturbs nothing: a probe of an
+        // open cage would act.
+        for register in CAGE {
+            let held = self
+                .with(|s| s.i_config_read(register.into()))
+                .map_err(fault)?;
+            if held & own_bits(register) != 0 {
+                return Err(TropicError::CageOpen);
+            }
+        }
+        // Then each command it denies is refused as unauthorized.
         denied(self.with(|s| s.mcounter_init(COUNTER, h0)))?;
         denied(self.with(|s| s.pairing_key_write(2u16.into(), own.as_bytes())))?;
         denied(self.with(|s| s.ecc_key_generate(31u16.into(), EccCurve::Ed25519)))?;
-        denied(self.with(|s| s.i_config_write(0x040u16.into(), OWN_SLOT)))
+        denied(self.with(|s| s.i_config_write(I_CONFIG_WRITE.into(), OWN_SLOT)))
     }
 }
 
@@ -327,19 +495,20 @@ enum Reboot {
     Latch,
 }
 
-fn own_bits() -> u32 {
-    LANES
+/// The bits of `register` the board's own slot holds.
+fn own_bits(register: u16) -> u32 {
+    lanes_of(register)
         .iter()
         .fold(0u32, |bits, lane| bits | (1u32 << (lane + OWN_SLOT)))
 }
 
 /// The appliance's chip operations over the shared session.
-pub struct RealChip<SPI: SpiDevice, CS: OutputPin> {
-    pub session: Rc<RefCell<ChipSession<SPI, CS>>>,
+pub struct RealChip<SPI: SpiDevice, CS: OutputPin, B: Board> {
+    pub session: Rc<RefCell<ChipSession<SPI, CS, B>>>,
     pub h0: u32,
 }
 
-impl<SPI: SpiDevice, CS: OutputPin> Tropic for RealChip<SPI, CS> {
+impl<SPI: SpiDevice, CS: OutputPin, B: Board> Tropic for RealChip<SPI, CS, B> {
     fn counter_get(&mut self) -> Result<u32, TropicError> {
         self.session
             .borrow_mut()
@@ -369,14 +538,29 @@ impl<SPI: SpiDevice, CS: OutputPin> Tropic for RealChip<SPI, CS> {
             .map_err(fault)
     }
 
+    fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        matches!(
+            (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
+            (Ok(key), Ok(signature)) if matches!(
+                ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                    .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                Ok(())
+            )
+        )
+    }
+
     fn close_birth(&mut self) -> Result<(), TropicError> {
         self.session.borrow_mut().close_birth(self.h0)
+    }
+
+    fn rehearse_birth(&mut self) -> Vec<TryStep> {
+        self.session.borrow_mut().rehearse_birth(self.h0)
     }
 }
 
 /// R-memory data slots over the shared session: the store the appliance's record lives in.
-pub struct RMemSlots<SPI: SpiDevice, CS: OutputPin> {
-    pub session: Rc<RefCell<ChipSession<SPI, CS>>>,
+pub struct RMemSlots<SPI: SpiDevice, CS: OutputPin, B: Board> {
+    pub session: Rc<RefCell<ChipSession<SPI, CS, B>>>,
 }
 
 fn store_fault(e: TropicError) -> StoreError {
@@ -388,7 +572,7 @@ fn store_fault(e: TropicError) -> StoreError {
     }
 }
 
-impl<SPI: SpiDevice, CS: OutputPin> SlotMemory for RMemSlots<SPI, CS> {
+impl<SPI: SpiDevice, CS: OutputPin, B: Board> SlotMemory for RMemSlots<SPI, CS, B> {
     fn capacity(&self) -> usize {
         RMEM_SLOT_BYTES
     }
@@ -403,6 +587,8 @@ impl<SPI: SpiDevice, CS: OutputPin> SlotMemory for RMemSlots<SPI, CS> {
             .borrow_mut()
             .with(|s| s.r_mem_data_read(slot.into()).map(|data| data.to_vec()))
         {
+            // The chip answers an erased slot with no bytes (libtropic: SLOT_EMPTY on a size of 0).
+            Ok(data) if data.is_empty() => Ok(None),
             Ok(data) => Ok(Some(data)),
             Err(Fault::SlotEmpty) => Ok(None),
             Err(e) => Err(store_fault(fault(e))),

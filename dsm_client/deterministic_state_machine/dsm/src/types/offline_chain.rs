@@ -391,6 +391,29 @@ pub(crate) mod fixture {
         fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
             Ok(self.resident.sign(message).to_bytes().to_vec())
         }
+        fn chip_signature_holds(
+            &self,
+            pk_chip: &[u8],
+            message: &[u8; 32],
+            signature: &[u8],
+        ) -> bool {
+            matches!(
+                (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
+                (Ok(key), Ok(signature)) if matches!(
+                    ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                        .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                    Ok(())
+                )
+            )
+        }
+
+        fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
+            vec![anchor_core::try_run::TryStep::new(
+                "this software chip's counter reads",
+                self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
+            )]
+        }
+
         fn close_birth(&mut self) -> Result<(), TropicError> {
             self.closed_births += 1;
             Ok(())

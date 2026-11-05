@@ -1,0 +1,26 @@
+[package]
+name = "dsm-anchor-chip"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The anchor's TROPIC01 session and bring-up, free of the RP2350: the code the Secure monitor runs, and the same code the rehearsal runs against Tropic Square's chip model. Not a workspace member: its tests need that model."
+
+[lib]
+name = "anchor_chip"
+
+# Its own workspace: excluded from the root manifest.
+[workspace]
+
+[dependencies]
+dsm-anchor-core = { path = "../dsm-anchor-core" }
+dsm-sphincs = { path = "../dsm-sphincs" }
+# The TROPIC01 driver, pinned by commit: a firmware build is reproducible only if its driver is.
+tropic01 = { git = "https://github.com/tropicsquare/libtropic-rs", rev = "0cacb5ed94e5df491bfbb39e8702cc47598f7d63" }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+# Verifying a recorded sigma^chip: the chip hedges its signatures, so it cannot be compared.
+ed25519-dalek = { version = "2", default-features = false }
+embedded-hal = "1.0"
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+prost = { version = "0.14", default-features = false, features = ["derive"] }

@@ -1984,6 +1984,8 @@ pub struct StagedBearerTransition {
 #[derive(Clone, Debug, Default)]
 pub struct AnchorStatusSnapshot {
     pub connected: bool,
+    /// An anchor is connected and was never installed: nothing about it is permanent yet.
+    pub awaiting_install: bool,
     pub anchor_id: [u8; 32],
     pub pk_chip: Vec<u8>,
     pub partition_pk: Vec<u8>,
@@ -1996,9 +1998,9 @@ pub struct AnchorStatusSnapshot {
 
 impl CoreSDK {
     /// The anchor appliance attached to this device: attached through the installed factory on
-    /// first use and kept. An anchor is attached only once it is provisioned for this device: one
-    /// never provisioned is provisioned here, once, with this device's id, online key, the
-    /// offline-bearer policy and its genesis; one provisioned for any other device, key or policy
+    /// first use and kept. An anchor is attached only once it is provisioned for this device. One
+    /// never provisioned stays as it is: connecting does nothing permanent, and it is installed only
+    /// when told to ([`Self::anchor_install`]). One provisioned for any other device, key or policy
     /// is refused. Its pin is kept with it.
     fn anchor_for_this_device<'a>(
         &self,
@@ -2007,16 +2009,45 @@ impl CoreSDK {
         if let Some(attached) = slot {
             return Ok(attached);
         }
-        let mut appliance = match crate::bridge::anchor_appliance_factory() {
-            Some(factory) => factory()?,
-            None => hardware_appliance_or_fail()?,
-        };
-        let pin = match appliance.provisioned_pin()? {
-            Some(pin) => pin,
-            None => appliance.provision(&self.anchor_provisioning()?)?,
-        };
+        let mut appliance = connected_appliance()?;
+        let pin = appliance.provisioned_pin()?.ok_or_else(|| {
+            DsmError::invalid_operation(
+                "this anchor is not installed: run its try-run and install it first",
+            )
+        })?;
         self.require_anchor_for_this_device(&pin)?;
         Ok(slot.insert(AttachedAnchor { appliance, pin }))
+    }
+
+    /// Go through installing the connected anchor for this device with the permanent parts
+    /// substituted, and report it. Binds nothing, and asks nothing of the wallet's state.
+    pub fn anchor_try_run(&self) -> Result<crate::anchor::TryRunReport, DsmError> {
+        let guard = self.anchor_appliance.lock();
+        if guard.is_some() {
+            return Err(DsmError::invalid_operation(
+                "this anchor is already installed for this device",
+            ));
+        }
+        connected_appliance()?.try_run(&self.anchor_provisioning()?)
+    }
+
+    /// Install the connected anchor for this device, for good. Only ever on being told to: the
+    /// anchor goes through its try-run again first and refuses, with nothing written, unless it
+    /// passes. One already provisioned for anything else is refused.
+    pub fn anchor_install(&self) -> Result<AnchorStatusSnapshot, DsmError> {
+        {
+            let mut guard = self.anchor_appliance.lock();
+            if guard.is_some() {
+                return Err(DsmError::invalid_operation(
+                    "this anchor is already installed for this device",
+                ));
+            }
+            let mut appliance = connected_appliance()?;
+            let pin = appliance.provision(&self.anchor_provisioning()?)?;
+            self.require_anchor_for_this_device(&pin)?;
+            guard.replace(AttachedAnchor { appliance, pin });
+        }
+        Ok(self.anchor_appliance_status())
     }
 
     /// What this device provisions an anchor with: its device id, its online key, the
@@ -2116,6 +2147,7 @@ impl CoreSDK {
     }
 
     /// Read-only anchor appliance snapshot for the `anchor.status` diagnostics route (signal (c)).
+    /// Binds nothing: an anchor never installed is reported as awaiting its install.
     /// Attaches (and caches) the appliance via the installed factory if not already attached, then
     /// reads `pin()`/`status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
     /// this performs NO offline-account check and NO mutation. When no appliance can
@@ -2128,8 +2160,17 @@ impl CoreSDK {
             Ok(a) => a,
             Err(e) => {
                 log::info!("[anchor.status] no anchor appliance attached: {e}");
+                let awaiting_install = matches!(
+                    connected_appliance().and_then(|mut blank| blank.provisioned_pin()),
+                    Ok(None)
+                );
                 return AnchorStatusSnapshot {
-                    status: format!("no anchor appliance connected: {e}"),
+                    awaiting_install,
+                    status: if awaiting_install {
+                        "a new anchor is connected. Nothing about it is permanent yet.".to_string()
+                    } else {
+                        format!("no anchor appliance connected: {e}")
+                    },
                     ..Default::default()
                 };
             }
@@ -2146,6 +2187,7 @@ impl CoreSDK {
                 enrolled_counter: pin.enrolled_counter,
                 bundle: pin.bundle,
                 status: format!("anchor connected (counter u={})", s.anchor_counter),
+                ..Default::default()
             },
             Err(e) => {
                 log::warn!("[anchor.status] appliance attached but OP_STATUS failed: {e}");
@@ -2362,6 +2404,14 @@ pub(crate) const OFFLINE_BEARER_NO_APPLIANCE_MSG: &str =
 fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError>
 {
     Err(DsmError::invalid_operation(OFFLINE_BEARER_NO_APPLIANCE_MSG))
+}
+
+/// The anchor appliance connected to this device now, attached to nothing.
+fn connected_appliance() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
+    match crate::bridge::anchor_appliance_factory() {
+        Some(factory) => factory(),
+        None => hardware_appliance_or_fail(),
+    }
 }
 
 impl CoreSDK {

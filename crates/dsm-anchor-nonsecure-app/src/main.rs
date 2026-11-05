@@ -123,14 +123,34 @@ fn secure_call(opcode: u32, offset: usize, total: usize, part: &[u8], resp: &mut
 type Serial<'a> = SerialPort<'a, hal::usb::UsbBus>;
 type UsbDev<'a> = UsbDevice<'a, hal::usb::UsbBus>;
 
-/// Write every byte to USB-CDC, polling + retrying on a full buffer (mirrors the pico anchor).
+/// Polls of the USB device with nothing moving between crossings of the Secure Gateway: the Secure
+/// handler feeds the ~2 s watchdog on each, so an anchor waiting on its host is not a hung one.
+const KEEPALIVE_IDLE_ITERS: u32 = 2_000;
+
+/// Write every byte to USB-CDC, polling + retrying on a full buffer (mirrors the pico anchor). A host
+/// that has stopped reading is waited for across keepalives, never by tripping the watchdog; a host
+/// that has dropped DTR has gone, and what it asked for is abandoned.
 fn write_all(serial: &mut Serial, usb_dev: &mut UsbDev, data: &[u8]) {
     let mut sent = 0;
+    let mut blocked = 0u32;
+    let host_was_there = serial.dtr();
     while sent < data.len() {
         usb_dev.poll(&mut [serial]);
+        if host_was_there && !serial.dtr() {
+            return;
+        }
         match serial.write(&data[sent..]) {
-            Ok(n) => sent += n,
-            Err(UsbError::WouldBlock) => {}
+            Ok(n) => {
+                sent += n;
+                blocked = 0;
+            }
+            Err(UsbError::WouldBlock) => {
+                blocked += 1;
+                if blocked >= KEEPALIVE_IDLE_ITERS {
+                    blocked = 0;
+                    secure_call(OP_KEEPALIVE, 0, 0, &[], &mut []);
+                }
+            }
             Err(_) => return,
         }
     }
@@ -159,7 +179,8 @@ fn write_response(serial: &mut Serial, usb_dev: &mut UsbDev, first: &Crossing, r
 ///
 /// A frame larger than any frame, or a part the Secure side refuses, is answered with an empty
 /// frame (the host refuses it); the bytes of the refused frame are read and dropped so the stream
-/// stays in step.
+/// stays in step. A host opening the port raises DTR, which starts a new frame: an app that died
+/// partway through a frame leaves nothing for the next one to be read against.
 fn serve_over_usb(serial: &mut Serial, usb_dev: &mut UsbDev) -> ! {
     let mut header = [0u8; 4];
     let mut header_len = 0usize;
@@ -171,12 +192,19 @@ fn serve_over_usb(serial: &mut Serial, usb_dev: &mut UsbDev) -> ! {
     let mut total = 0usize;
     let mut forwarded = 0usize;
     let mut refused = 0u8;
-    // Watchdog keepalive: when idle, cross the SG at least this often so the Secure handler feeds the
-    // ~2 s watchdog (a healthy idle anchor != a hung one).
-    const KEEPALIVE_IDLE_ITERS: u32 = 20_000;
     let mut idle: u32 = 0;
+    let mut host_there = serial.dtr();
     loop {
         usb_dev.poll(&mut [serial]);
+        let dtr = serial.dtr();
+        if dtr && !host_there {
+            header_len = 0;
+            total = 0;
+            forwarded = 0;
+            part_len = 0;
+            refused = 0;
+        }
+        host_there = dtr;
         let mut chunk = [0u8; 64];
         let n = match serial.read(&mut chunk) {
             Ok(n) => n,

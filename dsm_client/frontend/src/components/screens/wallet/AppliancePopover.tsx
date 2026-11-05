@@ -3,10 +3,12 @@
 // Rust read from it. The first connection needs the user: plug it in, tap
 // Connect, and allow it when Android asks. After that Android keeps the
 // permission while the appliance stays plugged in, and the send screen
-// connects on its own whenever Offline is chosen.
+// connects on its own whenever Offline is chosen. Connecting does nothing permanent: a new
+// appliance is offered its try-run and its install here, and only here.
 import React, { useEffect, useRef } from 'react';
 import { Notice } from '../../common/ScreenFrame';
 import { useBackButton } from '../../../hooks/useBackButton';
+import AnchorInstallPanel from '../../AnchorInstallPanel';
 import type { AnchorStatus } from '../../../dsm/anchor';
 
 /** What the last read of the appliance said, or that none has happened. */
@@ -89,6 +91,9 @@ export function AppliancePopover({ read, busy, onConnect, onClose }: Props): Rea
                 <span className="sb-kv__v sb-kv__v--mono">{read.status.frontierRootB32}</span>
               </div>
             </>
+          )}
+          {read.kind === 'read' && read.status.awaitingInstall && (
+            <AnchorInstallPanel onInstalled={onConnect} />
           )}
           {read.kind === 'error' && <Notice kind="error">{read.message}</Notice>}
         </div>

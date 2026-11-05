@@ -14,6 +14,15 @@
 //!     the whole thing repeats — proving an abandoned `Prepared` does not strand the appliance.
 //!
 //! It NEVER sends COMMIT — Phase 3 (the first real decrement) is deliberately out of scope here.
+//!
+//! `--check` is the runbook's Step 9: what the anchor says about itself over USB, and whether its
+//! Non-secure image passes the measurement gate, with nothing written to the chip. It sends STATUS
+//! and a PREPARE with no transition, which every anchor refuses, and never a provisioning.
+//!
+//! `--try-run` goes through an install on the board in front of it, with the permanent parts
+//! substituted, and reports each step, how long the whole of it took, and what an install would make
+//! permanent. It is what a new board runs before anything is burned on it, on the trial image, and it
+//! never provisions.
 //! RELEASE-only: a debug build refuses to run (SPHINCS+/BLE timing is invalid in debug).
 
 use std::time::Duration;
@@ -51,12 +60,26 @@ struct Args {
     deny: Vec<String>,
     /// Operator chip label for the bench log (e.g. "used chip A").
     label: Option<String>,
+    /// Run the read-only check of the board, and nothing else.
+    check: Check,
     /// Operator-supplied firmware build hash/commit for the bench log (the harness cannot read it
     /// off the chip; you built + flashed it, so you record it).
     fw_commit: Option<String>,
 }
 
+/// What this run is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// The used-chip phases.
+    No,
+    /// The read-only check.
+    Yes,
+    /// A try-run of an install.
+    TryRun,
+}
+
 fn parse_args() -> Result<Args, String> {
+    let mut check = Check::No;
     let mut port = None;
     let mut baud = 115_200u32;
     let mut repeats = 5usize;
@@ -84,6 +107,8 @@ fn parse_args() -> Result<Args, String> {
             "--deny" => deny.push(norm_id(&it.next().ok_or("--deny needs an anchor-id")?)),
             "--label" => label = it.next(),
             "--fw-commit" => fw_commit = it.next(),
+            "--check" => check = Check::Yes,
+            "--try-run" => check = Check::TryRun,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -95,6 +120,7 @@ fn parse_args() -> Result<Args, String> {
         allow,
         deny,
         label,
+        check,
         fw_commit,
     })
 }
@@ -133,6 +159,21 @@ fn roundtrip(
     port: &mut dyn serialport::SerialPort,
     req: &pb::ApplianceRequest,
 ) -> Result<pb::ApplianceResponse, String> {
+    let resp = answer(port, req)?;
+    if !resp.ok {
+        return Err(format!(
+            "op {} failed on-chip (error {}) {}",
+            resp.op, resp.error, resp.detail
+        ));
+    }
+    Ok(resp)
+}
+
+/// The anchor's answer to one op, refused or not. Fails on a transport or decode error.
+fn answer(
+    port: &mut dyn serialport::SerialPort,
+    req: &pb::ApplianceRequest,
+) -> Result<pb::ApplianceResponse, String> {
     let body = encode_request(req);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
@@ -149,14 +190,73 @@ fn roundtrip(
     let mut resp_body = vec![0u8; len];
     port.read_exact(&mut resp_body)
         .map_err(|e| format!("read body ({len} B): {e}"))?;
-    let resp = decode_response(&resp_body).map_err(|e| format!("decode: {e:?}"))?;
-    if !resp.ok {
-        return Err(format!(
-            "op {} failed on-chip (error {})",
-            resp.op, resp.error
-        ));
+    decode_response(&resp_body).map_err(|e| format!("decode: {e:?}"))
+}
+
+/// A try-run of an install, for a device no wallet holds: the board's own identity is what is tried.
+/// A nonzero exit unless every step passed.
+fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    let name = |what: &str| -> Vec<u8> {
+        anchor_core::hash::h("DSM/anchor/try-run/bench/v1", &[what.as_bytes()]).to_vec()
+    };
+    let started = std::time::Instant::now();
+    let run = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::TryRun as i32,
+            provision: Some(pb::Provisioning {
+                device_id: name("device"),
+                online_id_pk: name("online key"),
+                policy_hash: name("policy"),
+                genesis_root: name("genesis"),
+            }),
+            ..Default::default()
+        },
+    )?;
+    let took = started.elapsed();
+    for step in &run.try_run {
+        let verdict = if step.passed { "ok    " } else { "FAILED" };
+        println!("[TRY] {verdict} {} {}", step.name, step.detail);
     }
-    Ok(resp)
+    println!("[TRY] the whole of it took {:.1} s", took.as_secs_f64());
+    if !run.detail.is_empty() {
+        println!("[TRY] {}", run.detail);
+    }
+    if !run.ok {
+        return Err(format!("the try-run did not pass (error {})", run.error));
+    }
+    println!("[TRY] passed. Nothing was made permanent. An install would make these permanent:");
+    for line in &run.permanent {
+        println!("[TRY]   - {line}");
+    }
+    Ok(())
+}
+
+/// The runbook's Step 9, read-only: what the anchor reports, and the measurement gate's verdict. A
+/// PREPARE with no transition passes the gate and is then refused, so nothing moves.
+fn check(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    use anchor_core::service::err;
+    let bare = |op: pb::Op| pb::ApplianceRequest {
+        op: op as i32,
+        ..Default::default()
+    };
+    let status = answer(port, &bare(pb::Op::Status))?;
+    match status.error {
+        err::NONE => println!(
+            "[CHECK] the anchor serves: provisioned, closed, counter u={}",
+            status.active_anchor_counter
+        ),
+        err::NOT_PROVISIONED => println!("[CHECK] the anchor is up and not provisioned"),
+        err::NOT_UP => println!("[CHECK] the anchor did NOT come up: {}", status.detail),
+        other => println!("[CHECK] status refused: error {other} {}", status.detail),
+    }
+    let gate = answer(port, &bare(pb::Op::Prepare))?;
+    match gate.error {
+        err::MEASUREMENT => println!("[CHECK] measurement gate REFUSED: {}", gate.detail),
+        err::NOT_UP => println!("[CHECK] measurement gate passed; the anchor is not up"),
+        other => println!("[CHECK] measurement gate passed (prepare answered error {other})"),
+    }
+    Ok(())
 }
 
 /// STATUS -> `(u, H0, active_root)`. `u = H0 - live` is the DSM anchor coordinate; the raw counter is
@@ -501,8 +601,9 @@ fn run() -> Result<(), String> {
                 .to_string(),
         );
     }
-    const USAGE: &str =
-        "usage: used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
+    const USAGE: &str = "usage: used-chip-bench --port <serial> --check\n       \
+         used-chip-bench --port <serial> --try-run\n       \
+         used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
                          [--deny <id> ...] [--label \"used chip A\"] [--fw-commit <hash>] \
                          [--baud 115200] [--repeats 5]\n  \
                          (run once with no --allow to print the connected chip's anchor-id)";
@@ -530,6 +631,11 @@ fn run() -> Result<(), String> {
     );
 
     let mut port = open(&args)?;
+    match args.check {
+        Check::Yes => return check(port.as_mut()),
+        Check::TryRun => return try_run(port.as_mut()),
+        Check::No => {}
+    }
     // Structural guard against the one operational rule: read the chip's anchor-id and refuse unless
     // it is an explicitly allow-listed USED bench chip (never the sealed clean/virgin chip), with a
     // typed operator confirmation. Non-mutating: the gate itself only sends STATUS.

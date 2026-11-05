@@ -41,6 +41,25 @@ pub struct AnchorPin {
     pub birth_commitment: [u8; 32],
 }
 
+/// One thing a try-run went through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TryRunStep {
+    pub name: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+/// An install gone through on the anchor with its permanent parts substituted
+/// ([`anchor_core::try_run`]), and what installing would make permanent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TryRunReport {
+    pub passed: bool,
+    pub steps: Vec<TryRunStep>,
+    pub permanent: Vec<String>,
+    /// Why it could not run at all, when it could not.
+    pub refused: String,
+}
+
 /// Transport-agnostic producer interface to the anchor appliance: what an RP2350 USB-CDC/BLE
 /// client implements. All ops fail closed into [`DsmError`].
 pub trait AnchorAppliance {
@@ -66,6 +85,12 @@ pub trait AnchorAppliance {
     fn cancel(&mut self) -> Result<(), DsmError>;
     /// The pin material of the anchor as provisioned, or `None` while it was never provisioned.
     fn provisioned_pin(&mut self) -> Result<Option<AnchorPin>, DsmError>;
+    /// `OP_TRY_RUN`: go through installing this anchor for the device `provisioning` names, with the
+    /// permanent parts substituted. Nothing is bound and the chip is left as it was found.
+    fn try_run(
+        &mut self,
+        provisioning: &anchor_core::enrollment::Provisioning,
+    ) -> Result<TryRunReport, DsmError>;
     /// `OP_PROVISION`: provision a never-provisioned anchor for the device `provisioning` names,
     /// once, and return its pin. Refused by an anchor already provisioned.
     fn provision(

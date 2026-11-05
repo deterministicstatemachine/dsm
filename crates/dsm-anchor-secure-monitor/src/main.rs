@@ -5,8 +5,8 @@
 //! prepare/commit/recovery state, the exact measurement seal, and the ONLY Secure Gateway (the NSC
 //! veneer → this handler).
 //!
-//! STATUS (this increment): SRAM-resident TCB + runtime boundary + REAL appliance, wired; silicon
-//! validation of the full crypto round trip is pending (needs a clean TROPIC power cycle).
+//! STATUS: SRAM-resident TCB + runtime boundary + REAL appliance, wired. The chip side runs against
+//! Tropic Square's model (`dsm-anchor-chip`); the full round trip has not run on silicon.
 //!  * The whole Secure TCB runs from SRAM: the boot-block `LOAD_MAP` (linker-emitted) instructs the
 //!    bootrom to copy the SRAM-VMA payload out of mutable external flash before entry;
 //!    `scripts/check-secure-no-xip.sh` PASSES. (Cryptographic verification of that flash image is a
@@ -21,8 +21,8 @@
 //!    TROPIC01 die, `σ^host` via `dsm-sphincs`. The protocol state machine is NOT reimplemented here;
 //!    it is `anchor_core`.
 //!  * Fail-closed: if the chip/session/enroll bring-up in `init` fails, or §26 recovery returns an
-//!    outcome the appliance may not serve from, the appliance stays uninitialized and every
-//!    authority op is refused (`SG_ERR_INTERNAL`); the failing stage lands in heartbeat word 1.
+//!    outcome the appliance may not serve from, the appliance stays uninitialized and every request
+//!    is answered `NOT_UP` with the reason; the failing stage also lands in heartbeat word 1.
 
 #![no_std]
 #![no_main]
@@ -38,21 +38,20 @@ use alloc::vec::Vec;
 
 mod anchor_glue;
 mod boundary;
-mod chip;
 mod sealed;
 
 // Secure working-set heap (SPHINCS+ σ^host signing + release/proto Vec staging). Lives in Secure
 // .bss; the Non-secure app has its own separate heap. Initialized once at reset before any alloc.
 #[global_allocator]
 static HEAP: embedded_alloc::LlffHeap = embedded_alloc::LlffHeap::empty();
-const SECURE_HEAP_SIZE: usize = 160 * 1024;
+const SECURE_HEAP_SIZE: usize = anchor_chip::SECURE_HEAP_BYTES;
 static mut SECURE_HEAP_MEM: [core::mem::MaybeUninit<u8>; SECURE_HEAP_SIZE] =
     [core::mem::MaybeUninit::uninit(); SECURE_HEAP_SIZE];
 
 // RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
 // `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
 // LOAD_MAP whose entries need link-time LMA/VMA/size. The linker block carries IMAGE_TYPE +
-// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20060000, zero-fill
+// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20064000, zero-fill
 // Secure BSS) + explicit SRAM VECTOR_TABLE + ENTRY_POINT items, so the immutable bootrom is
 // instructed to copy the flash payload into SRAM and enter there. (Cryptographic verification of
 // that payload happens only once secure boot is enabled + validated; the LOAD_MAP itself just
@@ -63,8 +62,6 @@ const SG_SLOT_INDEX: u32 = 0;
 const SG_SLOT_MAX_LEN: usize = 4096;
 /// Mailbox ABI version: v2 moves a frame through the slot in parts.
 const SG_ABI_VERSION: u32 = 2;
-/// The largest request or response frame (anchor-core's frame bound).
-const SG_FRAME_MAX_LEN: usize = anchor_core::service::MAX_FRAME_LEN;
 /// Keep the watchdog fed while idle; touches no frame.
 const OP_KEEPALIVE: u32 = 1;
 /// One part of a request frame: `total` bytes in all, this part at `offset`.
@@ -76,10 +73,7 @@ const SG_ERR_SLOT: u32 = 1;
 const SG_ERR_SEQ: u32 = 2;
 const SG_ERR_SIZE: u32 = 3;
 const SG_ERR_OPCODE: u32 = 4;
-const SG_ERR_ENCODING: u32 = 5;
 const SG_ERR_STATE: u32 = 6;
-const SG_ERR_MEASUREMENT: u32 = 7;
-const SG_ERR_INTERNAL: u32 = 8;
 /// The request part was taken; the frame is not complete yet.
 const SG_MORE: u32 = 9;
 
@@ -283,7 +277,7 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
 }
 
 /// Take one part of a request frame into the Secure copy. A part out of order, past the frame's
-/// stated length, or of a frame larger than any frame is refused and the frame discarded. The
+/// stated length, or of a frame larger than the heap can serve is refused and the frame discarded. The
 /// frame's last part runs it: `service_request` decodes it, applies the §2 measurement seal to the
 /// DECODED op and serves it through the anchor; the response's first part is returned at once.
 fn request_part(mb: &mut Mailbox) -> u32 {
@@ -292,7 +286,7 @@ fn request_part(mb: &mut Mailbox) -> u32 {
     let len = unsafe { core::ptr::read_volatile(&mb.req_len) } as usize;
     unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
     let request = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
-    if total > SG_FRAME_MAX_LEN || len > SG_SLOT_MAX_LEN || offset + len > total {
+    if total > anchor_chip::MAX_REQUEST_BYTES || len > SG_SLOT_MAX_LEN || offset + len > total {
         discard(request);
         return SG_ERR_SIZE;
     }
@@ -318,16 +312,19 @@ fn request_part(mb: &mut Mailbox) -> u32 {
     let Some(mut frame) = request.take() else {
         return SG_ERR_STATE;
     };
-    let served = unsafe { anchor_glue::service_request(&frame, measurement_ok()) };
+    // A serve runs SPHINCS+ and many chip commands: it gets the watchdog's longest budget, renewed
+    // by each chip command, and `finish` gives the Non-secure side its short one back.
+    boundary::feed_watchdog_in_service();
+    let measurement = if measurement_ok() {
+        anchor_chip::bring_up::Measurement::Matches
+    } else {
+        anchor_chip::bring_up::Measurement::Differs
+    };
+    let response = unsafe { anchor_glue::service_request(&frame, measurement) };
     // §4.9 zeroize the Secure request copy.
     zeroize(&mut frame);
-    match served {
-        Ok(response) => {
-            unsafe { *core::ptr::addr_of_mut!(RESPONSE) = Some(response) };
-            response_part(mb, 0)
-        }
-        Err(status) => status,
-    }
+    unsafe { *core::ptr::addr_of_mut!(RESPONSE) = Some(response) };
+    response_part(mb, 0)
 }
 
 /// Copy the response frame's part from `offset` into the slot, with the whole frame's length.
@@ -367,6 +364,7 @@ fn discard(request: &mut Option<Vec<u8>>) {
 
 /// Publish the status, advance the sequence floor, transition to RESPONSE_READY (ownership barrier).
 fn finish(mb: &mut Mailbox, seq: u32, status: u32) -> u32 {
+    boundary::feed_watchdog();
     unsafe {
         core::ptr::write_volatile(&mut mb.status, status);
         LAST_SEQ = seq;
@@ -402,9 +400,9 @@ const HEARTBEAT_SENTINEL: u32 = 0x4453_4d31; // "DSM1"
 /// value is the `anchor_glue::InitStage` at which it refused.
 const HEARTBEAT_APPLIANCE_INSTALLED: u32 = 1;
 
-/// Bring-up triage beside the heartbeat: when `anchor_glue::init` refuses, the `Debug` rendering
-/// of its `InitFailure` (stage and the cause that stage reported), truncated to fit. Untouched
-/// when the appliance is installed. Not an authority signal.
+/// Bring-up triage beside the heartbeat, for an unlocked board's debug port: when
+/// `anchor_glue::init` refuses, the `Debug` rendering of its `InitFailure`, truncated to fit. A
+/// locked board says the same in its answer to any request. Not an authority signal.
 #[no_mangle]
 pub static mut DSM_SECURE_INIT_CAUSE: [u8; INIT_CAUSE_LEN] = [0; INIT_CAUSE_LEN];
 const INIT_CAUSE_LEN: usize = 96;
@@ -420,7 +418,7 @@ unsafe fn record_init_cause(failure: &anchor_glue::InitFailure) {
     }
 }
 
-// ── Reset entry (placeholder until step 5 SAU init + step 7 measured loader) ──────────────────
+// ── Reset entry ───────────────────────────────────────────────────────────────────────────
 #[hal::entry]
 fn main() -> ! {
     // Initialize the Secure heap once, before any allocation (σ^host / release staging use it).
@@ -458,13 +456,16 @@ fn main() -> ! {
     // one-way birth fuse) BEFORE the boundary is locked and NS launched, so the Secure-only SPI0/
     // TROPIC bring-up runs while the monitor still owns everything. Fail-closed: a chip/session/
     // enroll failure, or a §26 recovery the appliance may not serve from, leaves the appliance
-    // uninitialized and every authority op refuses (the SG handler returns SG_ERR_INTERNAL).
-    // Record the result in heartbeat[1] for bring-up triage: 1 = installed, otherwise the
-    // failing `anchor_glue::InitStage` discriminant, with the cause in DSM_SECURE_INIT_CAUSE.
+    // uninitialized and every request is answered `NOT_UP` with the reason. Record the result in
+    // heartbeat[1] for bring-up triage: 1 = installed, otherwise the failing
+    // `anchor_glue::InitStage` discriminant, with the cause in DSM_SECURE_INIT_CAUSE.
     let init_word = match unsafe { anchor_glue::init() } {
         Ok(()) => HEARTBEAT_APPLIANCE_INSTALLED,
         Err(failure) => {
-            unsafe { record_init_cause(&failure) };
+            unsafe {
+                record_init_cause(&failure);
+                anchor_glue::keep_refusal(&failure);
+            }
             failure.stage() as u32
         }
     };

@@ -15,6 +15,9 @@ chmod 700 "$SECRET_DIR"
 SIGNED="$BUILD_DIR/signed.elf"
 OTP_JSON="$BUILD_DIR/bootkey-otp.json"
 MU_BIN="$BUILD_DIR/mu-enrolled.bin"
+# The Non-secure image as signed. Its digest goes into OTP, so a later monitor update must carry these
+# very bytes: build it with DSM_ANCHOR_NS_BIN naming a kept copy of this file.
+NS_BIN="$BUILD_DIR/ns_app.bin"
 
 case "${1:-}" in
   --genkey)
@@ -27,15 +30,15 @@ case "${1:-}" in
     [ -f "$KEY" ]  || { echo "ERROR: no $KEY — run '$0 --genkey' or supply KEY=…"; exit 1; }
     [ -f "$ELF" ]  || { echo "ERROR: no firmware ELF at $ELF — build --release --features production first"; exit 1; }
     # An existing OTP file would be edited in place: every signing starts from nothing.
-    rm -f "$SIGNED" "$OTP_JSON" "$MU_BIN"
+    rm -f "$SIGNED" "$OTP_JSON" "$MU_BIN" "$NS_BIN"
     # seal --sign: signs $ELF into $SIGNED and writes the key-fingerprint OTP rows, the key's valid
     # flag and SECURE_BOOT_ENABLE into $OTP_JSON. provision-otp.sh splits those apart.
     picotool seal --sign "$ELF" -t elf "$SIGNED" "$KEY" "$OTP_JSON"
     # The digest the monitor compares before every authority op (main.rs `measurement_ok`): BLAKE3
     # over the bytes from __ns_rx_start to __ns_rx_end, which is the head of the .ns_app image.
-    python3 - "$ELF" "$SIGNED" "$MU_BIN" <<'PY'
+    python3 - "$ELF" "$SIGNED" "$MU_BIN" "$NS_BIN" <<'PY'
 import subprocess, sys, tempfile, os
-elf, signed, out = sys.argv[1:]
+elf, signed, out, ns_out = sys.argv[1:]
 symbols = {}
 for line in subprocess.check_output(["arm-none-eabi-nm", elf], text=True).splitlines():
     fields = line.split()
@@ -61,7 +64,10 @@ if len(digest) != 32:
 fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, "wb") as f:
     f.write(digest)
+with open(ns_out, "wb") as f:
+    f.write(image)
 print(f"wrote {out}: the digest of the {window}-byte measured window")
+print(f"wrote {ns_out}: the image it is the digest of. Keep it with bootkey.pem")
 PY
     echo "wrote $SIGNED + $OTP_JSON" ;;
   *)

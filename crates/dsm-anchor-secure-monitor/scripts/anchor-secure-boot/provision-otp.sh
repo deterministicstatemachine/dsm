@@ -13,13 +13,21 @@ BUILD_DIR="$SECRET_DIR/build"
 SECRET_ROW=$(( 48 * 64 ))
 # page 46, row 0 — MUST equal MU_ROW in ../../src/main.rs
 DIGEST_ROW=$(( 46 * 64 ))
-# PAGEn_LOCK1 = 0xf80 + 2n + 1. Each row holds its low byte three times over.
-# LOCK_S 1 (Secure reads, nothing writes), LOCK_NS 3 (Non-secure no access), and LOCK_BL 3 for the
-# secret (the USB bootloader never serves it), 1 for the digest (it reads back, and it is public).
+# PAGEn_LOCK1 = 0xf80 + 2n + 1. Each row holds its low byte three times over, and that byte is
+# LOCK_S in bits 0-1, LOCK_NS in bits 2-3 and LOCK_BL in bits 4-5 (`picotool otp list -f PAGE48_LOCK1`).
+# A row's value is built from its fields, never written out.
+lock_row_value() { # LOCK_S LOCK_NS LOCK_BL
+  local byte=$(( $1 | ($2 << 2) | ($3 << 4) ))
+  printf '0x%06x' $(( byte * 0x010101 ))
+}
+LOCK_READ_ONLY=1
+LOCK_INACCESSIBLE=3
+# Secure reads and nothing writes; Non-secure has no access. The USB bootloader never serves the
+# secret, and may read back the digest, which is public.
 SECRET_LOCK_ROW=$(( 0xf80 + 2 * 48 + 1 ))
-SECRET_LOCK=0x353535
+SECRET_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_INACCESSIBLE" "$LOCK_INACCESSIBLE")
 DIGEST_LOCK_ROW=$(( 0xf80 + 2 * 46 + 1 ))
-DIGEST_LOCK=0x1d1d1d
+DIGEST_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_INACCESSIBLE" "$LOCK_READ_ONLY")
 
 COMMIT=0; CMD=""; BOARD=""
 while [ $# -gt 0 ]; do

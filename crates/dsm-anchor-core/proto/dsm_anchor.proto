@@ -89,6 +89,8 @@ enum Op {
   OP_PROVISION   = 9;  // provision an unprovisioned anchor for the device `provision` names, once;
                        // answered with the STATUS pin material of the anchor it made
   OP_RECOVER     = 10; // §26 recovery: complete a durable commit if it can, and answer the outcome
+  OP_TRY_RUN     = 11; // go through an install of `provision` with the permanent parts
+                       // substituted; nothing is bound. See try_run.rs.
 }
 
 // The §26 recovery outcome, as OP_RECOVER answers it.
@@ -117,6 +119,13 @@ message ApplianceRequest {
   Provisioning provision            = 7;  // OP_PROVISION: the device the anchor is bound to
 }
 
+// One thing a try-run went through.
+message TryRunStep {
+  string name   = 1;
+  bool   passed = 2;
+  string detail = 3;  // why it did not pass
+}
+
 // The secure core's response.
 message ApplianceResponse {
   Op op                        = 1;
@@ -140,6 +149,10 @@ message ApplianceResponse {
   // owner's online key and device id, B recomputes from what the chip discloses.
   bytes  pin_birth_commitment  = 14;
   Recovery recovery            = 15; // OP_RECOVER: the outcome (its frontier in active_root)
+  // Why a refusal was made, when the code alone does not say: a locked board has no debug port.
+  string detail                = 16;
+  repeated TryRunStep try_run  = 17; // OP_TRY_RUN: what it went through
+  repeated string permanent    = 18; // OP_TRY_RUN: what installing makes permanent
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the

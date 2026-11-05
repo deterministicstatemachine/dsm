@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import * as pb from '../proto/dsm_app_pb';
-import { routerQueryBin } from './WebViewBridge';
+import { routerInvokeBin, routerQueryBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { bytesToBase32CrockfordPrefix } from '../utils/textId';
 import logger from '../utils/logger';
@@ -25,12 +25,79 @@ export interface AnchorStatus {
   enrolledCounter: bigint;
   /** Human-readable status line supplied by Rust. */
   statusText: string;
+  /** A new anchor is connected and never installed: nothing about it is permanent yet. */
+  awaitingInstall: boolean;
+}
+
+/** One thing a try-run went through, as Rust reported it. */
+export interface AnchorTryRunStep {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+/** An install gone through on the anchor with its permanent parts substituted. */
+export interface AnchorTryRun {
+  passed: boolean;
+  steps: AnchorTryRunStep[];
+  /** What installing makes permanent, shown before it is asked for. */
+  permanent: string[];
+  /** Why it could not run at all. */
+  refused: string;
+}
+
+const NO_ARGS = () => new Uint8Array(new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(0) }).toBinary());
+
+/**
+ * Go through an install on the connected anchor with its permanent parts substituted (`anchor.tryRun`).
+ * Binds nothing. Takes as long as the anchor takes to sign: tens of seconds.
+ */
+export async function runAnchorTryRun(): Promise<AnchorTryRun> {
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('anchor.tryRun', NO_ARGS()));
+  if (env.payload.case === 'error') {
+    throw new Error(env.payload.value.message || 'the try-run failed');
+  }
+  if (env.payload.case !== 'anchorTryRunResponse') {
+    throw new Error(`runAnchorTryRun: unexpected payload ${env.payload.case}`);
+  }
+  const resp = env.payload.value;
+  return {
+    passed: resp.passed,
+    steps: resp.steps.map((step) => ({ name: step.name, passed: step.passed, detail: step.detail })),
+    permanent: [...resp.permanent],
+    refused: resp.refused,
+  };
+}
+
+/** Install the connected anchor for this wallet, for good (`anchor.install`). */
+export async function installAnchor(): Promise<AnchorStatus> {
+  const env = decodeFramedEnvelopeV3(await routerInvokeBin('anchor.install', NO_ARGS()));
+  if (env.payload.case === 'error') {
+    throw new Error(env.payload.value.message || 'the install failed');
+  }
+  if (env.payload.case !== 'anchorStatusResponse') {
+    throw new Error(`installAnchor: unexpected payload ${env.payload.case}`);
+  }
+  return statusOf(env.payload.value);
 }
 
 /** Base32-encode a 32-byte field for display, treating an all-zero/empty field as "not present". */
 function b32OrEmpty(bytes: Uint8Array | undefined, prefixLen: number): string {
   if (!bytes || bytes.length === 0 || bytes.every((x) => x === 0)) return '';
   return bytesToBase32CrockfordPrefix(bytes, prefixLen);
+}
+
+function statusOf(resp: pb.AnchorStatusResponse): AnchorStatus {
+  return {
+    connected: resp.anchorConnected,
+    anchorIdB32: b32OrEmpty(resp.anchorId, 12),
+    pkChipB32: b32OrEmpty(resp.pkChip, 12),
+    anchorCounter: resp.anchorCounter,
+    frontierRootB32: b32OrEmpty(resp.frontierRoot, 12),
+    enrolledCounter: resp.enrolledCounter,
+    statusText: resp.status,
+    awaitingInstall: resp.awaitingInstall,
+  };
 }
 
 /**
@@ -63,13 +130,5 @@ export async function getAnchorStatus(): Promise<AnchorStatus> {
     counter: String(resp.anchorCounter),
   });
 
-  return {
-    connected: resp.anchorConnected,
-    anchorIdB32: b32OrEmpty(resp.anchorId, 12),
-    pkChipB32: b32OrEmpty(resp.pkChip, 12),
-    anchorCounter: resp.anchorCounter,
-    frontierRootB32: b32OrEmpty(resp.frontierRoot, 12),
-    enrolledCounter: resp.enrolledCounter,
-    statusText: resp.status,
-  };
+  return statusOf(resp);
 }

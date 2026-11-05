@@ -98,11 +98,11 @@ SECTIONS
     LONG(LOADADDR(.vector_table) - __dsm_load_map);
     LONG(ADDR(.vector_table));
     LONG((LOADADDR(.data) + SIZEOF(.data)) - LOADADDR(.vector_table));
-    /* entry 2 — NSC SG veneer FLASH -> SRAM 0x20060000 */
+    /* entry 2 — NSC SG veneer FLASH -> SRAM 0x20064000 */
     LONG(LOADADDR(.gnu.sgstubs) - __dsm_load_map);
     LONG(ADDR(.gnu.sgstubs));
     LONG(SIZEOF(.gnu.sgstubs));
-    /* entry 3 — Non-secure app image FLASH -> NS SRAM 0x20061000 */
+    /* entry 3 — Non-secure app image FLASH -> NS SRAM 0x20065000 */
     LONG(LOADADDR(.ns_app) - __dsm_load_map);
     LONG(ADDR(.ns_app));
     LONG(SIZEOF(.ns_app));
@@ -165,7 +165,9 @@ SECTIONS
     *(.text .text.*);
     *(.HardFaultTrampoline);
     *(.HardFault.*);
-    . = ALIGN(4);
+    /* To the largest section alignment, so .rodata starts where .text ends: the same linear copy,
+     * and the same hole picotool cannot hash, as between .rodata and .data below. */
+    . = ALIGN(32);
     __etext = .;
   } > SECURE AT> FLASH
 
@@ -210,7 +212,7 @@ SECTIONS
   __veneer_limit = .;
 
   /* ### .ns_app — the dsm-anchor-nonsecure-app image (build.rs), VMA at the NS SRAM base
-   * (0x20061000), FLASH LMA. A LOAD_MAP entry copies it to NS SRAM; the monitor launches it
+   * (0x20065000), FLASH LMA. A LOAD_MAP entry copies it to NS SRAM; the monitor launches it
    * Non-secure after SAU. */
   .ns_app ORIGIN(NS) : ALIGN(8)
   {

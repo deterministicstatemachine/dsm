@@ -17,6 +17,7 @@
 
 extern crate alloc;
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use prost::Message;
@@ -50,6 +51,9 @@ pub trait ActiveStore {
     fn write(&mut self, record: &[u8]) -> Result<(), StoreError>;
     /// The record last written in full; `None` if the appliance was never born into this store.
     fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
+    /// Write `record` where no record is ever read from, read it back, and erase it: a try-run of
+    /// [`Self::write`] that leaves the record as it was.
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError>;
 }
 
 /// Why a stored record is not an appliance record.
@@ -79,6 +83,8 @@ pub enum DurableError {
     NotProvisioned,
     /// The store already holds a record: an anchor is provisioned once.
     AlreadyProvisioned,
+    /// The try-run did not pass, so nothing was bound: the step it stopped at, and why.
+    TryRun(String),
 }
 
 impl From<ApplianceError> for DurableError {
@@ -237,10 +243,12 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     /// Provision the anchor for the device `provisioning` names: the birth ceremony over the
     /// chip's own identity and that device's, and the first record written before the appliance
     /// serves anything. Refused when the store already holds a record: an anchor is provisioned
-    /// once, and never for a second device.
+    /// once, and never for a second device. Refused too, with nothing written, unless a try-run of
+    /// this very install passes first ([`crate::try_run`]): nothing permanent happens on a chip that
+    /// has not just gone through it.
     pub fn provision(
         chip: &ChipBirth,
-        tropic: T,
+        mut tropic: T,
         mut store: S,
         provisioning: Provisioning,
     ) -> Result<Self, ProvisionRefused<T, S>> {
@@ -253,6 +261,11 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             Ok(None) => {}
             Ok(Some(_)) => return Err(refused(DurableError::AlreadyProvisioned, tropic, store)),
             Err(e) => return Err(refused(DurableError::Store(e), tropic, store)),
+        }
+        let run = crate::try_run::rehearse::<T, P, S>(chip, &mut tropic, &mut store, &provisioning);
+        if let Some(failed) = run.first_failure() {
+            let why = alloc::format!("{}: {:?}", failed.name, failed.outcome);
+            return Err(refused(DurableError::TryRun(why), tropic, store));
         }
         let birth = match chip.birth::<P>(&provisioning) {
             Ok(birth) => birth,
@@ -419,11 +432,11 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     }
 
     /// [`Appliance::recover_at_boot`] over the durable record: a prepared record no session can
-    /// own across the reboot is cancelled durably, then recovery must accept.
+    /// own across the reboot, its counter unchanged, is cancelled durably, then recovery must accept.
     pub fn recover_at_boot(&mut self) -> Result<(), DurableBootRefusal> {
         match self.recover() {
             RecoverOutcome::Accept(_) | RecoverOutcome::ReemitCommitted(_) => Ok(()),
-            RecoverOutcome::AcceptPreparedCanComplete => {
+            RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
                 self.cancel().map_err(DurableBootRefusal::Reset)?;
                 match self.recover() {
                     RecoverOutcome::Accept(_) => Ok(()),

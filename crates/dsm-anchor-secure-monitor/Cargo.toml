@@ -28,13 +28,12 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 # Heap for the Secure working set (SPHINCS+ signing / release staging) — SEPARATE from the NS heap.
 embedded-alloc = "0.6"
-# σ^chip: TROPIC01 resident Ed25519 signing over the DSM root-advance message (Secure-only SPI0).
-tropic01 = { path = "../../../../libtropic-rs/tropic01" }
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+# σ^chip and σ^host: the chip session and bring-up, the same code the rehearsal runs on the model.
+dsm-anchor-chip = { path = "../dsm-anchor-chip" }
+# The TROPIC01 driver, pinned by commit: a firmware build is reproducible only if its driver is.
+tropic01 = { git = "https://github.com/tropicsquare/libtropic-rs", rev = "0cacb5ed94e5df491bfbb39e8702cc47598f7d63" }
 embedded-hal = "1.0"
 embedded-hal-bus = "0.3"
-# σ^host: shared no_std BLAKE3-SPHINCS+ (SPX128f) — the SAME crate the pico anchor uses (PartitionSig).
-dsm-sphincs = { path = "../dsm-sphincs" }
 
 [build-dependencies]
 # Compiles the -mcmse NSC veneer and links --cmse-implib to emit the Secure Gateway import library.
@@ -44,14 +43,20 @@ cc = "1"
 # Production profile marker. A production build sets this; it FORBIDS `bench_self_enroll` (a build
 # that enables both fails to compile — see the compile_error in main.rs).
 production = []
-# BENCH-ONLY measurement enrollment (never production). Sources `mu_enrolled` from the NS image
-# measured at THIS boot instead of OTP, so authority ops work on an unsealed board WITHOUT burning
-# OTP. It does NOT weaken `measurement_ok`: the full fresh measure + constant-time compare runs on
-# every authority op — only the enrolled digest's SOURCE changes, and only when OTP is blank. If OTP
-# IS sealed, bench mode refuses (fail-closed) so a real seal is never overridden. Mutually exclusive
-# with `production`.
+# The trial image (never production): the one a new board runs before anything is burned on it.
+# It sources `mu_enrolled` from the NS image measured at THIS boot instead of OTP, and its secret is
+# fresh each boot and held nowhere, so a try-run goes through an install on the real board and chip
+# with nothing burned. It does NOT weaken `measurement_ok`: the full fresh measure + constant-time
+# compare runs on every authority op — only the enrolled digest's SOURCE changes, and only when OTP is
+# blank. If OTP IS sealed it refuses (fail-closed) so a real seal is never overridden, and it refuses
+# every provisioning, so it can make no install. Mutually exclusive with `production`.
 bench_self_enroll = []
 
-# Size: the Secure TCB, its heap and its stack share one 256 KiB SRAM region.
+# Size: the Secure TCB, its heap and its stack share one 400 KiB SRAM region.
 [profile.release]
 opt-level = "s"
+lto = "fat"
+codegen-units = 1
+
+# Its own workspace: excluded from the root manifest.
+[workspace]

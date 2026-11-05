@@ -76,9 +76,10 @@ function SendTabInner({
   const loadWalletDataRef = useRef(loadWalletData);
   loadWalletDataRef.current = loadWalletData;
 
-  // Rust attaches the appliance on this read. The first time, Android asks the
-  // user to allow it; from then on, while it stays plugged in, it connects on
-  // its own, so choosing Offline is enough. Once it is connected the balances
+  // Rust attaches an installed appliance on this read, and a new one stays as it
+  // is. The first time, Android asks the user to allow it; from then on, while it
+  // stays plugged in, it connects on its own, so choosing Offline is enough. Once
+  // it is connected the balances
   // can name their offline allocations, so they are read again.
   const connectAppliance = useCallback(async () => {
     setApplianceBusy(true);

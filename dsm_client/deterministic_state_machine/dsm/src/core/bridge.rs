@@ -554,6 +554,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         Some(gp::envelope::Payload::SessionStateResponse(_))
         // Offline-bearer anchor status (signal (c)) — SDK-owned `anchor.status` query response.
         | Some(gp::envelope::Payload::AnchorStatusResponse(_))
+        // SDK-owned `anchor.tryRun` query response.
+        | Some(gp::envelope::Payload::AnchorTryRunResponse(_))
         // Offline-cash load/unload — SDK-owned `wallet.loadOffline`/`unloadOffline` response.
         | Some(gp::envelope::Payload::OfflineCashResponse(_))
         | Some(gp::envelope::Payload::TokenPolicyListResponse(_))

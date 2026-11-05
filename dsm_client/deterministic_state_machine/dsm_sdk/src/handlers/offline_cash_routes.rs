@@ -68,6 +68,11 @@ impl AppRouterImpl {
         // connected anchor device. Offline cash is the appliance-gated regime, so managing it needs
         // the anchor present, standing where the account does.
         let snap = self.core_sdk.anchor_appliance_status();
+        if snap.awaiting_install {
+            return err(format!(
+                "wallet.{verb}: this anchor is not installed yet: try it and install it first"
+            ));
+        }
         if !snap.connected {
             return err(format!(
                 "wallet.{verb}: connect your anchor device to manage offline cash"
@@ -253,23 +258,57 @@ mod tests {
         assert!(msg.contains("invalid amount"), "{msg}");
     }
 
-    /// Phase 3, provisioning. An anchor never provisioned is provisioned, once,
-    /// for the device that attaches it: its bundle binds that device's id, its
-    /// online key and the offline-bearer policy, and it serves that device.
+    /// Connecting a new anchor does nothing permanent. A status read reports it as awaiting its install
+    /// and binds nothing, however often; a load refuses and moves nothing; a try-run goes through the
+    /// install and leaves it as it was. Only being told to installs it, and then its bundle binds this
+    /// device's id, its online key and the offline-bearer policy, and it serves this device.
+    ///
+    /// MUTATION CONTROL: provisioning restored to `anchor_for_this_device` installs on the first status
+    /// read and turns this red at "a status read binds nothing".
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
-    async fn an_anchor_never_provisioned_is_provisioned_for_the_device_that_attaches_it() {
+    async fn connecting_an_anchor_binds_nothing_until_it_is_told_to_install() {
         let r = router_on_a_device();
         let core = &r.core_sdk;
         let appliance =
             crate::test_support::appliance::HostAppliance::unprovisioned([0xD1; 32], 16).install();
-        let snap = core.anchor_appliance_status();
-        assert!(snap.connected, "{}", snap.status);
-        let pin = appliance.pin();
-        assert_eq!(
-            snap.bundle, pin.bundle,
-            "the anchor it attached is the one provisioned"
+        for _read in 0..3 {
+            let snap = core.anchor_appliance_status();
+            assert!(!snap.connected, "{}", snap.status);
+            assert!(snap.awaiting_install, "{}", snap.status);
+        }
+        assert!(
+            matches!(appliance.provisioned(), None),
+            "a status read binds nothing"
         );
+
+        let res = invoke(&r, "wallet.loadOffline", "10").await;
+        assert!(!res.success, "no offline cash on an anchor not installed");
+        assert!(
+            res.error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("not installed")),
+            "{:?}",
+            res.error_message
+        );
+
+        let report = core.anchor_try_run().expect("the try-run ran");
+        assert!(report.passed, "{report:?}");
+        assert!(!report.steps.is_empty(), "it reports what it went through");
+        assert!(
+            !report.permanent.is_empty(),
+            "it says what would be permanent"
+        );
+        assert!(
+            matches!(appliance.provisioned(), None),
+            "a try-run binds nothing"
+        );
+
+        let snap = core.anchor_install().expect("told to install");
+        assert!(snap.connected, "{}", snap.status);
+        assert!(!snap.awaiting_install, "{}", snap.status);
+        let pin = appliance.pin();
+        assert_eq!(snap.bundle, pin.bundle, "the anchor it installed");
         let device = core.device_head().expect("a head");
         assert_eq!(
             anchor_core::enrollment::anchor_bundle(
@@ -284,6 +323,10 @@ mod tests {
             ),
             pin.bundle,
             "B binds this device, its online key and the offline-bearer policy"
+        );
+        assert!(
+            matches!(core.anchor_try_run(), Err(e) if e.to_string().contains("already installed")),
+            "an installed anchor has nothing to try"
         );
     }
 

@@ -236,6 +236,28 @@ impl<M: SlotMemory> ActiveStore for SlottedStore<M> {
     fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
         Ok(self.current()?.map(|(_, record)| record))
     }
+
+    /// In the slots past the banks, one at a time: erased, written, read back, erased. A power cut
+    /// leaves at most one written, in a slot nothing reads a record from.
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        let capacity = self.memory.capacity();
+        let first = usize::from(self.first) + 2 + 2 * usize::from(self.bank_slots);
+        if first + record.len().div_ceil(capacity) > usize::from(self.memory.slots()) {
+            return Err(StoreError::TooLarge);
+        }
+        for (index, chunk) in record.chunks(capacity).enumerate() {
+            // Within the memory's slot count, just checked.
+            let slot = (first + index) as u16;
+            self.memory.erase(slot)?;
+            self.memory.write(slot, chunk)?;
+            match self.memory.read(slot)? {
+                Some(held) if held == chunk => {}
+                Some(_) | None => return Err(StoreError::Corrupt),
+            }
+            self.memory.erase(slot)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +410,21 @@ mod tests {
         chunk[7] ^= 0x01;
         store.memory.slots[usize::from(slot)] = Some(chunk);
         assert_eq!(store.read(), Err(StoreError::Corrupt));
+    }
+
+    #[test]
+    fn a_try_of_a_record_leaves_the_record_and_every_slot_as_they_were() {
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+        let held = record(200, 0x21);
+        ok(store.write(&held), "written");
+        let before = store.memory.slots.clone();
+        ok(store.try_record(&record(250, 0x5A)), "tried");
+        assert_eq!(store.memory.slots, before, "every slot is as it was");
+        assert_eq!(store.read(), Ok(Some(held)));
+        assert_eq!(
+            store.try_record(&record(96 * 32, 0x5A)),
+            Err(StoreError::TooLarge)
+        );
     }
 
     #[test]

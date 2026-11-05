@@ -2735,7 +2735,7 @@ impl AppRouter for AppRouterImpl {
             // Session routes
             "session.status" => self.handle_session_query(q).await,
             // Offline-bearer anchor status (signal (c)) — read-only diagnostics
-            "anchor.status" => self.handle_anchor_query(q).await,
+            "anchor.status" | "anchor.tryRun" => self.handle_anchor_query(q).await,
             // Recovery routes
             p if p.starts_with("recovery.") => self.handle_recovery_query(q).await,
             // Bitcoin query routes
@@ -2762,6 +2762,8 @@ impl AppRouter for AppRouterImpl {
             "wallet.sendSmart" | "wallet.sendOffline" => {
                 Box::pin(self.handle_wallet_invoke(i)).await
             }
+            // The one route that makes an anchor permanent.
+            "anchor.install" => Box::pin(self.handle_anchor_invoke(i)).await,
             // Offline-cash load/unload (two-regime money model)
             "wallet.loadOffline" | "wallet.unloadOffline" => {
                 Box::pin(self.handle_offline_cash_invoke(i)).await

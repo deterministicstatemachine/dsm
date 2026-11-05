@@ -26,6 +26,9 @@ const WD_CTRL: *mut u32 = 0x400d_8000 as *mut u32;
 const WD_LOAD: *mut u32 = 0x400d_8004 as *mut u32;
 const WD_SCRATCH0: *mut u32 = 0x400d_800c as *mut u32;
 const WD_PERIOD_US: u32 = 2_000_000; // ~2 s (nominal; scales with clk_ref)
+/// While the Secure side serves a request: the register's whole 24 bits, ~16.7 s. A SPHINCS+
+/// signature alone takes ~7 s on this silicon, and a record write is dozens of chip commands.
+const WD_SERVICE_US: u32 = 0x00FF_FFFF;
 const WD_ARMED: u32 = 0x5744_4147; // "WDAG": set while armed, cleared on a deliberate reboot / power-on
 
 /// True iff the previous boot armed the watchdog and never disarmed it — i.e. a watchdog reset fired
@@ -51,6 +54,14 @@ pub fn feed_watchdog() {
     unsafe { core::ptr::write_volatile(WD_LOAD, WD_PERIOD_US) };
 }
 
+/// Reload the watchdog with the budget of a request being served: each chip command renews it, and a
+/// Secure side that hangs or panics inside a serve still resets. Returning to the Non-secure side
+/// takes the short budget back ([`feed_watchdog`]).
+#[inline(always)]
+pub fn feed_watchdog_in_service() {
+    unsafe { core::ptr::write_volatile(WD_LOAD, WD_SERVICE_US) };
+}
+
 /// Disarm on any deliberate reboot (so it cannot fire once the chip is in BOOTSEL) and clear the
 /// recovery marker.
 pub fn disarm_watchdog() {
@@ -63,10 +74,10 @@ pub fn disarm_watchdog() {
 
 /// TrustZone domain map (must match dsm-secure-sram.x / memory.x). SAU limit addresses are the
 /// INCLUSIVE last byte (low 5 bits = 1), per the cortex-m SAU API.
-const NSC_BASE: u32 = 0x2006_0000;
-const NSC_LIMIT: u32 = 0x2006_0FFF; // NSC veneer region [0x20060000, 0x20061000)
-const NS_BASE: u32 = 0x2006_1000;
-const NS_LIMIT: u32 = 0x2007_FFFF; // Non-secure SRAM [0x20061000, 0x20080000)
+const NSC_BASE: u32 = 0x2006_4000;
+const NSC_LIMIT: u32 = 0x2006_4FFF; // NSC veneer region [0x20064000, 0x20065000)
+const NS_BASE: u32 = 0x2006_5000;
+const NS_LIMIT: u32 = 0x2007_FFFF; // Non-secure SRAM [0x20065000, 0x20080000)
                                    // Peripheral space made Non-secure-ADDRESSABLE so the NS app can reach the clocks + USB it needs.
                                    // This is defense-in-depth, NOT a blanket grant: SAU only lifts the address-level Secure attribution;
                                    // per-peripheral ACCESSCTRL (grant_ns_peripherals) still gates WHICH peripherals NS may touch, and
@@ -79,11 +90,11 @@ const PERIPH_LIMIT: u32 = 0x501F_FFFF;
 /// Configure SAU address attribution and enable it.
 ///
 /// Regions defined:
-/// - region 0: NSC — the single legal NS→S gateway surface (the `sg` veneer at 0x20060000).
+/// - region 0: NSC — the single legal NS→S gateway surface (the `sg` veneer at 0x20064000).
 /// - region 1: NS  — the Non-secure app's SRAM (code/data/stack + the mailbox data plane).
 ///
 /// Everything NOT covered by an enabled NS/NSC region is Secure by default (SAU_CTRL.ALLNS=0): the
-/// Secure monitor image at [0x20000000,0x20060000), the flash boot block, OTP, and all peripherals.
+/// Secure monitor image at [0x20000000,0x20064000), the flash boot block, OTP, and all peripherals.
 /// This function runs from Secure SRAM and must leave the Secure monitor executing (no Secure region
 /// is marked NS), so a post-config self-reboot / continued execution is the silicon check that the
 /// attribution did not fault the Secure world.
