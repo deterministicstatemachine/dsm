@@ -63,14 +63,12 @@ SECTIONS
    * DOWN. __secure_stack_limit is its explicit floor: MSPLIM is set to it (ENTRY_POINT sp_limit
    * word + belt-and-suspenders write at reset) so a Secure stack overflow FAULTS instead of
    * silently corrupting the monitor's own code/state/heap below it.
-   * Sized to fit the SRAM-resident TCB: SECURE (256K) = ~137K code+rodata + 56K working heap
-   * (SPHINCS+ σ^host) + this 48K stack. SILICON (SWD, 2026-07-13): the appliance bring-up call
-   * chain — TROPIC01 session_start (X25519 DH + AES-GCM + SHA-256) plus the ~4.6K `Tropic01`
-   * (ActiveSession) struct move — overflowed a 20K stack (read CFSR.STKOF over SWD, SP just above
-   * the 20K MSPLIM); 48K clears it (CFSR=0, init runs to completion) for bring-up, the only path
-   * measured. The MSPLIM floor sits above `.bss`, so any overflow faults (caught by the Secure fault
-   * handler) and never corrupts. */
-  __secure_stack_size = 48K;
+   * Sized from the production image itself: `scripts/stack-bound.py` walks its call graph and CI holds
+   * this to the result, about 49 KiB at the heaviest, which is a boot resuming a cut cage. On silicon
+   * (SWD, 2026-07-13) bring-up overflowed a 20K stack through the driver's 4.6K handle being moved by
+   * value, which is why those moves now sit in frames that return. The MSPLIM floor sits above `.bss`,
+   * so any overflow faults (caught by the Secure fault handler) and never corrupts. */
+  __secure_stack_size = 64K;
   PROVIDE(_stack_start = ORIGIN(SECURE) + LENGTH(SECURE));
   PROVIDE(__secure_stack_limit = ORIGIN(SECURE) + LENGTH(SECURE) - __secure_stack_size);
 
@@ -288,6 +286,11 @@ ASSERT(ORIGIN(SECURE) % 4 == 0, "the start of the SECURE SRAM region must be 4-b
 ASSERT(__sdata % 4 == 0 && __edata % 4 == 0, "BUG: .data is not 4-byte aligned");
 ASSERT(__sidata % 4 == 0, "BUG: the LMA of .data is not 4-byte aligned");
 ASSERT(__sbss % 4 == 0 && __ebss % 4 == 0, "BUG: .bss is not 4-byte aligned");
+/* RP2350-E25: the A4 bootrom takes an IMAGE_DEF whose LOAD_MAP holds a size that is not a whole number
+ * of words as invalid, and would not boot this image. */
+ASSERT(((LOADADDR(.data) + SIZEOF(.data)) - LOADADDR(.vector_table)) % 4 == 0, "BUG: LOAD_MAP entry 1 is not whole words");
+ASSERT(SIZEOF(.gnu.sgstubs) % 4 == 0, "BUG: LOAD_MAP entry 2 is not whole words");
+ASSERT(SIZEOF(.ns_app) % 4 == 0, "BUG: LOAD_MAP entry 3 is not whole words");
 ASSERT(__sheap % 4 == 0, "BUG: start of .heap is not 4-byte aligned");
 ASSERT(_stack_start % 8 == 0, "the stack start address is not 8-byte aligned");
 

@@ -25,8 +25,11 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::SpiDevice;
 use tropic01::{NoSession, Tropic01};
 
-use crate::session::{ChipFault, ChipSession, OpenRefused, RMemSlots, RealChip};
+use crate::session::{ChipFacts, ChipFault, ChipSession, OpenRefused, RMemSlots, RealChip, Unfit};
 use crate::Board;
+
+/// The one session, shared by the appliance's chip operations and its store.
+type Shared<SPI, CS, B> = Rc<RefCell<ChipSession<SPI, CS, B>>>;
 
 /// σ^host scheme — MUST match the receiver (byte-compatible SPX128f).
 const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
@@ -160,6 +163,8 @@ pub enum BringUpFailure<F> {
     /// tropic01 does not export its `PublicKeyError`, so the cause is carried type-erased.
     CertStoreKey(Box<dyn core::fmt::Debug>),
     Session(OpenRefused<F>),
+    /// A chip that is given nothing: refused before the first write to it.
+    Unfit(Unfit),
     /// The counter or the resident chip key.
     Enroll(TropicError),
     /// The R-memory record does not fit.
@@ -175,6 +180,7 @@ impl<F: core::fmt::Debug> core::fmt::Debug for BringUpFailure<F> {
             Self::CertStore(cause) => write!(f, "CertStore: {cause:?}"),
             Self::CertStoreKey(cause) => write!(f, "CertStoreKey: {cause:?}"),
             Self::Session(cause) => write!(f, "Session: {cause:?}"),
+            Self::Unfit(cause) => write!(f, "{cause:?}"),
             Self::Enroll(cause) => write!(f, "Enroll: {cause:?}"),
             Self::Layout(cause) => write!(f, "Layout: {cause:?}"),
             Self::Recovery(cause) => write!(f, "Recovery: {cause:?}"),
@@ -182,22 +188,77 @@ impl<F: core::fmt::Debug> core::fmt::Debug for BringUpFailure<F> {
     }
 }
 
-/// Bring the anchor up: unprovisioned when its R-memory holds no record, otherwise restored from
-/// the record through §26 recovery.
-pub fn bring_up<SPI, CS, B>(
-    mut chip: Tropic01<SPI, CS, NoSession>,
-    sealed: &[u8; 32],
-    board: B,
-) -> Result<BoardAnchor, BringUpFailure<ChipFault<SPI, CS>>>
+/// What the chip says it is, and the hash its identity derives from. The chip needs a gap between
+/// back-to-back L2 reads.
+fn chip_facts<SPI, CS, B>(
+    chip: &mut Tropic01<SPI, CS, NoSession>,
+    board: &B,
+) -> Result<(ChipFacts, [u8; 32]), ChipFault<SPI, CS>>
 where
-    SPI: SpiDevice + 'static,
-    CS: OutputPin + 'static,
-    B: Board + 'static,
+    SPI: SpiDevice,
+    CS: OutputPin,
+    B: Board,
 {
-    // The chip's identity (chip_id + device-cert stpub), read before session_start consumes the
-    // NoSession handle. Fail closed if the chip will not disclose a real identity.
-    let chip_id = chip.get_info_chip_id().map_err(BringUpFailure::ChipId)?;
-    let chip_id_hash = h("DSM/anchor/chip-id/v1", &[chip_id]);
+    // A part that tests its firmware and PTRNG at start-up takes longer to answer the first time.
+    let mut polls = 0u32;
+    let chip_id = loop {
+        match chip.get_info_chip_id() {
+            Ok(id) => break id.to_vec(),
+            Err(e) if polls >= 100 => return Err(e),
+            Err(_booting) => {
+                board.alive();
+                board.wait_100ms();
+                polls += 1;
+            }
+        }
+    };
+    board.wait_100ms();
+    let firmware = chip.get_info_riscv_fw_ver()?.to_vec();
+    board.wait_100ms();
+    let ecc_firmware = chip.get_info_spect_fw_ver()?.to_vec();
+    board.wait_100ms();
+    Ok((
+        ChipFacts::read(&chip_id, &firmware, &ecc_firmware),
+        h("DSM/anchor/chip-id/v1", &[chip_id.as_slice()]),
+    ))
+}
+
+/// Configure a test part's PTRNG, on a chip nothing has been bound to, and say what the chip now is.
+/// The one thing the image built with `prepare_chip` does.
+pub fn prepare_chip<SPI, CS, B>(
+    mut chip: Tropic01<SPI, CS, NoSession>,
+    pairing: [u8; 32],
+    board: B,
+) -> Result<ChipFacts, BringUpFailure<ChipFault<SPI, CS>>>
+where
+    SPI: SpiDevice,
+    CS: OutputPin,
+    B: Board,
+{
+    let (facts, _chip_id_hash) = chip_facts(&mut chip, &board).map_err(BringUpFailure::ChipId)?;
+    let mut session =
+        ChipSession::open(chip, pairing, facts.clone(), board).map_err(BringUpFailure::Session)?;
+    session
+        .configure_randomness()
+        .map_err(BringUpFailure::Enroll)?;
+    session.check_fit().map_err(BringUpFailure::Unfit)?;
+    Ok(facts)
+}
+
+/// The chip's identity, from its chip id and its certificate store, whose 3.8 KiB are given back here.
+/// Fail closed if the chip will not disclose a real identity.
+#[inline(never)]
+fn identify<SPI, CS, B>(
+    chip: &mut Tropic01<SPI, CS, NoSession>,
+    sealed: &[u8; 32],
+    board: &B,
+) -> Result<(ChipFacts, ChipIdentity), BringUpFailure<ChipFault<SPI, CS>>>
+where
+    SPI: SpiDevice,
+    CS: OutputPin,
+    B: Board,
+{
+    let (facts, chip_id_hash) = chip_facts(chip, board).map_err(BringUpFailure::ChipId)?;
     let cert_store = chip
         .get_info_cert_store()
         .map_err(BringUpFailure::CertStore)?;
@@ -207,11 +268,48 @@ where
     // Space the cert-store read from session_start's own: the chip needs a gap between back-to-back
     // L2 reads.
     board.wait_100ms();
-    let ident = ChipIdentity::derive(&stpub, &chip_id_hash, sealed);
+    Ok((facts, ChipIdentity::derive(&stpub, &chip_id_hash, sealed)))
+}
 
-    // The authenticated L3 session, on the board's own pairing slot once born.
-    let session = ChipSession::open(chip, ident.pairing, board).map_err(BringUpFailure::Session)?;
-    let session = Rc::new(RefCell::new(session));
+/// The chip's identity and its session, on the board's own pairing slot once born. Everything this
+/// moves is given back on return: a cage resumed at boot runs under what is left, and it reopens the
+/// session itself (`scripts/stack-bound.py`).
+#[inline(never)]
+fn open_chip<SPI, CS, B>(
+    mut chip: Tropic01<SPI, CS, NoSession>,
+    sealed: &[u8; 32],
+    board: B,
+) -> Result<(ChipIdentity, Shared<SPI, CS, B>), BringUpFailure<ChipFault<SPI, CS>>>
+where
+    SPI: SpiDevice,
+    CS: OutputPin,
+    B: Board,
+{
+    let (facts, ident) = identify(&mut chip, sealed, &board)?;
+    let session =
+        ChipSession::open(chip, ident.pairing, facts, board).map_err(BringUpFailure::Session)?;
+    Ok((ident, Rc::new(RefCell::new(session))))
+}
+
+/// Bring the anchor up: unprovisioned when its R-memory holds no record, otherwise restored from
+/// the record through §26 recovery.
+pub fn bring_up<SPI, CS, B>(
+    chip: Tropic01<SPI, CS, NoSession>,
+    sealed: &[u8; 32],
+    board: B,
+) -> Result<BoardAnchor, BringUpFailure<ChipFault<SPI, CS>>>
+where
+    SPI: SpiDevice + 'static,
+    CS: OutputPin + 'static,
+    B: Board + 'static,
+{
+    let (ident, session) = open_chip(chip, sealed, board)?;
+
+    // Whether this chip can be given anything, before it is given anything.
+    session
+        .borrow_mut()
+        .check_fit()
+        .map_err(BringUpFailure::Unfit)?;
 
     // The counter (initialized once on a virgin chip) and the resident chip key.
     let live = session

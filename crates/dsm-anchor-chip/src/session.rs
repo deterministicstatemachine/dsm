@@ -76,6 +76,121 @@ const CAGE: [u16; 7] = [
     I_CONFIG_WRITE,
 ];
 
+/// `CFG_START_UP` (User API, configuration objects).
+const CFG_START_UP: u16 = 0x000;
+/// `CFG_SENSORS`.
+const CFG_SENSORS: u16 = 0x008;
+/// `CFG_START_UP[RNGTEST_DIS]`, 0 when the chip tests its PTRNG at every start-up. Erratum
+/// OI_TR01_ERR_2026090100: left at 1 on some test parts the PTRNG is never configured, and what the
+/// chip generates from it may not be random.
+const RNGTEST_DIS_BIT: u8 = 2;
+/// Every sensor of `CFG_SENSORS` (bits 0..=17), each 0 when on. Tropic Square's factory configuration
+/// clears all of them in R-config on every part but its T0XX samples (catalog list, section 5).
+const SENSORS_OFF: u32 = 0x0003_FFFF;
+
+/// What the chip says it is: its part number, silicon revision and firmware versions. Reported, and
+/// never a credential: the chip's own word, which a chip that lies can change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChipFacts {
+    pub part_number: String,
+    pub silicon: String,
+    pub firmware: String,
+    pub ecc_firmware: String,
+    /// Below 2.0.0 the chip does not verify its own writes (OI_TR01_ERR_2025120100).
+    pub verifies_writes: Verifies,
+}
+
+/// Whether the chip's firmware reads back what it writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verifies {
+    ChipAndBoard,
+    BoardOnly,
+}
+
+impl ChipFacts {
+    /// `chip_id` as the chip gives it (`lt_chip_id_t`, 128 bytes), and its two firmware versions.
+    pub fn read(chip_id: &[u8], firmware: &[u8], ecc_firmware: &[u8]) -> Self {
+        let verifies_writes = match firmware.get(3) {
+            Some(major) if *major >= 2 => Verifies::ChipAndBoard,
+            Some(_) | None => Verifies::BoardOnly,
+        };
+        Self {
+            part_number: part_number(chip_id),
+            silicon: text(chip_id.get(28..32)),
+            firmware: version(firmware),
+            ecc_firmware: version(ecc_firmware),
+            verifies_writes,
+        }
+    }
+
+    /// One line for whoever is about to install on this chip.
+    pub fn describe(&self) -> String {
+        let writes = match self.verifies_writes {
+            Verifies::ChipAndBoard => "the chip and the board each verify its writes",
+            Verifies::BoardOnly => "only the board verifies its writes, as this firmware does not",
+        };
+        format!(
+            "the chip is {}, silicon {}, firmware {}, ECC firmware {}: {writes}",
+            self.part_number, self.silicon, self.firmware, self.ecc_firmware
+        )
+    }
+}
+
+/// The length byte and text of `part_num_data`, at offset 68 of `lt_chip_id_t`.
+fn part_number(chip_id: &[u8]) -> String {
+    match chip_id.get(68..84) {
+        Some(field) => text(field.get(1..1 + usize::from(field[0]).min(15))),
+        None => "unknown".to_string(),
+    }
+}
+
+fn text(bytes: Option<&[u8]>) -> String {
+    match bytes {
+        Some(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        None => "unknown".to_string(),
+    }
+}
+
+/// `[build, patch, minor, major]`, as the chip answers `Get_Info_Req`.
+fn version(bytes: &[u8]) -> String {
+    match <[u8; 4]>::try_from(bytes) {
+        Ok([_build, patch, minor, major]) => format!("{major}.{minor}.{patch}"),
+        Err(_short) => "unknown".to_string(),
+    }
+}
+
+/// Why a chip is not given a key, or anything else: refused before the first write to it.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Unfit {
+    /// `CFG_START_UP[RNGTEST_DIS]` is still 1. What the chip would generate may not be random.
+    RandomnessUntested(ChipFacts),
+    /// A sensor of `CFG_SENSORS` is off, as on a T0XX sample.
+    SensorsOff(ChipFacts, u32),
+    /// The chip's configuration could not be read.
+    Unread(TropicError),
+}
+
+impl core::fmt::Debug for Unfit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RandomnessUntested(facts) => write!(
+                f,
+                "{}. It does not test its PTRNG at start-up, so what it generates may not be random \
+                 (erratum OI_TR01_ERR_2026090100). Nothing has been written to it. The prepare_chip \
+                 image configures it, irreversibly",
+                facts.describe()
+            ),
+            Self::SensorsOff(facts, off) => write!(
+                f,
+                "{}. Its tamper sensors {off:#x} are off, as on a sample part. Nothing has been \
+                 written to it",
+                facts.describe()
+            ),
+            Self::Unread(cause) => write!(f, "the chip's configuration did not read: {cause:?}"),
+        }
+    }
+}
+
 /// The driver's fault over this SPI device and chip-select.
 pub type ChipFault<SPI, CS> = Fault<
     <SPI as embedded_hal::spi::ErrorType>::Error,
@@ -134,6 +249,45 @@ pub fn fault<ES, EG>(e: Fault<ES, EG>) -> TropicError {
     }
 }
 
+/// Reboot the chip. Firmware up to 1.0.1 resets partway through this answer's CRC, so a bad CRC here
+/// says nothing about the reboot (OI_TR01_ERR_2025091800). A corrupted request would look the same, so
+/// a bad CRC asks once more, which costs a reboot and nothing else.
+fn reboot_chip<SPI: SpiDevice, CS: OutputPin, B: Board>(
+    chip: &mut Tropic01<SPI, CS, NoSession>,
+    board: &B,
+) -> Result<(), TropicError> {
+    match chip.startup_req(StartupReq::Reboot) {
+        Ok(()) => await_chip(chip, board),
+        Err(Fault::InvalidCRC) => {
+            await_chip(chip, board)?;
+            match chip.startup_req(StartupReq::Reboot) {
+                Ok(()) | Err(Fault::InvalidCRC) => await_chip(chip, board),
+                Err(e) => Err(fault(e)),
+            }
+        }
+        Err(e) => Err(fault(e)),
+    }
+}
+
+/// Up to ~10 s for the chip to answer again.
+fn await_chip<SPI: SpiDevice, CS: OutputPin, B: Board>(
+    chip: &mut Tropic01<SPI, CS, NoSession>,
+    board: &B,
+) -> Result<(), TropicError> {
+    let mut polls = 0u32;
+    loop {
+        match chip.get_info_chip_id() {
+            Ok(_id) => return Ok(()),
+            Err(e) if polls >= 100 => return Err(fault(e)),
+            Err(_booting) => {
+                board.alive();
+                board.wait_100ms();
+                polls += 1;
+            }
+        }
+    }
+}
+
 /// Why the chip could not be opened: the board's own slot and the factory slot both refused.
 pub struct OpenRefused<F> {
     pub own_slot: F,
@@ -157,21 +311,26 @@ pub struct ChipSession<SPI: SpiDevice, CS: OutputPin, B: Board> {
     pairing: [u8; 32],
     /// The pairing slot the session runs on.
     slot: u8,
+    /// What the chip said it was before the session opened.
+    facts: ChipFacts,
     board: B,
 }
 
 impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     /// Open the chip on the board's own slot if it holds the board's key, else on the factory
     /// slot (an unborn chip).
+    #[inline(never)]
     pub fn open(
         chip: Tropic01<SPI, CS, NoSession>,
         pairing: [u8; 32],
+        facts: ChipFacts,
         board: B,
     ) -> Result<Self, OpenRefused<ChipFault<SPI, CS>>> {
         let mut this = Self {
             session: None,
             pairing,
             slot: OWN_SLOT,
+            facts,
             board,
         };
         match this.start(chip, OWN_SLOT) {
@@ -193,6 +352,58 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         }
     }
 
+    /// Whether this chip may be given a key and a counter, read before either is written. Every boot
+    /// asks, since nothing it reads depends on what the anchor has done.
+    pub fn check_fit(&mut self) -> Result<(), Unfit> {
+        let start_up = self
+            .with(|s| s.i_config_read(CFG_START_UP.into()))
+            .map_err(|e| Unfit::Unread(fault(e)))?;
+        if start_up & (1u32 << RNGTEST_DIS_BIT) != 0 {
+            return Err(Unfit::RandomnessUntested(self.facts.clone()));
+        }
+        // A sensor is on when either copy holds its bit at 0.
+        let irreversible = self
+            .with(|s| s.i_config_read(CFG_SENSORS.into()))
+            .map_err(|e| Unfit::Unread(fault(e)))?;
+        let reversible = self
+            .with(|s| s.r_config_read(CFG_SENSORS.into()))
+            .map_err(|e| Unfit::Unread(fault(e)))?;
+        let off = irreversible & reversible & SENSORS_OFF;
+        if off != 0 {
+            return Err(Unfit::SensorsOff(self.facts.clone(), off));
+        }
+        Ok(())
+    }
+
+    /// Tropic Square's correction for a test part whose PTRNG was never configured: clear
+    /// `CFG_START_UP[RNGTEST_DIS]`, irreversibly, and reboot so the chip tests it from now on. A key
+    /// already on the chip came from the untested source and is erased (OI_TR01_ERR_2026090100). Only
+    /// a chip still on its factory slot takes this, and only the image built to do it asks.
+    pub fn configure_randomness(&mut self) -> Result<(), TropicError> {
+        if self.slot != FACTORY_SLOT {
+            return Err(TropicError::Refused);
+        }
+        let held = self
+            .with(|s| s.i_config_read(CFG_START_UP.into()))
+            .map_err(fault)?;
+        if held & (1u32 << RNGTEST_DIS_BIT) != 0 {
+            self.with(|s| s.i_config_write(CFG_START_UP.into(), RNGTEST_DIS_BIT))
+                .map_err(fault)?;
+            let now = self
+                .with(|s| s.i_config_read(CFG_START_UP.into()))
+                .map_err(fault)?;
+            if now != held & !(1u32 << RNGTEST_DIS_BIT) {
+                return Err(TropicError::Refused);
+            }
+        }
+        match self.with(|s| s.ecc_key_erase(CHIP_KEY_SLOT.into())) {
+            Ok(()) | Err(Fault::SlotEmpty | Fault::SlotInvalid) => {}
+            Err(e) => return Err(fault(e)),
+        }
+        self.reopen(FACTORY_SLOT, Reboot::Latch)
+    }
+
+    #[inline(never)]
     fn start(
         &self,
         chip: Tropic01<SPI, CS, NoSession>,
@@ -226,32 +437,37 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         }
     }
 
-    /// End the session, optionally reboot the chip, and open again on `slot`.
+    /// End the session, optionally reboot the chip, and open again on `slot`. Each step moves the
+    /// driver's 4.6 KiB handle in a frame of its own, given back before the next, so a reopen under a
+    /// boot or a request does not hold several of them at once: `scripts/stack-bound.py`.
     fn reopen(&mut self, slot: u8, reboot: Reboot) -> Result<(), TropicError> {
+        let mut chip = self.end_session()?;
+        if reboot == Reboot::Latch {
+            reboot_chip(&mut chip, &self.board)?;
+        }
+        self.start_held(chip, slot)
+    }
+
+    /// The session ended, and the chip handed back.
+    #[inline(never)]
+    fn end_session(&mut self) -> Result<Tropic01<SPI, CS, NoSession>, TropicError> {
         let session = self.session.take().ok_or(TropicError::Comm)?;
-        let mut chip = match session.session_abort() {
-            Ok(chip) => chip,
+        match session.session_abort() {
+            Ok(chip) => Ok(chip),
             Err((session, e)) => {
                 self.session = Some(session);
-                return Err(fault(e));
-            }
-        };
-        if reboot == Reboot::Latch {
-            chip.startup_req(StartupReq::Reboot).map_err(fault)?;
-            // Up to ~10 s for the chip to answer again.
-            let mut polls = 0u32;
-            loop {
-                match chip.get_info_chip_id() {
-                    Ok(_id) => break,
-                    Err(e) if polls >= 100 => return Err(fault(e)),
-                    Err(_booting) => {
-                        self.board.alive();
-                        self.board.wait_100ms();
-                        polls += 1;
-                    }
-                }
+                Err(fault(e))
             }
         }
+    }
+
+    /// A session on `slot`.
+    #[inline(never)]
+    fn start_held(
+        &mut self,
+        chip: Tropic01<SPI, CS, NoSession>,
+        slot: u8,
+    ) -> Result<(), TropicError> {
         match self.start(chip, slot) {
             Ok(session) => {
                 self.session = Some(session);
@@ -338,6 +554,19 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     /// that will send it, and the reboot that latches the cage, session and all.
     fn rehearse_birth(&mut self, h0: u32) -> Vec<TryStep> {
         let mut steps = Vec::new();
+        steps.push(TryStep::new(&self.facts.describe(), Ok(())));
+        let revision = self.board.silicon_revision();
+        steps.push(TryStep::new(
+            &format!("the board's RP2350 is stepping A{revision}"),
+            if revision >= crate::MIN_SILICON_REVISION {
+                Ok(())
+            } else {
+                Err(format!(
+                    "below A{}, a glitch at boot can run unsigned code (RP2350-E24)",
+                    crate::MIN_SILICON_REVISION
+                ))
+            },
+        ));
         steps.push(TryStep::new(
             "the chip's counter moves one step and is set back to its start",
             self.rehearse_counter(h0),
@@ -433,9 +662,17 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
             match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).map(|k| *k)) {
                 Ok(key) if key == *own.as_bytes() => {}
                 Ok(_other) => return Err(TropicError::Refused),
-                Err(Fault::InvalidKey | Fault::SlotEmpty) => self
-                    .with(|s| s.pairing_key_write(u16::from(OWN_SLOT).into(), own.as_bytes()))
-                    .map_err(fault)?,
+                Err(Fault::InvalidKey | Fault::SlotEmpty) => {
+                    self.with(|s| s.pairing_key_write(u16::from(OWN_SLOT).into(), own.as_bytes()))
+                        .map_err(fault)?;
+                    // Firmware below 2.0.0 does not verify this write (OI_TR01_ERR_2025120100).
+                    let held = self
+                        .with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).map(|k| *k))
+                        .map_err(fault)?;
+                    if held != *own.as_bytes() {
+                        return Err(TropicError::Refused);
+                    }
+                }
                 Err(e) => return Err(fault(e)),
             }
             self.reopen(OWN_SLOT, Reboot::Keep)?;
@@ -458,7 +695,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                 }
             }
             for register in CAGE {
-                let held = self
+                let mut held = self
                     .with(|s| s.i_config_read(register.into()))
                     .map_err(fault)?;
                 for lane in lanes_of(register) {
@@ -466,6 +703,15 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                     if held & (1u32 << bit) != 0 {
                         self.with(|s| s.i_config_write(register.into(), bit))
                             .map_err(fault)?;
+                        // Firmware below 2.0.0 does not verify this write (OI_TR01_ERR_2025120100).
+                        // Each bit is read back before the next is cleared.
+                        held &= !(1u32 << bit);
+                        let now = self
+                            .with(|s| s.i_config_read(register.into()))
+                            .map_err(fault)?;
+                        if now != held {
+                            return Err(TropicError::Refused);
+                        }
                     }
                 }
             }
@@ -619,9 +865,19 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> SlotMemory for RMemSlots<SPI, CS, 
     }
 
     fn write(&mut self, slot: u16, data: &[u8]) -> Result<(), StoreError> {
-        self.session
+        let written = self
+            .session
             .borrow_mut()
-            .with(|s| s.r_mem_data_write(slot.into(), data))
-            .map_err(|e| store_fault(fault(e)))
+            .with(|s| s.r_mem_data_write(slot.into(), data));
+        match written {
+            Ok(()) => Ok(()),
+            // Firmware 2.0.0 and later says so when a write did not hold, and Tropic Square's
+            // correction is an erase, to restore a known state (OI_TR01_ERR_2025120100).
+            Err(Fault::HardwareFail) => {
+                self.erase(slot)?;
+                Err(StoreError::NotHeld)
+            }
+            Err(e) => Err(store_fault(fault(e))),
+        }
     }
 }

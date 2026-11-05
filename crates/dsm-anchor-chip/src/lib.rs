@@ -15,7 +15,6 @@ pub mod session;
 
 /// What a chip session needs from the board it runs on.
 pub trait Board {
-    /// One random byte from the board's own entropy source: each session's ephemeral key.
     /// 32 bytes no one else has seen, for one session's ephemeral key. `None` when the board's entropy
     /// source fails its own health tests: no session opens on anything less.
     fn random_key(&self) -> Option<[u8; 32]>;
@@ -24,7 +23,13 @@ pub trait Board {
     fn wait_100ms(&self);
     /// A chip command is about to run: the operation in progress is alive.
     fn alive(&self);
+    /// The stepping of the board's RP2350: 2 for A2, 3 for A3, 4 for A4.
+    fn silicon_revision(&self) -> u8;
 }
+
+/// The first RP2350 stepping an anchor is installed on. A2 and A3 can be made to run unsigned code by
+/// a physical glitch at boot, with no workaround (errata RP2350-E24, and on A2 also E16, E20, E21).
+pub const MIN_SILICON_REVISION: u8 = 4;
 
 /// The Secure heap the monitor gives the anchor. Its size is here so that the rehearsal holds every
 /// operation to it.

@@ -18,16 +18,50 @@ MU_BIN="$BUILD_DIR/mu-enrolled.bin"
 # The Non-secure image as signed. Its digest goes into OTP, so a later monitor update must carry these
 # very bytes: build it with DSM_ANCHOR_NS_BIN naming a kept copy of this file.
 NS_BIN="$BUILD_DIR/ns_app.bin"
+# DSM_BOOTKEY_PASSIN names where openssl takes the passphrase from (openssl-passphrase-options), for a
+# run with nobody at it. Unset, this script asks.
+PASSIN="${DSM_BOOTKEY_PASSIN:-}"
+# The image's version, covered by its signature. The bootrom refuses any image whose rollback version is
+# below what this board has already booted, and records it at each boot of a higher one. An image with
+# a real defect is retired by signing its successor with the next version. Starts at 1: version 0 does
+# not set ROLLBACK_REQUIRED (RP2350 datasheet, "Rollback versions and bootloaders").
+IMAGE_MAJOR=1
+IMAGE_MINOR=0
+ROLLBACK_VERSION=1
+# Page 44, rows 0-2: the bootrom keeps it in three raw rows, majority-voted, which hold versions up to
+# 23. Off the boot configuration's page, which --lock-boot-pages closes to Secure writes: a later
+# version could not be recorded there and the image would not boot. MUST equal ROLLBACK_ROW in
+# provision-otp.sh, and an image with more versions than these lists further groups after them.
+# picotool reads a row number as hex, written with or without its 0x.
+ROLLBACK_ROW="$(printf '0x%x' $(( 44 * 64 )))"
+
+# The passphrase, read here and handed to openssl through the environment of this one process.
+ask_passphrase() { # [new]
+  [ -z "$PASSIN" ] || return 0
+  IFS= read -rsp "Boot key passphrase: " DSM_BOOTKEY_PASSPHRASE; echo
+  if [ "${1:-}" = new ]; then
+    IFS= read -rsp "Again: " again; echo
+    [ "$DSM_BOOTKEY_PASSPHRASE" = "$again" ] || { echo "ERROR: they differ"; exit 1; }
+    [ "${#DSM_BOOTKEY_PASSPHRASE}" -ge 16 ] || { echo "ERROR: 16 characters at least"; exit 1; }
+  fi
+  export DSM_BOOTKEY_PASSPHRASE
+  PASSIN="env:DSM_BOOTKEY_PASSPHRASE"
+}
 
 case "${1:-}" in
   --genkey)
     [ -f "$KEY" ] && { echo "ERROR: $KEY exists — refusing to overwrite the enrolled signing key"; exit 1; }
     # RP2350 secure boot verifies a secp256k1 signature (RP2350 datasheet §5).
-    openssl ecparam -name secp256k1 -genkey -noout -out "$KEY"
+    # Encrypted from its first byte: the key is never on disk without its passphrase. A leaked file is then not a leaked key, and a lost passphrase is a lost key.
+    ask_passphrase new
+    # The key arrives whole or not at all: a file left behind by a failure would pass for one.
+    openssl ecparam -name secp256k1 -genkey -noout | openssl ec -aes256 -out "$KEY.new" -passout "$PASSIN" 2>/dev/null
+    mv "$KEY.new" "$KEY"
     chmod 600 "$KEY"
-    echo "wrote $KEY — keep a copy offline; NEVER commit it or copy it to an appliance" ;;
+    echo "wrote $KEY, encrypted — keep a copy and its passphrase offline, apart; NEVER commit it or copy it to an appliance" ;;
   --sign)
     [ -f "$KEY" ]  || { echo "ERROR: no $KEY — run '$0 --genkey' or supply KEY=…"; exit 1; }
+    grep -q ENCRYPTED "$KEY" || { echo "ERROR: $KEY is not encrypted — a signing key is never kept in the clear"; exit 1; }
     [ -f "$ELF" ]  || { echo "ERROR: no firmware ELF at $ELF — build --release --features production first"; exit 1; }
     # Only a production image is ever signed: the trial image and the production one build to one path.
     symbols="$(arm-none-eabi-nm "$ELF")"
@@ -38,7 +72,14 @@ case "${1:-}" in
     rm -f "$SIGNED" "$OTP_JSON" "$MU_BIN"
     # seal --sign: signs $ELF into $SIGNED and writes the key-fingerprint OTP rows, the key's valid
     # flag and SECURE_BOOT_ENABLE into $OTP_JSON. provision-otp.sh splits those apart.
-    picotool seal --sign "$ELF" -t elf "$SIGNED" "$KEY" "$OTP_JSON"
+    # picotool reads the key in the clear, so it gets a copy that lives only as long as this signing.
+    CLEAR_DIR="$(mktemp -d)"
+    trap 'rm -rf "$CLEAR_DIR"' EXIT
+    ask_passphrase
+    opened=0; openssl ec -in "$KEY" -out "$CLEAR_DIR/key.pem" -passin "$PASSIN" </dev/null 2>/dev/null || opened=$?
+    [ "$opened" = 0 ] || { echo "ERROR: $KEY did not open: is that its passphrase?"; exit 1; }
+    picotool seal --sign "$ELF" -t elf "$SIGNED" "$CLEAR_DIR/key.pem" "$OTP_JSON" --major "$IMAGE_MAJOR" --minor "$IMAGE_MINOR" --rollback "$ROLLBACK_VERSION" "$ROLLBACK_ROW"
+    rm -rf "$CLEAR_DIR"
     # The digest the monitor compares before every authority op (main.rs `measurement_ok`): BLAKE3
     # over the bytes from __ns_rx_start to __ns_rx_end, which is the head of the .ns_app image.
     python3 - "$ELF" "$SIGNED" "$MU_BIN" "$NS_BIN" <<'PY'

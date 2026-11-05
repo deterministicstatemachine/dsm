@@ -29,11 +29,12 @@ use crate::root_advance::{anchor_root_advance, transition_digest, OwnedTransitio
 use crate::tropic::{PartitionSig, Tropic};
 
 /// What installing makes permanent, for the wallet to show before it asks.
-pub const PERMANENT: [&str; 4] = [
+pub const PERMANENT: [&str; 5] = [
     "This anchor is bound to this wallet's device, online key and genesis. It can never serve another wallet, and a wallet wiped or created anew cannot use it.",
     "The chip's factory pairing key is invalidated, and the board's own key takes its place. The chip then opens to this board alone.",
     "The chip's counter start and resident key can never be set again.",
     "The chip's access rules are closed for good: nothing can loosen them afterward.",
+    "What is loaded onto this anchor can only come back through this anchor. If it dies or is lost, that balance is gone: nothing can recover it.",
 ];
 
 /// One thing a try-run went through, and how it came out.

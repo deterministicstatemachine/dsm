@@ -20,6 +20,7 @@ lock_row_value() { # LOCK_S LOCK_NS LOCK_BL
   local byte=$(( $1 | ($2 << 2) | ($3 << 4) ))
   printf '0x%06x' $(( byte * 0x010101 ))
 }
+LOCK_READ_WRITE=0
 LOCK_READ_ONLY=1
 LOCK_INACCESSIBLE=3
 # Secure reads and nothing writes; Non-secure has no access. The USB bootloader never serves the
@@ -34,6 +35,11 @@ DIGEST_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_INACCESSIBLE" "$LOCK_READ_
 BOOT_CONFIG_LOCK_ROW=$(( 0xf80 + 2 * 1 + 1 ))
 BOOT_KEYS_LOCK_ROW=$(( 0xf80 + 2 * 2 + 1 ))
 BOOT_PAGES_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_READ_ONLY" "$LOCK_READ_ONLY")
+# Page 44, rows 0-2, MUST equal ROLLBACK_ROW in sign.sh: the rollback version. The bootrom, running
+# Secure, goes on writing it. A USB host in the bootloader must not, which would retire every image.
+ROLLBACK_ROW=$(( 44 * 64 ))
+ROLLBACK_LOCK_ROW=$(( 0xf80 + 2 * 44 + 1 ))
+ROLLBACK_LOCK=$(lock_row_value "$LOCK_READ_WRITE" "$LOCK_READ_ONLY" "$LOCK_READ_ONLY")
 
 COMMIT=0; CMD=""; BOARD=""
 while [ $# -gt 0 ]; do
@@ -76,17 +82,18 @@ case "$CMD" in
     # READ-ONLY. Every row this procedure writes must still be zero.
     dump="$BOARD_DIR/otp-before.bin"
     picotool otp dump -r --output "$dump"
-    python3 - "$dump" "$SECRET_ROW" "$DIGEST_ROW" <<'PY'
+    python3 - "$dump" "$SECRET_ROW" "$DIGEST_ROW" "$ROLLBACK_ROW" <<'PY'
 import struct, sys
 data = open(sys.argv[1], "rb").read()
 rows = [word & 0xffffff for (word,) in struct.iter_unpack("<I", data)]
 if len(rows) != 4096:
     sys.exit(f"ERROR: the dump holds {len(rows)} rows, not 4096")
-secret, digest = int(sys.argv[2]), int(sys.argv[3])
+secret, digest, rollback = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 watched = {"sealed secret": range(secret, secret + 16), "digest": range(digest, digest + 16),
            "boot key 0": range(0x80, 0x90), "CRIT1": range(0x40, 0x48), "BOOT_FLAGS1": range(0x4b, 0x4e),
            "secret page lock": range(0xf80 + 96, 0xf80 + 98), "digest page lock": range(0xf80 + 92, 0xf80 + 94),
-           "boot page locks": range(0xf80 + 2, 0xf80 + 6)}
+           "boot page locks": range(0xf80 + 2, 0xf80 + 6), "rollback version": range(rollback, rollback + 3),
+           "rollback page lock": range(0xf80 + 88, 0xf80 + 90), "BOOT_FLAGS0": range(0x48, 0x4b)}
 used = {name: [hex(r) for r in span if rows[r] != 0] for name, span in watched.items()}
 used = {name: found for name, found in used.items() if found}
 if used:
@@ -115,7 +122,13 @@ PY
   --lock-pages)
     confirm
     run picotool otp set -r "$SECRET_LOCK_ROW" "$SECRET_LOCK"
-    run picotool otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK" ;;
+    run picotool otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK"
+    # Nothing reads this copy again. It could restore no board, since the chip's key does not leave
+    # the chip, and all it can still do is leak.
+    if [ "$COMMIT" = 1 ]; then
+      rm -f "$SECRET_BIN"
+      echo "removed $SECRET_BIN: the board holds the only copy"
+    fi ;;
   --write-bootkey)
     # The key's hash alone, so it can be read back before anything depends on it. sign.sh's OTP
     # file also holds KEY_VALID and SECURE_BOOT_ENABLE, which --lockdown burns.
@@ -141,11 +154,12 @@ PY
     confirm
     run picotool otp load "$lock_json" ;;
   --lock-boot-pages)
-    # DO LAST, after --lockdown: nothing writes these pages again, so everything meant for them must
-    # already be there.
+    # DO LAST, after the board has booted its signed image once. That boot sets ROLLBACK_REQUIRED in
+    # BOOT_FLAGS0, on page 1, and the bootrom cannot boot an image whose version it could not record.
     confirm
     run picotool otp set -r "$BOOT_CONFIG_LOCK_ROW" "$BOOT_PAGES_LOCK"
-    run picotool otp set -r "$BOOT_KEYS_LOCK_ROW" "$BOOT_PAGES_LOCK" ;;
+    run picotool otp set -r "$BOOT_KEYS_LOCK_ROW" "$BOOT_PAGES_LOCK"
+    run picotool otp set -r "$ROLLBACK_LOCK_ROW" "$ROLLBACK_LOCK" ;;
   *)
     usage ;;
 esac

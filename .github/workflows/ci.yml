@@ -810,12 +810,14 @@ jobs:
       - name: Install the firmware's tools
         run: sudo apt-get install -y binutils-arm-none-eabi clang
 
-      - name: dsm-anchor-secure-monitor builds the trial and production images (thumbv8m)
+      - name: dsm-anchor-secure-monitor builds its three images (thumbv8m)
         working-directory: crates/dsm-anchor-secure-monitor
         run: |
+          cargo build --release --locked --features bench_self_enroll,prepare_chip
           cargo build --release --locked --features bench_self_enroll
           cargo build --release --locked --features production
           ./scripts/check-secure-no-xip.sh
+          python3 scripts/stack-bound.py target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor --limit 65536
 
       - name: Install the TROPIC01 model
         run: bash ci/tropic01_model.sh "$RUNNER_TEMP/tropic01-model" >> "$GITHUB_ENV"

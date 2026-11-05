@@ -50,12 +50,37 @@ production = []
 # blank. If OTP IS sealed it refuses (fail-closed) so a real seal is never overridden, and it refuses
 # every provisioning, so it can make no install. Mutually exclusive with `production`.
 bench_self_enroll = []
+# The image that does one thing, on a test part whose PTRNG Tropic Square left unconfigured (erratum
+# OI_TR01_ERR_2026090100, T005, T101, T103): clears CFG_START_UP[RNGTEST_DIS], irreversibly, erases any
+# key generated before that, reboots the chip and says how it went. It installs nothing and answers
+# every request with that outcome. Only built on purpose, and a trial image in all else.
+prepare_chip = ["bench_self_enroll"]
 
 # Size: the Secure TCB, its heap and its stack share one 400 KiB SRAM region.
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
+
+# The cryptography keeps "s". Its speed is what the watchdog's budget and the phone's wait were set
+# against: a SPHINCS+ signature takes ~7 s on this silicon against a ~16.7 s budget. The rest gives up
+# speed nothing depends on, which frees about 19 KB of Secure SRAM.
+[profile.release.package.dsm-sphincs]
+opt-level = "s"
+[profile.release.package.blake3]
+opt-level = "s"
+[profile.release.package.curve25519-dalek]
+opt-level = "s"
+[profile.release.package.ed25519-dalek]
+opt-level = "s"
+[profile.release.package.x25519-dalek]
+opt-level = "s"
+[profile.release.package.aes]
+opt-level = "s"
+[profile.release.package.aes-gcm]
+opt-level = "s"
+[profile.release.package.sha2]
+opt-level = "s"
 
 # Its own workspace: excluded from the root manifest.
 [workspace]

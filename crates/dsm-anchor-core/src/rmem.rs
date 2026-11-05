@@ -8,7 +8,8 @@
 //! header carries a sequence number and the digest of its record; a read takes the highest
 //! sequence whose bank still hashes to its digest. A power cut at any erase or write, torn writes
 //! included, leaves either the new record or the one before it: a slot the chip will not give back
-//! ([`StoreError::Unreadable`]) is a slot holding no record, never a failure of the store.
+//! ([`StoreError::Unreadable`]) is a slot holding no record, never a failure of the store, and an
+//! erased slot may be answered either way.
 //!
 //! Every slot is read back before anything depends on it. A worn slot that does not hold what was
 //! written fails the write with the record before it still in force.
@@ -207,13 +208,20 @@ impl<M: SlotMemory> SlottedStore<M> {
                         found.push(header);
                     }
                 }
-                Ok(None) => {}
-                // What a header write cut short can leave: the slot holds something, and no header.
-                Err(StoreError::Unreadable) => written += 1,
+                // Tropic Square's firmware answers an erased slot with no bytes and its datasheet says
+                // FAIL, which cannot be told from a slot the chip will not give back. Neither is a
+                // header. A cut can leave one such slot beside a good header, never two: an anchor
+                // that finds none is unprovisioned, and a caged chip refuses that at `ready_for_birth`.
+                Ok(None) | Err(StoreError::Unreadable) => {}
                 Err(e) => return Err(e),
             }
         }
-        found.sort_by_key(|header| core::cmp::Reverse(header.seq));
+        // Two at most, and a general sort would cost 4 KiB of stack and its code to order them.
+        if let [first, second] = found.as_mut_slice() {
+            if first.seq < second.seq {
+                core::mem::swap(first, second);
+            }
+        }
         Ok((found, written))
     }
 
@@ -316,13 +324,10 @@ impl<M: SlotMemory> ActiveStore for SlottedStore<M> {
     }
 
     fn trial_clear(&mut self) -> Result<(), StoreError> {
+        // Erased without asking: a cut write can read as empty and still not be erased.
         let trial = self.trial();
         for slot in trial.first..trial.first + 2 + 2 * trial.bank_slots {
-            match trial.memory.read(slot) {
-                Ok(None) => {}
-                Ok(Some(_)) | Err(StoreError::Unreadable) => trial.memory.erase(slot)?,
-                Err(e) => return Err(e),
-            }
+            trial.memory.erase(slot)?;
         }
         Ok(())
     }
@@ -354,6 +359,15 @@ mod tests {
         worn: Vec<u16>,
         /// Reads answered with this failure of the bus.
         read_fault: Option<StoreError>,
+        /// How the chip answers an erased slot.
+        erased: Erased,
+    }
+
+    /// Tropic Square's firmware answers an erased slot with no bytes. Its datasheet says FAIL.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Erased {
+        NoBytes,
+        Fail,
     }
 
     impl Memory {
@@ -365,6 +379,7 @@ mod tests {
                 unreadable: Vec::new(),
                 worn: Vec::new(),
                 read_fault: None,
+                erased: Erased::NoBytes,
             }
         }
 
@@ -391,10 +406,11 @@ mod tests {
             if let Some(fault) = self.read_fault {
                 return Err(fault);
             }
-            if self.unreadable.contains(&slot) {
+            let held = self.slots[usize::from(slot)].clone();
+            if self.unreadable.contains(&slot) || (self.erased == Erased::Fail && held.is_none()) {
                 return Err(StoreError::Unreadable);
             }
-            Ok(self.slots[usize::from(slot)].clone())
+            Ok(held)
         }
         fn erase(&mut self, slot: u16) -> Result<(), StoreError> {
             self.spend()?;
@@ -529,12 +545,44 @@ mod tests {
         let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
         store.memory.unreadable = vec![0];
         assert_eq!(store.read(), Ok(None));
+    }
+
+    /// The datasheet says a read of an erased slot is answered FAIL, where the firmware's source
+    /// answers no bytes. A new chip must come up either way: this is every slot of it.
+    #[test]
+    fn a_chip_that_answers_an_erased_slot_with_fail_is_a_new_chip_and_keeps_its_records() {
+        let mut memory = Memory::new(600, 96);
+        memory.erased = Erased::Fail;
+        let mut store = ok(SlottedStore::new(memory, 0, 960), "laid out");
+        assert_eq!(store.read(), Ok(None), "nothing is born");
+        ok(store.try_record(&record(150, 0x31)), "the record's slots");
+        assert_eq!(store.read(), Ok(None), "the try left nothing");
+        ok(store.trial_write(&record(300, 0x42)), "the trial write");
+        assert_eq!(store.trial_read(), Ok(Some(record(300, 0x42))));
+        ok(store.trial_clear(), "the trial clear");
+        assert_eq!(store.trial_read(), Ok(None));
+        ok(store.write(&record(150, 0x51)), "the first record");
+        assert_eq!(store.read(), Ok(Some(record(150, 0x51))));
+        ok(store.write(&record(700, 0x62)), "the next");
+        assert_eq!(store.read(), Ok(Some(record(700, 0x62))));
+    }
+
+    /// Two slots the chip will not give back is what an erased chip that answers FAIL looks like. It
+    /// reads as no record, and what stops that being a second birth is the cage, not this store:
+    /// `chip_model::a_record_wiped_from_a_caged_chip_never_makes_it_installable_again`.
+    #[test]
+    fn two_header_slots_the_chip_will_not_give_back_are_no_record() {
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
         store.memory.unreadable = vec![0, 1];
-        assert_eq!(
-            store.read(),
-            Err(StoreError::Corrupt),
-            "two written slots with no header were not left by a first write"
-        );
+        assert_eq!(store.read(), Ok(None));
+    }
+
+    #[test]
+    fn two_written_slots_with_no_header_were_not_left_by_a_first_write() {
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+        store.memory.slots[0] = Some(vec![0x11; 40]);
+        store.memory.slots[1] = Some(vec![0x22; 40]);
+        assert_eq!(store.read(), Err(StoreError::Corrupt));
     }
 
     #[test]

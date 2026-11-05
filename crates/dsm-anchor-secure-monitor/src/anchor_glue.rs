@@ -13,7 +13,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor, BringUpFailure, Measurement};
+use anchor_chip::bring_up::{BringUpFailure, Measurement};
+#[cfg(not(feature = "prepare_chip"))]
+use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor};
 use anchor_chip::Board;
 use anchor_core::proto::decode_request;
 use anchor_core::service::{err, refusal};
@@ -38,6 +40,7 @@ static mut MONITOR_APP: Monitor = Monitor::NotBroughtUp;
 /// What the handler finds in its slot.
 enum Monitor {
     NotBroughtUp,
+    #[cfg(not(feature = "prepare_chip"))]
     Up(BoardAnchor),
     /// Why the anchor did not come up, for the answer to any request: with debug disabled this is
     /// the only way to learn it from a locked board. Names steps and chip faults, never a secret.
@@ -76,8 +79,17 @@ impl<R: core::borrow::Borrow<hal::rosc::RingOscillator<hal::rosc::Enabled>>> Boa
     fn alive(&self) {
         boundary::feed_watchdog_in_service();
     }
+
+    /// The bootrom's version byte: "the value 2 for A2 silicon, 3 for A3 silicon, and 4 for A4 silicon"
+    /// (RP2350 datasheet, "Bootrom Contents"). It is in ROM, so a chip cannot be told otherwise by
+    /// anything flash holds.
+    fn silicon_revision(&self) -> u8 {
+        unsafe { core::ptr::read_volatile(BOOTROM_VERSION_BYTE as *const u8) }
+    }
 }
 
+/// Where the bootrom keeps its version.
+const BOOTROM_VERSION_BYTE: usize = 0x0000_0013;
 /// TRNG blocks of 192 bits behind each key.
 const TRNG_BLOCKS: usize = 3;
 /// `clk_sys` cycles between samples of the TRNG's ring oscillator. The block's documented minimum is 17.
@@ -148,6 +160,11 @@ pub enum InitStage {
     Sealed = 9,
     Layout = 10,
     Entropy = 11,
+    /// A chip that is given nothing: refused before the first write to it.
+    Unfit = 12,
+    /// The `prepare_chip` image has done the one thing it does.
+    #[cfg(feature = "prepare_chip")]
+    Prepared = 13,
 }
 
 /// Why [`init`] refused to install the anchor: the failing stage and the cause it reported.
@@ -158,6 +175,9 @@ pub enum InitFailure {
     /// The board's sealed secret, or the secure boot it requires, is not there.
     Sealed(SealedError),
     BringUp(BringUpFailure<ChipError>),
+    /// The `prepare_chip` image configured this chip: what it now says it is.
+    #[cfg(feature = "prepare_chip")]
+    Prepared(anchor_chip::session::ChipFacts),
 }
 
 impl InitFailure {
@@ -170,6 +190,9 @@ impl InitFailure {
             Self::BringUp(BringUpFailure::CertStore(_)) => InitStage::CertStore,
             Self::BringUp(BringUpFailure::CertStoreKey(_)) => InitStage::CertStoreKey,
             Self::BringUp(BringUpFailure::Session(_)) => InitStage::Session,
+            Self::BringUp(BringUpFailure::Unfit(_)) => InitStage::Unfit,
+            #[cfg(feature = "prepare_chip")]
+            Self::Prepared(_) => InitStage::Prepared,
             Self::BringUp(BringUpFailure::Enroll(_)) => InitStage::Enroll,
             Self::BringUp(BringUpFailure::Layout(_)) => InitStage::Layout,
             Self::BringUp(BringUpFailure::Recovery(_)) => InitStage::Recovery,
@@ -184,6 +207,12 @@ impl core::fmt::Debug for InitFailure {
             Self::Entropy => write!(f, "the TRNG did not pass its health tests"),
             Self::Sealed(cause) => write!(f, "Sealed: {cause:?}"),
             Self::BringUp(cause) => write!(f, "{cause:?}"),
+            #[cfg(feature = "prepare_chip")]
+            Self::Prepared(facts) => write!(
+                f,
+                "{}. Its PTRNG is now configured and tested at every start-up. Load the trial image",
+                facts.describe()
+            ),
         }
     }
 }
@@ -201,7 +230,11 @@ pub unsafe fn keep_refusal(failure: &InitFailure) {
 /// them does nothing to its chip. Steals the peripherals it needs (CLOCKS/PLL/XOSC/ROSC/TIMER0/SPI0
 /// + GP16-19); `main` must not re-init clocks after.
 ///
+/// Never inlined: `main` does not return, so a frame of its own is held under every request served
+/// after the launch. What bring-up needs is given back here, before the launch.
+///
 /// SAFETY: single-threaded reset context, called once from `main` before the Non-secure launch.
+#[inline(never)]
 pub unsafe fn init() -> Result<(), InitFailure> {
     let mut pac = hal::pac::Peripherals::steal();
     let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
@@ -280,19 +313,40 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         cortex_m::asm::delay(150_000_000); // ~1 s @150 MHz
     }
 
+    // This image does one thing, and every request then hears how it went.
+    #[cfg(feature = "prepare_chip")]
+    {
+        let prepared = anchor_chip::bring_up::prepare_chip(
+            Tropic01::new(spi_dev),
+            sealed,
+            Rp2350Board { rosc },
+        );
+        crate::zeroize(&mut sealed);
+        return Err(match prepared {
+            Ok(facts) => InitFailure::Prepared(facts),
+            Err(cause) => InitFailure::BringUp(cause),
+        });
+    }
+
+    #[cfg(not(feature = "prepare_chip"))]
     let brought_up = bring_up(Tropic01::new(spi_dev), &sealed, Rp2350Board { rosc });
     // Everything the anchor needs derives from it, and nothing needs it again this boot.
+    #[cfg(not(feature = "prepare_chip"))]
     crate::zeroize(&mut sealed);
+    #[cfg(not(feature = "prepare_chip"))]
     let anchor = brought_up.map_err(InitFailure::BringUp)?;
-    *core::ptr::addr_of_mut!(MONITOR_APP) = Monitor::Up(anchor);
-    Ok(())
+    #[cfg(not(feature = "prepare_chip"))]
+    {
+        *core::ptr::addr_of_mut!(MONITOR_APP) = Monitor::Up(anchor);
+        Ok(())
+    }
 }
 
 /// Serve the Secure request copy through the anchor, under the measurement taken for it. An anchor
 /// that did not come up answers with why.
 ///
 /// SAFETY: single-threaded Secure context; the SG handler is the only caller.
-pub unsafe fn service_request(frame: &[u8], measurement: Measurement) -> Vec<u8> {
+pub unsafe fn service_request(frame: &[u8], _measurement: Measurement) -> Vec<u8> {
     #[cfg(feature = "bench_self_enroll")]
     if let Ok(req) = decode_request(frame) {
         if req.op == anchor_core::proto::pb::Op::Provision as i32 {
@@ -305,8 +359,9 @@ pub unsafe fn service_request(frame: &[u8], measurement: Measurement) -> Vec<u8>
     }
     let slot = &mut *core::ptr::addr_of_mut!(MONITOR_APP);
     match core::mem::replace(slot, Monitor::NotBroughtUp) {
+        #[cfg(not(feature = "prepare_chip"))]
         Monitor::Up(anchor) => {
-            let (anchor, answer) = serve_measured(anchor, frame, measurement);
+            let (anchor, answer) = serve_measured(anchor, frame, _measurement);
             *slot = Monitor::Up(anchor);
             answer
         }

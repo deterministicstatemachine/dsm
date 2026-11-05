@@ -7,8 +7,9 @@
 //! fails: nothing here passes without the model.
 //!
 //! The model is the vendor's behavioural reference. It enforces access privileges, latches them at a
-//! reboot and keeps R-memory as the chip does, one command at a time. It does not model timing, tear
-//! a write, or stand for a production chip's factory configuration.
+//! reboot and keeps R-memory as the chip does, one command at a time. It does not model timing or
+//! tear a write. Its factory configuration here is the one Tropic Square's catalog list gives for a
+//! production part.
 
 use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
@@ -33,9 +34,35 @@ const TAG_CSN_HIGH: u8 = 0x02;
 const TAG_SPI_SEND: u8 = 0x03;
 const TAG_POWER_ON: u8 = 0x04;
 const TAG_POWER_OFF: u8 = 0x05;
-const TAG_RESET_TARGET: u8 = 0x10;
 /// The L2 byte that asks the chip for its response.
 const L2_GET_RESPONSE: u8 = 0xAA;
+/// The L2 request that reboots the chip.
+const L2_STARTUP_REQ: u8 = 0xB3;
+/// The L2 status of a request the chip took.
+const L2_REQ_OK: u8 = 0x01;
+/// The commands that change what the chip stores, as the model logs them. Everything else leaves its
+/// memory as it was, so a power cut after it leaves the same chip as a cut before it.
+const STORING_COMMANDS: [&str; 13] = [
+    "ts_l3_r_mem_data_write",
+    "ts_l3_r_mem_data_erase",
+    "ts_l3_mcounter_init",
+    "ts_l3_mcounter_update",
+    "ts_l3_ecc_key_generate",
+    "ts_l3_ecc_key_store",
+    "ts_l3_ecc_key_erase",
+    "ts_l3_pairing_key_write",
+    "ts_l3_pairing_key_invalidate",
+    "ts_l3_i_config_write",
+    "ts_l3_r_config_write",
+    "ts_l3_r_config_erase",
+    "ts_l3_mac_and_destroy",
+];
+
+/// What Tropic Square programs into its T2XX and T3XX parts at manufacturing (catalog list v2.0,
+/// section 5): sensors on in R-config, and in I-config the PTRNG and firmware tests on.
+pub(crate) const PRODUCTION_FACTORY: &str =
+    "i_config:\n  cfg_start_up: 0xFFFFFFF9\n  cfg_debug: 0xFFFFFFFE\n\
+                                  r_config:\n  cfg_sensors: 0xFFFC0000\n";
 
 /// The board's sealed secret in these runs.
 pub const SEALED: [u8; 32] = [0x5A; 32];
@@ -60,27 +87,48 @@ impl Error for SpiCut {
 /// How many SPI transactions the power lasts.
 #[derive(Default)]
 pub struct Power {
-    budget: Cell<Option<u64>>,
-    spent: Cell<u64>,
+    pub(crate) budget: Cell<Option<u64>>,
+    pub(crate) spent: Cell<u64>,
+    /// The model's log, when this server keeps one, and how far it has been read.
+    log: RefCell<Option<(std::fs::File, String)>>,
+    /// The transactions in which the chip ran a command that changes what it stores.
+    pub(crate) stores: RefCell<Vec<u64>>,
+    /// Corrupt the CRC of the answer to the next reboot, as OI_TR01_ERR_2025091800 describes.
+    pub(crate) garble_reboot_crc: Cell<Garble>,
+    reboot_asked: Cell<Garble>,
+}
+
+/// Whether a reboot's answer has its CRC corrupted.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Garble(pub(crate) u8);
+
+impl Default for Garble {
+    fn default() -> Self {
+        Self::NO
+    }
+}
+
+impl Garble {
+    pub(crate) const NO: Self = Self(0);
+    pub(crate) const YES: Self = Self(1);
 }
 
 impl Power {
-    pub fn cut_after(&self, transactions: u64) {
-        self.budget.set(Some(transactions));
-    }
-
-    pub fn steady(&self) {
-        self.budget.set(None);
-    }
-
-    /// Whether the budget has run out.
-    pub fn was_cut(&self) -> bool {
-        matches!(self.budget.get(), Some(0))
-    }
-
-    /// The transactions that have gone through, to measure what a run takes.
-    pub fn spent(&self) -> u64 {
-        self.spent.get()
+    /// Note whether the transaction that just went through ran a command that stores.
+    fn watch_log(&self) {
+        let mut log = self.log.borrow_mut();
+        let Some((file, text)) = log.as_mut() else {
+            return;
+        };
+        text.clear();
+        if let Err(e) = file.read_to_string(text) {
+            panic!("the model's log did not read: {e}");
+        }
+        if text.lines().any(|line| {
+            line.contains("Executing") && STORING_COMMANDS.iter().any(|c| line.contains(c))
+        }) {
+            self.stores.borrow_mut().push(self.spent.get());
+        }
     }
 
     fn spend(&self) -> Result<(), SpiCut> {
@@ -94,7 +142,7 @@ impl Power {
     }
 }
 
-fn call(stream: &mut TcpStream, tag: u8, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn call(stream: &mut TcpStream, tag: u8, payload: &[u8]) -> Vec<u8> {
     let length = match u16::try_from(payload.len()) {
         Ok(length) => length,
         Err(e) => panic!("an SPI frame fits the model's protocol: {e}"),
@@ -138,8 +186,21 @@ impl ModelSpi {
             TAG_SPI_SEND,
             &buffer[..clocked],
         );
+        let asked = buffer[0];
         buffer.fill(0);
         buffer[..miso.len()].copy_from_slice(&miso);
+        if asked == L2_STARTUP_REQ {
+            self.power
+                .reboot_asked
+                .set(self.power.garble_reboot_crc.get());
+        } else if asked == L2_GET_RESPONSE
+            && self.power.reboot_asked.get() == Garble::YES
+            && buffer[1] == L2_REQ_OK
+        {
+            // CHIP_STATUS, STATUS, RSP_LEN, the data, then the CRC.
+            buffer[3 + usize::from(buffer[2]) + 1] ^= 0xFF;
+            self.power.reboot_asked.set(Garble::NO);
+        }
     }
 }
 
@@ -174,6 +235,7 @@ impl SpiDevice for ModelSpi {
                 Operation::TransferInPlace(buffer) => {
                     self.power.spend()?;
                     self.exchange(buffer);
+                    self.power.watch_log();
                 }
                 Operation::DelayNs(_) => {}
                 Operation::Read(_) | Operation::Write(_) | Operation::Transfer(_, _) => {
@@ -201,6 +263,9 @@ impl Board for HostBoard {
     }
     fn wait_100ms(&self) {}
     fn alive(&self) {}
+    fn silicon_revision(&self) -> u8 {
+        anchor_chip::MIN_SILICON_REVISION
+    }
 }
 
 pub type ModelChip = Tropic01<ModelSpi, ModelCsn>;
@@ -216,8 +281,13 @@ pub struct ModelServer {
 
 impl ModelServer {
     pub fn start() -> Self {
+        Self::launch(PRODUCTION_FACTORY, None)
+    }
+
+    /// A chip with this factory configuration, and a log of what it runs if `log` names a file.
+    pub(crate) fn launch(factory: &str, log: Option<&str>) -> Self {
         let server = required_env("DSM_TROPIC01_MODEL_SERVER");
-        let configuration = required_env("DSM_TROPIC01_MODEL_CFG");
+        let vendor_configuration = required_env("DSM_TROPIC01_MODEL_CFG");
         let port = match TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()) {
             Ok(address) => address.port(),
             Err(e) => panic!("no free port: {e}"),
@@ -226,13 +296,47 @@ impl ModelServer {
         if let Err(e) = std::fs::create_dir_all(&workdir) {
             panic!("no working directory for the model: {e}");
         }
-        let child = Command::new(&server)
+        // Tropic Square's chip configuration, with the factory's settings for this part added.
+        let mut chip = match std::fs::read_to_string(&vendor_configuration) {
+            Ok(text) => text,
+            Err(e) => panic!("{}: {e}", vendor_configuration.display()),
+        };
+        chip.push_str(factory);
+        let configuration = workdir.join("chip.yml");
+        if let Err(e) = std::fs::write(&configuration, chip) {
+            panic!("the chip's configuration was not written: {e}");
+        }
+        let mut command = Command::new(&server);
+        command
             .arg("tcp")
             .args(["-p", &port.to_string()])
             .arg("-c")
             .arg(&configuration)
             .arg("-o")
-            .arg(workdir.join("model_out.yml"))
+            .arg(workdir.join("model_out.yml"));
+        let power = Rc::new(Power::default());
+        if let Some(log) = log {
+            let log = workdir.join(log);
+            let logging = workdir.join("logging.yml");
+            let text = format!(
+                "version: 1\nformatters:\n  plain:\n    format: '%(message)s'\n\
+                 handlers:\n  file:\n    class: logging.FileHandler\n    filename: {}\n    \
+                 formatter: plain\nloggers:\n  model:\n    level: DEBUG\n    handlers:\n    - file\n",
+                log.display()
+            );
+            if let Err(e) = std::fs::write(&logging, text) {
+                panic!("the logging configuration was not written: {e}");
+            }
+            if let Err(e) = std::fs::write(&log, "") {
+                panic!("the log was not started: {e}");
+            }
+            match std::fs::File::open(&log) {
+                Ok(file) => *power.log.borrow_mut() = Some((file, String::new())),
+                Err(e) => panic!("the log did not open: {e}"),
+            }
+            command.arg("--logging-configuration").arg(&logging);
+        }
+        let child = command
             .current_dir(&workdir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -246,11 +350,11 @@ impl ModelServer {
             child,
             port,
             workdir,
-            power: Rc::new(Power::default()),
+            power,
         }
     }
 
-    fn connect(&self) -> TcpStream {
+    pub(crate) fn connect(&self) -> TcpStream {
         for _attempt in 0..600 {
             if let Ok(stream) = TcpStream::connect(("127.0.0.1", self.port)) {
                 return stream;
@@ -275,12 +379,6 @@ impl ModelServer {
             Ok(chip) => chip,
             Err(e) => panic!("the chip-select line did not take: {e:?}"),
         }
-    }
-
-    /// A new chip from the factory.
-    pub fn factory_reset(&self) {
-        let mut stream = self.connect();
-        call(&mut stream, TAG_RESET_TARGET, &[]);
     }
 
     /// Boot the anchor: what the monitor does at reset, on the same code.

@@ -24,12 +24,46 @@ you use it. A build must name one of them, and `sign.sh` signs only a production
 ## What has run without a chip
 
 `crates/dsm-anchor-chip/tests` runs the firmware's chip code against Tropic Square's TROPIC01 model
-(`ci/tropic01_model.sh` installs it): a birth, the cage, spends, and a power cut at every SPI
-transaction of a birth outside its try-run, at every seventh of a spend and at every 61st of a try-run.
-The model enforces access privileges and
-latches them at a reboot. It does not model timing, tear a write, or stand for a production chip's
-factory configuration, and nothing about the RP2350 runs there: secure boot, the OTP locks, the
-boundary, the measured window and USB are this runbook's to prove, on silicon.
+(`ci/tropic01_model.sh` installs it), set up with the factory configuration Tropic Square's catalog
+list gives for the part: a birth, the cage, spends, and a power cut at every state a birth, a spend and
+a try-run can leave on the chip, found from the model's own log of what it stores. The model enforces
+access privileges and latches them at a reboot. It does not model timing or tear a write (`rmem`'s own
+tests do), it answers as firmware 2.0.0, and nothing about the RP2350 runs there: secure boot, the OTP
+locks, the boundary, the measured window and USB are this runbook's to prove, on silicon.
+
+`scripts/stack-bound.py` walks the production image's call graph, and CI holds the 64 KiB Secure stack to
+it. It gives about 53 KiB at the heaviest, with a fault on top.
+
+## Which chip this is, before anything is written to it
+
+**What is on a board is not known until the chip says.** Tropic Square programs its parts differently
+(catalog list, section 5), and a Secure Tropic Click's part is not on its label. Every image reads the part
+number, silicon revision and firmware versions first, and gives a chip nothing if it fails either check. A
+refusal is an answer over USB, and `used-chip-bench --check` prints it:
+
+| Part | Factory configuration | What this firmware does |
+|---|---|---|
+| T2XX, T3XX | PTRNG tested at start-up, sensors on | Serves. These are the production parts. |
+| T101, T103 | Sensors on. `CFG_START_UP[RNGTEST_DIS]` left at 1, so the PTRNG is never configured and what the chip generates may not be random (erratum OI_TR01_ERR_2026090100). Tropic Square calls these test chips, not production devices. | Refused until prepared, below. |
+| T005 | I-config and R-config empty, tamper sensors off, engineering-sample key | Refused. Nothing here repairs one. |
+
+**Preparing a test part, only if the owner has decided to use one.** It clears that one bit, for good, which is
+Tropic Square's own correction, and erases any key the chip generated before it:
+
+```
+cargo build --release --features bench_self_enroll,prepare_chip
+picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor
+used-chip-bench --port <serial> --check     # says what the chip now is and how it went
+```
+
+**The RP2350.** Below A4 a physical glitch at boot can run unsigned code, with no workaround (RP2350-E24,
+and on A2 also E16, E20, E21), so a try-run on one fails and an install is refused. Its line says which
+stepping the board is: the bootrom's version byte.
+
+**The chip's own firmware.** Below 2.0.0 the chip does not verify its writes (OI_TR01_ERR_2025120100), so the
+board reads back each one it depends on. Tropic Square recommends 2.1.0 or later in both banks, then disabling
+maintenance mode (ODN_TR01_app_007, advisory ODR_TR01_SA_2026012900). This firmware reports the version and
+does not update it. A try-run's first line says which it is.
 
 ## The try-run, on this very board, before anything is burned
 
@@ -37,7 +71,12 @@ boundary, the measured window and USB are this runbook's to prove, on silicon.
 procedure.** The trial image goes through an install on the real RP2350 and the real TROPIC01 with the
 permanent parts substituted, and tells you what an install would make permanent. It burns no OTP, and it
 writes no pairing key and no access rule. Its first boot does generate the chip's resident key, which
-stays and which a later install uses, and it sets the counter to its start:
+stays and which a later install uses, and it sets the counter to its start, and those two are all it
+changes (`a_first_boot_writes_only_the_resident_key_and_the_counter`). Everything else the chip can report
+is left as found. The counter's set-back is `MCounter_Init`, which Tropic Square's firmware does by erasing
+the counter's two sectors and writing the start again: that works until the cage revokes the command, and
+then never. What a try-run spends and the chip does not report is wear, a few hundred erases out of the
+100,000 cycles the datasheet gives as typical:
 
 ```
 cargo build --release --features bench_self_enroll
@@ -74,6 +113,7 @@ Freeze the firmware before the first burn.
   on that board for good: it refuses Provision, Prepare, Commit, Emit, Finalize and Recover. A monitor
   update must carry the same bytes: keep `build/ns_app.bin` with the signing key, and build the update
   with `DSM_ANCHOR_NS_BIN` naming it. `sign.sh` refuses an image whose Non-secure app differs from it.
+- **The rollback version's rows,** page 44, rows 0 to 2. An image is signed naming them.
 - **On the monitor:** the key labels in `ChipIdentity::derive`, `SEALED_SECRET_ROW`, `MU_ROW` and
   the R-memory record format. The monitor can be re-signed and loaded only while `bootkey.pem`
   survives. A changed pairing label can never open slot 1 again, and slot 0 is gone by then.
@@ -86,8 +126,12 @@ Freeze the firmware before the first burn.
 Change them here before the first burn, not after.
 
 - **The USB bootloader stays on,** which is how a signed monitor update is loaded. Unsigned images
-  still do not boot. Reaching it takes the BOOTSEL button: no fault, watchdog reset or USB host sends a
-  board there. Step 8b locks the boot configuration against what it could otherwise burn.
+  still do not boot. Reaching it takes the BOOTSEL button, or a flash with no valid image: no fault,
+  watchdog reset or USB host sends a board there. Step 9b locks the boot configuration against what it
+  could otherwise burn. A host in the bootloader can still read and write flash and RAM, reads whatever OTP
+  its lock leaves it, and has no way to run an image, since the RP2350 does not support `EXEC`.
+- **The boot key signs every board.** One leak reaches all of them, and each board holds its own digest and
+  secret regardless.
 - **The glitch detectors stay off,** because their effect on a working board has not been measured.
 
 ## Step 0 — check the board is blank (READ-ONLY)
@@ -104,8 +148,9 @@ It refuses when any row this procedure writes already holds a value.
 ```
 ./sign.sh --genkey     # ~/.dsm-anchor-secure-boot/bootkey.pem (secp256k1)
 ```
-Keep a copy offline. It MUST NOT go on an appliance or in the repo. Losing it means no monitor
-update can ever reach a locked board; leaking it defeats secure boot.
+It asks for a passphrase of 16 characters or more and keeps the key encrypted, and each signing decrypts
+it only for as long as picotool reads it. Keep a copy and the passphrase offline, apart. It MUST NOT go on an appliance or in the
+repo. Losing it means no monitor update can ever reach a locked board; leaking it defeats secure boot.
 
 ## Step 2 — build the production image and sign it
 
@@ -113,6 +158,10 @@ update can ever reach a locked board; leaking it defeats secure boot.
 cargo build --release --features production
 ./sign.sh --sign
 ```
+The image carries version 1.0 with rollback version 1, under its signature. A board refuses any image below
+the highest rollback version it has booted, so an image with a real defect is retired by signing its
+successor one higher (RP2350 datasheet, "Rollback versions and bootloaders").
+
 This writes `build/signed.elf`, `build/bootkey-otp.json`, `build/mu-enrolled.bin`, the digest of the
 Non-secure window, and `build/ns_app.bin`, the image itself. It refuses an image shorter than the
 window, because bytes the loader does not copy would be measured, and a signed file that does not hold
@@ -148,7 +197,8 @@ request `NOT_UP`, naming what is missing (`secure boot is not enabled in OTP`).
 ./provision-otp.sh --board <name> --lock-pages --commit
 ```
 Secure firmware reads both; Non-secure reads neither; nothing writes either. The USB bootloader
-reads the digest and never the secret.
+reads the digest and never the secret. With `--commit` this removes `host-secret.bin`: nothing reads it
+again, and it could restore no board, since the chip's key does not leave the chip.
 
 ## Step 7 — burn the boot key's hash  ⚠️ IRREVERSIBLE
 
@@ -170,15 +220,6 @@ This step takes the hash from it and Step 8 burns the flags.
 ```
 This marks boot key 0 valid and keys 1-3 invalid, then sets `SECURE_BOOT_ENABLE` and
 `DEBUG_DISABLE`. The board now boots only images signed by the key, with debug off.
-
-## Step 8b — lock the boot pages  ⚠️ IRREVERSIBLE, LAST
-
-```
-./provision-otp.sh --board <name> --lock-boot-pages
-./provision-otp.sh --board <name> --lock-boot-pages --commit
-```
-Pages 1 and 2, the boot configuration and the boot key hashes, become read-only for everyone. Do this
-after Step 8: nothing writes them again.
 
 ## Step 9 — boot and validate (no pairing key, access rule or OTP is written)
 
@@ -202,6 +243,17 @@ bound it yet. Stop and look if any line is not as stated.
 4. **Digest checked at op time, after the Non-secure app has run:** `measurement gate passed`. A signed
    image with a different Non-secure app says `measurement gate REFUSED`, as error 200, and a
    provisioning is refused the same way, before the chip is bound.
+
+## Step 9b — lock the boot pages  ⚠️ IRREVERSIBLE, AFTER THE FIRST BOOT
+
+```
+./provision-otp.sh --board <name> --lock-boot-pages
+./provision-otp.sh --board <name> --lock-boot-pages --commit
+```
+Pages 1 and 2, the boot configuration and the boot key hashes, become read-only for everyone, and page 44,
+the rollback version, read-only for the USB bootloader. Not before Step 9: that first boot of the signed
+image records its rollback version and sets `ROLLBACK_REQUIRED` on page 1, and the bootrom will not launch
+an image whose version it could not record.
 
 ## Step 10 — install, from the wallet  ⚠️ IRREVERSIBLE
 
@@ -228,7 +280,8 @@ will be kept: a wallet wiped or created anew afterward cannot use this anchor.
 - **Does not (by itself):** defend against physical OTP extraction or fault injection on the
   RP2350 (an MCU, not a certified SE); the paper's residual (Thm 8 exposure bound) still applies.
 - **Has not been observed on silicon:** the TRNG path, the Non-secure MPU, the grants dropped at the first
-  crossing and the reset after a fault are each read and built, not run. The trial image runs the first
+  crossing, the reset after a fault, the chip check, the prepare image and the rollback version are each
+  read and built, not run. The stack bound is read from the image, not measured. The trial image runs the first
   three on a real board at no cost. A fault's reset can be seen by making the Non-secure side touch a
   revoked peripheral in a throwaway trial build.
   `secure_exe()` is only an Arm Secure-state marker; the enforcement is the burns above.

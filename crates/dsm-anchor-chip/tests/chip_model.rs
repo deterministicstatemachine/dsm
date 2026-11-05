@@ -3,16 +3,22 @@
 //! Secure monitor runs, with the chip's own access rules and reboot latch under it. See
 //! `support/mod.rs` for what the model does and does not stand for.
 
+#[path = "support/control.rs"]
+mod control;
 mod support;
 
-use anchor_chip::bring_up::{Measurement, ENROLL_H0};
-use anchor_chip::session::CHIP_KEY_SLOT;
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use anchor_chip::bring_up::{BringUpFailure, Measurement, ENROLL_H0};
+use anchor_chip::session::{Unfit, CHIP_KEY_SLOT};
 use anchor_core::accept::verify_cert_frontier_and_sigs;
 use anchor_core::hash::{h, kdf};
 use anchor_core::proto::pb;
 use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
 use anchor_core::service::err;
-use anchor_core::tropic::{ChipSig, HostSig};
+use anchor_core::tropic::{ChipSig, HostSig, TropicError};
+use control::Part;
 use support::{
     provision_request, try_run_request, HostBoard, ModelChip, ModelCsn, ModelServer, ModelSpi,
     Served, SEALED,
@@ -346,56 +352,95 @@ fn a_spend_on_the_chip_verifies_at_the_receiver_and_moves_the_counter_once() {
     }
 }
 
-/// A whole try-run is thousands of SPI transactions through the code a spend runs, and each cut is
-/// a new chip and a whole install after it, so a sweep takes every `TRY_RUN_STRIDE`th of them. What
-/// is permanent, the boot and the birth around it, is cut at every one.
-const TRY_RUN_STRIDE: u64 = 61;
-
-/// The transactions a boot takes, and those a try-run takes after it, on a new chip.
-fn boot_and_try_run(model: &ModelServer) -> (u64, u64) {
-    model.factory_reset();
-    model.power.steady();
-    let before = model.power.spent();
-    let mut anchor = booted(model);
-    let at_serve = model.power.spent();
-    let run = anchor.request(&try_run_request());
-    assert!(run.ok, "{:?}", run.try_run);
-    let tried = model.power.spent() - at_serve;
-    println!(
-        "[sweep] a boot is {} transactions, a try-run {tried}",
-        at_serve - before
+/// Every point at which a power cut can leave this chip different from a cut somewhere else: after
+/// each command that changes what it stores, and before the first. A cut after any other transaction
+/// leaves the same memory as the cut before it, and the board keeps nothing across a cut, so these
+/// are all the states a cut can reach. The model runs a command whole; `rmem` tears a write.
+///
+/// `setup` brings a chip to where the cuts start, and `run` is what they cut. Both run once on a server
+/// that logs what its chip does, which says where the stores fall.
+fn cuts_of(
+    setup: impl Fn(&ModelServer) -> Option<Served>,
+    run: impl Fn(&ModelServer, Option<Served>),
+) -> Vec<u64> {
+    let watched = ModelServer::start_watched();
+    let held = setup(&watched);
+    let from = watched.power.spent();
+    let before = watched.power.stores().len();
+    run(&watched, held);
+    let total = watched.power.spent() - from;
+    let mut cuts = vec![0u64];
+    cuts.extend(
+        watched.power.stores()[before..]
+            .iter()
+            .map(|store| store - from),
     );
-    (at_serve - before, tried)
+    println!(
+        "[sweep] {total} transactions, {} states to cut at",
+        cuts.len()
+    );
+    cuts
 }
 
-/// Cut the power after every SPI transaction of a birth, each on a new chip from the factory. The
-/// next boot, and a provisioning if the record never landed, always finishes a closed, serving
-/// anchor: a cut never costs the chip.
+/// One check per cut, each on a chip of its own, across this machine's cores.
+fn at_every_cut(cuts: &[u64], check: impl Fn(&ModelServer, u64) + Sync) {
+    let workers = match std::thread::available_parallelism() {
+        Ok(cores) => cores.get().div_ceil(2),
+        Err(e) => panic!("no count of this machine's cores: {e}"),
+    };
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _worker in 0..workers {
+            scope.spawn(|| {
+                let model = ModelServer::start();
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(cut) = cuts.get(index) else {
+                        return;
+                    };
+                    model.factory_reset();
+                    model.power.steady();
+                    check(&model, *cut);
+                }
+            });
+        }
+    });
+}
+
+/// Cut the power at every SPI transaction of a boot and at every state an install can reach, each on
+/// a new chip from the factory. The next boot, and a provisioning if the record never landed, always
+/// finishes a closed, serving anchor: a cut never costs the chip.
 #[test]
 fn a_power_cut_anywhere_in_a_birth_is_finished_by_the_next_boot() {
-    let model = ModelServer::start();
-    let (boot, try_run) = boot_and_try_run(&model);
-    let mut cut = 0u64;
-    loop {
-        model.factory_reset();
+    let boot_transactions = {
+        let model = ModelServer::start();
+        drop(booted(&model));
+        model.power.spent()
+    };
+    let install = cuts_of(
+        |_model| None,
+        |model, _held| {
+            let answer = booted(model).request(&provision_request());
+            assert!(answer.ok, "the install: error {}", answer.error);
+        },
+    );
+    let mut cuts: Vec<u64> = (0..=boot_transactions).collect();
+    cuts.extend(install.into_iter().filter(|cut| *cut > boot_transactions));
+    println!(
+        "[sweep] a boot is {boot_transactions}; {} cuts in a birth",
+        cuts.len()
+    );
+    assert!(cuts.len() > 300, "only {} cuts: not a birth", cuts.len());
+
+    at_every_cut(&cuts, |model, cut| {
         model.power.cut_after(cut);
-        let first_run = match model.boot() {
-            Ok(anchor) => {
-                let answer = Served::new(anchor).request(&provision_request());
-                if answer.ok && !model.power.was_cut() {
-                    FirstRun::Finished
-                } else {
-                    FirstRun::Cut
-                }
-            }
-            Err(e) => {
-                assert!(
-                    model.power.was_cut(),
-                    "cut after {cut}: the boot refused though the power held: {e:?}"
-                );
-                FirstRun::Cut
-            }
-        };
+        match model.boot() {
+            Ok(anchor) => drop(Served::new(anchor).request(&provision_request())),
+            Err(e) => assert!(
+                model.power.was_cut(),
+                "cut after {cut}: the boot refused though the power held: {e:?}"
+            ),
+        }
         model.power.steady();
 
         let mut anchor = match model.boot() {
@@ -429,53 +474,46 @@ fn a_power_cut_anywhere_in_a_birth_is_finished_by_the_next_boot() {
             status.error, status.detail
         );
         drop(anchor);
-        if cut % 25 == 0 {
-            assert_birth_closed(&model);
-        }
-        if first_run == FirstRun::Finished {
-            assert!(cut > 100, "only {cut} transactions were cut: not a birth");
-            return;
-        }
-        cut += if cut > boot && cut < boot + try_run {
-            TRY_RUN_STRIDE
-        } else {
-            1
-        };
-    }
+        assert_birth_closed(model);
+    });
 }
 
-/// How the run under test ended.
-#[derive(PartialEq)]
-enum FirstRun {
-    Finished,
-    Cut,
-}
-
-/// Cut the power inside a spend, at every `STRIDE`th SPI transaction, each on a new chip. The next
-/// boot always serves, the same release is emitted or none was, and the counter moves once.
+/// Cut the power at every state a spend can reach, each on a new chip. The next boot always serves,
+/// the same release is emitted or none was, and the counter moves once.
 #[test]
 fn a_power_cut_anywhere_in_a_spend_keeps_one_release_and_one_counter_step() {
-    const STRIDE: u64 = 7;
-    let model = ModelServer::start();
-    let mut cut = 0u64;
-    loop {
-        model.factory_reset();
-        model.power.steady();
-        let mut anchor = provisioned(&model);
+    let spend = |anchor: &mut Served, root: [u8; 32]| {
+        let mut survived = anchor.request(&prepare_request(root, 0)).ok;
+        survived = survived && anchor.bare(pb::Op::Commit).ok;
+        survived = survived && anchor.bare(pb::Op::Emit).ok;
+        survived && anchor.bare(pb::Op::Finalize).ok
+    };
+    let frontier = Cell::new(None);
+    let cuts = cuts_of(
+        |model| {
+            let mut anchor = provisioned(model);
+            let status = anchor.bare(pb::Op::Status);
+            assert!(status.ok, "the anchor serves");
+            frontier.set(Some(arr32(&status.active_root)));
+            Some(anchor)
+        },
+        |_model, held| {
+            let (Some(mut anchor), Some(root)) = (held, frontier.get()) else {
+                panic!("the setup hands over the anchor and its frontier");
+            };
+            assert!(spend(&mut anchor, root), "a spend with the power on");
+        },
+    );
+    assert!(cuts.len() > 50, "only {} cuts: not a spend", cuts.len());
+
+    at_every_cut(&cuts, |model, cut| {
+        let mut anchor = provisioned(model);
         let status = anchor.bare(pb::Op::Status);
         assert!(status.ok, "status: error {}", status.error);
         let root = arr32(&status.active_root);
 
         model.power.cut_after(cut);
-        let mut survived = anchor.request(&prepare_request(root, 0)).ok;
-        survived = survived && anchor.bare(pb::Op::Commit).ok;
-        survived = survived && anchor.bare(pb::Op::Emit).ok;
-        survived = survived && anchor.bare(pb::Op::Finalize).ok;
-        let first_run = if survived && !model.power.was_cut() {
-            FirstRun::Finished
-        } else {
-            FirstRun::Cut
-        };
+        spend(&mut anchor, root);
         model.power.steady();
         drop(anchor);
 
@@ -510,18 +548,12 @@ fn a_power_cut_anywhere_in_a_spend_keeps_one_release_and_one_counter_step() {
             other => panic!("cut after {cut}: state {other:?} after recovery"),
         }
         drop(anchor);
-        let mut session = own_session(&model);
+        let mut session = own_session(model);
         match session.mcounter_get(MCounterIndex::Index0) {
             Ok(h) => assert_eq!(h, ENROLL_H0 - 1, "cut after {cut}: the counter moved twice"),
             Err(e) => panic!("cut after {cut}: no counter: {e:?}"),
         }
-        drop(session);
-        if first_run == FirstRun::Finished {
-            assert!(cut > 500, "only {cut} transactions were cut: not a spend");
-            return;
-        }
-        cut += STRIDE;
-    }
+    });
 }
 
 /// A chip already used: its counter away from the start, its slot 1 holding another board's key.
@@ -555,25 +587,278 @@ fn a_chip_holding_another_boards_key_is_refused_before_anything_is_written() {
     );
 }
 
-/// Every step of the chip as it stands, read with the factory's slot: what a try-run promises to
-/// leave as it found it.
-fn chip_state(model: &ModelServer) -> Vec<String> {
+/// Every monotonic counter on the chip.
+const COUNTERS: [MCounterIndex; 16] = [
+    MCounterIndex::Index0,
+    MCounterIndex::Index1,
+    MCounterIndex::Index2,
+    MCounterIndex::Index3,
+    MCounterIndex::Index4,
+    MCounterIndex::Index5,
+    MCounterIndex::Index6,
+    MCounterIndex::Index7,
+    MCounterIndex::Index8,
+    MCounterIndex::Index9,
+    MCounterIndex::Index10,
+    MCounterIndex::Index11,
+    MCounterIndex::Index12,
+    MCounterIndex::Index13,
+    MCounterIndex::Index14,
+    MCounterIndex::Index15,
+];
+
+/// Everything the User API lets the factory's slot read of a chip: what a try-run promises to leave as
+/// it found it. Each entry is named, so a difference says what moved. Wear is not here: the chip does
+/// not report it. Neither is the private part of a key: a key's public part stands for it.
+fn chip_state(model: &ModelServer) -> Vec<(String, String)> {
     let mut session = factory_session(model);
     let mut state = Vec::new();
-    state.push(format!("{:?}", session.pairing_key_read(1u16.into())));
-    state.push(format!("{:?}", session.mcounter_get(MCounterIndex::Index0)));
-    for register in [0x020u16, 0x028, 0x040, 0x130, 0x134, 0x13C, 0x150] {
-        state.push(format!("{:?}", session.i_config_read(register.into())));
+    for slot in 0u16..4 {
+        let held = session.pairing_key_read(slot.into()).map(|key| *key);
+        state.push((format!("pairing key {slot}"), format!("{held:?}")));
     }
-    for slot in [0u16, 1, 2, 297, 298, 299, 300, 511] {
-        state.push(format!("{:?}", session.r_mem_data_read(slot.into())));
+    for index in COUNTERS {
+        let held = session.mcounter_get(index);
+        state.push((format!("counter {index:?}"), format!("{held:?}")));
+    }
+    for slot in 0u16..32 {
+        let held = session
+            .ecc_key_read(slot.into())
+            .map(|key| format!("{:?}", key.pub_key()));
+        state.push((format!("key {slot}"), format!("{held:?}")));
+    }
+    for address in (0u16..0x200).step_by(4) {
+        let irreversible = session.i_config_read(address.into());
+        state.push((
+            format!("I-config {address:#x}"),
+            format!("{irreversible:?}"),
+        ));
+        let reversible = session.r_config_read(address.into());
+        state.push((format!("R-config {address:#x}"), format!("{reversible:?}")));
+    }
+    for slot in 0u16..512 {
+        let held = session
+            .r_mem_data_read(slot.into())
+            .map(|data| data.to_vec());
+        state.push((format!("R-memory slot {slot}"), format!("{held:?}")));
     }
     state
 }
 
-/// A try-run goes through the whole install on the chip and every step passes, and the chip is as it
-/// was: nothing bound, no key written, no bit of its access rules cleared, its counter at the start,
-/// its memory empty. The real install then takes it.
+/// The names of the entries that differ.
+fn moved(before: &[(String, String)], after: &[(String, String)]) -> Vec<String> {
+    before
+        .iter()
+        .zip(after)
+        .filter(|(a, b)| a.1 != b.1)
+        .map(|(a, _b)| a.0.clone())
+        .collect()
+}
+
+/// The first boot of any image changes a new chip in exactly two places, each of which an install
+/// would write anyway: the resident key is generated and the counter set to its start.
+#[test]
+fn a_first_boot_writes_only_the_resident_key_and_the_counter() {
+    let model = ModelServer::start();
+    let factory = chip_state(&model);
+    drop(booted(&model));
+    assert_eq!(
+        moved(&factory, &chip_state(&model)),
+        ["counter Index0", "key 0"],
+        "what a first boot changed"
+    );
+}
+
+/// The chip says what it is, first thing, and that goes to whoever is about to install on it.
+#[test]
+fn a_try_run_reports_the_part_and_the_firmware_the_chip_says_it_has() {
+    let model = ModelServer::start();
+    let run = booted(&model).request(&try_run_request());
+    assert!(run.ok, "the try-run: {:?}", run.try_run);
+    let named = run.try_run.iter().any(|step| {
+        step.name.contains("TR01-C2S-T200")
+            && step.name.contains("silicon ACAB")
+            && step.name.contains("firmware 2.0.0")
+    });
+    assert!(named, "it does not say what the chip is: {:?}", run.try_run);
+}
+
+/// A test part whose PTRNG was never configured (OI_TR01_ERR_2026090100) is told so before anything
+/// is written to it: above all no key, which could not be trusted. MUTATION CONTROL: dropping
+/// `check_fit` from `bring_up` generates the key and turns this red.
+#[test]
+fn a_part_whose_randomness_is_untested_is_given_nothing() {
+    let model = ModelServer::start_as(Part::TestPart);
+    let factory = chip_state(&model);
+    match model.boot() {
+        Ok(_anchor) => panic!("an untested PTRNG came up to be given a key"),
+        Err(BringUpFailure::Unfit(Unfit::RandomnessUntested(facts))) => {
+            assert_eq!(facts.part_number, "TR01-C2S-T200");
+        }
+        Err(e) => panic!("refused for another reason: {e:?}"),
+    }
+    assert_eq!(moved(&factory, &chip_state(&model)), Vec::<String>::new());
+}
+
+/// Tropic Square's correction for that part takes on the chip, once, and the chip is then an
+/// ordinary new one. Only this image's one command writes anything.
+#[test]
+fn preparing_a_test_part_clears_its_one_bit_and_it_then_takes_an_install() {
+    let model = ModelServer::start_as(Part::TestPart);
+    let factory = chip_state(&model);
+    match model.prepare() {
+        Ok(facts) => assert_eq!(facts.part_number, "TR01-C2S-T200"),
+        Err(e) => panic!("the chip was not prepared: {e:?}"),
+    }
+    assert_eq!(
+        moved(&factory, &chip_state(&model)),
+        ["I-config 0x0"],
+        "what preparing a chip changed"
+    );
+    let mut session = factory_session(&model);
+    match session.i_config_read(0u16.into()) {
+        Ok(bits) => assert_eq!(bits, 0xFFFF_FFFB, "RNGTEST_DIS alone is cleared"),
+        Err(e) => panic!("{e:?}"),
+    }
+    drop(session);
+    match model.prepare() {
+        Ok(_facts) => {}
+        Err(e) => panic!("preparing a chip twice is one preparation: {e:?}"),
+    }
+    let mut anchor = booted(&model);
+    assert!(anchor.request(&try_run_request()).ok, "the try-run");
+    assert!(anchor.request(&provision_request()).ok, "the install");
+    drop(anchor);
+    assert_birth_closed(&model);
+    match model.prepare() {
+        Ok(_facts) => panic!("a born chip took a preparation"),
+        // Its factory slot is gone, and this image holds no key to its own.
+        Err(BringUpFailure::Session(_refused)) => {}
+        Err(e) => panic!("refused for another reason: {e:?}"),
+    }
+}
+
+/// An RP2350 below A4 can be made to run unsigned code at boot, so nothing is installed on one. The
+/// try-run says so before anything is burned, and the install refuses with its chip unbound. MUTATION
+/// CONTROL: making the stepping's step unconditional in `rehearse_birth` installs here and turns this red.
+#[test]
+fn a_board_whose_rp2350_can_be_glitched_past_its_signature_is_never_installed() {
+    for stepping in [2u8, 3] {
+        let model = ModelServer::start();
+        let anchor = match model.boot_stepped(stepping) {
+            Ok(anchor) => anchor,
+            Err(e) => panic!("the anchor did not come up: {e:?}"),
+        };
+        let mut anchor = Served::new(anchor);
+        let run = anchor.request(&try_run_request());
+        assert_eq!(run.error, err::TRY_RUN_FAILED, "{:?}", run.try_run);
+        let said = run
+            .try_run
+            .iter()
+            .any(|step| !step.passed && step.name.contains(&format!("stepping A{stepping}")));
+        assert!(said, "it does not say why: {:?}", run.try_run);
+        let refused = anchor.request(&provision_request());
+        assert_eq!(refused.error, err::TRY_RUN_FAILED, "{}", refused.detail);
+        drop(anchor);
+        let mut session = factory_session(&model);
+        assert!(
+            matches!(
+                session.pairing_key_read(1u16.into()),
+                Err(Fault::InvalidKey | Fault::SlotEmpty)
+            ),
+            "the board's key was written"
+        );
+    }
+}
+
+/// A key already on the chip came from the untested source, and goes.
+#[test]
+fn preparing_a_test_part_erases_a_key_it_generated_untested() {
+    let model = ModelServer::start_as(Part::TestPart);
+    let mut session = factory_session(&model);
+    if let Err(e) = session.ecc_key_generate(CHIP_KEY_SLOT.into(), EccCurve::Ed25519) {
+        panic!("{e:?}");
+    }
+    let old = match session.ecc_key_read(CHIP_KEY_SLOT.into()) {
+        Ok(key) => format!("{:?}", key.pub_key()),
+        Err(e) => panic!("{e:?}"),
+    };
+    drop(session);
+    match model.prepare() {
+        Ok(_facts) => {}
+        Err(e) => panic!("the chip was not prepared: {e:?}"),
+    }
+    let mut session = factory_session(&model);
+    match session.ecc_key_read(CHIP_KEY_SLOT.into()) {
+        Ok(key) => panic!("the key stayed: {old} is now {:?}", key.pub_key()),
+        Err(Fault::InvalidKey | Fault::SlotEmpty) => {}
+        Err(e) => panic!("{e:?}"),
+    }
+}
+
+/// A sample with its tamper sensors off, which no bit of this image's can repair, is told so.
+#[test]
+fn a_sample_with_its_sensors_off_is_given_nothing() {
+    let model = ModelServer::start_as(Part::Sample);
+    let mut session = factory_session(&model);
+    if let Err(e) = session.i_config_write(0u16.into(), 2) {
+        panic!("{e:?}");
+    }
+    drop(session);
+    let factory = chip_state(&model);
+    match model.boot() {
+        Ok(_anchor) => panic!("a chip with its sensors off came up"),
+        Err(BringUpFailure::Unfit(Unfit::SensorsOff(_facts, off))) => assert_eq!(off, 0x3_FFFF),
+        Err(e) => panic!("refused for another reason: {e:?}"),
+    }
+    assert_eq!(moved(&factory, &chip_state(&model)), Vec::<String>::new());
+}
+
+/// Firmware up to 1.0.1 resets partway through the CRC of its answer to a reboot
+/// (OI_TR01_ERR_2025091800). The reboot happened, and a try-run and an install both go on.
+#[test]
+fn a_reboot_whose_answer_fails_its_crc_still_reboots() {
+    let model = ModelServer::start();
+    model.power.garble_reboot_crc();
+    let mut anchor = booted(&model);
+    let run = anchor.request(&try_run_request());
+    assert!(run.ok, "the try-run: {:?}", run.try_run);
+    let installed = anchor.request(&provision_request());
+    assert!(
+        installed.ok,
+        "the install: error {} {}",
+        installed.error, installed.detail
+    );
+    drop(anchor);
+    assert_birth_closed(&model);
+}
+
+/// A record wiped from an installed chip, by a failure or by whoever opened the board, reads as no
+/// record. What stops that being a second install is the cage: the anchor is refused, and the chip's
+/// binding stands.
+#[test]
+fn a_record_wiped_from_a_caged_chip_never_makes_it_installable_again() {
+    let model = ModelServer::start();
+    drop(provisioned(&model));
+    let mut session = own_session(&model);
+    for slot in [0u16, 1] {
+        if let Err(e) = session.r_mem_data_erase(slot.into()) {
+            panic!("{e:?}");
+        }
+    }
+    drop(session);
+    match model.boot() {
+        Ok(_anchor) => panic!("a caged chip with no record came up to be installed"),
+        Err(BringUpFailure::Enroll(TropicError::Refused)) => {}
+        Err(e) => panic!("refused for another reason: {e:?}"),
+    }
+    assert_birth_closed(&model);
+}
+
+/// A try-run goes through the whole install on the chip and every step passes, and everything the
+/// chip will say about itself is as it was: nothing bound, no key written, no bit of its configuration
+/// cleared, its counter at the start, every slot of its memory empty. The real install then takes it.
+/// What it costs and the chip does not report is wear: see CONFORMANCE_GAPS 6.151.
 #[test]
 fn a_try_run_goes_through_the_install_and_leaves_the_chip_as_it_found_it() {
     let model = ModelServer::start();
@@ -616,14 +901,22 @@ fn a_try_run_goes_through_the_install_and_leaves_the_chip_as_it_found_it() {
         run.transport_check,
         anchor_core::try_run::transport_check(carried)
     );
-    assert_eq!(run.permanent.len(), 4, "what installing makes permanent");
+    assert_eq!(
+        run.permanent.len(),
+        anchor_core::try_run::PERMANENT.len(),
+        "what installing makes permanent"
+    );
     assert_eq!(
         anchor.bare(pb::Op::Status).error,
         err::NOT_PROVISIONED,
         "a try-run provisions nothing"
     );
     drop(anchor);
-    assert_eq!(chip_state(&model), before, "the chip is as it was");
+    assert_eq!(
+        moved(&before, &chip_state(&model)),
+        Vec::<String>::new(),
+        "what the try-run left changed"
+    );
 
     let mut anchor = booted(&model);
     let installed = anchor.request(&provision_request());
@@ -684,47 +977,42 @@ fn a_chip_that_fails_its_try_run_is_never_installed() {
     );
 }
 
-/// A power cut anywhere in a try-run costs nothing: the next boot still comes up unprovisioned, and
-/// the next try-run and install both pass.
+/// A power cut at any state a try-run can reach costs nothing: the next boot still comes up
+/// unprovisioned, and an install, which runs its own try-run first, passes.
 #[test]
 fn a_power_cut_anywhere_in_a_try_run_costs_nothing() {
-    let model = ModelServer::start();
-    let mut cut = 0u64;
-    loop {
-        model.factory_reset();
-        model.power.steady();
-        let mut anchor = booted(&model);
+    let cuts = cuts_of(
+        |model| Some(booted(model)),
+        |_model, held| {
+            let Some(mut anchor) = held else {
+                panic!("the setup hands over the anchor");
+            };
+            let run = anchor.request(&try_run_request());
+            assert!(run.ok, "the try-run: {:?}", run.try_run);
+        },
+    );
+    assert!(cuts.len() > 100, "only {} cuts: not a try-run", cuts.len());
+
+    at_every_cut(&cuts, |model, cut| {
+        let mut anchor = booted(model);
         model.power.cut_after(cut);
-        let run = anchor.request(&try_run_request());
-        let first_run = if run.ok && !model.power.was_cut() {
-            FirstRun::Finished
-        } else {
-            FirstRun::Cut
-        };
+        drop(anchor.request(&try_run_request()));
         model.power.steady();
         drop(anchor);
 
-        let mut anchor = booted(&model);
+        let mut anchor = booted(model);
         assert_eq!(
             anchor.bare(pb::Op::Status).error,
             err::NOT_PROVISIONED,
             "cut after {cut}"
         );
-        let run = anchor.request(&try_run_request());
-        assert!(run.ok, "cut after {cut}: {:?}", run.try_run);
         let installed = anchor.request(&provision_request());
         assert!(
             installed.ok,
             "cut after {cut}: error {} {}",
             installed.error, installed.detail
         );
-        drop(anchor);
-        if first_run == FirstRun::Finished {
-            assert!(cut > 100, "only {cut} transactions were cut: not a try-run");
-            return;
-        }
-        cut += TRY_RUN_STRIDE;
-    }
+    });
 }
 
 /// A board whose Non-secure image does not hash to its burned digest cannot bind its chip: the
