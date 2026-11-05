@@ -6737,7 +6737,7 @@ A read-only sweep of the firmware and offline path on 2026-10-31 found SA-166 to
 - An offer asks for a number of requests that move nothing (`AppConnectOfferBodyV1.free_requests`). The wallet's signed accept grants it, never more than the offer asked (`verify_accept`).
 - The approval screen names the count. The connected application's view shows how many are used.
 - The count of free requests used is read from the session's own log. Each request that ran under the grant and moved nothing leaves a row marked `free`. That includes a payment that failed and spent nothing.
-- Once the count is reached, a request the grant would run waits for the player instead (`free_requests_left`), and holds every later request behind it. A request that spends is held to the count too, since it can fail and move nothing. So nothing more is signed or logged under the grant until the player acts.
+- Once the count is reached, a request that spends nothing waits for the player instead (`free_requests_left`), and holds every later request behind it. A request that spends runs inside its caps until one fails and takes the log past the count, and then it waits too (§6.149). So at most one more is signed and logged under the grant until the player acts.
 - A free request's signed answer is dropped once delivered. Its row keeps the summary, the outcome and the answer's digest (`connect_log.response_digest`, `DSM/connect/response-digest`).
 - Test: `dsm_sdk::handlers::connect_e2e_tests::a_grant_runs_only_its_free_requests`. With a grant of 2, two requests run, the third waits for the player, and the two delivered answers are no longer held.
 
@@ -7298,6 +7298,15 @@ The direction, pasted into the session 2026-11-04: "the A28-specific exception d
 - **The lock.** `ci/acceptance_lock.py` now also refuses `FIRST_SPEND_POSITION`, a second `step_at` in `validate_peer_step`, A28's first-spend sentence in the explainer, and a one-hop test that expects position 1 beside the requested position.
 
 Run in release on real nodes, 2026-11-04, on this commit's code: `dsm` `economic::peer_lineage` 19/0; `dsm_sdk` 31/0 across `one_hop_verification_tests`, `counterfeit_acceptance_tests` and `boundary_notices`, with `a_trader_who_has_traded_can_pay`, `resolving_another_traders_position_reads_only_that_position`, `one_resolution_asks_each_node_for_a_final_cell_or_an_object_once` and `many_devices_conserve_value_and_settle_under_outages_crashes_and_restarts`. The lock refuses `ab7f70158` with 10 violations. The full board is GitHub's run on this commit.
+
+### 6.149 A payment inside its caps runs past the free requests (owner, 2026-11-04: "Payments run past count")
+
+The phone run on `c043278c6` (`audit-freeze-2026-11-04`) showed the wallet's approval screen promising more than the code did. The screen says an app can pay inside its caps "without asking you again", and §6.124 held a request that spends to the count of free requests, so a payment waited once those were used, and always on a grant of 0. Measured on the A16 and the A54: 3.00 FRZC ran with free requests left; 3.00 on a grant of 0, and 2.00 with the count used, each waited.
+
+- **The change.** `free_requests_left`: a request that spends runs while the log holds no more free rows than the count, and a request that spends nothing runs while it holds fewer. A payment that fails and moves nothing leaves a free row, which takes the log one past the count, and from there every request waits. So SA-78's bound on what is signed and logged moves from the count to the count plus one.
+- **Display.** The connected app's view reads the log, so it can show one more used than granted ("1 of 0 requests that spend nothing used"). The approval screen says nothing of the wait after a failed payment.
+- **Test.** `dsm_sdk::handlers::connect_e2e_tests::a_payment_inside_its_caps_runs_past_the_free_requests_until_one_fails`. Not run locally and not mutation-tested (owner, 2026-11-04: GitHub runs the tests); GitHub's run on this commit is its first.
+- **The freeze.** `audit-freeze-2026-11-04` does not hold this change. It holds the rule §6.124 recorded then.
 
 ## 7 Totals
 
