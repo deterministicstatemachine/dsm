@@ -407,6 +407,11 @@ pub(crate) mod fixture {
             )
         }
 
+        fn set_counter_back(&mut self) -> Result<(), TropicError> {
+            self.counter.set(H0);
+            Ok(())
+        }
+
         fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
             vec![anchor_core::try_run::TryStep::new(
                 "this software chip's counter reads",
@@ -539,7 +544,7 @@ pub(crate) mod fixture {
             );
             let mut head = device.created_token(token, 100).expect("token created");
             let born = birth::<Partition>(&BirthInputs {
-                partition_trng: &derive(seed, "partition trng"),
+                birth_entropy: &derive(seed, "birth entropy"),
                 chip_birth_witness: &derive(seed, "chip birth witness"),
                 host_nonce: &derive(seed, "host nonce"),
                 device_id: &head.devid(),

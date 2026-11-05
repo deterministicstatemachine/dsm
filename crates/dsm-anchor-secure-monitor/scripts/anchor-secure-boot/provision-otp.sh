@@ -28,6 +28,12 @@ SECRET_LOCK_ROW=$(( 0xf80 + 2 * 48 + 1 ))
 SECRET_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_INACCESSIBLE" "$LOCK_INACCESSIBLE")
 DIGEST_LOCK_ROW=$(( 0xf80 + 2 * 46 + 1 ))
 DIGEST_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_INACCESSIBLE" "$LOCK_READ_ONLY")
+# The boot configuration (page 1: CRIT1, BOOT_FLAGS) and the boot key hashes (page 2): everyone reads,
+# nothing writes. Until these lock, the USB bootloader could set more bits in them, KEY_INVALID on the
+# one valid key among them, and no signed image would ever boot again.
+BOOT_CONFIG_LOCK_ROW=$(( 0xf80 + 2 * 1 + 1 ))
+BOOT_KEYS_LOCK_ROW=$(( 0xf80 + 2 * 2 + 1 ))
+BOOT_PAGES_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_READ_ONLY" "$LOCK_READ_ONLY")
 
 COMMIT=0; CMD=""; BOARD=""
 while [ $# -gt 0 ]; do
@@ -42,7 +48,8 @@ done
 
 usage() {
   echo "usage: $0 --board <name> [--check-blank | --gen-secret | --write-secret | --write-digest |"
-  echo "                           --lock-pages | --write-bootkey | --lockdown] [--commit]"
+  echo "                           --lock-pages | --write-bootkey | --lockdown |"
+  echo "                           --lock-boot-pages] [--commit]"
   exit 2
 }
 [ -n "$CMD" ] || usage
@@ -78,7 +85,8 @@ if len(rows) != 4096:
 secret, digest = int(sys.argv[2]), int(sys.argv[3])
 watched = {"sealed secret": range(secret, secret + 16), "digest": range(digest, digest + 16),
            "boot key 0": range(0x80, 0x90), "CRIT1": range(0x40, 0x48), "BOOT_FLAGS1": range(0x4b, 0x4e),
-           "secret page lock": range(0xf80 + 96, 0xf80 + 98), "digest page lock": range(0xf80 + 92, 0xf80 + 94)}
+           "secret page lock": range(0xf80 + 96, 0xf80 + 98), "digest page lock": range(0xf80 + 92, 0xf80 + 94),
+           "boot page locks": range(0xf80 + 2, 0xf80 + 6)}
 used = {name: [hex(r) for r in span if rows[r] != 0] for name, span in watched.items()}
 used = {name: found for name, found in used.items() if found}
 if used:
@@ -120,9 +128,9 @@ PY
     confirm
     run picotool otp load "$key_json" ;;
   --lockdown)
-    # DO LAST: after this the board boots only images signed by the key, with debug off. Boot key
-    # slots 1-3 are marked invalid so no other key can be installed later. The USB bootloader stays
-    # on, which is how a signed monitor update is loaded.
+    # After this the board boots only images signed by the key, with debug off. Boot key slots 1-3
+    # are marked invalid so no other key can be installed later. The USB bootloader stays on, which is
+    # how a signed monitor update is loaded; --lock-boot-pages is all that remains after this.
     need "$OTP_JSON" "run sign.sh --sign first"
     lock_json="$BOARD_DIR/lockdown.json"
     python3 - "$lock_json" <<'PY'
@@ -132,6 +140,12 @@ json.dump({"boot_flags1": {"key_valid": 1, "key_invalid": 14},
 PY
     confirm
     run picotool otp load "$lock_json" ;;
+  --lock-boot-pages)
+    # DO LAST, after --lockdown: nothing writes these pages again, so everything meant for them must
+    # already be there.
+    confirm
+    run picotool otp set -r "$BOOT_CONFIG_LOCK_ROW" "$BOOT_PAGES_LOCK"
+    run picotool otp set -r "$BOOT_KEYS_LOCK_ROW" "$BOOT_PAGES_LOCK" ;;
   *)
     usage ;;
 esac

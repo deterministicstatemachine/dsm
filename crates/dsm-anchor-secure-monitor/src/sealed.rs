@@ -84,14 +84,25 @@ pub fn assert_secure_context() -> Result<(), SealedError> {
 /// provisioned: an appliance without its secret has no identity to serve under.
 pub fn read_sealed_secret() -> Result<[u8; 32], SealedError> {
     let mut words = [0u16; SEALED_SECRET_ROWS];
+    let secret = read_rows(&mut words).and_then(|()| {
+        if words.iter().fold(0u16, |all, word| all | word) == 0 {
+            return Err(SealedError::Unprovisioned);
+        }
+        Ok(core::array::from_fn(|i| {
+            (words[i / 2] >> (8 * (i % 2))) as u8
+        }))
+    });
+    for word in words.iter_mut() {
+        unsafe { core::ptr::write_volatile(word, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    secret
+}
+
+fn read_rows(words: &mut [u16; SEALED_SECRET_ROWS]) -> Result<(), SealedError> {
     for (i, word) in words.iter_mut().enumerate() {
         let row = SEALED_SECRET_ROW + i;
         *word = hal::otp::read_ecc_word(row).map_err(|e| SealedError::Unreadable(row, e))?;
     }
-    if words.iter().fold(0u16, |all, word| all | word) == 0 {
-        return Err(SealedError::Unprovisioned);
-    }
-    Ok(core::array::from_fn(|i| {
-        (words[i / 2] >> (8 * (i % 2))) as u8
-    }))
+    Ok(())
 }

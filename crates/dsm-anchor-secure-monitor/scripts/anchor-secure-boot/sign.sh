@@ -29,8 +29,13 @@ case "${1:-}" in
   --sign)
     [ -f "$KEY" ]  || { echo "ERROR: no $KEY — run '$0 --genkey' or supply KEY=…"; exit 1; }
     [ -f "$ELF" ]  || { echo "ERROR: no firmware ELF at $ELF — build --release --features production first"; exit 1; }
-    # An existing OTP file would be edited in place: every signing starts from nothing.
-    rm -f "$SIGNED" "$OTP_JSON" "$MU_BIN" "$NS_BIN"
+    # Only a production image is ever signed: the trial image and the production one build to one path.
+    symbols="$(arm-none-eabi-nm "$ELF")"
+    grep -q ' DSM_ANCHOR_PRODUCTION_IMAGE$' <<<"$symbols" || {
+      echo "ERROR: $ELF is not a production image — build --release --features production first"; exit 1; }
+    # An existing OTP file would be edited in place: every signing starts from nothing. The kept
+    # Non-secure image is another matter: a burned board's digest is of those bytes.
+    rm -f "$SIGNED" "$OTP_JSON" "$MU_BIN"
     # seal --sign: signs $ELF into $SIGNED and writes the key-fingerprint OTP rows, the key's valid
     # flag and SECURE_BOOT_ENABLE into $OTP_JSON. provision-otp.sh splits those apart.
     picotool seal --sign "$ELF" -t elf "$SIGNED" "$KEY" "$OTP_JSON"
@@ -58,16 +63,22 @@ if len(image) < window:
 measured = image[:window]
 if measured not in open(signed, "rb").read():
     sys.exit("ERROR: the signed image does not hold the measured bytes")
+if os.path.exists(ns_out) and open(ns_out, "rb").read() != image:
+    os.remove(signed)
+    sys.exit(f"ERROR: this image's Non-secure app is not the one kept at {ns_out}, and a burned board "
+             "refuses any other. Build with DSM_ANCHOR_NS_BIN naming that file. If no board was ever "
+             "burned with it, move it aside and sign again.")
 digest = subprocess.run(["b3sum", "--raw"], input=measured, capture_output=True, check=True).stdout
 if len(digest) != 32:
     sys.exit(f"ERROR: the digest is {len(digest)} bytes")
 fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, "wb") as f:
     f.write(digest)
-with open(ns_out, "wb") as f:
-    f.write(image)
+if not os.path.exists(ns_out):
+    with open(ns_out, "wb") as f:
+        f.write(image)
 print(f"wrote {out}: the digest of the {window}-byte measured window")
-print(f"wrote {ns_out}: the image it is the digest of. Keep it with bootkey.pem")
+print(f"holding {ns_out}: the image it is the digest of. Keep it with bootkey.pem")
 PY
     echo "wrote $SIGNED + $OTP_JSON" ;;
   *)

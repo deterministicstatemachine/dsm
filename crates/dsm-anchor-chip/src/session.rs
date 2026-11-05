@@ -198,9 +198,10 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         chip: Tropic01<SPI, CS, NoSession>,
         slot: u8,
     ) -> Result<Tropic01<SPI, CS, ActiveSession>, StartRefused<SPI, CS>> {
-        let eh = StaticSecret::from(core::array::from_fn::<u8, 32, _>(|_position| {
-            self.board.random_byte()
-        }));
+        let Some(ephemeral) = self.board.random_key() else {
+            return Err((chip, Fault::HandshakeFailed));
+        };
+        let eh = StaticSecret::from(ephemeral);
         let (shipub, shipriv) = if slot == FACTORY_SLOT {
             (
                 PublicKey::from(SH0PUB_PROD0),
@@ -553,8 +554,22 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> Tropic for RealChip<SPI, CS, B> {
         self.session.borrow_mut().close_birth(self.h0)
     }
 
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        let h0 = self.h0;
+        self.session
+            .borrow_mut()
+            .with(|s| s.mcounter_init(COUNTER, h0))
+            .map_err(fault)
+    }
+
     fn rehearse_birth(&mut self) -> Vec<TryStep> {
         self.session.borrow_mut().rehearse_birth(self.h0)
+    }
+}
+
+impl<SPI: SpiDevice, CS: OutputPin, B: Board> Drop for ChipSession<SPI, CS, B> {
+    fn drop(&mut self) {
+        anchor_core::util::zeroize(&mut self.pairing);
     }
 }
 
@@ -591,6 +606,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> SlotMemory for RMemSlots<SPI, CS, 
             Ok(data) if data.is_empty() => Ok(None),
             Ok(data) => Ok(Some(data)),
             Err(Fault::SlotEmpty) => Ok(None),
+            Err(Fault::HardwareFail | Fault::L3CmdFailed) => Err(StoreError::Unreadable),
             Err(e) => Err(store_fault(fault(e))),
         }
     }

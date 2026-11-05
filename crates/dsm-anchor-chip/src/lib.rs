@@ -16,7 +16,9 @@ pub mod session;
 /// What a chip session needs from the board it runs on.
 pub trait Board {
     /// One random byte from the board's own entropy source: each session's ephemeral key.
-    fn random_byte(&self) -> u8;
+    /// 32 bytes no one else has seen, for one session's ephemeral key. `None` when the board's entropy
+    /// source fails its own health tests: no session opens on anything less.
+    fn random_key(&self) -> Option<[u8; 32]>;
     /// Wait about 100 ms: the gap the chip needs between back-to-back reads, and one poll of a chip
     /// that is rebooting.
     fn wait_100ms(&self);

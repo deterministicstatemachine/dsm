@@ -22,10 +22,9 @@ blake3 = { version = "1", default-features = false }
 subtle = { version = "2", default-features = false }
 # RP2350 HAL — SAU/ACCESSCTRL, OTP reads (rom_data/otp), SRAM-image boot.
 rp235x-hal = { version = "0.3", features = ["binary-info", "critical-section-impl", "rt"] }
-# Secure fault/panic handler (halts; never returns to Non-secure).
-panic-halt = "1.0"
 cortex-m = "0.7"
-cortex-m-rt = "0.7"
+# `.data` stays as the bootrom loaded and verified it: nothing is copied from flash after that.
+cortex-m-rt = { version = "0.7", features = ["skip-data-copy"] }
 # Heap for the Secure working set (SPHINCS+ signing / release staging) — SEPARATE from the NS heap.
 embedded-alloc = "0.6"
 # σ^chip and σ^host: the chip session and bring-up, the same code the rehearsal runs on the model.

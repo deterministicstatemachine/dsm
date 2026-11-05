@@ -50,7 +50,7 @@ const NO_ARGS = () => new Uint8Array(new pb.ArgPack({ codec: pb.Codec.PROTO, bod
 
 /**
  * Go through an install on the connected anchor with its permanent parts substituted (`anchor.tryRun`).
- * Binds nothing. Takes as long as the anchor takes to sign: tens of seconds.
+ * Binds nothing. A whole payment on the real chip: expect a minute or more.
  */
 export async function runAnchorTryRun(): Promise<AnchorTryRun> {
   const env = decodeFramedEnvelopeV3(await routerQueryBin('anchor.tryRun', NO_ARGS()));

@@ -236,17 +236,33 @@ impl AnchorAppliance for UsbAnchorAppliance {
             ..Default::default()
         };
         let resp = exchange(&self.usb, req)?;
+        let mut steps: Vec<TryRunStep> = resp
+            .try_run
+            .iter()
+            .map(|step| TryRunStep {
+                name: step.name.clone(),
+                passed: step.passed,
+                detail: step.detail.clone(),
+            })
+            .collect();
+        // The transport carried an answer as long as the largest the anchor ever gives.
+        let carried = resp.transport_check.len();
+        let whole =
+            carried > 0 && resp.transport_check == anchor_core::try_run::transport_check(carried);
+        if resp.ok {
+            steps.push(TryRunStep {
+                name: "the anchor's largest answer came through whole".to_string(),
+                passed: whole,
+                detail: if whole {
+                    String::new()
+                } else {
+                    format!("{carried} bytes arrived")
+                },
+            });
+        }
         Ok(TryRunReport {
-            passed: resp.ok,
-            steps: resp
-                .try_run
-                .iter()
-                .map(|step| TryRunStep {
-                    name: step.name.clone(),
-                    passed: step.passed,
-                    detail: step.detail.clone(),
-                })
-                .collect(),
+            passed: resp.ok && whole,
+            steps,
             permanent: resp.permanent.clone(),
             refused: if resp.error == anchor_core::service::err::NONE {
                 String::new()

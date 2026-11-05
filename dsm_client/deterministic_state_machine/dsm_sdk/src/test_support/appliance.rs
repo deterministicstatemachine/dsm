@@ -106,6 +106,7 @@ impl Board {
 pub struct SoftwareTropic {
     board: Board,
     counter: Arc<Mutex<u32>>,
+    start: u32,
     closed_births: Arc<Mutex<u32>>,
     resident: SigningKey,
 }
@@ -139,6 +140,12 @@ impl Tropic for SoftwareTropic {
         )
     }
 
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        self.board.powered()?;
+        *held(&self.counter) = self.start;
+        Ok(())
+    }
+
     fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
         vec![anchor_core::try_run::TryStep::new(
             "this software chip's counter reads",
@@ -158,6 +165,17 @@ impl Tropic for SoftwareTropic {
 pub struct SoftwareRMemory {
     board: Board,
     slot: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Where a try-run's records go. No read of the record looks here.
+    trial: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl SoftwareRMemory {
+    fn on_the_supply(&self) -> Result<(), StoreError> {
+        match held(&self.board.0).power {
+            Power::On => Ok(()),
+            Power::Off => Err(StoreError::Unavailable),
+        }
+    }
 }
 
 impl ActiveStore for SoftwareRMemory {
@@ -176,10 +194,24 @@ impl ActiveStore for SoftwareRMemory {
     }
 
     fn try_record(&mut self, _record: &[u8]) -> Result<(), StoreError> {
-        match held(&self.board.0).power {
-            Power::On => Ok(()),
-            Power::Off => Err(StoreError::Unavailable),
-        }
+        self.on_the_supply()
+    }
+
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.on_the_supply()?;
+        *held(&self.trial) = Some(record.to_vec());
+        Ok(())
+    }
+
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.on_the_supply()?;
+        Ok(held(&self.trial).clone())
+    }
+
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        self.on_the_supply()?;
+        *held(&self.trial) = None;
+        Ok(())
     }
 }
 
@@ -246,6 +278,7 @@ impl Anchor {
         SoftwareTropic {
             board: self.board.clone(),
             counter: self.counter.clone(),
+            start: self.enrolled_counter,
             closed_births: self.closed_births.clone(),
             resident: self.resident(),
         }
@@ -257,7 +290,7 @@ impl Anchor {
             partition_device_id: self.derive("partition device id"),
             chip_pk: self.resident().verifying_key().to_bytes().to_vec(),
             enrolled_counter: self.enrolled_counter,
-            partition_trng: self.derive("partition trng"),
+            birth_entropy: self.derive("birth entropy"),
             chip_birth_witness: self.derive("chip birth witness"),
             host_nonce: self.derive("host nonce"),
             partition_key_seed: self.derive("partition key seed"),
@@ -313,6 +346,7 @@ impl HostAppliance {
                 rmemory: SoftwareRMemory {
                     board: board.clone(),
                     slot: Arc::new(Mutex::new(None)),
+                    trial: Arc::new(Mutex::new(None)),
                 },
                 board,
                 counter: Arc::new(Mutex::new(enrolled_counter)),

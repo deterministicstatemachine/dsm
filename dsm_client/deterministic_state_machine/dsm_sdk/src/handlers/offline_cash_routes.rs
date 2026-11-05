@@ -183,6 +183,7 @@ mod tests {
     use super::*;
     use crate::handlers::app_router_impl::AppRouterImpl;
     use crate::init::SdkConfig;
+    use dsm::types::error::DsmError;
 
     /// A router on a device created as wallet creation creates it. No anchor
     /// appliance is attached — no transport to one exists — and that absence
@@ -256,6 +257,127 @@ mod tests {
         assert!(!res.success);
         let msg = res.error_message.unwrap_or_default();
         assert!(msg.contains("invalid amount"), "{msg}");
+    }
+
+    /// An anchor told to install finishes, or refuses, whatever happens to its answer.
+    #[derive(Clone)]
+    struct OnTheCable {
+        anchor: crate::test_support::appliance::HostAppliance,
+        /// Whether the install's answer arrives: the anchor is told either way.
+        what_happens: AnswerTo,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AnswerTo {
+        /// It finishes and its answer never arrives: the cable went, or the wait ran out.
+        LostAfterInstalling,
+        /// It refuses, and that answer arrives.
+        Refused,
+    }
+
+    impl crate::anchor::AnchorAppliance for OnTheCable {
+        fn status(&mut self) -> Result<crate::anchor::ApplianceStatus, DsmError> {
+            self.anchor.status()
+        }
+        fn prepare(
+            &mut self,
+            t: &anchor_core::root_advance::Transition,
+            receiver_challenge: &[u8; 32],
+            sender_device_root_before: &[u8; 32],
+            sender_device_root_after: &[u8; 32],
+        ) -> Result<(), DsmError> {
+            self.anchor.prepare(
+                t,
+                receiver_challenge,
+                sender_device_root_before,
+                sender_device_root_after,
+            )
+        }
+        fn commit(&mut self) -> Result<(), DsmError> {
+            self.anchor.commit()
+        }
+        fn emit(&mut self) -> Result<Vec<u8>, DsmError> {
+            self.anchor.emit()
+        }
+        fn finalize(&mut self) -> Result<[u8; 32], DsmError> {
+            self.anchor.finalize()
+        }
+        fn cancel(&mut self) -> Result<(), DsmError> {
+            self.anchor.cancel()
+        }
+        fn provisioned_pin(&mut self) -> Result<Option<crate::anchor::AnchorPin>, DsmError> {
+            self.anchor.provisioned_pin()
+        }
+        fn try_run(
+            &mut self,
+            provisioning: &anchor_core::enrollment::Provisioning,
+        ) -> Result<crate::anchor::TryRunReport, DsmError> {
+            self.anchor.try_run(provisioning)
+        }
+        fn provision(
+            &mut self,
+            provisioning: &anchor_core::enrollment::Provisioning,
+        ) -> Result<crate::anchor::AnchorPin, DsmError> {
+            match self.what_happens {
+                AnswerTo::LostAfterInstalling => {
+                    self.anchor.provision(provisioning)?;
+                    Err(DsmError::invalid_operation(
+                        "USB: no answer from the anchor",
+                    ))
+                }
+                AnswerTo::Refused => Err(DsmError::invalid_operation(
+                    "anchor appliance: the try-run did not pass",
+                )),
+            }
+        }
+        fn recover(&mut self) -> Result<anchor_core::appliance::RecoverOutcome, DsmError> {
+            self.anchor.recover()
+        }
+    }
+
+    fn installing_through(
+        anchor: crate::test_support::appliance::HostAppliance,
+        what_happens: AnswerTo,
+    ) {
+        crate::bridge::install_anchor_appliance_factory(std::sync::Arc::new(move || {
+            Ok(Box::new(OnTheCable {
+                anchor: anchor.clone(),
+                what_happens,
+            })
+                as Box<dyn crate::anchor::AnchorAppliance + Send>)
+        }));
+    }
+
+    /// A burned chip is never reported as a failed install. The install finished and its answer was
+    /// lost: what the anchor now holds says so, and the wallet attaches it. MUTATION CONTROL: dropping
+    /// the read-back in `anchor_install` reports the failure and turns this red.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_install_whose_answer_was_lost_is_read_back_from_the_anchor() {
+        let r = router_on_a_device();
+        let core = &r.core_sdk;
+        let appliance =
+            crate::test_support::appliance::HostAppliance::unprovisioned([0xD2; 32], 16).install();
+        installing_through((*appliance).clone(), AnswerTo::LostAfterInstalling);
+        let snap = core.anchor_install().expect("the anchor holds the install");
+        assert!(snap.connected, "{}", snap.status);
+        assert!(!snap.awaiting_install, "{}", snap.status);
+        assert_eq!(snap.bundle, appliance.pin().bundle);
+    }
+
+    /// An install the anchor refused stays refused, with its reason, and attaches nothing.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_install_the_anchor_refused_stays_refused_and_attaches_nothing() {
+        let r = router_on_a_device();
+        let core = &r.core_sdk;
+        let appliance =
+            crate::test_support::appliance::HostAppliance::unprovisioned([0xD3; 32], 16).install();
+        installing_through((*appliance).clone(), AnswerTo::Refused);
+        let refused = core.anchor_install().expect_err("the anchor refused");
+        assert!(refused.to_string().contains("try-run"), "{refused}");
+        assert!(matches!(appliance.provisioned(), None));
+        assert!(core.anchor_appliance_status().awaiting_install);
     }
 
     /// Connecting a new anchor does nothing permanent. A status read reports it as awaiting its install

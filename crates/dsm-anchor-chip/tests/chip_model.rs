@@ -60,9 +60,10 @@ fn own_pairing_key(chip: &mut ModelChip) -> StaticSecret {
 }
 
 fn ephemeral() -> StaticSecret {
-    StaticSecret::from(core::array::from_fn::<u8, 32, _>(|_| {
-        anchor_chip::Board::random_byte(&HostBoard)
-    }))
+    match anchor_chip::Board::random_key(&HostBoard) {
+        Some(key) => StaticSecret::from(key),
+        None => panic!("no entropy"),
+    }
 }
 
 fn own_session(model: &ModelServer) -> Tropic01<ModelSpi, ModelCsn, ActiveSession> {
@@ -345,12 +346,35 @@ fn a_spend_on_the_chip_verifies_at_the_receiver_and_moves_the_counter_once() {
     }
 }
 
+/// A whole try-run is thousands of SPI transactions through the code a spend runs, and each cut is
+/// a new chip and a whole install after it, so a sweep takes every `TRY_RUN_STRIDE`th of them. What
+/// is permanent, the boot and the birth around it, is cut at every one.
+const TRY_RUN_STRIDE: u64 = 61;
+
+/// The transactions a boot takes, and those a try-run takes after it, on a new chip.
+fn boot_and_try_run(model: &ModelServer) -> (u64, u64) {
+    model.factory_reset();
+    model.power.steady();
+    let before = model.power.spent();
+    let mut anchor = booted(model);
+    let at_serve = model.power.spent();
+    let run = anchor.request(&try_run_request());
+    assert!(run.ok, "{:?}", run.try_run);
+    let tried = model.power.spent() - at_serve;
+    println!(
+        "[sweep] a boot is {} transactions, a try-run {tried}",
+        at_serve - before
+    );
+    (at_serve - before, tried)
+}
+
 /// Cut the power after every SPI transaction of a birth, each on a new chip from the factory. The
 /// next boot, and a provisioning if the record never landed, always finishes a closed, serving
 /// anchor: a cut never costs the chip.
 #[test]
 fn a_power_cut_anywhere_in_a_birth_is_finished_by_the_next_boot() {
     let model = ModelServer::start();
+    let (boot, try_run) = boot_and_try_run(&model);
     let mut cut = 0u64;
     loop {
         model.factory_reset();
@@ -412,7 +436,11 @@ fn a_power_cut_anywhere_in_a_birth_is_finished_by_the_next_boot() {
             assert!(cut > 100, "only {cut} transactions were cut: not a birth");
             return;
         }
-        cut += 1;
+        cut += if cut > boot && cut < boot + try_run {
+            TRY_RUN_STRIDE
+        } else {
+            1
+        };
     }
 }
 
@@ -557,14 +585,37 @@ fn a_try_run_goes_through_the_install_and_leaves_the_chip_as_it_found_it() {
     let mut anchor = booted(&model);
     let run = anchor.request(&try_run_request());
     assert!(run.ok, "the try-run: error {} {:?}", run.error, run.try_run);
-    assert!(
-        run.try_run.len() >= 7,
-        "what it went through: {:?}",
-        run.try_run
-    );
     for step in &run.try_run {
         assert!(step.passed, "{}: {}", step.name, step.detail);
     }
+    // A whole payment, as the anchor makes one, not a sample of it.
+    for reached in [
+        "first record is written",
+        "sign a payment",
+        "counter moves with the records",
+        "release is held",
+        "account advances",
+        "restores from its record",
+        "boot recovery accepts it",
+        "the payment left",
+        "own slots",
+        "would take the board's pairing key",
+        "would let the board close it",
+        "reboots and opens a session",
+    ] {
+        assert!(
+            run.try_run.iter().any(|step| step.name.contains(reached)),
+            "it did not go through {reached:?}: {:?}",
+            run.try_run
+        );
+    }
+    // The release stays on the anchor, and an answer as long as it crosses the transport in parts.
+    let carried = run.transport_check.len();
+    assert!(carried > 4096, "longer than one part: {carried} bytes");
+    assert_eq!(
+        run.transport_check,
+        anchor_core::try_run::transport_check(carried)
+    );
     assert_eq!(run.permanent.len(), 4, "what installing makes permanent");
     assert_eq!(
         anchor.bare(pb::Op::Status).error,
@@ -637,7 +688,6 @@ fn a_chip_that_fails_its_try_run_is_never_installed() {
 /// the next try-run and install both pass.
 #[test]
 fn a_power_cut_anywhere_in_a_try_run_costs_nothing() {
-    const STRIDE: u64 = 5;
     let model = ModelServer::start();
     let mut cut = 0u64;
     loop {
@@ -673,7 +723,7 @@ fn a_power_cut_anywhere_in_a_try_run_costs_nothing() {
             assert!(cut > 100, "only {cut} transactions were cut: not a try-run");
             return;
         }
-        cut += STRIDE;
+        cut += TRY_RUN_STRIDE;
     }
 }
 

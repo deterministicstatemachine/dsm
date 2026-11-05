@@ -52,10 +52,21 @@ struct Rp2350Board<R> {
 impl<R: core::borrow::Borrow<hal::rosc::RingOscillator<hal::rosc::Enabled>>> Board
     for Rp2350Board<R>
 {
-    fn random_byte(&self) -> u8 {
-        (0..8).fold(0u8, |acc, _bit| {
-            (acc << 1) | u8::from(self.rosc.borrow().get_random_bit())
-        })
+    fn random_key(&self) -> Option<[u8; 32]> {
+        let mut hasher = blake3::Hasher::new_derive_key("DSM/anchor/session-entropy/v1");
+        for _block in 0..TRNG_BLOCKS {
+            let mut block = trng_block()?;
+            hasher.update(&block);
+            crate::zeroize(&mut block);
+        }
+        // The ring oscillator's own bits go in too, and nothing rests on them.
+        for _byte in 0..32 {
+            let byte = (0..8).fold(0u8, |acc, _bit| {
+                (acc << 1) | u8::from(self.rosc.borrow().get_random_bit())
+            });
+            hasher.update(&[byte]);
+        }
+        Some(*hasher.finalize().as_bytes())
     }
 
     fn wait_100ms(&self) {
@@ -65,6 +76,55 @@ impl<R: core::borrow::Borrow<hal::rosc::RingOscillator<hal::rosc::Enabled>>> Boa
     fn alive(&self) {
         boundary::feed_watchdog_in_service();
     }
+}
+
+/// TRNG blocks of 192 bits behind each key.
+const TRNG_BLOCKS: usize = 3;
+/// `clk_sys` cycles between samples of the TRNG's ring oscillator. The block's documented minimum is 17.
+const TRNG_SAMPLE_CYCLES: u32 = 1024;
+/// A failed health test is tried again this many times before the source is called failed.
+const TRNG_TRIES: usize = 8;
+/// Reads of `RNG_ISR` one block may take: about 0.7 s, against the ~5 ms a block takes.
+const TRNG_POLLS: u32 = 10_000_000;
+/// `RNG_ISR` and `RNG_ICR`: `EHR_VALID`, `AUTOCORR_ERR`, `CRNGT_ERR`, `VN_ERR`.
+const TRNG_ALL_FLAGS: u32 = 0xF;
+const TRNG_HEALTH_FAILED: u32 = 0xE;
+
+/// One 192-bit block from the RP2350's TRNG, passed by the block's own health tests (autocorrelation,
+/// continuous, von Neumann). `None` when it never passes: there is no lesser source behind it.
+fn trng_block() -> Option<[u8; 24]> {
+    let trng = unsafe { &*hal::pac::TRNG::ptr() };
+    for _try in 0..TRNG_TRIES {
+        trng.rng_icr().write(|w| unsafe { w.bits(TRNG_ALL_FLAGS) });
+        trng.sample_cnt1()
+            .write(|w| unsafe { w.bits(TRNG_SAMPLE_CYCLES) });
+        trng.rnd_source_enable().write(|w| unsafe { w.bits(1) });
+        for _poll in 0..TRNG_POLLS {
+            let flags = trng.rng_isr().read();
+            if flags.bits() & TRNG_HEALTH_FAILED != 0 {
+                break;
+            }
+            if flags.ehr_valid().bit_is_set() {
+                let words = [
+                    trng.ehr_data0().read().bits(),
+                    trng.ehr_data1().read().bits(),
+                    trng.ehr_data2().read().bits(),
+                    trng.ehr_data3().read().bits(),
+                    trng.ehr_data4().read().bits(),
+                    trng.ehr_data5().read().bits(),
+                ];
+                trng.rnd_source_enable().write(|w| unsafe { w.bits(0) });
+                let mut block = [0u8; 24];
+                for (bytes, word) in block.chunks_exact_mut(4).zip(words) {
+                    bytes.copy_from_slice(&word.to_le_bytes());
+                }
+                return Some(block);
+            }
+        }
+        trng.rnd_source_enable().write(|w| unsafe { w.bits(0) });
+        trng.trng_sw_reset().write(|w| unsafe { w.bits(1) });
+    }
+    None
 }
 
 /// The TROPIC01 driver error on the monitor's bus: rp235x SPI and GPIO are infallible, and the
@@ -87,11 +147,14 @@ pub enum InitStage {
     Recovery = 8,
     Sealed = 9,
     Layout = 10,
+    Entropy = 11,
 }
 
 /// Why [`init`] refused to install the anchor: the failing stage and the cause it reported.
 pub enum InitFailure {
     Clocks(hal::clocks::InitError),
+    /// The TRNG never passed its health tests: nothing can be keyed on this board.
+    Entropy,
     /// The board's sealed secret, or the secure boot it requires, is not there.
     Sealed(SealedError),
     BringUp(BringUpFailure<ChipError>),
@@ -101,6 +164,7 @@ impl InitFailure {
     pub fn stage(&self) -> InitStage {
         match self {
             Self::Clocks(_) => InitStage::Clocks,
+            Self::Entropy => InitStage::Entropy,
             Self::Sealed(_) => InitStage::Sealed,
             Self::BringUp(BringUpFailure::ChipId(_)) => InitStage::ChipId,
             Self::BringUp(BringUpFailure::CertStore(_)) => InitStage::CertStore,
@@ -117,6 +181,7 @@ impl core::fmt::Debug for InitFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Clocks(cause) => write!(f, "Clocks: {cause:?}"),
+            Self::Entropy => write!(f, "the TRNG did not pass its health tests"),
             Self::Sealed(cause) => write!(f, "Sealed: {cause:?}"),
             Self::BringUp(cause) => write!(f, "{cause:?}"),
         }
@@ -151,8 +216,19 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     )
     .map_err(InitFailure::Clocks)?;
 
-    // The ring oscillator's entropy keys each L3 handshake; the chip session keeps it to reopen.
+    // The TRNG keys each L3 handshake, and is out of reset before anything needs it.
+    pac.RESETS.reset().modify(|_, w| w.trng().clear_bit());
+    for _read in 0..TRNG_POLLS {
+        if pac.RESETS.reset_done().read().trng().bit_is_set() {
+            break;
+        }
+    }
     let rosc = hal::rosc::RingOscillator::new(pac.ROSC).initialize();
+    // A source that fails now answers every request with why, instead of a chip that will not open.
+    match (Rp2350Board { rosc: &rosc }).random_key() {
+        Some(mut proof) => crate::zeroize(&mut proof),
+        None => return Err(InitFailure::Entropy),
+    }
 
     // The board's sealed secret: without it the anchor has no identity to serve under.
     #[cfg(not(feature = "bench_self_enroll"))]
@@ -162,10 +238,9 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     // and it can make no install (`service_request`).
     #[cfg(feature = "bench_self_enroll")]
     let mut sealed: [u8; 32] = match sealed::read_sealed_secret() {
-        Err(SealedError::Unprovisioned) => {
-            let board = Rp2350Board { rosc: &rosc };
-            core::array::from_fn(|_| board.random_byte())
-        }
+        Err(SealedError::Unprovisioned) => (Rp2350Board { rosc: &rosc })
+            .random_key()
+            .ok_or(InitFailure::Entropy)?,
         Ok(_burned) => return Err(InitFailure::Sealed(SealedError::AlreadySealed)),
         Err(cause) => return Err(InitFailure::Sealed(cause)),
     };

@@ -42,6 +42,7 @@ const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX1
 /// it under the pinned `pk_chip`.
 struct Chip {
     h: u32,
+    start: u32,
     resident: SigningKey,
     closed_births: u32,
 }
@@ -49,6 +50,7 @@ impl Chip {
     fn with_h(h: u32) -> Self {
         Self {
             h,
+            start: h,
             resident: SigningKey::from_bytes(&[0xC0; 32]),
             closed_births: 0,
         }
@@ -80,6 +82,11 @@ impl Tropic for Chip {
                 Ok(())
             )
         )
+    }
+
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        self.h = self.start;
+        Ok(())
     }
 
     fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
@@ -192,7 +199,7 @@ struct Fixture {
 fn fixture(h: u32) -> Fixture {
     let chip_pk = Chip::with_h(0).pk(); // deterministic (csk fixed)
     let b = birth::<Partition>(&BirthInputs {
-        partition_trng: &[0x01; 32],
+        birth_entropy: &[0x01; 32],
         chip_birth_witness: &[0x02; 32],
         host_nonce: &[0x03; 32],
         device_id: &DEVICE,

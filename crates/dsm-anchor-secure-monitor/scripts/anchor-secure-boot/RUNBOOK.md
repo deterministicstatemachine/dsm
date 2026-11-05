@@ -10,20 +10,23 @@ host-signing secret lives in OTP readable only by Secure firmware.
 
 Requires: `picotool` v2.2+, `openssl`, `b3sum`, `arm-none-eabi-nm`, `arm-none-eabi-objcopy`, `clang`,
 the built firmware ELF, and the board in BOOTSEL. The TROPIC01 driver is pinned by commit in the
-manifests. Build with the production profile:
+manifests. Build from `crates/dsm-anchor-secure-monitor` with the pinned toolchain on the path:
 
 ```
 cd crates/dsm-anchor-secure-monitor
-PATH="$HOME/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:$PATH" \
-RUSTC="$HOME/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc" \
-  cargo build --release --features production
+export PATH="$HOME/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:$PATH"
+export RUSTC="$HOME/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc"
 ```
+
+The trial image and the production image build to one path, so build the one you mean just before
+you use it. A build must name one of them, and `sign.sh` signs only a production image.
 
 ## What has run without a chip
 
 `crates/dsm-anchor-chip/tests` runs the firmware's chip code against Tropic Square's TROPIC01 model
 (`ci/tropic01_model.sh` installs it): a birth, the cage, spends, and a power cut at every SPI
-transaction of a birth and at every seventh of a spend. The model enforces access privileges and
+transaction of a birth outside its try-run, at every seventh of a spend and at every 61st of a try-run.
+The model enforces access privileges and
 latches them at a reboot. It does not model timing, tear a write, or stand for a production chip's
 factory configuration, and nothing about the RP2350 runs there: secure boot, the OTP locks, the
 boundary, the measured window and USB are this runbook's to prove, on silicon.
@@ -32,22 +35,27 @@ boundary, the measured window and USB are this runbook's to prove, on silicon.
 
 **Every board goes through this first, a new one included. It is part of installing, not a test of the
 procedure.** The trial image goes through an install on the real RP2350 and the real TROPIC01 with the
-permanent parts substituted, and tells you what an install would make permanent. Loading it writes only
-flash, which is rewritable, so it costs the board nothing:
+permanent parts substituted, and tells you what an install would make permanent. It burns no OTP, and it
+writes no pairing key and no access rule. Its first boot does generate the chip's resident key, which
+stays and which a later install uses, and it sets the counter to its start:
 
 ```
 cargo build --release --features bench_self_enroll
-picotool load -v -x target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor
+picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor
 used-chip-bench --port <serial> --check
 used-chip-bench --port <serial> --try-run
 ```
 
-What it goes through, for real: both images boot, the boundary holds, the Secure Gateway and USB framing
-work; the chip opens a session; the anchor's identity derives; the chip and the board sign a payment and
-both signatures verify; a record of that size is written to the chip, read back and erased; the counter
-moves one step and is set back; the chip reboots and opens a session again. Unplug and replug partway to
-see a power cut cost nothing, and leave it idle to see it outlast its watchdog. `--try-run` reports how
-long it took: that is this board's real signing and memory time, which nothing else measures.
+What it goes through, for real: both images boot, the TRNG passes its health tests, the boundary holds,
+the Secure Gateway and USB framing work; the chip opens a session; the anchor's identity derives and its
+first record is written; the chip and the board sign a payment and both signatures verify; the counter
+moves with the records around it; the release is held and an answer as long as it comes through whole;
+the account advances; the anchor restores from its record and boot recovery accepts it; then all of it is
+erased, the counter set back, the record's own slots tried, and the chip reboots and opens a session
+again. All the records go to slots no boot ever reads. Unplug and replug partway to see a power cut cost
+nothing, and leave it idle to see it outlast its watchdog. `--try-run` reports how long it took: that is
+this board's real signing and memory time, which nothing else measures, and it should be well inside the
+phone's ~5 minute wait.
 
 What is substituted, because it cannot be undone: OTP is not burned, so the sealed secret is fresh each
 boot and held nowhere and the digest is measured at boot; the board's key is not written to the chip's
@@ -65,12 +73,12 @@ Freeze the firmware before the first burn.
 - **Any byte of the Non-secure app.** Its digest is in OTP. A later change fails the digest check
   on that board for good: it refuses Provision, Prepare, Commit, Emit, Finalize and Recover. A monitor
   update must carry the same bytes: keep `build/ns_app.bin` with the signing key, and build the update
-  with `DSM_ANCHOR_NS_BIN` naming it.
+  with `DSM_ANCHOR_NS_BIN` naming it. `sign.sh` refuses an image whose Non-secure app differs from it.
 - **On the monitor:** the key labels in `ChipIdentity::derive`, `SEALED_SECRET_ROW`, `MU_ROW` and
   the R-memory record format. The monitor can be re-signed and loaded only while `bootkey.pem`
   survives. A changed pairing label can never open slot 1 again, and slot 0 is gone by then.
 - **On the TROPIC01,** at the first `OP_PROVISION`: the board's pairing key in slot 1, slot 0
-  invalidated, the cage (`chip.rs`), the counter's start and the resident key. A chip whose slot 0
+  invalidated, the cage (`dsm-anchor-chip`), the counter's start and the resident key. A chip whose slot 0
   was caged by the old process, or that holds another key in slot 1, refuses this birth.
 
 ## Two choices this procedure makes
@@ -78,7 +86,8 @@ Freeze the firmware before the first burn.
 Change them here before the first burn, not after.
 
 - **The USB bootloader stays on,** which is how a signed monitor update is loaded. Unsigned images
-  still do not boot.
+  still do not boot. Reaching it takes the BOOTSEL button: no fault, watchdog reset or USB host sends a
+  board there. Step 8b locks the boot configuration against what it could otherwise burn.
 - **The glitch detectors stay off,** because their effect on a working board has not been measured.
 
 ## Step 0 — check the board is blank (READ-ONLY)
@@ -98,9 +107,10 @@ It refuses when any row this procedure writes already holds a value.
 Keep a copy offline. It MUST NOT go on an appliance or in the repo. Losing it means no monitor
 update can ever reach a locked board; leaking it defeats secure boot.
 
-## Step 2 — sign the enrolled firmware
+## Step 2 — build the production image and sign it
 
 ```
+cargo build --release --features production
 ./sign.sh --sign
 ```
 This writes `build/signed.elf`, `build/bootkey-otp.json`, `build/mu-enrolled.bin`, the digest of the
@@ -161,15 +171,26 @@ This step takes the hash from it and Step 8 burns the flags.
 This marks boot key 0 valid and keys 1-3 invalid, then sets `SECURE_BOOT_ENABLE` and
 `DEBUG_DISABLE`. The board now boots only images signed by the key, with debug off.
 
-## Step 9 — boot and validate (nothing here writes to the chip)
+## Step 8b — lock the boot pages  ⚠️ IRREVERSIBLE, LAST
+
+```
+./provision-otp.sh --board <name> --lock-boot-pages
+./provision-otp.sh --board <name> --lock-boot-pages --commit
+```
+Pages 1 and 2, the boot configuration and the boot key hashes, become read-only for everyone. Do this
+after Step 8: nothing writes them again.
+
+## Step 9 — boot and validate (no pairing key, access rule or OTP is written)
 
 ```
 picotool reboot
 used-chip-bench --port <serial> --check
 ```
 With debug disabled this is how a board is read: every refusal is an answer over USB, with its reason.
-Nothing here writes to the chip, and nothing has bound it yet. Stop and look if any line is not as
-stated.
+A board that says nothing and resets over and over has panicked or faulted before it could answer, and a
+board that says nothing and stays silent has refused to launch with its boundary unconfirmed. Its boot
+generates the chip's resident key if there is none and sets the counter to its start, and nothing has
+bound it yet. Stop and look if any line is not as stated.
 
 1. **Unsigned firmware refused:** load an UNSIGNED build; the bootrom must not run it. Load
    `signed.elf` again.
@@ -206,4 +227,8 @@ will be kept: a wallet wiped or created anew afterward cannot use this anchor.
   σ^DSM, the three-factor release is three independent factors on a provisioned device.
 - **Does not (by itself):** defend against physical OTP extraction or fault injection on the
   RP2350 (an MCU, not a certified SE); the paper's residual (Thm 8 exposure bound) still applies.
+- **Has not been observed on silicon:** the TRNG path, the Non-secure MPU, the grants dropped at the first
+  crossing and the reset after a fault are each read and built, not run. The trial image runs the first
+  three on a real board at no cost. A fault's reset can be seen by making the Non-secure side touch a
+  revoked peripheral in a throwaway trial build.
   `secure_exe()` is only an Arm Secure-state marker; the enforcement is the burns above.

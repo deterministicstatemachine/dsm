@@ -21,22 +21,12 @@ use rp235x_hal as hal;
 // with no fault to trap. A stall is not a leak, but a permanent hang is a DoS. The watchdog turns it
 // into a recovered reset: armed before the NS launch, FED by the Secure fault/gateway paths while
 // they run (so normal operation never trips it), it fires only when NO code is running for the
-// period — exactly the stall — resetting the chip. The next boot detects the recovery via SCRATCH0.
-const WD_CTRL: *mut u32 = 0x400d_8000 as *mut u32;
+// period — exactly the stall — resetting the chip. The reset boots the signed image again.
 const WD_LOAD: *mut u32 = 0x400d_8004 as *mut u32;
-const WD_SCRATCH0: *mut u32 = 0x400d_800c as *mut u32;
 const WD_PERIOD_US: u32 = 2_000_000; // ~2 s (nominal; scales with clk_ref)
 /// While the Secure side serves a request: the register's whole 24 bits, ~16.7 s. A SPHINCS+
 /// signature alone takes ~7 s on this silicon, and a record write is dozens of chip commands.
 const WD_SERVICE_US: u32 = 0x00FF_FFFF;
-const WD_ARMED: u32 = 0x5744_4147; // "WDAG": set while armed, cleared on a deliberate reboot / power-on
-
-/// True iff the previous boot armed the watchdog and never disarmed it — i.e. a watchdog reset fired
-/// (recovery from a Non-secure hang). SCRATCH0 survives a soft/watchdog reset; `disarm_watchdog`
-/// clears it on every deliberate reboot; a power-on clears it.
-pub fn watchdog_recovery_pending() -> bool {
-    unsafe { core::ptr::read_volatile(WD_SCRATCH0 as *const u32) == WD_ARMED }
-}
 
 /// Arm the watchdog immediately before launching Non-secure.
 pub fn arm_watchdog() {
@@ -44,7 +34,6 @@ pub fn arm_watchdog() {
     let mut wd = hal::watchdog::Watchdog::new(pac.WATCHDOG);
     wd.enable_tick_generation(12); // ~1 us tick assuming ~12 MHz clk_ref
     wd.start(hal::fugit::MicrosDurationU32::from_ticks(WD_PERIOD_US));
-    unsafe { core::ptr::write_volatile(WD_SCRATCH0, WD_ARMED) };
 }
 
 /// Reload the watchdog. Called by the Secure paths while they spin so a LIVE monitor is not reset;
@@ -60,16 +49,6 @@ pub fn feed_watchdog() {
 #[inline(always)]
 pub fn feed_watchdog_in_service() {
     unsafe { core::ptr::write_volatile(WD_LOAD, WD_SERVICE_US) };
-}
-
-/// Disarm on any deliberate reboot (so it cannot fire once the chip is in BOOTSEL) and clear the
-/// recovery marker.
-pub fn disarm_watchdog() {
-    unsafe {
-        let ctrl = core::ptr::read_volatile(WD_CTRL as *const u32);
-        core::ptr::write_volatile(WD_CTRL, ctrl & !(1 << 30)); // clear CTRL.ENABLE (bit 30)
-        core::ptr::write_volatile(WD_SCRATCH0, 0);
-    }
 }
 
 /// TrustZone domain map (must match dsm-secure-sram.x / memory.x). SAU limit addresses are the
@@ -130,6 +109,16 @@ pub fn configure_sau(sau: &mut SAU) -> Result<(), SauError> {
     Ok(())
 }
 
+const ACCESSCTRL_BASE: u32 = 0x4006_0000;
+const ACCESSCTRL_PASSWORD: u32 = 0xACCE_0000;
+const NSP: u32 = 1 << 1;
+const NSU: u32 = 1 << 0;
+/// ACCESSCTRL per-peripheral register offsets (rp235x-pac SVD). What the Non-secure app keeps: USBCTRL.
+const NS_SERVING_GRANTS: [u32; 1] = [0x48];
+/// What it needs only to bring up its clocks and USB: RESETS, CLOCKS, XOSC, PLL_SYS, PLL_USB, TICKS
+/// (the tick generator clock init starts; SWD-confirmed BFAR 0x40108004) and WATCHDOG.
+const NS_BRING_UP_GRANTS: [u32; 7] = [0x64, 0xc0, 0xc4, 0xcc, 0xd0, 0xd4, 0xd8];
+
 /// Grant Non-secure access, via per-peripheral ACCESSCTRL, to ONLY the peripherals the NS app drives:
 /// the clock tree (CLOCKS/XOSC/PLL_SYS/PLL_USB), RESETS + WATCHDOG (used by the HAL clock init), and
 /// USBCTRL. Every other peripheral — critically OTP and SPI0 (the TROPIC bus) — keeps its reset
@@ -138,33 +127,82 @@ pub fn configure_sau(sau: &mut SAU) -> Result<(), SauError> {
 /// and carry the mandatory 0xACCE password in the top 16 bits; a keyless write bus-faults. Must run
 /// BEFORE lock_accessctrl and BEFORE launch_nonsecure.
 ///
-/// SECURITY NOTES (to harden after bring-up): granting RESETS lets NS assert resets on Secure
-/// peripherals (availability/glitch vector, not a secret-disclosure one) and granting WATCHDOG lets
-/// NS touch the same watchdog the Secure recovery uses — both are here only because the HAL clock/USB
-/// init needs them; a later increment should pre-init USB Secure-side and drop these two grants.
+/// Everything but USB is held only until the app's clocks and USB are up: [`revoke_ns_init_grants`]
+/// takes them back at its first crossing, so nothing a USB host sends is ever parsed by a Non-secure
+/// side able to reset a Secure peripheral, touch the watchdog or change a clock.
 pub fn grant_ns_peripherals() {
-    const ACCESSCTRL_BASE: u32 = 0x4006_0000;
-    const PASSWORD: u32 = 0xACCE_0000;
-    const NSP: u32 = 1 << 1;
-    const NSU: u32 = 1 << 0;
-    // ACCESSCTRL per-peripheral register offsets (rp235x-pac SVD): the NS-app working set only.
-    const GRANTS: [u32; 8] = [
-        0x48, // USBCTRL
-        0x64, // RESETS
-        0xc0, // CLOCKS
-        0xc4, // XOSC
-        0xcc, // PLL_SYS
-        0xd0, // PLL_USB
-        0xd4, // TICKS (RP2350 tick generator — clock init starts it; SWD-confirmed BFAR 0x40108004)
-        0xd8, // WATCHDOG
-    ];
-    for off in GRANTS {
+    let keep = NS_SERVING_GRANTS.iter().chain(NS_BRING_UP_GRANTS.iter());
+    for off in keep {
         let reg = (ACCESSCTRL_BASE + off) as *mut u32;
         unsafe {
             let cur = core::ptr::read_volatile(reg) & 0xFF;
-            core::ptr::write_volatile(reg, PASSWORD | cur | NSP | NSU);
+            core::ptr::write_volatile(reg, ACCESSCTRL_PASSWORD | cur | NSP | NSU);
         }
     }
+}
+
+/// Take back what the Non-secure app needed only to bring up its clocks and USB. Runs at every
+/// crossing, and writes only what is still granted. Core 0 keeps the right to: `lock_accessctrl`
+/// locks core 1 and the debugger out.
+pub fn revoke_ns_init_grants() {
+    for off in NS_BRING_UP_GRANTS {
+        let reg = (ACCESSCTRL_BASE + off) as *mut u32;
+        unsafe {
+            let cur = core::ptr::read_volatile(reg) & 0xFF;
+            if cur & (NSP | NSU) != 0 {
+                core::ptr::write_volatile(reg, ACCESSCTRL_PASSWORD | (cur & !(NSP | NSU)));
+                cortex_m::asm::dsb();
+            }
+        }
+    }
+}
+
+/// This Cortex-M33 reported fewer Non-secure MPU regions than the window needs.
+#[derive(Debug)]
+pub struct NsMpuTooSmall;
+
+/// The Non-secure MPU, through its Secure alias, before anything Non-secure runs: the measured window
+/// `[rx_start, rx_end)` read-only and executable, and the rest of Non-secure SRAM writable and never
+/// executed. A stray or attacker-steered write cannot change the code the digest covers, and bytes
+/// a host sent cannot run. Peripherals stay reachable through the privileged default map, gated by
+/// ACCESSCTRL. The Non-secure side runs privileged, so its own code could reprogram this; what stops
+/// that is that it holds no code but the measured window.
+pub fn protect_ns_window(rx_start: u32, rx_end: u32) -> Result<(), NsMpuTooSmall> {
+    const MPU_TYPE: *const u32 = 0xE002_ED90 as *const u32;
+    const MPU_CTRL: *mut u32 = 0xE002_ED94 as *mut u32;
+    const MPU_RNR: *mut u32 = 0xE002_ED98 as *mut u32;
+    const MPU_RBAR: *mut u32 = 0xE002_ED9C as *mut u32;
+    const MPU_RLAR: *mut u32 = 0xE002_EDA0 as *mut u32;
+    const MPU_MAIR0: *mut u32 = 0xE002_EDC0 as *mut u32;
+    const CTRL_ENABLE: u32 = 1 << 0;
+    const CTRL_PRIVDEFENA: u32 = 1 << 2;
+    const RBAR_XN: u32 = 1 << 0;
+    const RBAR_RW_ANY: u32 = 0b01 << 1;
+    const RBAR_RO_ANY: u32 = 0b11 << 1;
+    const RLAR_ENABLE: u32 = 1 << 0;
+    /// Attribute 0: normal memory, write-back. RLAR's attribute index stays 0.
+    const NORMAL_MEMORY: u32 = 0xFF;
+    const LIMIT_MASK: u32 = !0x1F;
+
+    let regions = unsafe { core::ptr::read_volatile(MPU_TYPE) >> 8 } & 0xFF;
+    if regions < 2 {
+        return Err(NsMpuTooSmall);
+    }
+    unsafe {
+        core::ptr::write_volatile(MPU_CTRL, 0);
+        cortex_m::asm::dsb();
+        core::ptr::write_volatile(MPU_MAIR0, NORMAL_MEMORY);
+        core::ptr::write_volatile(MPU_RNR, 0);
+        core::ptr::write_volatile(MPU_RBAR, rx_start | RBAR_RO_ANY);
+        core::ptr::write_volatile(MPU_RLAR, ((rx_end - 1) & LIMIT_MASK) | RLAR_ENABLE);
+        core::ptr::write_volatile(MPU_RNR, 1);
+        core::ptr::write_volatile(MPU_RBAR, rx_end | RBAR_RW_ANY | RBAR_XN);
+        core::ptr::write_volatile(MPU_RLAR, (NS_LIMIT & LIMIT_MASK) | RLAR_ENABLE);
+        core::ptr::write_volatile(MPU_CTRL, CTRL_ENABLE | CTRL_PRIVDEFENA);
+        cortex_m::asm::dsb();
+        cortex_m::asm::isb();
+    }
+    Ok(())
 }
 
 /// Freeze the ACCESSCTRL configuration so the Secure resource attribution cannot be re-opened.

@@ -16,7 +16,7 @@ dsm-anchor-core = { path = "../dsm-anchor-core" }
 dsm-sphincs = { path = "../dsm-sphincs" }
 # The TROPIC01 driver, pinned by commit: a firmware build is reproducible only if its driver is.
 tropic01 = { git = "https://github.com/tropicsquare/libtropic-rs", rev = "0cacb5ed94e5df491bfbb39e8702cc47598f7d63" }
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
 # Verifying a recorded sigma^chip: the chip hedges its signatures, so it cannot be compared.
 ed25519-dalek = { version = "2", default-features = false }
 embedded-hal = "1.0"

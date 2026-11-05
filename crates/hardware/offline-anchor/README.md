@@ -95,7 +95,7 @@ Inside the case the Click lies **under** the Pico. Sheet 1 draws the two boards 
 The firmware is two TrustZone images: the Secure monitor ([`crates/dsm-anchor-secure-monitor`](../../../crates/dsm-anchor-secure-monitor)), which holds the TROPIC01 session, the anchor and its R-memory record, and the Non-secure USB transport ([`crates/dsm-anchor-nonsecure-app`](../../../crates/dsm-anchor-nonsecure-app)), which the monitor's build embeds. Both are excluded from the host workspace (they build for thumbv8m only). In short:
 
 ```sh
-# The trial image: it burns nothing, and it cannot make an install.
+# The trial image: no OTP burned, no pairing key or access rule written, and it cannot make an install.
 cd crates/dsm-anchor-secure-monitor
 cargo build --release --features bench_self_enroll   # thumbv8m.main-none-eabihf; embeds the Non-secure image
 

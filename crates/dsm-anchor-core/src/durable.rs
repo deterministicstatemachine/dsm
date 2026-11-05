@@ -42,6 +42,11 @@ pub enum StoreError {
     Corrupt,
     /// The record is larger than the store was laid out to hold.
     TooLarge,
+    /// The chip answered and will not give this slot back, as a write cut short can leave it. The
+    /// slot holds no record; the store reads the record before it.
+    Unreadable,
+    /// A slot read back does not hold what was just written to it. The record before it stands.
+    NotHeld,
 }
 
 /// Where the appliance's durable record lives: one record, replaced whole.
@@ -51,9 +56,37 @@ pub trait ActiveStore {
     fn write(&mut self, record: &[u8]) -> Result<(), StoreError>;
     /// The record last written in full; `None` if the appliance was never born into this store.
     fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
-    /// Write `record` where no record is ever read from, read it back, and erase it: a try-run of
-    /// [`Self::write`] that leaves the record as it was.
+    /// With no record in the store: try `record` where the store's own record would go, read it back
+    /// and erase it. Refused over a record.
     fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError>;
+    /// [`Self::write`], where no record is ever read from: what a try-run writes through.
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError>;
+    /// [`Self::read`] of what [`Self::trial_write`] wrote.
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
+    /// Erase whatever a try-run wrote, a power cut's remains included.
+    fn trial_clear(&mut self) -> Result<(), StoreError>;
+}
+
+/// A store behind a `Box`, as a firmware holds it, and as a try-run drives its trial slots.
+impl<S: ActiveStore + ?Sized> ActiveStore for Box<S> {
+    fn write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).write(record)
+    }
+    fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).read()
+    }
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).try_record(record)
+    }
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).trial_write(record)
+    }
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).trial_read()
+    }
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        (**self).trial_clear()
+    }
 }
 
 /// Why a stored record is not an appliance record.
@@ -267,6 +300,22 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             let why = alloc::format!("{}: {:?}", failed.name, failed.outcome);
             return Err(refused(DurableError::TryRun(why), tropic, store));
         }
+        Self::born(chip, tropic, store, provisioning)
+    }
+
+    /// The birth ceremony and the first record written, before the appliance serves anything: what
+    /// a provisioning does once it may, and what a try-run goes through.
+    pub(crate) fn born(
+        chip: &ChipBirth,
+        tropic: T,
+        mut store: S,
+        provisioning: Provisioning,
+    ) -> Result<Self, ProvisionRefused<T, S>> {
+        let refused = |error, tropic, store| ProvisionRefused {
+            error,
+            tropic,
+            store,
+        };
         let birth = match chip.birth::<P>(&provisioning) {
             Ok(birth) => birth,
             Err(e) => {

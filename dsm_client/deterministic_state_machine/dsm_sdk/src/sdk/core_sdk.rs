@@ -2043,7 +2043,15 @@ impl CoreSDK {
                 ));
             }
             let mut appliance = connected_appliance()?;
-            let pin = appliance.provision(&self.anchor_provisioning()?)?;
+            let pin = match appliance.provision(&self.anchor_provisioning()?) {
+                Ok(pin) => pin,
+                // The anchor's answer is what was lost, or it is refused. What the anchor now
+                // holds decides which: a burned chip is never reported as a failed install.
+                Err(why) => match pin_after_a_lost_answer(appliance.as_mut()) {
+                    Some(pin) => pin,
+                    None => return Err(why),
+                },
+            };
             self.require_anchor_for_this_device(&pin)?;
             guard.replace(AttachedAnchor { appliance, pin });
         }
@@ -2407,6 +2415,20 @@ fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance
 }
 
 /// The anchor appliance connected to this device now, attached to nothing.
+/// The pin of an anchor whose install finished after its answer was lost. Its late answer to the
+/// provisioning can still be on the wire ahead of the status, and is refused as out of step, so the
+/// status is asked for again. `None` when the anchor holds no install, or does not answer.
+fn pin_after_a_lost_answer(
+    appliance: &mut (dyn crate::anchor::AnchorAppliance + Send),
+) -> Option<crate::anchor::AnchorPin> {
+    for _ask in 0..3 {
+        if let Ok(found) = appliance.provisioned_pin() {
+            return found;
+        }
+    }
+    None
+}
+
 fn connected_appliance() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
     match crate::bridge::anchor_appliance_factory() {
         Some(factory) => factory(),

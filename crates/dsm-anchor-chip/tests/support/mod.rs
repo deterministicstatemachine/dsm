@@ -61,6 +61,7 @@ impl Error for SpiCut {
 #[derive(Default)]
 pub struct Power {
     budget: Cell<Option<u64>>,
+    spent: Cell<u64>,
 }
 
 impl Power {
@@ -77,12 +78,18 @@ impl Power {
         matches!(self.budget.get(), Some(0))
     }
 
+    /// The transactions that have gone through, to measure what a run takes.
+    pub fn spent(&self) -> u64 {
+        self.spent.get()
+    }
+
     fn spend(&self) -> Result<(), SpiCut> {
         match self.budget.get() {
             Some(0) => return Err(SpiCut),
             Some(left) => self.budget.set(Some(left - 1)),
             None => {}
         }
+        self.spent.set(self.spent.get() + 1);
         Ok(())
     }
 }
@@ -182,10 +189,13 @@ impl SpiDevice for ModelSpi {
 pub struct HostBoard;
 
 impl Board for HostBoard {
-    fn random_byte(&self) -> u8 {
-        let mut byte = [0u8; 1];
-        match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut byte)) {
-            Ok(()) => byte[0],
+    fn random_key(&self) -> Option<[u8; 32]> {
+        let mut key = Vec::with_capacity(32);
+        match std::fs::File::open("/dev/urandom").and_then(|f| f.take(32).read_to_end(&mut key)) {
+            Ok(_read) => match <[u8; 32]>::try_from(key) {
+                Ok(key) => Some(key),
+                Err(short) => panic!("no entropy: {} bytes", short.len()),
+            },
             Err(e) => panic!("no entropy: {e}"),
         }
     }

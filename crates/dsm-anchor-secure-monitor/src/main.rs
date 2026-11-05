@@ -27,8 +27,6 @@
 #![no_std]
 #![no_main]
 
-extern crate panic_halt;
-
 use core::sync::atomic::{compiler_fence, Ordering};
 use rp235x_hal as hal;
 use subtle::ConstantTimeEq;
@@ -129,6 +127,17 @@ static mut LAST_SEQ: u32 = 0;
 compile_error!(
     "`bench_self_enroll` must NOT be enabled in a production build (feature `production`)"
 );
+
+// A build with neither would skip the secure-context check, and is neither image.
+#[cfg(not(any(feature = "bench_self_enroll", feature = "production")))]
+compile_error!("build the production image (`production`) or the trial image (`bench_self_enroll`)");
+
+/// Names a production image in its symbol table: `sign.sh` signs nothing else. Holds no authority,
+/// and the trial image has no such symbol.
+#[cfg(feature = "production")]
+#[used]
+#[no_mangle]
+pub static DSM_ANCHOR_PRODUCTION_IMAGE: u32 = 0x5052_4F44;
 
 /// The OTP-sealed enrolled digest (`scripts/anchor-secure-boot`). `None` = permission-denied or blank
 /// OTP.
@@ -236,6 +245,9 @@ fn measurement_ok() -> bool {
 /// Called by the `-mcmse` veneer's single NSC entry `dsm_secure_dispatch`. Secure-only.
 #[no_mangle]
 pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u32 {
+    // The Non-secure app crosses here only with its clocks and USB up, and needs none of those
+    // peripherals again. From the first crossing it holds the USB block alone.
+    boundary::revoke_ns_init_grants();
     // A crossing means the Non-secure app is alive and looping (a hung NS cannot reach the `sg`), so
     // feed the watchdog. Combined with the NS serve loop's periodic keepalive crossing, this keeps a
     // healthy idle anchor alive while a genuinely hung NS still trips the ~2 s watchdog reset.
@@ -429,16 +441,6 @@ fn main() -> ! {
         );
     }
 
-    // If the previous boot armed the watchdog and never disarmed it, a watchdog reset fired — i.e.
-    // we are recovering from a Non-secure-induced hang (the NS->DMA bus stall). Recover cleanly to
-    // BOOTSEL instead of re-launching NS into the same stall. reboot_bootsel disarms + clears it.
-    if boundary::watchdog_recovery_pending() {
-        // Recover to a safe state (BOOTSEL) instead of re-launching NS into the same hang. Proven on
-        // silicon 2026-07-12: with a distinctive ~20 s recovery marker the NS->DMA stall self-rebooted
-        // at 22 s (vs a permanent TIMEOUT without the watchdog); here the recovery is immediate.
-        reboot_bootsel();
-    }
-
     // Arm the Secure stack guard FIRST (belt-and-suspenders with the ENTRY_POINT sp_limit word):
     // set MSPLIM to the reserved stack floor before any deep call can overflow it.
     unsafe {
@@ -503,8 +505,20 @@ fn main() -> ! {
         }
     }
     // Grant Non-secure access, via per-peripheral ACCESSCTRL, to ONLY the clocks + USB the NS app
-    // drives (OTP, SPI0/TROPIC, DMA stay NSP=0 = denied). Before lock_accessctrl + the NS launch.
+    // drives (OTP, SPI0/TROPIC, DMA stay NSP=0 = denied). Before lock_accessctrl + the NS launch. All
+    // but USB go again at its first crossing (`revoke_ns_init_grants`).
     boundary::grant_ns_peripherals();
+
+    // The Non-secure app's own view of its memory: the measured window read-only, everything it
+    // writes never executed. Fail-closed like the SAU.
+    let window_start = core::ptr::addr_of!(__ns_rx_start) as u32;
+    let window_end = core::ptr::addr_of!(__ns_rx_end) as u32;
+    match boundary::protect_ns_window(window_start, window_end) {
+        Ok(()) => {}
+        Err(boundary::NsMpuTooSmall) => loop {
+            cortex_m::asm::wfi();
+        },
+    }
 
     // Route Non-secure-originated BusFault/HardFault/NMI to SECURE (AIRCR.BFHFNMINS = 0), so a
     // Non-secure access the bus/ACCESSCTRL denies with a bus error traps to the Secure fault handler
@@ -529,8 +543,8 @@ fn main() -> ! {
     // case, or an NS crash) stops crossing the SG, so nothing feeds the watchdog and it resets the
     // chip -> recovered on reboot (vs a permanent hang / DoS). A HEALTHY serving NS keeps it fed: the
     // Secure Gateway handler feeds on every crossing, and the NS serve loop sends a periodic keepalive
-    // crossing when idle (so idle-but-alive != hung). The Secure fault path also feeds via
-    // `delayed_reboot`.
+    // crossing when idle (so idle-but-alive != hung). A reset boots the signed image again, never the
+    // bootloader.
     boundary::arm_watchdog();
 
     // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
@@ -543,48 +557,43 @@ fn main() -> ! {
     }
 }
 
-/// Distinctive reboot timings that make silicon outcomes readable by wall-clock alone, since
-/// post-boot SRAM readback is cleared on BOOTSEL entry. The two delays are far apart so re-enumeration
-/// jitter + 2 s poll granularity cannot confuse them (empirically ~90M cycles ≈ 14 s):
-///   ROM rejects the block ......... < 4 s   (nothing of ours ran)
-///   DENIED (Secure fault fired) ... ~11 s   (a boundary violation trapped to Secure)
-///   lockup / no path .............. timeout
-const FAULT_REBOOT_DELAY_CYCLES: u32 = 70_000_000; // ~11 s
+extern "C" {
+    /// First byte of Secure `.data`: everything from here to the stack floor is Secure state.
+    static __sdata: u32;
+}
 
-fn reboot_bootsel() -> ! {
-    // Disarm the watchdog on any deliberate reboot so it cannot fire while the chip is in BOOTSEL.
-    boundary::disarm_watchdog();
+/// Wipe the Secure state and boot the signed image again. A fault never reaches the USB bootloader:
+/// that takes the button, on a board someone is holding. Reset by the bootrom, which verifies the
+/// image again; what it wipes is what the heap, `.data`, `.bss` and the unused stack hold.
+fn fail_reset() -> ! {
+    unsafe {
+        // A stack overflow got here: nothing below is left to protect from it.
+        cortex_m::register::msplim::write(0);
+        let from = core::ptr::addr_of!(__sdata) as usize;
+        let to = cortex_m::register::msp::read() as usize & !3;
+        let mut word = from;
+        while word < to {
+            core::ptr::write_volatile(word as *mut u32, 0);
+            word += 4;
+        }
+    }
+    compiler_fence(Ordering::SeqCst);
     hal::reboot::reboot(
-        hal::reboot::RebootKind::BootSel {
-            picoboot_disabled: false,
-            msd_disabled: false,
-        },
+        hal::reboot::RebootKind::Normal,
         hal::reboot::RebootArch::Normal,
     )
 }
 
-/// Spin for `cycles` while FEEDING the watchdog (so a live Secure path is never reset), then reboot.
-/// Used by the bring-up timed reboots; a hung core cannot reach this, so the watchdog fires instead.
-fn delayed_reboot(cycles: u32) -> ! {
-    let mut remaining = cycles;
-    while remaining > 0 {
-        boundary::feed_watchdog();
-        let d = remaining.min(1_000_000);
-        cortex_m::asm::delay(d);
-        remaining -= d;
-    }
-    reboot_bootsel()
+/// A panic in Secure: an allocation the heap could not meet, say.
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    fail_reset()
 }
 
-/// Secure fault handler = the denial-test observable. An NS access the boundary forbids (SAU-Secure
-/// SRAM, or an ACCESSCTRL-Secure peripheral that escalates here) traps to Secure; this reboots after
-/// the DENIED delay. Reaching it proves the access faulted rather than returning secret data.
-///
+/// Any fault reaching Secure, the Non-secure side's denied accesses included (`AIRCR.BFHFNMINS = 0`).
 #[cortex_m_rt::exception]
 unsafe fn HardFault(_ef: &cortex_m_rt::ExceptionFrame) -> ! {
-    // ANY fault reaching Secure -> ~12 s reboot (feeding the watchdog so a trapped fault, unlike a
-    // hang, is not treated as a stall).
-    delayed_reboot(FAULT_REBOOT_DELAY_CYCLES)
+    fail_reset()
 }
 
 extern "C" {

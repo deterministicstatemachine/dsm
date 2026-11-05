@@ -67,8 +67,9 @@ SECTIONS
    * (SPHINCS+ σ^host) + this 48K stack. SILICON (SWD, 2026-07-13): the appliance bring-up call
    * chain — TROPIC01 session_start (X25519 DH + AES-GCM + SHA-256) plus the ~4.6K `Tropic01`
    * (ActiveSession) struct move — overflowed a 20K stack (read CFSR.STKOF over SWD, SP just above
-   * the 20K MSPLIM); 48K clears it (CFSR=0, init runs to completion). The MSPLIM floor sits above
-   * `.bss`, so any future overflow faults (caught by the Secure fault handler), never corrupts. */
+   * the 20K MSPLIM); 48K clears it (CFSR=0, init runs to completion) for bring-up, the only path
+   * measured. The MSPLIM floor sits above `.bss`, so any overflow faults (caught by the Secure fault
+   * handler) and never corrupts. */
   __secure_stack_size = 48K;
   PROVIDE(_stack_start = ORIGIN(SECURE) + LENGTH(SECURE));
   PROVIDE(__secure_stack_limit = ORIGIN(SECURE) + LENGTH(SECURE) - __secure_stack_size);
@@ -183,8 +184,9 @@ SECTIONS
     __erodata = .;
   } > SECURE AT> FLASH
 
-  /* ### .data — VMA in SRAM, LMA in FLASH (cortex-m-rt's Reset also copies this; harmless when the
-   * bootrom LOAD_MAP already staged it). */
+  /* ### .data — VMA in SRAM, LMA in FLASH. The bootrom's LOAD_MAP entry 1 copies it and verifies
+   * the signature over what it copied; cortex-m-rt's `skip-data-copy` keeps Reset from reading flash
+   * again after that, so the signed bytes are the ones that run. */
   .data : ALIGN(4)
   {
     . = ALIGN(4);

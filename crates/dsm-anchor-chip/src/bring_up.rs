@@ -12,12 +12,14 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use anchor_core::anchor::{Anchor, AnchorBootRefusal};
+use anchor_core::durable::ActiveStore;
 use anchor_core::enrollment::ChipBirth;
 use anchor_core::hash::{h, kdf};
 use anchor_core::proto::{decode_request, pb};
 use anchor_core::rmem::{LayoutError, SlotMemory, SlottedStore};
 use anchor_core::service::{err, refusal, MAX_FRAME_LEN};
 use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
+use anchor_core::util::zeroize;
 use dsm_sphincs::SphincsVariant;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::SpiDevice;
@@ -33,8 +35,9 @@ pub const ENROLL_H0: u32 = 0xFFFF_FFFE;
 /// The first R-memory data slot of the anchor's record.
 const RECORD_FIRST_SLOT: u16 = 0;
 
-/// The anchor as a board holds it, the concrete chip session erased.
-pub type BoardAnchor = Anchor<Box<dyn Tropic>, SphincsPart, SlottedStore<Box<dyn SlotMemory>>>;
+/// The anchor as a board holds it, the concrete chip session and store erased. A try-run drives the
+/// same two trait objects over its own slots, so the firmware carries one copy of the appliance.
+pub type BoardAnchor = Anchor<Box<dyn Tropic>, SphincsPart, Box<dyn ActiveStore>>;
 
 /// BLAKE3-SPHINCS+ SPX128f as the partition (`σ^host`) signature scheme.
 pub struct SphincsPart;
@@ -90,6 +93,17 @@ impl ChipIdentity {
             birth_witness: kdf(sealed, "DSM/anchor/birth-witness/v2", &[&root]),
             pairing: kdf(sealed, "DSM/anchor/pairing-key/v1", &[&root]),
         }
+    }
+}
+
+impl Drop for ChipIdentity {
+    /// Every field below `partition_device_id` derives from the sealed secret.
+    fn drop(&mut self) {
+        zeroize(&mut self.partition_key_seed);
+        zeroize(&mut self.birth_entropy);
+        zeroize(&mut self.birth_host_nonce);
+        zeroize(&mut self.birth_witness);
+        zeroize(&mut self.pairing);
     }
 }
 
@@ -216,7 +230,7 @@ where
         partition_device_id: ident.partition_device_id,
         chip_pk,
         enrolled_counter: ENROLL_H0,
-        partition_trng: ident.birth_entropy,
+        birth_entropy: ident.birth_entropy,
         chip_birth_witness: ident.birth_witness,
         host_nonce: ident.birth_host_nonce,
         partition_key_seed: ident.partition_key_seed,
@@ -226,8 +240,10 @@ where
     let slots: Box<dyn SlotMemory> = Box::new(RMemSlots {
         session: session.clone(),
     });
-    let store = SlottedStore::new(slots, RECORD_FIRST_SLOT, MAX_FRAME_LEN)
-        .map_err(BringUpFailure::Layout)?;
+    let store: Box<dyn ActiveStore> = Box::new(
+        SlottedStore::new(slots, RECORD_FIRST_SLOT, MAX_FRAME_LEN)
+            .map_err(BringUpFailure::Layout)?,
+    );
     let tropic: Box<dyn Tropic> = Box::new(RealChip {
         session: session.clone(),
         h0: ENROLL_H0,

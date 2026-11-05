@@ -127,6 +127,10 @@ type UsbDev<'a> = UsbDevice<'a, hal::usb::UsbBus>;
 /// handler feeds the ~2 s watchdog on each, so an anchor waiting on its host is not a hung one.
 const KEEPALIVE_IDLE_ITERS: u32 = 2_000;
 
+/// Bytes read with no crossing of the Secure Gateway: a frame's parts each cross, but a refused frame's
+/// bytes are only dropped, and a host streaming them must not stop the watchdog being fed.
+const KEEPALIVE_BYTES: usize = 16 * 1024;
+
 /// Write every byte to USB-CDC, polling + retrying on a full buffer (mirrors the pico anchor). A host
 /// that has stopped reading is waited for across keepalives, never by tripping the watchdog; a host
 /// that has dropped DTR has gone, and what it asked for is abandoned.
@@ -193,7 +197,11 @@ fn serve_over_usb(serial: &mut Serial, usb_dev: &mut UsbDev) -> ! {
     let mut forwarded = 0usize;
     let mut refused = 0u8;
     let mut idle: u32 = 0;
+    let mut read_since_crossing = 0usize;
     let mut host_there = serial.dtr();
+    // The first crossing, before a byte from any host is read: the Secure side takes back the
+    // peripherals this app needed only to bring up its clocks and USB.
+    secure_call(OP_KEEPALIVE, 0, 0, &[], &mut resp);
     loop {
         usb_dev.poll(&mut [serial]);
         let dtr = serial.dtr();
@@ -220,6 +228,11 @@ fn serve_over_usb(serial: &mut Serial, usb_dev: &mut UsbDev) -> ! {
             continue;
         }
         idle = 0;
+        read_since_crossing += n;
+        if read_since_crossing >= KEEPALIVE_BYTES {
+            read_since_crossing = 0;
+            secure_call(OP_KEEPALIVE, 0, 0, &[], &mut resp);
+        }
         for &byte in &chunk[..n] {
             if header_len < 4 {
                 header[header_len] = byte;
@@ -274,10 +287,8 @@ fn serve_over_usb(serial: &mut Serial, usb_dev: &mut UsbDev) -> ! {
 fn main() -> ! {
     let mut pac = hal::pac::Peripherals::take().unwrap();
     let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
-    // NOTE (hardware-validation): this inits the PLL/clock tree from the Non-secure world. It only
-    // works if the monitor left CLOCKS/PLL/USB Non-secure-accessible via SAU/ACCESSCTRL; otherwise
-    // the monitor must configure USB + its clock and grant NS access before launch. Verified on the
-    // two-image bring-up.
+    // This inits the PLL/clock tree from the Non-secure world, through grants the monitor holds open
+    // only until this app's first crossing (`serve_over_usb`).
     let clocks = hal::clocks::init_clocks_and_plls(
         XTAL_HZ,
         pac.XOSC,

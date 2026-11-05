@@ -153,6 +153,8 @@ message ApplianceResponse {
   string detail                = 16;
   repeated TryRunStep try_run  = 17; // OP_TRY_RUN: what it went through
   repeated string permanent    = 18; // OP_TRY_RUN: what installing makes permanent
+  bytes transport_check        = 19; // OP_TRY_RUN: as long as the release it signed, which stays on
+                                     // the anchor; try_run::transport_check, for the host to compare
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the

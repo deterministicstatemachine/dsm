@@ -57,6 +57,10 @@ pub trait Tropic {
     /// closed is closed. Irreversible on silicon.
     fn close_birth(&mut self) -> Result<(), TropicError>;
 
+    /// Set the counter back to its start after a try-run's spend moved it. The chip takes this only
+    /// before its birth is closed, and a power cut before it is undone by the next boot.
+    fn set_counter_back(&mut self) -> Result<(), TropicError>;
+
     /// Go through what closing the birth needs with its permanent parts substituted, reporting each
     /// step ([`crate::try_run`]). Leaves the chip as it found it: what is written is undone, and what
     /// cannot be undone is not written but checked to be what the chip would take.
@@ -79,6 +83,9 @@ impl<T: Tropic + ?Sized> Tropic for &mut T {
     }
     fn close_birth(&mut self) -> Result<(), TropicError> {
         (**self).close_birth()
+    }
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        (**self).set_counter_back()
     }
     fn rehearse_birth(&mut self) -> Vec<crate::try_run::TryStep> {
         (**self).rehearse_birth()
@@ -105,6 +112,9 @@ impl<T: Tropic + ?Sized> Tropic for alloc::boxed::Box<T> {
     }
     fn close_birth(&mut self) -> Result<(), TropicError> {
         (**self).close_birth()
+    }
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        (**self).set_counter_back()
     }
     fn rehearse_birth(&mut self) -> Vec<crate::try_run::TryStep> {
         (**self).rehearse_birth()

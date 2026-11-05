@@ -7,7 +7,11 @@
 //! record is not in, and only then to the header slot the current record's header is not in. Each
 //! header carries a sequence number and the digest of its record; a read takes the highest
 //! sequence whose bank still hashes to its digest. A power cut at any erase or write, torn writes
-//! included, leaves either the new record or the one before it.
+//! included, leaves either the new record or the one before it: a slot the chip will not give back
+//! ([`StoreError::Unreadable`]) is a slot holding no record, never a failure of the store.
+//!
+//! Every slot is read back before anything depends on it. A worn slot that does not hold what was
+//! written fails the write with the record before it still in force.
 
 use alloc::vec::Vec;
 
@@ -49,6 +53,28 @@ impl<M: SlotMemory + ?Sized> SlotMemory for alloc::boxed::Box<M> {
         (**self).write(slot, data)
     }
 }
+
+/// Slots lent for a while, as a try-run borrows them.
+impl<M: SlotMemory + ?Sized> SlotMemory for &mut M {
+    fn capacity(&self) -> usize {
+        (**self).capacity()
+    }
+    fn slots(&self) -> u16 {
+        (**self).slots()
+    }
+    fn read(&mut self, slot: u16) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).read(slot)
+    }
+    fn erase(&mut self, slot: u16) -> Result<(), StoreError> {
+        (**self).erase(slot)
+    }
+    fn write(&mut self, slot: u16, data: &[u8]) -> Result<(), StoreError> {
+        (**self).write(slot, data)
+    }
+}
+
+/// The most slots a bank of the trial store takes: 28 KiB, larger than any record.
+const TRIAL_BANK_SLOTS: u16 = 64;
 
 /// Why a store could not be laid out over a memory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -158,9 +184,10 @@ impl<M: SlotMemory> SlottedStore<M> {
         let mut index = 0u16;
         while record.len() < len {
             let want = core::cmp::min(capacity, len - record.len());
-            match self.memory.read(self.bank_slot(header.bank, index))? {
-                Some(chunk) if chunk.len() == want => record.extend_from_slice(&chunk),
-                Some(_) | None => return Ok(None),
+            match self.memory.read(self.bank_slot(header.bank, index)) {
+                Ok(Some(chunk)) if chunk.len() == want => record.extend_from_slice(&chunk),
+                Ok(Some(_) | None) | Err(StoreError::Unreadable) => return Ok(None),
+                Err(e) => return Err(e),
             }
             index += 1;
         }
@@ -173,11 +200,17 @@ impl<M: SlotMemory> SlottedStore<M> {
         let mut found = Vec::new();
         let mut written = 0usize;
         for slot in [self.first, self.first + 1] {
-            if let Some(bytes) = self.memory.read(slot)? {
-                written += 1;
-                if let Some(header) = Header::decode(&bytes) {
-                    found.push(header);
+            match self.memory.read(slot) {
+                Ok(Some(bytes)) => {
+                    written += 1;
+                    if let Some(header) = Header::decode(&bytes) {
+                        found.push(header);
+                    }
                 }
+                Ok(None) => {}
+                // What a header write cut short can leave: the slot holds something, and no header.
+                Err(StoreError::Unreadable) => written += 1,
+                Err(e) => return Err(e),
             }
         }
         found.sort_by_key(|header| core::cmp::Reverse(header.seq));
@@ -200,6 +233,29 @@ impl<M: SlotMemory> SlottedStore<M> {
         }
         Err(StoreError::Corrupt)
     }
+
+    /// `data` in `slot`, read back. Nothing is written over a record the store depends on: a bank
+    /// is the one the current record is not in, and a header the one its header is not in.
+    fn write_held(&mut self, slot: u16, data: &[u8]) -> Result<(), StoreError> {
+        self.memory.erase(slot)?;
+        self.memory.write(slot, data)?;
+        match self.memory.read(slot) {
+            Ok(Some(held)) if held == data => Ok(()),
+            Ok(Some(_) | None) | Err(StoreError::Unreadable) => Err(StoreError::NotHeld),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// This store's own code over the slots past its banks, where no record is ever read from.
+    fn trial(&mut self) -> SlottedStore<&mut M> {
+        let first = self.first + 2 + 2 * self.bank_slots;
+        let room = self.memory.slots().saturating_sub(first).saturating_sub(2) / 2;
+        SlottedStore {
+            memory: &mut self.memory,
+            first,
+            bank_slots: core::cmp::min(room, TRIAL_BANK_SLOTS),
+        }
+    }
 }
 
 impl<M: SlotMemory> ActiveStore for SlottedStore<M> {
@@ -219,8 +275,7 @@ impl<M: SlotMemory> ActiveStore for SlottedStore<M> {
         let bank = (seq % 2) as u8;
         for (index, chunk) in record.chunks(capacity).enumerate() {
             let slot = self.bank_slot(bank, index as u16);
-            self.memory.erase(slot)?;
-            self.memory.write(slot, chunk)?;
+            self.write_held(slot, chunk)?;
         }
         let header = Header {
             seq,
@@ -229,32 +284,45 @@ impl<M: SlotMemory> ActiveStore for SlottedStore<M> {
             digest: h(domain::RMEM_RECORD_V1, &[record]),
         };
         let slot = self.header_slot(seq);
-        self.memory.erase(slot)?;
-        self.memory.write(slot, &header.encode())
+        self.write_held(slot, &header.encode())
     }
 
     fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
         Ok(self.current()?.map(|(_, record)| record))
     }
 
-    /// In the slots past the banks, one at a time: erased, written, read back, erased. A power cut
-    /// leaves at most one written, in a slot nothing reads a record from.
+    /// The first slot of each of the record's own banks: erased, written, read back, erased. Only
+    /// with no record in the store, whose banks no header names, so a power cut leaves nothing a
+    /// read would ever take. The trial store's slots say nothing about the access rules on these.
     fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
-        let capacity = self.memory.capacity();
-        let first = usize::from(self.first) + 2 + 2 * usize::from(self.bank_slots);
-        if first + record.len().div_ceil(capacity) > usize::from(self.memory.slots()) {
-            return Err(StoreError::TooLarge);
+        if self.current()?.is_some() {
+            return Err(StoreError::Refused);
         }
-        for (index, chunk) in record.chunks(capacity).enumerate() {
-            // Within the memory's slot count, just checked.
-            let slot = (first + index) as u16;
+        let chunk = &record[..core::cmp::min(self.memory.capacity(), record.len())];
+        for bank in 0..2u8 {
+            let slot = self.bank_slot(bank, 0);
+            self.write_held(slot, chunk)?;
             self.memory.erase(slot)?;
-            self.memory.write(slot, chunk)?;
-            match self.memory.read(slot)? {
-                Some(held) if held == chunk => {}
-                Some(_) | None => return Err(StoreError::Corrupt),
+        }
+        Ok(())
+    }
+
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.trial().write(record)
+    }
+
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.trial().read()
+    }
+
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        let trial = self.trial();
+        for slot in trial.first..trial.first + 2 + 2 * trial.bank_slots {
+            match trial.memory.read(slot) {
+                Ok(None) => {}
+                Ok(Some(_)) | Err(StoreError::Unreadable) => trial.memory.erase(slot)?,
+                Err(e) => return Err(e),
             }
-            self.memory.erase(slot)?;
         }
         Ok(())
     }
@@ -280,6 +348,12 @@ mod tests {
         slots: Vec<Option<Vec<u8>>>,
         capacity: usize,
         budget: Option<usize>,
+        /// Slots the chip answers but will not give back.
+        unreadable: Vec<u16>,
+        /// Slots that keep none of what is written to them, as a worn one does.
+        worn: Vec<u16>,
+        /// Reads answered with this failure of the bus.
+        read_fault: Option<StoreError>,
     }
 
     impl Memory {
@@ -288,6 +362,9 @@ mod tests {
                 slots: vec![None; usize::from(slots)],
                 capacity,
                 budget: None,
+                unreadable: Vec::new(),
+                worn: Vec::new(),
+                read_fault: None,
             }
         }
 
@@ -311,6 +388,12 @@ mod tests {
             self.slots.len() as u16
         }
         fn read(&mut self, slot: u16) -> Result<Option<Vec<u8>>, StoreError> {
+            if let Some(fault) = self.read_fault {
+                return Err(fault);
+            }
+            if self.unreadable.contains(&slot) {
+                return Err(StoreError::Unreadable);
+            }
             Ok(self.slots[usize::from(slot)].clone())
         }
         fn erase(&mut self, slot: u16) -> Result<(), StoreError> {
@@ -327,7 +410,12 @@ mod tests {
                 self.slots[usize::from(slot)] = Some(data[..data.len() / 2].to_vec());
                 return Err(cut);
             }
-            self.slots[usize::from(slot)] = Some(data.to_vec());
+            let keep = if self.worn.contains(&slot) {
+                vec![0u8; data.len()]
+            } else {
+                data.to_vec()
+            };
+            self.slots[usize::from(slot)] = Some(keep);
             Ok(())
         }
     }
@@ -413,17 +501,109 @@ mod tests {
     }
 
     #[test]
-    fn a_try_of_a_record_leaves_the_record_and_every_slot_as_they_were() {
-        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+    fn a_torn_header_the_chip_will_not_give_back_leaves_the_record_before_it() {
         let held = record(200, 0x21);
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+        ok(store.write(&record(150, 0x77)), "written");
         ok(store.write(&held), "written");
-        let before = store.memory.slots.clone();
-        ok(store.try_record(&record(250, 0x5A)), "tried");
-        assert_eq!(store.memory.slots, before, "every slot is as it was");
-        assert_eq!(store.read(), Ok(Some(held)));
+        // The older header's slot, as a cut in its next rewrite leaves it.
+        store.memory.unreadable = vec![store.header_slot(3)];
+        assert_eq!(store.read(), Ok(Some(held.clone())));
+        // The newer header's: the record before it stands, and the store writes on from there.
+        store.memory.unreadable = vec![store.header_slot(2)];
+        assert_eq!(store.read(), Ok(Some(record(150, 0x77))));
+    }
+
+    #[test]
+    fn a_torn_bank_slot_the_chip_will_not_give_back_leaves_the_record_before_it() {
+        let before = record(150, 0x77);
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+        ok(store.write(&before), "written");
+        ok(store.write(&record(200, 0x21)), "written");
+        store.memory.unreadable = vec![store.bank_slot(0, 1)];
+        assert_eq!(store.read(), Ok(Some(before)));
+    }
+
+    #[test]
+    fn a_first_header_torn_unreadable_leaves_nothing_born() {
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+        store.memory.unreadable = vec![0];
+        assert_eq!(store.read(), Ok(None));
+        store.memory.unreadable = vec![0, 1];
         assert_eq!(
-            store.try_record(&record(96 * 32, 0x5A)),
-            Err(StoreError::TooLarge)
+            store.read(),
+            Err(StoreError::Corrupt),
+            "two written slots with no header were not left by a first write"
+        );
+    }
+
+    #[test]
+    fn a_failure_of_the_bus_is_never_read_as_a_torn_slot() {
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+        ok(store.write(&record(200, 0x21)), "written");
+        store.memory.read_fault = Some(StoreError::Unavailable);
+        assert_eq!(store.read(), Err(StoreError::Unavailable));
+    }
+
+    #[test]
+    fn a_worn_slot_fails_its_write_and_the_record_before_it_stands() {
+        let before = record(150, 0x77);
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+        ok(store.write(&before), "written");
+        store.memory.worn = vec![store.bank_slot(0, 1)];
+        assert_eq!(store.write(&record(200, 0x21)), Err(StoreError::NotHeld));
+        assert_eq!(store.read(), Ok(Some(before.clone())));
+        store.memory.worn = vec![store.header_slot(2)];
+        assert_eq!(store.write(&record(200, 0x21)), Err(StoreError::NotHeld));
+        assert_eq!(store.read(), Ok(Some(before)));
+    }
+
+    #[test]
+    fn the_trial_store_runs_the_same_code_where_no_record_is_read_from() {
+        let mut store = ok(SlottedStore::new(Memory::new(64, 96), 0, 256), "laid out");
+        let trial = record(250, 0x5A);
+        ok(store.trial_clear(), "cleared");
+        assert_eq!(store.trial_read(), Ok(None));
+        ok(store.trial_write(&record(120, 0x11)), "written");
+        ok(store.trial_write(&trial), "written");
+        assert_eq!(store.trial_read(), Ok(Some(trial)));
+        assert_eq!(store.read(), Ok(None), "the store itself holds no record");
+        ok(store.trial_clear(), "cleared");
+        assert!(
+            store.memory.slots.iter().all(Option::is_none),
+            "every slot it wrote is erased"
+        );
+    }
+
+    #[test]
+    fn the_trial_store_clears_a_slot_a_cut_left_unreadable() {
+        let mut store = ok(SlottedStore::new(Memory::new(64, 96), 0, 256), "laid out");
+        ok(store.trial_write(&record(120, 0x11)), "written");
+        let first = store.trial().first;
+        store.memory.unreadable = vec![first];
+        ok(store.trial_clear(), "cleared");
+        assert_eq!(store.memory.slots[usize::from(first)], None);
+    }
+
+    #[test]
+    fn a_try_of_the_own_slots_leaves_them_erased_and_is_refused_over_a_record() {
+        let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
+        ok(store.try_record(&record(250, 0x5A)), "tried");
+        assert!(
+            store.memory.slots.iter().all(Option::is_none),
+            "every slot is erased"
+        );
+        store.memory.worn = vec![store.bank_slot(1, 0)];
+        assert_eq!(
+            store.try_record(&record(250, 0x5A)),
+            Err(StoreError::NotHeld),
+            "a slot that does not hold what it took fails the try"
+        );
+        store.memory.worn = Vec::new();
+        ok(store.write(&record(200, 0x21)), "written");
+        assert_eq!(
+            store.try_record(&record(250, 0x5A)),
+            Err(StoreError::Refused)
         );
     }
 

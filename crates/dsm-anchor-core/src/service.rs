@@ -113,6 +113,7 @@ fn base(op: i32) -> pb::ApplianceResponse {
         detail: alloc::string::String::new(),
         try_run: Vec::new(),
         permanent: Vec::new(),
+        transport_check: Vec::new(),
     }
 }
 
@@ -141,6 +142,7 @@ pub(crate) fn try_run_response(op: i32, run: &crate::try_run::TryRun) -> pb::App
     pb::ApplianceResponse {
         try_run: steps,
         permanent,
+        transport_check: crate::try_run::transport_check(run.release_bytes),
         ..answer
     }
 }

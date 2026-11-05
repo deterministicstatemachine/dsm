@@ -193,12 +193,19 @@ fn answer(
     decode_response(&resp_body).map_err(|e| format!("decode: {e:?}"))
 }
 
+/// How long one op may leave the port silent. The board's watchdog ends a hung one well before this.
+const OP_WAIT_SECS: u64 = 60;
+/// How long a try-run may: a whole spend and its records, around two chip reboots.
+const TRY_RUN_WAIT_SECS: u64 = 600;
+
 /// A try-run of an install, for a device no wallet holds: the board's own identity is what is tried.
 /// A nonzero exit unless every step passed.
 fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
     let name = |what: &str| -> Vec<u8> {
         anchor_core::hash::h("DSM/anchor/try-run/bench/v1", &[what.as_bytes()]).to_vec()
     };
+    port.set_timeout(Duration::from_secs(TRY_RUN_WAIT_SECS))
+        .map_err(|e| format!("the port's wait: {e}"))?;
     let started = std::time::Instant::now();
     let run = answer(
         port,
@@ -225,6 +232,13 @@ fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
     if !run.ok {
         return Err(format!("the try-run did not pass (error {})", run.error));
     }
+    let carried = run.transport_check.len();
+    if carried == 0 || run.transport_check != anchor_core::try_run::transport_check(carried) {
+        return Err(format!(
+            "the anchor's largest answer did not come through whole ({carried} bytes)"
+        ));
+    }
+    println!("[TRY] ok     its largest answer, {carried} bytes in parts, came through whole");
     println!("[TRY] passed. Nothing was made permanent. An install would make these permanent:");
     for line in &run.permanent {
         println!("[TRY]   - {line}");
@@ -253,7 +267,7 @@ fn check(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
     let gate = answer(port, &bare(pb::Op::Prepare))?;
     match gate.error {
         err::MEASUREMENT => println!("[CHECK] measurement gate REFUSED: {}", gate.detail),
-        err::NOT_UP => println!("[CHECK] measurement gate passed; the anchor is not up"),
+        err::NOT_UP => println!("[CHECK] measurement gate NOT REACHED: the anchor is not up"),
         other => println!("[CHECK] measurement gate passed (prepare answered error {other})"),
     }
     Ok(())
@@ -349,7 +363,8 @@ fn cancel(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
 
 fn open(args: &Args) -> Result<Box<dyn serialport::SerialPort>, String> {
     serialport::new(&args.port, args.baud)
-        .timeout(Duration::from_secs(10))
+        // A serve holds the board silent: a signature, then the chip commands around its records.
+        .timeout(Duration::from_secs(OP_WAIT_SECS))
         .open()
         .map_err(|e| format!("open {}: {e}", args.port))
 }
