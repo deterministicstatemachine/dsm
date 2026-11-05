@@ -44,7 +44,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use dsm_storage_node::{db, set_client, AppLimits, AppState, NodeStorageSet};
+use dsm_storage_node::{db, AppLimits, AppState, NodeStorageSet};
 
 /// The network whose pinned register the nodes are.
 const NETWORK: &[u8] = b"dsm-testnet";
@@ -607,9 +607,17 @@ impl NodeSet {
             .map(|p| (p.member_id.clone(), endpoint_of(&p.address)))
             .collect();
 
-        // The set's CA: it issues every node's certificate, and every member
-        // pins its peers to it.
+        // The CA that issues every node's certificate here, named for each
+        // member in turn: one operator running a whole set.
         let ca = TestCa::new();
+        let ca_pem = match std::str::from_utf8(&ca.pem) {
+            Ok(ca_pem) => ca_pem.to_string(),
+            Err(e) => panic!("the CA is PEM: {e}"),
+        };
+        let set_mates: Vec<(String, String, Option<String>)> = endpoints
+            .iter()
+            .map(|(member, endpoint)| (member.clone(), endpoint.clone(), Some(ca_pem.clone())))
+            .collect();
 
         // Phase 2: each node, with the set checked against its own register,
         // serving the binary's app.
@@ -620,15 +628,11 @@ impl NodeSet {
                 Ok(own) => own,
                 Err(e) => panic!("set against own register: {e}"),
             };
-            let set = match own.with_endpoints(&p.member_id, endpoints.clone()) {
+            let set = match own.with_set_mates(&p.member_id, set_mates.clone()) {
                 Ok(set) => set,
-                Err(e) => panic!("set endpoints: {e}"),
+                Err(e) => panic!("set-mates: {e}"),
             };
-            let peers = match set_client::pinned_set_client(&ca.pem) {
-                Ok(peers) => peers,
-                Err(e) => panic!("pinned set client: {e}"),
-            };
-            let state = match AppState::new(p.member_id.clone(), p.pool, peers) {
+            let state = match AppState::new(p.member_id.clone(), p.pool) {
                 Ok(state) => Arc::new(state.with_storage_set(set)),
                 Err(e) => panic!("app state: {e}"),
             };
@@ -666,8 +670,8 @@ impl NodeSet {
         self.ca.tls_for(member_id).await
     }
 
-    /// The PEM of this node set's CA: what a device's env config names in
-    /// `custom_ca_certs` to reach these nodes, as the bundled config names the
+    /// The PEM of this node set's CA: what a device's env config names as each
+    /// member's `ca_cert` to reach these nodes, as the bundled config names the
     /// fleet's.
     pub fn ca_pem(&self) -> &[u8] {
         &self.ca.pem

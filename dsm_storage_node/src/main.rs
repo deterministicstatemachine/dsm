@@ -20,7 +20,7 @@ use std::sync::Once;
 
 use dsm::utils::text_id;
 
-use dsm_storage_node::{db, set_client, AppState};
+use dsm_storage_node::{db, AppState};
 
 #[derive(Parser, Debug)]
 #[clap(version = "1.0", author = "DSM Core Team")]
@@ -44,7 +44,6 @@ struct ServerConfig {
     tls_key_path: String,
     /// The storage set's CA certificate: the one anchor this node pins its
     /// peers to.
-    set_ca_path: String,
     body_limit_bytes: usize,
     /// `[http] request_timeout_secs`: how long one request may take, waiting
     /// for a slot included.
@@ -55,9 +54,9 @@ struct ServerConfig {
     database_url: String,
     /// `[[storage_set.members]]` — each member's id and register incarnation.
     storage_set_members: Vec<(String, [u8; 32])>,
-    /// `endpoint` on `[[storage_set.members]]` — where each set-mate is
-    /// reached, for ByteCommit mirroring.
-    storage_set_endpoints: Vec<(String, String)>,
+    /// `endpoint` and `ca_cert` on `[[storage_set.members]]` — where each
+    /// set-mate is reached for ByteCommit mirroring, and the CA it is known by.
+    storage_set_mates: Vec<(String, String, Option<String>)>,
 }
 
 /// A setting the node cannot start without: absent is an error, never a
@@ -97,7 +96,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
 
     let tls_cert_path = required(&settings, "tls.cert_path")?;
     let tls_key_path = required(&settings, "tls.key_path")?;
-    let set_ca_path = required(&settings, "tls.ca_path")?;
     let database_url = required(&settings, "database.url")?;
 
     // The canonical storage set this node is a member of:
@@ -106,6 +104,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     //     id = "dsm-node-1"
     //     register_incarnation = "<Base32-Crockford of 32 bytes>"
     //     endpoint = "https://10.0.0.1:8080"   # required for every other member
+    //     ca_cert = "<PEM of the CA that member's operator holds>"   # likewise
     //
     // Absent = this node is in no set yet (it has no set-mates to mirror);
     // present but not containing this node's own id = misconfiguration,
@@ -115,7 +114,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     // derived over. A malformed entry refuses rather than defaulting, because
     // a defaulted incarnation would resolve every set to whatever the default
     // hashed to.
-    let storage_set_entries: Vec<(String, [u8; 32], Option<String>)> = match settings
+    let storage_set_entries: Vec<(String, [u8; 32], Option<String>, Option<String>)> = match settings
         .get_array("storage_set.members")
     {
         Ok(members) => members,
@@ -151,16 +150,22 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
                 anyhow::anyhow!("[[storage_set.members]] {id:?} endpoint is not a string")
             })?),
         };
-        Ok((id, inc, endpoint))
+        let ca_cert = match t.get("ca_cert") {
+            None => None,
+            Some(v) => Some(v.clone().into_string().map_err(|e| {
+                anyhow::anyhow!("[[storage_set.members]] {id:?} ca_cert is not a string: {e}")
+            })?),
+        };
+        Ok((id, inc, endpoint, ca_cert))
     })
     .collect::<anyhow::Result<Vec<_>>>()?;
-    let storage_set_endpoints: Vec<(String, String)> = storage_set_entries
+    let storage_set_mates: Vec<(String, String, Option<String>)> = storage_set_entries
         .iter()
-        .filter_map(|(id, _, e)| e.clone().map(|e| (id.clone(), e)))
+        .filter_map(|(id, _, e, ca)| e.clone().map(|e| (id.clone(), e, ca.clone())))
         .collect();
     let storage_set_members: Vec<(String, [u8; 32])> = storage_set_entries
         .into_iter()
-        .map(|(id, inc, _)| (id, inc))
+        .map(|(id, inc, _, _)| (id, inc))
         .collect();
 
     let listen_ip = required(&settings, "network.listen_addr")?;
@@ -178,13 +183,12 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         max_open_connections_per_peer,
         tls_cert_path,
         tls_key_path,
-        set_ca_path,
         body_limit_bytes,
         request_timeout_secs,
         header_read_timeout_secs,
         database_url,
         storage_set_members,
-        storage_set_endpoints,
+        storage_set_mates,
     })
 }
 
@@ -248,15 +252,7 @@ async fn async_main() -> Result<()> {
         .await
         .context("failed to initialize database schema")?;
 
-    let set_ca_pem = std::fs::read(&server_config.set_ca_path).with_context(|| {
-        format!(
-            "failed to read the storage set's CA certificate at {}",
-            server_config.set_ca_path
-        )
-    })?;
-    let set_client = set_client::pinned_set_client(&set_ca_pem)
-        .context("failed to build the client pinned to the storage set's CA")?;
-    let mut state = AppState::new(server_config.node_id.clone(), db_pool.clone(), set_client)?;
+    let mut state = AppState::new(server_config.node_id.clone(), db_pool.clone())?;
     // ESTABLISHED AND LOGGED UNCONDITIONALLY, before any set is considered.
     //
     // The incarnation is a property of this node's register, not of its
@@ -280,9 +276,9 @@ async fn async_main() -> Result<()> {
             &server_config.node_id,
             own_incarnation,
         )?
-        .with_endpoints(
+        .with_set_mates(
             &server_config.node_id,
-            server_config.storage_set_endpoints.clone(),
+            server_config.storage_set_mates.clone(),
         )?;
         log::info!(
             "storage set configured: {} members, id={}",
@@ -388,7 +384,6 @@ port = 8443
 [tls]
 cert_path = "/certs/node.crt"
 key_path = "/certs/node.key"
-ca_path = "/certs/ca.crt"
 
 [database]
 url = "postgresql://127.0.0.1:5432/node"
@@ -410,19 +405,17 @@ url = "postgresql://127.0.0.1:5432/node"
 
     /// Ruling #2: a node starts from what its config states. A setting it
     /// cannot run without is refused by name when absent — no identity, TLS
-    /// material, trust anchor or database is made up in its place.
+    /// material or database is made up in its place.
     #[test]
     fn a_config_missing_a_required_setting_is_refused_by_name() {
         let whole = load(WHOLE_CONFIG).expect("the whole config loads");
         assert_eq!(whole.node_id, "node-under-test");
-        assert_eq!(whole.set_ca_path, "/certs/ca.crt");
         for (line, key) in [
             ("id = \"node-under-test\"", "node.id"),
             ("listen_addr = \"127.0.0.1\"", "network.listen_addr"),
             ("port = 8443", "network.port"),
             ("cert_path = \"/certs/node.crt\"", "tls.cert_path"),
             ("key_path = \"/certs/node.key\"", "tls.key_path"),
-            ("ca_path = \"/certs/ca.crt\"", "tls.ca_path"),
             ("url = \"postgresql://127.0.0.1:5432/node\"", "database.url"),
         ] {
             assert!(WHOLE_CONFIG.contains(line), "fixture line {line}");

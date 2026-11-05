@@ -31,10 +31,12 @@ Storage Node (Rust / Axum)
 
 There is no consensus, no leader election and no gossip between nodes. A node
 reaches a set-mate only to mirror its ByteCommits, at the endpoint its own
-configuration names, over a client pinned to the storage set's CA.
+configuration names, over a client pinned to that set-mate's own CA.
 
 The environment config the app ships (`dsm_env_config.toml`) names the fleet
-it connects to.
+it connects to, and the CA each member is known by.
+
+**Running a public node?** Follow [RUN_A_NODE.md](RUN_A_NODE.md).
 
 ## Local Multi-Node Development (Optional)
 
@@ -59,7 +61,7 @@ cd dsm_storage_node
 ./scripts/dev/start_dev_nodes.sh status
 ```
 
-PIDs saved in `dev-node*.pid`, logs in `logs/`. Clients trust `dev-pki/ca.crt`.
+PIDs saved in `dev-node*.pid`, logs in `logs/`. Clients name `dev-pki/ca.crt` as each member's `ca_cert`.
 
 ### Stop
 
@@ -130,8 +132,9 @@ src/
 
 A node starts from its TOML config (`--config`, required). It refuses to start
 without `node.id`, `network.listen_addr`, `network.port`, `database.url`, and
-`tls.cert_path` / `tls.key_path` / `tls.ca_path` (the storage set's CA, which
-mirror sync pins set-mates to). `network.max_connections` and
+`tls.cert_path` / `tls.key_path`, or in a set without each set-mate's `endpoint`
+and `ca_cert` (the CA that member's operator holds, which mirror sync pins that
+set-mate to). `network.max_connections` and
 `http.body_limit_bytes` default when absent and are refused when of the wrong
 type. The database connection requires TLS unless its URL says
 `sslmode=disable`. It serves TLS only. See `config/production.toml` and
@@ -369,7 +372,7 @@ sleep 30 && bash deploy/check_nodes.sh <IPs>
 
 ### Security Notes
 
-- TLS certificates are self-signed, generated fresh per deployment
+- TLS certificates chain to an operator's own CA, generated fresh per deployment
 - SSH is key-based only, from the one `allowed_ssh_cidr` block (required, never 0.0.0.0/0)
 - Security groups and firewall rules allow only ports 8080 (API) and 22 (SSH)
 - Node instances carry `prevent_destroy` and keep their disks if deleted; AWS root volumes are encrypted and instance metadata takes IMDSv2 tokens only

@@ -1083,21 +1083,6 @@ class MainActivity : AppCompatActivity() {
         permLauncher.launch(perms.toTypedArray())
     }
 
-    /** Copy an APK asset to [targetDir] if the asset exists and the target is absent or stale. */
-    private fun materializeAssetIfBundled(name: String, targetDir: File) {
-        val dest = File(targetDir, name)
-        try {
-            assets.open(name).use { input ->
-                FileOutputStream(dest, false).use { output -> input.copyTo(output) }
-            }
-            Log.i(tag, "Materialized asset $name → ${dest.absolutePath} (${dest.length()} bytes)")
-        } catch (_: java.io.FileNotFoundException) {
-            // Asset not bundled (e.g., local-dev builds without ca.crt) — no-op.
-        } catch (t: Throwable) {
-            Log.w(tag, "Failed to materialize asset $name: ${t.message}")
-        }
-    }
-
     /** Debug builds: the first readable, non-empty developer override, or none. */
     private fun debugEnvConfigOverride(files: File): File? {
         fun firstExisting(vararg candidates: File?): File? = candidates.firstOrNull { it != null && it.exists() }
@@ -1129,10 +1114,6 @@ class MainActivity : AppCompatActivity() {
         val assetName = "dsm_env_config.toml"
         val files = applicationContext.filesDir
         val outFile = File(files, assetName)
-
-        // Materialize bundled assets that the SDK reads from filesDir.
-        // ca.crt is the storage fleet's CA, the one the bundled env config names.
-        materializeAssetIfBundled("ca.crt", files)
 
         // A developer's override is honoured in debug builds only. A release build always uses
         // the bundled config: the external files dir and Downloads are writable by other apps and

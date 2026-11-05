@@ -3,8 +3,8 @@
 #
 # Modes:
 #   --local   (default)  Generate localhost config + adb reverse ports (dev nodes)
-#   --gcp-beta          Push the LIVE 5-node GCP beta fleet config (us-central1) + CA
-#   --aws               Push pre-built AWS config + self-signed CA cert (production nodes)
+#   --gcp-beta          Push the LIVE 5-node GCP beta fleet config (us-central1)
+#   --aws               Push pre-built AWS config (production nodes)
 #   --gcp               REFUSED: the 6-node 3-region fleet is dead (see below)
 #
 # The Alibaba fleet and its CA were DELETED on 2026-09-12 — the config, the
@@ -59,13 +59,7 @@ echo "Mode: $MODE"
 # --- Remote config paths ---
 AWS_CONFIG="$REPO_ROOT/scripts/dsm_env_config.aws.toml"
 GCP_BETA_CONFIG="$REPO_ROOT/scripts/dsm_env_config.gcp_beta.toml"
-# ONE CA path, no fallback. The old second candidate (scripts/ca.crt) was the
-# Alibaba CA — same subject CN=DSM-Storage-CA, different key — so the fallback
-# could silently push a CA that verifies nothing and turn a fleet move into an
-# unexplained TLS outage. It is deleted; the deployment's CA is the only source.
-CA_CERT="$REPO_ROOT/dsm_storage_node/deploy/nodes/ca/ca.crt"
-
-# Resolve REMOTE_CONFIG and CA cert based on mode
+# Resolve REMOTE_CONFIG based on mode
 REMOTE_CONFIG=""
 if [[ "$MODE" == "aws" ]]; then
   REMOTE_CONFIG="$AWS_CONFIG"
@@ -77,12 +71,6 @@ if [[ -n "$REMOTE_CONFIG" ]]; then
   if [[ ! -f "$REMOTE_CONFIG" ]]; then
     echo "Config not found at $REMOTE_CONFIG"
     echo "Run the deployment first (deploy/provision_${MODE}.sh)"
-    exit 1
-  fi
-  if [[ ! -f "$CA_CERT" ]]; then
-    echo "CA cert not found at $CA_CERT" >&2
-    echo "That is the deployment's CA and the only one this script will push." >&2
-    echo "Restore it from the deployment before pushing to devices." >&2
     exit 1
   fi
 fi
@@ -148,17 +136,13 @@ for d in $transports; do
     adb -t "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.override.toml
     adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.override.toml files/dsm_env_config.override.toml
 
-    echo "Pushing CA cert to $d..."
-    adb -t "$d" push "$CA_CERT" /data/local/tmp/ca.crt
-    adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/ca.crt files/ca.crt
-
     # Remove any stale adb reverse ports (not needed for remote)
     for p in $PORTS 18443; do
       adb -t "$d" reverse --remove tcp:$p 2>/dev/null || true
     done
 
-    echo "Config: $MODE storage nodes (HTTPS + custom CA, via override file)"
-    adb -t "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.override.toml files/ca.crt
+    echo "Config: $MODE storage nodes (HTTPS, each member's CA in the config, via override file)"
+    adb -t "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.override.toml
 
   else
     # --- Local mode ---

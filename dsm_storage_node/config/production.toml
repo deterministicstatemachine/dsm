@@ -52,16 +52,28 @@ id = "__NODE_ID__"
 # a node mirrors every set-mate, and fetches one only at the endpoint named
 # here. The node refuses to start if a set-mate has none.
 #
+# `ca_cert` is the PEM of the CA that member's operator holds. A node reaches a
+# set-mate over a client that trusts that set-mate's CA and no other member's, so
+# no member can stand in for another. The node refuses to start if a set-mate
+# has none. A node's own entry needs neither, and carries both when the same list
+# is written to every member.
+#
 # [storage_set]
 # [[storage_set.members]]
 # id = "dsm-node-1"
 # register_incarnation = "<from that node's phase-1 log>"
 # endpoint = "https://<dsm-node-1 address>:8080"
+# ca_cert = """
+# <PEM of dsm-node-1's CA>
+# """
 #
 # [[storage_set.members]]
 # id = "dsm-node-2"
 # register_incarnation = "<from that node's phase-1 log>"
 # endpoint = "https://<dsm-node-2 address>:8080"
+# ca_cert = """
+# <PEM of dsm-node-2's CA>
+# """
 
 [network]
 listen_addr = "__LISTEN_ADDR__"
@@ -73,7 +85,6 @@ max_open_connections_per_peer = 128   # of those, held by one peer (an IPv4 addr
 [tls]
 cert_path = "/certs/node.crt"
 key_path  = "/certs/node.key"
-ca_path   = "/certs/ca.crt"    # the storage set's CA: mirror sync pins set-mates to it
 
 [database]
 url = "__DATABASE_URL__"

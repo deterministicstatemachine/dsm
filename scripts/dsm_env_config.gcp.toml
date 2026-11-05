@@ -12,9 +12,6 @@ bitcoin_network = "signet"
 dbtc_min_confirmations = 1
 mempool_api_url = "https://mempool.space"
 
-# Self-signed CA for GCP storage node TLS certs
-# Path is relative to this config file's directory (resolved by SDK).
-custom_ca_certs = ["ca.crt"]
 
 [[nodes]]
 name = "us-east1-a"
