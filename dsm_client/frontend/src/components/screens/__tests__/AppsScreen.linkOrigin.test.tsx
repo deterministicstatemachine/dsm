@@ -62,14 +62,14 @@ describe('a connect offer', () => {
     unmount();
   });
 
-  it('that a link brought with no app named says Android named none', async () => {
+  it('that a link brought with no app named says the phone named none', async () => {
     phoneWithAnOffer();
     render(<AppsScreen />);
     await act(settle);
     act(() => emit('connect.link', new TextEncoder().encode(`\n${CODE}`)));
     fireEvent.click(screen.getByRole('button', { name: 'READ' }));
     await act(settle);
-    expect(screen.getByTestId('connect-offer-origin')).toHaveTextContent('a link opened by an app Android did not name');
+    expect(screen.getByTestId('connect-offer-origin')).toHaveTextContent('a link opened by an app your phone did not name');
   });
 
   it('that the player pasted carries no link origin', async () => {

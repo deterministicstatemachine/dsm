@@ -237,6 +237,8 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
             className="sb-input sb-input--mono"
             aria-label="Contact code"
             placeholder="dsm:contact/v3:..."
+            autoCapitalize="none"
+            autoCorrect="off"
             value={pasteInput}
             onChange={e => setPasteInput(e.target.value)}
             rows={4}

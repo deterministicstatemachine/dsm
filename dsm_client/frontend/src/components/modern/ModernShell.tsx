@@ -5,7 +5,7 @@
 // apps, the lock, …) opens inside it, in its colours, under a Back button.
 // Simple mode puts some of them away (runtime/navigationStore.ts).
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useLayoutEffect, useRef } from 'react';
 import AppScreenRouter from '../AppScreenRouter';
 import { navigationStore, useNavigationStore } from '../../runtime/navigationStore';
 import type { ScreenType } from '../../types/app';
@@ -58,6 +58,7 @@ export default function ModernShell({ eraTokenSrc, btcLogoSrc }: { eraTokenSrc: 
   const own = useOwnCard();
   const navigation = useNavigationStore();
   const page = currentPage(nav);
+  const bodyRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     window.addEventListener('popstate', modernNav.onPop);
@@ -79,6 +80,12 @@ export default function ModernShell({ eraTokenSrc, btcLogoSrc }: { eraTokenSrc: 
   }, [navigation.currentScreen]);
 
   const classic = CLASSIC_INSIDE.has(navigation.currentScreen) ? navigation.currentScreen : null;
+
+  // One scroller holds every tab and page: what opens starts at its own top, not
+  // wherever the last one was left, which landed mid-page with its heading cut off.
+  useLayoutEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [nav.tab, nav.pages.length, classic]);
 
   let body: React.ReactNode;
   if (classic !== null) {
@@ -115,7 +122,7 @@ export default function ModernShell({ eraTokenSrc, btcLogoSrc }: { eraTokenSrc: 
         </button>
       </header>
       )}
-      <main className="s-body">
+      <main className="s-body" ref={bodyRef}>
         {onWallet ? <ProfileHeader mode="show" onOpen={() => modernNav.open({ kind: 'my_card' })} /> : null}
         {body}
       </main>

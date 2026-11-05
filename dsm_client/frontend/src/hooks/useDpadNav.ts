@@ -7,6 +7,7 @@
 // B button (back/Escape) is NOT intercepted — app-level back always works.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { isTextEntry } from './useBackButton';
 
 interface UseDpadNavOptions {
   /** Number of navigable items on screen */
@@ -71,6 +72,11 @@ export function useDpadNav({
     const handleKeyDown = (e: KeyboardEvent) => {
       // When combo entry is active, don't intercept keys — StateboyComboInput handles them
       if ((window as any).__dsmComboEntryActive) return;
+      // A key typed into a field is the field's: a space, Enter or an arrow
+      // there is text or caret movement, never the list's. iOS keyboards send
+      // these as real key events, so without this a space never reaches the
+      // field and presses the focused row behind it.
+      if (isTextEntry(e.target)) return;
       switch (e.key) {
         case 'ArrowUp':
         case 'ArrowLeft':

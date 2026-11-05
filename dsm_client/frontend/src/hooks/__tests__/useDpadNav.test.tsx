@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import React from 'react';
-import { render, act, fireEvent } from '@testing-library/react';
+import { render, act, fireEvent, createEvent } from '@testing-library/react';
 import { useDpadNav } from '../useDpadNav';
 
 type HookResult = ReturnType<typeof useDpadNav>;
@@ -34,6 +34,51 @@ describe('useDpadNav', () => {
     expect((window as any).__dsmScreenNavActive).toBe(true);
     unmount();
     expect((window as any).__dsmScreenNavActive).toBe(false);
+  });
+
+  describe('a key typed into a field', () => {
+    function FieldHarness(props: { pressed: number[] }) {
+      hookResult = useDpadNav({ itemCount: 3, onSelect: (i) => props.pressed.push(i) });
+      return (
+        <>
+          <input aria-label="name" />
+          <textarea aria-label="note" />
+        </>
+      );
+    }
+
+    function pressKey(target: Element, key: string): KeyboardEvent {
+      const event = createEvent.keyDown(target, { key }) as KeyboardEvent;
+      fireEvent(target, event);
+      return event;
+    }
+
+    // iOS keyboards send a space as a real keydown (2026-11-04, the simulator:
+    // "Ab", space, "c" read "Abc" and the focused row was pressed).
+    // MUTATION CONTROL: removing the isTextEntry check turns these red.
+    it.each(['name', 'note'])('leaves a space in the %s field and presses no row', (label) => {
+      const pressed: number[] = [];
+      const { getByLabelText } = render(<FieldHarness pressed={pressed} />);
+      expect(pressKey(getByLabelText(label), ' ').defaultPrevented).toBeFalsy();
+      expect(pressed).toEqual([]);
+    });
+
+    it('leaves Enter and the arrows in the field', () => {
+      const pressed: number[] = [];
+      const { getByLabelText } = render(<FieldHarness pressed={pressed} />);
+      const field = getByLabelText('name');
+      expect(pressKey(field, 'Enter').defaultPrevented).toBeFalsy();
+      expect(pressKey(field, 'ArrowDown').defaultPrevented).toBeFalsy();
+      expect(pressed).toEqual([]);
+      expect(hookResult.focusedIndex).toBe(0);
+    });
+
+    it('still takes a space pressed outside a field', () => {
+      const pressed: number[] = [];
+      render(<FieldHarness pressed={pressed} />);
+      expect(pressKey(document.body, ' ').defaultPrevented).toBeTruthy();
+      expect(pressed).toEqual([0]);
+    });
   });
 
   describe('keyboard navigation', () => {

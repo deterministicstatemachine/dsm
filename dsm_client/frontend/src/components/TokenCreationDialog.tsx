@@ -9,6 +9,7 @@ import { encodeCoinSource, silhouetteFromRgba } from '../utils/coinArtwork';
 import { readImageRgba } from '../utils/imageRgba';
 import { checkToken, createToken, getTokenCreationFee, type TokenCreateDetails, type TokenCreationFee } from '@/dsm/policies';
 import { useBackButton } from '../hooks/useBackButton';
+import { ScreenOverlay } from './common/ScreenOverlay';
 
 /** The creation fee and this device's standing as Rust reported them, the failure of asking, or not asked yet. */
 type CreationFee = TokenCreationFee | { error: string } | undefined;
@@ -701,14 +702,17 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   // ── Success screen ───────────────────────────────────────────────────────
   if (created) {
     return (
+      <ScreenOverlay>
       <div className="sb-popover-backdrop" onClick={(e) => e.stopPropagation()}>
         <SuccessScreen created={created} state={state} onClose={onClose} />
       </div>
+      </ScreenOverlay>
     );
   }
 
   // ── Wizard shell ─────────────────────────────────────────────────────────
   return (
+    <ScreenOverlay>
     <div className="sb-popover-backdrop" onClick={(e) => e.stopPropagation()}>
       <div className="sb-popover sb-card--dark token-wizard" role="dialog" aria-modal="true" aria-labelledby="tcd-title">
         <div className="sb-popover__head">
@@ -771,5 +775,6 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
         </div>
       </div>
     </div>
+    </ScreenOverlay>
   );
 };

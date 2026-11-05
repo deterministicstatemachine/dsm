@@ -162,6 +162,18 @@ describe('the Modern skin', () => {
     expect(screen.getByRole('heading', { name: 'People' })).toBeInTheDocument();
   });
 
+  // MUTATION CONTROL: removing the reset in ModernShell turns this red.
+  it('starts a tab and a page at the top, wherever the last one was left', () => {
+    renderShell();
+    const body = document.querySelector('.s-body') as HTMLElement;
+    body.scrollTop = 300;
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Wallet sections' })).getByRole('button', { name: 'People' }));
+    expect(body.scrollTop).toBe(0);
+    body.scrollTop = 300;
+    fireEvent.click(screen.getByText('Jane Miller'));
+    expect(body.scrollTop).toBe(0);
+  });
+
   it('lists payments by direction in Activity', () => {
     renderShell();
     fireEvent.click(within(screen.getByRole('navigation', { name: 'Wallet sections' })).getByRole('button', { name: 'Activity' }));

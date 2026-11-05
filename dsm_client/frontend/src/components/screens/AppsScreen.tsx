@@ -260,7 +260,11 @@ export default function AppsScreen(): React.JSX.Element {
       setLinkedCode(null);
       setLinkSender(null);
       // The app on this phone that sent the code is where the player goes on.
-      if (fromLink) await returnToConnectCaller();
+      // A host that cannot step back to it (iOS, until a return address is bound
+      // to the session) answers that it did not, and the way back is the player's.
+      if (fromLink && !(await returnToConnectCaller())) {
+        return `Connected to ${connected.displayName}. Go back to the app that sent you here.`;
+      }
       return `Connected to ${connected.displayName}.`;
     });
 
@@ -362,7 +366,7 @@ export default function AppsScreen(): React.JSX.Element {
                 <div data-testid="connect-offer-origin">
                   <Notice kind="error">
                     This code came from outside the wallet: a link opened by{' '}
-                    {linkSender !== null ? <b>{linkSender}</b> : 'an app Android did not name'}.
+                    {linkSender !== null ? <b>{linkSender}</b> : 'an app your phone did not name'}.
                     Any app or web page can open such a link. Approve only if you opened it yourself, from the app you mean to connect.
                   </Notice>
                 </div>

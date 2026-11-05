@@ -4,6 +4,7 @@
 // room; whoever wants the why taps the i, reads, and closes it (tap outside,
 // the ×, OK, or the shell's B button).
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { ScreenOverlay } from './ScreenOverlay';
 import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
 
 type Props = {
@@ -52,6 +53,7 @@ export function InfoTip({ title, label, className, children }: Props): React.JSX
         i
       </button>
       {open && (
+        <ScreenOverlay>
         <div className="sb-popover-backdrop" onClick={(e) => { e.stopPropagation(); close(); }}>
           <div
             ref={dialogRef}
@@ -71,6 +73,7 @@ export function InfoTip({ title, label, className, children }: Props): React.JSX
             <button type="button" className="sb-btn sb-btn--primary sb-btn--block sb-popover__ok" onClick={close}>OK</button>
           </div>
         </div>
+        </ScreenOverlay>
       )}
     </>
   );

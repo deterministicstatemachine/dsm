@@ -12,6 +12,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { dsmClient } from '../../../services/dsmClient';
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
+import { inPracticeSandbox } from '../../../bridge/practiceGate';
 import type { InboxItemView } from '../../../dsm/types';
 import type { DomainTransaction } from '../../../domain/types';
 import { getMoneyWaiting, markMoneySeen, type MoneyWaiting } from '../../../dsm/moneyWaiting';
@@ -53,7 +54,9 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
     () => getMoneyWaiting()
       .then((now) => {
         setShown(now.received);
-        return markMoneySeen(now.through);
+        // In the tour's practice mode nothing is reported seen: the real
+        // wallet's count is not the tour's to clear, and the sandbox refuses it.
+        return inPracticeSandbox() ? now : markMoneySeen(now.through);
       })
       .then(setWaiting, report),
     [report],

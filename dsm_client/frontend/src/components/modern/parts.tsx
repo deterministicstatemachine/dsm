@@ -9,6 +9,7 @@ import type { TokenBalanceView } from '../../dsm/types';
 import { phoneContactPhoto } from '../../dsm/WebViewBridge/phoneContacts';
 import logger from '../../utils/logger';
 import { useContactPhoto } from './contactPhotos';
+import { ScreenOverlay } from '../common/ScreenOverlay';
 
 export type IconName =
   | 'send' | 'receive' | 'people' | 'home' | 'activity' | 'settings' | 'person' | 'back' | 'chevron' | 'share' | 'copy' | 'info'
@@ -158,10 +159,12 @@ export function PageTitle({ title, onBack }: { title: string; onBack: () => void
 /** A bottom sheet over the screen. */
 export function Sheet({ label, onClose, children }: { label: string; onClose: () => void; children: React.ReactNode }): React.JSX.Element {
   return (
+    <ScreenOverlay on=".s-app">
     <div className="s-sheet-backdrop" onClick={onClose}>
       <div className="s-sheet" role="dialog" aria-label={label} onClick={(e) => e.stopPropagation()}>
         {children}
       </div>
     </div>
+    </ScreenOverlay>
   );
 }
