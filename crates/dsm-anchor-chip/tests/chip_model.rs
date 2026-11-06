@@ -819,6 +819,49 @@ fn identifying_a_born_chip_writes_nothing_and_says_its_slots_are_closed() {
     );
 }
 
+/// The trial image keys a chip whose PTRNG is untested without Tropic Square's correction, which waits
+/// for the last step (owner, 2026-11-06): the chip takes the trial's key, the try-run goes through everything after it and
+/// says the correction is still to make, and no install passes. Nothing irreversible is written, and the
+/// production image still gives the chip nothing. MUTATION CONTROL: making `randomness_tested` pass
+/// installs here and turns this red at "an install passed".
+#[test]
+fn the_trial_image_keys_an_untested_ptrng_and_installs_nothing() {
+    let model = ModelServer::start_as(Part::TestPart);
+    let factory = chip_state(&model);
+    let mut anchor = match model.boot_trial() {
+        Ok(anchor) => Served::new(anchor),
+        Err(e) => panic!("the trial did not come up on an untested PTRNG: {e:?}"),
+    };
+    let run = anchor.request(&try_run_request());
+    assert_eq!(run.error, err::TRY_RUN_FAILED, "{:?}", run.try_run);
+    let not_passed: Vec<&str> = run
+        .try_run
+        .iter()
+        .filter(|step| !step.passed)
+        .map(|step| step.name.as_str())
+        .collect();
+    assert_eq!(
+        not_passed,
+        ["the chip tests its PTRNG at start-up"],
+        "{:?}",
+        run.try_run
+    );
+    let install = anchor.request(&provision_request());
+    assert!(!install.ok, "an install passed without the correction");
+    assert_eq!(install.error, err::TRY_RUN_FAILED, "{}", install.detail);
+    drop(anchor);
+    assert_eq!(
+        moved(&factory, &chip_state(&model)),
+        ["counter Index0", "key 0"],
+        "what the trial changed"
+    );
+    match model.boot() {
+        Ok(_anchor) => panic!("production came up on an untested PTRNG"),
+        Err(BringUpFailure::Unfit(Unfit::RandomnessUntested(_facts))) => {}
+        Err(e) => panic!("refused for another reason: {e:?}"),
+    }
+}
+
 /// An RP2350 below A4 can be made to run unsigned code at boot, so nothing is installed on one. The
 /// try-run says so before anything is burned, and the install refuses with its chip unbound. MUTATION
 /// CONTROL: making the stepping's step unconditional in `rehearse_birth` installs here and turns this red.

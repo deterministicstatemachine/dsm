@@ -31,6 +31,19 @@ pub trait Board {
 /// a physical glitch at boot, with no workaround (errata RP2350-E24, and on A2 also E16, E20, E21).
 pub const MIN_SILICON_REVISION: u8 = 4;
 
+/// What a bring-up does with a chip whose PTRNG Tropic Square left untested (erratum
+/// OI_TR01_ERR_2026090100, the T101 and T103 parts).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UntestedRandomness {
+    /// Give it nothing: an anchor's keys come only from a PTRNG the chip tests.
+    Refuse,
+    /// The trial image (owner, 2026-11-06; CONFORMANCE_GAPS §6.152). Tropic Square's correction is
+    /// irreversible, so it is not made until the last step: the check is off for the trial, the chip
+    /// may generate the trial's key, which the correction erases, and the try-run reports the
+    /// correction as not made, so no install passes. The production image always refuses.
+    KeyForTrial,
+}
+
 /// The Secure heap the monitor gives the anchor. Its size is here so that the rehearsal holds every
 /// operation to it.
 pub const SECURE_HEAP_BYTES: usize = 160 * 1024;

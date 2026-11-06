@@ -15,6 +15,20 @@ use alloc::vec::Vec;
 
 #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
 use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor};
+#[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+use anchor_chip::UntestedRandomness;
+
+/// What this image does with a chip whose PTRNG Tropic Square left untested. The trial image keys it
+/// for the trial without the correction, which is irreversible and waits for the last step (owner,
+/// 2026-11-06; CONFORMANCE_GAPS §6.152). Its try-run reports the correction as not made, so no install
+/// passes. Production refuses the chip.
+#[cfg(all(
+    feature = "bench_self_enroll",
+    not(any(feature = "prepare_chip", feature = "identify_chip"))
+))]
+const UNTESTED: UntestedRandomness = UntestedRandomness::KeyForTrial;
+#[cfg(not(feature = "bench_self_enroll"))]
+const UNTESTED: UntestedRandomness = UntestedRandomness::Refuse;
 use anchor_chip::bring_up::{BringUpFailure, Measurement};
 use anchor_chip::Board;
 use anchor_core::proto::decode_request;
@@ -358,7 +372,12 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     }
 
     #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
-    let brought_up = bring_up(Tropic01::new(spi_dev), &sealed, Rp2350Board { rosc });
+    let brought_up = bring_up(
+        Tropic01::new(spi_dev),
+        &sealed,
+        Rp2350Board { rosc },
+        UNTESTED,
+    );
     // Everything the anchor needs derives from it, and nothing needs it again this boot.
     #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
     crate::zeroize(&mut sealed);

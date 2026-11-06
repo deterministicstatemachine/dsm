@@ -670,6 +670,10 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
             },
         ));
         steps.push(TryStep::new(
+            "the chip tests its PTRNG at start-up",
+            self.randomness_tested(),
+        ));
+        steps.push(TryStep::new(
             "the chip's counter moves one step and is set back to its start",
             self.rehearse_counter(h0),
         ));
@@ -687,6 +691,23 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                 .map_err(|e| format!("{e:?}")),
         ));
         steps
+    }
+
+    /// Whether the chip tests its PTRNG at start-up. A chip that does not reached a try-run only on the
+    /// trial image, whose check is off until the correction: the step says what is still to do.
+    fn randomness_tested(&mut self) -> Result<(), String> {
+        let start_up = self
+            .with(|s| s.i_config_read(CFG_START_UP.into()))
+            .map_err(|e| format!("{:?}", fault(e)))?;
+        match start_up & (1u32 << RNGTEST_DIS_BIT) {
+            0 => Ok(()),
+            _untested => Err(
+                "it does not, so what it generates may not be random (erratum OI_TR01_ERR_2026090100). \
+                 Tropic Square's correction is irreversible: the prepare_chip image makes it at the last \
+                 step and erases the key the chip holds now. Until then no install passes"
+                    .to_string(),
+            ),
+        }
     }
 
     fn rehearse_counter(&mut self, h0: u32) -> Result<(), String> {

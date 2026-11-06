@@ -30,7 +30,7 @@ use embedded_hal::spi::SpiDevice;
 use tropic01::{NoSession, Tropic01};
 
 use crate::session::{ChipFacts, ChipFault, ChipSession, OpenRefused, RMemSlots, RealChip, Unfit};
-use crate::Board;
+use crate::{Board, UntestedRandomness};
 
 /// The one session, shared by the appliance's chip operations and its store.
 type Shared<SPI, CS, B> = Rc<RefCell<ChipSession<SPI, CS, B>>>;
@@ -369,11 +369,13 @@ where
 }
 
 /// Bring the anchor up: unprovisioned when its R-memory holds no record, otherwise restored from
-/// the record through §26 recovery.
+/// the record through §26 recovery. `untested` is the image's: only the trial image keys a chip
+/// whose PTRNG Tropic Square left untested.
 pub fn bring_up<SPI, CS, B>(
     chip: Tropic01<SPI, CS, NoSession>,
     sealed: &[u8; 32],
     board: B,
+    untested: UntestedRandomness,
 ) -> Result<BoardAnchor, BringUpFailure<ChipFault<SPI, CS>>>
 where
     SPI: SpiDevice + 'static,
@@ -383,10 +385,12 @@ where
     let (ident, session) = open_chip(chip, sealed, board)?;
 
     // Whether this chip can be given anything, before it is given anything.
-    session
-        .borrow_mut()
-        .check_fit()
-        .map_err(BringUpFailure::Unfit)?;
+    let fit = session.borrow_mut().check_fit();
+    match (fit, untested) {
+        (Ok(()), _) => {}
+        (Err(Unfit::RandomnessUntested(_facts)), UntestedRandomness::KeyForTrial) => {}
+        (Err(unfit), _) => return Err(BringUpFailure::Unfit(unfit)),
+    }
 
     // The counter (initialized once on a virgin chip) and the resident chip key.
     let live = session

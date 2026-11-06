@@ -4,7 +4,7 @@
 
 use anchor_chip::bring_up::{bring_up, identify_chip, prepare_chip, BoardAnchor};
 use anchor_chip::session::ChipFacts;
-use anchor_chip::Board;
+use anchor_chip::{Board, UntestedRandomness};
 use anchor_core::identify::ChipSurvey;
 
 use super::support::{call, BringUpError, Garble, HostBoard, ModelServer, Power, SEALED};
@@ -90,7 +90,22 @@ impl ModelServer {
 
     /// Boot the anchor on a board of this stepping.
     pub fn boot_stepped(&self, stepping: u8) -> Result<BoardAnchor, BringUpError> {
-        bring_up(self.power_cycle(), &SEALED, SteppedBoard(stepping))
+        bring_up(
+            self.power_cycle(),
+            &SEALED,
+            SteppedBoard(stepping),
+            UntestedRandomness::Refuse,
+        )
+    }
+
+    /// Boot the anchor as the trial image does, whose check of an untested PTRNG is off.
+    pub fn boot_trial(&self) -> Result<BoardAnchor, BringUpError> {
+        bring_up(
+            self.power_cycle(),
+            &SEALED,
+            HostBoard,
+            UntestedRandomness::KeyForTrial,
+        )
     }
 
     /// What the `prepare_chip` image does at reset, on the same code.

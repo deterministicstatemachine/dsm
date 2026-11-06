@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor, BringUpFailure, Measurement};
 use anchor_chip::session::ChipFault;
-use anchor_chip::Board;
+use anchor_chip::{Board, UntestedRandomness};
 use anchor_core::enrollment::Provisioning;
 use anchor_core::proto::{decode_response, encode_request, pb};
 use embedded_hal::digital::OutputPin;
@@ -381,9 +381,14 @@ impl ModelServer {
         }
     }
 
-    /// Boot the anchor: what the monitor does at reset, on the same code.
+    /// Boot the anchor: what the production image does at reset, on the same code.
     pub fn boot(&self) -> Result<BoardAnchor, BringUpError> {
-        bring_up(self.power_cycle(), &SEALED, HostBoard)
+        bring_up(
+            self.power_cycle(),
+            &SEALED,
+            HostBoard,
+            UntestedRandomness::Refuse,
+        )
     }
 }
 
