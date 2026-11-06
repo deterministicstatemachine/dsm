@@ -283,10 +283,31 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     // The board's sealed secret: without it the anchor has no identity to serve under.
     #[cfg(not(feature = "bench_self_enroll"))]
     let mut sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
-    // A trial image reads the same OTP page and must find it blank: a real seal is never overridden.
-    // Its secret is then fresh each boot and held nowhere, so nothing it derives can bind the board,
-    // and it can make no install (`service_request`).
-    #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
+    // A board locked for production is a finished unit, and the trial stands down on it. Any other
+    // board, its secret page blank or written by an earlier procedure, takes the trial under a secret
+    // of this boot held nowhere: the page is neither used nor written.
+    #[cfg(all(
+        feature = "bench_self_enroll",
+        not(any(feature = "identify_chip", feature = "prepare_chip"))
+    ))]
+    let mut sealed: [u8; 32] = {
+        match sealed::read_sealed_secret() {
+            Ok(mut burned) => {
+                crate::zeroize(&mut burned);
+                if sealed::locked_for_production().map_err(InitFailure::Sealed)? {
+                    return Err(InitFailure::Sealed(SealedError::AlreadySealed));
+                }
+            }
+            Err(SealedError::Unprovisioned) => {}
+            Err(cause) => return Err(InitFailure::Sealed(cause)),
+        }
+        (Rp2350Board { rosc: &rosc })
+            .random_key()
+            .ok_or(InitFailure::Entropy)?
+    };
+    // The prepare image writes the chip irreversibly, so it runs only on a board whose secret page is
+    // blank, and its secret is one of this boot held nowhere.
+    #[cfg(feature = "prepare_chip")]
     let mut sealed: [u8; 32] = match sealed::read_sealed_secret() {
         Err(SealedError::Unprovisioned) => (Rp2350Board { rosc: &rosc })
             .random_key()

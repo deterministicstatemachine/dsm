@@ -46,9 +46,11 @@ production = []
 # It sources `mu_enrolled` from the NS image measured at THIS boot instead of OTP, and its secret is
 # fresh each boot and held nowhere, so a try-run goes through an install on the real board and chip
 # with nothing burned. It does NOT weaken `measurement_ok`: the full fresh measure + constant-time
-# compare runs on every authority op — only the enrolled digest's SOURCE changes, and only when OTP is
-# blank. If OTP IS sealed it refuses (fail-closed) so a real seal is never overridden, and it refuses
-# every provisioning, so it can make no install. Mutually exclusive with `production`.
+# compare runs on every authority op — only the enrolled digest's SOURCE changes, and only when the
+# digest's OTP page is blank. If that page IS sealed it refuses (fail-closed) so a real seal is never
+# overridden. A secret an earlier procedure wrote to the secret's page is neither used nor written; on a
+# board locked for production (secure boot enabled) it stands down. It refuses every provisioning, so it
+# can make no install. Mutually exclusive with `production`.
 bench_self_enroll = []
 # The image that does one thing, on a test part whose PTRNG Tropic Square left unconfigured (erratum
 # OI_TR01_ERR_2026090100, T005, T101, T103): clears CFG_START_UP[RNGTEST_DIS], irreversibly, erases any
