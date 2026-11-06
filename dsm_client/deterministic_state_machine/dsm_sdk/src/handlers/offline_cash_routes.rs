@@ -421,10 +421,7 @@ mod tests {
             !report.permanent.is_empty(),
             "it says what would be permanent"
         );
-        assert!(
-            appliance.provisioned().is_none(),
-            "a try-run binds nothing"
-        );
+        assert!(appliance.provisioned().is_none(), "a try-run binds nothing");
 
         let snap = core.anchor_install().expect("told to install");
         assert!(snap.connected, "{}", snap.status);

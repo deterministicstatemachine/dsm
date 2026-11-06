@@ -31,6 +31,10 @@ use crate::Board;
 /// The one session, shared by the appliance's chip operations and its store.
 type Shared<SPI, CS, B> = Rc<RefCell<ChipSession<SPI, CS, B>>>;
 
+/// The chip's identity and its open session, or why bring-up stopped.
+type Opened<SPI, CS, B> =
+    Result<(ChipIdentity, Shared<SPI, CS, B>), BringUpFailure<ChipFault<SPI, CS>>>;
+
 /// σ^host scheme — MUST match the receiver (byte-compatible SPX128f).
 const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
 /// The counter's lifetime budget `H0` at birth: tropic01 `MCOUNTER_VALUE_MAX`.
@@ -279,7 +283,7 @@ fn open_chip<SPI, CS, B>(
     mut chip: Tropic01<SPI, CS, NoSession>,
     sealed: &[u8; 32],
     board: B,
-) -> Result<(ChipIdentity, Shared<SPI, CS, B>), BringUpFailure<ChipFault<SPI, CS>>>
+) -> Opened<SPI, CS, B>
 where
     SPI: SpiDevice,
     CS: OutputPin,

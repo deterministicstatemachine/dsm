@@ -11,6 +11,7 @@
 //! sequence the next boot completes. Every boot then proves the cage: the chip must report each
 //! revocation and refuse each command as unauthorized.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -197,8 +198,8 @@ pub type ChipFault<SPI, CS> = Fault<
     <CS as embedded_hal::digital::ErrorType>::Error,
 >;
 
-/// A session start the chip refused, with the chip handed back.
-type StartRefused<SPI, CS> = (Tropic01<SPI, CS, NoSession>, ChipFault<SPI, CS>);
+/// A session start the chip refused, with the chip handed back. Boxed: the driver's handle is 4.6 KiB.
+type StartRefused<SPI, CS> = Box<(Tropic01<SPI, CS, NoSession>, ChipFault<SPI, CS>)>;
 
 /// A probe of a command the closed birth denies: proven closed only by the chip refusing it as
 /// unauthorized. Any other refusal means the command got past the access check, which is an open
@@ -338,17 +339,20 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                 this.session = Some(session);
                 Ok(this)
             }
-            Err((chip, own_slot)) => match this.start(chip, FACTORY_SLOT) {
-                Ok(session) => {
-                    this.session = Some(session);
-                    this.slot = FACTORY_SLOT;
-                    Ok(this)
+            Err(refused) => {
+                let (chip, own_slot) = *refused;
+                match this.start(chip, FACTORY_SLOT) {
+                    Ok(session) => {
+                        this.session = Some(session);
+                        this.slot = FACTORY_SLOT;
+                        Ok(this)
+                    }
+                    Err(refused) => Err(OpenRefused {
+                        own_slot,
+                        factory_slot: refused.1,
+                    }),
                 }
-                Err((_chip, factory_slot)) => Err(OpenRefused {
-                    own_slot,
-                    factory_slot,
-                }),
-            },
+            }
         }
     }
 
@@ -410,7 +414,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         slot: u8,
     ) -> Result<Tropic01<SPI, CS, ActiveSession>, StartRefused<SPI, CS>> {
         let Some(ephemeral) = self.board.random_key() else {
-            return Err((chip, Fault::HandshakeFailed));
+            return Err(Box::new((chip, Fault::HandshakeFailed)));
         };
         let eh = StaticSecret::from(ephemeral);
         let (shipub, shipriv) = if slot == FACTORY_SLOT {
@@ -424,6 +428,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         };
         let ehpub = PublicKey::from(&eh);
         chip.session_start(&X25519Dalek, shipub, shipriv, ehpub, eh, slot)
+            .map_err(Box::new)
     }
 
     fn with<R>(
@@ -474,7 +479,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                 self.slot = slot;
                 Ok(())
             }
-            Err((_chip, e)) => Err(fault(e)),
+            Err(refused) => Err(fault(refused.1)),
         }
     }
 
@@ -523,7 +528,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     pub fn ready_for_birth(&mut self, h0: u32) -> Result<(), TropicError> {
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot == FACTORY_SLOT {
-            match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).map(|k| *k)) {
+            match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied()) {
                 Ok(key) if key == *own.as_bytes() => {}
                 Ok(_other) => return Err(TropicError::Refused),
                 Err(Fault::InvalidKey | Fault::SlotEmpty) => {}
@@ -617,7 +622,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         if self.slot != FACTORY_SLOT {
             return Ok(());
         }
-        match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).map(|k| *k)) {
+        match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied()) {
             Ok(key) if key == *own.as_bytes() => {}
             Ok(_other) => return Err("another board's key holds the slot".to_string()),
             Err(Fault::InvalidKey | Fault::SlotEmpty) => {}
@@ -659,7 +664,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     fn close_birth(&mut self, h0: u32) -> Result<(), TropicError> {
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot == FACTORY_SLOT {
-            match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).map(|k| *k)) {
+            match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied()) {
                 Ok(key) if key == *own.as_bytes() => {}
                 Ok(_other) => return Err(TropicError::Refused),
                 Err(Fault::InvalidKey | Fault::SlotEmpty) => {
@@ -667,7 +672,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                         .map_err(fault)?;
                     // Firmware below 2.0.0 does not verify this write (OI_TR01_ERR_2025120100).
                     let held = self
-                        .with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).map(|k| *k))
+                        .with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied())
                         .map_err(fault)?;
                     if held != *own.as_bytes() {
                         return Err(TropicError::Refused);
