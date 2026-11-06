@@ -13,9 +13,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use anchor_chip::bring_up::{BringUpFailure, Measurement};
 #[cfg(not(feature = "prepare_chip"))]
 use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor};
+use anchor_chip::bring_up::{BringUpFailure, Measurement};
 use anchor_chip::Board;
 use anchor_core::proto::decode_request;
 use anchor_core::service::{err, refusal};

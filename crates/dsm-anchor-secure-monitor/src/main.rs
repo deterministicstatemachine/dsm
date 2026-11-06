@@ -130,7 +130,9 @@ compile_error!(
 
 // A build with neither would skip the secure-context check, and is neither image.
 #[cfg(not(any(feature = "bench_self_enroll", feature = "production")))]
-compile_error!("build the production image (`production`) or the trial image (`bench_self_enroll`)");
+compile_error!(
+    "build the production image (`production`) or the trial image (`bench_self_enroll`)"
+);
 
 /// Names a production image in its symbol table: `sign.sh` signs nothing else. Holds no authority,
 /// and the trial image has no such symbol.
