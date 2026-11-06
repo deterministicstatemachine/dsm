@@ -376,7 +376,7 @@ mod tests {
         installing_through((*appliance).clone(), AnswerTo::Refused);
         let refused = core.anchor_install().expect_err("the anchor refused");
         assert!(refused.to_string().contains("try-run"), "{refused}");
-        assert!(matches!(appliance.provisioned(), None));
+        assert!(appliance.provisioned().is_none());
         assert!(core.anchor_appliance_status().awaiting_install);
     }
 
@@ -400,7 +400,7 @@ mod tests {
             assert!(snap.awaiting_install, "{}", snap.status);
         }
         assert!(
-            matches!(appliance.provisioned(), None),
+            appliance.provisioned().is_none(),
             "a status read binds nothing"
         );
 
@@ -422,7 +422,7 @@ mod tests {
             "it says what would be permanent"
         );
         assert!(
-            matches!(appliance.provisioned(), None),
+            appliance.provisioned().is_none(),
             "a try-run binds nothing"
         );
 

@@ -544,7 +544,9 @@ pub(crate) mod fixture {
             );
             let mut head = device.created_token(token, 100).expect("token created");
             let born = birth::<Partition>(&BirthInputs {
-                birth_entropy: &derive(seed, "birth entropy"),
+                // The label from before the field's rename: the offline tests' cases were built
+                // on the bundle it derives.
+                birth_entropy: &derive(seed, "partition trng"),
                 chip_birth_witness: &derive(seed, "chip birth witness"),
                 host_nonce: &derive(seed, "host nonce"),
                 device_id: &head.devid(),
