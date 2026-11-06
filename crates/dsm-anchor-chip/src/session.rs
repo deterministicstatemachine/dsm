@@ -658,7 +658,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         let mut steps = Vec::new();
         steps.push(TryStep::new(&self.facts.describe(), Ok(())));
         let revision = self.board.silicon_revision();
-        steps.push(TryStep::new(
+        steps.push(TryStep::production(
             &format!("the board's RP2350 is stepping A{revision}"),
             if revision >= crate::MIN_SILICON_REVISION {
                 Ok(())
@@ -669,7 +669,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                 ))
             },
         ));
-        steps.push(TryStep::new(
+        steps.push(TryStep::production(
             "the chip tests its PTRNG at start-up",
             self.randomness_tested(),
         ));

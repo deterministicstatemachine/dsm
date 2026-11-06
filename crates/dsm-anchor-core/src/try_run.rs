@@ -37,18 +37,40 @@ pub const PERMANENT: [&str; 5] = [
     "What is loaded onto this anchor can only come back through this anchor. If it dies or is lost, that balance is gone: nothing can recover it.",
 ];
 
+/// What a step of a try-run answers to: the trial's own working, or a production install alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Requirement {
+    /// What the anchor needs to work at all, on a development board as on a production one.
+    Works,
+    /// What a production install alone needs, such as the RP2350's stepping or a chip whose PTRNG is
+    /// tested. A development board may leave it unmet; an install still refuses until it is met.
+    Production,
+}
+
 /// One thing a try-run went through, and how it came out.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TryStep {
     pub name: String,
     pub outcome: Result<(), String>,
+    pub requirement: Requirement,
 }
 
 impl TryStep {
+    /// A step the anchor needs to work.
     pub fn new(name: &str, outcome: Result<(), String>) -> Self {
         Self {
             name: name.to_string(),
             outcome,
+            requirement: Requirement::Works,
+        }
+    }
+
+    /// A step only a production install needs.
+    pub fn production(name: &str, outcome: Result<(), String>) -> Self {
+        Self {
+            name: name.to_string(),
+            outcome,
+            requirement: Requirement::Production,
         }
     }
 }
@@ -64,11 +86,21 @@ pub struct TryRun {
 }
 
 impl TryRun {
-    /// The first step that did not pass, its reason with it; a run with none passed.
+    /// The first step that did not pass, its reason with it; a run with none passed. What an install
+    /// refuses on, production requirements among them.
     pub fn first_failure(&self) -> Option<&TryStep> {
         self.steps
             .iter()
             .find(|step| matches!(step.outcome, Err(ref _kept_in_the_step)))
+    }
+
+    /// The first step the anchor needed to work that did not pass: none on a board where the trial
+    /// works, development or production.
+    pub fn first_broken(&self) -> Option<&TryStep> {
+        self.steps.iter().find(|step| {
+            step.requirement == Requirement::Works
+                && matches!(step.outcome, Err(ref _kept_in_the_step))
+        })
     }
 }
 
@@ -293,5 +325,70 @@ pub fn rehearse<T: Tropic, P: PartitionSig, S: ActiveStore>(
     TryRun {
         steps,
         release_bytes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::pb;
+    use crate::service::err;
+
+    /// A production requirement a development board leaves unmet: the run still works, the answer marks
+    /// the step as production's, and the verdict still refuses, as an install refuses on it.
+    #[test]
+    fn a_production_requirement_unmet_is_marked_and_still_refused() {
+        let run = TryRun {
+            steps: alloc::vec![
+                TryStep::new("the anchor signs a payment", Ok(())),
+                TryStep::production(
+                    "the board's RP2350 is stepping A2",
+                    Err("below A4".to_string())
+                ),
+            ],
+            release_bytes: 8,
+        };
+        assert_eq!(run.first_broken(), None);
+        assert_eq!(
+            run.first_failure().map(|step| step.name.as_str()),
+            Some("the board's RP2350 is stepping A2")
+        );
+        let answer = crate::service::try_run_response(pb::Op::TryRun as i32, &run);
+        assert!(!answer.ok);
+        assert_eq!(answer.error, err::TRY_RUN_FAILED);
+        let passed: Vec<&str> = answer
+            .try_run
+            .iter()
+            .filter(|step| step.passed)
+            .map(|step| step.name.as_str())
+            .collect();
+        let production: Vec<&str> = answer
+            .try_run
+            .iter()
+            .filter(|step| step.production)
+            .map(|step| step.name.as_str())
+            .collect();
+        assert_eq!(passed, ["the anchor signs a payment"]);
+        assert_eq!(production, ["the board's RP2350 is stepping A2"]);
+        assert_eq!(answer.transport_check, transport_check(8));
+    }
+
+    /// A step the anchor needs that fails breaks the run, whatever production needs too.
+    #[test]
+    fn a_working_step_that_fails_breaks_the_run() {
+        let run = TryRun {
+            steps: alloc::vec![
+                TryStep::production(
+                    "the chip tests its PTRNG at start-up",
+                    Err("no".to_string())
+                ),
+                TryStep::new("the chip's counter moves", Err("no answer".to_string())),
+            ],
+            release_bytes: 0,
+        };
+        assert_eq!(
+            run.first_broken().map(|step| step.name.as_str()),
+            Some("the chip's counter moves")
+        );
     }
 }

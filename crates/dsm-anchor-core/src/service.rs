@@ -129,6 +129,7 @@ pub(crate) fn try_run_response(op: i32, run: &crate::try_run::TryRun) -> pb::App
         .map(|step| pb::TryRunStep {
             name: step.name.clone(),
             passed: matches!(step.outcome, Ok(())),
+            production: step.requirement == crate::try_run::Requirement::Production,
             detail: match &step.outcome {
                 Ok(()) => alloc::string::String::new(),
                 Err(why) => why.clone(),

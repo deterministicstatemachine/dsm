@@ -233,17 +233,36 @@ fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
         },
     )?;
     let took = started.elapsed();
+    let mut broken = Vec::new();
+    let mut production_unmet = Vec::new();
     for step in &run.try_run {
-        let verdict = if step.passed { "ok    " } else { "FAILED" };
+        let verdict = if step.passed {
+            "ok    "
+        } else if step.production {
+            "PROD  "
+        } else {
+            "FAILED"
+        };
         println!("[TRY] {verdict} {} {}", step.name, step.detail);
+        if !step.passed && step.production {
+            production_unmet.push(step.name.as_str());
+        } else if !step.passed {
+            broken.push(step.name.as_str());
+        }
     }
     println!("[TRY] the whole of it took {:.1} s", took.as_secs_f64());
     if !run.detail.is_empty() {
         println!("[TRY] {}", run.detail);
     }
-    if !run.ok {
-        return Err(format!("the try-run did not pass (error {})", run.error));
+    if !broken.is_empty() {
+        return Err(format!(
+            "the try-run did not work on this board (error {}): {}",
+            run.error,
+            broken.join("; ")
+        ));
     }
+    // A run that stopped short of its payment carries no check of the transport; one that went
+    // through carries it whatever production still needs.
     let carried = run.transport_check.len();
     if carried == 0 || run.transport_check != anchor_core::try_run::transport_check(carried) {
         return Err(format!(
@@ -251,9 +270,19 @@ fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
         ));
     }
     println!("[TRY] ok     its largest answer, {carried} bytes in parts, came through whole");
-    println!("[TRY] passed. Nothing was made permanent. An install would make these permanent:");
-    for line in &run.permanent {
-        println!("[TRY]   - {line}");
+    println!("[TRY] the anchor works on this board. Nothing was made permanent.");
+    if production_unmet.is_empty() {
+        println!(
+            "[TRY] production: every requirement is met. An install would make these permanent:"
+        );
+        for line in &run.permanent {
+            println!("[TRY]   - {line}");
+        }
+    } else {
+        println!("[TRY] production: not ready. An install refuses until these are met:");
+        for name in production_unmet {
+            println!("[TRY]   - {name}");
+        }
     }
     Ok(())
 }
@@ -290,11 +319,7 @@ fn identify(port: &mut dyn serialport::SerialPort, certs: &str) -> Result<(), St
         }
     }
     if read.chip_certificates.len() != CERT_FILES.len() {
-        return Err(format!(
-            "the chip gave {} certificates, not {}",
-            read.chip_certificates.len(),
-            CERT_FILES.len()
-        ));
+        return Err("the chip did not give the four certificates of its chain".to_string());
     }
     std::fs::create_dir_all(certs).map_err(|e| format!("{certs}: {e}"))?;
     for (name, der) in CERT_FILES.iter().zip(&read.chip_certificates) {

@@ -123,9 +123,12 @@ message ApplianceRequest {
 
 // One thing a try-run went through.
 message TryRunStep {
-  string name   = 1;
-  bool   passed = 2;
-  string detail = 3;  // why it did not pass
+  string name       = 1;
+  bool   passed     = 2;
+  string detail     = 3;  // why it did not pass
+  // A production install's requirement alone (the RP2350's stepping, a tested PTRNG): a development
+  // board may leave it unmet, and an install still refuses until it is met.
+  bool   production = 4;
 }
 
 // One thing the identify image read from the chip: its value, or why it did not read.

@@ -618,7 +618,7 @@ fn chip_state(model: &ModelServer) -> Vec<(String, String)> {
 fn state_of(session: &mut Tropic01<ModelSpi, ModelCsn, ActiveSession>) -> Vec<(String, String)> {
     let mut state = Vec::new();
     for slot in 0u16..4 {
-        let held = session.pairing_key_read(slot.into()).map(|key| *key);
+        let held = session.pairing_key_read(slot.into()).copied();
         state.push((format!("pairing key {slot}"), format!("{held:?}")));
     }
     for index in COUNTERS {
@@ -834,17 +834,26 @@ fn the_trial_image_keys_an_untested_ptrng_and_installs_nothing() {
     };
     let run = anchor.request(&try_run_request());
     assert_eq!(run.error, err::TRY_RUN_FAILED, "{:?}", run.try_run);
-    let not_passed: Vec<&str> = run
+    let not_passed: Vec<(&str, bool)> = run
         .try_run
         .iter()
         .filter(|step| !step.passed)
-        .map(|step| step.name.as_str())
+        .map(|step| (step.name.as_str(), step.production))
         .collect();
     assert_eq!(
-        not_passed,
+        not_passed.iter().map(|step| step.0).collect::<Vec<_>>(),
         ["the chip tests its PTRNG at start-up"],
         "{:?}",
         run.try_run
+    );
+    assert!(
+        not_passed.iter().all(|step| step.1),
+        "the PTRNG step is a production requirement: {:?}",
+        run.try_run
+    );
+    assert!(
+        !run.transport_check.is_empty(),
+        "a trial that worked carries the transport's check"
     );
     let install = anchor.request(&provision_request());
     assert!(!install.ok, "an install passed without the correction");
