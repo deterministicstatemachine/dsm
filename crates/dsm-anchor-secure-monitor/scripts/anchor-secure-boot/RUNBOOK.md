@@ -39,7 +39,31 @@ it. It gives about 53 KiB at the heaviest, with a fault on top.
 **What is on a board is not known until the chip says.** Tropic Square programs its parts differently
 (catalog list, section 5), and a Secure Tropic Click's part is not on its label. Every image reads the part
 number, silicon revision and firmware versions first, and gives a chip nothing if it fails either check. A
-refusal is an answer over USB, and `used-chip-bench --check` prints it:
+refusal is an answer over USB, and `used-chip-bench --check` prints it.
+
+**Read a board first with the identify image.** It writes nothing, to the chip or to OTP, and needs no
+sealed secret, so it runs on any board, burned or blank. It reports the part, its firmware, its
+configuration and access rules, its pairing slots, counter, resident key slot and R-memory, the RP2350's
+stepping and whether OTP holds a sealed secret, and it saves the chip's four certificates:
+
+```
+cargo build --release --features bench_self_enroll,identify_chip
+picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor
+used-chip-bench --port <serial> --identify --certs <dir>
+# The chain, against Tropic Square's root (libtropic examples/linux/spi/full_chain_verification):
+for f in t01_ese_cert t01_xxxx_ca_cert t01_ca_cert; do
+  openssl x509 -inform DER -in <dir>/$f.der -out <dir>/$f.pem
+done
+cat <dir>/t01_xxxx_ca_cert.pem <dir>/t01_ca_cert.pem > <dir>/untrusted.pem
+openssl verify -CAfile tropicsquare_root_ca_certificate_sn_301.pem -untrusted <dir>/untrusted.pem \
+  <dir>/t01_ese_cert.pem
+```
+
+The first board read this way (2026-11-06) carried a TR01-C2P-T103 on chip firmware 0.3.1, with
+`CFG_START_UP` at `0xFFFFFFFF` (the PTRNG untested, as the table below says of a T103), its chain verifying
+to Tropic Square Root CA v1 (revocation lists not fetched), on an RP2350 A2.
+
+The parts:
 
 | Part | Factory configuration | What this firmware does |
 |---|---|---|

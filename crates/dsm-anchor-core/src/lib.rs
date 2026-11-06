@@ -38,6 +38,7 @@ pub mod domain;
 pub mod durable;
 pub mod enrollment;
 pub mod hash;
+pub mod identify;
 pub mod proto;
 pub mod rmem;
 pub mod root_advance;

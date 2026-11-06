@@ -611,7 +611,11 @@ const COUNTERS: [MCounterIndex; 16] = [
 /// it found it. Each entry is named, so a difference says what moved. Wear is not here: the chip does
 /// not report it. Neither is the private part of a key: a key's public part stands for it.
 fn chip_state(model: &ModelServer) -> Vec<(String, String)> {
-    let mut session = factory_session(model);
+    state_of(&mut factory_session(model))
+}
+
+/// The same, read through whichever slot `session` runs on: a born chip's factory slot is gone.
+fn state_of(session: &mut Tropic01<ModelSpi, ModelCsn, ActiveSession>) -> Vec<(String, String)> {
     let mut state = Vec::new();
     for slot in 0u16..4 {
         let held = session.pairing_key_read(slot.into()).map(|key| *key);
@@ -736,6 +740,83 @@ fn preparing_a_test_part_clears_its_one_bit_and_it_then_takes_an_install() {
         Err(BringUpFailure::Session(_refused)) => {}
         Err(e) => panic!("refused for another reason: {e:?}"),
     }
+}
+
+/// The value the identify image read under `name`.
+fn reading(survey: &anchor_core::identify::ChipSurvey, name: &str) -> Result<String, String> {
+    match survey.readings.iter().find(|reading| reading.name == name) {
+        Some(reading) => reading.value.clone(),
+        None => panic!("nothing was read as {name:?}: {:?}", survey.readings),
+    }
+}
+
+/// The identify image reads a new chip and writes nothing to it: the chip is as the factory left it,
+/// and the report is what the chip holds. MUTATION CONTROL: setting the counter in `survey`, as a first
+/// boot sets it, turns this red at "what identifying changed".
+#[test]
+fn identifying_a_new_chip_writes_nothing_and_says_what_it_holds() {
+    let model = ModelServer::start();
+    let factory = chip_state(&model);
+    let survey = match model.identify() {
+        Ok(survey) => survey,
+        Err(e) => panic!("the chip was not identified: {e:?}"),
+    };
+    assert_eq!(
+        moved(&factory, &chip_state(&model)),
+        Vec::<String>::new(),
+        "what identifying changed"
+    );
+    let unread: Vec<&String> = survey
+        .readings
+        .iter()
+        .filter(|reading| matches!(reading.value, Err(ref _why)))
+        .map(|reading| &reading.name)
+        .collect();
+    assert_eq!(unread, Vec::<&String>::new(), "{:?}", survey.readings);
+    for (name, value) in [
+        ("part number", "TR01-C2S-T200"),
+        ("firmware", "2.0.0"),
+        ("session", "opened on pairing slot 0"),
+        ("pairing slot 0", "holds a key"),
+        ("pairing slot 1", "empty"),
+        ("counter 0", "never set"),
+        ("resident key slot 0", "empty"),
+        ("R-memory", "0 of 512 slots written"),
+    ] {
+        assert_eq!(reading(&survey, name), Ok(value.to_string()), "{name}");
+    }
+    assert_eq!(survey.certificates.len(), 4, "the chip's certificates");
+}
+
+/// On a chip an install bound, the identify image writes nothing either, and says why it cannot look
+/// inside: the factory slot is closed and it holds no key to the board's own. The anchor still serves.
+#[test]
+fn identifying_a_born_chip_writes_nothing_and_says_its_slots_are_closed() {
+    let model = ModelServer::start();
+    drop(provisioned(&model));
+    let born = state_of(&mut own_session(&model));
+    let survey = match model.identify() {
+        Ok(survey) => survey,
+        Err(e) => panic!("the chip was not identified: {e:?}"),
+    };
+    assert_eq!(
+        moved(&born, &state_of(&mut own_session(&model))),
+        Vec::<String>::new(),
+        "what identifying changed"
+    );
+    assert_eq!(
+        reading(&survey, "part number"),
+        Ok("TR01-C2S-T200".to_string())
+    );
+    match reading(&survey, "session") {
+        Err(why) => assert!(why.contains("factory slot"), "{why}"),
+        Ok(opened) => panic!("a born chip opened to the identify image: {opened}"),
+    }
+    assert_eq!(survey.certificates.len(), 4, "the chip's certificates");
+    assert!(
+        booted(&model).bare(pb::Op::Status).ok,
+        "the anchor no longer serves"
+    );
 }
 
 /// An RP2350 below A4 can be made to run unsigned code at boot, so nothing is installed on one. The

@@ -13,7 +13,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-#[cfg(not(feature = "prepare_chip"))]
+#[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
 use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor};
 use anchor_chip::bring_up::{BringUpFailure, Measurement};
 use anchor_chip::Board;
@@ -40,8 +40,11 @@ static mut MONITOR_APP: Monitor = Monitor::NotBroughtUp;
 /// What the handler finds in its slot.
 enum Monitor {
     NotBroughtUp,
-    #[cfg(not(feature = "prepare_chip"))]
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
     Up(BoardAnchor),
+    /// What the identify image read from the chip, for every `OP_IDENTIFY`.
+    #[cfg(feature = "identify_chip")]
+    Identified(anchor_core::identify::ChipSurvey),
     /// Why the anchor did not come up, for the answer to any request: with debug disabled this is
     /// the only way to learn it from a locked board. Names steps and chip faults, never a secret.
     Refused(String),
@@ -269,12 +272,22 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     // A trial image reads the same OTP page and must find it blank: a real seal is never overridden.
     // Its secret is then fresh each boot and held nowhere, so nothing it derives can bind the board,
     // and it can make no install (`service_request`).
-    #[cfg(feature = "bench_self_enroll")]
+    #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
     let mut sealed: [u8; 32] = match sealed::read_sealed_secret() {
         Err(SealedError::Unprovisioned) => (Rp2350Board { rosc: &rosc })
             .random_key()
             .ok_or(InitFailure::Entropy)?,
         Ok(_burned) => return Err(InitFailure::Sealed(SealedError::AlreadySealed)),
+        Err(cause) => return Err(InitFailure::Sealed(cause)),
+    };
+    // The identify image binds nothing and needs no secret. It says whether the board holds one.
+    #[cfg(feature = "identify_chip")]
+    let board_otp = match sealed::read_sealed_secret() {
+        Ok(mut burned) => {
+            crate::zeroize(&mut burned);
+            "a secret is sealed in its OTP page"
+        }
+        Err(SealedError::Unprovisioned) => "its OTP secret page is blank",
         Err(cause) => return Err(InitFailure::Sealed(cause)),
     };
     #[cfg(feature = "production")]
@@ -328,14 +341,30 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         });
     }
 
-    #[cfg(not(feature = "prepare_chip"))]
+    // This image reads the chip, writes nothing, and answers every OP_IDENTIFY with what it read.
+    #[cfg(feature = "identify_chip")]
+    {
+        let mut survey =
+            anchor_chip::bring_up::identify_chip(Tropic01::new(spi_dev), Rp2350Board { rosc })
+                .map_err(InitFailure::BringUp)?;
+        survey
+            .readings
+            .push(anchor_core::identify::ChipReading::new(
+                "the board's OTP",
+                Ok(String::from(board_otp)),
+            ));
+        *core::ptr::addr_of_mut!(MONITOR_APP) = Monitor::Identified(survey);
+        return Ok(());
+    }
+
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
     let brought_up = bring_up(Tropic01::new(spi_dev), &sealed, Rp2350Board { rosc });
     // Everything the anchor needs derives from it, and nothing needs it again this boot.
-    #[cfg(not(feature = "prepare_chip"))]
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
     crate::zeroize(&mut sealed);
-    #[cfg(not(feature = "prepare_chip"))]
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
     let anchor = brought_up.map_err(InitFailure::BringUp)?;
-    #[cfg(not(feature = "prepare_chip"))]
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
     {
         *core::ptr::addr_of_mut!(MONITOR_APP) = Monitor::Up(anchor);
         Ok(())
@@ -347,7 +376,7 @@ pub unsafe fn init() -> Result<(), InitFailure> {
 ///
 /// SAFETY: single-threaded Secure context; the SG handler is the only caller.
 pub unsafe fn service_request(frame: &[u8], _measurement: Measurement) -> Vec<u8> {
-    #[cfg(feature = "bench_self_enroll")]
+    #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
     if let Ok(req) = decode_request(frame) {
         if req.op == anchor_core::proto::pb::Op::Provision as i32 {
             return refusal(
@@ -359,10 +388,16 @@ pub unsafe fn service_request(frame: &[u8], _measurement: Measurement) -> Vec<u8
     }
     let slot = &mut *core::ptr::addr_of_mut!(MONITOR_APP);
     match core::mem::replace(slot, Monitor::NotBroughtUp) {
-        #[cfg(not(feature = "prepare_chip"))]
+        #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
         Monitor::Up(anchor) => {
             let (anchor, answer) = serve_measured(anchor, frame, _measurement);
             *slot = Monitor::Up(anchor);
+            answer
+        }
+        #[cfg(feature = "identify_chip")]
+        Monitor::Identified(survey) => {
+            let answer = anchor_core::identify::answer(frame, &survey);
+            *slot = Monitor::Identified(survey);
             answer
         }
         Monitor::Refused(reason) => {

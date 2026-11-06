@@ -46,6 +46,8 @@ pub mod err {
     pub const TRY_RUN_FAILED: u32 = 202;
     /// This image exists to try an install on a board. It cannot make one.
     pub const TRIAL_IMAGE: u32 = 203;
+    /// This image reads the chip and says what it is and holds (`OP_IDENTIFY`). It serves nothing else.
+    pub const IDENTIFY_IMAGE: u32 = 204;
 }
 
 /// Protocol-level ceiling on a request frame, a backstop against absurd inputs before prost
@@ -114,6 +116,8 @@ fn base(op: i32) -> pb::ApplianceResponse {
         try_run: Vec::new(),
         permanent: Vec::new(),
         transport_check: Vec::new(),
+        chip_readings: Vec::new(),
+        chip_certificates: Vec::new(),
     }
 }
 
@@ -147,7 +151,7 @@ pub(crate) fn try_run_response(op: i32, run: &crate::try_run::TryRun) -> pb::App
     }
 }
 
-fn ok(op: i32) -> pb::ApplianceResponse {
+pub(crate) fn ok(op: i32) -> pb::ApplianceResponse {
     pb::ApplianceResponse {
         ok: true,
         ..base(op)
@@ -371,6 +375,8 @@ pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::Appli
         // An appliance exists only once its anchor is provisioned, and an anchor is provisioned
         // once: provisioning it again is refused.
         Ok(pb::Op::Provision | pb::Op::TryRun) => fail(op, err::ALREADY_PROVISIONED),
+        // Only the identify image reads a chip for whoever asks (`identify`); an anchor does not.
+        Ok(pb::Op::Identify) => fail(op, err::BAD_OP),
         Ok(pb::Op::Unspecified) | Err(_) => fail(op, err::BAD_OP),
     }
 }

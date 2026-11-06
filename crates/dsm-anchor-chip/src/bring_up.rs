@@ -7,7 +7,10 @@
 //! online key, policy and genesis) arrives once, in the owner's provisioning.
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::rc::Rc;
+use alloc::string::ToString;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -15,6 +18,7 @@ use anchor_core::anchor::{Anchor, AnchorBootRefusal};
 use anchor_core::durable::ActiveStore;
 use anchor_core::enrollment::ChipBirth;
 use anchor_core::hash::{h, kdf};
+use anchor_core::identify::{ChipReading, ChipSurvey};
 use anchor_core::proto::{decode_request, pb};
 use anchor_core::rmem::{LayoutError, SlotMemory, SlottedStore};
 use anchor_core::service::{err, refusal, MAX_FRAME_LEN};
@@ -247,6 +251,75 @@ where
         .map_err(BringUpFailure::Enroll)?;
     session.check_fit().map_err(BringUpFailure::Unfit)?;
     Ok(facts)
+}
+
+/// What the chip says it is and what it holds, read with nothing written to it: the one thing the
+/// image built with `identify_chip` does. The session is opened as a bring-up opens it, on the factory
+/// slot of a chip nothing has been bound to, with a key of this boot that no slot holds standing in for
+/// the board's own. Only a chip that does not give its id refuses; anything after that which does not
+/// read is reported with why.
+pub fn identify_chip<SPI, CS, B>(
+    mut chip: Tropic01<SPI, CS, NoSession>,
+    board: B,
+) -> Result<ChipSurvey, BringUpFailure<ChipFault<SPI, CS>>>
+where
+    SPI: SpiDevice,
+    CS: OutputPin,
+    B: Board,
+{
+    let (facts, _chip_id_hash) = chip_facts(&mut chip, &board).map_err(BringUpFailure::ChipId)?;
+    let mut readings = vec![
+        ChipReading::new("part number", Ok(facts.part_number.clone())),
+        ChipReading::new("silicon", Ok(facts.silicon.clone())),
+        ChipReading::new("firmware", Ok(facts.firmware.clone())),
+        ChipReading::new("ECC firmware", Ok(facts.ecc_firmware.clone())),
+        ChipReading::new(
+            "the board's RP2350",
+            Ok(format!("stepping A{}", board.silicon_revision())),
+        ),
+    ];
+    let certificates: Vec<Vec<u8>> = match chip.get_info_cert_store() {
+        Ok(store) => {
+            let certificates: Vec<Vec<u8>> = (0..4)
+                .map_while(|index| store.cert(index).map(<[u8]>::to_vec))
+                .collect();
+            readings.push(ChipReading::new(
+                "certificate store",
+                match store.public_key() {
+                    Ok(_stpub) => Ok(format!(
+                        "{} certificates, the device's holding its STPUB",
+                        certificates.len()
+                    )),
+                    Err(e) => Err(format!("{e:?}")),
+                },
+            ));
+            certificates
+        }
+        Err(e) => {
+            readings.push(ChipReading::new("certificate store", Err(format!("{e:?}"))));
+            Vec::new()
+        }
+    };
+    board.wait_100ms();
+    let Some(mut standing_in) = board.random_key() else {
+        readings.push(ChipReading::new(
+            "session",
+            Err("the board's entropy did not pass its health tests".to_string()),
+        ));
+        return Ok(ChipSurvey {
+            readings,
+            certificates,
+        });
+    };
+    match ChipSession::open(chip, standing_in, facts, board) {
+        Ok(mut session) => readings.extend(session.survey()),
+        Err(refused) => readings.push(ChipReading::new("session", Err(format!("{refused:?}")))),
+    }
+    zeroize(&mut standing_in);
+    Ok(ChipSurvey {
+        readings,
+        certificates,
+    })
 }
 
 /// The chip's identity, from its chip id and its certificate store, whose 3.8 KiB are given back here.

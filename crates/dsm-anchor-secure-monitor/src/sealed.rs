@@ -35,7 +35,7 @@ pub enum SealedError {
     /// The OTP page was never provisioned.
     Unprovisioned,
     /// A trial image found a sealed secret: this board is already burned, and it stands down.
-    #[cfg(feature = "bench_self_enroll")]
+    #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
     AlreadySealed,
 }
 
@@ -54,7 +54,7 @@ impl core::fmt::Debug for SealedError {
             Self::ArmDisabled => write!(f, "the ARM core is disabled in OTP"),
             Self::Unreadable(row, cause) => write!(f, "OTP row {row} unreadable: {cause:?}"),
             Self::Unprovisioned => write!(f, "the sealed secret's OTP page was never provisioned"),
-            #[cfg(feature = "bench_self_enroll")]
+            #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
             Self::AlreadySealed => {
                 write!(f, "this board's OTP is sealed: a trial image stands down")
             }

@@ -2,9 +2,10 @@
 //! What the tests of the chip itself do to the model, beyond serving from it: cut its power, choose its
 //! part, watch what it stores.
 
-use anchor_chip::bring_up::{bring_up, prepare_chip, BoardAnchor};
+use anchor_chip::bring_up::{bring_up, identify_chip, prepare_chip, BoardAnchor};
 use anchor_chip::session::ChipFacts;
 use anchor_chip::Board;
+use anchor_core::identify::ChipSurvey;
 
 use super::support::{call, BringUpError, Garble, HostBoard, ModelServer, Power, SEALED};
 
@@ -95,5 +96,10 @@ impl ModelServer {
     /// What the `prepare_chip` image does at reset, on the same code.
     pub fn prepare(&self) -> Result<ChipFacts, BringUpError> {
         prepare_chip(self.power_cycle(), SEALED, HostBoard)
+    }
+
+    /// What the `identify_chip` image does at reset, on the same code.
+    pub fn identify(&self) -> Result<ChipSurvey, BringUpError> {
+        identify_chip(self.power_cycle(), HostBoard)
     }
 }

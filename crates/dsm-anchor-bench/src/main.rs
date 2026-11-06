@@ -23,6 +23,10 @@
 //! substituted, and reports each step, how long the whole of it took, and what an install would make
 //! permanent. It is what a new board runs before anything is burned on it, on the trial image, and it
 //! never provisions.
+//!
+//! `--identify` asks a board running the identify image what its chip is and holds, prints every
+//! reading, and saves the chip's four certificates under `--certs <dir>` by the names Tropic Square's
+//! `verify.sh` reads. Nothing is written to the chip or the board.
 //! RELEASE-only: a debug build refuses to run (SPHINCS+/BLE timing is invalid in debug).
 
 use std::time::Duration;
@@ -65,6 +69,8 @@ struct Args {
     /// Operator-supplied firmware build hash/commit for the bench log (the harness cannot read it
     /// off the chip; you built + flashed it, so you record it).
     fw_commit: Option<String>,
+    /// Where `--identify` saves the chip's certificates.
+    certs: String,
 }
 
 /// What this run is.
@@ -76,6 +82,8 @@ enum Check {
     Yes,
     /// A try-run of an install.
     TryRun,
+    /// What the identify image read from the chip.
+    Identify,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -87,6 +95,7 @@ fn parse_args() -> Result<Args, String> {
     let mut deny = Vec::new();
     let mut label = None;
     let mut fw_commit = None;
+    let mut certs = String::from("tropic01-certs");
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -109,6 +118,8 @@ fn parse_args() -> Result<Args, String> {
             "--fw-commit" => fw_commit = it.next(),
             "--check" => check = Check::Yes,
             "--try-run" => check = Check::TryRun,
+            "--identify" => check = Check::Identify,
+            "--certs" => certs = it.next().ok_or("--certs needs a directory")?,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -122,6 +133,7 @@ fn parse_args() -> Result<Args, String> {
         label,
         check,
         fw_commit,
+        certs,
     })
 }
 
@@ -243,6 +255,54 @@ fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
     for line in &run.permanent {
         println!("[TRY]   - {line}");
     }
+    Ok(())
+}
+
+/// The names Tropic Square's `verify.sh` reads the chip's certificates under, in the store's order.
+const CERT_FILES: [&str; 4] = [
+    "t01_ese_cert.der",
+    "t01_xxxx_ca_cert.der",
+    "t01_ca_cert.der",
+    "tropicsquare_root_ca_cert.der",
+];
+
+/// What the identify image read from the chip: every reading, and its certificates saved to `certs`.
+/// A nonzero exit when the board is not running the identify image or the chip gave no certificates.
+fn identify(port: &mut dyn serialport::SerialPort, certs: &str) -> Result<(), String> {
+    let read = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Identify as i32,
+            ..Default::default()
+        },
+    )?;
+    if !read.ok {
+        return Err(format!(
+            "the board did not identify its chip (error {}): {}",
+            read.error, read.detail
+        ));
+    }
+    for reading in &read.chip_readings {
+        if reading.unread.is_empty() {
+            println!("[CHIP] {:<34} {}", reading.name, reading.value);
+        } else {
+            println!("[CHIP] {:<34} UNREAD: {}", reading.name, reading.unread);
+        }
+    }
+    if read.chip_certificates.len() != CERT_FILES.len() {
+        return Err(format!(
+            "the chip gave {} certificates, not {}",
+            read.chip_certificates.len(),
+            CERT_FILES.len()
+        ));
+    }
+    std::fs::create_dir_all(certs).map_err(|e| format!("{certs}: {e}"))?;
+    for (name, der) in CERT_FILES.iter().zip(&read.chip_certificates) {
+        let path = std::path::Path::new(certs).join(name);
+        std::fs::write(&path, der).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("[CERT] {} ({} bytes)", path.display(), der.len());
+    }
+    println!("[CHIP] read only: nothing was written to the chip or the board");
     Ok(())
 }
 
@@ -618,6 +678,7 @@ fn run() -> Result<(), String> {
     }
     const USAGE: &str = "usage: used-chip-bench --port <serial> --check\n       \
          used-chip-bench --port <serial> --try-run\n       \
+         used-chip-bench --port <serial> --identify [--certs <dir>]\n       \
          used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
                          [--deny <id> ...] [--label \"used chip A\"] [--fw-commit <hash>] \
                          [--baud 115200] [--repeats 5]\n  \
@@ -649,6 +710,7 @@ fn run() -> Result<(), String> {
     match args.check {
         Check::Yes => return check(port.as_mut()),
         Check::TryRun => return try_run(port.as_mut()),
+        Check::Identify => return identify(port.as_mut(), &args.certs),
         Check::No => {}
     }
     // Structural guard against the one operational rule: read the chip's anchor-id and refuse unless

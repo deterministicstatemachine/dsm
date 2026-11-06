@@ -55,6 +55,11 @@ bench_self_enroll = []
 # key generated before that, reboots the chip and says how it went. It installs nothing and answers
 # every request with that outcome. Only built on purpose, and a trial image in all else.
 prepare_chip = ["bench_self_enroll"]
+# The image that reads the board's chip and writes nothing, to it or to OTP: its part, firmware and
+# certificates, its configuration and access rules, its pairing slots, counter, resident key slot and
+# R-memory, and whether the board's OTP holds a sealed secret. It answers OP_IDENTIFY with that and
+# serves nothing else. What a board runs to say which chip it carries before anything is decided for it.
+identify_chip = ["bench_self_enroll"]
 
 # Size: the Secure TCB, its heap and its stack share one 400 KiB SRAM region.
 [profile.release]

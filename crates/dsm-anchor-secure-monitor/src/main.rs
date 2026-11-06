@@ -134,6 +134,10 @@ compile_error!(
     "build the production image (`production`) or the trial image (`bench_self_enroll`)"
 );
 
+// The prepare image writes one bit of the chip; the identify image writes nothing. One image is one.
+#[cfg(all(feature = "prepare_chip", feature = "identify_chip"))]
+compile_error!("an image prepares a chip (`prepare_chip`) or identifies it (`identify_chip`)");
+
 /// Names a production image in its symbol table: `sign.sh` signs nothing else. Holds no authority,
 /// and the trial image has no such symbol.
 #[cfg(feature = "production")]

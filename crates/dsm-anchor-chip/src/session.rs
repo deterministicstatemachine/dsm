@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use anchor_core::durable::StoreError;
+use anchor_core::identify::ChipReading;
 use anchor_core::rmem::SlotMemory;
 use anchor_core::tropic::{Tropic, TropicError};
 use anchor_core::try_run::TryStep;
@@ -507,6 +508,102 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
             return Err(TropicError::Refused);
         }
         Ok(pk)
+    }
+
+    /// What the chip holds, read with nothing written: the configuration a birth depends on, the
+    /// access rules a cage changes, the pairing slots, the counter, the resident key's slot and how
+    /// many R-memory slots are written. What the identify image reports after the chip's own word.
+    pub fn survey(&mut self) -> Vec<ChipReading> {
+        let mut readings = Vec::new();
+        readings.push(ChipReading::new(
+            "session",
+            Ok(format!("opened on pairing slot {}", self.slot)),
+        ));
+        for (name, register) in [("CFG_START_UP", CFG_START_UP), ("CFG_SENSORS", CFG_SENSORS)]
+            .into_iter()
+            .chain(CAGE.iter().map(|register| ("access rule", *register)))
+        {
+            let irreversible = self
+                .with(|s| s.i_config_read(register.into()))
+                .map(|bits| format!("{bits:#010x}"))
+                .map_err(|e| format!("{e:?}"));
+            readings.push(ChipReading::new(
+                &format!("I-config {name} {register:#05x}"),
+                irreversible,
+            ));
+            let reversible = self
+                .with(|s| s.r_config_read(register.into()))
+                .map(|bits| format!("{bits:#010x}"))
+                .map_err(|e| format!("{e:?}"));
+            readings.push(ChipReading::new(
+                &format!("R-config {name} {register:#05x}"),
+                reversible,
+            ));
+        }
+        for slot in 0u16..4 {
+            let held = match self.with(|s| s.pairing_key_read(slot.into()).copied()) {
+                Ok(_key) => Ok("holds a key".to_string()),
+                Err(Fault::SlotEmpty) => Ok("empty".to_string()),
+                Err(Fault::SlotInvalid) => Ok("invalidated".to_string()),
+                Err(e) => Err(format!("{e:?}")),
+            };
+            readings.push(ChipReading::new(&format!("pairing slot {slot}"), held));
+        }
+        let counter = match self.with(|s| s.mcounter_get(COUNTER)) {
+            Ok(value) => Ok(format!("{value}")),
+            Err(Fault::CounterInvalid) => Ok("never set".to_string()),
+            Err(e) => Err(format!("{e:?}")),
+        };
+        readings.push(ChipReading::new("counter 0", counter));
+        let key = match self.with(|s| {
+            s.ecc_key_read(CHIP_KEY_SLOT.into())
+                .map(|k| (k.curve(), k.origin()))
+        }) {
+            Ok((curve, origin)) => Ok(format!("{curve:?}, {origin:?}")),
+            Err(Fault::InvalidKey | Fault::SlotEmpty) => Ok("empty".to_string()),
+            Err(e) => Err(format!("{e:?}")),
+        };
+        readings.push(ChipReading::new(
+            &format!("resident key slot {CHIP_KEY_SLOT}"),
+            key,
+        ));
+        readings.push(self.written_rmem());
+        readings
+    }
+
+    /// How many R-memory slots hold bytes, and the first of them.
+    fn written_rmem(&mut self) -> ChipReading {
+        let mut written = Vec::new();
+        for slot in 0..RMEM_SLOTS {
+            match self.with(|s| s.r_mem_data_read(slot.into()).map(|data| data.len())) {
+                Ok(0) | Err(Fault::SlotEmpty) => {}
+                Ok(_bytes) => written.push(slot),
+                Err(e) => {
+                    return ChipReading::new(
+                        "R-memory",
+                        Err(format!("slot {slot} did not read: {e:?}")),
+                    )
+                }
+            }
+        }
+        let listed = match written.first() {
+            Some(_first) => {
+                let first: Vec<String> = written
+                    .iter()
+                    .take(8)
+                    .map(|slot| format!("{slot}"))
+                    .collect();
+                format!(" (first: {})", first.join(", "))
+            }
+            None => String::new(),
+        };
+        ChipReading::new(
+            "R-memory",
+            Ok(format!(
+                "{} of {RMEM_SLOTS} slots written{listed}",
+                written.len()
+            )),
+        )
     }
 
     /// The live counter; a virgin counter (never initialized) is initialized once to `h0`.

@@ -810,10 +810,11 @@ jobs:
       - name: Install the firmware's tools
         run: sudo apt-get install -y binutils-arm-none-eabi clang
 
-      - name: dsm-anchor-secure-monitor builds its three images (thumbv8m)
+      - name: dsm-anchor-secure-monitor builds its four images (thumbv8m)
         working-directory: crates/dsm-anchor-secure-monitor
         run: |
           cargo build --release --locked --features bench_self_enroll,prepare_chip
+          cargo build --release --locked --features bench_self_enroll,identify_chip
           cargo build --release --locked --features bench_self_enroll
           cargo build --release --locked --features production
           ./scripts/check-secure-no-xip.sh
