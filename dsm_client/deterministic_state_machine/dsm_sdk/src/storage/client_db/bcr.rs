@@ -92,7 +92,9 @@ const REL_CHAIN_STATE_VERSION: u8 = 0x03;
 // is its own SMT whose root is one device leaf, and the section carries what rebuilds it — its
 // bundle, counter, frontier, funding chain and allocations. The fused anchor-state and flat
 // allocation leaves are gone from `extra_leaves`. Breaking bump, NO back-compat reader.
-const DEVICE_STATE_VERSION: u8 = 0x08;
+// v0x09 adds each offline account's received amounts after its allocations: what its board
+// received offline, beside what it loaded (owner, 2026-11-07). Breaking bump, NO back-compat reader.
+const DEVICE_STATE_VERSION: u8 = 0x09;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -301,6 +303,12 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
             out.extend_from_slice(asset);
             out.extend_from_slice(&amount.to_le_bytes());
         }
+        // v0x09: what the account holds received, by asset.
+        put_len_u32(&mut out, account.received_amounts().len());
+        for (asset, amount) in account.received_amounts() {
+            out.extend_from_slice(asset);
+            out.extend_from_slice(&amount.to_le_bytes());
+        }
     }
 
     out
@@ -431,9 +439,24 @@ pub fn decode_device_state(
                 ));
             }
         }
+        let received_count =
+            read_len_u32(&mut cursor).map_err(|e| anyhow!("received count: {e}"))?;
+        let mut received: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        for _ in 0..received_count {
+            let asset: [u8; 32] =
+                take::<32>(&mut cursor).map_err(|e| anyhow!("received asset: {e}"))?;
+            let amount = u64::from_le_bytes(
+                take::<8>(&mut cursor).map_err(|e| anyhow!("received amount: {e}"))?,
+            );
+            if let Some(prior) = received.insert(asset, amount) {
+                return Err(anyhow!(
+                    "an offline account names one received asset twice ({prior}, then {amount})"
+                ));
+            }
+        }
         if let Some(prior) = offline_accounts.insert(
             bundle,
-            OfflineAccount::restore(allocations, counter, frontier, funding_chain),
+            OfflineAccount::restore(allocations, received, counter, frontier, funding_chain),
         ) {
             return Err(anyhow!(
                 "two offline accounts name one bundle (the first at counter {})",

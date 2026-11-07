@@ -941,6 +941,18 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> Tropic for RealChip<SPI, CS, B> {
     fn rehearse_birth(&mut self) -> Vec<TryStep> {
         self.session.borrow_mut().rehearse_birth(self.h0)
     }
+
+    /// The board's TRNG, passed by its health tests, and the chip's own generator
+    /// (`Random_Value_Get`). Either failing draws nothing.
+    fn challenge_entropy(&mut self) -> Result<anchor_core::tropic::ChallengeEntropy, TropicError> {
+        let mut session = self.session.borrow_mut();
+        let board = session.board.random_key().ok_or(TropicError::NoEntropy)?;
+        let drawn = session
+            .with(|s| s.get_random_value(32).map(<[u8]>::to_vec))
+            .map_err(fault)?;
+        let chip = <[u8; 32]>::try_from(drawn.as_slice()).map_err(|_short| TropicError::Refused)?;
+        Ok(anchor_core::tropic::ChallengeEntropy { board, chip })
+    }
 }
 
 impl<SPI: SpiDevice, CS: OutputPin, B: Board> Drop for ChipSession<SPI, CS, B> {
@@ -957,9 +969,10 @@ pub struct RMemSlots<SPI: SpiDevice, CS: OutputPin, B: Board> {
 fn store_fault(e: TropicError) -> StoreError {
     match e {
         TropicError::Comm => StoreError::Unavailable,
-        TropicError::Refused | TropicError::CounterExhausted | TropicError::CageOpen => {
-            StoreError::Refused
-        }
+        TropicError::Refused
+        | TropicError::CounterExhausted
+        | TropicError::CageOpen
+        | TropicError::NoEntropy => StoreError::Refused,
     }
 }
 

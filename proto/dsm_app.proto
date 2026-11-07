@@ -1775,6 +1775,11 @@ message BilateralPrepareResponse {
   // binding_digest(device_id, genesis, responder_kyber_public_key), per ADR 0002, verified
   // against the PINNED peer AK (never the wire signing key). Required.
   bytes  responder_kyber_binding_sig = 10 [(dsm_max_len)=51200];
+  // The receiver's board (owner, 2026-11-07: an offline payment needs a board on both sides): the
+  // pin material of the anchor whose board drew receiver_challenge and will commit the receive, its
+  // bundle under local_signature. The sender pins it on first use, as a receiver pins a sender's,
+  // and checks the step's acknowledgement under it.
+  AnchorDisclosure receiver_anchor = 11;
 }
 
 enum RelationshipSendCheckState {
@@ -1900,6 +1905,10 @@ message BilateralCommitResponse {
   // a fully co-signed copy to its own archive. This field is required for
   // offline receipt authorization.
   bytes  counter_signed_receipt = 6 [(dsm_max_len)=131072];
+  // The receiver's board's receive commit of the sender's release (owner, 2026-11-07): the
+  // prost-encoded dsm.anchor.OfflineRelease of the receive, its certificate the acknowledgement. The
+  // sender checks it under the receiver's pinned anchor against its own release, and keeps it.
+  bytes  receive_acknowledgement = 7 [(dsm_max_len)=262144];
 }
 
 // 3-step BLE protocol: Step 3 — Sender confirms (A→B), both finalize.
@@ -2023,6 +2032,7 @@ message StepWrite {
   oneof leaf {
     StepWriteRelationship relationship = 1;
     StepWriteOfflineAccount offline_account = 6;
+    StepWriteOfflineReceive offline_receive = 7;
   }
   bytes path_heights = 4 [(dsm_fixed_len)=32];
   bytes path_siblings = 5 [(dsm_max_len)=8192];
@@ -2045,6 +2055,31 @@ message StepWriteOfflineAccount {
   bytes pre_frontier = 4 [(dsm_fixed_len)=32];
   bytes next_frontier = 5 [(dsm_fixed_len)=32];
   repeated SmtPath account_paths = 6;
+}
+
+// The receiver's offline account under its own bundle, the one device-SMT leaf an offline-bearer
+// receive writes besides its relationship (owner, 2026-11-07: an offline payment needs a board on
+// both sides, and the money received lands in the receiver's own offline balance): the account as
+// it stood before the receive. After is derived — what the account holds received of the
+// operation's asset plus its amount, the counter plus one, and the frontier the receiver's board
+// advanced to — by folding account_paths from pre_account_root. pre_received is absent when the
+// account never received the asset.
+message StepWriteOfflineReceive {
+  bytes pre_account_root = 1 [(dsm_fixed_len)=32];
+  optional uint64 pre_received = 2;
+  uint64 pre_counter = 3;
+  bytes pre_frontier = 4 [(dsm_fixed_len)=32];
+  bytes next_frontier = 5 [(dsm_fixed_len)=32];
+  repeated SmtPath account_paths = 6;
+}
+
+// The unload of a payment received offline, as an offline account's step: the account as it stood
+// before, and what it held received of the payment's asset. After is derived — less the payment's
+// amount — by folding account_path from pre_account_root.
+message StepWriteOfflineSettle {
+  bytes pre_account_root = 1 [(dsm_fixed_len)=32];
+  uint64 pre_received = 2;
+  SmtPath account_path = 3;
 }
 
 // A leaf-to-root path in the one canonical encoding: the 256-bit set of heights
@@ -2080,6 +2115,35 @@ message OfflineSpendHop {
 // An offline account's spends, in order.
 message OfflineSpendChain {
   repeated OfflineSpendHop hops = 1;
+}
+
+// One offline-bearer receive into an offline account as the receiver's board committed it: its
+// receive commit's release (dsm.anchor.OfflineRelease, its offline-state proofs attached), which
+// is the acknowledgement the payer kept, the receive's account witness, and what it received.
+message OfflineReceiveHop {
+  bytes release = 1 [(dsm_max_len)=262144];
+  StepWriteOfflineReceive receive = 2;
+  bytes asset = 3 [(dsm_fixed_len)=32];
+  uint64 amount = 4;
+}
+
+// The unload of one payment received offline, as a step of the account: what it took from the
+// account's received amount, and the settlement it was (H(G ‖ DevID ‖ G_payer ‖ DevID_payer ‖ M)).
+message OfflineSettleHop {
+  StepWriteOfflineSettle settle = 1;
+  bytes asset = 2 [(dsm_fixed_len)=32];
+  uint64 amount = 3;
+  bytes settlement_id = 4 [(dsm_fixed_len)=32];
+}
+
+// One step of an offline account between two of its boundaries: a spend, a receive, or the unload
+// of a payment received.
+message OfflineAccountHop {
+  oneof hop {
+    OfflineSpendHop spend = 1;
+    OfflineReceiveHop receive = 2;
+    OfflineSettleHop settle = 3;
+  }
 }
 
 // Bilateral event notifications for frontend
@@ -2828,6 +2892,7 @@ message Envelope {
     MoneyWaitingResponse              money_waiting_response           = 139;
     // Reply to `wallet.pendingOffline`.
     PendingOfflineValueResponse       pending_offline_value_response   = 140;
+    UnloadReceivedResponse            unload_received_response         = 142;
 
 
     // Reply to `token.adoptionQr`.
@@ -3891,6 +3956,16 @@ message OfflineAllocationView {
 // settles online only once the payer's return online exposes its signed spend
 // chain (CONFORMANCE §6.103). It is not part of `available` and not part of
 // the offline allocation, and nothing spends it until it settles.
+// wallet.unloadReceived (owner, 2026-11-07): one action moves every payment received offline whose
+// payer has been back online out of the offline account's received amount into the online balance,
+// each as its own checked step (its settlement); the rest stay in the offline balance, waiting.
+message UnloadReceivedResponse {
+  uint32 moved   = 1;
+  uint32 waiting = 2;
+  // Rust's own sentence about the move, and what could not be done.
+  string message = 3;
+}
+
 message PendingOfflineReceiptView {
   // The token's policy commit, and its ticker and decimals as Rust read them.
   bytes  asset          = 1;

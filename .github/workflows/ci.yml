@@ -818,7 +818,7 @@ jobs:
           cargo build --release --locked --features bench_self_enroll
           cargo build --release --locked --features production
           ./scripts/check-secure-no-xip.sh
-          python3 scripts/stack-bound.py target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor --limit 65536
+          python3 scripts/stack-bound.py target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor --limit 61440
 
       - name: Install the TROPIC01 model
         run: bash ci/tropic01_model.sh "$RUNNER_TEMP/tropic01-model" >> "$GITHUB_ENV"

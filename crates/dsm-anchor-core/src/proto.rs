@@ -225,3 +225,89 @@ pub fn encode_release(rel: &pb::OfflineRelease) -> Vec<u8> {
 pub fn decode_response(bytes: &[u8]) -> Result<pb::ApplianceResponse, ProtoError> {
     pb::ApplianceResponse::decode(bytes).map_err(|_| ProtoError::Decode)
 }
+
+// --- The receiver's side of an offline payment ---
+
+impl pb::RootAdvanceCertificate {
+    /// The certificate as the receiver's appliance checks it, its signatures borrowed from the
+    /// decoded request so `σ^host` is held once.
+    pub fn as_payment(&self) -> Result<crate::receive::PaymentCert<'_>, ProtoError> {
+        bounded(&self.sigma_chip, MAX_SIGMA)?;
+        bounded(&self.sigma_host, MAX_SIGMA)?;
+        Ok(crate::receive::PaymentCert {
+            anchor_bundle: arr32(&self.anchor_bundle)?,
+            sender_device_root_before: arr32(&self.sender_device_root_before)?,
+            sender_device_root_after: arr32(&self.sender_device_root_after)?,
+            prev_frontier: arr32(&self.prev_frontier)?,
+            next_frontier: arr32(&self.next_frontier)?,
+            anchor_counter: self.anchor_counter,
+            next_anchor_counter: self.next_anchor_counter,
+            transition_digest: arr32(&self.transition_digest)?,
+            root_advance_message: arr32(&self.root_advance_message)?,
+            anchor_id: arr32(&self.anchor_id)?,
+            sigma_chip: &self.sigma_chip,
+            sigma_host: &self.sigma_host,
+            receiver_challenge: arr32(&self.receiver_challenge)?,
+            recipient: arr32(&self.recipient)?,
+        })
+    }
+}
+
+/// Upper bound on a disclosed public key (the online key and the partition key are SPHINCS+ keys
+/// of tens of bytes; the chip key is 32).
+pub const MAX_DISCLOSED_KEY: usize = 1024;
+
+impl pb::PayerDisclosure {
+    pub fn to_disclosure(&self) -> Result<crate::receive::PayerDisclosure, ProtoError> {
+        bounded(&self.online_id_pk, MAX_DISCLOSED_KEY)?;
+        bounded(&self.chip_pk, MAX_DISCLOSED_KEY)?;
+        bounded(&self.partition_pk, MAX_DISCLOSED_KEY)?;
+        if self.online_id_pk.is_empty() || self.chip_pk.is_empty() || self.partition_pk.is_empty() {
+            return Err(ProtoError::MissingField);
+        }
+        Ok(crate::receive::PayerDisclosure {
+            online_id_pk: self.online_id_pk.clone(),
+            anchor_id: arr32(&self.anchor_id)?,
+            chip_pk: self.chip_pk.clone(),
+            partition_pk: self.partition_pk.clone(),
+            enrolled_counter: self.enrolled_counter,
+            device_id: arr32(&self.device_id)?,
+            policy_hash: arr32(&self.policy_hash)?,
+            birth_commitment: arr32(&self.birth_commitment)?,
+        })
+    }
+}
+
+impl crate::receive::PayerDisclosure {
+    pub fn to_pb(&self) -> pb::PayerDisclosure {
+        pb::PayerDisclosure {
+            online_id_pk: self.online_id_pk.clone(),
+            anchor_id: self.anchor_id.to_vec(),
+            chip_pk: self.chip_pk.clone(),
+            partition_pk: self.partition_pk.clone(),
+            enrolled_counter: self.enrolled_counter,
+            device_id: self.device_id.to_vec(),
+            policy_hash: self.policy_hash.to_vec(),
+            birth_commitment: self.birth_commitment.to_vec(),
+        }
+    }
+}
+
+/// Peek a request frame's op without decoding it: the field prost writes first (field 1, a
+/// varint). Lets a server refuse a large frame before it allocates its decoded copy. A frame that
+/// does not open with its op is refused as `BadOp`.
+pub fn peek_op(frame: &[u8]) -> Result<i32, ProtoError> {
+    match frame {
+        [0x08, rest @ ..] => {
+            let mut value: u64 = 0;
+            for (i, byte) in rest.iter().take(10).enumerate() {
+                value |= u64::from(byte & 0x7F) << (7 * i);
+                if byte & 0x80 == 0 {
+                    return i32::try_from(value).map_err(|_overflow| ProtoError::BadOp);
+                }
+            }
+            Err(ProtoError::Decode)
+        }
+        _ => Err(ProtoError::BadOp),
+    }
+}

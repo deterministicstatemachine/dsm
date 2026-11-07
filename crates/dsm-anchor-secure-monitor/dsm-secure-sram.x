@@ -64,11 +64,13 @@ SECTIONS
    * word + belt-and-suspenders write at reset) so a Secure stack overflow FAULTS instead of
    * silently corrupting the monitor's own code/state/heap below it.
    * Sized from the production image itself: `scripts/stack-bound.py` walks its call graph and CI holds
-   * this to the result, about 49 KiB at the heaviest, which is a boot resuming a cut cage. On silicon
+   * this to the result, 54,560 bytes at the heaviest with a fault on top (2026-11-07, the receiver's
+   * payment check added). The owner moved it from 64K to 60K on 2026-11-07 to make room for that check's
+   * code, keeping 6.9 KB of the computed worst path free. On silicon
    * (SWD, 2026-07-13) bring-up overflowed a 20K stack through the driver's 4.6K handle being moved by
    * value, which is why those moves now sit in frames that return. The MSPLIM floor sits above `.bss`,
    * so any overflow faults (caught by the Secure fault handler) and never corrupts. */
-  __secure_stack_size = 64K;
+  __secure_stack_size = 60K;
   PROVIDE(_stack_start = ORIGIN(SECURE) + LENGTH(SECURE));
   PROVIDE(__secure_stack_limit = ORIGIN(SECURE) + LENGTH(SECURE) - __secure_stack_size);
 

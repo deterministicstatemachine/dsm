@@ -161,15 +161,10 @@ impl RealizedHead {
         counterparty_devid: [u8; 32],
         operation: Operation,
         deltas: &[BalanceDelta],
-        offline_spend: Option<OfflineSpend>,
+        offline: Option<OfflineMove>,
     ) -> Result<AdvanceOutcome, DsmError> {
-        self.0.advance(
-            rel_key,
-            counterparty_devid,
-            operation,
-            deltas,
-            offline_spend,
-        )
+        self.0
+            .advance(rel_key, counterparty_devid, operation, deltas, offline)
     }
 
     /// The relationship with `counterparty_devid` established at its `h_0`:
@@ -483,6 +478,41 @@ pub struct OfflineSpend {
     pub next_frontier: [u8; 32],
 }
 
+/// The receiver's side of an offline-bearer transfer (owner, 2026-11-07: an offline payment needs a
+/// board on both sides, and the money received lands in the receiver's own offline balance): its
+/// own board's receive commit credits what its offline account holds received of the operation's
+/// asset — never its loaded allocation, never its online balance — and the account's counter and
+/// frontier advance with the board's. One write set over the account, landing with the relationship
+/// leaf in ONE device-root replacement, as a spend's does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfflineReceive {
+    /// The receiver's own anchor bundle `B_r`, whose offline account receives.
+    pub anchor_bundle_b: [u8; 32],
+    /// Asset (CPTA `policy_commit`) received.
+    pub asset: [u8; 32],
+    /// Amount received — must equal the transfer operation's amount.
+    pub amount: u64,
+    /// The frontier the receiver's board's receive commit advances the account to.
+    pub next_frontier: [u8; 32],
+}
+
+/// How an offline-bearer transfer moves this device's offline account: the sender's spend draws its
+/// allocation down, the receiver's receive credits what it holds received.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfflineMove {
+    Spend(OfflineSpend),
+    Receive(OfflineReceive),
+}
+
+impl OfflineMove {
+    fn amount(&self) -> u64 {
+        match self {
+            Self::Spend(s) => s.amount,
+            Self::Receive(r) => r.amount,
+        }
+    }
+}
+
 /// By-construction balance-conservation guard for [`DeviceState::advance`].
 ///
 /// Validates that `deltas` exactly realize `operation` for the device identified
@@ -494,11 +524,11 @@ pub struct OfflineSpend {
 /// - `Transfer` (online): exactly one delta, `amount == op.amount`, direction is `Credit`
 ///   iff this device is the recipient (`op.to_device_id == local_devid`) else
 ///   `Debit`, and `policy_commit == op.policy_commit` (§9.5 token binding).
-/// - `Transfer` (offline-bearer, `offline_spend = Some(amount)`): value comes from the
-///   device-bound offline-cash allocation, so `deltas` MUST be empty (the online balance is not
-///   touched) and the allocation debit must equal `op.amount`. The operation must be a bearer
-///   transfer (`OfflineBearerRequired`). This keeps ONE conservation chokepoint across both
-///   value regimes — the allocation debit is the conserved source, exactly as an online `Debit` is.
+/// - `Transfer` (offline-bearer): value moves only through the offline accounts, so `deltas` MUST
+///   be empty (the online balance is not touched on either side). The sender's spend debits its
+///   loaded allocation by `op.amount`; the recipient's receive credits what its own account holds
+///   received by `op.amount` (owner, 2026-11-07). Neither side may take the other's move. This
+///   keeps ONE conservation chokepoint across both value regimes.
 /// - `Burn`: exactly one `Debit` delta of `amount`.
 /// - `CreateToken`: the debit of the protocol's ERA creation fee,
 ///   [`TOKEN_CREATION_FEE_ERA`](crate::core::token::TOKEN_CREATION_FEE_ERA)
@@ -512,11 +542,11 @@ fn validate_conservation(
     local_devid: &[u8; 32],
     operation: &Operation,
     deltas: &[BalanceDelta],
-    offline_spend: Option<u64>,
+    offline: Option<&OfflineMove>,
 ) -> Result<(), DsmError> {
-    // A allocation-backed spend is only ever valid for an offline-bearer transfer. Reject it on any
-    // other operation before the per-op match, so no non-transfer path can source from the allocation.
-    if offline_spend.is_some()
+    // An offline account move is only ever valid for an offline-bearer transfer. Reject it on any
+    // other operation before the per-op match, so no non-transfer path can move an offline account.
+    if offline.is_some()
         && !crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(operation)
     {
         return Err(DsmError::invalid_operation(
@@ -567,36 +597,41 @@ fn validate_conservation(
                 } else {
                     Side::Sender
                 };
-                return match (offline_spend, side) {
-                    // The sender draws the value from its offline account, never the online
-                    // balance.
-                    (Some(allocation_amount), Side::Sender) => {
-                        if !deltas.is_empty() {
-                            return Err(DsmError::invalid_operation(
-                                "conservation: offline-bearer transfer must not apply an online balance delta",
-                            ));
-                        }
-                        if allocation_amount != amount.value() {
-                            return Err(DsmError::invalid_operation(
-                                "conservation: offline-cash allocation debit != transfer amount",
-                            ));
-                        }
-                        Ok(())
+                if !deltas.is_empty() {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: an offline-bearer transfer applies no online balance delta \
+                         on either side",
+                    ));
+                }
+                if let Some(moved) = offline {
+                    if moved.amount() != amount.value() {
+                        return Err(DsmError::invalid_operation(
+                            "conservation: the offline account moves another amount than the \
+                             transfer's",
+                        ));
                     }
-                    // The receiver credits nothing online: value received offline is pending
-                    // until it is validated online, and its settlement is an admitted economic
-                    // step of its own (SA-91; the owner's rule that offline receipts stay
-                    // unspendable until then).
-                    (None, Side::Recipient) => match deltas {
-                        [] => Ok(()),
-                        _ => Err(DsmError::invalid_operation(
-                            "conservation: an offline-bearer receipt credits nothing online — its \
-                             value is pending until it is reconciled online (SA-91)",
-                        )),
-                    },
-                    (Some(_), Side::Recipient) => Err(DsmError::invalid_operation(
-                        "conservation: a transfer to this device spends nothing of its offline \
-                         account",
+                }
+                return match (offline, side) {
+                    // The sender draws the value from its loaded allocation.
+                    (Some(OfflineMove::Spend(_)), Side::Sender) => Ok(()),
+                    // The receiver's board's receive commit credits what its own offline account
+                    // holds received (owner, 2026-11-07): never its online balance.
+                    (Some(OfflineMove::Receive(_)), Side::Recipient) => Ok(()),
+                    (Some(OfflineMove::Receive(_)), Side::Sender) => {
+                        Err(DsmError::invalid_operation(
+                            "conservation: the sender of an offline-bearer transfer receives \
+                             nothing",
+                        ))
+                    }
+                    (Some(OfflineMove::Spend(_)), Side::Recipient) => {
+                        Err(DsmError::invalid_operation(
+                            "conservation: a transfer to this device spends nothing of its \
+                             offline account",
+                        ))
+                    }
+                    (None, Side::Recipient) => Err(DsmError::invalid_operation(
+                        "conservation: an offline-bearer transfer to this device is received \
+                         only through its own board's receive commit, into its offline account",
                     )),
                     (None, Side::Sender) => Err(DsmError::invalid_operation(
                         "conservation: an offline-bearer transfer's sender draws it from its \
@@ -1369,7 +1404,7 @@ impl DeviceState {
         counterparty_devid: [u8; 32],
         operation: Operation,
         deltas: &[BalanceDelta],
-        offline_spend: Option<OfflineSpend>,
+        offline: Option<OfflineMove>,
     ) -> Result<AdvanceOutcome, DsmError> {
         // A zero-effect transition is not a transition (MR-DSM-0201), online or
         // offline, refused before anything else is computed.
@@ -1409,12 +1444,7 @@ impl DeviceState {
         // value from the device-bound allocation and `deltas` is empty. This is the by-construction
         // guard at the sole balance-mutation chokepoint (online balance AND offline allocation); it
         // rejects value creation/substitution regardless of caller.
-        validate_conservation(
-            &self.devid,
-            &operation,
-            deltas,
-            offline_spend.map(|o| o.amount),
-        )?;
+        validate_conservation(&self.devid, &operation, deltas, offline.as_ref())?;
 
         // SOFI v8 SIGNS ITS PROTOCOL OBJECTS, NOT A SECOND COPY OF THEM.
         //
@@ -1497,35 +1527,69 @@ impl DeviceState {
         // the counter step and the frontier's advance are one write set over the
         // account, and the account's new root is written with the relationship
         // leaf below, so they land in ONE atomic device root.
-        let account_spend = match offline_spend {
+        let account_spend = match offline {
             None => None,
-            Some(os) => {
-                // The allocation drawn from is the one for the operation's own
-                // asset: its receipt's verifier derives the leaf from it.
+            Some(moved) => {
+                use crate::types::offline_account::{
+                    AccountWitness, OfflineAccountStep, ReceiveWitness, SpendWitness,
+                };
+                let (bundle, asset, step) = match moved {
+                    OfflineMove::Spend(os) => (
+                        os.anchor_bundle_b,
+                        os.asset,
+                        OfflineAccountStep::Spend {
+                            asset: os.asset,
+                            amount: os.amount,
+                            next_frontier: os.next_frontier,
+                        },
+                    ),
+                    OfflineMove::Receive(or) => {
+                        // A receive is a credit, held to the adoption gate an online credit is:
+                        // value of a token arrives only where its policy is installed.
+                        if !self.has_adopted(&or.asset) {
+                            return Err(DsmError::invalid_operation(format!(
+                                "advance: refusing to receive token {} offline — this device has \
+                                 not adopted its policy",
+                                crate::utils::text_id::encode_base32_crockford(&or.asset)
+                            )));
+                        }
+                        (
+                            or.anchor_bundle_b,
+                            or.asset,
+                            OfflineAccountStep::Receive {
+                                asset: or.asset,
+                                amount: or.amount,
+                                next_frontier: or.next_frontier,
+                            },
+                        )
+                    }
+                };
+                // The account moved is the one for the operation's own asset: its receipt's
+                // verifier derives the leaf from it.
                 if !matches!(
                     &operation,
-                    Operation::Transfer { policy_commit, .. } if *policy_commit == os.asset
+                    Operation::Transfer { policy_commit, .. } if *policy_commit == asset
                 ) {
                     return Err(DsmError::invalid_operation(
-                        "advance: an offline-cash spend draws from the allocation of the operation's own asset",
+                        "advance: an offline-bearer transfer moves the offline account of the \
+                         operation's own asset",
                     ));
                 }
-                let account = self
-                    .offline_accounts
-                    .get(&os.anchor_bundle_b)
-                    .ok_or_else(|| {
-                        DsmError::invalid_operation(
-                            "advance: this device holds no offline account for the anchor bundle",
-                        )
-                    })?;
-                let spent =
-                    account.step(&crate::types::offline_account::OfflineAccountStep::Spend {
-                        asset: os.asset,
-                        amount: os.amount,
-                        next_frontier: os.next_frontier,
-                    })?;
-                let witness = crate::types::offline_account::SpendWitness::of(account, &spent)?;
-                Some((os.anchor_bundle_b, spent.account, witness))
+                let account = self.offline_accounts.get(&bundle).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: this device holds no offline account for the anchor bundle",
+                    )
+                })?;
+                let stepped = account.step(&step)?;
+                let witness = match moved {
+                    OfflineMove::Spend(_) => {
+                        AccountWitness::Spend(SpendWitness::of(account, &stepped)?)
+                    }
+                    OfflineMove::Receive(_) => {
+                        AccountWitness::Receive(ReceiveWitness::of(account, &stepped)?)
+                    }
+                };
+                Some((bundle, stepped.account, witness))
             }
         };
 
@@ -1837,8 +1901,9 @@ impl DeviceState {
             ),
             OfflineBoundaryKind::Settle => {
                 return Err(DsmError::invalid_operation(
-                    "a settlement moves no offline account of its own: it is a credit of what \
-                     this device received offline (settle_offline_receipt)",
+                    "the unload of a received payment is not a boundary of the loaded \
+                     allocation: it moves what the account holds received \
+                     (settle_offline_receipt)",
                 ))
             }
         };
@@ -1875,22 +1940,36 @@ impl DeviceState {
 }
 
 impl RealizedHead {
-    /// Settle what this device received offline: its online balance credited
-    /// by `amount` of `asset`, the payment a payer's spend made to it and the
-    /// payer's online history exposed (SA-91). The credit is an admitted
-    /// economic transition, funded by that spend
-    /// (`economic::offline_boundary::OfflineSettlementBody`); this is the head
-    /// it leaves. No offline account moves.
+    /// The unload of a payment this device received offline (owner, 2026-11-07): `amount` of
+    /// `asset` leaves what its offline account under its own bundle `bundle` holds received, and its
+    /// online balance is credited by it. The credit is an admitted economic transition, funded by the
+    /// payer's spend the payer's online history exposed
+    /// (`economic::offline_boundary::OfflineSettlementBody`), which a contact checks against that
+    /// history. Answers the head it leaves, with the account's step as the witness the account's
+    /// next boundary carries in its ancestry.
     pub fn settle_offline_receipt(
         &self,
+        bundle: &[u8; 32],
         asset: &[u8; 32],
         amount: u64,
-    ) -> Result<RealizedHead, DsmError> {
+    ) -> Result<(RealizedHead, crate::types::offline_account::SettleWitness), DsmError> {
+        use crate::types::offline_account::{OfflineAccountStep, SettleWitness};
         if amount == 0 {
             return Err(DsmError::invalid_operation(
                 "a settlement credits a positive amount",
             ));
         }
+        let account = self.0.offline_accounts.get(bundle).ok_or_else(|| {
+            DsmError::invalid_operation(
+                "the unload of a received payment names an offline account this device does not \
+                 hold",
+            )
+        })?;
+        let settled = account.step(&OfflineAccountStep::Settle {
+            asset: *asset,
+            amount,
+        })?;
+        let witness = SettleWitness::of(account, &settled)?;
         let mut balances = self.0.balances.clone();
         let credited = match balances.get(asset) {
             Some(held) => held.checked_add(amount).ok_or_else(|| {
@@ -1899,10 +1978,19 @@ impl RealizedHead {
             None => amount,
         };
         balances.insert(*asset, credited);
-        Ok(RealizedHead::of(DeviceState {
-            balances,
-            ..self.0.clone()
-        }))
+        let mut smt = self.0.smt.clone();
+        smt.apply_writes(&[(offline_account_leaf_key(bundle), settled.account.root())])?;
+        let mut offline_accounts = self.0.offline_accounts.clone();
+        offline_accounts.insert(*bundle, settled.account);
+        Ok((
+            RealizedHead::of(DeviceState {
+                balances,
+                smt,
+                offline_accounts,
+                ..self.0.clone()
+            }),
+            witness,
+        ))
     }
 }
 
@@ -1913,9 +2001,9 @@ pub enum OfflineBoundaryKind {
     Load,
     /// From the offline account back to the online balance.
     Unload,
-    /// A receiver's settlement of value it received offline: its online balance
-    /// credited by the payer's spend the payer's online history exposed
-    /// (SA-91). It moves no offline account of its own.
+    /// The unload of a payment received offline: its amount leaves what the receiver's offline
+    /// account holds received for its online balance, funded by the payer's spend the payer's
+    /// online history exposed (owner, 2026-11-07).
     Settle,
 }
 
@@ -2762,15 +2850,13 @@ pub(crate) mod tests {
         // Non-balance op must carry no deltas.
         assert!(validate_conservation(&me, &op(), &[], None).is_ok());
         assert!(validate_conservation(&me, &op(), &[credit(1, pcx)], None).is_err());
-        // offline_spend is only valid on a bearer transfer, and forbids online deltas.
-        assert!(
-            validate_conservation(&me, &burn_op_for(9, pcx), &[], Some(9)).is_err(),
-            "allocation spend on a non-bearer op must be rejected"
-        );
-        assert!(
-            validate_conservation(&me, &op(), &[], Some(1)).is_err(),
-            "allocation spend on a non-transfer op must be rejected"
-        );
+        // An offline account move is only valid on a bearer transfer, and forbids online deltas.
+        validate_conservation(&me, &burn_op_for(9, pcx), &[], Some(&spend_of(9)))
+            .expect_err("allocation spend on a non-bearer op must be rejected");
+        validate_conservation(&me, &op(), &[], Some(&spend_of(1)))
+            .expect_err("allocation spend on a non-transfer op must be rejected");
+        validate_conservation(&me, &op(), &[], Some(&receive_of(1)))
+            .expect_err("a receive on a non-transfer op must be rejected");
         // A bearer transfer sourced from the allocation: empty deltas + Some(offline_spend) is accepted;
         // but empty deltas WITHOUT offline_spend is rejected before commit (the fail-closed case the
         // activation seam must never produce — empty deltas and Some(offline_spend) are one choice).
@@ -2801,41 +2887,74 @@ pub(crate) mod tests {
             }
         };
         let bearer_xfer = |amt: u64| bearer_to(other, amt);
-        assert!(
-            validate_conservation(&me, &bearer_xfer(5), &[], Some(5)).is_ok(),
-            "bearer transfer with empty deltas + matching allocation debit must be accepted"
+        validate_conservation(&me, &bearer_xfer(5), &[], Some(&spend_of(5))).expect(
+            "bearer transfer with empty deltas + matching allocation debit must be accepted",
         );
-        assert!(
-            validate_conservation(&me, &bearer_xfer(5), &[], None).is_err(),
-            "bearer transfer with empty deltas and NO offline_spend must be rejected before commit"
+        validate_conservation(&me, &bearer_xfer(5), &[], None).expect_err(
+            "bearer transfer with empty deltas and NO offline_spend must be rejected before commit",
         );
+        validate_conservation(&me, &bearer_xfer(5), &[debit(5, pcx)], Some(&spend_of(5)))
+            .expect_err(
+                "bearer transfer must not carry an online delta alongside a allocation spend",
+            );
+        validate_conservation(&me, &bearer_xfer(5), &[], Some(&spend_of(6)))
+            .expect_err("bearer allocation debit must equal the transfer amount");
+        let received = validate_conservation(&me, &bearer_xfer(5), &[], Some(&receive_of(5)))
+            .expect_err("the sender receiving its own payment");
         assert!(
-            validate_conservation(&me, &bearer_xfer(5), &[debit(5, pcx)], Some(5)).is_err(),
-            "bearer transfer must not carry an online delta alongside a allocation spend"
+            received.to_string().contains("receives nothing"),
+            "refused for the receive: {received}"
         );
-        assert!(
-            validate_conservation(&me, &bearer_xfer(5), &[], Some(6)).is_err(),
-            "bearer allocation debit must equal the transfer amount"
-        );
-        // The receiver credits nothing online: the value is pending until its
-        // settlement is admitted online (SA-91). A receipt that applies the
-        // credit an online transfer would is refused, as is one that spends
-        // from the receiver's own account.
+        // The receiver's board's receive commit credits what its own offline account holds
+        // received (owner, 2026-11-07): never its online balance, never a spend, and never
+        // nothing.
         let (moving, _) = moving_token();
-        validate_conservation(&me, &bearer_to(me, 5), &[], None)
-            .expect("a receipt that credits nothing is the receiver's step");
-        let credited = validate_conservation(&me, &bearer_to(me, 5), &[credit(5, moving)], None)
-            .expect_err("a receipt credited online before it is settled");
+        validate_conservation(&me, &bearer_to(me, 5), &[], Some(&receive_of(5)))
+            .expect("the receiver's step receives into its offline account");
+        let nothing = validate_conservation(&me, &bearer_to(me, 5), &[], None)
+            .expect_err("a receipt that receives nothing into the offline account");
         assert!(
-            credited.to_string().contains("credits nothing online"),
+            nothing
+                .to_string()
+                .contains("only through its own board's receive commit"),
+            "refused for receiving nothing: {nothing}"
+        );
+        let credited = validate_conservation(&me, &bearer_to(me, 5), &[credit(5, moving)], None)
+            .expect_err("a receipt credited online");
+        assert!(
+            credited.to_string().contains("no online balance delta"),
             "refused for the credit: {credited}"
         );
-        let spent = validate_conservation(&me, &bearer_to(me, 5), &[], Some(5))
+        let spent = validate_conservation(&me, &bearer_to(me, 5), &[], Some(&spend_of(5)))
             .expect_err("a receipt that spends the receiver's own account");
         assert!(
             spent.to_string().contains("spends nothing of its offline"),
             "refused for the spend: {spent}"
         );
+        let wrong = validate_conservation(&me, &bearer_to(me, 5), &[], Some(&receive_of(4)))
+            .expect_err("a receive of another amount");
+        assert!(
+            wrong.to_string().contains("another amount"),
+            "refused for the amount: {wrong}"
+        );
+    }
+
+    fn spend_of(amount: u64) -> OfflineMove {
+        OfflineMove::Spend(OfflineSpend {
+            anchor_bundle_b: [0xB1; 32],
+            asset: [0xA1; 32],
+            amount,
+            next_frontier: [0xF1; 32],
+        })
+    }
+
+    fn receive_of(amount: u64) -> OfflineMove {
+        OfflineMove::Receive(OfflineReceive {
+            anchor_bundle_b: [0xB1; 32],
+            asset: [0xA1; 32],
+            amount,
+            next_frontier: [0xF1; 32],
+        })
     }
 
     /// The credit shape the recipient path builds for a custom token: a
@@ -3180,12 +3299,12 @@ pub(crate) mod tests {
         let rk = compute_smt_key(&loaded.devid, &cp);
         let loaded = loaded.establish_relationship(cp).expect("establish");
         let spend = |amt: u64, asset: [u8; 32]| {
-            Some(OfflineSpend {
+            Some(OfflineMove::Spend(OfflineSpend {
                 anchor_bundle_b: bundle,
                 asset,
                 amount: amt,
                 next_frontier: [0x02; 32],
-            })
+            }))
         };
 
         let out = loaded
@@ -3273,7 +3392,7 @@ pub(crate) mod tests {
                 }],
                 spend(25, token),
             ),
-            "must not apply an online balance delta",
+            "applies no online balance delta on either side",
         );
         refused(
             loaded.advance(rk, cp, bearer_op(cp, token, 100), &[], spend(100, token)),
@@ -3313,12 +3432,12 @@ pub(crate) mod tests {
                 cp,
                 bearer_op(cp, token, 25),
                 &[],
-                Some(OfflineSpend {
+                Some(OfflineMove::Spend(OfflineSpend {
                     anchor_bundle_b: bundle,
                     asset: token,
                     amount: 25,
                     next_frontier: [0x02; 32],
-                }),
+                })),
             )
             .expect("bearer advance");
         let commitment = DeviceTreeAcceptanceCommitment::from_root(
@@ -3366,7 +3485,7 @@ pub(crate) mod tests {
         }
         refused(
             check(&receipt, None),
-            "verified against the release it advances",
+            "verified against its author's board certificate",
         );
         // A receipt stating another allocation before the spend folds to
         // another account root.
@@ -3468,12 +3587,12 @@ pub(crate) mod tests {
                         p,
                         bearer_op(p, token, amount),
                         &[],
-                        Some(OfflineSpend {
+                        Some(OfflineMove::Spend(OfflineSpend {
                             anchor_bundle_b: bundle,
                             asset: token,
                             amount,
                             next_frontier,
-                        }),
+                        })),
                     );
                     let Ok(out) = advanced else {
                         // Core cannot make a step the allocation cannot pay:
@@ -3542,6 +3661,9 @@ pub(crate) mod tests {
                                             ReceiptLeaf::OfflineAccount(_) => {
                                                 anchor_w == Presence::Named
                                                     && alloc_w == Presence::Named
+                                            }
+                                            ReceiptLeaf::OfflineReceive(_) => {
+                                                panic!("a spend's receipt names no receive")
                                             }
                                         });
                                         match check(&r) {

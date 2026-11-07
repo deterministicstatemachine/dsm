@@ -25,7 +25,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("anchor proto not found: {}", proto_file.display()).into());
     }
 
+    // A payment check's payment and disclosure are boxed: every frame that holds a decoded request
+    // would otherwise hold them inline, a few hundred bytes of the Secure stack each.
     prost_build::Config::new()
+        .boxed(".dsm.anchor.ApplianceRequest.payment")
+        .boxed(".dsm.anchor.ApplianceRequest.payer")
         .out_dir(&out_dir)
         .compile_protos(&[&proto_file], &[&proto_dir, &include])?;
 

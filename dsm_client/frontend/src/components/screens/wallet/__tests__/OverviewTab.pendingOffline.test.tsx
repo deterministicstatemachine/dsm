@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Payments received offline and held pending are shown apart from the
-//! balances, each with its token, its amount and its payer, under "Pending
-//! settlement" (owner ruling, 2026-10-28). The balance rows are what
-//! balance.list answered, which does not include them. The rows here are
-//! built from the answers Rust gives, through the wallet's own mappings.
+//! Payments received offline, in the phone's offline balance, are shown apart
+//! from the balances, each with its token, its amount and its payer, under
+//! "Received offline" (owner rulings, 2026-10-28 and 2026-11-07), with the one
+//! action that moves the ready ones into the balance. The balance rows are what
+//! balance.list answered, which does not include them. The rows here are built
+//! from the answers Rust gives, through the wallet's own mappings.
 
 import React from 'react';
 import { render, screen, within } from '@testing-library/react';
@@ -44,11 +45,13 @@ const held = pendingOfflineView(
 /** The tab showing `answered` as balance.list answered it, loading as the wallet store says it is. */
 function renderTab(pendingOffline: PendingOfflineState, answered: TokenBalanceView[]) {
   const stay = (): void => undefined;
+  const read = async (): Promise<void> => undefined;
   return render(
     <OverviewTab
       balances={answered}
       balancesLoading={walletStore.getSnapshot().isLoading}
       pendingOffline={pendingOffline}
+      onReceivedMoved={read}
       transactions={[]}
       genesisB32=""
       deviceB32=""
@@ -61,7 +64,8 @@ function renderTab(pendingOffline: PendingOfflineState, answered: TokenBalanceVi
 it('shows each payment held pending apart from the balance, which it is not in', () => {
   renderTab({ receipts: held, error: null }, [wild]);
   const pending = screen.getByTestId('pending-offline');
-  expect(within(pending).getByText('Pending settlement')).toBeInTheDocument();
+  expect(within(pending).getByText('Received offline')).toBeInTheDocument();
+  expect(within(pending).getByTestId('unload-received')).toHaveTextContent('Move to balance');
   const rows = within(pending).getAllByTestId('pending-offline-receipt');
   expect(rows.map((r) => r.textContent)).toEqual(['WILD from Alice7.00', 'WILD from Alice3.00']);
 
@@ -69,6 +73,11 @@ it('shows each payment held pending apart from the balance, which it is not in',
   expect(within(balances).getByText('10.00')).toBeInTheDocument();
   expect(within(balances).queryByText('7.00')).not.toBeInTheDocument();
   expect(within(balances).queryByText('3.00')).not.toBeInTheDocument();
+});
+
+it('offers no unload when the received payments could not be read', () => {
+  renderTab({ receipts: [], error: 'the receipts held pending are unreadable' }, [wild]);
+  expect(screen.queryByTestId('unload-received')).not.toBeInTheDocument();
 });
 
 it('shows no pending section when nothing is held pending', () => {

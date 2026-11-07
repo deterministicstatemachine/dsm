@@ -96,6 +96,13 @@ impl Tropic for Chip {
         )]
     }
 
+    fn challenge_entropy(&mut self) -> Result<anchor_core::tropic::ChallengeEntropy, TropicError> {
+        Ok(anchor_core::tropic::ChallengeEntropy {
+            board: software_entropy(),
+            chip: software_entropy(),
+        })
+    }
+
     fn close_birth(&mut self) -> Result<(), TropicError> {
         self.closed_births += 1;
         Ok(())
@@ -589,4 +596,20 @@ fn service_rejects_host_boot() {
     let r = decode_response(&handle(&mut f.a, &encode_request(&req))).unwrap();
     assert!(!r.ok);
     assert_eq!(r.error, err::BAD_OP);
+}
+
+/// 32 bytes from the process's own randomness: this software chip's generator.
+fn software_entropy() -> [u8; 32] {
+    use std::hash::{BuildHasher, Hasher};
+    let drawn: Vec<u8> = (0..4u8)
+        .flat_map(|lane| {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u8(lane);
+            hasher.finish().to_le_bytes()
+        })
+        .collect();
+    match drawn.try_into() {
+        Ok(bytes) => bytes,
+        Err(short) => panic!("four lanes of eight bytes, not {}", short.len()),
+    }
 }

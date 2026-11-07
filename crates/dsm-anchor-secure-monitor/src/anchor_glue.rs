@@ -441,6 +441,28 @@ pub unsafe fn service_request(frame: &[u8], _measurement: Measurement) -> Vec<u8
     }
 }
 
+/// Whether a request frame of `total` bytes may be taken in now: any frame of a prepare's size, and a
+/// larger one, a payment check's, only while the anchor holds no record for its copies to meet.
+///
+/// SAFETY: single-threaded Secure context; the SG handler is the only caller.
+pub unsafe fn takes_frame(total: usize) -> bool {
+    total <= anchor_chip::MAX_REQUEST_BYTES || takes_a_payment_check(total)
+}
+
+#[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+unsafe fn takes_a_payment_check(total: usize) -> bool {
+    let slot = &*core::ptr::addr_of!(MONITOR_APP);
+    total <= anchor_chip::MAX_FRAME_BYTES
+        && matches!(slot, Monitor::Up(anchor) if anchor.takes_a_payment_check())
+}
+
+/// The identify and chip-preparing images serve no payment, so they take no frame larger than a
+/// prepare's.
+#[cfg(any(feature = "prepare_chip", feature = "identify_chip"))]
+unsafe fn takes_a_payment_check(total: usize) -> bool {
+    total <= anchor_chip::MAX_REQUEST_BYTES
+}
+
 /// The answer of an anchor that did not come up, to whichever op asked.
 fn not_up(frame: &[u8], reason: &str) -> Vec<u8> {
     match decode_request(frame) {

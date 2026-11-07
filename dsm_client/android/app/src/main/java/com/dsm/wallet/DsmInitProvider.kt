@@ -27,11 +27,13 @@ class DsmInitProvider : ContentProvider() {
             // it only opens the Pico lazily on the first counter read, and accepts no value by itself.
             context?.let { com.dsm.wallet.bridge.LocalPicoUsb.init(it) }
 
-            // The sender's anchor appliance: register its USB transport with Rust, so the
-            // first offline read attaches the appliance by itself and every later one reuses
-            // it. Registering opens nothing; Android asks for the USB permission once, on first
-            // use. A build without the anchor capability has no such export: offline sends are
-            // unavailable there, and Rust refuses them saying so.
+            // The phone's anchor appliance, for both sides of an offline payment (owner,
+            // 2026-11-07: an offline payment needs a board on both sides): register its USB
+            // transport with Rust, so the first offline read attaches the appliance by itself and
+            // every later one reuses it. Registering opens nothing; Android asks for the USB
+            // permission once, on first use. A build without the anchor capability has no such
+            // export: offline sends and receives are unavailable there, and Rust refuses them
+            // saying so.
             try {
                 com.dsm.wallet.bridge.Unified.installAnchorTransport()
             } catch (e: UnsatisfiedLinkError) {

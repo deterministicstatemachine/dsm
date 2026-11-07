@@ -93,6 +93,21 @@ enum Op {
                        // substituted; nothing is bound. See try_run.rs.
   OP_IDENTIFY    = 12; // what the chip says it is and what it holds, read with nothing written to
                        // it or to the board's OTP. Only the identify image serves it. See identify.rs.
+  // The receiver's side of an offline payment (owner, 2026-11-07). See receive.rs.
+  OP_CHALLENGE     = 13; // draw a receive challenge from both hardware sources and hold it open
+  OP_CHECK_PAYMENT = 14; // check the payer's release against the open challenge, before the receive
+}
+
+// What a payer discloses of its enrollment, for its bundle B to recompute (every field B binds).
+message PayerDisclosure {
+  bytes  online_id_pk     = 1;
+  bytes  anchor_id        = 2;  // 32
+  bytes  chip_pk          = 3;
+  bytes  partition_pk     = 4;
+  uint32 enrolled_counter = 5;
+  bytes  device_id        = 6;  // 32
+  bytes  policy_hash      = 7;  // 32
+  bytes  birth_commitment = 8;  // 32
 }
 
 // What an install of this anchor makes.
@@ -126,6 +141,8 @@ message ApplianceRequest {
   reserved 6;  // the raw-SPI relay's MOSI bytes
   reserved "spi_payload";
   Provisioning provision            = 7;  // OP_PROVISION: the device the anchor is bound to
+  OfflineRelease payment            = 8;  // OP_CHECK_PAYMENT: the payer's transition and certificate
+  PayerDisclosure payer             = 9;  // OP_CHECK_PAYMENT: the payer's enrollment
 }
 
 // One thing a try-run went through.
@@ -179,6 +196,8 @@ message ApplianceResponse {
   // TROPIC01 CA, Tropic Square root.
   repeated bytes chip_certificates   = 21;
   InstallKind install                = 22; // OP_STATUS, OP_TRY_RUN: what an install here makes
+  bytes receiver_challenge           = 23; // OP_CHALLENGE: the challenge drawn (32)
+  bytes open_challenge               = 24; // OP_STATUS: the challenge held open (32), if any
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the
@@ -205,6 +224,7 @@ message DurableActive {
     DurablePrepared prepared       = 3;
     DurableCommitted committed     = 4;
   }
+  bytes open_challenge             = 5;  // 32  the receive challenge held open, or empty
 }
 
 // What the host supplies when it provisions an anchor for its device, once: the identity the

@@ -18,7 +18,8 @@ const SESSION_COLUMNS: &str = "commitment_hash, counterparty_device_id, operatio
     counterparty_genesis_hash, local_signature, counterparty_signature, sender_ble_address,
     stitched_receipt_bytes, counter_signed_receipt, parent_tip, receiver_challenge,
     sent_child_root, spend_anchor_bundle, spend_asset, spend_amount, spend_next_frontier,
-    owed_frame, terms_bytes";
+    owed_frame, terms_bytes, receive_anchor_bundle, receive_asset, receive_amount,
+    receive_next_frontier";
 
 fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BilateralSessionRecord> {
     Ok(BilateralSessionRecord {
@@ -41,6 +42,10 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BilateralSessio
         spend_next_frontier: row.get(16)?,
         owed_frame: row.get(17)?,
         terms_bytes: row.get(18)?,
+        receive_anchor_bundle: row.get(19)?,
+        receive_asset: row.get(20)?,
+        receive_amount: row.get(21)?,
+        receive_next_frontier: row.get(22)?,
     })
 }
 
@@ -171,8 +176,10 @@ pub fn store_bilateral_session_with_conn(
             counterparty_genesis_hash, local_signature, counterparty_signature, sender_ble_address,
             stitched_receipt_bytes, counter_signed_receipt, parent_tip, receiver_challenge,
             sent_child_root, spend_anchor_bundle, spend_asset, spend_amount, spend_next_frontier,
-            owed_frame, terms_bytes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            owed_frame, terms_bytes, receive_anchor_bundle, receive_asset, receive_amount,
+            receive_next_frontier)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+                 ?20, ?21, ?22, ?23)
          ON CONFLICT(commitment_hash) DO UPDATE SET
             phase = excluded.phase,
             local_signature = excluded.local_signature,
@@ -189,7 +196,11 @@ pub fn store_bilateral_session_with_conn(
             spend_amount = COALESCE(excluded.spend_amount, bilateral_sessions.spend_amount),
             spend_next_frontier = COALESCE(excluded.spend_next_frontier, bilateral_sessions.spend_next_frontier),
             owed_frame = COALESCE(excluded.owed_frame, bilateral_sessions.owed_frame),
-            terms_bytes = COALESCE(excluded.terms_bytes, bilateral_sessions.terms_bytes)",
+            terms_bytes = COALESCE(excluded.terms_bytes, bilateral_sessions.terms_bytes),
+            receive_anchor_bundle = COALESCE(excluded.receive_anchor_bundle, bilateral_sessions.receive_anchor_bundle),
+            receive_asset = COALESCE(excluded.receive_asset, bilateral_sessions.receive_asset),
+            receive_amount = COALESCE(excluded.receive_amount, bilateral_sessions.receive_amount),
+            receive_next_frontier = COALESCE(excluded.receive_next_frontier, bilateral_sessions.receive_next_frontier)",
         params![
             &session.commitment_hash,
             &session.counterparty_device_id,
@@ -210,6 +221,10 @@ pub fn store_bilateral_session_with_conn(
             &session.spend_next_frontier,
             &session.owed_frame,
             &session.terms_bytes,
+            &session.receive_anchor_bundle,
+            &session.receive_asset,
+            &session.receive_amount,
+            &session.receive_next_frontier,
         ],
     )?;
     Ok(())
@@ -245,12 +260,13 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
 
 /// The phase tags of a step in flight: the steps a relationship's one-step-
 /// at-a-time rule counts.
-pub const IN_FLIGHT_PHASE_TAGS: [&str; 6] = [
+pub const IN_FLIGHT_PHASE_TAGS: [&str; 7] = [
     "preparing",
     "prepared",
     "pending_user_action",
     "accepted",
     "releasing",
+    "receiving",
     "confirm_pending",
 ];
 
@@ -416,6 +432,10 @@ mod tests {
             spend_anchor_bundle: None,
             spend_asset: None,
             spend_amount: None,
+            receive_anchor_bundle: None,
+            receive_asset: None,
+            receive_amount: None,
+            receive_next_frontier: None,
             owed_frame: None,
             terms_bytes: None,
         }
@@ -498,6 +518,7 @@ mod tests {
             "accepted",
             "rejected",
             "releasing",
+            "receiving",
             "confirm_pending",
             "committed",
             "failed",

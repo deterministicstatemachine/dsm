@@ -220,6 +220,9 @@ fn active_pb(active: &Active) -> pb::DurableActive {
         root: active.root.to_vec(),
         anchor_counter: active.anchor_counter,
         record,
+        open_challenge: active
+            .open_challenge
+            .map_or_else(Vec::new, |challenge| challenge.to_vec()),
     }
 }
 
@@ -262,11 +265,16 @@ fn active_from_pb(d: pb::DurableActive) -> Result<Active, RecordError> {
             )
         }
     };
+    let open_challenge = match d.open_challenge.as_slice() {
+        [] => None,
+        held => Some(arr32(held)?),
+    };
     Ok(Active {
         root: arr32(&d.root)?,
         anchor_counter: d.anchor_counter,
         status,
         record,
+        open_challenge,
     })
 }
 
@@ -515,6 +523,27 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
         let next = self.app.finalize()?;
         self.persist()?;
         Ok(next)
+    }
+
+    /// [`Appliance::draw_challenge`], then the open challenge written: a payer may release against it
+    /// after a power cut, and the receive must still be possible then.
+    pub fn draw_challenge(&mut self) -> Result<[u8; 32], DurableError> {
+        let challenge = match self.app.draw_challenge() {
+            Ok(challenge) => challenge,
+            Err(e) => return Err(self.back_to_written(e)),
+        };
+        self.persist()?;
+        Ok(challenge)
+    }
+
+    /// [`Appliance::check_payment`]. Nothing durable changes.
+    pub fn check_payment(
+        &mut self,
+        transition: &Transition,
+        cert: &crate::receive::PaymentCert,
+        payer: &crate::receive::PayerDisclosure,
+    ) -> Result<(), ApplianceError> {
+        self.app.check_payment(transition, cert, payer)
     }
 
     /// [`Appliance::cancel`], then the emptied record written.

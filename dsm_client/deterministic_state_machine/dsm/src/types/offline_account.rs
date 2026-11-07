@@ -14,8 +14,14 @@
 //!            allocation(asset) → H(amount) ┤
 //!            counter           → H(u)      ┤   the software counter (DSM §68)
 //!            frontier          → h         ┤   the offline frontier
-//!            funding chain     → op id     ┘   the last boundary, which chains every one before it
+//!            funding chain     → op id     ┤   the last boundary, which chains every one before it
+//!            received(asset)   → H(amount) ┘   value received offline, waiting for its unload
 //! ```
+//!
+//! Value received offline (owner, 2026-11-07: an offline payment needs a board on both sides, and
+//! the money received lands in the receiver's own offline balance) sits in its own leaf, apart from
+//! the loaded allocation: no spend draws from it, and it leaves only by its unload, which a contact
+//! takes once the payer's own online history shows the spend.
 //!
 //! The counter leaf is the authority for offline progression (DSM §68, §69):
 //! `u_{i+1} = u_i + 1` is committed into authenticated state, and the anchor's
@@ -35,8 +41,8 @@ use std::collections::BTreeMap;
 use crate::common::domain_tags::{
     TAG_OFFLINE_ACCOUNT_ALLOCATION_KEY, TAG_OFFLINE_ACCOUNT_ALLOCATION_VALUE,
     TAG_OFFLINE_ACCOUNT_COUNTER_KEY, TAG_OFFLINE_ACCOUNT_COUNTER_VALUE,
-    TAG_OFFLINE_ACCOUNT_FRONTIER_KEY, TAG_OFFLINE_ACCOUNT_LEAF,
-    TAG_OFFLINE_ACCOUNT_FUNDING_CHAIN_KEY,
+    TAG_OFFLINE_ACCOUNT_FRONTIER_KEY, TAG_OFFLINE_ACCOUNT_FUNDING_CHAIN_KEY,
+    TAG_OFFLINE_ACCOUNT_LEAF, TAG_OFFLINE_ACCOUNT_RECEIVED_KEY, TAG_OFFLINE_ACCOUNT_RECEIVED_VALUE,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::merkle::batch_fold::{fold_path, verify_batch, FoldEntry, FOLD_HEIGHT};
@@ -63,6 +69,20 @@ pub fn allocation_key(asset: &[u8; 32]) -> [u8; 32] {
 /// Account-tree value of an allocation holding `amount`.
 pub fn allocation_value(amount: u64) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_OFFLINE_ACCOUNT_ALLOCATION_VALUE);
+    h.update(&amount.to_be_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// Account-tree key of the amount of `asset` received offline.
+pub fn received_key(asset: &[u8; 32]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_OFFLINE_ACCOUNT_RECEIVED_KEY);
+    h.update(asset);
+    *h.finalize().as_bytes()
+}
+
+/// Account-tree value of a received amount of `amount`.
+pub fn received_value(amount: u64) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_OFFLINE_ACCOUNT_RECEIVED_VALUE);
     h.update(&amount.to_be_bytes());
     *h.finalize().as_bytes()
 }
@@ -125,6 +145,17 @@ pub enum OfflineAccountStep {
         amount: u64,
         next_frontier: [u8; 32],
     },
+    /// An offline-bearer receive, the receiver's board's receive commit: `amount` of `asset` is
+    /// added to what the account holds received (never to its loaded allocation), and the counter
+    /// and the frontier advance with it in the same write set.
+    Receive {
+        asset: [u8; 32],
+        amount: u64,
+        next_frontier: [u8; 32],
+    },
+    /// The unload of a payment received offline: `amount` of `asset` leaves what the account holds
+    /// received, for the online balance.
+    Settle { asset: [u8; 32], amount: u64 },
 }
 
 /// The values a step's touched leaves held before it, as the prover states
@@ -145,6 +176,15 @@ pub enum StepBefore {
         counter: u64,
         frontier: [u8; 32],
     },
+    /// Before a receive: what the account holds received of the step's asset, if it ever received
+    /// any, the counter and the frontier.
+    Receive {
+        received: Option<u64>,
+        counter: u64,
+        frontier: [u8; 32],
+    },
+    /// Before the unload of a received payment: what the account holds received of its asset.
+    Settle { received: u64 },
 }
 
 /// One leaf a step writes: its key and its value before and after.
@@ -250,6 +290,66 @@ pub fn step_writes(
                 },
             ]
         }
+        (
+            OfflineAccountStep::Receive {
+                asset,
+                amount,
+                next_frontier,
+            },
+            StepBefore::Receive {
+                received,
+                counter,
+                frontier,
+            },
+        ) => {
+            positive(*amount, "a receive")?;
+            let next = match received {
+                Some(held) => held.checked_add(*amount).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "a receive overflows what the account holds received",
+                    )
+                })?,
+                None => *amount,
+            };
+            let next_counter = counter
+                .checked_add(1)
+                .ok_or_else(|| DsmError::invalid_operation("the offline counter is exhausted"))?;
+            if next_frontier == frontier {
+                return Err(DsmError::invalid_operation(
+                    "a receive moves the offline frontier",
+                ));
+            }
+            vec![
+                AccountWrite {
+                    key: received_key(asset),
+                    pre: received.map(received_value),
+                    post: received_value(next),
+                },
+                AccountWrite {
+                    key: counter_key(),
+                    pre: Some(counter_value(*counter)),
+                    post: counter_value(next_counter),
+                },
+                AccountWrite {
+                    key: frontier_key(),
+                    pre: Some(*frontier),
+                    post: *next_frontier,
+                },
+            ]
+        }
+        (OfflineAccountStep::Settle { asset, amount }, StepBefore::Settle { received }) => {
+            positive(*amount, "an unload of a received payment")?;
+            let next = received.checked_sub(*amount).ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "an unload of a received payment takes more than the account holds received",
+                )
+            })?;
+            vec![AccountWrite {
+                key: received_key(asset),
+                pre: Some(received_value(*received)),
+                post: received_value(next),
+            }]
+        }
         _ => {
             return Err(DsmError::invalid_operation(
                 "the stated pre-values are not those of this kind of step",
@@ -339,6 +439,7 @@ pub fn verify_step(
 pub struct OfflineAccount {
     tree: SparseMerkleTree,
     allocations: BTreeMap<[u8; 32], u64>,
+    received: BTreeMap<[u8; 32], u64>,
     counter: u64,
     frontier: [u8; 32],
     funding_chain: Option<[u8; 32]>,
@@ -349,6 +450,7 @@ impl core::fmt::Debug for OfflineAccount {
         f.debug_struct("OfflineAccount")
             .field("root", &self.tree.root())
             .field("allocations", &self.allocations)
+            .field("received", &self.received)
             .field("counter", &self.counter)
             .field("frontier", &self.frontier)
             .field("funding_chain", &self.funding_chain)
@@ -369,12 +471,13 @@ impl OfflineAccount {
     /// Open the account of a newly enrolled anchor at its frontier and
     /// counter. It holds no allocation and no boundary has funded it.
     pub fn open(frontier: [u8; 32], counter: u64) -> Self {
-        Self::restore(BTreeMap::new(), counter, frontier, None)
+        Self::restore(BTreeMap::new(), BTreeMap::new(), counter, frontier, None)
     }
 
     /// Rebuild an account from its persisted record.
     pub fn restore(
         allocations: BTreeMap<[u8; 32], u64>,
+        received: BTreeMap<[u8; 32], u64>,
         counter: u64,
         frontier: [u8; 32],
         funding_chain: Option<[u8; 32]>,
@@ -382,6 +485,11 @@ impl OfflineAccount {
         let leaves = allocations
             .iter()
             .map(|(asset, amount)| (allocation_key(asset), allocation_value(*amount)))
+            .chain(
+                received
+                    .iter()
+                    .map(|(asset, amount)| (received_key(asset), received_value(*amount))),
+            )
             .chain([
                 (counter_key(), counter_value(counter)),
                 (frontier_key(), frontier),
@@ -390,6 +498,7 @@ impl OfflineAccount {
         Self {
             tree: SparseMerkleTree::from_leaves(leaves),
             allocations,
+            received,
             counter,
             frontier,
             funding_chain,
@@ -409,6 +518,16 @@ impl OfflineAccount {
     /// Every allocation, for persistence.
     pub fn allocations(&self) -> &BTreeMap<[u8; 32], u64> {
         &self.allocations
+    }
+
+    /// What the account holds received of `asset`, if it ever received any.
+    pub fn received(&self, asset: &[u8; 32]) -> Option<u64> {
+        self.received.get(asset).copied()
+    }
+
+    /// Everything the account holds received, by asset, for persistence.
+    pub fn received_amounts(&self) -> &BTreeMap<[u8; 32], u64> {
+        &self.received
     }
 
     /// The software counter `u`.
@@ -444,6 +563,18 @@ impl OfflineAccount {
                 counter: self.counter,
                 frontier: self.frontier,
             }),
+            OfflineAccountStep::Receive { asset, .. } => Ok(StepBefore::Receive {
+                received: self.received(asset),
+                counter: self.counter,
+                frontier: self.frontier,
+            }),
+            OfflineAccountStep::Settle { asset, .. } => Ok(StepBefore::Settle {
+                received: self.received(asset).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "an unload of a received payment names an asset the account never received",
+                    )
+                })?,
+            }),
         }
     }
 
@@ -458,6 +589,7 @@ impl OfflineAccount {
         let mut account = Self {
             tree,
             allocations: self.allocations.clone(),
+            received: self.received.clone(),
             counter: self.counter,
             frontier: self.frontier,
             funding_chain: self.funding_chain,
@@ -490,6 +622,20 @@ impl OfflineAccount {
                 *held -= amount;
                 account.counter += 1;
                 account.frontier = *next_frontier;
+            }
+            OfflineAccountStep::Receive {
+                asset,
+                amount,
+                next_frontier,
+            } => {
+                let held = account.received.entry(*asset).or_insert(0);
+                *held += amount;
+                account.counter += 1;
+                account.frontier = *next_frontier;
+            }
+            OfflineAccountStep::Settle { asset, amount } => {
+                let held = account.received.entry(*asset).or_insert(0);
+                *held -= amount;
             }
         }
         Ok(OfflineAccountMove {
@@ -620,6 +766,226 @@ impl SpendWitness {
             pre_frontier: fixed(&a.pre_frontier, "pre-frontier")?,
             next_frontier: fixed(&a.next_frontier, "next frontier")?,
             account_paths,
+        })
+    }
+}
+
+/// The paths of a witness, each in the one canonical encoding.
+fn decoded_paths(paths: &[EncodedPath]) -> Result<Vec<Box<[[u8; 32]; FOLD_HEIGHT]>>, DsmError> {
+    paths
+        .iter()
+        .map(|p| {
+            smt_path::decode::<DeviceSmtHashes>(&p.explicit_heights, &p.siblings)
+                .map_err(|e| DsmError::invalid_operation(format!("an offline account path: {e}")))
+        })
+        .collect()
+}
+
+/// The paths a wire form states, each checked to be in the one canonical encoding of a path.
+fn paths_from_proto(paths: Vec<SmtPathProto>, what: &str) -> Result<Vec<EncodedPath>, DsmError> {
+    paths
+        .into_iter()
+        .map(|p| {
+            smt_path::decode::<DeviceSmtHashes>(&p.heights, &p.siblings)
+                .map_err(|e| DsmError::invalid_operation(format!("{what}'s path: {e}")))?;
+            Ok(EncodedPath {
+                explicit_heights: fixed32(&p.heights, what, "path height set")?,
+                siblings: p.siblings,
+            })
+        })
+        .collect()
+}
+
+fn paths_to_proto(paths: &[EncodedPath]) -> Vec<SmtPathProto> {
+    paths
+        .iter()
+        .map(|p| SmtPathProto {
+            heights: p.explicit_heights.to_vec(),
+            siblings: p.siblings.clone(),
+        })
+        .collect()
+}
+
+fn fixed32(bytes: &[u8], what: &str, field: &str) -> Result<[u8; 32], DsmError> {
+    bytes
+        .try_into()
+        .map_err(|e| DsmError::invalid_operation(format!("{what}'s {field}: {e}")))
+}
+
+/// What a receipt carries for the offline account an offline-bearer receive writes, the receiver's
+/// own under its bundle (owner, 2026-11-07): the account as it stood before the receive, the
+/// frontier the receiver's board advanced to, and the account paths of the leaves the receive
+/// writes, in key order. After is derived from these and the operation, never carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiveWitness {
+    pub pre_account_root: [u8; 32],
+    /// What the account held received of the asset, or `None` when it never received it.
+    pub pre_received: Option<u64>,
+    pub pre_counter: u64,
+    pub pre_frontier: [u8; 32],
+    pub next_frontier: [u8; 32],
+    pub account_paths: Vec<EncodedPath>,
+}
+
+impl ReceiveWitness {
+    /// The witness of `receive` taken by `before` (the account the receive started from).
+    pub fn of(before: &OfflineAccount, receive: &OfflineAccountMove) -> Result<Self, DsmError> {
+        let StepBefore::Receive {
+            received,
+            counter,
+            frontier,
+        } = receive.before
+        else {
+            return Err(DsmError::invalid_operation(
+                "a receive witness is taken of a receive",
+            ));
+        };
+        Ok(Self {
+            pre_account_root: before.root(),
+            pre_received: received,
+            pre_counter: counter,
+            pre_frontier: frontier,
+            next_frontier: receive.account.frontier(),
+            account_paths: receive
+                .entries
+                .iter()
+                .map(|e| smt_path::encode::<DeviceSmtHashes>(&e.path))
+                .collect(),
+        })
+    }
+
+    /// The account root after receiving `amount` of `asset`: the receive's writes, recomputed from
+    /// this witness, folded from its pre-root.
+    pub fn post_account_root(&self, asset: &[u8; 32], amount: u64) -> Result<[u8; 32], DsmError> {
+        verify_step(
+            &self.pre_account_root,
+            &OfflineAccountStep::Receive {
+                asset: *asset,
+                amount,
+                next_frontier: self.next_frontier,
+            },
+            &StepBefore::Receive {
+                received: self.pre_received,
+                counter: self.pre_counter,
+                frontier: self.pre_frontier,
+            },
+            &decoded_paths(&self.account_paths)?,
+        )
+    }
+
+    /// The witness's wire form.
+    pub fn to_proto(&self) -> crate::types::proto::StepWriteOfflineReceive {
+        crate::types::proto::StepWriteOfflineReceive {
+            pre_account_root: self.pre_account_root.to_vec(),
+            pre_received: self.pre_received,
+            pre_counter: self.pre_counter,
+            pre_frontier: self.pre_frontier.to_vec(),
+            next_frontier: self.next_frontier.to_vec(),
+            account_paths: paths_to_proto(&self.account_paths),
+        }
+    }
+
+    /// The witness a wire form states.
+    pub fn from_proto(a: crate::types::proto::StepWriteOfflineReceive) -> Result<Self, DsmError> {
+        const WHAT: &str = "an offline receive witness";
+        Ok(Self {
+            pre_account_root: fixed32(&a.pre_account_root, WHAT, "pre-root")?,
+            pre_received: a.pre_received,
+            pre_counter: a.pre_counter,
+            pre_frontier: fixed32(&a.pre_frontier, WHAT, "pre-frontier")?,
+            next_frontier: fixed32(&a.next_frontier, WHAT, "next frontier")?,
+            account_paths: paths_from_proto(a.account_paths, WHAT)?,
+        })
+    }
+}
+
+/// The witness of the one offline-account move a bearer step makes: the sender's spend, or the
+/// receiver's receive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountWitness {
+    Spend(SpendWitness),
+    Receive(ReceiveWitness),
+}
+
+impl AccountWitness {
+    /// The account root the move started from.
+    pub fn pre_account_root(&self) -> [u8; 32] {
+        match self {
+            Self::Spend(w) => w.pre_account_root,
+            Self::Receive(w) => w.pre_account_root,
+        }
+    }
+
+    /// The receipt leaf that names the move.
+    pub fn receipt_leaf(&self) -> crate::types::receipt_types::ReceiptLeaf {
+        use crate::types::receipt_types::ReceiptLeaf;
+        match self {
+            Self::Spend(w) => ReceiptLeaf::OfflineAccount(Box::new(w.clone())),
+            Self::Receive(w) => ReceiptLeaf::OfflineReceive(Box::new(w.clone())),
+        }
+    }
+}
+
+/// The unload of a payment received offline, as a step of the account: the account before it,
+/// what it held received of the payment's asset, and the path of that leaf.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettleWitness {
+    pub pre_account_root: [u8; 32],
+    pub pre_received: u64,
+    pub account_path: EncodedPath,
+}
+
+impl SettleWitness {
+    /// The witness of `settle` taken by `before`.
+    pub fn of(before: &OfflineAccount, settle: &OfflineAccountMove) -> Result<Self, DsmError> {
+        let (StepBefore::Settle { received }, [entry]) = (settle.before, settle.entries.as_slice())
+        else {
+            return Err(DsmError::invalid_operation(
+                "a settle witness is taken of the one write of an unload of a received payment",
+            ));
+        };
+        Ok(Self {
+            pre_account_root: before.root(),
+            pre_received: received,
+            account_path: smt_path::encode::<DeviceSmtHashes>(&entry.path),
+        })
+    }
+
+    /// The account root after the unload of `amount` of `asset`.
+    pub fn post_account_root(&self, asset: &[u8; 32], amount: u64) -> Result<[u8; 32], DsmError> {
+        verify_step(
+            &self.pre_account_root,
+            &OfflineAccountStep::Settle {
+                asset: *asset,
+                amount,
+            },
+            &StepBefore::Settle {
+                received: self.pre_received,
+            },
+            &decoded_paths(core::slice::from_ref(&self.account_path))?,
+        )
+    }
+
+    pub fn to_proto(&self) -> crate::types::proto::StepWriteOfflineSettle {
+        crate::types::proto::StepWriteOfflineSettle {
+            pre_account_root: self.pre_account_root.to_vec(),
+            pre_received: self.pre_received,
+            account_path: paths_to_proto(core::slice::from_ref(&self.account_path))
+                .into_iter()
+                .next(),
+        }
+    }
+
+    pub fn from_proto(a: crate::types::proto::StepWriteOfflineSettle) -> Result<Self, DsmError> {
+        const WHAT: &str = "an offline settle witness";
+        let path = a
+            .account_path
+            .ok_or_else(|| DsmError::invalid_operation(format!("{WHAT} carries no path")))?;
+        let mut paths = paths_from_proto(vec![path], WHAT)?;
+        Ok(Self {
+            pre_account_root: fixed32(&a.pre_account_root, WHAT, "pre-root")?,
+            pre_received: a.pre_received,
+            account_path: paths.remove(0),
         })
     }
 }
@@ -794,6 +1160,7 @@ mod tests {
         assert_eq!(account.funding_chain(), Some([0x12; 32]));
         let rebuilt = OfflineAccount::restore(
             account.allocations().clone(),
+            account.received_amounts().clone(),
             account.counter(),
             account.frontier(),
             account.funding_chain(),
@@ -894,5 +1261,127 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    fn receive(amount: u64, next_frontier: u8) -> OfflineAccountStep {
+        OfflineAccountStep::Receive {
+            asset: ASSET,
+            amount,
+            next_frontier: [next_frontier; 32],
+        }
+    }
+
+    /// A receive (owner, 2026-11-07: the money received offline lands in the receiver's own offline
+    /// balance, apart from what it loaded) adds to what the account holds received, never to its
+    /// loaded allocation, and moves the counter and the frontier with the receiver's board. Its
+    /// unload takes only from what was received. Both fold from their pre-roots, and the account
+    /// they leave rebuilds from its persisted record.
+    #[test]
+    fn a_receive_lands_beside_the_loaded_allocation_and_leaves_only_by_its_unload() {
+        let mut account = OfflineAccount::open([0x01; 32], 0)
+            .step(&load(ASSET, 10, 0x10))
+            .expect("load")
+            .account;
+        for step in [
+            receive(4, 0x02),
+            receive(3, 0x03),
+            OfflineAccountStep::Settle {
+                asset: ASSET,
+                amount: 5,
+            },
+        ] {
+            let m = account.step(&step).expect("the account takes the step");
+            let post = verify_step(&account.root(), &step, &m.before, &paths(&m))
+                .expect("the step verifies");
+            assert_eq!(post, m.account.root());
+            account = m.account;
+        }
+        assert_eq!(
+            account.allocation(&ASSET),
+            Some(10),
+            "the loaded allocation is untouched"
+        );
+        assert_eq!(account.received(&ASSET), Some(2), "received 7, unloaded 5");
+        assert_eq!(account.counter(), 2, "each receive moves the counter once");
+        assert_eq!(account.frontier(), [0x03; 32]);
+        let rebuilt = OfflineAccount::restore(
+            account.allocations().clone(),
+            account.received_amounts().clone(),
+            account.counter(),
+            account.frontier(),
+            account.funding_chain(),
+        );
+        assert_eq!(rebuilt.root(), account.root());
+
+        // Money received is spent by no one: a spend takes the loaded allocation only.
+        refused(
+            account.step(&spend(11, 0x04)),
+            "takes more than the offline allocation holds",
+        );
+        // An unload of a received payment takes only from what was received.
+        refused(
+            account.step(&OfflineAccountStep::Settle {
+                asset: ASSET,
+                amount: 3,
+            }),
+            "takes more than the account holds received",
+        );
+        refused(
+            account.step(&OfflineAccountStep::Settle {
+                asset: OTHER,
+                amount: 1,
+            }),
+            "never received",
+        );
+        refused(
+            account.step(&receive(1, 0x03)),
+            "moves the offline frontier",
+        );
+        refused(account.step(&receive(0, 0x05)), "positive amount");
+    }
+
+    /// The witnesses a receipt and an account's ancestry carry fold exactly the step they were
+    /// taken of: a receive into an asset never received proves the received leaf absent, and a
+    /// misstated pre-value folds to another root.
+    #[test]
+    fn a_receive_and_its_unload_are_proven_by_their_witnesses() {
+        let opened = OfflineAccount::open([0x01; 32], 0);
+        let received = opened.step(&receive(6, 0x02)).expect("a first receive");
+        let witness = ReceiveWitness::of(&opened, &received).expect("its witness");
+        assert_eq!(witness.pre_received, None, "never received before");
+        assert_eq!(
+            witness.post_account_root(&ASSET, 6).expect("folds"),
+            received.account.root()
+        );
+        assert_ne!(
+            witness.post_account_root(&ASSET, 7).expect("folds"),
+            received.account.root(),
+            "another amount folds to another account"
+        );
+        let mut misstated = witness.clone();
+        misstated.pre_received = Some(0);
+        refused(
+            misstated.post_account_root(&ASSET, 6),
+            "the offline account step",
+        );
+        let wire = ReceiveWitness::from_proto(witness.to_proto()).expect("the wire form");
+        assert_eq!(wire, witness);
+
+        let settled = received
+            .account
+            .step(&OfflineAccountStep::Settle {
+                asset: ASSET,
+                amount: 6,
+            })
+            .expect("its unload");
+        let witness = SettleWitness::of(&received.account, &settled).expect("its witness");
+        assert_eq!(
+            witness.post_account_root(&ASSET, 6).expect("folds"),
+            settled.account.root()
+        );
+        assert_eq!(
+            SettleWitness::from_proto(witness.to_proto()).expect("the wire form"),
+            witness
+        );
     }
 }

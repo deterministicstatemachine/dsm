@@ -63,6 +63,10 @@ pub struct Birth {
     pub partition_sk: Vec<u8>,
     /// Resident chip public key `pk_chip` (`σ^chip`; echoed for pinning, bound into `B`).
     pub chip_pk: Vec<u8>,
+    /// The owner's DSM device id `B` binds: the device a payment to this anchor must name.
+    pub device_id: [u8; 32],
+    /// The policy `B` binds: the policy a payer's anchor must be enrolled under too.
+    pub policy_hash: [u8; 32],
 }
 
 /// `B = H("DSM/anchor-bundle/v2" ‖ H(pk_on) ‖ stpub ‖ commit(pk_chip) ‖ commit(pk_host) ‖
@@ -145,6 +149,8 @@ pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Result<Birth, PartitionError
         partition_pk,
         partition_sk,
         chip_pk: inp.chip_pk.to_vec(),
+        device_id: *inp.device_id,
+        policy_hash: *inp.policy_hash,
     })
 }
 

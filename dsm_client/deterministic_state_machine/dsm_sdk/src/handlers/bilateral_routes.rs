@@ -44,7 +44,11 @@ impl AppRouterImpl {
                             P::Rejected => W::OfflinePhaseRejected,
                             // A releasing step's appliance commitment is incomplete: it is
                             // pending, never shown as accepted before the anchor commits.
-                            P::Releasing | P::ConfirmPending => W::OfflinePhaseConfirmPending,
+                            // A receiving step's board is committing the receive: pending too,
+                            // never shown as received before its board commits.
+                            P::Releasing | P::Receiving | P::ConfirmPending => {
+                                W::OfflinePhaseConfirmPending
+                            }
                             P::Committed => W::OfflinePhaseCommitted,
                             P::Failed => W::OfflinePhaseFailed,
                         }
@@ -283,6 +287,10 @@ mod pending_list_tests {
             spend_amount: None,
             owed_frame: None,
             terms_bytes: Some(terms.to_bytes()),
+            receive_anchor_bundle: None,
+            receive_asset: None,
+            receive_amount: None,
+            receive_next_frontier: None,
         }
     }
 

@@ -13,18 +13,23 @@ use crate::storage::client_db::economic_lineage::{
     get_admitted_coordinate, latest_offline_account, offline_account_below,
 };
 use crate::storage::client_db::offline_boundary_notices::owed_to;
-use crate::test_support::appliance::{HostAppliance, InstalledAppliance};
+use crate::test_support::appliance::{HostAppliance, InstalledPair};
 use dsm::economic::peer_lineage::PeerOfflineAccount;
 use dsm::economic::register::economic_root_register_key;
 use dsm::types::device_state::DeviceState;
 use dsm::types::offline_account::OfflineAccount;
 
 /// A funded and loaded through the wallet route. B has run no sync since.
-async fn loaded_with_no_sync_since() -> (Pair, OfflineDevice, OfflineDevice, InstalledAppliance) {
+async fn loaded_with_no_sync_since() -> (Pair, OfflineDevice, OfflineDevice, InstalledPair) {
     let pair = Pair::boot(100, 0).await;
     let a = OfflineDevice::new(&pair.a);
     let b = OfflineDevice::new(&pair.b);
-    let appliance = HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
+    let appliance = HostAppliance::install_pair(
+        &pair.a,
+        HostAppliance::birth(&pair.a, [0xC4; 32], 16),
+        &pair.b,
+        HostAppliance::birth(&pair.b, [0xB4; 32], 16),
+    );
     a.device.enter();
     let loaded = offline_cash(&a, "wallet.loadOffline", "20.00").await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
@@ -35,7 +40,7 @@ async fn loaded_with_no_sync_since() -> (Pair, OfflineDevice, OfflineDevice, Ins
 fn recorded_by(
     reader: &TestDevice,
     payer: &TestDevice,
-    appliance: &InstalledAppliance,
+    appliance: &InstalledPair,
 ) -> Option<PeerOfflineAccount> {
     let bundle = appliance.pin().bundle;
     reader.enter();
@@ -73,7 +78,11 @@ async fn a_load_reaches_a_contact_by_its_sync_and_the_first_offline_payment_is_t
     let commitment = offline_step(&a, &b, bearer_transfer(&b, whole_era(7))).await;
     assert_committed_on_both(&a, &b, &commitment);
     b.device.enter();
-    assert_eq!(pending_era(), whole_era(7), "B holds the payment pending");
+    assert_eq!(
+        pending_era(),
+        whole_era(7),
+        "B holds the payment in its offline balance, waiting for its unload"
+    );
 
     a.device.enter();
     let unloaded = offline_cash(&a, "wallet.unloadOffline", "10.00").await;
@@ -81,7 +90,22 @@ async fn a_load_reaches_a_contact_by_its_sync_and_the_first_offline_payment_is_t
     let synced = pair.b.sync().await;
     assert_eq!(synced.errors, Vec::<String>::new(), "B's second sync");
     b.device.enter();
-    assert_eq!(pending_era(), 0, "B settled the payment");
+    assert_eq!(
+        pending_era(),
+        whole_era(7),
+        "B's sync moves nothing on its own"
+    );
+    // B's own unload of the payment received (owner, 2026-11-07), checked against A's history.
+    let moved = b
+        .device
+        .invoke(
+            "wallet.unloadReceived",
+            &crate::generated::ArgPack::default(),
+        )
+        .await;
+    assert!(moved.success, "B's unload: {:?}", moved.error_message);
+    b.device.enter();
+    assert_eq!(pending_era(), 0, "B's unload moved the payment online");
     assert_eq!(pair.b.era_balance(), whole_era(7), "B's online balance");
 }
 
@@ -160,7 +184,12 @@ async fn a_contact_checks_a_load_one_hop_and_reads_nothing_behind_it() {
         let synced = pair.b.sync().await;
         assert_eq!(synced.errors, Vec::<String>::new(), "B's sync {round}");
     }
-    let appliance = HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
+    let appliance = HostAppliance::install_pair(
+        &pair.a,
+        HostAppliance::birth(&pair.a, [0xC4; 32], 16),
+        &pair.b,
+        HostAppliance::birth(&pair.b, [0xB4; 32], 16),
+    );
     a.device.enter();
     let loaded = offline_cash(&a, "wallet.loadOffline", "20.00").await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
@@ -278,7 +307,12 @@ async fn a_notice_is_believed_in_nothing_and_no_notice_creates_a_record() {
     let pair = Pair::boot(100, 0).await;
     let a = OfflineDevice::new(&pair.a);
     let b = OfflineDevice::new(&pair.b);
-    let appliance = HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
+    let appliance = HostAppliance::install_pair(
+        &pair.a,
+        HostAppliance::birth(&pair.a, [0xC4; 32], 16),
+        &pair.b,
+        HostAppliance::birth(&pair.b, [0xB4; 32], 16),
+    );
     let tip = a.tip_with(&b);
     let funded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
     let mut b0x = B0xSDK::new(
@@ -383,6 +417,7 @@ async fn a_balance_the_payers_host_invented_is_refused_under_its_real_chip() {
         bundle,
         OfflineAccount::restore(
             allocations,
+            real.received_amounts().clone(),
             real.counter(),
             real.frontier(),
             real.funding_chain(),

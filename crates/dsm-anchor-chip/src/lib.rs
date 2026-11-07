@@ -31,7 +31,12 @@ pub trait Board {
 /// operation to it.
 pub const SECURE_HEAP_BYTES: usize = 160 * 1024;
 
-/// The largest request frame the monitor takes. A prepare holds its transition several times over
-/// while it signs and records it, so a larger one could exhaust the heap and halt the board. The
-/// wallet's own requests are a few hundred bytes: it attaches its proofs after the emit.
-pub const MAX_REQUEST_BYTES: usize = 4 * 1024;
+/// The largest request frame the monitor takes but a payment check. A prepare holds its transition
+/// several times over while it signs and records it, so a larger one could exhaust the heap and halt
+/// the board. The wallet's own requests are a few hundred bytes: it attaches its proofs after the emit.
+pub const MAX_REQUEST_BYTES: usize = anchor_core::service::MAX_REQUEST_BYTES;
+
+/// The largest frame the monitor takes at all: a payment check, the payer's certificate with its
+/// 49,856-byte `σ^host`. The anchor serves a frame this large only as a payment check, and only while
+/// it holds no record ([`anchor_core::service::handle`]), so its copies never meet a record's.
+pub const MAX_FRAME_BYTES: usize = anchor_core::service::MAX_PAYMENT_CHECK_BYTES;

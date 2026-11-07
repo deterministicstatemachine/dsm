@@ -40,6 +40,7 @@ pub mod enrollment;
 pub mod hash;
 pub mod identify;
 pub mod proto;
+pub mod receive;
 pub mod rmem;
 pub mod root_advance;
 pub mod service;

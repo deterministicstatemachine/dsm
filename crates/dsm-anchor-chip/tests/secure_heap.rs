@@ -137,4 +137,66 @@ fn every_operation_fits_the_secure_heap() {
     };
     let answer = peak_of("finalize", ceiling, || anchor.bare(pb::Op::Finalize));
     assert!(answer.ok, "finalize: error {}", answer.error);
+
+    // The receiver's side: a challenge, a payment made for it (the anchor's own, standing in for a
+    // payer's), its check, the largest request any op takes, and the receive.
+    use support::{
+        check_of, disclosure_of, prepare_of, receive_of, self_payment, served, thirty_two,
+    };
+    let status = served(anchor.bare(pb::Op::Status), "status");
+    let challenge = thirty_two(
+        &peak_of("challenge", ceiling, || {
+            served(anchor.bare(pb::Op::Challenge), "challenge")
+        })
+        .receiver_challenge,
+        "the challenge",
+    );
+    let paid = self_payment(thirty_two(&status.active_root, "h"), 1, &challenge);
+    served(
+        anchor.request(&prepare_of(&paid, &challenge, [0x51; 32], [0x52; 32])),
+        "pay",
+    );
+    served(anchor.bare(pb::Op::Commit), "commit");
+    let release = match served(anchor.bare(pb::Op::Emit), "emit").release {
+        Some(release) => match release.to_release() {
+            Ok(release) => release,
+            Err(e) => panic!("the release decodes: {e:?}"),
+        },
+        None => panic!("the emit carried no release"),
+    };
+    let root = thirty_two(
+        &served(anchor.bare(pb::Op::Finalize), "finalize").active_root,
+        "h",
+    );
+    let check = check_of(&release, &disclosure_of(&status));
+    assert!(
+        encode_request(&check).len() <= anchor_core::service::MAX_PAYMENT_CHECK_BYTES,
+        "a payment check fits the frame the monitor takes"
+    );
+    drop(release);
+    peak_of("payment check, the largest request", ceiling, || {
+        served(anchor.request(&check), "the check")
+    });
+    let paid = match check.payment.as_ref().map(|p| p.to_release()) {
+        Some(Ok(paid)) => paid,
+        other => panic!("the checked payment decodes: {:?}", other.map(|r| r.err())),
+    };
+    let t = receive_of(&paid, root, 2, &challenge);
+    drop(paid);
+    drop(check);
+    peak_of("receive prepare", ceiling, || {
+        served(
+            anchor.request(&prepare_of(&t, &challenge, [0x71; 32], [0x72; 32])),
+            "receive",
+        )
+    });
+    peak_of("receive commit", ceiling, || {
+        served(anchor.bare(pb::Op::Commit), "commit")
+    });
+    drop(peak_of("receive emit", ceiling, || {
+        served(anchor.bare(pb::Op::Emit), "emit")
+    }));
+    peak_of("receive finalize", ceiling, || {
+        served(anchor.bare(pb::Op::Finalize), "finalize")
+    });
 }

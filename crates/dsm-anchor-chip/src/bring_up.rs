@@ -137,7 +137,9 @@ fn op_requires_measurement(op: i32) -> bool {
             | pb::Op::Commit
             | pb::Op::Emit
             | pb::Op::Finalize
-            | pb::Op::Recover)
+            | pb::Op::Recover
+            | pb::Op::Challenge
+            | pb::Op::CheckPayment)
     )
 }
 
@@ -148,14 +150,16 @@ pub fn serve_measured(
     frame: &[u8],
     measurement: Measurement,
 ) -> (BoardAnchor, Vec<u8>) {
-    let req = match decode_request(frame) {
-        Ok(req) => req,
+    // Only the op is kept: the decoded copy of a payment check is as large as its frame, and is
+    // dropped here, before the anchor decodes the frame for itself.
+    let op = match decode_request(frame) {
+        Ok(req) => req.op,
         Err(_undecodable) => return (anchor, refusal(0, err::BAD_PROTO, "")),
     };
-    if measurement == Measurement::Differs && op_requires_measurement(req.op) {
+    if measurement == Measurement::Differs && op_requires_measurement(op) {
         // §7.12 measurement failure => no counter movement, no TROPIC/host signature.
         let refused = refusal(
-            req.op,
+            op,
             err::MEASUREMENT,
             "the Non-secure image does not match the enrolled digest",
         );

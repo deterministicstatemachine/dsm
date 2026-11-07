@@ -11937,6 +11937,16 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
    */
   responderKyberBindingSig = new Uint8Array(0);
 
+  /**
+   * The receiver's board (owner, 2026-11-07: an offline payment needs a board on both sides): the
+   * pin material of the anchor whose board drew receiver_challenge and will commit the receive, its
+   * bundle under local_signature. The sender pins it on first use, as a receiver pins a sender's,
+   * and checks the step's acknowledgement under it.
+   *
+   * @generated from field: dsm.AnchorDisclosure receiver_anchor = 11;
+   */
+  receiverAnchor?: AnchorDisclosure;
+
   constructor(data?: PartialMessage<BilateralPrepareResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11953,6 +11963,7 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
     { no: 7, name: "receiver_challenge", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "responder_kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "responder_kyber_binding_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "receiver_anchor", kind: "message", T: AnchorDisclosure },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareResponse {
@@ -12569,6 +12580,15 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
    */
   counterSignedReceipt = new Uint8Array(0);
 
+  /**
+   * The receiver's board's receive commit of the sender's release (owner, 2026-11-07): the
+   * prost-encoded dsm.anchor.OfflineRelease of the receive, its certificate the acknowledgement. The
+   * sender checks it under the receiver's pinned anchor against its own release, and keeps it.
+   *
+   * @generated from field: bytes receive_acknowledgement = 7;
+   */
+  receiveAcknowledgement = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralCommitResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12579,6 +12599,7 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 5, name: "commitment_hash", kind: "message", T: Hash32 },
     { no: 6, name: "counter_signed_receipt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "receive_acknowledgement", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralCommitResponse {
@@ -12960,6 +12981,12 @@ export class StepWrite extends Message<StepWrite> {
      */
     value: StepWriteOfflineAccount;
     case: "offlineAccount";
+  } | {
+    /**
+     * @generated from field: dsm.StepWriteOfflineReceive offline_receive = 7;
+     */
+    value: StepWriteOfflineReceive;
+    case: "offlineReceive";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   /**
@@ -12982,6 +13009,7 @@ export class StepWrite extends Message<StepWrite> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "relationship", kind: "message", T: StepWriteRelationship, oneof: "leaf" },
     { no: 6, name: "offline_account", kind: "message", T: StepWriteOfflineAccount, oneof: "leaf" },
+    { no: 7, name: "offline_receive", kind: "message", T: StepWriteOfflineReceive, oneof: "leaf" },
     { no: 4, name: "path_heights", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "path_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
@@ -13108,6 +13136,134 @@ export class StepWriteOfflineAccount extends Message<StepWriteOfflineAccount> {
 
   static equals(a: StepWriteOfflineAccount | PlainMessage<StepWriteOfflineAccount> | undefined, b: StepWriteOfflineAccount | PlainMessage<StepWriteOfflineAccount> | undefined): boolean {
     return proto3.util.equals(StepWriteOfflineAccount, a, b);
+  }
+}
+
+/**
+ * The receiver's offline account under its own bundle, the one device-SMT leaf an offline-bearer
+ * receive writes besides its relationship (owner, 2026-11-07: an offline payment needs a board on
+ * both sides, and the money received lands in the receiver's own offline balance): the account as
+ * it stood before the receive. After is derived — what the account holds received of the
+ * operation's asset plus its amount, the counter plus one, and the frontier the receiver's board
+ * advanced to — by folding account_paths from pre_account_root. pre_received is absent when the
+ * account never received the asset.
+ *
+ * @generated from message dsm.StepWriteOfflineReceive
+ */
+export class StepWriteOfflineReceive extends Message<StepWriteOfflineReceive> {
+  /**
+   * @generated from field: bytes pre_account_root = 1;
+   */
+  preAccountRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: optional uint64 pre_received = 2;
+   */
+  preReceived?: bigint;
+
+  /**
+   * @generated from field: uint64 pre_counter = 3;
+   */
+  preCounter = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes pre_frontier = 4;
+   */
+  preFrontier = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes next_frontier = 5;
+   */
+  nextFrontier = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.SmtPath account_paths = 6;
+   */
+  accountPaths: SmtPath[] = [];
+
+  constructor(data?: PartialMessage<StepWriteOfflineReceive>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StepWriteOfflineReceive";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "pre_account_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "pre_received", kind: "scalar", T: 4 /* ScalarType.UINT64 */, opt: true },
+    { no: 3, name: "pre_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "pre_frontier", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "next_frontier", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "account_paths", kind: "message", T: SmtPath, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteOfflineReceive {
+    return new StepWriteOfflineReceive().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteOfflineReceive {
+    return new StepWriteOfflineReceive().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteOfflineReceive {
+    return new StepWriteOfflineReceive().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StepWriteOfflineReceive | PlainMessage<StepWriteOfflineReceive> | undefined, b: StepWriteOfflineReceive | PlainMessage<StepWriteOfflineReceive> | undefined): boolean {
+    return proto3.util.equals(StepWriteOfflineReceive, a, b);
+  }
+}
+
+/**
+ * The unload of a payment received offline, as an offline account's step: the account as it stood
+ * before, and what it held received of the payment's asset. After is derived — less the payment's
+ * amount — by folding account_path from pre_account_root.
+ *
+ * @generated from message dsm.StepWriteOfflineSettle
+ */
+export class StepWriteOfflineSettle extends Message<StepWriteOfflineSettle> {
+  /**
+   * @generated from field: bytes pre_account_root = 1;
+   */
+  preAccountRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 pre_received = 2;
+   */
+  preReceived = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.SmtPath account_path = 3;
+   */
+  accountPath?: SmtPath;
+
+  constructor(data?: PartialMessage<StepWriteOfflineSettle>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StepWriteOfflineSettle";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "pre_account_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "pre_received", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "account_path", kind: "message", T: SmtPath },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteOfflineSettle {
+    return new StepWriteOfflineSettle().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteOfflineSettle {
+    return new StepWriteOfflineSettle().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteOfflineSettle {
+    return new StepWriteOfflineSettle().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StepWriteOfflineSettle | PlainMessage<StepWriteOfflineSettle> | undefined, b: StepWriteOfflineSettle | PlainMessage<StepWriteOfflineSettle> | undefined): boolean {
+    return proto3.util.equals(StepWriteOfflineSettle, a, b);
   }
 }
 
@@ -13314,6 +13470,183 @@ export class OfflineSpendChain extends Message<OfflineSpendChain> {
 
   static equals(a: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined, b: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined): boolean {
     return proto3.util.equals(OfflineSpendChain, a, b);
+  }
+}
+
+/**
+ * One offline-bearer receive into an offline account as the receiver's board committed it: its
+ * receive commit's release (dsm.anchor.OfflineRelease, its offline-state proofs attached), which
+ * is the acknowledgement the payer kept, the receive's account witness, and what it received.
+ *
+ * @generated from message dsm.OfflineReceiveHop
+ */
+export class OfflineReceiveHop extends Message<OfflineReceiveHop> {
+  /**
+   * @generated from field: bytes release = 1;
+   */
+  release = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.StepWriteOfflineReceive receive = 2;
+   */
+  receive?: StepWriteOfflineReceive;
+
+  /**
+   * @generated from field: bytes asset = 3;
+   */
+  asset = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount = 4;
+   */
+  amount = protoInt64.zero;
+
+  constructor(data?: PartialMessage<OfflineReceiveHop>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineReceiveHop";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "receive", kind: "message", T: StepWriteOfflineReceive },
+    { no: 3, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineReceiveHop {
+    return new OfflineReceiveHop().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineReceiveHop {
+    return new OfflineReceiveHop().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineReceiveHop {
+    return new OfflineReceiveHop().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineReceiveHop | PlainMessage<OfflineReceiveHop> | undefined, b: OfflineReceiveHop | PlainMessage<OfflineReceiveHop> | undefined): boolean {
+    return proto3.util.equals(OfflineReceiveHop, a, b);
+  }
+}
+
+/**
+ * The unload of one payment received offline, as a step of the account: what it took from the
+ * account's received amount, and the settlement it was (H(G ‖ DevID ‖ G_payer ‖ DevID_payer ‖ M)).
+ *
+ * @generated from message dsm.OfflineSettleHop
+ */
+export class OfflineSettleHop extends Message<OfflineSettleHop> {
+  /**
+   * @generated from field: dsm.StepWriteOfflineSettle settle = 1;
+   */
+  settle?: StepWriteOfflineSettle;
+
+  /**
+   * @generated from field: bytes asset = 2;
+   */
+  asset = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount = 3;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes settlement_id = 4;
+   */
+  settlementId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<OfflineSettleHop>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineSettleHop";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "settle", kind: "message", T: StepWriteOfflineSettle },
+    { no: 2, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "settlement_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSettleHop {
+    return new OfflineSettleHop().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineSettleHop {
+    return new OfflineSettleHop().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineSettleHop {
+    return new OfflineSettleHop().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineSettleHop | PlainMessage<OfflineSettleHop> | undefined, b: OfflineSettleHop | PlainMessage<OfflineSettleHop> | undefined): boolean {
+    return proto3.util.equals(OfflineSettleHop, a, b);
+  }
+}
+
+/**
+ * One step of an offline account between two of its boundaries: a spend, a receive, or the unload
+ * of a payment received.
+ *
+ * @generated from message dsm.OfflineAccountHop
+ */
+export class OfflineAccountHop extends Message<OfflineAccountHop> {
+  /**
+   * @generated from oneof dsm.OfflineAccountHop.hop
+   */
+  hop: {
+    /**
+     * @generated from field: dsm.OfflineSpendHop spend = 1;
+     */
+    value: OfflineSpendHop;
+    case: "spend";
+  } | {
+    /**
+     * @generated from field: dsm.OfflineReceiveHop receive = 2;
+     */
+    value: OfflineReceiveHop;
+    case: "receive";
+  } | {
+    /**
+     * @generated from field: dsm.OfflineSettleHop settle = 3;
+     */
+    value: OfflineSettleHop;
+    case: "settle";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<OfflineAccountHop>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineAccountHop";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "spend", kind: "message", T: OfflineSpendHop, oneof: "hop" },
+    { no: 2, name: "receive", kind: "message", T: OfflineReceiveHop, oneof: "hop" },
+    { no: 3, name: "settle", kind: "message", T: OfflineSettleHop, oneof: "hop" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineAccountHop {
+    return new OfflineAccountHop().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineAccountHop {
+    return new OfflineAccountHop().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineAccountHop {
+    return new OfflineAccountHop().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineAccountHop | PlainMessage<OfflineAccountHop> | undefined, b: OfflineAccountHop | PlainMessage<OfflineAccountHop> | undefined): boolean {
+    return proto3.util.equals(OfflineAccountHop, a, b);
   }
 }
 
@@ -18309,6 +18642,12 @@ export class Envelope extends Message<Envelope> {
     case: "pendingOfflineValueResponse";
   } | {
     /**
+     * @generated from field: dsm.UnloadReceivedResponse unload_received_response = 142;
+     */
+    value: UnloadReceivedResponse;
+    case: "unloadReceivedResponse";
+  } | {
+    /**
      * Reply to `token.adoptionQr`.
      *
      * @generated from field: dsm.TokenAdoptionQrResponse token_adoption_qr_response = 119;
@@ -18434,6 +18773,7 @@ export class Envelope extends Message<Envelope> {
     { no: 138, name: "receipt_email_result", kind: "message", T: ReceiptEmailResultV1, oneof: "payload" },
     { no: 139, name: "money_waiting_response", kind: "message", T: MoneyWaitingResponse, oneof: "payload" },
     { no: 140, name: "pending_offline_value_response", kind: "message", T: PendingOfflineValueResponse, oneof: "payload" },
+    { no: 142, name: "unload_received_response", kind: "message", T: UnloadReceivedResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
 
@@ -23859,7 +24199,61 @@ export class OfflineAllocationView extends Message<OfflineAllocationView> {
  * settles online only once the payer's return online exposes its signed spend
  * chain (CONFORMANCE §6.103). It is not part of `available` and not part of
  * the offline allocation, and nothing spends it until it settles.
+ * wallet.unloadReceived (owner, 2026-11-07): one action moves every payment received offline whose
+ * payer has been back online out of the offline account's received amount into the online balance,
+ * each as its own checked step (its settlement); the rest stay in the offline balance, waiting.
  *
+ * @generated from message dsm.UnloadReceivedResponse
+ */
+export class UnloadReceivedResponse extends Message<UnloadReceivedResponse> {
+  /**
+   * @generated from field: uint32 moved = 1;
+   */
+  moved = 0;
+
+  /**
+   * @generated from field: uint32 waiting = 2;
+   */
+  waiting = 0;
+
+  /**
+   * Rust's own sentence about the move, and what could not be done.
+   *
+   * @generated from field: string message = 3;
+   */
+  message = "";
+
+  constructor(data?: PartialMessage<UnloadReceivedResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.UnloadReceivedResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "moved", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "waiting", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): UnloadReceivedResponse {
+    return new UnloadReceivedResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): UnloadReceivedResponse {
+    return new UnloadReceivedResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): UnloadReceivedResponse {
+    return new UnloadReceivedResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: UnloadReceivedResponse | PlainMessage<UnloadReceivedResponse> | undefined, b: UnloadReceivedResponse | PlainMessage<UnloadReceivedResponse> | undefined): boolean {
+    return proto3.util.equals(UnloadReceivedResponse, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.PendingOfflineReceiptView
  */
 export class PendingOfflineReceiptView extends Message<PendingOfflineReceiptView> {

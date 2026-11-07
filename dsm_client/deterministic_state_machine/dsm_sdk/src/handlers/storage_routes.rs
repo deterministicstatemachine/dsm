@@ -2680,12 +2680,8 @@ impl AppRouterImpl {
         self.complete_split_transfers(&mut b0x_sdk, &mut report)
             .await;
 
-        // SA-91: payments received offline are settled once their payers'
-        // online histories expose the spends.
-        let (settled, failures) =
-            crate::sdk::economic_admission_flow::settle_received_offline(&self.core_sdk).await;
-        report.processed += settled;
-        report.errors.extend(failures);
+        // Payments received offline wait in the offline balance for their unload
+        // (`wallet.unloadReceived`, owner 2026-11-07): the sync moves none of them.
 
         // §16.6 on-access acceptance recovery, from the durable apply record.
         match crate::init::current_chain_head_at_rest_key() {

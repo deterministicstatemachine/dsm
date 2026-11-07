@@ -1323,11 +1323,13 @@ fn receiver_acceptance_sig(
     kp: &SignatureKeyPair,
     commitment_hash: &[u8; 32],
     receiver_challenge: &[u8; 32],
+    receiver_bundle: &[u8; 32],
 ) -> Vec<u8> {
     kp.sign(
         &dsm::core::bilateral_transaction_manager::bilateral_accept_sign_message(
             commitment_hash,
             receiver_challenge,
+            receiver_bundle,
         ),
     )
     .expect("receiver acceptance signature")
@@ -1470,6 +1472,11 @@ async fn trace_commit_prepared(
     let receiver_challenge: [u8; 32] = dsm::crypto::rng::random_bytes(32)
         .try_into()
         .map_err(|e| format!("the receiver challenge is not 32 bytes: {e:?}"))?;
+    // The bundle the receiver's acceptance names (owner, 2026-11-07: σ_B binds its board): this
+    // trace's receiver has no board, so its acceptance names the bundle drawn for it here.
+    let receiver_bundle: [u8; 32] = dsm::crypto::rng::random_bytes(32)
+        .try_into()
+        .map_err(|e| format!("the receiver bundle is not 32 bytes: {e:?}"))?;
     let prepared = manager
         .prepare_bilateral_advance(
             remote_device_id,
@@ -1479,8 +1486,10 @@ async fn trace_commit_prepared(
                     remote_kp,
                     pre_commitment_hash,
                     &receiver_challenge,
+                    &receiver_bundle,
                 ),
                 receiver_challenge: &receiver_challenge,
+                receiver_bundle: &receiver_bundle,
             },
             vec![BalanceDelta {
                 policy_commit: era_policy_commit(),

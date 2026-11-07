@@ -1510,6 +1510,70 @@ mod tests {
         }
     }
 
+    /// The record the wallet's tests answer `wallet.unloadReceived` from: the
+    /// request the wallet sends when its user moves what was received offline
+    /// to the balance, framed as the WebView frames it, and this ingress's
+    /// answer. The committed record must equal the live answer;
+    /// DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const UNLOAD_RECEIVED_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/screens/wallet/__tests__/fixtures/unload_received.ingress.bin"
+    );
+
+    /// `wallet.unloadReceived` through the ingress (owner, 2026-11-07: "One
+    /// tap, all ready"), as the wallet asks it, on a device that received
+    /// nothing offline: Rust moves nothing and says so, with no payment
+    /// waiting.
+    #[test]
+    #[serial]
+    fn unload_received_answers_through_the_ingress_as_the_wallet_records_it() {
+        device_with_router(0x49);
+        let request = IngressRequest {
+            operation: Some(ingress_request::Operation::RouterInvoke(
+                pb::RouterInvokeOp {
+                    method: "wallet.unloadReceived".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: Vec::new(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                },
+            )),
+        }
+        .encode_to_vec();
+        let response = dispatch_ingress_bytes(&request);
+        let answer = expect_ok_bytes(
+            IngressResponse::decode(response.as_slice()).expect("an IngressResponse"),
+        );
+        match crate::handlers::response_helpers::decode_local_envelope(&answer)
+            .expect("the router's local answer")
+            .payload
+        {
+            Some(dsm::types::proto::envelope::Payload::UnloadReceivedResponse(r)) => assert_eq!(
+                (r.moved, r.waiting, r.message.as_str()),
+                (0, 0, "No money received offline is waiting.")
+            ),
+            other => panic!("wallet.unloadReceived answered {other:?}"),
+        }
+        let mut record = Vec::new();
+        for part in [&request, &response] {
+            let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+            record.extend_from_slice(&len.to_be_bytes());
+            record.extend_from_slice(part);
+        }
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => std::fs::write(UNLOAD_RECEIVED_RECORD, &record)
+                .expect("write the frontend's record"),
+            None => assert_eq!(
+                std::fs::read(UNLOAD_RECEIVED_RECORD).expect("the frontend's committed record"),
+                record,
+                "the wallet's wallet.unloadReceived record differs from this ingress's answer; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+    }
+
     /// The record the wallet's escrow tab tests answer `escrow.*` from: the
     /// requests the tab sends, framed as the WebView frames them, in the order
     /// it sends them, and this device's answers on running nodes. The

@@ -25,6 +25,12 @@ pub mod err {
     pub const NOT_COMMITTED: u32 = 7;
     pub const TROPIC: u32 = 8;
     pub const PARTITION: u32 = 9;
+    /// A receive with no challenge open, or under another challenge than the open one.
+    pub const NO_OPEN_CHALLENGE: u32 = 10;
+    /// A receive of a payment this appliance did not check, or of another than it checked.
+    pub const PAYMENT_UNCHECKED: u32 = 11;
+    /// The payer's release did not pass the appliance's own check; `detail` says which part.
+    pub const PAYMENT_REFUSED: u32 = 12;
     pub const BAD_PROTO: u32 = 100;
     pub const MISSING_FIELD: u32 = 101;
     pub const BAD_OP: u32 = 102;
@@ -54,6 +60,15 @@ pub mod err {
 /// cap at its receive edge.
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 
+/// The largest frame of any request but a payment check: a prepare holds its transition several
+/// times over while it signs and records it. The wallet's own are a few hundred bytes.
+pub const MAX_REQUEST_BYTES: usize = 4 * 1024;
+
+/// The largest payment check: the payer's certificate, whose `σ^host` alone is 49,856 bytes, with
+/// its transition and the payer's disclosure. It is served only by an appliance holding no record,
+/// and held once while it is checked.
+pub const MAX_PAYMENT_CHECK_BYTES: usize = 56 * 1024;
+
 pub(crate) fn appliance_code(e: ApplianceError) -> u32 {
     match e {
         ApplianceError::WrongState => err::WRONG_STATE,
@@ -65,6 +80,9 @@ pub(crate) fn appliance_code(e: ApplianceError) -> u32 {
         ApplianceError::NotCommitted => err::NOT_COMMITTED,
         ApplianceError::Tropic(_) => err::TROPIC,
         ApplianceError::Partition(_) => err::PARTITION,
+        ApplianceError::NoOpenChallenge => err::NO_OPEN_CHALLENGE,
+        ApplianceError::PaymentUnchecked => err::PAYMENT_UNCHECKED,
+        ApplianceError::PaymentRefused(_) => err::PAYMENT_REFUSED,
     }
 }
 
@@ -118,6 +136,8 @@ fn base(op: i32) -> pb::ApplianceResponse {
         chip_readings: Vec::new(),
         chip_certificates: Vec::new(),
         install: pb::InstallKind::InstallUnspecified as i32,
+        receiver_challenge: Vec::new(),
+        open_challenge: Vec::new(),
     }
 }
 
@@ -214,6 +234,13 @@ pub trait Served {
     fn finalize(&mut self) -> Result<[u8; 32], u32>;
     fn cancel(&mut self) -> Result<(), u32>;
     fn recover(&mut self) -> RecoverOutcome;
+    fn draw_challenge(&mut self) -> Result<[u8; 32], ApplianceError>;
+    fn check_payment(
+        &mut self,
+        t: &Transition,
+        cert: &crate::receive::PaymentCert,
+        payer: &crate::receive::PayerDisclosure,
+    ) -> Result<(), ApplianceError>;
 }
 
 impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
@@ -248,6 +275,17 @@ impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
     fn recover(&mut self) -> RecoverOutcome {
         Appliance::recover(self)
     }
+    fn draw_challenge(&mut self) -> Result<[u8; 32], ApplianceError> {
+        Appliance::draw_challenge(self)
+    }
+    fn check_payment(
+        &mut self,
+        t: &Transition,
+        cert: &crate::receive::PaymentCert,
+        payer: &crate::receive::PayerDisclosure,
+    ) -> Result<(), ApplianceError> {
+        Appliance::check_payment(self, t, cert, payer)
+    }
 }
 
 impl<T: Tropic, P: PartitionSig, S: ActiveStore> Served for DurableAppliance<T, P, S> {
@@ -281,6 +319,21 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Served for DurableAppliance<T, 
     }
     fn recover(&mut self) -> RecoverOutcome {
         DurableAppliance::recover(self)
+    }
+    fn draw_challenge(&mut self) -> Result<[u8; 32], ApplianceError> {
+        DurableAppliance::draw_challenge(self).map_err(|e| match e {
+            DurableError::Appliance(a) => a,
+            // The challenge was not written, so none is open: a receive under it is refused.
+            _ => ApplianceError::NoOpenChallenge,
+        })
+    }
+    fn check_payment(
+        &mut self,
+        t: &Transition,
+        cert: &crate::receive::PaymentCert,
+        payer: &crate::receive::PayerDisclosure,
+    ) -> Result<(), ApplianceError> {
+        DurableAppliance::check_payment(self, t, cert, payer)
     }
 }
 
@@ -317,6 +370,10 @@ pub(crate) fn status<T: Tropic, P: PartitionSig>(
         pin_chip_pk: app.chip_pk.clone(),
         pin_birth_commitment: app.birth_commitment.to_vec(),
         install: install_kind(app.install),
+        open_challenge: app
+            .active
+            .open_challenge
+            .map_or_else(Vec::new, |challenge| challenge.to_vec()),
         ..base(op)
     }
 }
@@ -387,6 +444,14 @@ pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::Appli
             Ok(()) => ok(op),
             Err(code) => fail(op, code),
         },
+        Ok(pb::Op::Challenge) => match app.draw_challenge() {
+            Ok(challenge) => pb::ApplianceResponse {
+                receiver_challenge: challenge.to_vec(),
+                ..ok(op)
+            },
+            Err(e) => appliance_refusal(op, e),
+        },
+        Ok(pb::Op::CheckPayment) => check_payment_request(app, req),
         // An appliance exists only once its anchor is provisioned, and an anchor is provisioned
         // once: provisioning it again is refused.
         Ok(pb::Op::Provision | pb::Op::TryRun) => fail(op, err::ALREADY_PROVISIONED),
@@ -396,11 +461,55 @@ pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::Appli
     }
 }
 
+/// `OP_CHECK_PAYMENT`, in a frame of its own: what it reads of the request is the largest any op
+/// reads, and no other op's frame holds it.
+#[inline(never)]
+fn check_payment_request<A: Served>(
+    app: &mut A,
+    req: &pb::ApplianceRequest,
+) -> pb::ApplianceResponse {
+    let op = req.op;
+    let (Some(payment), Some(payer)) = (&req.payment, &req.payer) else {
+        return fail(op, err::MISSING_FIELD);
+    };
+    let (Some(transition), Some(cert)) = (&payment.transition, &payment.cert) else {
+        return fail(op, err::MISSING_FIELD);
+    };
+    let transition = match transition.to_owned_transition() {
+        Ok(t) => t,
+        Err(e) => return fail(op, proto_code(e)),
+    };
+    let cert = match cert.as_payment() {
+        Ok(c) => c,
+        Err(e) => return fail(op, proto_code(e)),
+    };
+    let payer = match payer.to_disclosure() {
+        Ok(p) => p,
+        Err(e) => return fail(op, proto_code(e)),
+    };
+    match app.check_payment(&transition.as_transition(), &cert, &payer) {
+        Ok(()) => ok(op),
+        Err(e) => appliance_refusal(op, e),
+    }
+}
+
 /// Decode a request frame, dispatch it, and encode the response frame. The single secure-core
 /// entry point; a malformed frame yields a `BAD_PROTO` error response rather than a panic.
 pub fn handle<A: Served>(app: &mut A, frame: &[u8]) -> Vec<u8> {
     if frame.len() > MAX_FRAME_LEN {
         return encode_response(&fail(0, err::FRAME_TOO_LARGE));
+    }
+    // A frame larger than any request but a payment check is decoded only for a payment check, and
+    // only by an appliance holding no record, so its decoded copy never meets a record's in the heap.
+    if frame.len() > MAX_REQUEST_BYTES {
+        match crate::proto::peek_op(frame) {
+            Ok(op)
+                if op == pb::Op::CheckPayment as i32
+                    && frame.len() <= MAX_PAYMENT_CHECK_BYTES
+                    && app.view().active.status == Status::Ready => {}
+            Ok(op) => return encode_response(&fail(op, err::FRAME_TOO_LARGE)),
+            Err(e) => return encode_response(&fail(pb::Op::Unspecified as i32, proto_code(e))),
+        }
     }
     match decode_request(frame) {
         Ok(req) => encode_response(&dispatch(app, &req)),
