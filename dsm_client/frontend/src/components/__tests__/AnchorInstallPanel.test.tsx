@@ -163,7 +163,7 @@ describe('the install of a new anchor', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Trial install…' }));
     expect(asked).not.toContain('anchor.install');
-    fireEvent.click(screen.getByRole('button', { name: 'Yes, install it for a trial' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, trial install' }));
     await waitFor(() => expect(asked.filter((route) => route === 'anchor.install')).toHaveLength(1));
   });
 

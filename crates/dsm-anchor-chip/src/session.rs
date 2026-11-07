@@ -701,7 +701,8 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
             _untested => Err(
                 "it does not, so what it generates may not be random (erratum OI_TR01_ERR_2026090100). \
                  Tropic Square's correction is irreversible: the prepare_chip image makes it at the last \
-                 step and erases the key the chip holds now. Until then no install passes"
+                 step and erases the key the chip holds now. Until then no install for good passes; a trial \
+                 install does"
                     .to_string(),
             ),
         }

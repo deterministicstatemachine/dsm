@@ -102,7 +102,7 @@ export default function AnchorInstallPanel({ onInstalled }: Props) {
         )}
         {run?.passed && (stage === 'confirming' || stage === 'installing') && (
           <button type="button" className="sb-btn sb-btn--primary" disabled={working} onClick={install}>
-            {stage === 'installing' ? 'Installing…' : run.trial ? 'Yes, install it for a trial' : 'Yes, make it permanent'}
+            {stage === 'installing' ? 'Installing…' : run.trial ? 'Yes, trial install' : 'Yes, make it permanent'}
           </button>
         )}
       </div>
