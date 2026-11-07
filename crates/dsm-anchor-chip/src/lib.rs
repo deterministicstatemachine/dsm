@@ -27,10 +27,6 @@ pub trait Board {
     fn silicon_revision(&self) -> u8;
 }
 
-/// The first RP2350 stepping an anchor is installed on. A2 and A3 can be made to run unsigned code by
-/// a physical glitch at boot, with no workaround (errata RP2350-E24, and on A2 also E16, E20, E21).
-pub const MIN_SILICON_REVISION: u8 = 4;
-
 /// What a bring-up does with a chip whose PTRNG Tropic Square left untested (erratum
 /// OI_TR01_ERR_2026090100, the T101 and T103 parts).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

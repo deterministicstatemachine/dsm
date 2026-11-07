@@ -871,39 +871,6 @@ fn the_trial_image_keys_an_untested_ptrng_and_installs_nothing() {
     }
 }
 
-/// An RP2350 below A4 can be made to run unsigned code at boot, so nothing is installed on one. The
-/// try-run says so before anything is burned, and the install refuses with its chip unbound. MUTATION
-/// CONTROL: making the stepping's step unconditional in `rehearse_birth` installs here and turns this red.
-#[test]
-fn a_board_whose_rp2350_can_be_glitched_past_its_signature_is_never_installed() {
-    for stepping in [2u8, 3] {
-        let model = ModelServer::start();
-        let anchor = match model.boot_stepped(stepping) {
-            Ok(anchor) => anchor,
-            Err(e) => panic!("the anchor did not come up: {e:?}"),
-        };
-        let mut anchor = Served::new(anchor);
-        let run = anchor.request(&try_run_request());
-        assert_eq!(run.error, err::TRY_RUN_FAILED, "{:?}", run.try_run);
-        let said = run
-            .try_run
-            .iter()
-            .any(|step| !step.passed && step.name.contains(&format!("stepping A{stepping}")));
-        assert!(said, "it does not say why: {:?}", run.try_run);
-        let refused = anchor.request(&provision_request());
-        assert_eq!(refused.error, err::TRY_RUN_FAILED, "{}", refused.detail);
-        drop(anchor);
-        let mut session = factory_session(&model);
-        assert!(
-            matches!(
-                session.pairing_key_read(1u16.into()),
-                Err(Fault::InvalidKey | Fault::SlotEmpty)
-            ),
-            "the board's key was written"
-        );
-    }
-}
-
 /// A key already on the chip came from the untested source, and goes.
 #[test]
 fn preparing_a_test_part_erases_a_key_it_generated_untested() {

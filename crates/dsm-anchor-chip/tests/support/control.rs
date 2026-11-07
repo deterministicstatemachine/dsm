@@ -4,7 +4,7 @@
 
 use anchor_chip::bring_up::{bring_up, identify_chip, prepare_chip, BoardAnchor};
 use anchor_chip::session::ChipFacts;
-use anchor_chip::{Board, UntestedRandomness};
+use anchor_chip::UntestedRandomness;
 use anchor_core::identify::ChipSurvey;
 
 use super::support::{call, BringUpError, Garble, HostBoard, ModelServer, Power, SEALED};
@@ -18,20 +18,6 @@ pub enum Part {
     TestPart,
     /// T0XX: R-config and I-config both empty.
     Sample,
-}
-
-/// A board with an RP2350 of this stepping.
-pub struct SteppedBoard(pub u8);
-
-impl Board for SteppedBoard {
-    fn random_key(&self) -> Option<[u8; 32]> {
-        HostBoard.random_key()
-    }
-    fn wait_100ms(&self) {}
-    fn alive(&self) {}
-    fn silicon_revision(&self) -> u8 {
-        self.0
-    }
 }
 
 impl Power {
@@ -86,16 +72,6 @@ impl ModelServer {
     pub fn factory_reset(&self) {
         let mut stream = self.connect();
         call(&mut stream, TAG_RESET_TARGET, &[]);
-    }
-
-    /// Boot the anchor on a board of this stepping.
-    pub fn boot_stepped(&self, stepping: u8) -> Result<BoardAnchor, BringUpError> {
-        bring_up(
-            self.power_cycle(),
-            &SEALED,
-            SteppedBoard(stepping),
-            UntestedRandomness::Refuse,
-        )
     }
 
     /// Boot the anchor as the trial image does, whose check of an untested PTRNG is off.

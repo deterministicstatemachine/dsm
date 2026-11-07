@@ -264,9 +264,12 @@ impl Board for HostBoard {
     fn wait_100ms(&self) {}
     fn alive(&self) {}
     fn silicon_revision(&self) -> u8 {
-        anchor_chip::MIN_SILICON_REVISION
+        HOST_STEPPING
     }
 }
+
+/// The stepping the host board reports, as the try-run's note shows it.
+const HOST_STEPPING: u8 = 4;
 
 pub type ModelChip = Tropic01<ModelSpi, ModelCsn>;
 pub type BringUpError = BringUpFailure<ChipFault<ModelSpi, ModelCsn>>;

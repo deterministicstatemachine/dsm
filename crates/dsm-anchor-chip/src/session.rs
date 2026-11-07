@@ -656,18 +656,14 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     /// that will send it, and the reboot that latches the cage, session and all.
     fn rehearse_birth(&mut self, h0: u32) -> Vec<TryStep> {
         let mut steps = Vec::new();
-        steps.push(TryStep::new(&self.facts.describe(), Ok(())));
-        let revision = self.board.silicon_revision();
-        steps.push(TryStep::production(
-            &format!("the board's RP2350 is stepping A{revision}"),
-            if revision >= crate::MIN_SILICON_REVISION {
-                Ok(())
-            } else {
-                Err(format!(
-                    "below A{}, a glitch at boot can run unsigned code (RP2350-E24)",
-                    crate::MIN_SILICON_REVISION
-                ))
-            },
+        // The board's stepping is a note, not a requirement (owner, 2026-11-06).
+        steps.push(TryStep::new(
+            &format!(
+                "{}; the board's RP2350 is stepping A{}",
+                self.facts.describe(),
+                self.board.silicon_revision()
+            ),
+            Ok(()),
         ));
         steps.push(TryStep::production(
             "the chip tests its PTRNG at start-up",

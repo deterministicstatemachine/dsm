@@ -80,9 +80,9 @@ picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/dsm-anchor-s
 used-chip-bench --port <serial> --check     # says what the chip now is and how it went
 ```
 
-**The RP2350.** Below A4 a physical glitch at boot can run unsigned code, with no workaround (RP2350-E24,
-and on A2 also E16, E20, E21), so a try-run on one fails and an install is refused. Its line says which
-stepping the board is: the bootrom's version byte.
+**The RP2350, a note and not a rule (owner, 2026-11-06).** Below A4 a physical glitch at boot can run
+unsigned code, with no workaround (RP2350-E24, and on A2 also E16, E20, E21). Nothing refuses a board for
+its stepping. The try-run's first line says which stepping the board is: the bootrom's version byte.
 
 **The chip's own firmware.** Below 2.0.0 the chip does not verify its writes (OI_TR01_ERR_2025120100), so the
 board reads back each one it depends on. Tropic Square recommends 2.1.0 or later in both banks, then disabling

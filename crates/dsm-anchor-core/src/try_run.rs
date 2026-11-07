@@ -42,8 +42,7 @@ pub const PERMANENT: [&str; 5] = [
 pub enum Requirement {
     /// What the anchor needs to work at all, on a development board as on a production one.
     Works,
-    /// What a production install alone needs, such as the RP2350's stepping or a chip whose PTRNG is
-    /// tested. A development board may leave it unmet; an install still refuses until it is met.
+    /// What a production install alone needs, such as a chip whose PTRNG is tested. A development board may leave it unmet; an install still refuses until it is met.
     Production,
 }
 
@@ -342,8 +341,8 @@ mod tests {
             steps: alloc::vec![
                 TryStep::new("the anchor signs a payment", Ok(())),
                 TryStep::production(
-                    "the board's RP2350 is stepping A2",
-                    Err("below A4".to_string())
+                    "the chip tests its PTRNG at start-up",
+                    Err("it does not".to_string())
                 ),
             ],
             release_bytes: 8,
@@ -351,7 +350,7 @@ mod tests {
         assert_eq!(run.first_broken(), None);
         assert_eq!(
             run.first_failure().map(|step| step.name.as_str()),
-            Some("the board's RP2350 is stepping A2")
+            Some("the chip tests its PTRNG at start-up")
         );
         let answer = crate::service::try_run_response(pb::Op::TryRun as i32, &run);
         assert!(!answer.ok);
@@ -369,7 +368,7 @@ mod tests {
             .map(|step| step.name.as_str())
             .collect();
         assert_eq!(passed, ["the anchor signs a payment"]);
-        assert_eq!(production, ["the board's RP2350 is stepping A2"]);
+        assert_eq!(production, ["the chip tests its PTRNG at start-up"]);
         assert_eq!(answer.transport_check, transport_check(8));
     }
 

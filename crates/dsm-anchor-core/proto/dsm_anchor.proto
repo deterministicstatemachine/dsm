@@ -126,8 +126,8 @@ message TryRunStep {
   string name       = 1;
   bool   passed     = 2;
   string detail     = 3;  // why it did not pass
-  // A production install's requirement alone (the RP2350's stepping, a tested PTRNG): a development
-  // board may leave it unmet, and an install still refuses until it is met.
+  // A production install's requirement alone (a chip that tests its PTRNG): a development board
+  // may leave it unmet, and an install still refuses until it is met.
   bool   production = 4;
 }
 

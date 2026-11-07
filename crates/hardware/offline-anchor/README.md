@@ -23,7 +23,7 @@ The appliance proves **device identity only**. Transfer uniqueness is a software
 
 | # | Qty | Part | Notes |
 |---|---|---|---|
-| 1 | 1 | **Raspberry Pi Pico 2 W** (RP2350) | Get it **without headers**. Its RP2350 must be stepping A4, marked on the package: an install refuses A2 and A3. This is the board the firmware is tested on. A non-W Pico 2 has the same pinout but is untested. |
+| 1 | 1 | **Raspberry Pi Pico 2 W** (RP2350) | Get it **without headers**. Its RP2350's stepping is marked on the package, and the try-run's first line says it. A note, not a requirement (owner, 2026-11-06): on A2 and A3 a physical glitch at boot can run unsigned code (errata RP2350-E24, and on A2 also E16, E20, E21), which A4 fixes. This is the board the firmware is tested on. A non-W Pico 2 has the same pinout but is untested. |
 | 2 | 1 | **MIKROE-6559 Secure Tropic Click** (TROPIC01) | Use the whole board and **do not snap off** the Click Snap module. Don't fit headers. Which TROPIC01 part it carries is not on its label, and it matters: the firmware reads it and refuses a part it cannot trust (`crates/dsm-anchor-secure-monitor/scripts/anchor-secure-boot/RUNBOOK.md`). |
 | 3 | 6 | Wire, 28–30 AWG stranded silicone | Cut 60–80 mm per lead. Six colours make checking easier. |
 | 4 | 4 | Screw, M2 × 5 mm, self-tapping | Fixes the Pico to the standoffs (Ø1.7 pilots). |
