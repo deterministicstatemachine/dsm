@@ -61,6 +61,11 @@ struct ServerConfig {
 
 /// A setting the node cannot start without: absent is an error, never a
 /// value made up in its place.
+/// One `[[storage_set.members]]` entry as the config states it: the member's
+/// id, its register incarnation, and the endpoint and CA PEM every other
+/// member must name.
+type SetMemberEntry = (String, [u8; 32], Option<String>, Option<String>);
+
 fn required(settings: &Config, key: &str) -> Result<String> {
     settings
         .get_string(key)
@@ -114,51 +119,54 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     // derived over. A malformed entry refuses rather than defaulting, because
     // a defaulted incarnation would resolve every set to whatever the default
     // hashed to.
-    let storage_set_entries: Vec<(String, [u8; 32], Option<String>, Option<String>)> = match settings
-        .get_array("storage_set.members")
-    {
-        Ok(members) => members,
-        Err(config::ConfigError::NotFound(_)) => Vec::new(),
-        Err(e) => return Err(e).context("`storage_set.members` is not an array of tables"),
-    }
-    .into_iter()
-    .map(|v| {
-        let t = v
-            .into_table()
-            .map_err(|e| anyhow::anyhow!("[[storage_set.members]] is not a table: {e}"))?;
-        let id = t
-            .get("id")
-            .and_then(|v| v.clone().into_string().ok())
-            .ok_or_else(|| anyhow::anyhow!("[[storage_set.members]] is missing `id`"))?;
-        let inc_text = t
-            .get("register_incarnation")
-            .and_then(|v| v.clone().into_string().ok())
-            .ok_or_else(|| {
-                anyhow::anyhow!("[[storage_set.members]] {id:?} is missing `register_incarnation`")
+    let storage_set_entries: Vec<SetMemberEntry> =
+        match settings.get_array("storage_set.members") {
+            Ok(members) => members,
+            Err(config::ConfigError::NotFound(_)) => Vec::new(),
+            Err(e) => return Err(e).context("`storage_set.members` is not an array of tables"),
+        }
+        .into_iter()
+        .map(|v| {
+            let t = v
+                .into_table()
+                .map_err(|e| anyhow::anyhow!("[[storage_set.members]] is not a table: {e}"))?;
+            let id = t
+                .get("id")
+                .and_then(|v| v.clone().into_string().ok())
+                .ok_or_else(|| anyhow::anyhow!("[[storage_set.members]] is missing `id`"))?;
+            let inc_text = t
+                .get("register_incarnation")
+                .and_then(|v| v.clone().into_string().ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "[[storage_set.members]] {id:?} is missing `register_incarnation`"
+                    )
+                })?;
+            let raw = text_id::decode_base32_crockford(&inc_text).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[[storage_set.members]] {id:?} register_incarnation is not Base32-Crockford"
+                )
             })?;
-        let raw = text_id::decode_base32_crockford(&inc_text).ok_or_else(|| {
-            anyhow::anyhow!(
-                "[[storage_set.members]] {id:?} register_incarnation is not Base32-Crockford"
-            )
-        })?;
-        let inc: [u8; 32] = raw.try_into().map_err(|_| {
-            anyhow::anyhow!("[[storage_set.members]] {id:?} register_incarnation is not 32 bytes")
-        })?;
-        let endpoint = match t.get("endpoint") {
-            None => None,
-            Some(v) => Some(v.clone().into_string().map_err(|_| {
-                anyhow::anyhow!("[[storage_set.members]] {id:?} endpoint is not a string")
-            })?),
-        };
-        let ca_cert = match t.get("ca_cert") {
-            None => None,
-            Some(v) => Some(v.clone().into_string().map_err(|e| {
-                anyhow::anyhow!("[[storage_set.members]] {id:?} ca_cert is not a string: {e}")
-            })?),
-        };
-        Ok((id, inc, endpoint, ca_cert))
-    })
-    .collect::<anyhow::Result<Vec<_>>>()?;
+            let inc: [u8; 32] = raw.try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "[[storage_set.members]] {id:?} register_incarnation is not 32 bytes"
+                )
+            })?;
+            let endpoint = match t.get("endpoint") {
+                None => None,
+                Some(v) => Some(v.clone().into_string().map_err(|_| {
+                    anyhow::anyhow!("[[storage_set.members]] {id:?} endpoint is not a string")
+                })?),
+            };
+            let ca_cert = match t.get("ca_cert") {
+                None => None,
+                Some(v) => Some(v.clone().into_string().map_err(|e| {
+                    anyhow::anyhow!("[[storage_set.members]] {id:?} ca_cert is not a string: {e}")
+                })?),
+            };
+            Ok((id, inc, endpoint, ca_cert))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let storage_set_mates: Vec<(String, String, Option<String>)> = storage_set_entries
         .iter()
         .filter_map(|(id, _, e, ca)| e.clone().map(|e| (id.clone(), e, ca.clone())))
