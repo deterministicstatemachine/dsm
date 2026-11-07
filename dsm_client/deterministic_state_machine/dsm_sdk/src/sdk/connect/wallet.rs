@@ -374,7 +374,8 @@ const RETRY_AFTER: Duration = Duration::from_secs(3);
 const MIN_CYCLE: Duration = Duration::from_secs(1);
 
 /// Start the listener unless one is running. It ends by itself once no
-/// application is connected; approving one starts it again.
+/// application is connected, and empties its slot as it does; approving one
+/// starts it again.
 pub fn start_listener() -> Result<(), String> {
     // The two-device harness drives `connect.sync` itself, one device at a
     // time, as it drives `storage.sync`: no background task runs behind it.
@@ -429,8 +430,48 @@ fn none_completed(sessions: &[generated::ConnectSessionV1]) -> bool {
 
 async fn listen() {
     log::info!("[connect] listener started");
-    listen_with(sync_cycle).await;
+    loop {
+        listen_with(sync_cycle).await;
+        match stop_unless_connected() {
+            Ok(Ending::Stopped) => break,
+            Ok(Ending::RunsOn) => {
+                log::info!(
+                    "[connect] an application connected as the listener stopped: it runs on"
+                );
+            }
+            Err(e) => {
+                log::warn!("[connect] listener stopped: {e}");
+                return;
+            }
+        }
+    }
     log::info!("[connect] listener stopped: no application is connected");
+}
+
+/// What the listener came to once its cycles found no application connected.
+enum Ending {
+    /// No application is connected: the slot is empty and the listener ends.
+    Stopped,
+    /// An application connected meanwhile: the listener runs on.
+    RunsOn,
+}
+
+/// Decide, under the slot's lock, whether the listener stops: it stops, and
+/// empties the slot, only while no application is connected. A cycle that read
+/// no session can end after an approval stored one and called
+/// [`start_listener`], which found this listener still running and started
+/// none; the decision is read again here so that approval is never left with
+/// nothing listening. An approval that comes after finds the slot empty and
+/// starts a new listener.
+fn stop_unless_connected() -> Result<Ending, String> {
+    let mut slot = LISTENER
+        .lock()
+        .map_err(|e| format!("the connect listener's slot: {e}"))?;
+    if any_connected()? {
+        return Ok(Ending::RunsOn);
+    }
+    *slot = None;
+    Ok(Ending::Stopped)
 }
 
 /// Run `cycle` over and over until one answers that no application is
