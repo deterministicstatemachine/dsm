@@ -422,6 +422,9 @@ impl PairingOrchestrator {
 
         log::info!("[PairingOrchestrator] start_pairing_all_unpaired: loop started");
 
+        // Pairing attempts this run of the loop started: each one asks the radio to
+        // look for its contact. Only then is a scan the loop's to stop on exit.
+        let mut initiated_this_run: u32 = 0;
         loop {
             let state_changed = self.state_change.notified();
 
@@ -536,6 +539,7 @@ impl PairingOrchestrator {
                 // Initiate pairing for this contact
                 match self.initiate_pairing(device_id).await {
                     Ok(should_advertise) => {
+                        initiated_this_run += 1;
                         let role_str = if should_advertise {
                             "advertise"
                         } else {
@@ -566,10 +570,16 @@ impl PairingOrchestrator {
         }
 
         // Stop the pairing scan on loop exit so it does not linger ("stuck
-        // scanning") once the peer has completed pairing. Advertising follows
-        // the identity and is not the loop's.
-        if let Err(e) = self.stop_ble_discovery().await {
-            log::warn!("[PairingOrchestrator] loop ended with the scan not stopped: {e}");
+        // scanning") once the peer has completed pairing, but only a scan this
+        // run started. A run that found nobody to pair started none, and a scan
+        // running then is someone else's: a contact owed frames is being reached
+        // for with it, and each session snapshot starts a run, so stopping it here
+        // left that reach without a scanner. Advertising follows the identity and
+        // is not the loop's.
+        if initiated_this_run > 0 {
+            if let Err(e) = self.stop_ble_discovery().await {
+                log::warn!("[PairingOrchestrator] loop ended with the scan not stopped: {e}");
+            }
         }
 
         self.loop_running.store(false, Ordering::SeqCst);

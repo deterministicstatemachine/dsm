@@ -306,13 +306,26 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      */
     fun stopScanning(): Boolean {
         return runOperationBool(BleOpLane.LIFECYCLE) {
-            lastScanStopTimestamp = System.currentTimeMillis()
             scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
             val wasScanning = scanner.isScanning()
             val stopped = scanner.stopScanning()
+            // Only a scan that ran holds back the next start: a stop with nothing
+            // scanning must not make a reach that needs the scanner wait.
+            if (wasScanning) lastScanStopTimestamp = System.currentTimeMillis()
             if (wasScanning && stopped) radioEvents.scanStopped()
             stopped
         }
+    }
+
+    /**
+     * Pairing's stop. While Rust is reaching for a contact by scan ([requestConnect]
+     * left it to the next device the scan finds), the scan is the reach's: pairing
+     * finishing must not end it. The reach's scan stops at the device it connects to.
+     */
+    fun stopPairingScan(): Boolean {
+        val reaching = pendingTarget != null
+        if (reaching) Log.i("BleCoordinator", "pairing scan stop: a reach for a contact is scanning; left on")
+        return reaching || stopScanning()
     }
 
     /**
