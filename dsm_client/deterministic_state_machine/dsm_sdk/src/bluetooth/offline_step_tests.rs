@@ -4884,12 +4884,15 @@ async fn a_payment_over_ble_carries_no_identity_on_the_radio() {
     );
 }
 
-/// A record opens once, on the link it was sealed for: replayed on the same
-/// link it is refused, and after the link closes and the two pair again, a
-/// record of the old link opens on nothing, the one never delivered too.
-/// MUTATION CONTROL: dropping the counter check in `LinkSession::open` takes
-/// the replay: red. Keeping the session when its link closes opens the
-/// record never delivered: red.
+/// A record opens once, on the link it was sealed for. Carried again on the
+/// same link, as a sender's resend after a window ACK timed out carries it,
+/// it opens nothing and the link stays up: the record after it is taken.
+/// After the link closes and the two pair again, a record of the old link
+/// opens on nothing, the one never delivered too.
+/// MUTATION CONTROLS: dropping the counter check in `LinkSession::open` opens
+/// the record again: red at "opens nothing". Refusing it instead of dropping
+/// it: red at "the link stays up". Keeping the session when its link closes
+/// opens the record never delivered: red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_record_replayed_or_from_a_closed_link_opens_on_nothing() {
@@ -4898,7 +4901,14 @@ async fn a_record_replayed_or_from_a_closed_link_opens_on_nothing() {
     a.device.enter();
     let sealed = a
         .links
-        .seal_on(&at_a, &[b"a unit".to_vec(), b"never delivered".to_vec()])
+        .seal_on(
+            &at_a,
+            &[
+                b"a unit".to_vec(),
+                b"after the resend".to_vec(),
+                b"never delivered".to_vec(),
+            ],
+        )
         .expect("sealed");
     b.device.enter();
     assert_eq!(
@@ -4908,9 +4918,18 @@ async fn a_record_replayed_or_from_a_closed_link_opens_on_nothing() {
             .unit,
         Some(b"a unit".to_vec())
     );
-    assert!(
-        matches!(b.links.inbound(&at_b, &sealed[0], &WalletKeys), Err(..)),
-        "a replayed record is refused"
+    let again = b
+        .links
+        .inbound(&at_b, &sealed[0], &WalletKeys)
+        .expect("the link stays up");
+    assert_eq!(again.unit, None, "a record carried again opens nothing");
+    assert_eq!(again.reply, Vec::<Vec<u8>>::new(), "and answers nothing");
+    assert_eq!(
+        b.links
+            .inbound(&at_b, &sealed[1], &WalletKeys)
+            .expect("the record after it")
+            .unit,
+        Some(b"after the resend".to_vec())
     );
     a.links.closed(&at_a);
     b.links.closed(&at_b);
@@ -4926,7 +4945,7 @@ async fn a_record_replayed_or_from_a_closed_link_opens_on_nothing() {
         "a record of the closed link does not open on the new one"
     );
     assert!(
-        matches!(b.links.inbound(&again_b, &sealed[1], &WalletKeys), Err(..)),
+        matches!(b.links.inbound(&again_b, &sealed[2], &WalletKeys), Err(..)),
         "nor does one the closed link never delivered"
     );
 }

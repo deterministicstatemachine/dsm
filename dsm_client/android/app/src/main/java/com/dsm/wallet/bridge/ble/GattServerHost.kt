@@ -431,8 +431,9 @@ class GattServerHost(private val context: Context) {
             // Whole-transfer retry: BLE notification streams die routinely mid-flight (observed
             // live: ACK timeout at chunk 150/295 killed a settled transfer's commit ack, leaving
             // the sender undebited). Each attempt bumps the transfer nonce, which resets the
-            // client's per-transfer ACK counter, and the Rust reassembly layer dedupes
-            // re-received chunks by index — so a full resend is safe and self-consistent.
+            // client's per-transfer ACK counter. The client's link drops each sealed record it
+            // already took, and the Rust reassembly layer dedupes re-received chunks by index,
+            // so a full resend is safe and self-consistent.
             attempts@ for (attempt in 1..TRANSFER_MAX_ATTEMPTS) {
             // Increment transfer nonce so the client resets its ACK counter.
             // This eliminates reliance on idle-gap detection for transfer boundary.
