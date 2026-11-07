@@ -77,11 +77,24 @@ class GattServerHost(private val context: Context) {
         /** Number of notification chunks to send before pausing for an ACK. */
         const val NOTIFICATION_WINDOW_SIZE = 10
 
-        // Whole-transfer retry on window-ACK timeout (transport-level; see sendChunkedNotifications).
+        // Attempts of one transfer; each after the first resumes at the window whose ACK timed
+        // out (transport-level; see sendChunkedNotifications).
         const val TRANSFER_MAX_ATTEMPTS = 3
         const val TRANSFER_RETRY_DELAY_MS = 500L
-        /** Timeout waiting for client ACK write-back per window. */
-        const val ACK_TIMEOUT_MS = 5000L
+        /**
+         * Timeout waiting for the client's ACK of a window. The ACK arrives once the window has
+         * drained over the air: 240 ms typically and 516 ms at most over 275 windows
+         * (2026-10-15). A window that has not drained in 2 s lost a chunk, and the client's
+         * count will not reach the boundary without a resend.
+         */
+        const val ACK_TIMEOUT_MS = 2000L
+        /**
+         * How long a chunk waits for onNotificationSent before it is sent again. The callback
+         * arrives in about 30 ms; the stack sometimes never delivers it (observed 2026-10-15:
+         * 9 of 300 chunks), and at 5 s each those waits were 45 s of a 58 s transfer. A chunk
+         * sent twice is a sealed record the client's link drops the second time.
+         */
+        const val NOTIFICATION_SENT_TIMEOUT_MS = 400L
         /** Granularity for draining stale ACKs while still honoring ACK_TIMEOUT_MS overall. */
         private const val ACK_WAIT_SLICE_MS = 250L
         /** Maximum allowed write buffer size (64KB). Rejects oversized prepared writes to prevent OOM. */
@@ -149,9 +162,11 @@ class GattServerHost(private val context: Context) {
             val deviceAddress = device?.address ?: return
             val success = status == BluetoothGatt.GATT_SUCCESS
             Log.d("GattServerHost", "Notification sent to $deviceAddress: status=$status, success=$success")
-            val p = peer(deviceAddress)
-            p.notificationCompletion?.complete(success)
-            p.notificationCompletion = null
+            // The sender owns the slot and replaces it per chunk. Clearing it here raced the
+            // sender: the next chunk's wait, set as soon as this completion resumed it, was
+            // cleared, so that chunk's own callback found nothing, waited out its timeout and
+            // went out twice (2026-10-15: 5 of 300 chunks).
+            peer(deviceAddress).notificationCompletion?.complete(success)
         }
 
         override fun onCharacteristicReadRequest(
@@ -394,8 +409,9 @@ class GattServerHost(private val context: Context) {
      * back a transport-level ACK confirming receipt before continuing. This prevents
      * silent notification drops caused by BLE buffer overflow on the remote device.
      *
-     * The client ACKs by writing [0xFF][hi][lo] to TX_REQUEST, where hi:lo is the
-     * number of chunks received so far. The server detects this in [handleTxWrite].
+     * The client ACKs by writing [0xFF][nonce][b3][b2][b1][b0] to TX_REQUEST: the
+     * transfer nonce it counts under and the number of chunks it received under it.
+     * The server detects this in [handleTxWrite] and takes only its current nonce's.
      */
     suspend fun sendChunkedNotifications(deviceAddress: String, chunks: Array<ByteArray>): Boolean {
         val server = gattServer.get()
@@ -428,19 +444,22 @@ class GattServerHost(private val context: Context) {
         }
 
         return peer.notificationSendLock.withLock {
-            // Whole-transfer retry: BLE notification streams die routinely mid-flight (observed
-            // live: ACK timeout at chunk 150/295 killed a settled transfer's commit ack, leaving
-            // the sender undebited). Each attempt bumps the transfer nonce, which resets the
-            // client's per-transfer ACK counter. The client's link drops each sealed record it
-            // already took, and the Rust reassembly layer dedupes re-received chunks by index,
-            // so a full resend is safe and self-consistent.
+            // A window whose ACK times out lost a chunk on the way (observed live: ACK timeout at
+            // chunk 150/295). The next attempt resumes at that window, under a fresh nonce: every
+            // chunk before it was acknowledged, the client counts the attempt from its first
+            // chunk, and an ACK of an earlier attempt's nonce is not taken. A resent chunk is a
+            // sealed record the client's link already took or never got: it drops the first kind
+            // and takes the second, and the Rust reassembly keeps each chunk index once. The
+            // attempts are the whole-transfer retry's, so a peer withholding ACKs gets at most 10
+            // chunks resent per attempt where it got the whole frame.
+            var resumeFrom = 0
             attempts@ for (attempt in 1..TRANSFER_MAX_ATTEMPTS) {
             // Increment transfer nonce so the client resets its ACK counter.
             // This eliminates reliance on idle-gap detection for transfer boundary.
             peer.serverTransferNonce = ((peer.serverTransferNonce.toInt() + 1) and 0xFF).toByte()
             val nonce = peer.serverTransferNonce
 
-            Log.i("GattServerHost", "sendChunkedNotifications: sending ${chunks.size} chunks to $deviceAddress (window=$NOTIFICATION_WINDOW_SIZE, nonce=${nonce.toInt() and 0xFF})")
+            Log.i("GattServerHost", "sendChunkedNotifications: sending chunks ${resumeFrom + 1}..${chunks.size} of ${chunks.size} to $deviceAddress (window=$NOTIFICATION_WINDOW_SIZE, nonce=${nonce.toInt() and 0xFF})")
             // ACK flow only needs the latest observed count while a send window waits.
             // Keep the channel bounded so a noisy peer cannot accumulate unbounded ACK state.
             val ackChannel = Channel<Int>(Channel.CONFLATED)
@@ -448,14 +467,12 @@ class GattServerHost(private val context: Context) {
             var windowTimedOut = false
 
             try {
-                // Prepend [0xFF, nonce] to the first chunk so the client can
-                // detect transfer boundaries. 0xFF is an invalid protobuf tag
-                // so it won't be confused with real BleChunk payload bytes.
-                val framedChunks = chunks.mapIndexed { i, c ->
-                    if (i == 0) byteArrayOf(0xFF.toByte(), nonce) + c else c
-                }.toTypedArray()
-
-                for ((index, chunk) in framedChunks.withIndex()) {
+                for (index in resumeFrom until chunks.size) {
+                    // Prepend [0xFF, nonce] to the attempt's first chunk so the client can
+                    // detect transfer boundaries. 0xFF begins no radio byte the client takes
+                    // (a handshake fragment or a sealed record), so it is never confused.
+                    val chunk =
+                        if (index == resumeFrom) byteArrayOf(0xFF.toByte(), nonce) + chunks[index] else chunks[index]
                     val deferred = CompletableDeferred<Boolean>()
                     peer.notificationCompletion = deferred
 
@@ -488,7 +505,7 @@ class GattServerHost(private val context: Context) {
                         // P1.2: Wait for onNotificationSent with retry on timeout.
                         // Android BLE can silently drop notifications if link layer is congested.
                         // Retry up to 2 times with exponential backoff before continuing.
-                        var notifSuccess: Boolean? = withTimeoutOrNull(5000) { deferred.await() }
+                        var notifSuccess: Boolean? = withTimeoutOrNull(NOTIFICATION_SENT_TIMEOUT_MS) { deferred.await() }
                         peer.notificationCompletion = null
                         if (notifSuccess == null) {
                             // Retry loop: 50ms, then 200ms backoff
@@ -508,7 +525,7 @@ class GattServerHost(private val context: Context) {
                                     peer.notificationCompletion = null
                                     continue
                                 }
-                                notifSuccess = withTimeoutOrNull(5000) { retryDeferred.await() }
+                                notifSuccess = withTimeoutOrNull(NOTIFICATION_SENT_TIMEOUT_MS) { retryDeferred.await() }
                                 peer.notificationCompletion = null
                                 if (notifSuccess != null) break
                             }
@@ -522,7 +539,7 @@ class GattServerHost(private val context: Context) {
                         // Adaptive inter-chunk pacing via token bucket.
                         // Replaces static delay(10) with back-pressure that
                         // adapts to the actual BLE connection interval.
-                        if (index < framedChunks.size - 1) {
+                        if (index < chunks.size - 1) {
                             val budget = peer.writeBudget
                             var backoff = 0
                             while (!budget.tryConsume()) {
@@ -538,34 +555,34 @@ class GattServerHost(private val context: Context) {
                         Log.i("BleTransferTrace", "Send chunk $chunkNum/${chunks.size} to $deviceAddress")
                         Log.i("BleTransferTrace", "Send chunk $chunkNum/${chunks.size} to $deviceAddress")
                         val isWindowBoundary = chunkNum % NOTIFICATION_WINDOW_SIZE == 0
-                        val isLastChunk = chunkNum == framedChunks.size
+                        val isLastChunk = chunkNum == chunks.size
                         if (isWindowBoundary) {
                             Log.d("GattServerHost", "sendChunkedNotifications: waiting for ACK after chunk $chunkNum/${chunks.size}")
+                            // The client counts this attempt's chunks from its first.
+                            val expected = chunkNum - resumeFrom
 
                             var ackCount: Int? = null
                             repeat((ACK_TIMEOUT_MS / ACK_WAIT_SLICE_MS).toInt()) {
                                 if (ackCount != null) return@repeat
 
                                 val candidate = withTimeoutOrNull(ACK_WAIT_SLICE_MS) { ackChannel.receive() } ?: return@repeat
-                                // Client resets its counter per-transfer (idle-gap
-                                // detection), so ACKs are 1-indexed within each
-                                // sendChunkedNotifications call. No offset needed.
-                                if (candidate >= chunkNum) {
+                                if (candidate >= expected) {
                                     ackCount = candidate
                                     return@repeat
                                 }
 
                                 Log.w(
                                     "GattServerHost",
-                                    "sendChunkedNotifications: stale ACK $candidate while waiting for $chunkNum/${chunks.size}; continuing to wait"
+                                    "sendChunkedNotifications: stale ACK $candidate while waiting for $expected of this attempt ($chunkNum/${chunks.size}); continuing to wait"
                                 )
                             }
 
                             if (ackCount == null) {
                                 Log.e(
                                     "GattServerHost",
-                                    "sendChunkedNotifications: ACK timeout at chunk $chunkNum/${chunks.size} (attempt $attempt/$TRANSFER_MAX_ATTEMPTS)"
+                                    "sendChunkedNotifications: ACK timeout at chunk $chunkNum/${chunks.size} (attempt $attempt/$TRANSFER_MAX_ATTEMPTS); the next attempt resumes at chunk ${chunkNum - NOTIFICATION_WINDOW_SIZE + 1}"
                                 )
+                                resumeFrom = chunkNum - NOTIFICATION_WINDOW_SIZE
                                 windowTimedOut = true
                                 break
                             }
@@ -595,8 +612,8 @@ class GattServerHost(private val context: Context) {
                 peer.chunkAckChannel = null
                 ackChannel.close()
             }
-            // Window ACK timed out: pause briefly for the link to recover, then retry the
-            // whole transfer under a fresh nonce.
+            // Window ACK timed out: pause briefly for the link to recover, then resume at that
+            // window under a fresh nonce.
             if (attempt < TRANSFER_MAX_ATTEMPTS) {
                 kotlinx.coroutines.delay(TRANSFER_RETRY_DELAY_MS)
             }
@@ -725,15 +742,25 @@ class GattServerHost(private val context: Context) {
                 }
             }
 
-            // Check for transport-level chunk ACK: [0xFF][b3][b2][b1][b0].
-            if (data.size == 5 && data[0] == CHUNK_ACK_MARKER) {
+            // Check for transport-level chunk ACK: [0xFF][nonce][b3][b2][b1][b0].
+            if (data.size == 6 && data[0] == CHUNK_ACK_MARKER) {
+                val ackNonce = data[1]
                 val ackCount =
-                    ((data[1].toInt() and 0xFF) shl 24) or
-                    ((data[2].toInt() and 0xFF) shl 16) or
-                    ((data[3].toInt() and 0xFF) shl 8) or
-                    (data[4].toInt() and 0xFF)
-                Log.i("GattServerHost", "Chunk ACK received from $deviceAddress: $ackCount chunks confirmed")
-                peer(deviceAddress).chunkAckChannel?.trySend(ackCount)
+                    ((data[2].toInt() and 0xFF) shl 24) or
+                    ((data[3].toInt() and 0xFF) shl 16) or
+                    ((data[4].toInt() and 0xFF) shl 8) or
+                    (data[5].toInt() and 0xFF)
+                val p = peer(deviceAddress)
+                if (ackNonce == p.serverTransferNonce) {
+                    Log.i("GattServerHost", "Chunk ACK received from $deviceAddress: $ackCount chunks confirmed")
+                    p.chunkAckChannel?.trySend(ackCount)
+                } else {
+                    // A count under an earlier attempt's nonce says nothing of this attempt.
+                    Log.w(
+                        "GattServerHost",
+                        "Chunk ACK from $deviceAddress under nonce ${ackNonce.toInt() and 0xFF}, not ${p.serverTransferNonce.toInt() and 0xFF}: not taken"
+                    )
+                }
             } else {
                 // Regular immediate write — process as transaction data
                 Log.d("GattServerHost", "TX immediate write: ${data.size} bytes from $deviceAddress")

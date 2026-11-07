@@ -254,11 +254,12 @@ class GattClientSession(
 
     /**
      * Transport-level chunk ACK back to the server's TX_REQUEST characteristic:
-     * [0xFF][b3][b2][b1][b0], the 32-bit count of notification chunks received,
-     * so the server can pace delivery. Queued ahead of waiting message chunks;
-     * a newer count supersedes a waiting one.
+     * [0xFF][nonce][b3][b2][b1][b0], the transfer nonce and the 32-bit count of
+     * notification chunks received under it, so the server can pace delivery and
+     * tell this attempt's count from an earlier one's. Queued ahead of waiting
+     * message chunks; a newer count supersedes a waiting one.
      */
-    private inner class ChunkAckWrite(val count: Int) : GattOperationQueue.Op {
+    private inner class ChunkAckWrite(val nonce: Byte, val count: Int) : GattOperationQueue.Op {
         override val key = writeKey(BleConstants.TX_REQUEST_UUID)
         override val label = "chunk ACK ($count)"
 
@@ -266,6 +267,7 @@ class GattClientSession(
             requestCharacteristic,
             byteArrayOf(
                 0xFF.toByte(),
+                nonce,
                 ((count shr 24) and 0xFF).toByte(),
                 ((count shr 16) and 0xFF).toByte(),
                 ((count shr 8) and 0xFF).toByte(),
@@ -483,7 +485,7 @@ class GattClientSession(
                     }
                     if (notificationChunkCount % NOTIFICATION_ACK_WINDOW == 0) {
                         val count = notificationChunkCount
-                        ops.enqueueFirst(ChunkAckWrite(count)) { it is ChunkAckWrite }
+                        ops.enqueueFirst(ChunkAckWrite(currentTransferNonce, count)) { it is ChunkAckWrite }
                     }
                 }
                 else -> {
