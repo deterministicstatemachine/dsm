@@ -43,6 +43,9 @@ class GattClientSession(
         private const val CONNECTION_TIMEOUT_MS = 15_000L
         /** Number of notification chunks to receive before sending ACK write-back. */
         private const val NOTIFICATION_ACK_WINDOW = 10
+        /** How many times a refused start of service discovery is tried, and how far apart. */
+        private const val SERVICE_DISCOVERY_START_ATTEMPTS = 6
+        private const val SERVICE_DISCOVERY_RETRY_MS = 500L
     }
 
     private var bluetoothGatt: BluetoothGatt? = null
@@ -350,15 +353,7 @@ class GattClientSession(
                     // negotiation (supervision timeout, PHY, connection interval) before
                     // discovery starts, preventing transient status-133 failures.
                     serviceDiscoveryRetried = false
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        try {
-                            gatt?.discoverServices()
-                        } catch (e: SecurityException) {
-                            reportPermissionFailure(e, "service discovery")
-                            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "service_discovery"))
-                            cleanup("service_discovery_permission")
-                        }
-                    }, 200L)
+                    Handler(Looper.getMainLooper()).postDelayed({ startServiceDiscovery(gatt, 1) }, 200L)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
@@ -497,6 +492,34 @@ class GattClientSession(
                     emitEvent(BleSessionEvent.ResponseReceived(deviceAddress, data))
                 }
             }
+        }
+    }
+
+    /**
+     * Start service discovery on a link just connected. The stack refuses to start it while
+     * another operation on the link is in flight (both phones connect to each other at once,
+     * each as client and server): a refusal is tried again, and a link that never starts its
+     * discovery is closed and reported, not left idle until the radio drops it.
+     */
+    @SuppressLint("MissingPermission")
+    private fun startServiceDiscovery(gatt: BluetoothGatt?, attempt: Int) {
+        if (gatt == null || gatt !== bluetoothGatt) return
+        val started = try {
+            gatt.discoverServices()
+        } catch (e: SecurityException) {
+            reportPermissionFailure(e, "service discovery")
+            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "service_discovery"))
+            cleanup("service_discovery_permission")
+            return
+        }
+        if (started) return
+        if (attempt < SERVICE_DISCOVERY_START_ATTEMPTS) {
+            Log.w("GattClientSession", "Service discovery for $deviceAddress not started (attempt $attempt); trying again")
+            Handler(Looper.getMainLooper()).postDelayed({ startServiceDiscovery(gatt, attempt + 1) }, SERVICE_DISCOVERY_RETRY_MS)
+        } else {
+            Log.e("GattClientSession", "Service discovery for $deviceAddress not started after $attempt attempts — closing the link")
+            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.SERVICE_DISCOVERY_FAILED, "service_discovery_not_started"))
+            disconnect()
         }
     }
 

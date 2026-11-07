@@ -591,6 +591,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         // Remove stale session so future scans can reconnect to this peer
                         clearClient(peer)
                         if (peer.isEmpty) peers.remove(event.deviceAddress)
+                        // A link that closed before Rust opened it leaves its reach target to
+                        // the scan's next link.
+                        reachTargets.remove(event.deviceAddress)?.let { pendingTarget = it }
                         com.dsm.wallet.bridge.Unified.onDeviceDisconnected(event.deviceAddress)
                         // Exponential backoff on reconnection to prevent battery drain
                         // and Android scan-rate-limit violations from rapid reconnect loops.
@@ -725,6 +728,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         val opened = peer.clientRouteReady
                         clearClient(peer)
                         if (peer.isEmpty) peers.remove(event.deviceAddress)
+                        // A contact Rust asked to reach at an address it last saw there: the
+                        // address may have rotated, so the scan's next link names it instead.
+                        reachTargets.remove(event.deviceAddress)?.let { pendingTarget = it }
                         if (!opened) {
                             resumePairingScan(event.deviceAddress, event.details)
                         }
