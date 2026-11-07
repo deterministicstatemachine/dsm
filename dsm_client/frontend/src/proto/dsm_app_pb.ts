@@ -22664,6 +22664,45 @@ export class ContactSetProfileRequest extends Message<ContactSetProfileRequest> 
 }
 
 /**
+ * contacts.unpair: forget this phone's pairing with the contact and pair again.
+ *
+ * @generated from message dsm.ContactUnpairRequest
+ */
+export class ContactUnpairRequest extends Message<ContactUnpairRequest> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ContactUnpairRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ContactUnpairRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactUnpairRequest {
+    return new ContactUnpairRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ContactUnpairRequest {
+    return new ContactUnpairRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ContactUnpairRequest {
+    return new ContactUnpairRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ContactUnpairRequest | PlainMessage<ContactUnpairRequest> | undefined, b: ContactUnpairRequest | PlainMessage<ContactUnpairRequest> | undefined): boolean {
+    return proto3.util.equals(ContactUnpairRequest, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.ContactManualAddRequest
  */
 export class ContactManualAddRequest extends Message<ContactManualAddRequest> {

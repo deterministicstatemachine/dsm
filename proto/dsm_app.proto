@@ -3553,6 +3553,11 @@ message ContactSetProfileRequest {
   ContactProfileV1 profile   = 2;
 }
 
+// contacts.unpair: forget this phone's pairing with the contact and pair again.
+message ContactUnpairRequest {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+}
+
 message ContactManualAddRequest {
   string alias = 1;
   bytes  device_id = 2 [(dsm_fixed_len)=32];

@@ -2769,9 +2769,10 @@ impl AppRouter for AppRouterImpl {
                 Box::pin(self.handle_offline_cash_invoke(i)).await
             }
             // Contacts invoke routes
-            "contacts.addManual" | "contacts.setProfile" | "contacts.setOwnProfile" => {
-                Box::pin(self.handle_contacts_invoke(i)).await
-            }
+            "contacts.addManual"
+            | "contacts.setProfile"
+            | "contacts.setOwnProfile"
+            | "contacts.unpair" => Box::pin(self.handle_contacts_invoke(i)).await,
             // Email receipts (DSM Amendment A17): outside the protocol.
             "receipts.email" => Box::pin(self.handle_receipts_invoke(i)).await,
             // DSM Connect (DSM Amendment A11)
