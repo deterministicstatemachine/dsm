@@ -591,6 +591,7 @@ impl AnchorAppliance for HostAppliance {
                         Ok(()) => String::new(),
                         Err(why) => why.clone(),
                     },
+                    requirement: step.requirement,
                 })
                 .collect(),
             permanent: anchor_core::try_run::PERMANENT

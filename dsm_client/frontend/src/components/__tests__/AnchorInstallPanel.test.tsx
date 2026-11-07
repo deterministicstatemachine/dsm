@@ -65,6 +65,40 @@ function report(stepPassed: 'passed' | 'failed'): pb.AnchorTryRunResponse {
   return run;
 }
 
+type StepOf = {
+  name: string;
+  outcome: 'passed' | 'failed';
+  requirement: 'works' | 'production';
+  detail: string;
+};
+
+/** A run of these steps, which passes only when every one of them did. */
+function reportOf(steps: StepOf[]): pb.AnchorTryRunResponse {
+  const run = new pb.AnchorTryRunResponse({
+    steps: steps.map((s) => {
+      const step = new pb.AnchorTryRunStep({ name: s.name, detail: s.detail });
+      step.passed = s.outcome === 'passed';
+      step.production = s.requirement === 'production';
+      return step;
+    }),
+    permanent: [PERMANENT],
+  });
+  run.passed = steps.every((s) => s.outcome === 'passed');
+  return run;
+}
+
+/** The anchor works, and a production install still waits for a tested PTRNG. */
+const productionUnmet = (): pb.AnchorTryRunResponse =>
+  reportOf([
+    { name: 'the chip signs', outcome: 'passed', requirement: 'works', detail: '' },
+    {
+      name: 'the chip tests its PTRNG at start-up',
+      outcome: 'failed',
+      requirement: 'production',
+      detail: 'it does not',
+    },
+  ]);
+
 async function popover(onConnect: () => Promise<void>) {
   const status = await getAnchorStatus();
   const onClose = () => undefined;
@@ -100,6 +134,19 @@ describe('the install of a new anchor', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Yes, make it permanent' }));
     await waitFor(() => expect(reads).toEqual(['read again']));
     expect(asked.filter((route) => route === 'anchor.install')).toHaveLength(1);
+  });
+
+  it('shows what a production install still needs apart from the steps, and offers no install', async () => {
+    hostWith(productionUnmet(), 'new anchor');
+    await popover(nothing);
+    fireEvent.click(screen.getByRole('button', { name: 'Try the install' }));
+    const unmet = await screen.findByTestId('anchor-production-unmet');
+    expect(unmet).toHaveTextContent('the chip tests its PTRNG at start-up (it does not)');
+    expect(screen.getByText('Not ready for a production install')).toBeInTheDocument();
+    expect(screen.getByTestId('anchor-try-run-steps')).toHaveTextContent('OK: the chip signs');
+    expect(screen.getByTestId('anchor-try-run-steps')).not.toHaveTextContent('PTRNG');
+    expect(screen.queryByText(/FAILED/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Install…' })).toBeNull();
   });
 
   it('is never offered after a try-run that failed', async () => {

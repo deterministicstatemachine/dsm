@@ -47,6 +47,8 @@ pub struct TryRunStep {
     pub name: String,
     pub passed: bool,
     pub detail: String,
+    /// Whether the anchor needs it to work, or a production install alone does.
+    pub requirement: anchor_core::try_run::Requirement,
 }
 
 /// An install gone through on the anchor with its permanent parts substituted

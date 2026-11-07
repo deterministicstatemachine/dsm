@@ -2142,9 +2142,12 @@ message AnchorStatusResponse {
 
 // One thing an anchor's try-run went through.
 message AnchorTryRunStep {
-  string name   = 1;
-  bool   passed = 2;
-  string detail = 3; // why it did not pass
+  string name       = 1;
+  bool   passed     = 2;
+  string detail     = 3; // why it did not pass
+  // A production install's requirement alone (a chip that tests its PTRNG): the anchor works without
+  // it, and an install refuses until it is met.
+  bool   production = 4;
 }
 
 // `anchor.tryRun`: an install gone through on the anchor with its permanent parts substituted.

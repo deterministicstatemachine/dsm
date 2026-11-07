@@ -13567,6 +13567,14 @@ export class AnchorTryRunStep extends Message<AnchorTryRunStep> {
    */
   detail = "";
 
+  /**
+   * A production install's requirement alone (a chip that tests its PTRNG): the anchor works without
+   * it, and an install refuses until it is met.
+   *
+   * @generated from field: bool production = 4;
+   */
+  production = false;
+
   constructor(data?: PartialMessage<AnchorTryRunStep>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13578,6 +13586,7 @@ export class AnchorTryRunStep extends Message<AnchorTryRunStep> {
     { no: 1, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "passed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 3, name: "detail", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "production", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorTryRunStep {

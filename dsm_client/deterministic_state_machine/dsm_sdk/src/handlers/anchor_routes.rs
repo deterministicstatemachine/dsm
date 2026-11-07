@@ -72,6 +72,8 @@ impl AppRouterImpl {
                                         name: step.name,
                                         passed: step.passed,
                                         detail: step.detail,
+                                        production: step.requirement
+                                            == anchor_core::try_run::Requirement::Production,
                                     })
                                     .collect(),
                                 permanent: report.permanent,

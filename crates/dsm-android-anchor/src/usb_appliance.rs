@@ -18,6 +18,8 @@
 use anchor_core::appliance::RecoverOutcome;
 use anchor_core::proto::{decode_response, encode_release, encode_request, pb};
 use anchor_core::root_advance::{OwnedTransition, Transition};
+use anchor_core::service::err;
+use anchor_core::try_run::Requirement;
 use dsm::types::error::DsmError;
 use dsm_sdk::anchor::{AnchorAppliance, AnchorPin, ApplianceStatus, TryRunReport, TryRunStep};
 
@@ -243,13 +245,19 @@ impl AnchorAppliance for UsbAnchorAppliance {
                 name: step.name.clone(),
                 passed: step.passed,
                 detail: step.detail.clone(),
+                requirement: if step.production {
+                    Requirement::Production
+                } else {
+                    Requirement::Works
+                },
             })
             .collect();
-        // The transport carried an answer as long as the largest the anchor ever gives.
+        // The transport carried an answer as long as the largest the anchor ever gives: checked on
+        // any run that went through its payment, whatever production still needs.
         let carried = resp.transport_check.len();
         let whole =
             carried > 0 && resp.transport_check == anchor_core::try_run::transport_check(carried);
-        if resp.ok {
+        if resp.ok || carried > 0 {
             steps.push(TryRunStep {
                 name: "the anchor's largest answer came through whole".to_string(),
                 passed: whole,
@@ -258,17 +266,23 @@ impl AnchorAppliance for UsbAnchorAppliance {
                 } else {
                     format!("{carried} bytes arrived")
                 },
+                requirement: Requirement::Works,
             });
         }
+        // A run that went through answers with its steps; only an anchor that would not run one at
+        // all is a refusal, and it says why.
+        let refused = match resp.error {
+            err::NONE | err::TRY_RUN_FAILED => String::new(),
+            code if resp.detail.is_empty() => {
+                format!("the anchor refused the try-run (error {code})")
+            }
+            _ => resp.detail.clone(),
+        };
         Ok(TryRunReport {
             passed: resp.ok && whole,
             steps,
             permanent: resp.permanent.clone(),
-            refused: if resp.error == anchor_core::service::err::NONE {
-                String::new()
-            } else {
-                format!("error {} {}", resp.error, resp.detail)
-            },
+            refused,
         })
     }
 

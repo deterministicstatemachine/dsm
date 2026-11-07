@@ -47,17 +47,34 @@ export default function AnchorInstallPanel({ onInstalled }: Props) {
   };
 
   const working = stage === 'trying' || stage === 'installing';
+  // What a production install alone still needs is shown apart from the steps: the anchor works
+  // without it, and Rust offers no install until it is met.
+  const unmet = run ? run.steps.filter((step) => step.production && !step.passed) : [];
+  const steps = run ? run.steps.filter((step) => !(step.production && !step.passed)) : [];
   return (
     <div className="sb-field" data-testid="anchor-install">
       {run && (
         <ul data-testid="anchor-try-run-steps">
-          {run.steps.map((step) => (
+          {steps.map((step) => (
             <li key={step.name}>
               {step.passed ? 'OK' : 'FAILED'}: {step.name}
               {step.detail ? ` (${step.detail})` : ''}
             </li>
           ))}
         </ul>
+      )}
+      {unmet.length > 0 && (
+        <>
+          <span className="sb-label">Not ready for a production install</span>
+          <ul data-testid="anchor-production-unmet">
+            {unmet.map((step) => (
+              <li key={step.name}>
+                {step.name}
+                {step.detail ? ` (${step.detail})` : ''}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
       {run?.refused && <Notice kind="error">{run.refused}</Notice>}
       {run && run.permanent.length > 0 && (

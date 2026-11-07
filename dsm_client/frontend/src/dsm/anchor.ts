@@ -34,6 +34,8 @@ export interface AnchorTryRunStep {
   name: string;
   passed: boolean;
   detail: string;
+  /** A production install's requirement alone: the anchor works without it, and an install waits for it. */
+  production: boolean;
 }
 
 /** An install gone through on the anchor with its permanent parts substituted. */
@@ -63,7 +65,12 @@ export async function runAnchorTryRun(): Promise<AnchorTryRun> {
   const resp = env.payload.value;
   return {
     passed: resp.passed,
-    steps: resp.steps.map((step) => ({ name: step.name, passed: step.passed, detail: step.detail })),
+    steps: resp.steps.map((step) => ({
+      name: step.name,
+      passed: step.passed,
+      detail: step.detail,
+      production: step.production,
+    })),
     permanent: [...resp.permanent],
     refused: resp.refused,
   };
