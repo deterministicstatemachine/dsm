@@ -16,19 +16,21 @@ use alloc::vec::Vec;
 #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
 use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor};
 #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
-use anchor_chip::UntestedRandomness;
+use anchor_core::enrollment::Install;
 
-/// What this image does with a chip whose PTRNG Tropic Square left untested. The trial image keys it
-/// for the trial without the correction, which is irreversible and waits for the last step (owner,
-/// 2026-11-06; CONFORMANCE_GAPS §6.152). Its try-run reports the correction as not made, so no install
-/// passes. Production refuses the chip.
+/// What an install on this image makes. The trial image's binds nothing (owner, 2026-11-06;
+/// CONFORMANCE_GAPS §6.152): its record is
+/// cleared at each boot, the counter set back, and the pairing key and the cage only checked
+/// ([`anchor_chip::bring_up::bring_up`]). It keys a chip whose PTRNG Tropic Square left untested, as
+/// the correction waits for the last step. The production image installs for good, and refuses that
+/// chip.
 #[cfg(all(
     feature = "bench_self_enroll",
     not(any(feature = "prepare_chip", feature = "identify_chip"))
 ))]
-const UNTESTED: UntestedRandomness = UntestedRandomness::KeyForTrial;
+const INSTALL: Install = Install::ForTrial;
 #[cfg(not(feature = "bench_self_enroll"))]
-const UNTESTED: UntestedRandomness = UntestedRandomness::Refuse;
+const INSTALL: Install = Install::ForGood;
 use anchor_chip::bring_up::{BringUpFailure, Measurement};
 use anchor_chip::Board;
 use anchor_core::proto::decode_request;
@@ -397,7 +399,7 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         Tropic01::new(spi_dev),
         &sealed,
         Rp2350Board { rosc },
-        UNTESTED,
+        INSTALL,
     );
     // Everything the anchor needs derives from it, and nothing needs it again this boot.
     #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
@@ -416,16 +418,6 @@ pub unsafe fn init() -> Result<(), InitFailure> {
 ///
 /// SAFETY: single-threaded Secure context; the SG handler is the only caller.
 pub unsafe fn service_request(frame: &[u8], _measurement: Measurement) -> Vec<u8> {
-    #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
-    if let Ok(req) = decode_request(frame) {
-        if req.op == anchor_core::proto::pb::Op::Provision as i32 {
-            return refusal(
-                req.op,
-                err::TRIAL_IMAGE,
-                "this image tries an install and cannot make one",
-            );
-        }
-    }
     let slot = &mut *core::ptr::addr_of_mut!(MONITOR_APP);
     match core::mem::replace(slot, Monitor::NotBroughtUp) {
         #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]

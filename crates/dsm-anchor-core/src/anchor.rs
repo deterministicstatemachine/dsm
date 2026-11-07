@@ -128,7 +128,7 @@ fn provision<T: Tropic, P: PartitionSig, S: ActiveStore>(
     if op == pb::Op::TryRun as i32 {
         let run =
             crate::try_run::rehearse::<T, P, S>(&chip, &mut tropic, &mut store, &provisioning);
-        let answer = encode_response(&try_run_response(op, &run));
+        let answer = encode_response(&try_run_response(op, &run, chip.install));
         return (
             Anchor::Unprovisioned {
                 chip,

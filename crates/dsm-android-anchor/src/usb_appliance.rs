@@ -16,6 +16,7 @@
 //! fabricate a release.
 
 use anchor_core::appliance::RecoverOutcome;
+use anchor_core::enrollment::Install;
 use anchor_core::proto::{decode_response, encode_release, encode_request, pb};
 use anchor_core::root_advance::{OwnedTransition, Transition};
 use anchor_core::service::err;
@@ -137,12 +138,26 @@ fn provisioning_pb(provisioning: &anchor_core::enrollment::Provisioning) -> pb::
     }
 }
 
+/// The install an answer names: for good, or a trial its next boot ends. `None` when it names none,
+/// as an anchor that would not run a try-run at all does.
+fn install_of(r: &pb::ApplianceResponse) -> Option<Install> {
+    match pb::InstallKind::try_from(r.install) {
+        Ok(pb::InstallKind::InstallForGood) => Some(Install::ForGood),
+        Ok(pb::InstallKind::InstallForTrial) => Some(Install::ForTrial),
+        Ok(pb::InstallKind::InstallUnspecified) => None,
+        Err(_unknown) => None,
+    }
+}
+
 impl AnchorAppliance for UsbAnchorAppliance {
     fn status(&mut self) -> Result<ApplianceStatus, DsmError> {
         let r = self.roundtrip(bare(pb::Op::Status))?;
         Ok(ApplianceStatus {
             root: arr32(&r.active_root)?,
             anchor_counter: r.active_anchor_counter,
+            install: install_of(&r).ok_or_else(|| {
+                DsmError::invalid_operation("anchor appliance: STATUS named no install")
+            })?,
         })
     }
 
@@ -281,6 +296,7 @@ impl AnchorAppliance for UsbAnchorAppliance {
         Ok(TryRunReport {
             passed: resp.ok && whole,
             steps,
+            install: install_of(&resp),
             permanent: resp.permanent.clone(),
             refused,
         })
@@ -318,6 +334,7 @@ mod tests {
             pin_partition_pk: vec![0x07; 64],
             pin_chip_pk: vec![0x0C; 32],
             pin_birth_commitment: vec![0x5B; 32],
+            install: pb::InstallKind::InstallForGood as i32,
             ..Default::default()
         })
     }

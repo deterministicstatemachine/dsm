@@ -2031,9 +2031,10 @@ impl CoreSDK {
         connected_appliance()?.try_run(&self.anchor_provisioning()?)
     }
 
-    /// Install the connected anchor for this device, for good. Only ever on being told to: the
-    /// anchor goes through its try-run again first and refuses, with nothing written, unless it
-    /// passes. One already provisioned for anything else is refused.
+    /// Install the connected anchor for this device: for good, or as a trial on the trial image,
+    /// which writes nothing permanent and ends at the anchor's next boot. Only ever on being told
+    /// to: the anchor goes through its try-run again first and refuses, with nothing written, unless
+    /// it passes. One already provisioned for anything else is refused.
     pub fn anchor_install(&self) -> Result<AnchorStatusSnapshot, DsmError> {
         {
             let mut guard = self.anchor_appliance.lock();
@@ -2194,7 +2195,16 @@ impl CoreSDK {
                 frontier_root: s.root,
                 enrolled_counter: pin.enrolled_counter,
                 bundle: pin.bundle,
-                status: format!("anchor connected (counter u={})", s.anchor_counter),
+                status: match s.install {
+                    anchor_core::enrollment::Install::ForGood => {
+                        format!("anchor connected (counter u={})", s.anchor_counter)
+                    }
+                    anchor_core::enrollment::Install::ForTrial => format!(
+                        "trial anchor connected (counter u={}): nothing on it is permanent, and \
+                         its next boot ends the trial",
+                        s.anchor_counter
+                    ),
+                },
                 ..Default::default()
             },
             Err(e) => {

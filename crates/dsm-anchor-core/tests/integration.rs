@@ -8,7 +8,7 @@ use anchor_core::accept::{
     accept_offline, AcceptError, DsmVerifier, OfflineStateRefused, VerifierContext,
 };
 use anchor_core::appliance::{Appliance, BootRecoveryRefusal, Record, RecoverOutcome, Status};
-use anchor_core::enrollment::{birth, BirthInputs};
+use anchor_core::enrollment::{birth, BirthInputs, Install};
 use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OfflineRelease, OwnedTransition,
@@ -216,7 +216,7 @@ fn fixture(h: u32) -> Fixture {
     let part_pk = b.partition_pk.clone();
     let bundle = b.bundle;
     let frontier0 = b.genesis_frontier;
-    let a = Appliance::new(Chip::with_h(h), H0, ANCHOR, PART_DEV, b);
+    let a = Appliance::new(Chip::with_h(h), H0, ANCHOR, PART_DEV, b, Install::ForGood);
     Fixture {
         a,
         part_pk,

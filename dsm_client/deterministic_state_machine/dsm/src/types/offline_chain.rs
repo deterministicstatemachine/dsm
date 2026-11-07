@@ -578,6 +578,7 @@ pub(crate) mod fixture {
                 pin.anchor_id,
                 derive(seed, "partition device id"),
                 born,
+                anchor_core::enrollment::Install::ForGood,
             );
             head = head
                 .open_offline_account(&pin.bundle, frontier, 0)

@@ -23,6 +23,8 @@ pub struct ApplianceStatus {
     /// The current offline frontier `h_i` (the transition's `prev_root`).
     pub root: [u8; 32],
     pub anchor_counter: u64,
+    /// For good, or a trial that the anchor's next boot ends ([`anchor_core::enrollment::Install`]).
+    pub install: anchor_core::enrollment::Install,
 }
 
 /// The pin material a receiver must hold to recognize + verify this anchor's releases
@@ -57,6 +59,8 @@ pub struct TryRunStep {
 pub struct TryRunReport {
     pub passed: bool,
     pub steps: Vec<TryRunStep>,
+    /// The install the anchor would make, when it ran: a trial image's is a trial.
+    pub install: Option<anchor_core::enrollment::Install>,
     pub permanent: Vec<String>,
     /// Why it could not run at all, when it could not.
     pub refused: String,

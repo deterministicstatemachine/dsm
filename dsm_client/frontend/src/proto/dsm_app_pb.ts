@@ -13569,7 +13569,7 @@ export class AnchorTryRunStep extends Message<AnchorTryRunStep> {
 
   /**
    * A production install's requirement alone (a chip that tests its PTRNG): the anchor works without
-   * it, and an install refuses until it is met.
+   * it. An install for good refuses until it is met; a trial install passes over it.
    *
    * @generated from field: bool production = 4;
    */
@@ -13636,6 +13636,13 @@ export class AnchorTryRunResponse extends Message<AnchorTryRunResponse> {
    */
   refused = "";
 
+  /**
+   * The install would be a trial: the trial image's, with nothing permanent. Its next boot ends it.
+   *
+   * @generated from field: bool trial = 5;
+   */
+  trial = false;
+
   constructor(data?: PartialMessage<AnchorTryRunResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13648,6 +13655,7 @@ export class AnchorTryRunResponse extends Message<AnchorTryRunResponse> {
     { no: 2, name: "steps", kind: "message", T: AnchorTryRunStep, repeated: true },
     { no: 3, name: "permanent", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 4, name: "refused", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "trial", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorTryRunResponse {

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Connecting a new anchor does nothing permanent. The install is offered only after a try-run has
-//! passed, says what it makes permanent, and takes a second tap. The real bridge code runs here over
-//! a host that answers each route as the SDK does, and counts what it was asked.
+//! passed, says what it makes permanent, and takes a second tap. On the trial image it is a trial
+//! install, and says so. The real bridge code runs here over a host that answers each route as the
+//! SDK does, and counts what it was asked.
 
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -33,6 +34,7 @@ function routeOf(reqBytes: Uint8Array): string {
 }
 
 const PERMANENT = 'This anchor is bound to this wallet.';
+const TRIAL = 'Nothing on the chip or the board is permanent.';
 
 function hostWith(tryRun: pb.AnchorTryRunResponse, awaiting: 'new anchor' | 'nothing new') {
   const asked: string[] = [];
@@ -72,8 +74,9 @@ type StepOf = {
   detail: string;
 };
 
-/** A run of these steps, which passes only when every one of them did. */
-function reportOf(steps: StepOf[]): pb.AnchorTryRunResponse {
+/** A run of these steps, as the anchor answers it: an install for good passes only when every step
+ *  did, and a trial install passes over what a production install alone needs. */
+function reportOf(steps: StepOf[], install: 'for good' | 'trial'): pb.AnchorTryRunResponse {
   const run = new pb.AnchorTryRunResponse({
     steps: steps.map((s) => {
       const step = new pb.AnchorTryRunStep({ name: s.name, detail: s.detail });
@@ -81,23 +84,23 @@ function reportOf(steps: StepOf[]): pb.AnchorTryRunResponse {
       step.production = s.requirement === 'production';
       return step;
     }),
-    permanent: [PERMANENT],
+    permanent: [install === 'trial' ? TRIAL : PERMANENT],
   });
-  run.passed = steps.every((s) => s.outcome === 'passed');
+  run.trial = install === 'trial';
+  run.passed = steps.every((s) => s.outcome === 'passed' || (run.trial && s.requirement === 'production'));
   return run;
 }
 
 /** The anchor works, and a production install still waits for a tested PTRNG. */
-const productionUnmet = (): pb.AnchorTryRunResponse =>
-  reportOf([
-    { name: 'the chip signs', outcome: 'passed', requirement: 'works', detail: '' },
-    {
-      name: 'the chip tests its PTRNG at start-up',
-      outcome: 'failed',
-      requirement: 'production',
-      detail: 'it does not',
-    },
-  ]);
+const PTRNG_UNTESTED: StepOf[] = [
+  { name: 'the chip signs', outcome: 'passed', requirement: 'works', detail: '' },
+  {
+    name: 'the chip tests its PTRNG at start-up',
+    outcome: 'failed',
+    requirement: 'production',
+    detail: 'it does not',
+  },
+];
 
 async function popover(onConnect: () => Promise<void>) {
   const status = await getAnchorStatus();
@@ -137,7 +140,7 @@ describe('the install of a new anchor', () => {
   });
 
   it('shows what a production install still needs apart from the steps, and offers no install', async () => {
-    hostWith(productionUnmet(), 'new anchor');
+    hostWith(reportOf(PTRNG_UNTESTED, 'for good'), 'new anchor');
     await popover(nothing);
     fireEvent.click(screen.getByRole('button', { name: 'Try the install' }));
     const unmet = await screen.findByTestId('anchor-production-unmet');
@@ -147,6 +150,21 @@ describe('the install of a new anchor', () => {
     expect(screen.getByTestId('anchor-try-run-steps')).not.toHaveTextContent('PTRNG');
     expect(screen.queryByText(/FAILED/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Install…' })).toBeNull();
+  });
+
+  it('on the trial image is a trial install over what production still needs, and says so', async () => {
+    const asked = hostWith(reportOf(PTRNG_UNTESTED, 'trial'), 'new anchor');
+    await popover(nothing);
+    fireEvent.click(screen.getByRole('button', { name: 'Try the install' }));
+    expect(await screen.findByText(TRIAL)).toBeInTheDocument();
+    expect(screen.getByText('A trial install: what it leaves')).toBeInTheDocument();
+    expect(screen.queryByText('Installing makes these permanent')).toBeNull();
+    expect(screen.getByTestId('anchor-production-unmet')).toHaveTextContent('PTRNG');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Trial install…' }));
+    expect(asked).not.toContain('anchor.install');
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, install it for a trial' }));
+    await waitFor(() => expect(asked.filter((route) => route === 'anchor.install')).toHaveLength(1));
   });
 
   it('is never offered after a try-run that failed', async () => {

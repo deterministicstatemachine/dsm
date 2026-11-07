@@ -34,9 +34,9 @@ fn status_response(
 }
 
 impl AppRouterImpl {
-    /// `anchor.install`: install the connected anchor for this device, for good. The one route that
-    /// makes an anchor permanent, and only ever on being told to: the anchor goes through its try-run
-    /// again first, and refuses with nothing written unless it passes.
+    /// `anchor.install`: install the connected anchor for this device, for good, or as a trial on the
+    /// trial image. The one route that makes an anchor permanent, and only ever on being told to: the
+    /// anchor goes through its try-run again first, and refuses with nothing written unless it passes.
     pub(crate) async fn handle_anchor_invoke(&self, i: AppInvoke) -> AppResult {
         if i.method != "anchor.install" {
             return err(format!("unknown anchor route: {}", i.method));
@@ -76,6 +76,10 @@ impl AppRouterImpl {
                                             == anchor_core::try_run::Requirement::Production,
                                     })
                                     .collect(),
+                                trial: matches!(
+                                    report.install,
+                                    Some(anchor_core::enrollment::Install::ForTrial)
+                                ),
                                 permanent: report.permanent,
                                 refused: report.refused,
                             },

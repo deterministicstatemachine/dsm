@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use anchor_core::durable::StoreError;
+use anchor_core::enrollment::Install;
 use anchor_core::identify::ChipReading;
 use anchor_core::rmem::SlotMemory;
 use anchor_core::tropic::{Tropic, TropicError};
@@ -868,10 +869,12 @@ fn own_bits(register: u16) -> u32 {
         .fold(0u32, |bits, lane| bits | (1u32 << (lane + OWN_SLOT)))
 }
 
-/// The appliance's chip operations over the shared session.
+/// The appliance's chip operations over the shared session. A trial install closes no birth: the
+/// key write and the cage are checked as a try-run checks them, and nothing is written.
 pub struct RealChip<SPI: SpiDevice, CS: OutputPin, B: Board> {
     pub session: Rc<RefCell<ChipSession<SPI, CS, B>>>,
     pub h0: u32,
+    pub install: Install,
 }
 
 impl<SPI: SpiDevice, CS: OutputPin, B: Board> Tropic for RealChip<SPI, CS, B> {
@@ -916,7 +919,14 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> Tropic for RealChip<SPI, CS, B> {
     }
 
     fn close_birth(&mut self) -> Result<(), TropicError> {
-        self.session.borrow_mut().close_birth(self.h0)
+        let mut session = self.session.borrow_mut();
+        match self.install {
+            Install::ForGood => session.close_birth(self.h0),
+            Install::ForTrial => match (session.rehearse_key_write(), session.rehearse_cage()) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(_key), _) | (_, Err(_key)) => Err(TropicError::Refused),
+            },
+        }
     }
 
     fn set_counter_back(&mut self) -> Result<(), TropicError> {

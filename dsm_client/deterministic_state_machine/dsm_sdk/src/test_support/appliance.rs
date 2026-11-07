@@ -294,6 +294,7 @@ impl Anchor {
             chip_birth_witness: self.derive("chip birth witness"),
             host_nonce: self.derive("host nonce"),
             partition_key_seed: self.derive("partition key seed"),
+            install: anchor_core::enrollment::Install::ForGood,
         }
     }
 
@@ -506,6 +507,7 @@ impl AnchorAppliance for HostAppliance {
             Ok(ApplianceStatus {
                 root: a.active.root,
                 anchor_counter: a.active.anchor_counter,
+                install: a.install,
             })
         })
     }
@@ -578,7 +580,8 @@ impl AnchorAppliance for HostAppliance {
             &mut anchor.rmemory.clone(),
             provisioning,
         );
-        let failed = run.first_failure().map(|step| step.name.clone());
+        let install = anchor.chip_birth().install;
+        let failed = run.blocking(install).map(|step| step.name.clone());
         Ok(TryRunReport {
             passed: failed.is_none(),
             steps: run
@@ -594,7 +597,8 @@ impl AnchorAppliance for HostAppliance {
                     requirement: step.requirement,
                 })
                 .collect(),
-            permanent: anchor_core::try_run::PERMANENT
+            install: Some(install),
+            permanent: anchor_core::try_run::permanent(install)
                 .iter()
                 .map(|line| (*line).to_string())
                 .collect(),

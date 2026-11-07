@@ -34,7 +34,7 @@ export interface AnchorTryRunStep {
   name: string;
   passed: boolean;
   detail: string;
-  /** A production install's requirement alone: the anchor works without it, and an install waits for it. */
+  /** A production install's requirement alone: the anchor works without it. An install for good waits for it; a trial install does not. */
   production: boolean;
 }
 
@@ -42,6 +42,8 @@ export interface AnchorTryRunStep {
 export interface AnchorTryRun {
   passed: boolean;
   steps: AnchorTryRunStep[];
+  /** The install would be a trial: nothing on the anchor is permanent, and its next boot ends it. */
+  trial: boolean;
   /** What installing makes permanent, shown before it is asked for. */
   permanent: string[];
   /** Why it could not run at all. */
@@ -71,12 +73,13 @@ export async function runAnchorTryRun(): Promise<AnchorTryRun> {
       detail: step.detail,
       production: step.production,
     })),
+    trial: resp.trial,
     permanent: [...resp.permanent],
     refused: resp.refused,
   };
 }
 
-/** Install the connected anchor for this wallet, for good (`anchor.install`). */
+/** Install the connected anchor for this wallet (`anchor.install`): for good, or a trial on the trial image. */
 export async function installAnchor(): Promise<AnchorStatus> {
   const env = decodeFramedEnvelopeV3(await routerInvokeBin('anchor.install', NO_ARGS()));
   if (env.payload.case === 'error') {

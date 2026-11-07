@@ -142,6 +142,8 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     /// pin keys, the owner's online key and its device id, `B` recomputes from what is disclosed.
     pub birth_commitment: [u8; 32],
     pub active: Active,
+    /// What its install made: for good, or a trial.
+    pub install: crate::enrollment::Install,
     /// SECRET partition signing key (non-exportable on device).
     partition_sk: Vec<u8>,
     tropic: T,
@@ -149,13 +151,15 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
 }
 
 impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
-    /// Construct from a [`Birth`] result. Starts at the genesis frontier `h_0`, counter 0.
+    /// Construct from a [`Birth`] result, installed as `install` says. Starts at the genesis
+    /// frontier `h_0`, counter 0.
     pub fn new(
         tropic: T,
         h0: u32,
         anchor_id: [u8; 32],
         partition_device_id: [u8; 32],
         birth: Birth,
+        install: crate::enrollment::Install,
     ) -> Self {
         Self {
             h0,
@@ -166,6 +170,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             chip_pk: birth.chip_pk,
             birth_commitment: birth.birth_commitment,
             active: Active::genesis(birth.genesis_frontier),
+            install,
             partition_sk: birth.partition_sk,
             tropic,
             _p: PhantomData,

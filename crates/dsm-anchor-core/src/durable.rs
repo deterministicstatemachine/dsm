@@ -89,6 +89,55 @@ impl<S: ActiveStore + ?Sized> ActiveStore for Box<S> {
     }
 }
 
+/// A store a try-run lends out for the length of one payment.
+impl<S: ActiveStore + ?Sized> ActiveStore for &mut S {
+    fn write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).write(record)
+    }
+    fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).read()
+    }
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).try_record(record)
+    }
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).trial_write(record)
+    }
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).trial_read()
+    }
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        (**self).trial_clear()
+    }
+}
+
+/// A store's trial slots, driven as the store itself: what a try-run's payment and a trial install
+/// keep their record in. The trial image clears them at every boot. The record is the anchor's own,
+/// written and read as any record is, in slots no install for good reads. Its own slots are still
+/// tried before an install, as for one for good.
+pub struct TrialRecords<S>(pub S);
+
+impl<S: ActiveStore> ActiveStore for TrialRecords<S> {
+    fn write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.0.trial_write(record)
+    }
+    fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.trial_read()
+    }
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.0.try_record(record)
+    }
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.0.trial_write(record)
+    }
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.trial_read()
+    }
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        self.0.trial_clear()
+    }
+}
+
 /// Why a stored record is not an appliance record.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RecordError {
@@ -296,7 +345,7 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             Err(e) => return Err(refused(DurableError::Store(e), tropic, store)),
         }
         let run = crate::try_run::rehearse::<T, P, S>(chip, &mut tropic, &mut store, &provisioning);
-        if let Some(failed) = run.first_failure() {
+        if let Some(failed) = run.blocking(chip.install) {
             let why = alloc::format!("{}: {:?}", failed.name, failed.outcome);
             return Err(refused(DurableError::TryRun(why), tropic, store));
         }
@@ -338,6 +387,7 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             chip.anchor_id,
             chip.partition_device_id,
             birth,
+            chip.install,
         );
         Ok(Self {
             app,
@@ -363,6 +413,7 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             chip.partition_device_id,
             chip.birth::<P>(&provisioning)
                 .map_err(ApplianceError::Partition)?,
+            chip.install,
         );
         app.active = active;
         Ok(Self {

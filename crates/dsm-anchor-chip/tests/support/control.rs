@@ -4,7 +4,7 @@
 
 use anchor_chip::bring_up::{bring_up, identify_chip, prepare_chip, BoardAnchor};
 use anchor_chip::session::ChipFacts;
-use anchor_chip::UntestedRandomness;
+use anchor_core::enrollment::Install;
 use anchor_core::identify::ChipSurvey;
 
 use super::support::{call, BringUpError, Garble, HostBoard, ModelServer, Power, SEALED};
@@ -74,14 +74,10 @@ impl ModelServer {
         call(&mut stream, TAG_RESET_TARGET, &[]);
     }
 
-    /// Boot the anchor as the trial image does, whose check of an untested PTRNG is off.
+    /// Boot the anchor as the trial image does: its install is a trial, and it keys a chip whose PTRNG
+    /// is untested.
     pub fn boot_trial(&self) -> Result<BoardAnchor, BringUpError> {
-        bring_up(
-            self.power_cycle(),
-            &SEALED,
-            HostBoard,
-            UntestedRandomness::KeyForTrial,
-        )
+        bring_up(self.power_cycle(), &SEALED, HostBoard, Install::ForTrial)
     }
 
     /// What the `prepare_chip` image does at reset, on the same code.

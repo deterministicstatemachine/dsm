@@ -18,6 +18,7 @@ use anchor_core::proto::pb;
 use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
 use anchor_core::service::err;
 use anchor_core::tropic::{ChipSig, HostSig, TropicError};
+use anchor_core::try_run::TRIAL_PERMANENT;
 use control::Part;
 use support::{
     provision_request, try_run_request, HostBoard, ModelChip, ModelCsn, ModelServer, ModelSpi,
@@ -819,50 +820,108 @@ fn identifying_a_born_chip_writes_nothing_and_says_its_slots_are_closed() {
     );
 }
 
-/// The trial image keys a chip whose PTRNG is untested without Tropic Square's correction, which waits
-/// for the last step (owner, 2026-11-06): the chip takes the trial's key, the try-run goes through everything after it and
-/// says the correction is still to make, and no install passes. Nothing irreversible is written, and the
-/// production image still gives the chip nothing. MUTATION CONTROL: making `randomness_tested` pass
-/// installs here and turns this red at "an install passed".
-#[test]
-fn the_trial_image_keys_an_untested_ptrng_and_installs_nothing() {
-    let model = ModelServer::start_as(Part::TestPart);
-    let factory = chip_state(&model);
-    let mut anchor = match model.boot_trial() {
+fn trial_booted(model: &ModelServer) -> Served {
+    match model.boot_trial() {
         Ok(anchor) => Served::new(anchor),
         Err(e) => panic!("the trial did not come up on an untested PTRNG: {e:?}"),
-    };
+    }
+}
+
+/// The trial image installs with nothing permanent (owner, 2026-11-06; CONFORMANCE_GAPS §6.152). It
+/// keys a chip whose PTRNG is untested, as Tropic Square's correction waits for the last step, and its
+/// try-run says the correction is still to make. Its install passes as a trial and serves a payment
+/// the receiver verifies, yet the factory slot still opens and no pairing key or access rule moves,
+/// and the next boot starts over: the record gone and the counter at its start. The production image
+/// still gives the chip nothing. MUTATION CONTROLS: closing the birth in a trial turns this red where
+/// the factory slot no longer opens; leaving the trial slots at boot turns it red at "the next boot".
+#[test]
+fn the_trial_image_installs_with_nothing_permanent() {
+    let model = ModelServer::start_as(Part::TestPart);
+    drop(trial_booted(&model));
+    let first_boot = chip_state(&model);
+
+    let mut anchor = trial_booted(&model);
     let run = anchor.request(&try_run_request());
-    assert_eq!(run.error, err::TRY_RUN_FAILED, "{:?}", run.try_run);
-    let not_passed: Vec<(&str, bool)> = run
+    assert!(
+        run.ok,
+        "the trial's try-run: error {}: {:?}",
+        run.error, run.try_run
+    );
+    assert_eq!(run.install, pb::InstallKind::InstallForTrial as i32);
+    let unmet: Vec<&str> = run
         .try_run
         .iter()
         .filter(|step| !step.passed)
-        .map(|step| (step.name.as_str(), step.production))
+        .map(|step| step.name.as_str())
+        .collect();
+    let production: Vec<&str> = run
+        .try_run
+        .iter()
+        .filter(|step| step.production)
+        .map(|step| step.name.as_str())
         .collect();
     assert_eq!(
-        not_passed.iter().map(|step| step.0).collect::<Vec<_>>(),
+        unmet,
         ["the chip tests its PTRNG at start-up"],
         "{:?}",
         run.try_run
     );
-    assert!(
-        not_passed.iter().all(|step| step.1),
-        "the PTRNG step is a production requirement: {:?}",
-        run.try_run
+    assert_eq!(
+        production, unmet,
+        "the PTRNG step is a production requirement"
+    );
+    assert_eq!(
+        run.permanent, TRIAL_PERMANENT,
+        "what the trial makes permanent"
     );
     assert!(
         !run.transport_check.is_empty(),
         "a trial that worked carries the transport's check"
     );
-    let install = anchor.request(&provision_request());
-    assert!(!install.ok, "an install passed without the correction");
-    assert_eq!(install.error, err::TRY_RUN_FAILED, "{}", install.detail);
+
+    let installed = anchor.request(&provision_request());
+    assert!(
+        installed.ok,
+        "the trial install: error {}: {}",
+        installed.error, installed.detail
+    );
+    assert_eq!(installed.install, pb::InstallKind::InstallForTrial as i32);
+    let status = anchor.bare(pb::Op::Status);
+    assert_eq!(status.install, pb::InstallKind::InstallForTrial as i32);
+    let prepared = anchor.request(&prepare_request(arr32(&status.active_root), 0));
+    assert!(prepared.ok, "prepare: error {}", prepared.error);
+    let committed = anchor.bare(pb::Op::Commit);
+    assert!(committed.ok, "commit: error {}", committed.error);
+    let emitted = anchor.bare(pb::Op::Emit);
+    assert!(emitted.ok, "emit: error {}", emitted.error);
+    assert_release_verifies(&status, &emitted);
+    let finalized = anchor.bare(pb::Op::Finalize);
+    assert!(finalized.ok, "finalize: error {}", finalized.error);
     drop(anchor);
+
+    let served = moved(&first_boot, &chip_state(&model));
+    let records: Vec<&String> = served
+        .iter()
+        .filter(|name| name.starts_with("R-memory slot "))
+        .collect();
+    assert!(!records.is_empty(), "the trial kept no record");
+    let others: Vec<&String> = served
+        .iter()
+        .filter(|name| !name.starts_with("R-memory slot "))
+        .collect();
+    assert_eq!(others, ["counter Index0"], "what the trial changed");
+
+    let mut again = trial_booted(&model);
     assert_eq!(
-        moved(&factory, &chip_state(&model)),
-        ["counter Index0", "key 0"],
-        "what the trial changed"
+        again.bare(pb::Op::Status).error,
+        err::NOT_PROVISIONED,
+        "the next boot starts the trial over"
+    );
+    drop(again);
+    assert_eq!(
+        moved(&first_boot, &chip_state(&model)),
+        Vec::<String>::new(),
+        "what the trial left"
     );
     match model.boot() {
         Ok(_anchor) => panic!("production came up on an untested PTRNG"),

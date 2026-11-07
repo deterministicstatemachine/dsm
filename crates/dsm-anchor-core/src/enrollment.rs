@@ -162,6 +162,17 @@ pub struct Provisioning {
     pub genesis_root: [u8; 32],
 }
 
+/// What an install of this anchor makes. The production image installs for good; the trial image
+/// installs for a trial (owner, 2026-11-06: nothing permanent, "even including the bind").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Install {
+    /// The pairing key, the cage and the record, for good.
+    ForGood,
+    /// The record in the slots a try-run writes, which the next boot clears, and the chip's pairing
+    /// key, counter start and access rules left as they are: it serves until the board loses power.
+    ForTrial,
+}
+
 /// What the chip itself contributes to its birth: its identity, its keys and its entropy. A host
 /// never supplies these.
 #[derive(Clone)]
@@ -177,6 +188,8 @@ pub struct ChipBirth {
     pub chip_birth_witness: [u8; 32],
     pub host_nonce: [u8; 32],
     pub partition_key_seed: [u8; 32],
+    /// What an install of this anchor makes.
+    pub install: Install,
 }
 
 impl Drop for ChipBirth {

@@ -95,6 +95,13 @@ enum Op {
                        // it or to the board's OTP. Only the identify image serves it. See identify.rs.
 }
 
+// What an install of this anchor makes.
+enum InstallKind {
+  INSTALL_UNSPECIFIED = 0;
+  INSTALL_FOR_GOOD    = 1; // the production image: the pairing key, the cage and the record, for good
+  INSTALL_FOR_TRIAL   = 2; // the trial image: the record in slots the next boot clears; nothing permanent
+}
+
 // The §26 recovery outcome, as OP_RECOVER answers it.
 enum Recovery {
   RECOVERY_UNSPECIFIED                  = 0;
@@ -171,6 +178,7 @@ message ApplianceResponse {
   // OP_IDENTIFY: the chip's four X.509 certificates as it gives them: device, part group,
   // TROPIC01 CA, Tropic Square root.
   repeated bytes chip_certificates   = 21;
+  InstallKind install                = 22; // OP_STATUS, OP_TRY_RUN: what an install here makes
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // A new anchor is connected. Connecting it did nothing permanent; this offers its try-run, shows what
 // the try-run went through and what installing would make permanent, and installs only when told to.
+// On the trial image the install is a trial, with nothing permanent, and it says so.
 // Rust and the anchor decide everything here; this renders what they report and carries the taps.
 import React, { useState } from 'react';
 import { Notice } from './common/ScreenFrame';
@@ -79,7 +80,9 @@ export default function AnchorInstallPanel({ onInstalled }: Props) {
       {run?.refused && <Notice kind="error">{run.refused}</Notice>}
       {run && run.permanent.length > 0 && (
         <>
-          <span className="sb-label">Installing makes these permanent</span>
+          <span className="sb-label">
+            {run.trial ? 'A trial install: what it leaves' : 'Installing makes these permanent'}
+          </span>
           <ul data-testid="anchor-permanent">
             {run.permanent.map((line) => (
               <li key={line}>{line}</li>
@@ -94,12 +97,12 @@ export default function AnchorInstallPanel({ onInstalled }: Props) {
         </button>
         {run?.passed && stage === 'tried' && (
           <button type="button" className="sb-btn" onClick={() => setStage('confirming')}>
-            Install…
+            {run.trial ? 'Trial install…' : 'Install…'}
           </button>
         )}
         {run?.passed && (stage === 'confirming' || stage === 'installing') && (
           <button type="button" className="sb-btn sb-btn--primary" disabled={working} onClick={install}>
-            {stage === 'installing' ? 'Installing…' : 'Yes, make it permanent'}
+            {stage === 'installing' ? 'Installing…' : run.trial ? 'Yes, install it for a trial' : 'Yes, make it permanent'}
           </button>
         )}
       </div>

@@ -22,8 +22,8 @@ use alloc::vec::Vec;
 use prost::Message;
 
 use crate::appliance::{RecoverOutcome, Status};
-use crate::durable::{ActiveStore, DurableAppliance, StoreError};
-use crate::enrollment::{ChipBirth, Provisioning};
+use crate::durable::{ActiveStore, DurableAppliance, TrialRecords};
+use crate::enrollment::{ChipBirth, Install, Provisioning};
 use crate::hash::h;
 use crate::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
 use crate::tropic::{PartitionSig, Tropic};
@@ -37,12 +37,28 @@ pub const PERMANENT: [&str; 5] = [
     "What is loaded onto this anchor can only come back through this anchor. If it dies or is lost, that balance is gone: nothing can recover it.",
 ];
 
+/// What a trial install leaves for good: nothing on the chip or the board. Only a balance loaded onto
+/// it and not unloaded before the board loses power is gone, since the next boot clears the trial.
+pub const TRIAL_PERMANENT: [&str; 1] = [
+    "Nothing on the chip or the board is permanent: this trial install serves this wallet until the board loses power, and the next boot clears it. What is loaded onto it and not unloaded before then is gone: nothing can recover it.",
+];
+
+/// What an install of this kind makes permanent, for the wallet to show before it asks.
+pub fn permanent(install: Install) -> &'static [&'static str] {
+    match install {
+        Install::ForGood => &PERMANENT,
+        Install::ForTrial => &TRIAL_PERMANENT,
+    }
+}
+
 /// What a step of a try-run answers to: the trial's own working, or a production install alone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Requirement {
     /// What the anchor needs to work at all, on a development board as on a production one.
     Works,
-    /// What a production install alone needs, such as a chip whose PTRNG is tested. A development board may leave it unmet; an install still refuses until it is met.
+    /// What a production install alone needs, such as a chip whose PTRNG is tested. A development
+    /// board may leave it unmet: a trial install passes over it, and an install for good refuses
+    /// until it is met.
     Production,
 }
 
@@ -101,36 +117,21 @@ impl TryRun {
                 && matches!(step.outcome, Err(ref _kept_in_the_step))
         })
     }
+
+    /// The first step that keeps an install of this kind from passing. An install for good waits for
+    /// every requirement. A trial install substitutes what is permanent, so what a production install
+    /// alone needs does not stop it; anything the anchor needs to work still does.
+    pub fn blocking(&self, install: Install) -> Option<&TryStep> {
+        match install {
+            Install::ForGood => self.first_failure(),
+            Install::ForTrial => self.first_broken(),
+        }
+    }
 }
 
 /// `len` bytes a host can check for itself, in place of a release that does not leave the anchor.
 pub fn transport_check(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
-}
-
-/// A store's trial slots, driven as the store itself: the code a real anchor runs, over slots no
-/// record is ever read from.
-struct TrialStore<'a>(&'a mut dyn ActiveStore);
-
-impl ActiveStore for TrialStore<'_> {
-    fn write(&mut self, record: &[u8]) -> Result<(), StoreError> {
-        self.0.trial_write(record)
-    }
-    fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.0.trial_read()
-    }
-    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
-        self.0.trial_write(record)
-    }
-    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
-        self.0.trial_write(record)
-    }
-    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
-        self.0.trial_read()
-    }
-    fn trial_clear(&mut self) -> Result<(), StoreError> {
-        self.0.trial_clear()
-    }
 }
 
 /// The transition a try-run signs: shaped as the wallet's, naming no device and no counterparty.
@@ -195,7 +196,7 @@ fn spend<P: PartitionSig>(
             Lent::<P>::born(
                 chip,
                 Box::new(&mut *tropic),
-                Box::new(TrialStore(&mut *store)),
+                Box::new(TrialRecords(&mut *store)),
                 provisioning.clone(),
             )
             .map_err(|refused| refused.error),
@@ -252,7 +253,7 @@ fn spend<P: PartitionSig>(
         Lent::<P>::restore(
             chip,
             Box::new(&mut *tropic),
-            Box::new(TrialStore(&mut *store)),
+            Box::new(TrialRecords(&mut *store)),
         ),
     )?;
     let mut restored = restored;
@@ -352,7 +353,11 @@ mod tests {
             run.first_failure().map(|step| step.name.as_str()),
             Some("the chip tests its PTRNG at start-up")
         );
-        let answer = crate::service::try_run_response(pb::Op::TryRun as i32, &run);
+        let answer = crate::service::try_run_response(
+            pb::Op::TryRun as i32,
+            &run,
+            crate::enrollment::Install::ForGood,
+        );
         assert!(!answer.ok);
         assert_eq!(answer.error, err::TRY_RUN_FAILED);
         let passed: Vec<&str> = answer

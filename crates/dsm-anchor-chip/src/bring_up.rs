@@ -15,8 +15,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use anchor_core::anchor::{Anchor, AnchorBootRefusal};
-use anchor_core::durable::ActiveStore;
-use anchor_core::enrollment::ChipBirth;
+use anchor_core::durable::{ActiveStore, DurableError, TrialRecords};
+use anchor_core::enrollment::{ChipBirth, Install};
 use anchor_core::hash::{h, kdf};
 use anchor_core::identify::{ChipReading, ChipSurvey};
 use anchor_core::proto::{decode_request, pb};
@@ -30,7 +30,7 @@ use embedded_hal::spi::SpiDevice;
 use tropic01::{NoSession, Tropic01};
 
 use crate::session::{ChipFacts, ChipFault, ChipSession, OpenRefused, RMemSlots, RealChip, Unfit};
-use crate::{Board, UntestedRandomness};
+use crate::Board;
 
 /// The one session, shared by the appliance's chip operations and its store.
 type Shared<SPI, CS, B> = Rc<RefCell<ChipSession<SPI, CS, B>>>;
@@ -369,13 +369,20 @@ where
 }
 
 /// Bring the anchor up: unprovisioned when its R-memory holds no record, otherwise restored from
-/// the record through §26 recovery. `untested` is the image's: only the trial image keys a chip
-/// whose PTRNG Tropic Square left untested.
+/// the record through §26 recovery. `install` is the image's.
+///
+/// The trial image (owner, 2026-11-06; CONFORMANCE_GAPS §6.152) installs for a trial, with nothing
+/// permanent: the record goes to the slots a try-run writes, which each of its boots clears, the
+/// counter goes back to its start, and the pairing key and the cage are checked but not written. It
+/// also keys a chip whose PTRNG Tropic Square left untested (erratum OI_TR01_ERR_2026090100, the T101
+/// and T103 parts), since the correction is irreversible and waits for the last step; its try-run
+/// reports the correction as not made. The production image installs for good, and refuses that
+/// chip: an anchor's keys come only from a PTRNG the chip tests.
 pub fn bring_up<SPI, CS, B>(
     chip: Tropic01<SPI, CS, NoSession>,
     sealed: &[u8; 32],
     board: B,
-    untested: UntestedRandomness,
+    install: Install,
 ) -> Result<BoardAnchor, BringUpFailure<ChipFault<SPI, CS>>>
 where
     SPI: SpiDevice + 'static,
@@ -386,9 +393,9 @@ where
 
     // Whether this chip can be given anything, before it is given anything.
     let fit = session.borrow_mut().check_fit();
-    match (fit, untested) {
+    match (fit, install) {
         (Ok(()), _) => {}
-        (Err(Unfit::RandomnessUntested(_facts)), UntestedRandomness::KeyForTrial) => {}
+        (Err(Unfit::RandomnessUntested(_facts)), Install::ForTrial) => {}
         (Err(unfit), _) => return Err(BringUpFailure::Unfit(unfit)),
     }
 
@@ -413,19 +420,30 @@ where
         chip_birth_witness: ident.birth_witness,
         host_nonce: ident.birth_host_nonce,
         partition_key_seed: ident.partition_key_seed,
+        install,
     };
 
-    // The record in R-memory, and the anchor it describes.
+    // The record in R-memory, and the anchor it describes. A trial's record is in the trial slots,
+    // cleared here so that every boot starts the trial over: the counter goes back to its start below,
+    // once the store is found empty.
     let slots: Box<dyn SlotMemory> = Box::new(RMemSlots {
         session: session.clone(),
     });
-    let store: Box<dyn ActiveStore> = Box::new(
-        SlottedStore::new(slots, RECORD_FIRST_SLOT, MAX_FRAME_LEN)
-            .map_err(BringUpFailure::Layout)?,
-    );
+    let mut records = SlottedStore::new(slots, RECORD_FIRST_SLOT, MAX_FRAME_LEN)
+        .map_err(BringUpFailure::Layout)?;
+    let store: Box<dyn ActiveStore> = match install {
+        Install::ForGood => Box::new(records),
+        Install::ForTrial => {
+            records.trial_clear().map_err(|e| {
+                BringUpFailure::Recovery(AnchorBootRefusal::Restore(DurableError::Store(e)))
+            })?;
+            Box::new(TrialRecords(records))
+        }
+    };
     let tropic: Box<dyn Tropic> = Box::new(RealChip {
         session: session.clone(),
         h0: ENROLL_H0,
+        install,
     });
     let anchor = Anchor::boot(birth, tropic, store).map_err(BringUpFailure::Recovery)?;
     // No record yet: a chip that cannot take the birth is refused here, with nothing written to it,

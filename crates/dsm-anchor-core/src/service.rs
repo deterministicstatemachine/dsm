@@ -44,8 +44,7 @@ pub mod err {
     pub const NOT_UP: u32 = 201;
     /// A try-run did not pass; its steps say where. A provisioning refused for it bound nothing.
     pub const TRY_RUN_FAILED: u32 = 202;
-    /// This image exists to try an install on a board. It cannot make one.
-    pub const TRIAL_IMAGE: u32 = 203;
+    // 203 was the trial image's refusal of an install; its install is a trial now, and binds nothing.
     /// This image reads the chip and says what it is and holds (`OP_IDENTIFY`). It serves nothing else.
     pub const IDENTIFY_IMAGE: u32 = 204;
 }
@@ -118,11 +117,24 @@ fn base(op: i32) -> pb::ApplianceResponse {
         transport_check: Vec::new(),
         chip_readings: Vec::new(),
         chip_certificates: Vec::new(),
+        install: pb::InstallKind::InstallUnspecified as i32,
+    }
+}
+
+/// What an install makes, on the wire.
+pub(crate) fn install_kind(install: crate::enrollment::Install) -> i32 {
+    match install {
+        crate::enrollment::Install::ForGood => pb::InstallKind::InstallForGood as i32,
+        crate::enrollment::Install::ForTrial => pb::InstallKind::InstallForTrial as i32,
     }
 }
 
 /// A try-run on the wire: every step, and what installing would make permanent.
-pub(crate) fn try_run_response(op: i32, run: &crate::try_run::TryRun) -> pb::ApplianceResponse {
+pub(crate) fn try_run_response(
+    op: i32,
+    run: &crate::try_run::TryRun,
+    install: crate::enrollment::Install,
+) -> pb::ApplianceResponse {
     let steps = run
         .steps
         .iter()
@@ -136,11 +148,11 @@ pub(crate) fn try_run_response(op: i32, run: &crate::try_run::TryRun) -> pb::App
             },
         })
         .collect();
-    let permanent = crate::try_run::PERMANENT
+    let permanent = crate::try_run::permanent(install)
         .iter()
         .map(|line| alloc::string::String::from(*line))
         .collect();
-    let answer = match run.first_failure() {
+    let answer = match run.blocking(install) {
         None => ok(op),
         Some(_stopped) => fail(op, err::TRY_RUN_FAILED),
     };
@@ -148,6 +160,7 @@ pub(crate) fn try_run_response(op: i32, run: &crate::try_run::TryRun) -> pb::App
         try_run: steps,
         permanent,
         transport_check: crate::try_run::transport_check(run.release_bytes),
+        install: install_kind(install),
         ..answer
     }
 }
@@ -303,6 +316,7 @@ pub(crate) fn status<T: Tropic, P: PartitionSig>(
         pin_partition_pk: app.partition_pk.clone(),
         pin_chip_pk: app.chip_pk.clone(),
         pin_birth_commitment: app.birth_commitment.to_vec(),
+        install: install_kind(app.install),
         ..base(op)
     }
 }

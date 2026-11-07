@@ -16,7 +16,7 @@ use anchor_core::durable::{
     decode_anchor, encode_active, ActiveStore, DurableAppliance, DurableBootRefusal, DurableError,
     StoreError,
 };
-use anchor_core::enrollment::{anchor_bundle, ChipBirth, Provisioning};
+use anchor_core::enrollment::{anchor_bundle, ChipBirth, Install, Provisioning};
 use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OwnedTransition, Transition,
@@ -337,6 +337,7 @@ impl Anchor {
             chip_birth_witness: derive(&self.seed, "chip birth witness"),
             host_nonce: derive(&self.seed, "host nonce"),
             partition_key_seed: derive(&self.seed, "partition key seed"),
+            install: Install::ForGood,
         }
     }
 
@@ -371,6 +372,7 @@ impl Anchor {
                 self.chip_birth().birth::<Partition>(&self.owner()),
                 "the anchor is born",
             ),
+            Install::ForGood,
         )
     }
 
@@ -845,6 +847,7 @@ fn a_partition_that_cannot_sign_prepares_nothing_and_says_so() {
                 .birth::<UnsigningPartition>(&anchor.owner()),
             "the anchor is born",
         ),
+        Install::ForGood,
     );
     let root = a.active.root;
     let t = transition(root, a.active.anchor_counter);
