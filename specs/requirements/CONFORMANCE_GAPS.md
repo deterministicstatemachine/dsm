@@ -524,7 +524,7 @@ Owner rulings of 2026-09-24 (receipts, `wallet.send`, the rule that nothing whic
 | `dsm_sdk` · storage/client_db/native_reserve.rs · `release_at` (R03) | A negative stored supply read as zero; generation 0 underflowed. | Errors. Test: `a_corrupt_memo_row_is_an_error_not_a_release` (mutation red). |
 | `dsm_sdk` · sdk/token_sdk.rs · `token_exists` (R04) | An unreadable archive read as "no such token". | Propagated. Test: `a_token_lookup_over_an_unreadable_archive_is_an_error_not_absence` (mutation red). |
 | `dsm_sdk` · jni/unified_protobuf_bridge.rs (R05) | BLE events other than identity were dropped with success. | Routed to the Android bridge, or `NotReady` without one; an event with no payload is `InvalidInput`. Verified by the Android build only; there is no host harness. |
-| `dsm_sdk` · sdk/storage_node_sdk.rs (R06) | A malformed `custom_ca_certs` entry was skipped. | A missing key is none; any other type is an error. Test: `custom_ca_certs_is_a_list_of_readable_paths_or_an_error` (mutation red). |
+| `dsm_sdk` · sdk/storage_node_sdk.rs (R06) | A malformed CA entry was skipped (then `custom_ca_certs`, now each member's `ca_cert`; §6.150). | A missing key is none; any other type is an error. Test: `each_members_ca_cert_is_a_string_or_an_error` (mutation red). |
 | `dsm_sdk` · sdk/dlv_pre_commitment_sdk.rs | A public verifier that accepted no signatures, and a hash that did not separate parameter sets. | Module deleted (no production caller). |
 | `dsm_sdk` · handlers/token_routes.rs · `token.forget`; sdk/core_sdk.rs · `execute` | A missing device head read as a zero balance; the policy check ran over a zero state hash when no head was loaded. | Both refuse. The router is built only over a head and a head is never cleared, so neither branch is reachable on a live router and no test can build it. |
 | `dsm` · types/operations.rs, types/general.rs | `Ops::validate` passed every variant but three; `Ops::execute` executed nothing; `GenericOps`, and every type in `types::general` (`KeyPair`, `IdToken`, `DirectoryEntry`, `Commitment`, `VerificationResult`, `SecurityLevel`), had no user. | Deleted. |
@@ -7307,6 +7307,15 @@ The phone run on `c043278c6` (`audit-freeze-2026-11-04`) showed the wallet's app
 - **Display.** The connected app's view reads the log, so it can show one more used than granted ("1 of 0 requests that spend nothing used"). The approval screen says nothing of the wait after a failed payment.
 - **Test.** `dsm_sdk::handlers::connect_e2e_tests::a_payment_inside_its_caps_runs_past_the_free_requests_until_one_fails`. Not run locally and not mutation-tested (owner, 2026-11-04: GitHub runs the tests); GitHub's run on this commit is its first.
 - **The freeze.** `audit-freeze-2026-11-04` does not hold this change. It holds the rule §6.124 recorded then.
+
+### 6.150 Each operator's own certificate (owner, 2026-11-05)
+
+The owner's words, on the five people who run the public beta nodes: "It's their own accounts. It's up to them." and "It's theirs. They're setting it up, so it's their own certificate." The owner's own five nodes become a private fleet for testing and updating beta.
+
+- **Device.** `custom_ca_certs` is gone. Each `[[nodes]]` entry in the env config carries `ca_cert`, the PEM of that member's CA. `build_member_client` trusts that CA alone for that member, and still requires a certificate naming the member. `ca.crt` is no longer bundled, copied or preserved on Android, iOS or the frontend build. A member with no `ca_cert` gets no client.
+- **Node.** `tls.ca_path` is gone. Each `[[storage_set.members]]` entry carries `ca_cert`, and `NodeStorageSet::with_set_mates` builds one client per set-mate, pinned to that set-mate's CA. A set-mate with none refuses startup.
+- **Tests.** `a_certificate_from_another_members_ca_is_refused` (SDK) and `a_set_mate_certified_by_another_members_ca_is_not_mirrored` (node) each carry their own control: the same node through its own CA is reached. `a_set_mate_without_a_ca_of_its_own_is_refused` covers startup.
+- **Existing fleet.** The owner's five share one CA, so the bundled config names that CA for each of them. Moving those nodes to this build needs `ca_cert` added to each member in their `node.toml` first, or they refuse to start. Nothing was deployed.
 
 ## 7 Totals
 

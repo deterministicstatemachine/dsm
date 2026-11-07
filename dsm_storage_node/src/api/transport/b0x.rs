@@ -432,7 +432,6 @@ mod tests {
             AppState::new(
                 "test-node".to_string(),
                 pool,
-                crate::db::test_store::set_client(),
             )
             .unwrap_or_else(|e| panic!("app state: {e}")),
         );
@@ -833,7 +832,6 @@ mod tests {
             AppState::new(
                 "test-node".to_string(),
                 Arc::new(pool),
-                crate::db::test_store::set_client(),
             )
             .expect("app state"),
         );

@@ -24,7 +24,7 @@ use tower::ServiceExt;
 async fn member(store: &str) -> Router {
     let pool = common::fresh_store(store).await;
     let state = Arc::new(common::ok_or_panic(
-        AppState::new("member".to_string(), pool, common::set_client()),
+        AppState::new("member".to_string(), pool),
         "app state",
     ));
     // The binary's own assembly: what this suite drives is what is served.
@@ -153,7 +153,7 @@ async fn an_unknown_address_is_not_found() {
 async fn member_and_store(store: &str) -> (Router, Arc<dsm_storage_node::db::DBPool>) {
     let pool = common::fresh_store(store).await;
     let state = Arc::new(common::ok_or_panic(
-        AppState::new("member".to_string(), pool.clone(), common::set_client()),
+        AppState::new("member".to_string(), pool.clone()),
         "app state",
     ));
     (common::served(state), pool)

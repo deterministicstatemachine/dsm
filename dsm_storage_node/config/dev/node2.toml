@@ -12,7 +12,6 @@ port = 8081
 [tls]
 cert_path = "dev-pki/node2.crt"
 key_path = "dev-pki/node2.key"
-ca_path = "dev-pki/ca.crt"
 
 [database]
 url = "postgresql://localhost:5432/dsm_storage_node2?sslmode=disable"

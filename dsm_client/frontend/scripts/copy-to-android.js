@@ -97,7 +97,7 @@ if (fs.existsSync(overlayDir)) {
 // local fleet, push an override config to the device
 // (scripts/push_env_override.sh); do not edit the copies here — every build
 // rewrites them.
-const RUNTIME_CONFIG = ['dsm_env_config.toml', 'ca.crt'];
+const RUNTIME_CONFIG = ['dsm_env_config.toml'];
 const publicDir = path.join(__dirname, '..', 'public');
 for (const name of RUNTIME_CONFIG) {
   const source = path.join(publicDir, name);

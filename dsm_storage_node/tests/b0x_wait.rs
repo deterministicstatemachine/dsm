@@ -20,7 +20,7 @@ use tower::ServiceExt;
 async fn node(store: &str, wait_bound: Duration) -> axum::Router {
     let pool = common::fresh_store(store).await;
     let state = Arc::new(common::ok_or_panic(
-        AppState::new("member".to_string(), pool, common::set_client()),
+        AppState::new("member".to_string(), pool),
         "app state",
     ));
     build_app(

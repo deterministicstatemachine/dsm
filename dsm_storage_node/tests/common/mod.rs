@@ -89,10 +89,10 @@ fn with_database(url: &str, database: &str) -> String {
     }
 }
 
-/// The storage set CA every test node is served under, made once per test
-/// binary: its certificate, and one certificate it issued for the loopback
-/// address with that certificate's key, as the fleet's CA issues each node a
-/// certificate naming its IP (`deploy/generate_node_configs.sh`).
+/// The CA every test node is served under, made once per test binary: its
+/// certificate, and one certificate it issued for the loopback address with
+/// that certificate's key, as an operator's CA issues its node a certificate
+/// naming its IP.
 struct TestCa {
     ca_pem: String,
     node_cert_pem: String,
@@ -134,13 +134,22 @@ fn test_ca() -> &'static TestCa {
     })
 }
 
-/// A client pinned to the test storage set's CA, as a node's set client is
-/// pinned to its set's.
-pub fn set_client() -> reqwest::Client {
+/// The CA certificate every test node's certificate chains to, as a node's
+/// configuration names each set-mate's.
+pub fn node_ca_pem() -> String {
+    test_ca().ca_pem.clone()
+}
+
+/// A CA certificate that issued none of the test nodes' certificates: another
+/// member's, as a node's configuration could name it by mistake or be pointed
+/// at by a member standing in for another.
+pub fn another_members_ca_pem() -> String {
     ok_or_panic(
-        dsm_storage_node::set_client::pinned_set_client(test_ca().ca_pem.as_bytes()),
-        "pinned client",
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]),
+        "another member's CA",
     )
+    .cert
+    .pem()
 }
 
 /// The process's TLS provider, as the node binary installs it before it
@@ -213,7 +222,7 @@ pub fn runtime() -> tokio::runtime::Runtime {
 /// The member the binary serves on `pool`, as member id `id`.
 pub fn member(id: &str, pool: std::sync::Arc<dsm_storage_node::db::DBPool>) -> axum::Router {
     let state = std::sync::Arc::new(ok_or_panic(
-        dsm_storage_node::AppState::new(id.to_string(), pool, set_client()),
+        dsm_storage_node::AppState::new(id.to_string(), pool),
         "app state",
     ));
     served(state)

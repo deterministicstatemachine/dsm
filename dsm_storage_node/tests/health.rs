@@ -35,7 +35,7 @@ async fn health_of(app: &axum::Router) -> (StatusCode, String) {
 async fn the_health_route_answers_ok_only_over_a_live_postgres() {
     let pool = common::fresh_store("health").await;
     let state = Arc::new(common::ok_or_panic(
-        AppState::new("member".to_string(), pool, common::set_client()),
+        AppState::new("member".to_string(), pool),
         "app state",
     ));
     let app = common::served(state.clone());

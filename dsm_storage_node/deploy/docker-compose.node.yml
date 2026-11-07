@@ -1,7 +1,7 @@
 # DSM Storage Node — Per-Node Docker Compose
 #
-# Deployed to each EC2 instance. Runs PostgreSQL + storage-node together.
-# Requires: .env, config/node.toml, certs/node.crt, certs/node.key, certs/ca.crt
+# Deployed to each VM. Runs PostgreSQL + storage-node together.
+# Requires: .env, config/node.toml, certs/node.crt, certs/node.key
 #
 # Usage:
 #   docker compose -f docker-compose.node.yml up -d
@@ -41,7 +41,7 @@ services:
         max-file: "5"
 
   storage-node:
-    image: dsm-storage-node:latest
+    image: ${DSM_NODE_IMAGE:-dsm-storage-node:latest}
     restart: unless-stopped
     mem_limit: ${DSM_NODE_MEM_LIMIT:-896m}
     # The runtime's worker threads and its blocking pool (at most 512).

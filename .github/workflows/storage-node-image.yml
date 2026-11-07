@@ -1,0 +1,76 @@
+name: Storage node image
+
+# Publishes the ready-made storage node image that operators' machines pull, so
+# nobody running a node ever compiles anything. Only someone with write access
+# to this repository can run it, and it never runs by itself.
+#
+# Build a commit: it is published as :<commit>, which the private test fleet can
+# run. Then run this again with `promote` on the same commit: the very image
+# that was tested becomes :beta, the tag the public nodes update to.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "The full commit to build, or to promote"
+        type: string
+        required: true
+      promote:
+        description: "Make this commit's already published image the :beta image"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/dsm-storage-node
+
+jobs:
+  build:
+    if: ${{ !inputs.promote }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Sign in to the container registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Build
+        env:
+          COMMIT: ${{ inputs.commit }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          docker build --platform linux/amd64 \
+            -f dsm_storage_node/Dockerfile.cloud \
+            --label "org.opencontainers.image.source=$SOURCE" \
+            --label "org.opencontainers.image.revision=$COMMIT" \
+            -t "$IMAGE:$COMMIT" .
+
+      - name: Publish
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: docker push "$IMAGE:$COMMIT"
+
+  promote:
+    if: ${{ inputs.promote }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Sign in to the container registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Move :beta to this commit's image
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: docker buildx imagetools create --tag "$IMAGE:beta" "$IMAGE:$COMMIT"
