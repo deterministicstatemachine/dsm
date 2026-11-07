@@ -78,6 +78,16 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
     );
   };
 
+  // This device forgets the pairing and reaches theirs to pair anew over a
+  // new link handshake; the pairing line follows what Rust lists after.
+  const unpair = () => {
+    setSaid('Unpairing…');
+    contactsStore.unpair(contact.deviceId).then(
+      () => setSaid('Unpaired. This device reaches theirs to pair again.'),
+      (e: unknown) => setSaid(messageOf(e)),
+    );
+  };
+
   const link = () => {
     pickPhoneContact().then(
       (picked) => {
@@ -132,6 +142,7 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
           <>
             <button type="button" className="s-btn s-btn-quiet" onClick={() => setDraft(held)}>Edit details</button>
             <button type="button" className="s-btn s-btn-quiet" onClick={link}><Icon name="people" /> Link a phone contact</button>
+            <button type="button" className="s-btn s-btn-quiet" onClick={unpair}>Unpair and pair again</button>
           </>
         ) : (
           <section className="s-card" aria-label="Edit details">
