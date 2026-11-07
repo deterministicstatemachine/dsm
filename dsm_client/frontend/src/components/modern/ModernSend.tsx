@@ -12,7 +12,6 @@ import { useContacts } from '../../contexts/ContactsContext';
 import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
 import { sendTransfer, type SendMode } from '../../domain/sendTransfer';
 import { emailReceiptIfDue } from '../../domain/sendReceipt';
-import UnderConstructionModal from '../UnderConstructionModal';
 import { Avatar, Icon, PageTitle, Sheet, mainBalance, personName, sendable } from './parts';
 import { modernNav } from './modernNav';
 import type { DomainContact } from '../../domain/types';
@@ -40,7 +39,6 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
   const [mode, setMode] = useState<SendMode>('online');
-  const [notice, setNotice] = useState<string | null>(null);
   const [stage, setStage] = useState<Stage>({ kind: 'form' });
 
   const contact: DomainContact | null = contacts.find((c) => c.deviceId === recipient) ?? null;
@@ -173,7 +171,7 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
         <div className="s-field">
           <div className="s-seg" role="group" aria-label="How to send">
             <button type="button" aria-pressed={mode === 'online'} onClick={() => setMode('online')}>Online</button>
-            <button type="button" aria-pressed={mode === 'offline'} onClick={() => setNotice('Under construction, check back soon.')}>Offline</button>
+            <button type="button" aria-pressed={mode === 'offline'} onClick={() => setMode('offline')}>Offline</button>
           </div>
         </div>
       ) : null}
@@ -193,8 +191,6 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
         <Icon name="send" /> Review Send
       </button>
       {tried === 'tried' && missing !== null ? <p className="s-hint" role="alert" style={{ textAlign: 'center', marginTop: 10 }}>{missing}</p> : null}
-
-      <UnderConstructionModal title="Offline" message={notice} onClose={() => setNotice(null)} />
 
       {stage.kind === 'review' && contact !== null && token !== null ? (
         <Sheet label="Review send" onClose={() => setStage({ kind: 'form' })}>
