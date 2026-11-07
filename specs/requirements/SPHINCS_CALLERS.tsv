@@ -10,7 +10,7 @@ crates/dsm-anchor-chip/src/bring_up.rs	75	dsm_sphincs::Error::Crypto(
 crates/dsm-anchor-chip/src/bring_up.rs	76	dsm_sphincs::CryptoFailure::EmptySigningMessage
 crates/dsm-anchor-chip/src/bring_up.rs	77	| dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
 crates/dsm-anchor-chip/src/bring_up.rs	79	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
-crates/dsm-anchor-chip/tests/chip_model.rs	240	dsm_sphincs::verify(dsm_sphincs::SphincsVariant::SPX128f, pk_host, message, sig),
+crates/dsm-anchor-chip/tests/chip_model.rs	241	dsm_sphincs::verify(dsm_sphincs::SphincsVariant::SPX128f, pk_host, message, sig),
 crates/dsm-anchor-core/src/accept.rs	312	const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX128f;
 crates/dsm-anchor-core/src/accept.rs	316	let kp = dsm_sphincs::generate_keypair_from_seed(PARTITION, seed)
 crates/dsm-anchor-core/src/accept.rs	321	dsm_sphincs::sign(PARTITION, sk, digest).map_err(partition_error)
