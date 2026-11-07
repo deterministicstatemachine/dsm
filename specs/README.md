@@ -11,6 +11,7 @@ This folder is the authoritative engineering source for the DSM protocol archite
 - Even a demonstrated finding is a report to the owner, never a rewrite. The owner decides.
 - Anything that goes against a position the owner has held is said first, in bold, as its own yes-or-no question, and is not done until the owner has said yes more than once.
 - Nothing is labelled an owner request or ruling without the owner's quoted words and date.
+- **Holes in A14, if there are any, are the external auditor's, not any agent's.** Owner, 2026-11-04: "It's already been decided that the external auditor will handle A14 if there are any holes, not you guys. You just leave it and make notes that agents do not go back on this. They just move on, and I will identify it myself to the auditor." An agent leaves it: no going back on it, no test or run aimed at it, no raising it again. It moves on. The owner raises it with the auditor.
 
 The independent audit assesses A14 as specified. `ci/acceptance_lock.py` enforces this in CI.
 

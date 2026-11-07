@@ -39,14 +39,19 @@ enum BleConstants {
     static let minUpdateValueLength = recordOnRadio + transferHeader
 
     /// Transport-level chunk ACK the client writes to TX_REQUEST:
-    /// `0xFF ‖ b3 b2 b1 b0`, the count of notifications received.
+    /// `0xFF ‖ nonce ‖ b3 b2 b1 b0`, the transfer nonce it counts under and the
+    /// count of notifications received under it.
     static let chunkAckMarker: UInt8 = 0xFF
-    static let chunkAckLength = 5
+    static let chunkAckLength = 6
     /// Notifications the server sends before it waits for an ACK.
     static let notificationWindow = 10
-    /// A window's ACK is waited for this long before the transfer is tried again.
-    static let ackTimeout = DispatchTimeInterval.seconds(5)
-    /// Whole-transfer attempts, each under a new nonce.
+    /// A window's ACK is waited for this long before the transfer goes again
+    /// from that window. It arrives once the window has drained over the air:
+    /// 240 ms typically and 516 ms at most over 275 windows (Android,
+    /// 2026-10-15), so a window not acknowledged in 2 s lost a notification.
+    static let ackTimeout = DispatchTimeInterval.milliseconds(2000)
+    /// Attempts of one transfer, each under a new nonce, each after the first
+    /// resuming at the window whose ACK did not come.
     static let transferMaxAttempts = 3
     /// A write refused by the stack as busy is waited on this long.
     static let readyTimeout = DispatchTimeInterval.seconds(5)

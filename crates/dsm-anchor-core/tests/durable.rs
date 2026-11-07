@@ -16,7 +16,7 @@ use anchor_core::durable::{
     decode_anchor, encode_active, ActiveStore, DurableAppliance, DurableBootRefusal, DurableError,
     StoreError,
 };
-use anchor_core::enrollment::{anchor_bundle, ChipBirth, Provisioning};
+use anchor_core::enrollment::{anchor_bundle, ChipBirth, Install, Provisioning};
 use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OwnedTransition, Transition,
@@ -165,6 +165,30 @@ impl Tropic for Chip {
         Ok(self.resident.sign(message).to_bytes().to_vec())
     }
 
+    fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        matches!(
+            (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
+            (Ok(key), Ok(signature)) if matches!(
+                ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                    .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                Ok(())
+            )
+        )
+    }
+
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        self.board.powered()?;
+        self.counter.set(H0);
+        Ok(())
+    }
+
+    fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
+        vec![anchor_core::try_run::TryStep::new(
+            "this software chip's counter reads",
+            self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
+        )]
+    }
+
     fn close_birth(&mut self) -> Result<(), TropicError> {
         self.board.powered()?;
         if self.cage.get() == Cage::Open {
@@ -180,6 +204,17 @@ impl Tropic for Chip {
 struct RMemory {
     board: Board,
     slot: Rc<RefCell<Option<Vec<u8>>>>,
+    /// Where a try-run's records go. No read of the record looks here.
+    trial: Rc<RefCell<Option<Vec<u8>>>>,
+}
+
+impl RMemory {
+    fn on_the_supply(&self) -> Result<(), StoreError> {
+        match self.board.power() {
+            Power::On => Ok(()),
+            Power::Off => Err(StoreError::Unavailable),
+        }
+    }
 }
 
 impl ActiveStore for RMemory {
@@ -195,6 +230,27 @@ impl ActiveStore for RMemory {
             Power::On => Ok(self.slot.borrow().clone()),
             Power::Off => Err(StoreError::Unavailable),
         }
+    }
+
+    fn try_record(&mut self, _record: &[u8]) -> Result<(), StoreError> {
+        self.on_the_supply()
+    }
+
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.on_the_supply()?;
+        *self.trial.borrow_mut() = Some(record.to_vec());
+        Ok(())
+    }
+
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.on_the_supply()?;
+        Ok(self.trial.borrow().clone())
+    }
+
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        self.on_the_supply()?;
+        *self.trial.borrow_mut() = None;
+        Ok(())
     }
 }
 
@@ -256,6 +312,7 @@ impl Anchor {
             rmemory: RMemory {
                 board: board.clone(),
                 slot: Rc::new(RefCell::new(None)),
+                trial: Rc::new(RefCell::new(None)),
             },
             board,
             counter: Rc::new(Cell::new(H0)),
@@ -276,10 +333,11 @@ impl Anchor {
             partition_device_id: derive(&self.seed, "partition device id"),
             chip_pk: self.resident().verifying_key().to_bytes().to_vec(),
             enrolled_counter: H0,
-            partition_trng: derive(&self.seed, "partition trng"),
+            birth_entropy: derive(&self.seed, "birth entropy"),
             chip_birth_witness: derive(&self.seed, "chip birth witness"),
             host_nonce: derive(&self.seed, "host nonce"),
             partition_key_seed: derive(&self.seed, "partition key seed"),
+            install: Install::ForGood,
         }
     }
 
@@ -314,6 +372,7 @@ impl Anchor {
                 self.chip_birth().birth::<Partition>(&self.owner()),
                 "the anchor is born",
             ),
+            Install::ForGood,
         )
     }
 
@@ -724,6 +783,7 @@ fn a_restored_anchor_is_bound_to_the_device_it_was_provisioned_for() {
                 RMemory {
                     board: anchor.board.clone(),
                     slot: Rc::new(RefCell::new(None)),
+                    trial: Rc::new(RefCell::new(None)),
                 }
             )
             .map(|d| d.appliance().bundle),
@@ -787,6 +847,7 @@ fn a_partition_that_cannot_sign_prepares_nothing_and_says_so() {
                 .birth::<UnsigningPartition>(&anchor.owner()),
             "the anchor is born",
         ),
+        Install::ForGood,
     );
     let root = a.active.root;
     let t = transition(root, a.active.anchor_counter);

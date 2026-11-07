@@ -10,7 +10,7 @@
 //! timers never participate in chain ordering, receipt commits or acceptance
 //! predicates.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -89,6 +89,10 @@ pub struct PairingOrchestrator {
     loop_running: Arc<AtomicBool>,
     /// Event-driven wake-up for pairing state changes.
     state_change: Arc<Notify>,
+    /// Contacts unpaired here ([`Self::unpair`]) that this phone reaches itself,
+    /// whatever the device ids say, until they are paired again: the peer may
+    /// still hold the pairing, and a paired phone never comes looking.
+    reaches_itself: Arc<RwLock<HashSet<[u8; 32]>>>,
 }
 
 impl PairingOrchestrator {
@@ -98,11 +102,39 @@ impl PairingOrchestrator {
             loop_stop: Arc::new(AtomicBool::new(false)),
             loop_running: Arc::new(AtomicBool::new(false)),
             state_change: Arc::new(Notify::new()),
+            reaches_itself: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
     fn signal_state_change(&self) {
         self.state_change.notify_waiters();
+    }
+
+    /// Whether this phone only advertises for `contact` and waits to be reached,
+    /// or scans and reaches it. The lower device id waits, so two phones that
+    /// both look never cross their connections; a contact unpaired here is
+    /// reached by this phone whatever the ids say.
+    async fn waits_to_be_reached(&self, self_device_id: &[u8; 32], contact: &[u8; 32]) -> bool {
+        self_device_id < contact && !self.reaches_itself.read().await.contains(contact)
+    }
+
+    /// Unpair `contact` here so it is paired again: its stored address is
+    /// forgotten, any session for it is dropped, and this phone reaches the
+    /// contact itself until the two are paired again. The peer answers the new
+    /// link's handshake whether or not it still holds the old pairing, and the
+    /// pairing is stored on this phone only once that handshake completes.
+    pub async fn unpair(&self, contact: [u8; 32]) -> Result<(), String> {
+        crate::storage::client_db::forget_contact_ble_address(&contact)
+            .map_err(|e| format!("the paired address was not forgotten: {e}"))?;
+        self.sessions.write().await.remove(&contact);
+        self.reaches_itself.write().await.insert(contact);
+        log::info!(
+            "[PairingOrchestrator] Unpaired {:02x}{:02x}... — this phone reaches it to pair again",
+            contact[0],
+            contact[1]
+        );
+        self.signal_state_change();
+        Ok(())
     }
 
     /// Initiate pairing for a specific contact
@@ -175,8 +207,9 @@ impl PairingOrchestrator {
             .try_into()
             .map_err(|_| "Self device ID is not 32 bytes".to_string())?;
 
-        // Determine role: if self < contact, advertise (be peripheral); else scan (be central)
-        let should_advertise = self_device_id_array < contact_device_id;
+        let should_advertise = self
+            .waits_to_be_reached(&self_device_id_array, &contact_device_id)
+            .await;
 
         log::info!(
             "[PairingOrchestrator] Initiated pairing for contact: {:02x}{:02x}{:02x}{:02x}... self={:02x}{:02x}... role={}",
@@ -311,9 +344,11 @@ impl PairingOrchestrator {
             session.ble_address = Some(ble_address.to_string());
             session.last_activity = Instant::now();
         }
-        self.signal_state_change();
         match &stored {
             Ok(()) => {
+                // Paired again: the lower id goes back to waiting to be reached.
+                self.reaches_itself.write().await.remove(&peer);
+                self.signal_state_change();
                 log::info!(
                     "[PairingOrchestrator] paired with {:02x}{:02x}... on {ble_address}",
                     peer[0],
@@ -334,6 +369,7 @@ impl PairingOrchestrator {
                 self.notify_pairing_complete(&peer);
             }
             Err(reason) => {
+                self.signal_state_change();
                 self.emit_pairing_status(&peer, "failed", reason, Some(ble_address))
                     .await
             }
@@ -408,7 +444,7 @@ impl PairingOrchestrator {
     /// 6. Loops until all contacts are paired or stop_pairing_loop() is called
     ///
     /// Spawned on the tokio runtime when the session lets pairing run
-    /// (`bluetooth::pairing_follows`, `bluetooth::contact_added`).
+    /// (`bluetooth::pairing_follows`, `bluetooth::contact_to_pair`).
     pub async fn start_pairing_all_unpaired(self: Arc<Self>) {
         // Reset stop flag first, then atomically claim the loop
         self.loop_stop.store(false, Ordering::SeqCst);
@@ -422,6 +458,9 @@ impl PairingOrchestrator {
 
         log::info!("[PairingOrchestrator] start_pairing_all_unpaired: loop started");
 
+        // Pairing attempts this run of the loop started: each one asks the radio to
+        // look for its contact. Only then is a scan the loop's to stop on exit.
+        let mut initiated_this_run: u32 = 0;
         loop {
             let state_changed = self.state_change.notified();
 
@@ -536,6 +575,7 @@ impl PairingOrchestrator {
                 // Initiate pairing for this contact
                 match self.initiate_pairing(device_id).await {
                     Ok(should_advertise) => {
+                        initiated_this_run += 1;
                         let role_str = if should_advertise {
                             "advertise"
                         } else {
@@ -566,10 +606,16 @@ impl PairingOrchestrator {
         }
 
         // Stop the pairing scan on loop exit so it does not linger ("stuck
-        // scanning") once the peer has completed pairing. Advertising follows
-        // the identity and is not the loop's.
-        if let Err(e) = self.stop_ble_discovery().await {
-            log::warn!("[PairingOrchestrator] loop ended with the scan not stopped: {e}");
+        // scanning") once the peer has completed pairing, but only a scan this
+        // run started. A run that found nobody to pair started none, and a scan
+        // running then is someone else's: a contact owed frames is being reached
+        // for with it, and each session snapshot starts a run, so stopping it here
+        // left that reach without a scanner. Advertising follows the identity and
+        // is not the loop's.
+        if initiated_this_run > 0 {
+            if let Err(e) = self.stop_ble_discovery().await {
+                log::warn!("[PairingOrchestrator] loop ended with the scan not stopped: {e}");
+            }
         }
 
         self.loop_running.store(false, Ordering::SeqCst);
@@ -638,7 +684,9 @@ impl PairingOrchestrator {
     /// device can connect and run the link handshake. Only ONE device scans.
     /// This prevents the race condition where both devices discover each other
     /// simultaneously, both call connectGatt(), and the crossing GATT connections
-    /// cause error 133 or timeout on Samsung/Qualcomm stacks.
+    /// cause error 133 or timeout on Samsung/Qualcomm stacks. A contact unpaired
+    /// on this phone is the exception: this phone scans for it whatever the ids
+    /// say ([`Self::waits_to_be_reached`]).
     #[cfg(feature = "bluetooth")]
     async fn start_ble_discovery(&self, contact_device_id: [u8; 32]) -> Result<(), String> {
         let self_device_id = crate::sdk::app_state::AppState::get_device_id()
@@ -647,7 +695,9 @@ impl PairingOrchestrator {
             .try_into()
             .map_err(|_| "Self device ID is not 32 bytes".to_string())?;
 
-        let should_advertise = self_device_id_array < contact_device_id;
+        let should_advertise = self
+            .waits_to_be_reached(&self_device_id_array, &contact_device_id)
+            .await;
 
         log::info!(
             "[PairingOrchestrator] Starting BLE discovery for contact {:02x}{:02x}... role={}",
@@ -992,6 +1042,64 @@ mod tests {
                 last_activity: Instant::now(),
             },
         );
+    }
+
+    /// Unpairing forgets the stored address and drops the session, and this
+    /// phone then reaches the contact itself, even as the lower device id that
+    /// would only wait: the peer may still hold the pairing and never come
+    /// looking. A link that pairs the two again ends that. MUTATION CONTROL:
+    /// `waits_to_be_reached` ignoring the contacts unpaired here leaves the
+    /// lower id waiting: red at "this phone reaches it".
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_unpaired_contact_is_reached_by_this_phone_until_paired_again() {
+        crate::economic_fixtures::use_test_storage_dir();
+        client_db::reset_database_for_tests();
+        client_db::init_database().expect("init db");
+        let orchestrator = PairingOrchestrator::new();
+        let lower = [0x10u8; 32];
+        let peer = [0x73u8; 32];
+        let address = "AA:00:00:00:00:73";
+
+        store_peer(peer);
+        client_db::update_contact_ble_status(&peer, None, Some(address)).expect("paired");
+        session_in(&orchestrator, peer, PairingState::Complete, address).await;
+        assert!(
+            orchestrator.waits_to_be_reached(&lower, &peer).await,
+            "the lower id waits for a paired contact"
+        );
+
+        orchestrator.unpair(peer).await.expect("unpaired");
+        let contact = client_db::get_contact_by_device_id(&peer)
+            .expect("read")
+            .expect("contact");
+        assert_eq!(contact.ble_address, None, "the paired address is forgotten");
+        assert_eq!(orchestrator.get_session_status(&peer).await, None);
+        assert!(
+            !orchestrator.waits_to_be_reached(&lower, &peer).await,
+            "this phone reaches it"
+        );
+
+        let paired = dsm::crypto::ble_link::LinkIdentity {
+            device_id: peer,
+            genesis: [0x55; 32],
+        };
+        orchestrator
+            .link_paired(&paired, address)
+            .await
+            .expect("paired again");
+        assert!(
+            orchestrator.waits_to_be_reached(&lower, &peer).await,
+            "paired again, the lower id waits again"
+        );
+
+        let unknown = [0x74u8; 32];
+        let refused = orchestrator
+            .unpair(unknown)
+            .await
+            .expect_err("no such contact");
+        assert!(refused.contains("not forgotten"), "{refused}");
+        assert!(orchestrator.waits_to_be_reached(&lower, &unknown).await);
     }
 
     /// DSM Amendment A27: a paired link completes pairing only once the

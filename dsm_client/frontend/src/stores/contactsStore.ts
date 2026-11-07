@@ -163,6 +163,12 @@ class ContactsStore {
     return stored;
   };
 
+  /** Unpairs a contact's phone to pair it again, then reads the list again. */
+  unpair = async (deviceIdB32: string): Promise<void> => {
+    await dsmClient.unpairContact(deviceIdB32);
+    await this.refreshContacts();
+  };
+
   private emit(): void {
     this.listeners.forEach((listener) => listener());
   }

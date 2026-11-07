@@ -173,14 +173,17 @@ describe('the Modern skin', () => {
     expect(within(list).getByText('Jane Miller')).toBeInTheDocument();
   });
 
-  it('offers Offline in full, and in Simple mode only when switched on there; Offline says it is under construction', () => {
+  it('offers Offline in full, and in Simple mode only when switched on there; Offline is chosen', () => {
     appRuntimeStore.setSimpleMode('on');
     renderShell();
     act(() => modernNav.open({ kind: 'send', to: JANE }));
     expect(screen.queryByRole('group', { name: 'How to send' })).not.toBeInTheDocument();
     act(() => appRuntimeStore.setSimpleOffline('on'));
-    fireEvent.click(within(screen.getByRole('group', { name: 'How to send' })).getByRole('button', { name: 'Offline' }));
-    expect(screen.getByRole('alertdialog', { name: 'Offline' })).toHaveTextContent('Under construction, check back soon.');
+    const how = within(screen.getByRole('group', { name: 'How to send' }));
+    fireEvent.click(how.getByRole('button', { name: 'Offline' }));
+    expect(screen.queryByRole('alertdialog', { name: 'Offline' })).not.toBeInTheDocument();
+    expect(how.getByRole('button', { name: 'Offline' })).toBePressed();
+    expect(how.getByRole('button', { name: 'Online' })).not.toBePressed();
   });
 
   it('says a receipt will be emailed only when receipts are on and the person has an email', () => {

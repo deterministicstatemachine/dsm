@@ -8,7 +8,7 @@ use anchor_core::accept::{
     accept_offline, AcceptError, DsmVerifier, OfflineStateRefused, VerifierContext,
 };
 use anchor_core::appliance::{Appliance, BootRecoveryRefusal, Record, RecoverOutcome, Status};
-use anchor_core::enrollment::{birth, BirthInputs};
+use anchor_core::enrollment::{birth, BirthInputs, Install};
 use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OfflineRelease, OwnedTransition,
@@ -42,6 +42,7 @@ const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX1
 /// it under the pinned `pk_chip`.
 struct Chip {
     h: u32,
+    start: u32,
     resident: SigningKey,
     closed_births: u32,
 }
@@ -49,6 +50,7 @@ impl Chip {
     fn with_h(h: u32) -> Self {
         Self {
             h,
+            start: h,
             resident: SigningKey::from_bytes(&[0xC0; 32]),
             closed_births: 0,
         }
@@ -71,6 +73,29 @@ impl Tropic for Chip {
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
         Ok(self.resident.sign(message).to_bytes().to_vec())
     }
+    fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        matches!(
+            (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
+            (Ok(key), Ok(signature)) if matches!(
+                ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                    .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                Ok(())
+            )
+        )
+    }
+
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        self.h = self.start;
+        Ok(())
+    }
+
+    fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
+        vec![anchor_core::try_run::TryStep::new(
+            "this software chip's counter reads",
+            self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
+        )]
+    }
+
     fn close_birth(&mut self) -> Result<(), TropicError> {
         self.closed_births += 1;
         Ok(())
@@ -174,7 +199,7 @@ struct Fixture {
 fn fixture(h: u32) -> Fixture {
     let chip_pk = Chip::with_h(0).pk(); // deterministic (csk fixed)
     let b = birth::<Partition>(&BirthInputs {
-        partition_trng: &[0x01; 32],
+        birth_entropy: &[0x01; 32],
         chip_birth_witness: &[0x02; 32],
         host_nonce: &[0x03; 32],
         device_id: &DEVICE,
@@ -191,7 +216,7 @@ fn fixture(h: u32) -> Fixture {
     let part_pk = b.partition_pk.clone();
     let bundle = b.bundle;
     let frontier0 = b.genesis_frontier;
-    let a = Appliance::new(Chip::with_h(h), H0, ANCHOR, PART_DEV, b);
+    let a = Appliance::new(Chip::with_h(h), H0, ANCHOR, PART_DEV, b, Install::ForGood);
     Fixture {
         a,
         part_pk,
@@ -430,8 +455,10 @@ fn recover_at_boot_refuses_a_chip_counter_advanced_past_the_software_counter() {
     );
 }
 
+/// A prepared record that would not complete is still only prepared: its counter did not move and
+/// it was never exported. The boot resets it as any other, and the anchor does not die of it.
 #[test]
-fn recover_at_boot_refuses_a_prepared_record_missing_its_signatures() {
+fn recover_at_boot_resets_a_prepared_record_missing_its_signatures() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
@@ -439,15 +466,10 @@ fn recover_at_boot_refuses_a_prepared_record_missing_its_signatures() {
     if let Record::Prepared(p) = &mut f.a.active.record {
         p.cert.sigma_host.clear();
     }
-    assert_eq!(
-        f.a.recover_at_boot(),
-        Err(BootRecoveryRefusal::Outcome(
-            RecoverOutcome::OnlineCancelOrResolve
-        ))
-    );
-    // Refusal leaves the record for online resolution; nothing was cancelled.
-    assert_eq!(f.a.active.status, Status::Prepared);
-    assert!(matches!(f.a.active.record, Record::Prepared(_)));
+    assert_eq!(f.a.recover(), RecoverOutcome::OnlineCancelOrResolve);
+    assert_eq!(f.a.recover_at_boot(), Ok(()));
+    assert_eq!(f.a.active.status, Status::Ready);
+    assert!(matches!(f.a.active.record, Record::Empty));
 }
 
 #[test]

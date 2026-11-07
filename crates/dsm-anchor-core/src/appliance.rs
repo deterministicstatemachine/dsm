@@ -142,6 +142,8 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     /// pin keys, the owner's online key and its device id, `B` recomputes from what is disclosed.
     pub birth_commitment: [u8; 32],
     pub active: Active,
+    /// What its install made: for good, or a trial.
+    pub install: crate::enrollment::Install,
     /// SECRET partition signing key (non-exportable on device).
     partition_sk: Vec<u8>,
     tropic: T,
@@ -149,13 +151,15 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
 }
 
 impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
-    /// Construct from a [`Birth`] result. Starts at the genesis frontier `h_0`, counter 0.
+    /// Construct from a [`Birth`] result, installed as `install` says. Starts at the genesis
+    /// frontier `h_0`, counter 0.
     pub fn new(
         tropic: T,
         h0: u32,
         anchor_id: [u8; 32],
         partition_device_id: [u8; 32],
         birth: Birth,
+        install: crate::enrollment::Install,
     ) -> Self {
         Self {
             h0,
@@ -166,6 +170,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             chip_pk: birth.chip_pk,
             birth_commitment: birth.birth_commitment,
             active: Active::genesis(birth.genesis_frontier),
+            install,
             partition_sk: birth.partition_sk,
             tropic,
             _p: PhantomData,
@@ -466,8 +471,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                 // Both on-device witnesses (σ^chip, σ^host) are formed atomically in prepare and
                 // no counter has moved, so a Prepared record is safe to complete when it is the
                 // record this appliance signed: its message recomputes from its own fields and
-                // transition, σ^host verifies under the pinned partition key, and σ^chip is what
-                // the chip signs over that message now (Ed25519 is deterministic).
+                // transition, and σ^host and σ^chip verify under the pinned keys.
                 let (root_ok, holds, m, sigma_chip, sigma_host) = match &self.active.record {
                     Record::Prepared(p) => {
                         let c = &p.cert;
@@ -502,14 +506,15 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                 if !root_ok {
                     return RecoverOutcome::DowngradeOnline;
                 }
-                if !holds || !P::part_verify(&self.partition_pk, &m, &sigma_host) {
+                if !holds
+                    || !P::part_verify(&self.partition_pk, &m, &sigma_host)
+                    || !self
+                        .tropic
+                        .chip_signature_holds(&self.chip_pk, &m, &sigma_chip)
+                {
                     return RecoverOutcome::OnlineCancelOrResolve;
                 }
-                match self.tropic.chip_sign(&m) {
-                    Ok(signed) if signed == sigma_chip => RecoverOutcome::AcceptPreparedCanComplete,
-                    Ok(_other) => RecoverOutcome::OnlineCancelOrResolve,
-                    Err(_unreachable_chip) => RecoverOutcome::DowngradeOnline,
-                }
+                RecoverOutcome::AcceptPreparedCanComplete
             }
             Status::Ready => {
                 // The software counter `active.u` is the authority; the TROPIC01 counter is its
@@ -539,13 +544,14 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     ///
     /// `Accept` (no durable transaction, counters agree) and `ReemitCommitted` (a committed
     /// release whose counter already moved; the host re-emits and finalizes the same successor)
-    /// serve. `AcceptPreparedCanComplete` (prepared, counter unchanged) takes the reset rule: no
-    /// host session can own a prepared record across a reboot, so the record is cancelled and
-    /// recovery must then return `Accept`. Every other outcome refuses.
+    /// serve. A prepared record with its counter unchanged takes the reset rule, whether or not it
+    /// would have completed (`AcceptPreparedCanComplete`, `OnlineCancelOrResolve`): no host session
+    /// can own one across a reboot and nothing has moved, so it is cancelled and recovery must then
+    /// return `Accept`. Every other outcome refuses.
     pub fn recover_at_boot(&mut self) -> Result<(), BootRecoveryRefusal> {
         match self.recover() {
             RecoverOutcome::Accept(_) | RecoverOutcome::ReemitCommitted(_) => Ok(()),
-            RecoverOutcome::AcceptPreparedCanComplete => {
+            RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
                 self.cancel().map_err(BootRecoveryRefusal::PreparedReset)?;
                 match self.recover() {
                     RecoverOutcome::Accept(_) => Ok(()),

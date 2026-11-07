@@ -37,6 +37,16 @@ pub mod err {
     pub const STORE: u32 = 106;
     /// The durable store holds bytes that are not an anchor record.
     pub const RECORD: u32 = 107;
+    /// The Non-secure image does not hash to the digest burned for it: no authority op runs and the
+    /// chip is not touched.
+    pub const MEASUREMENT: u32 = 200;
+    /// The anchor did not come up at boot; `detail` says why.
+    pub const NOT_UP: u32 = 201;
+    /// A try-run did not pass; its steps say where. A provisioning refused for it bound nothing.
+    pub const TRY_RUN_FAILED: u32 = 202;
+    // 203 was the trial image's refusal of an install; its install is a trial now, and binds nothing.
+    /// This image reads the chip and says what it is and holds (`OP_IDENTIFY`). It serves nothing else.
+    pub const IDENTIFY_IMAGE: u32 = 204;
 }
 
 /// Protocol-level ceiling on a request frame, a backstop against absurd inputs before prost
@@ -65,6 +75,7 @@ pub(crate) fn durable_code(e: DurableError) -> u32 {
         DurableError::Record(_) => err::RECORD,
         DurableError::NotProvisioned => err::NOT_PROVISIONED,
         DurableError::AlreadyProvisioned => err::ALREADY_PROVISIONED,
+        DurableError::TryRun(_) => err::TRY_RUN_FAILED,
     }
 }
 
@@ -100,10 +111,61 @@ fn base(op: i32) -> pb::ApplianceResponse {
         pin_chip_pk: Vec::new(),
         pin_birth_commitment: Vec::new(),
         recovery: pb::Recovery::Unspecified as i32,
+        detail: alloc::string::String::new(),
+        try_run: Vec::new(),
+        permanent: Vec::new(),
+        transport_check: Vec::new(),
+        chip_readings: Vec::new(),
+        chip_certificates: Vec::new(),
+        install: pb::InstallKind::InstallUnspecified as i32,
     }
 }
 
-fn ok(op: i32) -> pb::ApplianceResponse {
+/// What an install makes, on the wire.
+pub(crate) fn install_kind(install: crate::enrollment::Install) -> i32 {
+    match install {
+        crate::enrollment::Install::ForGood => pb::InstallKind::InstallForGood as i32,
+        crate::enrollment::Install::ForTrial => pb::InstallKind::InstallForTrial as i32,
+    }
+}
+
+/// A try-run on the wire: every step, and what installing would make permanent.
+pub(crate) fn try_run_response(
+    op: i32,
+    run: &crate::try_run::TryRun,
+    install: crate::enrollment::Install,
+) -> pb::ApplianceResponse {
+    let steps = run
+        .steps
+        .iter()
+        .map(|step| pb::TryRunStep {
+            name: step.name.clone(),
+            passed: matches!(step.outcome, Ok(())),
+            production: step.requirement == crate::try_run::Requirement::Production,
+            detail: match &step.outcome {
+                Ok(()) => alloc::string::String::new(),
+                Err(why) => why.clone(),
+            },
+        })
+        .collect();
+    let permanent = crate::try_run::permanent(install)
+        .iter()
+        .map(|line| alloc::string::String::from(*line))
+        .collect();
+    let answer = match run.blocking(install) {
+        None => ok(op),
+        Some(_stopped) => fail(op, err::TRY_RUN_FAILED),
+    };
+    pb::ApplianceResponse {
+        try_run: steps,
+        permanent,
+        transport_check: crate::try_run::transport_check(run.release_bytes),
+        install: install_kind(install),
+        ..answer
+    }
+}
+
+pub(crate) fn ok(op: i32) -> pb::ApplianceResponse {
     pb::ApplianceResponse {
         ok: true,
         ..base(op)
@@ -115,6 +177,23 @@ pub(crate) fn fail(op: i32, code: u32) -> pb::ApplianceResponse {
         error: code,
         ..base(op)
     }
+}
+
+/// A refusal of an appliance operation with its cause: what the code alone does not say.
+pub(crate) fn appliance_refusal(op: i32, e: ApplianceError) -> pb::ApplianceResponse {
+    pb::ApplianceResponse {
+        detail: alloc::format!("{e:?}"),
+        ..fail(op, appliance_code(e))
+    }
+}
+
+/// A refusal frame from outside the anchor: the firmware's own gates, and an anchor that did not come
+/// up. The code says which, and `detail` what the code alone does not.
+pub fn refusal(op: i32, code: u32, detail: &str) -> Vec<u8> {
+    encode_response(&pb::ApplianceResponse {
+        detail: alloc::string::String::from(detail),
+        ..fail(op, code)
+    })
 }
 
 /// An appliance the wire drives: each operation, its failure as the wire code, and the appliance
@@ -237,6 +316,7 @@ pub(crate) fn status<T: Tropic, P: PartitionSig>(
         pin_partition_pk: app.partition_pk.clone(),
         pin_chip_pk: app.chip_pk.clone(),
         pin_birth_commitment: app.birth_commitment.to_vec(),
+        install: install_kind(app.install),
         ..base(op)
     }
 }
@@ -309,7 +389,9 @@ pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::Appli
         },
         // An appliance exists only once its anchor is provisioned, and an anchor is provisioned
         // once: provisioning it again is refused.
-        Ok(pb::Op::Provision) => fail(op, err::ALREADY_PROVISIONED),
+        Ok(pb::Op::Provision | pb::Op::TryRun) => fail(op, err::ALREADY_PROVISIONED),
+        // Only the identify image reads a chip for whoever asks (`identify`); an anchor does not.
+        Ok(pb::Op::Identify) => fail(op, err::BAD_OP),
         Ok(pb::Op::Unspecified) | Err(_) => fail(op, err::BAD_OP),
     }
 }

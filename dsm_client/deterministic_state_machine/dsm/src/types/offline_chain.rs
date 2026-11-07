@@ -391,6 +391,34 @@ pub(crate) mod fixture {
         fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
             Ok(self.resident.sign(message).to_bytes().to_vec())
         }
+        fn chip_signature_holds(
+            &self,
+            pk_chip: &[u8],
+            message: &[u8; 32],
+            signature: &[u8],
+        ) -> bool {
+            matches!(
+                (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
+                (Ok(key), Ok(signature)) if matches!(
+                    ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                        .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                    Ok(())
+                )
+            )
+        }
+
+        fn set_counter_back(&mut self) -> Result<(), TropicError> {
+            self.counter.set(H0);
+            Ok(())
+        }
+
+        fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
+            vec![anchor_core::try_run::TryStep::new(
+                "this software chip's counter reads",
+                self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
+            )]
+        }
+
         fn close_birth(&mut self) -> Result<(), TropicError> {
             self.closed_births += 1;
             Ok(())
@@ -516,7 +544,9 @@ pub(crate) mod fixture {
             );
             let mut head = device.created_token(token, 100).expect("token created");
             let born = birth::<Partition>(&BirthInputs {
-                partition_trng: &derive(seed, "partition trng"),
+                // The label from before the field's rename: the offline tests' cases were built
+                // on the bundle it derives.
+                birth_entropy: &derive(seed, "partition trng"),
                 chip_birth_witness: &derive(seed, "chip birth witness"),
                 host_nonce: &derive(seed, "host nonce"),
                 device_id: &head.devid(),
@@ -548,6 +578,7 @@ pub(crate) mod fixture {
                 pin.anchor_id,
                 derive(seed, "partition device id"),
                 born,
+                anchor_core::enrollment::Install::ForGood,
             );
             head = head
                 .open_offline_account(&pin.bundle, frontier, 0)

@@ -5,8 +5,8 @@
 //! prepare/commit/recovery state, the exact measurement seal, and the ONLY Secure Gateway (the NSC
 //! veneer → this handler).
 //!
-//! STATUS (this increment): SRAM-resident TCB + runtime boundary + REAL appliance, wired; silicon
-//! validation of the full crypto round trip is pending (needs a clean TROPIC power cycle).
+//! STATUS: SRAM-resident TCB + runtime boundary + REAL appliance, wired. The chip side runs against
+//! Tropic Square's model (`dsm-anchor-chip`); the full round trip has not run on silicon.
 //!  * The whole Secure TCB runs from SRAM: the boot-block `LOAD_MAP` (linker-emitted) instructs the
 //!    bootrom to copy the SRAM-VMA payload out of mutable external flash before entry;
 //!    `scripts/check-secure-no-xip.sh` PASSES. (Cryptographic verification of that flash image is a
@@ -21,13 +21,11 @@
 //!    TROPIC01 die, `σ^host` via `dsm-sphincs`. The protocol state machine is NOT reimplemented here;
 //!    it is `anchor_core`.
 //!  * Fail-closed: if the chip/session/enroll bring-up in `init` fails, or §26 recovery returns an
-//!    outcome the appliance may not serve from, the appliance stays uninitialized and every
-//!    authority op is refused (`SG_ERR_INTERNAL`); the failing stage lands in heartbeat word 1.
+//!    outcome the appliance may not serve from, the appliance stays uninitialized and every request
+//!    is answered `NOT_UP` with the reason; the failing stage also lands in heartbeat word 1.
 
 #![no_std]
 #![no_main]
-
-extern crate panic_halt;
 
 use core::sync::atomic::{compiler_fence, Ordering};
 use rp235x_hal as hal;
@@ -38,21 +36,20 @@ use alloc::vec::Vec;
 
 mod anchor_glue;
 mod boundary;
-mod chip;
 mod sealed;
 
 // Secure working-set heap (SPHINCS+ σ^host signing + release/proto Vec staging). Lives in Secure
 // .bss; the Non-secure app has its own separate heap. Initialized once at reset before any alloc.
 #[global_allocator]
 static HEAP: embedded_alloc::LlffHeap = embedded_alloc::LlffHeap::empty();
-const SECURE_HEAP_SIZE: usize = 160 * 1024;
+const SECURE_HEAP_SIZE: usize = anchor_chip::SECURE_HEAP_BYTES;
 static mut SECURE_HEAP_MEM: [core::mem::MaybeUninit<u8>; SECURE_HEAP_SIZE] =
     [core::mem::MaybeUninit::uninit(); SECURE_HEAP_SIZE];
 
 // RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
 // `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
 // LOAD_MAP whose entries need link-time LMA/VMA/size. The linker block carries IMAGE_TYPE +
-// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20060000, zero-fill
+// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20064000, zero-fill
 // Secure BSS) + explicit SRAM VECTOR_TABLE + ENTRY_POINT items, so the immutable bootrom is
 // instructed to copy the flash payload into SRAM and enter there. (Cryptographic verification of
 // that payload happens only once secure boot is enabled + validated; the LOAD_MAP itself just
@@ -63,8 +60,6 @@ const SG_SLOT_INDEX: u32 = 0;
 const SG_SLOT_MAX_LEN: usize = 4096;
 /// Mailbox ABI version: v2 moves a frame through the slot in parts.
 const SG_ABI_VERSION: u32 = 2;
-/// The largest request or response frame (anchor-core's frame bound).
-const SG_FRAME_MAX_LEN: usize = anchor_core::service::MAX_FRAME_LEN;
 /// Keep the watchdog fed while idle; touches no frame.
 const OP_KEEPALIVE: u32 = 1;
 /// One part of a request frame: `total` bytes in all, this part at `offset`.
@@ -76,10 +71,7 @@ const SG_ERR_SLOT: u32 = 1;
 const SG_ERR_SEQ: u32 = 2;
 const SG_ERR_SIZE: u32 = 3;
 const SG_ERR_OPCODE: u32 = 4;
-const SG_ERR_ENCODING: u32 = 5;
 const SG_ERR_STATE: u32 = 6;
-const SG_ERR_MEASUREMENT: u32 = 7;
-const SG_ERR_INTERNAL: u32 = 8;
 /// The request part was taken; the frame is not complete yet.
 const SG_MORE: u32 = 9;
 
@@ -135,6 +127,23 @@ static mut LAST_SEQ: u32 = 0;
 compile_error!(
     "`bench_self_enroll` must NOT be enabled in a production build (feature `production`)"
 );
+
+// A build with neither would skip the secure-context check, and is neither image.
+#[cfg(not(any(feature = "bench_self_enroll", feature = "production")))]
+compile_error!(
+    "build the production image (`production`) or the trial image (`bench_self_enroll`)"
+);
+
+// The prepare image writes one bit of the chip; the identify image writes nothing. One image is one.
+#[cfg(all(feature = "prepare_chip", feature = "identify_chip"))]
+compile_error!("an image prepares a chip (`prepare_chip`) or identifies it (`identify_chip`)");
+
+/// Names a production image in its symbol table: `sign.sh` signs nothing else. Holds no authority,
+/// and the trial image has no such symbol.
+#[cfg(feature = "production")]
+#[used]
+#[no_mangle]
+pub static DSM_ANCHOR_PRODUCTION_IMAGE: u32 = 0x5052_4F44;
 
 /// The OTP-sealed enrolled digest (`scripts/anchor-secure-boot`). `None` = permission-denied or blank
 /// OTP.
@@ -242,6 +251,9 @@ fn measurement_ok() -> bool {
 /// Called by the `-mcmse` veneer's single NSC entry `dsm_secure_dispatch`. Secure-only.
 #[no_mangle]
 pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u32 {
+    // The Non-secure app crosses here only with its clocks and USB up, and needs none of those
+    // peripherals again. From the first crossing it holds the USB block alone.
+    boundary::revoke_ns_init_grants();
     // A crossing means the Non-secure app is alive and looping (a hung NS cannot reach the `sg`), so
     // feed the watchdog. Combined with the NS serve loop's periodic keepalive crossing, this keeps a
     // healthy idle anchor alive while a genuinely hung NS still trips the ~2 s watchdog reset.
@@ -283,7 +295,7 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
 }
 
 /// Take one part of a request frame into the Secure copy. A part out of order, past the frame's
-/// stated length, or of a frame larger than any frame is refused and the frame discarded. The
+/// stated length, or of a frame larger than the heap can serve is refused and the frame discarded. The
 /// frame's last part runs it: `service_request` decodes it, applies the §2 measurement seal to the
 /// DECODED op and serves it through the anchor; the response's first part is returned at once.
 fn request_part(mb: &mut Mailbox) -> u32 {
@@ -292,7 +304,7 @@ fn request_part(mb: &mut Mailbox) -> u32 {
     let len = unsafe { core::ptr::read_volatile(&mb.req_len) } as usize;
     unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
     let request = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
-    if total > SG_FRAME_MAX_LEN || len > SG_SLOT_MAX_LEN || offset + len > total {
+    if total > anchor_chip::MAX_REQUEST_BYTES || len > SG_SLOT_MAX_LEN || offset + len > total {
         discard(request);
         return SG_ERR_SIZE;
     }
@@ -318,16 +330,19 @@ fn request_part(mb: &mut Mailbox) -> u32 {
     let Some(mut frame) = request.take() else {
         return SG_ERR_STATE;
     };
-    let served = unsafe { anchor_glue::service_request(&frame, measurement_ok()) };
+    // A serve runs SPHINCS+ and many chip commands: it gets the watchdog's longest budget, renewed
+    // by each chip command, and `finish` gives the Non-secure side its short one back.
+    boundary::feed_watchdog_in_service();
+    let measurement = if measurement_ok() {
+        anchor_chip::bring_up::Measurement::Matches
+    } else {
+        anchor_chip::bring_up::Measurement::Differs
+    };
+    let response = unsafe { anchor_glue::service_request(&frame, measurement) };
     // §4.9 zeroize the Secure request copy.
     zeroize(&mut frame);
-    match served {
-        Ok(response) => {
-            unsafe { *core::ptr::addr_of_mut!(RESPONSE) = Some(response) };
-            response_part(mb, 0)
-        }
-        Err(status) => status,
-    }
+    unsafe { *core::ptr::addr_of_mut!(RESPONSE) = Some(response) };
+    response_part(mb, 0)
 }
 
 /// Copy the response frame's part from `offset` into the slot, with the whole frame's length.
@@ -367,6 +382,7 @@ fn discard(request: &mut Option<Vec<u8>>) {
 
 /// Publish the status, advance the sequence floor, transition to RESPONSE_READY (ownership barrier).
 fn finish(mb: &mut Mailbox, seq: u32, status: u32) -> u32 {
+    boundary::feed_watchdog();
     unsafe {
         core::ptr::write_volatile(&mut mb.status, status);
         LAST_SEQ = seq;
@@ -402,9 +418,9 @@ const HEARTBEAT_SENTINEL: u32 = 0x4453_4d31; // "DSM1"
 /// value is the `anchor_glue::InitStage` at which it refused.
 const HEARTBEAT_APPLIANCE_INSTALLED: u32 = 1;
 
-/// Bring-up triage beside the heartbeat: when `anchor_glue::init` refuses, the `Debug` rendering
-/// of its `InitFailure` (stage and the cause that stage reported), truncated to fit. Untouched
-/// when the appliance is installed. Not an authority signal.
+/// Bring-up triage beside the heartbeat, for an unlocked board's debug port: when
+/// `anchor_glue::init` refuses, the `Debug` rendering of its `InitFailure`, truncated to fit. A
+/// locked board says the same in its answer to any request. Not an authority signal.
 #[no_mangle]
 pub static mut DSM_SECURE_INIT_CAUSE: [u8; INIT_CAUSE_LEN] = [0; INIT_CAUSE_LEN];
 const INIT_CAUSE_LEN: usize = 96;
@@ -420,7 +436,7 @@ unsafe fn record_init_cause(failure: &anchor_glue::InitFailure) {
     }
 }
 
-// ── Reset entry (placeholder until step 5 SAU init + step 7 measured loader) ──────────────────
+// ── Reset entry ───────────────────────────────────────────────────────────────────────────
 #[hal::entry]
 fn main() -> ! {
     // Initialize the Secure heap once, before any allocation (σ^host / release staging use it).
@@ -429,16 +445,6 @@ fn main() -> ! {
             core::ptr::addr_of_mut!(SECURE_HEAP_MEM) as usize,
             SECURE_HEAP_SIZE,
         );
-    }
-
-    // If the previous boot armed the watchdog and never disarmed it, a watchdog reset fired — i.e.
-    // we are recovering from a Non-secure-induced hang (the NS->DMA bus stall). Recover cleanly to
-    // BOOTSEL instead of re-launching NS into the same stall. reboot_bootsel disarms + clears it.
-    if boundary::watchdog_recovery_pending() {
-        // Recover to a safe state (BOOTSEL) instead of re-launching NS into the same hang. Proven on
-        // silicon 2026-07-12: with a distinctive ~20 s recovery marker the NS->DMA stall self-rebooted
-        // at 22 s (vs a permanent TIMEOUT without the watchdog); here the recovery is immediate.
-        reboot_bootsel();
     }
 
     // Arm the Secure stack guard FIRST (belt-and-suspenders with the ENTRY_POINT sp_limit word):
@@ -458,13 +464,16 @@ fn main() -> ! {
     // one-way birth fuse) BEFORE the boundary is locked and NS launched, so the Secure-only SPI0/
     // TROPIC bring-up runs while the monitor still owns everything. Fail-closed: a chip/session/
     // enroll failure, or a §26 recovery the appliance may not serve from, leaves the appliance
-    // uninitialized and every authority op refuses (the SG handler returns SG_ERR_INTERNAL).
-    // Record the result in heartbeat[1] for bring-up triage: 1 = installed, otherwise the
-    // failing `anchor_glue::InitStage` discriminant, with the cause in DSM_SECURE_INIT_CAUSE.
+    // uninitialized and every request is answered `NOT_UP` with the reason. Record the result in
+    // heartbeat[1] for bring-up triage: 1 = installed, otherwise the failing
+    // `anchor_glue::InitStage` discriminant, with the cause in DSM_SECURE_INIT_CAUSE.
     let init_word = match unsafe { anchor_glue::init() } {
         Ok(()) => HEARTBEAT_APPLIANCE_INSTALLED,
         Err(failure) => {
-            unsafe { record_init_cause(&failure) };
+            unsafe {
+                record_init_cause(&failure);
+                anchor_glue::keep_refusal(&failure);
+            }
             failure.stage() as u32
         }
     };
@@ -502,8 +511,20 @@ fn main() -> ! {
         }
     }
     // Grant Non-secure access, via per-peripheral ACCESSCTRL, to ONLY the clocks + USB the NS app
-    // drives (OTP, SPI0/TROPIC, DMA stay NSP=0 = denied). Before lock_accessctrl + the NS launch.
+    // drives (OTP, SPI0/TROPIC, DMA stay NSP=0 = denied). Before lock_accessctrl + the NS launch. All
+    // but USB go again at its first crossing (`revoke_ns_init_grants`).
     boundary::grant_ns_peripherals();
+
+    // The Non-secure app's own view of its memory: the measured window read-only, everything it
+    // writes never executed. Fail-closed like the SAU.
+    let window_start = core::ptr::addr_of!(__ns_rx_start) as u32;
+    let window_end = core::ptr::addr_of!(__ns_rx_end) as u32;
+    match boundary::protect_ns_window(window_start, window_end) {
+        Ok(()) => {}
+        Err(boundary::NsMpuTooSmall) => loop {
+            cortex_m::asm::wfi();
+        },
+    }
 
     // Route Non-secure-originated BusFault/HardFault/NMI to SECURE (AIRCR.BFHFNMINS = 0), so a
     // Non-secure access the bus/ACCESSCTRL denies with a bus error traps to the Secure fault handler
@@ -528,8 +549,8 @@ fn main() -> ! {
     // case, or an NS crash) stops crossing the SG, so nothing feeds the watchdog and it resets the
     // chip -> recovered on reboot (vs a permanent hang / DoS). A HEALTHY serving NS keeps it fed: the
     // Secure Gateway handler feeds on every crossing, and the NS serve loop sends a periodic keepalive
-    // crossing when idle (so idle-but-alive != hung). The Secure fault path also feeds via
-    // `delayed_reboot`.
+    // crossing when idle (so idle-but-alive != hung). A reset boots the signed image again, never the
+    // bootloader.
     boundary::arm_watchdog();
 
     // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
@@ -542,48 +563,43 @@ fn main() -> ! {
     }
 }
 
-/// Distinctive reboot timings that make silicon outcomes readable by wall-clock alone, since
-/// post-boot SRAM readback is cleared on BOOTSEL entry. The two delays are far apart so re-enumeration
-/// jitter + 2 s poll granularity cannot confuse them (empirically ~90M cycles ≈ 14 s):
-///   ROM rejects the block ......... < 4 s   (nothing of ours ran)
-///   DENIED (Secure fault fired) ... ~11 s   (a boundary violation trapped to Secure)
-///   lockup / no path .............. timeout
-const FAULT_REBOOT_DELAY_CYCLES: u32 = 70_000_000; // ~11 s
+extern "C" {
+    /// First byte of Secure `.data`: everything from here to the stack floor is Secure state.
+    static __sdata: u32;
+}
 
-fn reboot_bootsel() -> ! {
-    // Disarm the watchdog on any deliberate reboot so it cannot fire while the chip is in BOOTSEL.
-    boundary::disarm_watchdog();
+/// Wipe the Secure state and boot the signed image again. A fault never reaches the USB bootloader:
+/// that takes the button, on a board someone is holding. Reset by the bootrom, which verifies the
+/// image again; what it wipes is what the heap, `.data`, `.bss` and the unused stack hold.
+fn fail_reset() -> ! {
+    unsafe {
+        // A stack overflow got here: nothing below is left to protect from it.
+        cortex_m::register::msplim::write(0);
+        let from = core::ptr::addr_of!(__sdata) as usize;
+        let to = cortex_m::register::msp::read() as usize & !3;
+        let mut word = from;
+        while word < to {
+            core::ptr::write_volatile(word as *mut u32, 0);
+            word += 4;
+        }
+    }
+    compiler_fence(Ordering::SeqCst);
     hal::reboot::reboot(
-        hal::reboot::RebootKind::BootSel {
-            picoboot_disabled: false,
-            msd_disabled: false,
-        },
+        hal::reboot::RebootKind::Normal,
         hal::reboot::RebootArch::Normal,
     )
 }
 
-/// Spin for `cycles` while FEEDING the watchdog (so a live Secure path is never reset), then reboot.
-/// Used by the bring-up timed reboots; a hung core cannot reach this, so the watchdog fires instead.
-fn delayed_reboot(cycles: u32) -> ! {
-    let mut remaining = cycles;
-    while remaining > 0 {
-        boundary::feed_watchdog();
-        let d = remaining.min(1_000_000);
-        cortex_m::asm::delay(d);
-        remaining -= d;
-    }
-    reboot_bootsel()
+/// A panic in Secure: an allocation the heap could not meet, say.
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    fail_reset()
 }
 
-/// Secure fault handler = the denial-test observable. An NS access the boundary forbids (SAU-Secure
-/// SRAM, or an ACCESSCTRL-Secure peripheral that escalates here) traps to Secure; this reboots after
-/// the DENIED delay. Reaching it proves the access faulted rather than returning secret data.
-///
+/// Any fault reaching Secure, the Non-secure side's denied accesses included (`AIRCR.BFHFNMINS = 0`).
 #[cortex_m_rt::exception]
 unsafe fn HardFault(_ef: &cortex_m_rt::ExceptionFrame) -> ! {
-    // ANY fault reaching Secure -> ~12 s reboot (feeding the watchdog so a trapped fault, unlike a
-    // hang, is not treated as a stall).
-    delayed_reboot(FAULT_REBOOT_DELAY_CYCLES)
+    fail_reset()
 }
 
 extern "C" {

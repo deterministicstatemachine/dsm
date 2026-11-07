@@ -48,11 +48,13 @@ object LocalPicoUsb {
     private const val DRAIN_QUIET_POLLS = 4   // ~800ms of silence ends the drain
     private const val DRAIN_MAX_POLLS = 40    // hard cap (~8s worst case) so boot chatter can finish
     // Max idle bulk-IN polls before failing closed (each blocks up to READ_TIMEOUT_MS). Bounds the
-    // total read wait deterministically without a wall-clock deadline (repo invariant). The appliance
-    // PREPARE runs a BLAKE3-SPHINCS+ (SPX128f) keygen + sign on the RP2350 and takes ~7s on real
-    // silicon, during which the firmware sends nothing; 40 polls x 500ms = ~20s covers it with margin
-    // (16 = ~8s was too tight and intermittently timed out a valid PREPARE -> false online recovery).
-    private const val MAX_EMPTY_POLLS = 40
+    // total read wait deterministically without a wall-clock deadline (repo invariant). The firmware
+    // sends nothing while it serves: a try-run is a whole spend and its records around two chip
+    // reboots, and an install is that and more. 600 polls x 500ms = ~5 min covers them, and it is
+    // only ever spent on an anchor still serving: a hung one is reset by its own watchdog, which
+    // drops the device, and a read of a dropped device fails at once. An install this outruns is
+    // read back from the anchor (`CoreSDK::anchor_install`), never reported as failed on the wait.
+    private const val MAX_EMPTY_POLLS = 600
 
     @Volatile private var appContext: Context? = null
     private var connection: UsbDeviceConnection? = null
@@ -231,6 +233,9 @@ object LocalPicoUsb {
     private fun setControlLine(conn: UsbDeviceConnection, commId: Int): Int {
         val lineCoding = byteArrayOf(0x00, 0xC2.toByte(), 0x01, 0x00, 0x00, 0x00, 0x08)
         val lc = conn.controlTransfer(0x21, 0x20, 0, commId, lineCoding, lineCoding.size, CONTROL_TIMEOUT_MS)
+        // DTR down and up: the firmware starts a new frame on the rise, so a frame an earlier process
+        // left partway is not read against this one.
+        conn.controlTransfer(0x21, 0x22, 0x00, commId, null, 0, CONTROL_TIMEOUT_MS)
         val cls = conn.controlTransfer(0x21, 0x22, 0x03, commId, null, 0, CONTROL_TIMEOUT_MS)
         Log.i(TAG, "CDC line (comm iface $commId): setLineCoding=$lc setControlLineState=$cls")
         return cls

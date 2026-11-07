@@ -19,10 +19,22 @@ pub const SEALED_SECRET_ROWS: usize = 16;
 /// Why the appliance will not read its sealed secret.
 pub enum SealedError {
     /// The bootrom refused the critical-register query.
-    #[cfg(feature = "production")]
+    #[cfg(any(
+        feature = "production",
+        all(
+            feature = "bench_self_enroll",
+            not(any(feature = "identify_chip", feature = "prepare_chip"))
+        )
+    ))]
     Bootrom(hal::rom_data::BootRomApiErrorCode),
     /// This bootrom does not report the critical register.
-    #[cfg(feature = "production")]
+    #[cfg(any(
+        feature = "production",
+        all(
+            feature = "bench_self_enroll",
+            not(any(feature = "identify_chip", feature = "prepare_chip"))
+        )
+    ))]
     Unreported,
     #[cfg(feature = "production")]
     SecureBootDisabled,
@@ -34,14 +46,30 @@ pub enum SealedError {
     Unreadable(usize, hal::otp::Error),
     /// The OTP page was never provisioned.
     Unprovisioned,
+    /// A sealed secret where this image stands down: a trial image on a board locked for production,
+    /// a finished unit, or the prepare image on any board.
+    #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
+    AlreadySealed,
 }
 
 impl core::fmt::Debug for SealedError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            #[cfg(feature = "production")]
+            #[cfg(any(
+                feature = "production",
+                all(
+                    feature = "bench_self_enroll",
+                    not(any(feature = "identify_chip", feature = "prepare_chip"))
+                )
+            ))]
             Self::Bootrom(code) => write!(f, "bootrom: {code:?}"),
-            #[cfg(feature = "production")]
+            #[cfg(any(
+                feature = "production",
+                all(
+                    feature = "bench_self_enroll",
+                    not(any(feature = "identify_chip", feature = "prepare_chip"))
+                )
+            ))]
             Self::Unreported => write!(f, "the bootrom does not report the critical register"),
             #[cfg(feature = "production")]
             Self::SecureBootDisabled => write!(f, "secure boot is not enabled in OTP"),
@@ -51,6 +79,13 @@ impl core::fmt::Debug for SealedError {
             Self::ArmDisabled => write!(f, "the ARM core is disabled in OTP"),
             Self::Unreadable(row, cause) => write!(f, "OTP row {row} unreadable: {cause:?}"),
             Self::Unprovisioned => write!(f, "the sealed secret's OTP page was never provisioned"),
+            #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
+            Self::AlreadySealed => {
+                write!(
+                    f,
+                    "this board's OTP holds a sealed secret where this image stands down"
+                )
+            }
         }
     }
 }
@@ -73,18 +108,41 @@ pub fn assert_secure_context() -> Result<(), SealedError> {
     Ok(())
 }
 
+/// Whether this board boots only signed images: secure boot enabled in OTP, as on every finished unit.
+#[cfg(all(
+    feature = "bench_self_enroll",
+    not(any(feature = "identify_chip", feature = "prepare_chip"))
+))]
+pub fn locked_for_production() -> Result<bool, SealedError> {
+    let crit = hal::rom_data::sys_info_api::otp_critical_register()
+        .map_err(SealedError::Bootrom)?
+        .ok_or(SealedError::Unreported)?;
+    Ok(crit.secure_boot_enabled())
+}
+
 /// The sealed secret. Refused when this context may not read the page, or when the page was never
 /// provisioned: an appliance without its secret has no identity to serve under.
 pub fn read_sealed_secret() -> Result<[u8; 32], SealedError> {
     let mut words = [0u16; SEALED_SECRET_ROWS];
+    let secret = read_rows(&mut words).and_then(|()| {
+        if words.iter().fold(0u16, |all, word| all | word) == 0 {
+            return Err(SealedError::Unprovisioned);
+        }
+        Ok(core::array::from_fn(|i| {
+            (words[i / 2] >> (8 * (i % 2))) as u8
+        }))
+    });
+    for word in words.iter_mut() {
+        unsafe { core::ptr::write_volatile(word, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    secret
+}
+
+fn read_rows(words: &mut [u16; SEALED_SECRET_ROWS]) -> Result<(), SealedError> {
     for (i, word) in words.iter_mut().enumerate() {
         let row = SEALED_SECRET_ROW + i;
         *word = hal::otp::read_ecc_word(row).map_err(|e| SealedError::Unreadable(row, e))?;
     }
-    if words.iter().fold(0u16, |all, word| all | word) == 0 {
-        return Err(SealedError::Unprovisioned);
-    }
-    Ok(core::array::from_fn(|i| {
-        (words[i / 2] >> (8 * (i % 2))) as u8
-    }))
+    Ok(())
 }

@@ -89,6 +89,17 @@ enum Op {
   OP_PROVISION   = 9;  // provision an unprovisioned anchor for the device `provision` names, once;
                        // answered with the STATUS pin material of the anchor it made
   OP_RECOVER     = 10; // §26 recovery: complete a durable commit if it can, and answer the outcome
+  OP_TRY_RUN     = 11; // go through an install of `provision` with the permanent parts
+                       // substituted; nothing is bound. See try_run.rs.
+  OP_IDENTIFY    = 12; // what the chip says it is and what it holds, read with nothing written to
+                       // it or to the board's OTP. Only the identify image serves it. See identify.rs.
+}
+
+// What an install of this anchor makes.
+enum InstallKind {
+  INSTALL_UNSPECIFIED = 0;
+  INSTALL_FOR_GOOD    = 1; // the production image: the pairing key, the cage and the record, for good
+  INSTALL_FOR_TRIAL   = 2; // the trial image: the record in slots the next boot clears; nothing permanent
 }
 
 // The §26 recovery outcome, as OP_RECOVER answers it.
@@ -117,6 +128,23 @@ message ApplianceRequest {
   Provisioning provision            = 7;  // OP_PROVISION: the device the anchor is bound to
 }
 
+// One thing a try-run went through.
+message TryRunStep {
+  string name       = 1;
+  bool   passed     = 2;
+  string detail     = 3;  // why it did not pass
+  // A production install's requirement alone (a chip that tests its PTRNG): a development board
+  // may leave it unmet, and an install still refuses until it is met.
+  bool   production = 4;
+}
+
+// One thing the identify image read from the chip: its value, or why it did not read.
+message ChipReading {
+  string name   = 1;
+  string value  = 2;
+  string unread = 3;
+}
+
 // The secure core's response.
 message ApplianceResponse {
   Op op                        = 1;
@@ -140,6 +168,17 @@ message ApplianceResponse {
   // owner's online key and device id, B recomputes from what the chip discloses.
   bytes  pin_birth_commitment  = 14;
   Recovery recovery            = 15; // OP_RECOVER: the outcome (its frontier in active_root)
+  // Why a refusal was made, when the code alone does not say: a locked board has no debug port.
+  string detail                = 16;
+  repeated TryRunStep try_run  = 17; // OP_TRY_RUN: what it went through
+  repeated string permanent    = 18; // OP_TRY_RUN: what installing makes permanent
+  bytes transport_check        = 19; // OP_TRY_RUN: as long as the release it signed, which stays on
+                                     // the anchor; try_run::transport_check, for the host to compare
+  repeated ChipReading chip_readings = 20; // OP_IDENTIFY: what the chip says and holds
+  // OP_IDENTIFY: the chip's four X.509 certificates as it gives them: device, part group,
+  // TROPIC01 CA, Tropic Square root.
+  repeated bytes chip_certificates   = 21;
+  InstallKind install                = 22; // OP_STATUS, OP_TRY_RUN: what an install here makes
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the

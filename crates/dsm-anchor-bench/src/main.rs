@@ -14,6 +14,19 @@
 //!     the whole thing repeats — proving an abandoned `Prepared` does not strand the appliance.
 //!
 //! It NEVER sends COMMIT — Phase 3 (the first real decrement) is deliberately out of scope here.
+//!
+//! `--check` is the runbook's Step 9: what the anchor says about itself over USB, and whether its
+//! Non-secure image passes the measurement gate, with nothing written to the chip. It sends STATUS
+//! and a PREPARE with no transition, which every anchor refuses, and never a provisioning.
+//!
+//! `--try-run` goes through an install on the board in front of it, with the permanent parts
+//! substituted, and reports each step, how long the whole of it took, and what an install would make
+//! permanent. It is what a new board runs before anything is burned on it, on the trial image, and it
+//! never provisions.
+//!
+//! `--identify` asks a board running the identify image what its chip is and holds, prints every
+//! reading, and saves the chip's four certificates under `--certs <dir>` by the names Tropic Square's
+//! `verify.sh` reads. Nothing is written to the chip or the board.
 //! RELEASE-only: a debug build refuses to run (SPHINCS+/BLE timing is invalid in debug).
 
 use std::time::Duration;
@@ -51,12 +64,30 @@ struct Args {
     deny: Vec<String>,
     /// Operator chip label for the bench log (e.g. "used chip A").
     label: Option<String>,
+    /// Run the read-only check of the board, and nothing else.
+    check: Check,
     /// Operator-supplied firmware build hash/commit for the bench log (the harness cannot read it
     /// off the chip; you built + flashed it, so you record it).
     fw_commit: Option<String>,
+    /// Where `--identify` saves the chip's certificates.
+    certs: String,
+}
+
+/// What this run is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// The used-chip phases.
+    No,
+    /// The read-only check.
+    Yes,
+    /// A try-run of an install.
+    TryRun,
+    /// What the identify image read from the chip.
+    Identify,
 }
 
 fn parse_args() -> Result<Args, String> {
+    let mut check = Check::No;
     let mut port = None;
     let mut baud = 115_200u32;
     let mut repeats = 5usize;
@@ -64,6 +95,7 @@ fn parse_args() -> Result<Args, String> {
     let mut deny = Vec::new();
     let mut label = None;
     let mut fw_commit = None;
+    let mut certs = String::from("tropic01-certs");
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -84,6 +116,10 @@ fn parse_args() -> Result<Args, String> {
             "--deny" => deny.push(norm_id(&it.next().ok_or("--deny needs an anchor-id")?)),
             "--label" => label = it.next(),
             "--fw-commit" => fw_commit = it.next(),
+            "--check" => check = Check::Yes,
+            "--try-run" => check = Check::TryRun,
+            "--identify" => check = Check::Identify,
+            "--certs" => certs = it.next().ok_or("--certs needs a directory")?,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -95,7 +131,9 @@ fn parse_args() -> Result<Args, String> {
         allow,
         deny,
         label,
+        check,
         fw_commit,
+        certs,
     })
 }
 
@@ -133,6 +171,21 @@ fn roundtrip(
     port: &mut dyn serialport::SerialPort,
     req: &pb::ApplianceRequest,
 ) -> Result<pb::ApplianceResponse, String> {
+    let resp = answer(port, req)?;
+    if !resp.ok {
+        return Err(format!(
+            "op {} failed on-chip (error {}) {}",
+            resp.op, resp.error, resp.detail
+        ));
+    }
+    Ok(resp)
+}
+
+/// The anchor's answer to one op, refused or not. Fails on a transport or decode error.
+fn answer(
+    port: &mut dyn serialport::SerialPort,
+    req: &pb::ApplianceRequest,
+) -> Result<pb::ApplianceResponse, String> {
     let body = encode_request(req);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
@@ -149,14 +202,160 @@ fn roundtrip(
     let mut resp_body = vec![0u8; len];
     port.read_exact(&mut resp_body)
         .map_err(|e| format!("read body ({len} B): {e}"))?;
-    let resp = decode_response(&resp_body).map_err(|e| format!("decode: {e:?}"))?;
-    if !resp.ok {
+    decode_response(&resp_body).map_err(|e| format!("decode: {e:?}"))
+}
+
+/// How long one op may leave the port silent. The board's watchdog ends a hung one well before this.
+const OP_WAIT_SECS: u64 = 60;
+/// How long a try-run may: a whole spend and its records, around two chip reboots.
+const TRY_RUN_WAIT_SECS: u64 = 600;
+
+/// A try-run of an install, for a device no wallet holds: the board's own identity is what is tried.
+/// A nonzero exit unless every step passed.
+fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    let name = |what: &str| -> Vec<u8> {
+        anchor_core::hash::h("DSM/anchor/try-run/bench/v1", &[what.as_bytes()]).to_vec()
+    };
+    port.set_timeout(Duration::from_secs(TRY_RUN_WAIT_SECS))
+        .map_err(|e| format!("the port's wait: {e}"))?;
+    let started = std::time::Instant::now();
+    let run = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::TryRun as i32,
+            provision: Some(pb::Provisioning {
+                device_id: name("device"),
+                online_id_pk: name("online key"),
+                policy_hash: name("policy"),
+                genesis_root: name("genesis"),
+            }),
+            ..Default::default()
+        },
+    )?;
+    let took = started.elapsed();
+    let mut broken = Vec::new();
+    let mut production_unmet = Vec::new();
+    for step in &run.try_run {
+        let verdict = if step.passed {
+            "ok    "
+        } else if step.production {
+            "PROD  "
+        } else {
+            "FAILED"
+        };
+        println!("[TRY] {verdict} {} {}", step.name, step.detail);
+        if !step.passed && step.production {
+            production_unmet.push(step.name.as_str());
+        } else if !step.passed {
+            broken.push(step.name.as_str());
+        }
+    }
+    println!("[TRY] the whole of it took {:.1} s", took.as_secs_f64());
+    if !run.detail.is_empty() {
+        println!("[TRY] {}", run.detail);
+    }
+    if !broken.is_empty() {
         return Err(format!(
-            "op {} failed on-chip (error {})",
-            resp.op, resp.error
+            "the try-run did not work on this board (error {}): {}",
+            run.error,
+            broken.join("; ")
         ));
     }
-    Ok(resp)
+    // A run that stopped short of its payment carries no check of the transport; one that went
+    // through carries it whatever production still needs.
+    let carried = run.transport_check.len();
+    if carried == 0 || run.transport_check != anchor_core::try_run::transport_check(carried) {
+        return Err(format!(
+            "the anchor's largest answer did not come through whole ({carried} bytes)"
+        ));
+    }
+    println!("[TRY] ok     its largest answer, {carried} bytes in parts, came through whole");
+    println!("[TRY] the anchor works on this board. Nothing was made permanent.");
+    if production_unmet.is_empty() {
+        println!(
+            "[TRY] production: every requirement is met. An install would make these permanent:"
+        );
+        for line in &run.permanent {
+            println!("[TRY]   - {line}");
+        }
+    } else {
+        println!("[TRY] production: not ready. An install refuses until these are met:");
+        for name in production_unmet {
+            println!("[TRY]   - {name}");
+        }
+    }
+    Ok(())
+}
+
+/// The names Tropic Square's `verify.sh` reads the chip's certificates under, in the store's order.
+const CERT_FILES: [&str; 4] = [
+    "t01_ese_cert.der",
+    "t01_xxxx_ca_cert.der",
+    "t01_ca_cert.der",
+    "tropicsquare_root_ca_cert.der",
+];
+
+/// What the identify image read from the chip: every reading, and its certificates saved to `certs`.
+/// A nonzero exit when the board is not running the identify image or the chip gave no certificates.
+fn identify(port: &mut dyn serialport::SerialPort, certs: &str) -> Result<(), String> {
+    let read = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Identify as i32,
+            ..Default::default()
+        },
+    )?;
+    if !read.ok {
+        return Err(format!(
+            "the board did not identify its chip (error {}): {}",
+            read.error, read.detail
+        ));
+    }
+    for reading in &read.chip_readings {
+        if reading.unread.is_empty() {
+            println!("[CHIP] {:<34} {}", reading.name, reading.value);
+        } else {
+            println!("[CHIP] {:<34} UNREAD: {}", reading.name, reading.unread);
+        }
+    }
+    if read.chip_certificates.len() != CERT_FILES.len() {
+        return Err("the chip did not give the four certificates of its chain".to_string());
+    }
+    std::fs::create_dir_all(certs).map_err(|e| format!("{certs}: {e}"))?;
+    for (name, der) in CERT_FILES.iter().zip(&read.chip_certificates) {
+        let path = std::path::Path::new(certs).join(name);
+        std::fs::write(&path, der).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("[CERT] {} ({} bytes)", path.display(), der.len());
+    }
+    println!("[CHIP] read only: nothing was written to the chip or the board");
+    Ok(())
+}
+
+/// The runbook's Step 9, read-only: what the anchor reports, and the measurement gate's verdict. A
+/// PREPARE with no transition passes the gate and is then refused, so nothing moves.
+fn check(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    use anchor_core::service::err;
+    let bare = |op: pb::Op| pb::ApplianceRequest {
+        op: op as i32,
+        ..Default::default()
+    };
+    let status = answer(port, &bare(pb::Op::Status))?;
+    match status.error {
+        err::NONE => println!(
+            "[CHECK] the anchor serves: provisioned, closed, counter u={}",
+            status.active_anchor_counter
+        ),
+        err::NOT_PROVISIONED => println!("[CHECK] the anchor is up and not provisioned"),
+        err::NOT_UP => println!("[CHECK] the anchor did NOT come up: {}", status.detail),
+        other => println!("[CHECK] status refused: error {other} {}", status.detail),
+    }
+    let gate = answer(port, &bare(pb::Op::Prepare))?;
+    match gate.error {
+        err::MEASUREMENT => println!("[CHECK] measurement gate REFUSED: {}", gate.detail),
+        err::NOT_UP => println!("[CHECK] measurement gate NOT REACHED: the anchor is not up"),
+        other => println!("[CHECK] measurement gate passed (prepare answered error {other})"),
+    }
+    Ok(())
 }
 
 /// STATUS -> `(u, H0, active_root)`. `u = H0 - live` is the DSM anchor coordinate; the raw counter is
@@ -249,7 +448,8 @@ fn cancel(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
 
 fn open(args: &Args) -> Result<Box<dyn serialport::SerialPort>, String> {
     serialport::new(&args.port, args.baud)
-        .timeout(Duration::from_secs(10))
+        // A serve holds the board silent: a signature, then the chip commands around its records.
+        .timeout(Duration::from_secs(OP_WAIT_SECS))
         .open()
         .map_err(|e| format!("open {}: {e}", args.port))
 }
@@ -501,8 +701,10 @@ fn run() -> Result<(), String> {
                 .to_string(),
         );
     }
-    const USAGE: &str =
-        "usage: used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
+    const USAGE: &str = "usage: used-chip-bench --port <serial> --check\n       \
+         used-chip-bench --port <serial> --try-run\n       \
+         used-chip-bench --port <serial> --identify [--certs <dir>]\n       \
+         used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
                          [--deny <id> ...] [--label \"used chip A\"] [--fw-commit <hash>] \
                          [--baud 115200] [--repeats 5]\n  \
                          (run once with no --allow to print the connected chip's anchor-id)";
@@ -530,6 +732,12 @@ fn run() -> Result<(), String> {
     );
 
     let mut port = open(&args)?;
+    match args.check {
+        Check::Yes => return check(port.as_mut()),
+        Check::TryRun => return try_run(port.as_mut()),
+        Check::Identify => return identify(port.as_mut(), &args.certs),
+        Check::No => {}
+    }
     // Structural guard against the one operational rule: read the chip's anchor-id and refuse unless
     // it is an explicitly allow-listed USED bench chip (never the sealed clean/virgin chip), with a
     // typed operator confirmation. Non-mutating: the gate itself only sends STATUS.

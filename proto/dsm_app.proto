@@ -2135,6 +2135,29 @@ message AnchorStatusResponse {
   uint64 enrolled_counter = 7;                      // counter floor at enrollment (AnchorPin)
   bytes  bundle           = 8 [(dsm_fixed_len)=32]; // anchor bundle B (AnchorPin.bundle)
   string status           = 9;                      // human-readable status line
+  // An anchor is connected and was never installed. Nothing about it is permanent yet: the wallet
+  // offers its try-run (`anchor.tryRun`), and installs only when told to (`anchor.install`).
+  bool   awaiting_install = 10;
+}
+
+// One thing an anchor's try-run went through.
+message AnchorTryRunStep {
+  string name       = 1;
+  bool   passed     = 2;
+  string detail     = 3; // why it did not pass
+  // A production install's requirement alone (a chip that tests its PTRNG): the anchor works without
+  // it. An install for good refuses until it is met; a trial install passes over it.
+  bool   production = 4;
+}
+
+// `anchor.tryRun`: an install gone through on the anchor with its permanent parts substituted.
+message AnchorTryRunResponse {
+  bool              passed    = 1;
+  repeated AnchorTryRunStep steps = 2;
+  repeated string   permanent = 3; // what installing makes permanent, shown before it is asked for
+  string            refused   = 4; // why it could not run at all
+  // The install would be a trial: the trial image's, with nothing permanent. Its next boot ends it.
+  bool              trial     = 5;
 }
 
 // ── Offline-cash (two-regime money model) ──────────────────────────────────
@@ -2764,6 +2787,7 @@ message Envelope {
 
     // Offline-bearer anchor status (signal (c)) — read-only `anchor.status` diagnostics.
     AnchorStatusResponse              anchor_status_response           = 112;
+    AnchorTryRunResponse              anchor_try_run_response          = 141;
 
     // Offline-cash load/unload (two-regime money model): device-bound allocation balance.
     OfflineCashResponse               offline_cash_response            = 113;
@@ -3527,6 +3551,11 @@ message ReceiptEmailResultV1 {
 message ContactSetProfileRequest {
   bytes            device_id = 1 [(dsm_fixed_len)=32];
   ContactProfileV1 profile   = 2;
+}
+
+// contacts.unpair: forget this phone's pairing with the contact and pair again.
+message ContactUnpairRequest {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
 }
 
 message ContactManualAddRequest {

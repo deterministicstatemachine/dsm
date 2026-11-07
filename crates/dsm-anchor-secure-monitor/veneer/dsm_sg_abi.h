@@ -20,16 +20,14 @@
 #define DSM_SG_OP_REQUEST_PART   2u        // one part of a request frame
 #define DSM_SG_OP_RESPONSE_PART  3u        // one part of the response frame, from `offset`
 
-// dsm_secure_dispatch return status.
+// dsm_secure_dispatch return status. Statuses 5, 7 and 8 are retired: an undecodable frame, a
+// failed measurement and an anchor that did not come up are answered with a refusal frame.
 #define DSM_SG_OK              0u
 #define DSM_SG_ERR_SLOT        1u          // bad slot index
 #define DSM_SG_ERR_SEQ         2u          // stale / replayed sequence number, or a part out of order
 #define DSM_SG_ERR_SIZE        3u          // a part past its frame, or a frame past the largest frame
 #define DSM_SG_ERR_OPCODE      4u          // unknown opcode
-#define DSM_SG_ERR_ENCODING    5u          // canonical encoding invalid (from the Secure copy)
 #define DSM_SG_ERR_STATE       6u          // wrong mailbox or ABI state for this op
-#define DSM_SG_ERR_MEASUREMENT 7u          // measurement_ok == false: fail closed, no signing
-#define DSM_SG_ERR_INTERNAL    8u
 #define DSM_SG_MORE            9u          // request part taken; the frame is not complete
 
 #endif // DSM_SG_ABI_H

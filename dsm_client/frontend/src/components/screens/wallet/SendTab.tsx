@@ -6,7 +6,6 @@ import { emailReceiptIfDue } from '../../../domain/sendReceipt';
 import { appRuntimeStore } from '../../../runtime/appRuntimeStore';
 import { useUX } from '../../../contexts/UXContext';
 import ConfirmModal from '../../ConfirmModal';
-import UnderConstructionModal from '../../UnderConstructionModal';
 import { TokenMark } from '../../TokenMark';
 import { TokenSelect } from '../../common/TokenSelect';
 import { Notice } from '../../common/ScreenFrame';
@@ -66,7 +65,6 @@ function SendTabInner({
   });
   const [txMode, setTxMode] = useState<'online' | 'offline'>('online');
   // Offline sending is not open yet: choosing it says so and the send stays online.
-  const [notice, setNotice] = useState<string | null>(null);
   const [sendingTx, setSendingTx] = useState(false);
   const [showSendConfirm, setShowSendConfirm] = useState(false);
   const [fundingOpen, setFundingOpen] = useState(false);
@@ -76,9 +74,10 @@ function SendTabInner({
   const loadWalletDataRef = useRef(loadWalletData);
   loadWalletDataRef.current = loadWalletData;
 
-  // Rust attaches the appliance on this read. The first time, Android asks the
-  // user to allow it; from then on, while it stays plugged in, it connects on
-  // its own, so choosing Offline is enough. Once it is connected the balances
+  // Rust attaches an installed appliance on this read, and a new one stays as it
+  // is. The first time, Android asks the user to allow it; from then on, while it
+  // stays plugged in, it connects on its own, so choosing Offline is enough. Once
+  // it is connected the balances
   // can name their offline allocations, so they are read again.
   const connectAppliance = useCallback(async () => {
     setApplianceBusy(true);
@@ -266,7 +265,7 @@ function SendTabInner({
         </span>
         <div className="sb-seg sb-seg--block" role="group" aria-label="Transaction mode">
           <button type="button" className={`sb-seg__opt${txMode === 'online' ? ' active' : ''}`} onClick={() => setTxMode('online')}>Online</button>
-          <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setNotice('Under construction, check back soon.')}>Offline</button>
+          <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
         </div>
         {txMode === 'offline' && (
           <>
@@ -375,7 +374,6 @@ function SendTabInner({
           </button>
         </div>
       </form>
-      <UnderConstructionModal title="Offline" message={notice} onClose={() => setNotice(null)} />
       <ConfirmModal
         visible={showSendConfirm}
         title="Send"

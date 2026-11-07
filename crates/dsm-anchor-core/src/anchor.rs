@@ -11,7 +11,8 @@ use crate::durable::{
 use crate::enrollment::ChipBirth;
 use crate::proto::{decode_request, encode_response, pb, ProtoError};
 use crate::service::{
-    appliance_code, durable_code, err, fail, handle, proto_code, status, MAX_FRAME_LEN,
+    appliance_refusal, durable_code, err, fail, handle, proto_code, status, try_run_response,
+    MAX_FRAME_LEN,
 };
 use crate::tropic::{PartitionSig, Tropic};
 
@@ -72,7 +73,7 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Anchor<T, P, S> {
                 }
                 Err(e) => {
                     let answer = match decode_request(frame) {
-                        Ok(req) => fail(req.op, appliance_code(e)),
+                        Ok(req) => appliance_refusal(req.op, e),
                         Err(pe) => fail(0, proto_code(pe)),
                     };
                     (Self::Unclosed(d), encode_response(&answer))
@@ -87,12 +88,12 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Anchor<T, P, S> {
     }
 }
 
-/// An unprovisioned anchor's answer: a provisioning provisions it; anything else is refused as
-/// not provisioned.
+/// An unprovisioned anchor's answer: a try-run goes through an install and leaves it unprovisioned;
+/// a provisioning provisions it; anything else is refused as not provisioned.
 fn provision<T: Tropic, P: PartitionSig, S: ActiveStore>(
     chip: ChipBirth,
-    tropic: T,
-    store: S,
+    mut tropic: T,
+    mut store: S,
     frame: &[u8],
 ) -> (Anchor<T, P, S>, Vec<u8>) {
     let unprovisioned = |tropic, store, code: u32, op: i32| {
@@ -113,7 +114,7 @@ fn provision<T: Tropic, P: PartitionSig, S: ActiveStore>(
         Err(e) => return unprovisioned(tropic, store, proto_code(e), 0),
     };
     let op = req.op;
-    if op != pb::Op::Provision as i32 {
+    if op != pb::Op::Provision as i32 && op != pb::Op::TryRun as i32 {
         return unprovisioned(tropic, store, err::NOT_PROVISIONED, op);
     }
     let provisioning = match req
@@ -124,6 +125,19 @@ fn provision<T: Tropic, P: PartitionSig, S: ActiveStore>(
         Ok(p) => p,
         Err(e) => return unprovisioned(tropic, store, proto_code(e), op),
     };
+    if op == pb::Op::TryRun as i32 {
+        let run =
+            crate::try_run::rehearse::<T, P, S>(&chip, &mut tropic, &mut store, &provisioning);
+        let answer = encode_response(&try_run_response(op, &run, chip.install));
+        return (
+            Anchor::Unprovisioned {
+                chip,
+                tropic,
+                store,
+            },
+            answer,
+        );
+    }
     match DurableAppliance::provision(&chip, tropic, store, provisioning) {
         Ok(mut d) => match d.close_birth() {
             Ok(()) => {
@@ -132,14 +146,22 @@ fn provision<T: Tropic, P: PartitionSig, S: ActiveStore>(
             }
             Err(e) => (
                 Anchor::Unclosed(d),
-                encode_response(&fail(op, appliance_code(e))),
+                encode_response(&appliance_refusal(op, e)),
             ),
         },
-        Err(refused) => unprovisioned(
-            refused.tropic,
-            refused.store,
-            durable_code(refused.error),
-            op,
-        ),
+        Err(refused) => {
+            let answer = pb::ApplianceResponse {
+                detail: alloc::format!("{:?}", refused.error),
+                ..fail(op, durable_code(refused.error.clone()))
+            };
+            (
+                Anchor::Unprovisioned {
+                    chip,
+                    tropic: refused.tropic,
+                    store: refused.store,
+                },
+                encode_response(&answer),
+            )
+        }
     }
 }

@@ -43,25 +43,39 @@
 # `read`, kyber.rs:187 `len`, inbox_poller.rs:184 `store`) cannot rule them out.
 # android IND_UNINDEXED_ARTIFACT 33 -> 38: all 38 are named by crates/dsm-android-anchor/src,
 # which the map cannot index.
+#
+# 2026-11-06, PR #1180 (CI map at c129f1dd, against the rows above):
+# android IND_UNRESOLVED_CALL 162 -> 189. All 27 more are dsm-anchor-core's: the
+# R-memory store (`rmem`, 29 -> 41), the appliance and durable record (68 -> 75),
+# its states (`service`, 19 -> 20), the chip trait (`tropic`, 14), the try-run
+# (`try_run`, 5) and two helpers in `domain` and `util` have methods named `read`,
+# `prepare`, `len`, `store`, `as_bytes` and `as_slice`, which the same unresolved
+# calls in reached code (bilateral_tip_sync.rs `prepare`, client_db/mod.rs `read`,
+# kyber.rs `len`, `as_bytes` and `as_slice`, inbox_poller.rs `store`) cannot rule
+# out. The dsm crate's 30 are unchanged.
+# android IND_UNINDEXED_ARTIFACT 38 -> 58: all 58 are named by
+# crates/dsm-android-anchor/src, which the map cannot index; the phone's anchor
+# client now drives the try-run over USB (usb_appliance.rs) and names those items.
+# The other rows move with the code.
 artifact	state	code	count
-android	dead	DEAD_NO_ROOT_PATH	1608
+android	dead	DEAD_NO_ROOT_PATH	1630
 android	indeterminate	IND_AMBIGUOUS_SELF_TYPE	22
 android	indeterminate	IND_DISPATCH_SELF_TYPE	6
 android	indeterminate	IND_NOT_CONSTRUCTED	2
 android	indeterminate	IND_NOT_DISPATCHED	13
-android	indeterminate	IND_UNINDEXED_ARTIFACT	38
+android	indeterminate	IND_UNINDEXED_ARTIFACT	58
 android	indeterminate	IND_UNLINKED_IMPL	12
-android	indeterminate	IND_UNRESOLVED_CALL	162
-android	no-definition	OUTSIDE_SYMBOL	2553
-android	no-definition	WORKSPACE_SYMBOL	2952
-android	not-in-artifact	NOT_IN_ARTIFACT	6279
+android	indeterminate	IND_UNRESOLVED_CALL	189
+android	no-definition	OUTSIDE_SYMBOL	2559
+android	no-definition	WORKSPACE_SYMBOL	2989
+android	not-in-artifact	NOT_IN_ARTIFACT	6336
 android	reached	REACHED	3424
-android	reached	REACHED_VIA_DISPATCH	10021
-node	dead	DEAD_NO_ROOT_PATH	8108
+android	reached	REACHED_VIA_DISPATCH	10044
+node	dead	DEAD_NO_ROOT_PATH	8155
 node	indeterminate	IND_AMBIGUOUS_SELF_TYPE	38
 node	indeterminate	IND_UNLINKED_IMPL	287
-node	no-definition	OUTSIDE_SYMBOL	2480
-node	no-definition	WORKSPACE_SYMBOL	2935
-node	not-in-artifact	NOT_IN_ARTIFACT	3163
+node	no-definition	OUTSIDE_SYMBOL	2483
+node	no-definition	WORKSPACE_SYMBOL	2972
+node	not-in-artifact	NOT_IN_ARTIFACT	3182
 node	reached	REACHED	378
 node	reached	REACHED_VIA_DISPATCH	116

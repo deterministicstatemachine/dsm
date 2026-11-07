@@ -19,3 +19,6 @@ path = "src/main.rs"
 dsm-anchor-core = { path = "../dsm-anchor-core" }
 # Host USB-CDC serial transport to the Pico.
 serialport = "4"
+
+# Its own workspace: excluded from the root manifest.
+[workspace]

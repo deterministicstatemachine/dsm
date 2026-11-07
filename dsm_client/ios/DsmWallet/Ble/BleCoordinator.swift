@@ -319,10 +319,11 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
     }
 
     /// The transport-level ACK after a window of notifications, written to
-    /// TX_REQUEST: `0xFF ‖ b3 b2 b1 b0`.
-    func writeChunkAck(_ peer: PeerSession, count: Int) {
+    /// TX_REQUEST: `0xFF ‖ nonce ‖ b3 b2 b1 b0`, so the server tells this
+    /// attempt's count from an earlier one's.
+    func writeChunkAck(_ peer: PeerSession, nonce: UInt8, count: Int) {
         let value = UInt32(truncatingIfNeeded: count)
-        let ack = Data([BleConstants.chunkAckMarker, UInt8(value >> 24), UInt8((value >> 16) & 0xFF), UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)])
+        let ack = Data([BleConstants.chunkAckMarker, nonce, UInt8(value >> 24), UInt8((value >> 16) & 0xFF), UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)])
         guard let peripheral = peer.peripheral, let characteristic = peer.txRequest else { return }
         if peripheral.canSendWriteWithoutResponse {
             peripheral.writeValue(ack, for: characteristic, type: .withoutResponse)

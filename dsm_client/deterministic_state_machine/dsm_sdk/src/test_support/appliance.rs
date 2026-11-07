@@ -30,7 +30,7 @@ use anchor_core::root_advance::Transition;
 use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use ed25519_dalek::{Signer, SigningKey};
 
-use crate::anchor::{AnchorAppliance, AnchorPin, ApplianceStatus};
+use crate::anchor::{AnchorAppliance, AnchorPin, ApplianceStatus, TryRunReport, TryRunStep};
 use crate::test_support::two_device::TestDevice;
 use dsm::types::error::DsmError;
 
@@ -106,6 +106,7 @@ impl Board {
 pub struct SoftwareTropic {
     board: Board,
     counter: Arc<Mutex<u32>>,
+    start: u32,
     closed_births: Arc<Mutex<u32>>,
     resident: SigningKey,
 }
@@ -128,6 +129,30 @@ impl Tropic for SoftwareTropic {
         Ok(self.resident.sign(message).to_bytes().to_vec())
     }
 
+    fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        matches!(
+            (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
+            (Ok(key), Ok(signature)) if matches!(
+                ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                    .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                Ok(())
+            )
+        )
+    }
+
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        self.board.powered()?;
+        *held(&self.counter) = self.start;
+        Ok(())
+    }
+
+    fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
+        vec![anchor_core::try_run::TryStep::new(
+            "this software chip's counter reads",
+            self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
+        )]
+    }
+
     fn close_birth(&mut self) -> Result<(), TropicError> {
         self.board.powered()?;
         *held(&self.closed_births) += 1;
@@ -140,6 +165,17 @@ impl Tropic for SoftwareTropic {
 pub struct SoftwareRMemory {
     board: Board,
     slot: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Where a try-run's records go. No read of the record looks here.
+    trial: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl SoftwareRMemory {
+    fn on_the_supply(&self) -> Result<(), StoreError> {
+        match held(&self.board.0).power {
+            Power::On => Ok(()),
+            Power::Off => Err(StoreError::Unavailable),
+        }
+    }
 }
 
 impl ActiveStore for SoftwareRMemory {
@@ -155,6 +191,27 @@ impl ActiveStore for SoftwareRMemory {
             Power::On => Ok(held(&self.slot).clone()),
             Power::Off => Err(StoreError::Unavailable),
         }
+    }
+
+    fn try_record(&mut self, _record: &[u8]) -> Result<(), StoreError> {
+        self.on_the_supply()
+    }
+
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.on_the_supply()?;
+        *held(&self.trial) = Some(record.to_vec());
+        Ok(())
+    }
+
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.on_the_supply()?;
+        Ok(held(&self.trial).clone())
+    }
+
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        self.on_the_supply()?;
+        *held(&self.trial) = None;
+        Ok(())
     }
 }
 
@@ -221,6 +278,7 @@ impl Anchor {
         SoftwareTropic {
             board: self.board.clone(),
             counter: self.counter.clone(),
+            start: self.enrolled_counter,
             closed_births: self.closed_births.clone(),
             resident: self.resident(),
         }
@@ -232,10 +290,11 @@ impl Anchor {
             partition_device_id: self.derive("partition device id"),
             chip_pk: self.resident().verifying_key().to_bytes().to_vec(),
             enrolled_counter: self.enrolled_counter,
-            partition_trng: self.derive("partition trng"),
+            birth_entropy: self.derive("birth entropy"),
             chip_birth_witness: self.derive("chip birth witness"),
             host_nonce: self.derive("host nonce"),
             partition_key_seed: self.derive("partition key seed"),
+            install: anchor_core::enrollment::Install::ForGood,
         }
     }
 
@@ -288,6 +347,7 @@ impl HostAppliance {
                 rmemory: SoftwareRMemory {
                     board: board.clone(),
                     slot: Arc::new(Mutex::new(None)),
+                    trial: Arc::new(Mutex::new(None)),
                 },
                 board,
                 counter: Arc::new(Mutex::new(enrolled_counter)),
@@ -366,6 +426,14 @@ impl HostAppliance {
         *held(&held(&self.anchor).counter)
     }
 
+    /// The pin it answers with, or `None` while it was never provisioned.
+    pub fn provisioned(&self) -> Option<AnchorPin> {
+        match self.clone().provisioned_pin() {
+            Ok(pin) => pin,
+            Err(e) => panic!("the appliance answers: {e}"),
+        }
+    }
+
     /// The pin of the provisioned appliance.
     pub fn pin(&self) -> AnchorPin {
         match self.clone().provisioned_pin() {
@@ -439,6 +507,7 @@ impl AnchorAppliance for HostAppliance {
             Ok(ApplianceStatus {
                 root: a.active.root,
                 anchor_counter: a.active.anchor_counter,
+                install: a.install,
             })
         })
     }
@@ -495,6 +564,46 @@ impl AnchorAppliance for HostAppliance {
             pk_chip: a.chip_pk.clone(),
             birth_commitment: a.birth_commitment,
         }))
+    }
+
+    fn try_run(&mut self, provisioning: &Provisioning) -> Result<TryRunReport, DsmError> {
+        let anchor = held(&self.anchor);
+        if !matches!(anchor.served, Served::Unprovisioned) {
+            return Err(appliance_error(
+                "try-run",
+                anchor_core::durable::DurableError::AlreadyProvisioned,
+            ));
+        }
+        let run = anchor_core::try_run::rehearse::<_, SphincsPartition, _>(
+            &anchor.chip_birth(),
+            &mut anchor.chip(),
+            &mut anchor.rmemory.clone(),
+            provisioning,
+        );
+        let install = anchor.chip_birth().install;
+        let failed = run.blocking(install).map(|step| step.name.clone());
+        Ok(TryRunReport {
+            passed: failed.is_none(),
+            steps: run
+                .steps
+                .iter()
+                .map(|step| TryRunStep {
+                    name: step.name.clone(),
+                    passed: matches!(step.outcome, Ok(())),
+                    detail: match &step.outcome {
+                        Ok(()) => String::new(),
+                        Err(why) => why.clone(),
+                    },
+                    requirement: step.requirement,
+                })
+                .collect(),
+            install: Some(install),
+            permanent: anchor_core::try_run::permanent(install)
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect(),
+            refused: String::new(),
+        })
     }
 
     fn provision(&mut self, provisioning: &Provisioning) -> Result<AnchorPin, DsmError> {

@@ -348,6 +348,28 @@ pub fn update_contact_ble_status(
     Ok(())
 }
 
+/// Forget the BLE address stored for a contact: the contact is unpaired until a
+/// pairing stores one again. Only the transport changes; the relationship is
+/// untouched. An error when no contact has that device id.
+pub fn forget_contact_ble_address(device_id: &[u8]) -> Result<()> {
+    require_device_id(device_id)?;
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    let changed = conn.execute(
+        "UPDATE contacts SET ble_address = NULL WHERE device_id = ?1",
+        params![device_id],
+    )?;
+    if changed == 0 {
+        return Err(anyhow!("no contact has that device id"));
+    }
+    Ok(())
+}
+
 /// Persist an unverified remote chain-tip claim in an observed-only namespace.
 ///
 /// This is advisory durability for BLE/session recovery. It MUST NOT be used as

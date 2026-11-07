@@ -8,10 +8,14 @@
 use super::*;
 use crate::economic_fixtures::whole_era;
 use crate::sdk::b0x_sdk::{B0xSDK, OFFLINE_BOUNDARY_NOTICE_METHOD};
-use crate::storage::client_db::economic_lineage::{latest_offline_account, offline_account_below};
+use crate::sdk::economic_registers::asked_cells;
+use crate::storage::client_db::economic_lineage::{
+    get_admitted_coordinate, latest_offline_account, offline_account_below,
+};
 use crate::storage::client_db::offline_boundary_notices::owed_to;
 use crate::test_support::appliance::{HostAppliance, InstalledAppliance};
 use dsm::economic::peer_lineage::PeerOfflineAccount;
+use dsm::economic::register::economic_root_register_key;
 use dsm::types::device_state::DeviceState;
 use dsm::types::offline_account::OfflineAccount;
 
@@ -133,6 +137,69 @@ async fn a_load_followed_by_an_online_payment_still_reaches_the_contact() {
     assert_committed_on_both(&a, &b, &commitment);
     b.device.enter();
     assert_eq!(pending_era(), whole_era(7), "B holds the payment pending");
+}
+
+/// A contact checks a load one hop (DSM Amendment A14): from that step's own
+/// parent, reading nothing behind it. A pays B three times online before it loads,
+/// so the load sits past a history. B's sync, told of the load, asks for A's
+/// register key at the load's position and at no earlier one, and records the
+/// account the load left. MUTATION CONTROL: a check that reads behind the step asks
+/// for one of A's earlier positions and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_contact_checks_a_load_one_hop_and_reads_nothing_behind_it() {
+    let pair = Pair::boot(100, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    for round in 1..=3u64 {
+        let sent = pair.a.send(&pair.b, whole_era(5)).await;
+        assert!(
+            sent.success,
+            "A's online send {round}: {:?}",
+            sent.error_message
+        );
+        let synced = pair.b.sync().await;
+        assert_eq!(synced.errors, Vec::<String>::new(), "B's sync {round}");
+    }
+    let appliance = HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
+    a.device.enter();
+    let loaded = offline_cash(&a, "wallet.loadOffline", "20.00").await;
+    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    a.device.enter();
+    let (load_at, _) = get_admitted_coordinate()
+        .expect("A's admitted coordinate reads")
+        .expect("A admitted its load");
+
+    asked_cells::take();
+    let synced = pair.b.sync().await;
+    assert_eq!(synced.errors, Vec::<String>::new(), "B's sync");
+    let asked = asked_cells::take();
+
+    let read: Vec<u64> = (1..=load_at)
+        .filter(|position| {
+            asked.contains_key(&economic_root_register_key(
+                &pair.a.genesis,
+                &pair.a.device_id,
+                *position,
+            ))
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec![load_at],
+        "B read A only at the load, at position {load_at}"
+    );
+
+    let recorded = recorded_by(&pair.b, &pair.a, &appliance).expect("B's sync recorded the load");
+    a.device.enter();
+    let head = a.device.router().core_sdk.device_head().expect("A's head");
+    let held = head
+        .offline_account(&appliance.pin().bundle)
+        .expect("A's offline account");
+    assert_eq!(
+        recorded.account_root(),
+        &held.root(),
+        "the account the load left"
+    );
 }
 
 /// Every boundary since a contact was last told reaches it in order, each

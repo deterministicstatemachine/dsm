@@ -13499,6 +13499,14 @@ export class AnchorStatusResponse extends Message<AnchorStatusResponse> {
    */
   status = "";
 
+  /**
+   * An anchor is connected and was never installed. Nothing about it is permanent yet: the wallet
+   * offers its try-run (`anchor.tryRun`), and installs only when told to (`anchor.install`).
+   *
+   * @generated from field: bool awaiting_install = 10;
+   */
+  awaitingInstall = false;
+
   constructor(data?: PartialMessage<AnchorStatusResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13516,6 +13524,7 @@ export class AnchorStatusResponse extends Message<AnchorStatusResponse> {
     { no: 7, name: "enrolled_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 8, name: "bundle", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "status", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 10, name: "awaiting_install", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorStatusResponse {
@@ -13532,6 +13541,137 @@ export class AnchorStatusResponse extends Message<AnchorStatusResponse> {
 
   static equals(a: AnchorStatusResponse | PlainMessage<AnchorStatusResponse> | undefined, b: AnchorStatusResponse | PlainMessage<AnchorStatusResponse> | undefined): boolean {
     return proto3.util.equals(AnchorStatusResponse, a, b);
+  }
+}
+
+/**
+ * One thing an anchor's try-run went through.
+ *
+ * @generated from message dsm.AnchorTryRunStep
+ */
+export class AnchorTryRunStep extends Message<AnchorTryRunStep> {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name = "";
+
+  /**
+   * @generated from field: bool passed = 2;
+   */
+  passed = false;
+
+  /**
+   * why it did not pass
+   *
+   * @generated from field: string detail = 3;
+   */
+  detail = "";
+
+  /**
+   * A production install's requirement alone (a chip that tests its PTRNG): the anchor works without
+   * it. An install for good refuses until it is met; a trial install passes over it.
+   *
+   * @generated from field: bool production = 4;
+   */
+  production = false;
+
+  constructor(data?: PartialMessage<AnchorTryRunStep>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorTryRunStep";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "passed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 3, name: "detail", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "production", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorTryRunStep {
+    return new AnchorTryRunStep().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorTryRunStep {
+    return new AnchorTryRunStep().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorTryRunStep {
+    return new AnchorTryRunStep().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorTryRunStep | PlainMessage<AnchorTryRunStep> | undefined, b: AnchorTryRunStep | PlainMessage<AnchorTryRunStep> | undefined): boolean {
+    return proto3.util.equals(AnchorTryRunStep, a, b);
+  }
+}
+
+/**
+ * `anchor.tryRun`: an install gone through on the anchor with its permanent parts substituted.
+ *
+ * @generated from message dsm.AnchorTryRunResponse
+ */
+export class AnchorTryRunResponse extends Message<AnchorTryRunResponse> {
+  /**
+   * @generated from field: bool passed = 1;
+   */
+  passed = false;
+
+  /**
+   * @generated from field: repeated dsm.AnchorTryRunStep steps = 2;
+   */
+  steps: AnchorTryRunStep[] = [];
+
+  /**
+   * what installing makes permanent, shown before it is asked for
+   *
+   * @generated from field: repeated string permanent = 3;
+   */
+  permanent: string[] = [];
+
+  /**
+   * why it could not run at all
+   *
+   * @generated from field: string refused = 4;
+   */
+  refused = "";
+
+  /**
+   * The install would be a trial: the trial image's, with nothing permanent. Its next boot ends it.
+   *
+   * @generated from field: bool trial = 5;
+   */
+  trial = false;
+
+  constructor(data?: PartialMessage<AnchorTryRunResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorTryRunResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "passed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "steps", kind: "message", T: AnchorTryRunStep, repeated: true },
+    { no: 3, name: "permanent", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 4, name: "refused", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "trial", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorTryRunResponse {
+    return new AnchorTryRunResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorTryRunResponse {
+    return new AnchorTryRunResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorTryRunResponse {
+    return new AnchorTryRunResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorTryRunResponse | PlainMessage<AnchorTryRunResponse> | undefined, b: AnchorTryRunResponse | PlainMessage<AnchorTryRunResponse> | undefined): boolean {
+    return proto3.util.equals(AnchorTryRunResponse, a, b);
   }
 }
 
@@ -17996,6 +18136,12 @@ export class Envelope extends Message<Envelope> {
     case: "anchorStatusResponse";
   } | {
     /**
+     * @generated from field: dsm.AnchorTryRunResponse anchor_try_run_response = 141;
+     */
+    value: AnchorTryRunResponse;
+    case: "anchorTryRunResponse";
+  } | {
+    /**
      * Offline-cash load/unload (two-regime money model): device-bound allocation balance.
      *
      * @generated from field: dsm.OfflineCashResponse offline_cash_response = 113;
@@ -18264,6 +18410,7 @@ export class Envelope extends Message<Envelope> {
     { no: 108, name: "device_admission_request", kind: "message", T: AddDeviceAdmissionRequestV1, oneof: "payload" },
     { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
     { no: 112, name: "anchor_status_response", kind: "message", T: AnchorStatusResponse, oneof: "payload" },
+    { no: 141, name: "anchor_try_run_response", kind: "message", T: AnchorTryRunResponse, oneof: "payload" },
     { no: 113, name: "offline_cash_response", kind: "message", T: OfflineCashResponse, oneof: "payload" },
     { no: 116, name: "token_burn_response", kind: "message", T: TokenBurnResponse, oneof: "payload" },
     { no: 117, name: "token_fee_schedule_response", kind: "message", T: TokenFeeScheduleResponse, oneof: "payload" },
@@ -22513,6 +22660,45 @@ export class ContactSetProfileRequest extends Message<ContactSetProfileRequest> 
 
   static equals(a: ContactSetProfileRequest | PlainMessage<ContactSetProfileRequest> | undefined, b: ContactSetProfileRequest | PlainMessage<ContactSetProfileRequest> | undefined): boolean {
     return proto3.util.equals(ContactSetProfileRequest, a, b);
+  }
+}
+
+/**
+ * contacts.unpair: forget this phone's pairing with the contact and pair again.
+ *
+ * @generated from message dsm.ContactUnpairRequest
+ */
+export class ContactUnpairRequest extends Message<ContactUnpairRequest> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ContactUnpairRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ContactUnpairRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactUnpairRequest {
+    return new ContactUnpairRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ContactUnpairRequest {
+    return new ContactUnpairRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ContactUnpairRequest {
+    return new ContactUnpairRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ContactUnpairRequest | PlainMessage<ContactUnpairRequest> | undefined, b: ContactUnpairRequest | PlainMessage<ContactUnpairRequest> | undefined): boolean {
+    return proto3.util.equals(ContactUnpairRequest, a, b);
   }
 }
 
