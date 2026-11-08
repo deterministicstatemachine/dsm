@@ -2374,3 +2374,81 @@ async fn a_grant_runs_only_its_free_requests() {
         );
     }
 }
+
+/// A payment inside its caps runs without asking, as the approval screen says,
+/// even on a grant of no free requests (owner, 2026-11-04). It can fail and move
+/// nothing, and that takes the log one past the count: from there every request
+/// waits for the player, payments too, so a grant never signs or logs more than
+/// one request past its count (SA-78).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payment_inside_its_caps_runs_past_the_free_requests_until_one_fails() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = invoke(
+        &p.a,
+        "connect.app.offer",
+        args(&generated::ConnectAppOfferRequestV1 {
+            display_name: "Wildstate".into(),
+            endpoint: relay.endpoint.clone(),
+            cert_pin: relay.pin.to_vec(),
+            scopes: game_scopes(&wild),
+            token_anchors: vec![wild.to_vec()],
+            free_requests: 0,
+        }),
+    )
+    .await;
+    let Reply::Offer(made) = reply(&made) else {
+        panic!("connect.app.offer answered another reply");
+    };
+    let digest: [u8; 32] = made.offer_digest.as_slice().try_into().expect("a digest");
+    relay.held().offer = Some((digest, made.offer.clone()));
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 15).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    settle(&p).await;
+    let pay = |amount: u64| {
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: wild.to_vec(),
+            amount,
+            memo: String::new(),
+        })
+    };
+
+    let paid = request(&p.a, &relay, &session, pay(10)).await;
+    sync_clean(&p, &relay).await;
+    carried_out(&p.b, &session, paid).await;
+    assert_eq!(balance(&p.b, &wild), 5, "the payment ran under the grant");
+    settle(&p).await;
+    assert_eq!(waiting_for_the_player(&p.b).await, 0);
+
+    // Inside the caps, and more than the wallet holds: it runs and moves nothing.
+    let failed = request(&p.a, &relay, &session, pay(10)).await;
+    sync_and_deliver(&p, &relay).await;
+    assert_eq!(
+        outcome(&status(&p.a, &session, failed).await),
+        generated::ConnectOutcome::Failed
+    );
+    assert_eq!(balance(&p.b, &wild), 5, "the failed payment moved nothing");
+    p.b.enter();
+    assert_eq!(
+        crate::storage::client_db::connect::free_requests_used(&session).expect("the count"),
+        1,
+        "the failed payment is the one row past the count"
+    );
+
+    // A payment the wallet could make now waits, the count being passed.
+    let waits = request(&p.a, &relay, &session, pay(5)).await;
+    sync_and_deliver(&p, &relay).await;
+    let held = status(&p.a, &session, waits).await;
+    assert_eq!(
+        outcome(&held),
+        generated::ConnectOutcome::AwaitingApproval,
+        "past the count: {}",
+        held.reason
+    );
+    assert_eq!(balance(&p.b, &wild), 5, "nothing is paid past the count");
+    assert_eq!(waiting_for_the_player(&p.b).await, 1);
+}
