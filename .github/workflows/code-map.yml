@@ -1,15 +1,12 @@
 name: Code map
 
-# The merge gate: the code map, the intent manifest against it, and every
-# requirement row's evidence pin (specs/requirements/INTENT_PINS.tsv). It runs
-# on every pull request, with no path condition (owner, 2026-09-28): a change
-# to CONFORMANCE §8 alone can move a row's status and so its pin, and a
-# required check skipped by a path filter would read as passed. Its jobs have
-# no layer condition for the same reason.
+# The code map, the intent manifest against it, and every requirement row's
+# evidence pin (specs/requirements/INTENT_PINS.tsv). It was the merge gate
+# while the beta's bulk work landed, to keep stand-ins and dead code out.
+# Owner, 2026-11-08: no longer needed now the work builds out what is already
+# there, so it no longer runs on pull requests or on pushes to main, and is no
+# longer a required check. It still runs by hand from the Actions tab.
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       base:
