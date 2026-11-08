@@ -59,6 +59,8 @@ pub mod offline_boundary_notices;
 #[cfg(test)]
 mod offline_boundary_tests;
 pub mod offline_cash_routes;
+#[cfg(test)]
+mod one_hop_verification_tests;
 pub mod online_finalize;
 pub mod prefs_routes;
 pub mod receipt_routes;
@@ -82,8 +84,6 @@ mod token_adoption_tests;
 pub(crate) mod token_create_tests;
 pub mod token_routes;
 pub mod transfer_helpers;
-#[cfg(test)]
-mod validated_ancestry_tests;
 pub mod wallet_routes;
 pub use recovery_impl::RecoveryImpl;
 pub(crate) use system_routes::{handle_create_genesis_v2, handle_generate_mnemonic_query};
