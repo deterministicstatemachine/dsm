@@ -30,7 +30,9 @@ use anchor_core::root_advance::Transition;
 use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use ed25519_dalek::{Signer, SigningKey};
 
-use crate::anchor::{AnchorAppliance, AnchorPin, ApplianceStatus, TryRunReport, TryRunStep};
+use crate::anchor::{
+    AnchorAppliance, AnchorPin, ApplianceStatus, TryRunReport, TryRunStep, RehearsalOwner,
+};
 use crate::test_support::two_device::TestDevice;
 use dsm::types::error::DsmError;
 
@@ -253,7 +255,32 @@ impl PartitionSig for SphincsPartition {
             Ok(valid) if valid
         )
     }
+
+    fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+        matches!(
+            dsm::crypto::sphincs::verify(OWNER_VARIANT, pk_on, digest, sig),
+            Ok(valid) if valid
+        )
+    }
+
+    fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        match dsm::crypto::sphincs::generate_keypair_from_seed(OWNER_VARIANT, seed) {
+            Ok(kp) => Ok((kp.secret_key.clone(), kp.public_key.clone())),
+            Err(e) => panic!("the owner keypair from its seed: {e}"),
+        }
+    }
+
+    fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        match dsm::crypto::sphincs::sign(OWNER_VARIANT, sk, digest) {
+            Ok(sig) => Ok(sig),
+            Err(e) => panic!("the owner signs: {e}"),
+        }
+    }
 }
+
+/// The owner's scheme: DSM's device key, BLAKE3-SPHINCS+ SPX256f.
+const OWNER_VARIANT: dsm::crypto::sphincs::SphincsVariant =
+    dsm::crypto::sphincs::SphincsVariant::SPX256f;
 
 type Durable = DurableAppliance<SoftwareTropic, SphincsPartition, SoftwareRMemory>;
 
@@ -272,6 +299,11 @@ struct Anchor {
     rmemory: SoftwareRMemory,
     chip_seed: [u8; 32],
     enrolled_counter: u32,
+    /// What an install of this anchor makes: the board's image decides.
+    install: anchor_core::enrollment::Install,
+    /// Births so far: the chip's RNG gives each birth its own entropy, so a chip born again has a
+    /// new bundle under the same identity.
+    births: u32,
     served: Served,
 }
 
@@ -279,6 +311,17 @@ impl Anchor {
     fn derive(&self, input: &str) -> [u8; 32] {
         blake3::derive_key(
             &format!("DSM test software TROPIC01 2026-09-27 {input}"),
+            &self.chip_seed,
+        )
+    }
+
+    /// What the chip's RNG gives this birth and no other.
+    fn derive_for_birth(&self, input: &str) -> [u8; 32] {
+        blake3::derive_key(
+            &format!(
+                "DSM test software TROPIC01 2026-09-27 birth {} {input}",
+                self.births
+            ),
             &self.chip_seed,
         )
     }
@@ -303,11 +346,11 @@ impl Anchor {
             partition_device_id: self.derive("partition device id"),
             chip_pk: self.resident().verifying_key().to_bytes().to_vec(),
             enrolled_counter: self.enrolled_counter,
-            birth_entropy: self.derive("birth entropy"),
-            chip_birth_witness: self.derive("chip birth witness"),
-            host_nonce: self.derive("host nonce"),
-            partition_key_seed: self.derive("partition key seed"),
-            install: anchor_core::enrollment::Install::ForGood,
+            birth_entropy: self.derive_for_birth("birth entropy"),
+            chip_birth_witness: self.derive_for_birth("chip birth witness"),
+            host_nonce: self.derive_for_birth("host nonce"),
+            partition_key_seed: self.derive_for_birth("partition key seed"),
+            install: self.install,
         }
     }
 
@@ -367,16 +410,26 @@ impl HostAppliance {
                 closed_births: Arc::new(Mutex::new(0)),
                 chip_seed,
                 enrolled_counter,
+                install: anchor_core::enrollment::Install::ForGood,
+                births: 0,
                 served: Served::Unprovisioned,
             })),
         }
+    }
+
+    /// A chip as it leaves the factory, on a board running the trial image: its install is a
+    /// trial, which the board's next boot clears.
+    pub fn unprovisioned_trial(chip_seed: [u8; 32], enrolled_counter: u32) -> Self {
+        let appliance = Self::unprovisioned(chip_seed, enrolled_counter);
+        held(&appliance.anchor).install = anchor_core::enrollment::Install::ForTrial;
+        appliance
     }
 
     /// The appliance provisioned for `device`, its chip seeded with
     /// `chip_seed` and enrolled with `enrolled_counter` counter steps.
     pub fn birth(device: &TestDevice, chip_seed: [u8; 32], enrolled_counter: u32) -> Self {
         let mut appliance = Self::unprovisioned(chip_seed, enrolled_counter);
-        if let Err(e) = appliance.provision(&provisioning_of(device)) {
+        if let Err(e) = appliance.provision(&provisioning_of(device), &rehearsal_owner_of(device)) {
             panic!("the appliance provisions for its device: {e}");
         }
         appliance
@@ -421,6 +474,13 @@ impl HostAppliance {
             s.power = Power::On;
             s.cut = Cut::Never;
             s.writes = 0;
+        }
+        if anchor.install == anchor_core::enrollment::Install::ForTrial {
+            // The trial image clears the slots a trial wrote at boot: the anchor comes back unborn.
+            *held(&anchor.rmemory.slot) = None;
+            *held(&anchor.rmemory.trial) = None;
+            anchor.served = Served::Unprovisioned;
+            return;
         }
         let restored =
             DurableAppliance::restore(&anchor.chip_birth(), anchor.chip(), anchor.rmemory.clone());
@@ -563,6 +623,13 @@ impl AnchorAppliance for HostAppliance {
         })
     }
 
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DsmError> {
+        self.with(|d| {
+            d.authorize(digest, signature)
+                .map_err(|e| appliance_error("authorize", e))
+        })
+    }
+
     fn prepare(
         &mut self,
         t: &Transition,
@@ -658,7 +725,11 @@ impl AnchorAppliance for HostAppliance {
         }))
     }
 
-    fn try_run(&mut self, provisioning: &Provisioning) -> Result<TryRunReport, DsmError> {
+    fn try_run(
+        &mut self,
+        provisioning: &Provisioning,
+        rehearsal: &RehearsalOwner,
+    ) -> Result<TryRunReport, DsmError> {
         let anchor = held(&self.anchor);
         if !matches!(anchor.served, Served::Unprovisioned) {
             return Err(appliance_error(
@@ -666,11 +737,12 @@ impl AnchorAppliance for HostAppliance {
                 anchor_core::durable::DurableError::AlreadyProvisioned,
             ));
         }
-        let run = anchor_core::try_run::rehearse::<_, SphincsPartition, _>(
+        let run = anchor_core::try_run::rehearse_with::<_, SphincsPartition, _>(
             &anchor.chip_birth(),
             &mut anchor.chip(),
             &mut anchor.rmemory.clone(),
-            provisioning,
+            &rehearsal_of(provisioning, rehearsal),
+            |digest| rehearsal.sign(digest).map_err(|e| e.to_string()),
         );
         let install = anchor.chip_birth().install;
         let failed = run.blocking(install).map(|step| step.name.clone());
@@ -698,7 +770,11 @@ impl AnchorAppliance for HostAppliance {
         })
     }
 
-    fn provision(&mut self, provisioning: &Provisioning) -> Result<AnchorPin, DsmError> {
+    fn provision(
+        &mut self,
+        provisioning: &Provisioning,
+        rehearsal: &RehearsalOwner,
+    ) -> Result<AnchorPin, DsmError> {
         {
             let mut anchor = held(&self.anchor);
             if !matches!(anchor.served, Served::Unprovisioned) {
@@ -707,11 +783,20 @@ impl AnchorAppliance for HostAppliance {
                     anchor_core::durable::DurableError::AlreadyProvisioned,
                 ));
             }
+            // Before a birth the board sets a counter a used chip left elsewhere back to `h0`,
+            // which only an uncaged chip allows (`ready_for_birth`); a trial never cages the chip,
+            // so a trial born again starts its counter over.
+            if anchor.install == anchor_core::enrollment::Install::ForTrial {
+                *held(&anchor.counter) = anchor.enrolled_counter;
+            }
+            anchor.births += 1;
             let d = DurableAppliance::provision(
                 &anchor.chip_birth(),
                 anchor.chip(),
                 anchor.rmemory.clone(),
                 provisioning.clone(),
+                &rehearsal_of(provisioning, rehearsal),
+                |digest| rehearsal.sign(digest).map_err(|e| e.to_string()),
             )
             .map_err(|refused| appliance_error("provision", refused.error))?;
             anchor.served = Served::Serving(Box::new(d));
@@ -722,6 +807,23 @@ impl AnchorAppliance for HostAppliance {
 
     fn recover(&mut self) -> Result<RecoverOutcome, DsmError> {
         self.with(|d| Ok(d.recover()))
+    }
+}
+
+/// The rehearsal owner `device` tries its anchor under: derived one way from the device's seed, as
+/// the wallet derives its own from its signing key.
+pub fn rehearsal_owner_of(device: &TestDevice) -> RehearsalOwner {
+    match RehearsalOwner::derive(&[device.seed; 32]) {
+        Ok(owner) => owner,
+        Err(e) => panic!("the device's rehearsal owner: {e}"),
+    }
+}
+
+/// `provisioning` under its rehearsal owner key: the device a try-run is born for.
+fn rehearsal_of(provisioning: &Provisioning, rehearsal: &RehearsalOwner) -> Provisioning {
+    Provisioning {
+        online_id_pk: rehearsal.public_key().to_vec(),
+        ..provisioning.clone()
     }
 }
 
@@ -885,15 +987,74 @@ mod model_correspondence {
         t
     }
 
+    /// The replay board's owner: the device key it is provisioned for, which authorizes every
+    /// prepare the replay makes.
+    fn owner() -> &'static dsm::crypto::sphincs::SphincsKeyPair {
+        static OWNER: std::sync::OnceLock<dsm::crypto::sphincs::SphincsKeyPair> =
+            std::sync::OnceLock::new();
+        OWNER.get_or_init(|| {
+            match dsm::crypto::sphincs::generate_keypair_from_seed(
+                dsm::crypto::sphincs::SphincsVariant::SPX256f,
+                &[0x66; 32],
+            ) {
+                Ok(kp) => kp,
+                Err(e) => panic!("the replay board's owner key: {e}"),
+            }
+        })
+    }
+
+    /// The owner authorizes preparing `t` on `board` with device roots `before`/`after`.
+    fn authorize(
+        board: &mut HostAppliance,
+        t: &OwnedTransition,
+        before: &[u8; 32],
+        after: &[u8; 32],
+    ) {
+        let bundle = match board.provisioned_pin() {
+            Ok(Some(pin)) => pin.bundle,
+            other => panic!("the board's pin: {other:?}"),
+        };
+        let root = match board.status() {
+            Ok(s) => s.root,
+            Err(e) => panic!("the board's frontier: {e}"),
+        };
+        let digest = anchor_core::appliance::owner_authorization_digest(
+            &bundle,
+            &root,
+            t.anchor_counter,
+            &transition_digest(&t.as_transition(), &CHALLENGE),
+            before,
+            after,
+        );
+        let signature = match dsm::crypto::sphincs::sign(
+            dsm::crypto::sphincs::SphincsVariant::SPX256f,
+            &owner().secret_key,
+            &digest,
+        ) {
+            Ok(sig) => sig,
+            Err(e) => panic!("the owner signs: {e}"),
+        };
+        if let Err(e) = board.authorize(&digest, &signature) {
+            panic!("the board takes its owner's authorization: {e}");
+        }
+    }
+
     /// A board born and provisioned the same way for every replay.
     fn board() -> HostAppliance {
         let mut board = HostAppliance::unprovisioned([0x3C; 32], H0);
-        if let Err(e) = board.provision(&Provisioning {
-            device_id: [0x77; 32],
-            online_id_pk: vec![0x66; 32],
-            policy_hash: dsm::types::operations::canonical_offline_bearer_policy().policy_id,
-            genesis_root: [0x11; 32],
-        }) {
+        let rehearsal = match RehearsalOwner::derive(b"the replay board's device") {
+            Ok(owner) => owner,
+            Err(e) => panic!("the replay board's rehearsal owner: {e}"),
+        };
+        if let Err(e) = board.provision(
+            &Provisioning {
+                device_id: [0x77; 32],
+                online_id_pk: owner().public_key.clone(),
+                policy_hash: dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+                genesis_root: [0x11; 32],
+            },
+            &rehearsal,
+        ) {
             panic!("the board provisions: {e}");
         }
         board
@@ -932,6 +1093,7 @@ mod model_correspondence {
                     let t = transition(frontier, model.counter, *c);
                     let before = [0x51u8.wrapping_add(model.counter as u8); 32];
                     let after = [0x61u8.wrapping_add(model.counter as u8); 32];
+                    authorize(&mut board, &t, &before, &after);
                     if let Err(e) = board.prepare(&t.as_transition(), &CHALLENGE, &before, &after) {
                         panic!("{path:?}: prepare refused: {e}");
                     }

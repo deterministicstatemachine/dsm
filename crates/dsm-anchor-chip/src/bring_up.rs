@@ -19,7 +19,7 @@ use anchor_core::durable::{ActiveStore, DurableError, TrialRecords};
 use anchor_core::enrollment::{ChipBirth, Install};
 use anchor_core::hash::{h, kdf};
 use anchor_core::identify::{ChipReading, ChipSurvey};
-use anchor_core::proto::{decode_request, pb};
+use anchor_core::proto::{decode_frame, pb};
 use anchor_core::rmem::{LayoutError, SlotMemory, SlottedStore};
 use anchor_core::service::{err, refusal, MAX_FRAME_LEN};
 use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
@@ -63,6 +63,18 @@ impl PartitionSig for SphincsPart {
     }
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
         matches!(dsm_sphincs::verify(PART_VARIANT, pk, digest, sig), Ok(valid) if valid)
+    }
+    fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+        matches!(dsm_sphincs::verify(dsm_sphincs::SphincsVariant::SPX256f, pk_on, digest, sig), Ok(valid) if valid)
+    }
+    fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(dsm_sphincs::SphincsVariant::SPX256f, seed)
+                .map_err(partition_error)?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
+    }
+    fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest).map_err(partition_error)
     }
 }
 
@@ -147,14 +159,18 @@ fn op_requires_measurement(op: i32) -> bool {
 /// anchor. Every refusal is an answer the host can read: a locked board has no debug port to ask.
 pub fn serve_measured(
     anchor: BoardAnchor,
-    frame: &[u8],
+    frame: Vec<u8>,
     measurement: Measurement,
 ) -> (BoardAnchor, Vec<u8>) {
-    // Only the op is kept: the decoded copy of a payment check is as large as its frame, and is
-    // dropped here, before the anchor decodes the frame for itself.
-    let op = match decode_request(frame) {
-        Ok(req) => req.op,
-        Err(_undecodable) => return (anchor, refusal(0, err::BAD_PROTO, "")),
+    let op = match anchor_core::proto::peek_op(&frame) {
+        // A payment check is one message larger than any head. Its op is read without decoding a
+        // copy of it, which would be as large as its frame; the anchor decodes it for itself. Any
+        // other frame is a head and, for an authorization, its signature after it.
+        Ok(op) if op == pb::Op::CheckPayment as i32 => op,
+        _ => match decode_frame(&frame) {
+            Ok((req, _signature)) => req.op,
+            Err(_undecodable) => return (anchor, refusal(0, err::BAD_PROTO, "")),
+        },
     };
     if measurement == Measurement::Differs && op_requires_measurement(op) {
         // §7.12 measurement failure => no counter movement, no TROPIC/host signature.
@@ -165,7 +181,7 @@ pub fn serve_measured(
         );
         return (anchor, refused);
     }
-    anchor.serve(frame)
+    anchor.serve_owned(frame)
 }
 
 /// Why the anchor did not come up, with the cause each step reported.

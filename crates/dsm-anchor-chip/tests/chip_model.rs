@@ -17,7 +17,7 @@ use anchor_core::hash::{h, kdf};
 use anchor_core::proto::pb;
 use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
 use anchor_core::service::err;
-use anchor_core::tropic::{ChipSig, HostSig, TropicError};
+use anchor_core::tropic::{ChipSig, HostSig, PartitionSig, TropicError};
 use anchor_core::try_run::TRIAL_PERMANENT;
 use control::Part;
 use support::{
@@ -43,7 +43,7 @@ fn booted(model: &ModelServer) -> Served {
 
 fn provisioned(model: &ModelServer) -> Served {
     let mut anchor = booted(model);
-    let answer = anchor.request(&provision_request());
+    let answer = rehearse(&mut anchor, &provision_request());
     assert!(answer.ok, "provisioning refused: error {}", answer.error);
     anchor
 }
@@ -206,6 +206,41 @@ fn arr32(bytes: &[u8]) -> [u8; 32] {
     }
 }
 
+/// A try-run or a provisioning, as the wallet drives it: the request and, when the anchor answers
+/// with the digest its rehearsal waits on, the rehearsal key's authorization of it. Answers what the
+/// anchor answered last.
+fn rehearse(anchor: &mut Served, request: &pb::ApplianceRequest) -> pb::ApplianceResponse {
+    let begun = anchor.request(request);
+    if begun.awaiting_authorization.is_empty() {
+        return begun;
+    }
+    let digest: [u8; 32] = match begun.awaiting_authorization.as_slice().try_into() {
+        Ok(digest) => digest,
+        Err(e) => panic!("a 32-byte digest: {e}"),
+    };
+    let signature = match anchor_chip::bring_up::SphincsPart::owner_sign(
+        &support::rehearsal_key().0,
+        &digest,
+    ) {
+        Ok(sig) => sig,
+        Err(e) => panic!("the rehearsal key signs: {e:?}"),
+    };
+    anchor.authorize(&digest, &signature)
+}
+
+/// The owner authorizes `prepare` for the anchor whose bundle is `bundle`, then sends it.
+fn prepare(
+    anchor: &mut Served,
+    prepare: &pb::ApplianceRequest,
+    bundle: &[u8],
+) -> pb::ApplianceResponse {
+    let (digest, signature) = support::authorization_for(prepare, bundle);
+    let authorized = anchor.authorize(&digest, &signature);
+    assert!(authorized.ok, "authorize: error {}", authorized.error);
+    anchor.request(prepare)
+}
+
+/// A prepare from `root` at `counter`, as the wallet sends it.
 fn prepare_request(root: [u8; 32], counter: u64) -> pb::ApplianceRequest {
     pb::ApplianceRequest {
         op: pb::Op::Prepare as i32,
@@ -320,7 +355,7 @@ fn a_birth_leaves_no_way_to_a_second_birth() {
     drop(provisioned(&model));
     assert_birth_closed(&model);
     let mut anchor = booted(&model);
-    let again = anchor.request(&provision_request());
+    let again = rehearse(&mut anchor, &provision_request());
     assert_eq!(again.error, err::ALREADY_PROVISIONED);
 }
 
@@ -333,7 +368,11 @@ fn a_spend_on_the_chip_verifies_at_the_receiver_and_moves_the_counter_once() {
         assert!(status.ok, "status: error {}", status.error);
         assert_eq!(status.active_anchor_counter, spent);
         let root = arr32(&status.active_root);
-        let prepared = anchor.request(&prepare_request(root, spent));
+        let prepared = prepare(
+            &mut anchor,
+            &prepare_request(root, spent),
+            &status.anchor_bundle,
+        );
         assert!(prepared.ok, "prepare: error {}", prepared.error);
         let committed = anchor.bare(pb::Op::Commit);
         assert!(committed.ok, "commit: error {}", committed.error);
@@ -421,7 +460,7 @@ fn a_power_cut_anywhere_in_a_birth_is_finished_by_the_next_boot() {
     let install = cuts_of(
         |_model| None,
         |model, _held| {
-            let answer = booted(model).request(&provision_request());
+            let answer = rehearse(&mut booted(model), &provision_request());
             assert!(answer.ok, "the install: error {}", answer.error);
         },
     );
@@ -436,7 +475,7 @@ fn a_power_cut_anywhere_in_a_birth_is_finished_by_the_next_boot() {
     at_every_cut(&cuts, |model, cut| {
         model.power.cut_after(cut);
         match model.boot() {
-            Ok(anchor) => drop(Served::new(anchor).request(&provision_request())),
+            Ok(anchor) => drop(rehearse(&mut Served::new(anchor), &provision_request())),
             Err(e) => assert!(
                 model.power.was_cut(),
                 "cut after {cut}: the boot refused though the power held: {e:?}"
@@ -456,7 +495,7 @@ fn a_power_cut_anywhere_in_a_birth_is_finished_by_the_next_boot() {
                 "cut after {cut}: {}",
                 status.detail
             );
-            let answer = anchor.request(&provision_request());
+            let answer = rehearse(&mut anchor, &provision_request());
             assert!(
                 answer.ok,
                 "cut after {cut}: provisioning refused: error {}",
@@ -483,26 +522,31 @@ fn a_power_cut_anywhere_in_a_birth_is_finished_by_the_next_boot() {
 /// the same release is emitted or none was, and the counter moves once.
 #[test]
 fn a_power_cut_anywhere_in_a_spend_keeps_one_release_and_one_counter_step() {
-    let spend = |anchor: &mut Served, root: [u8; 32]| {
-        let mut survived = anchor.request(&prepare_request(root, 0)).ok;
+    let spend = |anchor: &mut Served, root: [u8; 32], bundle: &[u8]| {
+        let mut survived = prepare(anchor, &prepare_request(root, 0), bundle).ok;
         survived = survived && anchor.bare(pb::Op::Commit).ok;
         survived = survived && anchor.bare(pb::Op::Emit).ok;
         survived && anchor.bare(pb::Op::Finalize).ok
     };
     let frontier = Cell::new(None);
+    let bundle = std::cell::RefCell::new(Vec::new());
     let cuts = cuts_of(
         |model| {
             let mut anchor = provisioned(model);
             let status = anchor.bare(pb::Op::Status);
             assert!(status.ok, "the anchor serves");
             frontier.set(Some(arr32(&status.active_root)));
+            bundle.replace(status.anchor_bundle);
             Some(anchor)
         },
         |_model, held| {
             let (Some(mut anchor), Some(root)) = (held, frontier.get()) else {
                 panic!("the setup hands over the anchor and its frontier");
             };
-            assert!(spend(&mut anchor, root), "a spend with the power on");
+            assert!(
+                spend(&mut anchor, root, &bundle.borrow()),
+                "a spend with the power on"
+            );
         },
     );
     assert!(cuts.len() > 50, "only {} cuts: not a spend", cuts.len());
@@ -514,7 +558,7 @@ fn a_power_cut_anywhere_in_a_spend_keeps_one_release_and_one_counter_step() {
         let root = arr32(&status.active_root);
 
         model.power.cut_after(cut);
-        spend(&mut anchor, root);
+        spend(&mut anchor, root, &status.anchor_bundle);
         model.power.steady();
         drop(anchor);
 
@@ -528,7 +572,11 @@ fn a_power_cut_anywhere_in_a_spend_keeps_one_release_and_one_counter_step() {
             // Nothing moved: the spend runs again from the same frontier.
             (0, 0) => {
                 assert_eq!(after.active_root, status.active_root, "cut after {cut}");
-                let prepared = anchor.request(&prepare_request(root, 0));
+                let prepared = prepare(
+                    &mut anchor,
+                    &prepare_request(root, 0),
+                    &status.anchor_bundle,
+                );
                 assert!(prepared.ok, "cut after {cut}: error {}", prepared.error);
                 let committed = anchor.bare(pb::Op::Commit);
                 assert!(committed.ok, "cut after {cut}: error {}", committed.error);
@@ -678,7 +726,7 @@ fn a_first_boot_writes_only_the_resident_key_and_the_counter() {
 #[test]
 fn a_try_run_reports_the_part_and_the_firmware_the_chip_says_it_has() {
     let model = ModelServer::start();
-    let run = booted(&model).request(&try_run_request());
+    let run = rehearse(&mut booted(&model), &try_run_request());
     assert!(run.ok, "the try-run: {:?}", run.try_run);
     let named = run.try_run.iter().any(|step| {
         step.name.contains("TR01-C2S-T200")
@@ -731,8 +779,11 @@ fn preparing_a_test_part_clears_its_one_bit_and_it_then_takes_an_install() {
         Err(e) => panic!("preparing a chip twice is one preparation: {e:?}"),
     }
     let mut anchor = booted(&model);
-    assert!(anchor.request(&try_run_request()).ok, "the try-run");
-    assert!(anchor.request(&provision_request()).ok, "the install");
+    assert!(rehearse(&mut anchor, &try_run_request()).ok, "the try-run");
+    assert!(
+        rehearse(&mut anchor, &provision_request()).ok,
+        "the install"
+    );
     drop(anchor);
     assert_birth_closed(&model);
     match model.prepare() {
@@ -841,7 +892,7 @@ fn the_trial_image_installs_with_nothing_permanent() {
     let first_boot = chip_state(&model);
 
     let mut anchor = trial_booted(&model);
-    let run = anchor.request(&try_run_request());
+    let run = rehearse(&mut anchor, &try_run_request());
     assert!(
         run.ok,
         "the trial's try-run: error {}: {:?}",
@@ -879,7 +930,7 @@ fn the_trial_image_installs_with_nothing_permanent() {
         "a trial that worked carries the transport's check"
     );
 
-    let installed = anchor.request(&provision_request());
+    let installed = rehearse(&mut anchor, &provision_request());
     assert!(
         installed.ok,
         "the trial install: error {}: {}",
@@ -888,7 +939,11 @@ fn the_trial_image_installs_with_nothing_permanent() {
     assert_eq!(installed.install, pb::InstallKind::InstallForTrial as i32);
     let status = anchor.bare(pb::Op::Status);
     assert_eq!(status.install, pb::InstallKind::InstallForTrial as i32);
-    let prepared = anchor.request(&prepare_request(arr32(&status.active_root), 0));
+    let prepared = prepare(
+        &mut anchor,
+        &prepare_request(arr32(&status.active_root), 0),
+        &status.anchor_bundle,
+    );
     assert!(prepared.ok, "prepare: error {}", prepared.error);
     let committed = anchor.bare(pb::Op::Commit);
     assert!(committed.ok, "commit: error {}", committed.error);
@@ -980,9 +1035,9 @@ fn a_reboot_whose_answer_fails_its_crc_still_reboots() {
     let model = ModelServer::start();
     model.power.garble_reboot_crc();
     let mut anchor = booted(&model);
-    let run = anchor.request(&try_run_request());
+    let run = rehearse(&mut anchor, &try_run_request());
     assert!(run.ok, "the try-run: {:?}", run.try_run);
-    let installed = anchor.request(&provision_request());
+    let installed = rehearse(&mut anchor, &provision_request());
     assert!(
         installed.ok,
         "the install: error {} {}",
@@ -1027,7 +1082,7 @@ fn a_try_run_goes_through_the_install_and_leaves_the_chip_as_it_found_it() {
     let before = chip_state(&model);
 
     let mut anchor = booted(&model);
-    let run = anchor.request(&try_run_request());
+    let run = rehearse(&mut anchor, &try_run_request());
     assert!(run.ok, "the try-run: error {} {:?}", run.error, run.try_run);
     for step in &run.try_run {
         assert!(step.passed, "{}: {}", step.name, step.detail);
@@ -1078,7 +1133,7 @@ fn a_try_run_goes_through_the_install_and_leaves_the_chip_as_it_found_it() {
     );
 
     let mut anchor = booted(&model);
-    let installed = anchor.request(&provision_request());
+    let installed = rehearse(&mut anchor, &provision_request());
     assert!(
         installed.ok,
         "the install: error {} {}",
@@ -1087,7 +1142,7 @@ fn a_try_run_goes_through_the_install_and_leaves_the_chip_as_it_found_it() {
     drop(anchor);
     assert_birth_closed(&model);
     assert_eq!(
-        booted(&model).request(&try_run_request()).error,
+        rehearse(&mut booted(&model), &try_run_request()).error,
         err::ALREADY_PROVISIONED,
         "an installed anchor has nothing to try"
     );
@@ -1108,7 +1163,7 @@ fn a_chip_that_fails_its_try_run_is_never_installed() {
     drop(session);
 
     let mut anchor = booted(&model);
-    let run = anchor.request(&try_run_request());
+    let run = rehearse(&mut anchor, &try_run_request());
     assert_eq!(run.error, err::TRY_RUN_FAILED, "{:?}", run.try_run);
     assert!(
         run.try_run
@@ -1118,7 +1173,7 @@ fn a_chip_that_fails_its_try_run_is_never_installed() {
         run.try_run
     );
 
-    let refused = anchor.request(&provision_request());
+    let refused = rehearse(&mut anchor, &provision_request());
     assert_eq!(refused.error, err::TRY_RUN_FAILED, "{}", refused.detail);
     assert!(refused.detail.contains("record"), "{}", refused.detail);
     drop(anchor);
@@ -1146,7 +1201,7 @@ fn a_power_cut_anywhere_in_a_try_run_costs_nothing() {
             let Some(mut anchor) = held else {
                 panic!("the setup hands over the anchor");
             };
-            let run = anchor.request(&try_run_request());
+            let run = rehearse(&mut anchor, &try_run_request());
             assert!(run.ok, "the try-run: {:?}", run.try_run);
         },
     );
@@ -1155,7 +1210,7 @@ fn a_power_cut_anywhere_in_a_try_run_costs_nothing() {
     at_every_cut(&cuts, |model, cut| {
         let mut anchor = booted(model);
         model.power.cut_after(cut);
-        drop(anchor.request(&try_run_request()));
+        drop(rehearse(&mut anchor, &try_run_request()));
         model.power.steady();
         drop(anchor);
 
@@ -1165,7 +1220,7 @@ fn a_power_cut_anywhere_in_a_try_run_costs_nothing() {
             err::NOT_PROVISIONED,
             "cut after {cut}"
         );
-        let installed = anchor.request(&provision_request());
+        let installed = rehearse(&mut anchor, &provision_request());
         assert!(
             installed.ok,
             "cut after {cut}: error {} {}",
@@ -1235,7 +1290,7 @@ fn repeated_power_cuts_never_cost_the_chip() {
         for _power_up in 0..12 {
             model.power.cut_after(every);
             if let Ok(anchor) = model.boot() {
-                Served::new(anchor).request(&provision_request());
+                rehearse(&mut Served::new(anchor), &provision_request());
             }
         }
         model.power.steady();
@@ -1243,7 +1298,7 @@ fn repeated_power_cuts_never_cost_the_chip() {
         let status = anchor.bare(pb::Op::Status);
         if !status.ok {
             assert_eq!(status.error, err::NOT_PROVISIONED, "every {every}");
-            let answer = anchor.request(&provision_request());
+            let answer = rehearse(&mut anchor, &provision_request());
             assert!(answer.ok, "every {every}: error {}", answer.error);
         }
         drop(anchor);
@@ -1266,7 +1321,11 @@ fn a_chip_with_a_used_counter_is_set_to_the_start_of_a_birth() {
     let status = anchor.bare(pb::Op::Status);
     assert_eq!(status.active_anchor_counter, 0);
     let root = arr32(&status.active_root);
-    let prepared = anchor.request(&prepare_request(root, 0));
+    let prepared = prepare(
+        &mut anchor,
+        &prepare_request(root, 0),
+        &status.anchor_bundle,
+    );
     assert!(prepared.ok, "prepare: error {}", prepared.error);
 }
 
@@ -1295,7 +1354,11 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
 
     let paid = self_payment(arr32(&status.active_root), 0, &challenge);
     served(
-        anchor.request(&prepare_of(&paid, &challenge, ROOT_BEFORE, ROOT_AFTER)),
+        prepare(
+            &mut anchor,
+            &prepare_of(&paid, &challenge, ROOT_BEFORE, ROOT_AFTER),
+            &status.anchor_bundle,
+        ),
         "pay",
     );
     served(anchor.bare(pb::Op::Commit), "commit");
@@ -1320,7 +1383,11 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
         "the check",
     );
     served(
-        anchor.request(&prepare_of(&t, &challenge, [0x71; 32], [0x72; 32])),
+        prepare(
+            &mut anchor,
+            &prepare_of(&t, &challenge, [0x71; 32], [0x72; 32]),
+            &status.anchor_bundle,
+        ),
         "the receive",
     );
     served(anchor.bare(pb::Op::Commit), "the receive commits");

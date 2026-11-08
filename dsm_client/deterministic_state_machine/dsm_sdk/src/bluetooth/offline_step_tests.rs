@@ -1313,6 +1313,130 @@ fn bearer_transfer(to: &OfflineDevice, amount: u64) -> Proposal {
     }
 }
 
+/// A trial install clears at the board's next boot, and the anchor comes back born again: the same
+/// identity, a new bundle, at its origin. The account that followed the earlier trial stands where
+/// its last payment left it under the old bundle: it is lost with the trial (owner, 2026-11-08).
+/// Here A's anchor is a trial, A loads 20 ERA and pays B 7 base units on it, and the board reboots.
+/// The status then offers the install again and names the ended trial; the install closes the old
+/// bundle's account, says what it held, and opens the new bundle's account at the anchor's origin,
+/// so cash in hand reads as none, not unknown. MUTATION CONTROL: dropping
+/// `close_the_accounts_earlier_anchors_left` from `anchor_install` leaves the old account standing
+/// and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_is_gone() {
+    let pair = Pair::boot(100, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let appliance =
+        crate::test_support::appliance::HostAppliance::unprovisioned_trial([0xC5; 32], 16);
+    // B receives, so it holds a board of its own (owner, 2026-11-07).
+    let _boards = crate::test_support::appliance::HostAppliance::install_each(vec![
+        (pair.a.device_id, appliance.clone()),
+        (
+            pair.b.device_id,
+            crate::test_support::appliance::HostAppliance::birth(&pair.b, [0xB5; 32], 16),
+        ),
+    ]);
+    a.device.enter();
+    let core = a.device.router().core_sdk.clone();
+    let installed = core.anchor_install().expect("the trial installs");
+    assert!(
+        installed.status.contains("trial anchor connected"),
+        "{}",
+        installed.status
+    );
+    let bundle = installed.bundle;
+    let loaded = a
+        .device
+        .invoke(
+            "wallet.loadOffline",
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: "20.00".to_string(),
+            },
+        )
+        .await;
+    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    pair.b.sync().await;
+    let operation = bearer_transfer(&b, 7);
+    bearer_payment_over_ble(&a, &b, &operation).await;
+    a.device.enter();
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let after_payment = core
+        .device_head()
+        .and_then(|head| head.offline_account(&bundle).cloned())
+        .expect("the account the payment moved");
+    assert_eq!(after_payment.counter(), 1, "the payment moved the account");
+    assert_eq!(
+        after_payment.allocation(&era),
+        Some(1993),
+        "20.00 ERA less 7 base units"
+    );
+
+    // The board loses power: the trial is over, and the anchor comes back unborn.
+    appliance.reboot();
+    let ended = core.anchor_appliance_status();
+    assert!(!ended.connected, "{}", ended.status);
+    assert!(ended.awaiting_install, "{}", ended.status);
+    assert!(
+        ended.status.contains("the trial on this anchor ended"),
+        "{}",
+        ended.status
+    );
+    // A second read says the same: the dead attachment was dropped, not read again and again.
+    assert!(core.anchor_appliance_status().awaiting_install);
+
+    let again = core
+        .anchor_install()
+        .expect("the anchor installs again, for a new trial");
+    assert!(again.connected, "{}", again.status);
+    assert_eq!(
+        again.anchor_id, installed.anchor_id,
+        "the same chip, the same identity"
+    );
+    assert_ne!(again.bundle, bundle, "born again: a new bundle");
+    assert!(
+        again
+            .status
+            .contains("what that account held is gone: 19.93 ERA"),
+        "{}",
+        again.status
+    );
+    let head = core.device_head().expect("a head");
+    assert!(
+        head.offline_account(&bundle).is_none(),
+        "the ended trial's account is closed"
+    );
+    assert!(
+        crate::storage::client_db::offline_spends::own_offline_hops(&bundle)
+            .expect("A's steps")
+            .is_empty(),
+        "the closed account's steps went with it: no boundary of it will ever carry them"
+    );
+    let fresh = head
+        .offline_account(&again.bundle)
+        .cloned()
+        .expect("the new bundle's account is open at the install");
+    assert_eq!(
+        fresh.counter(),
+        0,
+        "the account stands at the anchor's origin"
+    );
+    assert_eq!(fresh.frontier(), again.frontier_root, "and at its frontier");
+    assert!(fresh.allocations().is_empty(), "it holds nothing yet");
+    assert_eq!(
+        core.offline_allocation_of(&era),
+        Some(0),
+        "none of ERA, known: not unknown"
+    );
+
+    // The anchor and its account agree, so another status read changes nothing.
+    let standing = core.anchor_appliance_status();
+    assert!(standing.connected, "{}", standing.status);
+    assert!(!standing.status.contains("gone"), "{}", standing.status);
+}
+
 /// The value of ERA the entered device received offline and has not settled.
 fn pending_era() -> u64 {
     crate::storage::client_db::offline_receipts::pending_offline_value(
@@ -2002,9 +2126,16 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_and_spend_
     );
     let era_held = era_row_shown(&b).await;
     assert_eq!(
-        (era_held.available, era_held.offline_allocation),
-        (era_before.available, era_before.offline_allocation),
-        "the value received is in neither the balance nor the loaded allocation"
+        era_held.available, era_before.available,
+        "the value received is not in the balance"
+    );
+    assert_eq!(
+        era_held
+            .offline_allocation
+            .map(|allocation| allocation.base_units),
+        Some(0),
+        "nor in the loaded allocation: B's board, which stated its bundle at the receive, holds \
+         nothing loaded"
     );
     assert_eq!(pair.b.era_balance(), 0, "B is credited nothing online");
     let refused = pair.b.send(&pair.a, whole_era(1)).await;

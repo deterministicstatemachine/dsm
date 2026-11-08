@@ -11,7 +11,7 @@ use std::fmt::Debug;
 use std::rc::Rc;
 
 use anchor_core::anchor::Anchor as Firmware;
-use anchor_core::appliance::{Appliance, RecoverOutcome, Status};
+use anchor_core::appliance::{owner_authorization_digest, Appliance, RecoverOutcome, Status};
 use anchor_core::durable::{
     decode_anchor, encode_active, ActiveStore, DurableAppliance, DurableBootRefusal, DurableError,
     StoreError,
@@ -281,6 +281,18 @@ impl PartitionSig for Partition {
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
         matches!(dsm_sphincs::verify(PARTITION, pk, digest, sig), Ok(valid) if valid)
     }
+    fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+        matches!(dsm_sphincs::verify(dsm_sphincs::SphincsVariant::SPX256f, pk_on, digest, sig), Ok(valid) if valid)
+    }
+    fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(dsm_sphincs::SphincsVariant::SPX256f, seed)
+                .map_err(partition_error)?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
+    }
+    fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest).map_err(partition_error)
+    }
 }
 
 /// The SPHINCS+ failure, as the partition reports it.
@@ -300,6 +312,85 @@ fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
 }
 
 type Durable = DurableAppliance<Chip, Partition, RMemory>;
+
+/// The owner's device key, BLAKE3-SPHINCS+ SPX256f from a fixed seed: the key the anchors here are
+/// provisioned for, whose signature authorizes a prepare.
+fn owner_key() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEY: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| match Partition::owner_keygen(&[0x0A; 32]) {
+        Ok(key) => key,
+        Err(e) => panic!("the owner's key: {e:?}"),
+    })
+}
+
+/// The owner-authorization digest of preparing `t` on `a`, under challenge `rc` with device roots
+/// `before`/`after`, and the owner's signature of it.
+fn owner_authorization<T: Tropic, P: PartitionSig>(
+    a: &Appliance<T, P>,
+    t: &OwnedTransition,
+    rc: &[u8; 32],
+    before: &[u8; 32],
+    after: &[u8; 32],
+) -> ([u8; 32], Vec<u8>) {
+    let digest = owner_authorization_digest(
+        &a.bundle,
+        &a.active.root,
+        t.anchor_counter,
+        &transition_digest(&t.as_transition(), rc),
+        before,
+        after,
+    );
+    (digest, owner_sign(&digest))
+}
+
+fn owner_sign(digest: &[u8; 32]) -> Vec<u8> {
+    ok(
+        Partition::owner_sign(&owner_key().0, digest),
+        "the owner signs",
+    )
+}
+
+/// The owner authorizes preparing `t` on `a`.
+fn authorize<T: Tropic, P: PartitionSig>(
+    a: &mut Appliance<T, P>,
+    t: &OwnedTransition,
+    rc: &[u8; 32],
+    before: &[u8; 32],
+    after: &[u8; 32],
+) {
+    let (digest, signature) = owner_authorization(a, t, rc, before, after);
+    ok(a.authorize(&digest, &signature), "authorized");
+}
+
+/// An `OP_AUTHORIZE` frame as it goes over the wire: the message, then the signature after it.
+fn authorize_frame(digest: &[u8; 32], signature: &[u8]) -> Vec<u8> {
+    let mut frame = encode_request(&pb::ApplianceRequest {
+        op: pb::Op::Authorize as i32,
+        authorization_digest: digest.to_vec(),
+        ..Default::default()
+    });
+    frame.extend_from_slice(signature);
+    frame
+}
+
+/// The wallet's rehearsal owner key, derived apart from its device key: what a try-run's payment
+/// is authorized under.
+fn rehearsal_key() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEY: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| ok(Partition::owner_keygen(&[0x0B; 32]), "the rehearsal key"))
+}
+
+/// `owner` under its rehearsal key: the device a try-run is born for.
+fn rehearsal_of(owner: &Provisioning) -> Provisioning {
+    Provisioning {
+        online_id_pk: rehearsal_key().1.clone(),
+        ..owner.clone()
+    }
+}
+
+fn rehearsal_sign(digest: &[u8; 32]) -> Result<Vec<u8>, String> {
+    Partition::owner_sign(&rehearsal_key().0, digest).map_err(|e| format!("{e:?}"))
+}
 
 /// One anchor on its board: what its birth is made from, its chip's counter and its R-memory.
 struct Anchor {
@@ -355,7 +446,7 @@ impl Anchor {
     fn owner(&self) -> Provisioning {
         Provisioning {
             device_id: derive(&self.seed, "device id"),
-            online_id_pk: derive(&self.seed, "online key").to_vec(),
+            online_id_pk: owner_key().1.clone(),
             // Every anchor here is enrolled under one policy, as every wallet's is.
             policy_hash: POLICY,
             genesis_root: derive(&self.seed, "genesis root"),
@@ -384,6 +475,7 @@ impl Anchor {
                 "the anchor is born",
             ),
             Install::ForGood,
+            owner_key().1.clone(),
         )
     }
 
@@ -395,6 +487,8 @@ impl Anchor {
                 self.chip(),
                 self.rmemory.clone(),
                 self.owner(),
+                &rehearsal_of(&self.owner()),
+                rehearsal_sign,
             ),
             "provisioned",
         )
@@ -461,6 +555,8 @@ fn transition(prev: [u8; 32], u: u64) -> OwnedTransition {
 fn prepare(d: &mut Durable) -> Result<OwnedTransition, DurableError> {
     let a = d.appliance();
     let t = transition(a.active.root, a.active.anchor_counter);
+    let (digest, signature) = owner_authorization(a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+    d.authorize(&digest, &signature)?;
     d.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)?;
     Ok(t)
 }
@@ -667,7 +763,10 @@ fn the_counter_moves_once_per_candidate() {
     let mut a = anchor.appliance();
     let t = transition(a.active.root, 0);
     ok(
-        a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+        {
+            authorize(&mut a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+            a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)
+        },
         "prepared",
     );
     ok(a.commit_candidate(), "candidate");
@@ -684,7 +783,10 @@ fn the_counter_moves_once_per_candidate() {
     let mut b = other.appliance();
     let t = transition(b.active.root, 0);
     ok(
-        b.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+        {
+            authorize(&mut b, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+            b.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)
+        },
         "prepared",
     );
     ok(b.commit_candidate(), "candidate");
@@ -712,7 +814,7 @@ fn the_status_discloses_what_the_bundle_recomputes_from() {
     );
     let status = ok(decode_response(&frame), "a response");
     let recomputed = anchor_bundle(
-        &derive(&anchor.seed, "online key"),
+        &owner_key().1,
         &ok(<[u8; 32]>::try_from(status.pin_anchor_id.as_slice()), "32"),
         &status.pin_chip_pk,
         &status.pin_partition_pk,
@@ -742,7 +844,9 @@ fn an_anchor_is_provisioned_once() {
         &anchor.chip_birth(),
         anchor.chip(),
         anchor.rmemory.clone(),
-        stranger,
+        stranger.clone(),
+        &rehearsal_of(&stranger),
+        rehearsal_sign,
     )
     .map(|d| d.appliance().bundle)
     .map_err(|refused| refused.error);
@@ -840,6 +944,15 @@ impl PartitionSig for UnsigningPartition {
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
         Partition::part_verify(pk, digest, sig)
     }
+    fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+        Partition::owner_verify(pk_on, digest, sig)
+    }
+    fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        Partition::owner_keygen(seed)
+    }
+    fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        Partition::owner_sign(sk, digest)
+    }
 }
 
 /// No `σ^host` is put in place of one the partition could not make: the prepare is refused
@@ -859,16 +972,23 @@ fn a_partition_that_cannot_sign_prepares_nothing_and_says_so() {
             "the anchor is born",
         ),
         Install::ForGood,
+        owner_key().1.clone(),
     );
     let root = a.active.root;
     let t = transition(root, a.active.anchor_counter);
     assert_eq!(
-        a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)
-            .err(),
+        {
+            authorize(&mut a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+            a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)
+        }
+        .err(),
         Some(anchor_core::appliance::ApplianceError::Partition(
             PartitionError::SelfCheck
         ))
     );
+    let (digest, signature) = owner_authorization(&a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+    let authorized = anchor_core::service::handle(&mut a, &authorize_frame(&digest, &signature));
+    assert!(ok(decode_response(&authorized), "a response").ok);
     let frame = anchor_core::service::handle(
         &mut a,
         &encode_request(&pb::ApplianceRequest {
@@ -899,10 +1019,16 @@ fn provisioning_pb(p: &Provisioning) -> pb::Provisioning {
     }
 }
 
+/// A request frame. One naming a provisioning names the rehearsal key with it, as the wallet's does.
 fn frame(op: pb::Op, provision: Option<pb::Provisioning>) -> Vec<u8> {
+    let rehearsal_pk = match &provision {
+        Some(_) => rehearsal_key().1.clone(),
+        None => Vec::new(),
+    };
     encode_request(&pb::ApplianceRequest {
         op: op as i32,
         provision,
+        rehearsal_pk,
         ..Default::default()
     })
 }
@@ -910,6 +1036,23 @@ fn frame(op: pb::Op, provision: Option<pb::Provisioning>) -> Vec<u8> {
 fn served(anchor: Booted, request: &[u8]) -> (Booted, pb::ApplianceResponse) {
     let (anchor, answer) = anchor.serve(request);
     (anchor, ok(decode_response(&answer), "a response"))
+}
+
+/// A provisioning or a try-run over the wire, as the wallet drives it: the request, and when the
+/// anchor answers with the digest its rehearsal waits on, the rehearsal key's authorization of it.
+/// Answers what the anchor answered last.
+fn over_the_wire(
+    anchor: Booted,
+    op: pb::Op,
+    provision: pb::Provisioning,
+) -> (Booted, pb::ApplianceResponse) {
+    let (anchor, begun) = served(anchor, &frame(op, Some(provision)));
+    if begun.awaiting_authorization.is_empty() {
+        return (anchor, begun);
+    }
+    let digest: [u8; 32] = ok(begun.awaiting_authorization.as_slice().try_into(), "32");
+    let signature = ok(rehearsal_sign(&digest), "the rehearsal key signs");
+    served(anchor, &authorize_frame(&digest, &signature))
 }
 
 impl Anchor {
@@ -935,10 +1078,7 @@ fn an_unprovisioned_anchor_answers_only_a_provisioning_and_is_bound_to_its_owner
     assert_eq!(anchor.cage.get(), Cage::Open);
 
     let owner = anchor.owner();
-    let (booted, provisioned) = served(
-        booted,
-        &frame(pb::Op::Provision, Some(provisioning_pb(&owner))),
-    );
+    let (booted, provisioned) = over_the_wire(booted, pb::Op::Provision, provisioning_pb(&owner));
     assert_eq!(provisioned.error, anchor_core::service::err::NONE);
     assert_eq!(
         provisioned.anchor_bundle,
@@ -948,10 +1088,7 @@ fn an_unprovisioned_anchor_answers_only_a_provisioning_and_is_bound_to_its_owner
 
     let mut stranger = owner;
     stranger.device_id = derive(&[0x31; 32], "device id");
-    let (booted, again) = served(
-        booted,
-        &frame(pb::Op::Provision, Some(provisioning_pb(&stranger))),
-    );
+    let (booted, again) = over_the_wire(booted, pb::Op::Provision, provisioning_pb(&stranger));
     assert_eq!(again.error, anchor_core::service::err::ALREADY_PROVISIONED);
     let (_, status) = served(booted, &frame(pb::Op::Status, None));
     assert_eq!(status.anchor_bundle, anchor.appliance().bundle.to_vec());
@@ -965,15 +1102,139 @@ fn a_provisioning_the_store_does_not_take_leaves_the_anchor_provisionable() {
     let anchor = Anchor::new(0x32);
     let booted = anchor.boot();
     anchor.board.cut(Cut::AtWrite(1));
-    let request = frame(pb::Op::Provision, Some(provisioning_pb(&anchor.owner())));
-    let (booted, cut) = served(booted, &request);
+    let (booted, cut) = over_the_wire(booted, pb::Op::Provision, provisioning_pb(&anchor.owner()));
     assert_eq!(cut.error, anchor_core::service::err::STORE);
     assert_eq!(*anchor.rmemory.slot.borrow(), None);
     assert_eq!(anchor.cage.get(), Cage::Open);
     anchor.board.power_up();
-    let (_, provisioned) = served(booted, &request);
+    let (_, provisioned) =
+        over_the_wire(booted, pb::Op::Provision, provisioning_pb(&anchor.owner()));
     assert_eq!(provisioned.error, anchor_core::service::err::NONE);
     assert_eq!(anchor.cage.get(), Cage::Closed);
+}
+
+/// The owner's authorization lives in memory: a reboot drops it, and a prepare after one is refused
+/// until the owner authorizes again.
+#[test]
+fn an_authorization_does_not_outlive_a_reboot() {
+    let anchor = Anchor::new(0x40);
+    let mut d = anchor.born();
+    let a = d.appliance();
+    let t = transition(a.active.root, a.active.anchor_counter);
+    let (digest, signature) = owner_authorization(a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+    ok(d.authorize(&digest, &signature), "authorized");
+    drop(d);
+    let mut restored = ok(anchor.reboot(), "serves");
+    assert_eq!(
+        restored.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+        Err(DurableError::Appliance(
+            anchor_core::appliance::ApplianceError::OwnerUnauthorized
+        ))
+    );
+    ok(restored.authorize(&digest, &signature), "authorized again");
+    ok(
+        restored.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+        "prepared",
+    );
+}
+
+/// A try-run is two requests: begun, the anchor answers with the digest its rehearsal payment waits
+/// on; the rehearsal key's authorization of it finishes the run, through the same check a real
+/// payment's authorization goes through. The chip and the store are left as they were found.
+#[test]
+fn a_try_run_waits_on_its_owners_authorization_and_finishes_on_it() {
+    let anchor = Anchor::new(0x41);
+    let (booted, begun) = served(
+        anchor.boot(),
+        &frame(pb::Op::TryRun, Some(provisioning_pb(&anchor.owner()))),
+    );
+    assert!(begun.ok, "begun: error {} {}", begun.error, begun.detail);
+    assert_eq!(begun.awaiting_authorization.len(), 32);
+    assert!(begun.try_run.iter().all(|step| step.passed));
+    let digest: [u8; 32] = ok(begun.awaiting_authorization.as_slice().try_into(), "32");
+
+    let signature = ok(rehearsal_sign(&digest), "the rehearsal key signs");
+    let (booted, finished) = served(booted, &authorize_frame(&digest, &signature));
+    assert!(
+        finished.ok,
+        "finished: error {} {}",
+        finished.error, finished.detail
+    );
+    assert_eq!(finished.op, pb::Op::Authorize as i32);
+    let names: Vec<&str> = finished.try_run.iter().map(|s| s.name.as_str()).collect();
+    for name in [
+        "a payment its owner did not authorize signs nothing",
+        "its owner authorizes the payment",
+        "the chip and the board sign a payment, and its record is written",
+        "the chip's counter goes back to its start",
+    ] {
+        assert!(names.contains(&name), "{name} is not among {names:?}");
+    }
+    assert!(
+        finished.try_run.iter().all(|step| step.passed),
+        "{:?}",
+        finished.try_run
+    );
+    assert_eq!(anchor.chip_counter(), H0, "the counter went back");
+    assert_eq!(*anchor.rmemory.slot.borrow(), None, "nothing provisioned");
+    assert_eq!(anchor.cage.get(), Cage::Open);
+    let (_, status) = served(booted, &frame(pb::Op::Status, None));
+    assert_eq!(status.error, anchor_core::service::err::NOT_PROVISIONED);
+}
+
+/// While a try-run waits on its authorization, any other request ends it: the request is not
+/// served, the answer says why, and the anchor is as it was found. An authorization naming another
+/// digest, or signed by another key, fails the run the same way.
+#[test]
+fn a_waiting_try_run_is_ended_by_any_other_request_and_by_an_authorization_not_its_own() {
+    let anchor = Anchor::new(0x42);
+    let (booted, begun) = served(
+        anchor.boot(),
+        &frame(pb::Op::TryRun, Some(provisioning_pb(&anchor.owner()))),
+    );
+    assert_eq!(begun.awaiting_authorization.len(), 32);
+    let (booted, ended) = served(booted, &frame(pb::Op::Status, None));
+    assert_eq!(ended.error, anchor_core::service::err::REHEARSAL_ENDED);
+    assert!(ended
+        .try_run
+        .iter()
+        .any(|step| step.name == "its owner authorizes the payment" && !step.passed));
+    assert_eq!(anchor.chip_counter(), H0);
+    assert_eq!(*anchor.rmemory.slot.borrow(), None);
+    let (booted, status) = served(booted, &frame(pb::Op::Status, None));
+    assert_eq!(status.error, anchor_core::service::err::NOT_PROVISIONED);
+
+    // Signed by the owner's device key, not the rehearsal key: the rehearsal was born under the
+    // rehearsal key, so the device key authorizes nothing in it.
+    let (booted, begun) = served(
+        booted,
+        &frame(pb::Op::TryRun, Some(provisioning_pb(&anchor.owner()))),
+    );
+    let digest: [u8; 32] = ok(begun.awaiting_authorization.as_slice().try_into(), "32");
+    let (booted, failed) = served(booted, &authorize_frame(&digest, &owner_sign(&digest)));
+    assert_eq!(failed.error, anchor_core::service::err::TRY_RUN_FAILED);
+    assert!(failed
+        .try_run
+        .iter()
+        .any(|step| step.name == "its owner authorizes the payment" && !step.passed));
+
+    // Naming another digest: not even verified.
+    let (booted, begun) = served(
+        booted,
+        &frame(pb::Op::TryRun, Some(provisioning_pb(&anchor.owner()))),
+    );
+    let digest: [u8; 32] = ok(begun.awaiting_authorization.as_slice().try_into(), "32");
+    let other = derive(&[0x43; 32], "another digest");
+    let signature = ok(rehearsal_sign(&other), "signs");
+    let (_, failed) = served(booted, &authorize_frame(&other, &signature));
+    assert_eq!(failed.error, anchor_core::service::err::TRY_RUN_FAILED);
+    assert_ne!(other, digest, "the other digest is another");
+    assert!(failed
+        .try_run
+        .iter()
+        .any(|step| step.name == "the authorization names the payment begun" && !step.passed));
+    assert_eq!(anchor.chip_counter(), H0);
+    assert_eq!(*anchor.rmemory.slot.borrow(), None);
 }
 
 /// A provisioning that names no online key binds nothing: it is refused and nothing is born.
@@ -1012,7 +1273,10 @@ fn recovery_completes_only_a_prepared_record_whose_signatures_verify() {
         let mut a = anchor.appliance();
         let t = transition(a.active.root, a.active.anchor_counter);
         ok(
-            a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+            {
+                authorize(&mut a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+                a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)
+            },
             "prepared",
         );
         a
@@ -1047,7 +1311,10 @@ fn recovery_over_the_wire_names_the_committed_releases_successor_frontier() {
     let mut a = anchor.appliance();
     let t = transition(a.active.root, a.active.anchor_counter);
     ok(
-        a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+        {
+            authorize(&mut a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+            a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)
+        },
         "prepared",
     );
     ok(a.commit(), "committed");
@@ -1142,6 +1409,19 @@ fn payment(
     }
 }
 
+/// The owner authorizes preparing `t` on `d`, which then prepares it.
+fn authorized_prepare(
+    d: &mut Durable,
+    t: &OwnedTransition,
+    rc: &[u8; 32],
+    before: &[u8; 32],
+    after: &[u8; 32],
+) -> Result<(), DurableError> {
+    let (digest, signature) = owner_authorization(d.appliance(), t, rc, before, after);
+    d.authorize(&digest, &signature)?;
+    d.prepare(&t.as_transition(), rc, before, after)
+}
+
 /// The payer's anchor releases a payment to `recipient` under `challenge`: prepare, commit, emit and
 /// finalize. Answers the release.
 fn pay(
@@ -1159,7 +1439,7 @@ fn pay(
         challenge,
     );
     ok(
-        d.prepare(&t.as_transition(), challenge, &ROOT_BEFORE, &ROOT_AFTER),
+        authorized_prepare(d, &t, challenge, &ROOT_BEFORE, &ROOT_AFTER),
         "the payer's anchor prepares",
     );
     ok(d.commit(), "the payer's anchor commits");
@@ -1297,8 +1577,9 @@ fn a_receive_commits_only_the_payment_checked_under_its_own_challenge() {
         Err(DurableError::Appliance(ApplianceError::PaymentUnchecked))
     ));
     ok(
-        b.prepare(
-            &t.as_transition(),
+        authorized_prepare(
+            &mut b,
+            &t,
             &challenge,
             &RECEIVER_ROOT_BEFORE,
             &RECEIVER_ROOT_AFTER,
@@ -1472,8 +1753,9 @@ fn an_open_challenge_and_a_committed_receive_survive_a_power_cut() {
     ));
     ok(check(&mut b, &release, &shown), "checked again");
     ok(
-        b.prepare(
-            &t.as_transition(),
+        authorized_prepare(
+            &mut b,
+            &t,
             &challenge,
             &RECEIVER_ROOT_BEFORE,
             &RECEIVER_ROOT_AFTER,
@@ -1487,8 +1769,9 @@ fn an_open_challenge_and_a_committed_receive_survive_a_power_cut() {
         "a cancel keeps it"
     );
     ok(
-        b.prepare(
-            &t.as_transition(),
+        authorized_prepare(
+            &mut b,
+            &t,
             &challenge,
             &RECEIVER_ROOT_BEFORE,
             &RECEIVER_ROOT_AFTER,
@@ -1529,12 +1812,12 @@ fn a_challenge_is_drawn_only_when_ready() {
 /// appliance holding no record.
 #[test]
 fn a_large_frame_is_served_only_as_a_payment_check_on_a_ready_appliance() {
-    use anchor_core::service::{handle, MAX_REQUEST_BYTES};
+    use anchor_core::service::{handle, REQUEST_HEAD_MAX};
     let receiver = Anchor::new(0x59);
     let mut b = receiver.born();
     let big = pb::ApplianceRequest {
         op: pb::Op::Prepare as i32,
-        sender_device_root_before: vec![0x51; MAX_REQUEST_BYTES],
+        sender_device_root_before: vec![0x51; REQUEST_HEAD_MAX],
         ..Default::default()
     };
     let answer = ok(
@@ -1554,7 +1837,7 @@ fn a_large_frame_is_served_only_as_a_payment_check_on_a_ready_appliance() {
     };
     let frame = encode_request(&request);
     assert!(
-        frame.len() > MAX_REQUEST_BYTES,
+        frame.len() > REQUEST_HEAD_MAX,
         "a payment check is a large frame"
     );
     let answer = ok(decode_response(&handle(&mut b, &frame)), "an answer");

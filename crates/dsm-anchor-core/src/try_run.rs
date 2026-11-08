@@ -21,12 +21,13 @@ use alloc::vec::Vec;
 
 use prost::Message;
 
-use crate::appliance::{RecoverOutcome, Status};
-use crate::durable::{ActiveStore, DurableAppliance, TrialRecords};
+use crate::appliance::{owner_authorization_digest, ApplianceError, RecoverOutcome, Status};
+use crate::durable::{ActiveStore, DurableAppliance, DurableError, TrialRecords};
 use crate::enrollment::{ChipBirth, Install, Provisioning};
 use crate::hash::h;
 use crate::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
 use crate::tropic::{PartitionSig, Tropic};
+use crate::util::ct_eq_32;
 
 /// What installing makes permanent, for the wallet to show before it asks.
 pub const PERMANENT: [&str; 5] = [
@@ -180,38 +181,236 @@ fn step<V, E: core::fmt::Debug>(
 /// this is the code that serves, and the image carries one copy of it.
 type Lent<'a, P> = DurableAppliance<Box<dyn Tropic + 'a>, P, Box<dyn ActiveStore + 'a>>;
 
-/// A whole payment, as a real anchor makes it, over the trial slots.
+/// A try-run begun: what it went through so far, and the authorization its payment waits on. The
+/// anchor holds no owner's key and never signs as one, so the rehearsal's payment is authorized by
+/// the rehearsal owner, the wallet, over this digest, through the same check a real payment's is.
+pub struct Begun {
+    pub steps: Vec<TryStep>,
+    /// The owner-authorization digest of the rehearsal's payment, when the run reached it.
+    pub awaiting: Option<[u8; 32]>,
+}
+
+/// The challenge the rehearsal's payment is made under.
+fn challenge() -> [u8; 32] {
+    h("DSM/anchor/try-run/v1", &[b"challenge"])
+}
+
+/// The device roots the rehearsal's payment carries.
+fn device_roots() -> ([u8; 32], [u8; 32]) {
+    (
+        h("DSM/anchor/try-run/v1", &[b"device root before"]),
+        h("DSM/anchor/try-run/v1", &[b"device root after"]),
+    )
+}
+
+/// The owner-authorization digest of the rehearsal's payment on `anchor`, standing where it does.
+fn awaiting_of<P: PartitionSig>(anchor: &Lent<'_, P>) -> [u8; 32] {
+    let a = anchor.appliance();
+    let transition = try_transition(a.active.root, &challenge());
+    let (before, after) = device_roots();
+    owner_authorization_digest(
+        &a.bundle,
+        &a.active.root,
+        transition.anchor_counter,
+        &transition_digest(&transition.as_transition(), &challenge()),
+        &before,
+        &after,
+    )
+}
+
+/// Begin a try-run of an install of `chip` for the device `rehearsal` names: the trial slots are
+/// cleared and the anchor is born into them. What it needs next is its owner's authorization of its
+/// payment ([`Begun::awaiting`]), which [`finish`] takes.
+pub fn begin<T: Tropic, P: PartitionSig, S: ActiveStore>(
+    chip: &ChipBirth,
+    tropic: &mut T,
+    store: &mut S,
+    rehearsal: &Provisioning,
+) -> Begun {
+    begin_in::<P>(chip, &mut *tropic, &mut *store, rehearsal)
+}
+
+fn begin_in<P: PartitionSig>(
+    chip: &ChipBirth,
+    tropic: &mut dyn Tropic,
+    store: &mut dyn ActiveStore,
+    rehearsal: &Provisioning,
+) -> Begun {
+    let mut steps = Vec::new();
+    let cleared = step(
+        &mut steps,
+        "the slots a try-run writes to are clear",
+        store.trial_clear(),
+    );
+    let awaiting = cleared.and_then(|()| {
+        step(
+            &mut steps,
+            "the anchor's identity derives and its first record is written",
+            Lent::<P>::born(
+                chip,
+                Box::new(&mut *tropic),
+                Box::new(TrialRecords(&mut *store)),
+                rehearsal.clone(),
+            )
+            .map_err(|refused| refused.error),
+        )
+        .map(|anchor| awaiting_of(&anchor))
+    });
+    Begun { steps, awaiting }
+}
+
+/// Finish a try-run begun with [`begin`]. With the owner's `authorization` of its payment, the
+/// payment is made as a real anchor makes it, and the anchor restored from its record as a boot
+/// does; without one (none arrived), the payment is not made and the run says so. Either way the
+/// chip and the store go back as they were found.
+pub fn finish<T: Tropic, P: PartitionSig, S: ActiveStore>(
+    chip: &ChipBirth,
+    tropic: &mut T,
+    store: &mut S,
+    begun: Begun,
+    authorization: Option<Vec<u8>>,
+) -> TryRun {
+    finish_in::<P>(chip, &mut *tropic, &mut *store, begun, authorization)
+}
+
+fn finish_in<P: PartitionSig>(
+    chip: &ChipBirth,
+    tropic: &mut dyn Tropic,
+    store: &mut dyn ActiveStore,
+    begun: Begun,
+    authorization: Option<Vec<u8>>,
+) -> TryRun {
+    let mut steps = begun.steps;
+    let mut release_bytes = 0;
+    if let Some(awaiting) = begun.awaiting {
+        // How far it reached is in its steps.
+        spend::<P>(
+            chip,
+            &mut *tropic,
+            &mut *store,
+            &awaiting,
+            authorization,
+            &mut steps,
+            &mut release_bytes,
+        );
+    }
+    // Whatever the spend reached, the chip and the store go back as they were found.
+    step(
+        &mut steps,
+        "everything the payment wrote is erased",
+        store.trial_clear(),
+    );
+    step(
+        &mut steps,
+        "the chip's counter goes back to its start",
+        tropic.set_counter_back(),
+    );
+    let sample = h("DSM/anchor/try-run/v1", &[b"own slots"]);
+    step(
+        &mut steps,
+        "a record's own slots take a write, give it back and erase",
+        store.try_record(&sample),
+    );
+    steps.extend(tropic.rehearse_birth());
+    TryRun {
+        steps,
+        release_bytes,
+    }
+}
+
+/// A try-run in one, for a host that holds the rehearsal owner's key: begun, its payment authorized
+/// by `sign` over the digest it waits on, and finished.
+pub fn rehearse_with<T: Tropic, P: PartitionSig, S: ActiveStore>(
+    chip: &ChipBirth,
+    tropic: &mut T,
+    store: &mut S,
+    rehearsal: &Provisioning,
+    sign: impl FnOnce(&[u8; 32]) -> Result<Vec<u8>, String>,
+) -> TryRun {
+    let mut begun = begin::<T, P, S>(chip, tropic, store, rehearsal);
+    let authorization = match begun.awaiting.map(|digest| sign(&digest)) {
+        Some(Ok(signature)) => Some(signature),
+        Some(Err(why)) => {
+            steps_push_unauthorized(&mut begun, why);
+            None
+        }
+        None => None,
+    };
+    finish::<T, P, S>(chip, tropic, store, begun, authorization)
+}
+
+/// The rehearsal owner did not authorize the payment: the run says so and waits for nothing.
+fn steps_push_unauthorized(begun: &mut Begun, why: String) {
+    begun
+        .steps
+        .push(TryStep::new("its owner authorizes the payment", Err(why)));
+    begun.awaiting = None;
+}
+
+/// A whole payment, as a real anchor makes it, over the trial slots: from the record [`begin`]
+/// wrote, with its owner's `authorization` of the payment that record awaits.
 fn spend<P: PartitionSig>(
     chip: &ChipBirth,
     tropic: &mut dyn Tropic,
     store: &mut dyn ActiveStore,
-    provisioning: &Provisioning,
+    awaiting: &[u8; 32],
+    authorization: Option<Vec<u8>>,
     steps: &mut Vec<TryStep>,
     release_bytes: &mut usize,
 ) -> Option<()> {
     let next_root = {
         let mut anchor = step(
             steps,
-            "the anchor's identity derives and its first record is written",
-            Lent::<P>::born(
+            "the anchor restores from its first record",
+            Lent::<P>::restore(
                 chip,
                 Box::new(&mut *tropic),
                 Box::new(TrialRecords(&mut *store)),
-                provisioning.clone(),
-            )
-            .map_err(|refused| refused.error),
+            ),
         )?;
-        let challenge = h("DSM/anchor/try-run/v1", &[b"challenge"]);
-        let transition = try_transition(anchor.appliance().active.root, &challenge);
+        step(
+            steps,
+            "boot recovery accepts a fresh anchor",
+            anchor.recover_at_boot(),
+        )?;
+        let digest = awaiting_of(&anchor);
+        step(
+            steps,
+            "the payment awaiting authorization is the one begun",
+            if ct_eq_32(&digest, awaiting) {
+                Ok(())
+            } else {
+                Err("the anchor stands elsewhere")
+            },
+        )?;
+        let transition = try_transition(anchor.appliance().active.root, &challenge());
+        let (before, after) = device_roots();
+        step(
+            steps,
+            "a payment its owner did not authorize signs nothing",
+            match anchor.prepare(&transition.as_transition(), &challenge(), &before, &after) {
+                Err(DurableError::Appliance(ApplianceError::OwnerUnauthorized)) => Ok(()),
+                other => Err(format!("an unauthorized prepare answered {other:?}")),
+            },
+        )?;
+        // The signature is let go once the anchor has taken the authorization: what follows signs
+        // with the heap no longer holding it.
+        step(
+            steps,
+            "its owner authorizes the payment",
+            match authorization {
+                Some(mut signature) => {
+                    let taken = anchor.authorize(&digest, &signature);
+                    crate::util::zeroize_vec(&mut signature);
+                    taken
+                }
+                None => Err(DurableError::TryRun("no authorization arrived".to_string())),
+            },
+        )?;
         step(
             steps,
             "the chip and the board sign a payment, and its record is written",
-            anchor.prepare(
-                &transition.as_transition(),
-                &challenge,
-                &h("DSM/anchor/try-run/v1", &[b"device root before"]),
-                &h("DSM/anchor/try-run/v1", &[b"device root after"]),
-            ),
+            anchor.prepare(&transition.as_transition(), &challenge(), &before, &after),
         )?;
         step(
             steps,
@@ -274,58 +473,6 @@ fn spend<P: PartitionSig>(
         },
     )?;
     Some(())
-}
-
-/// Go through an install of `chip` for the device `provisioning` names, with the permanent parts
-/// substituted. Reports every step it reached, and leaves the chip and the store as it found them.
-pub fn rehearse<T: Tropic, P: PartitionSig, S: ActiveStore>(
-    chip: &ChipBirth,
-    tropic: &mut T,
-    store: &mut S,
-    provisioning: &Provisioning,
-) -> TryRun {
-    let mut steps = Vec::new();
-    let mut release_bytes = 0;
-    // What an earlier try-run a power cut stopped left behind.
-    if step(
-        &mut steps,
-        "the slots a try-run writes to are clear",
-        store.trial_clear(),
-    )
-    .is_some()
-    {
-        // How far it reached is in its steps.
-        spend::<P>(
-            chip,
-            &mut *tropic,
-            &mut *store,
-            provisioning,
-            &mut steps,
-            &mut release_bytes,
-        );
-    }
-    // Whatever the spend reached, the chip and the store go back as they were found.
-    step(
-        &mut steps,
-        "everything the payment wrote is erased",
-        store.trial_clear(),
-    );
-    step(
-        &mut steps,
-        "the chip's counter goes back to its start",
-        tropic.set_counter_back(),
-    );
-    let sample = h("DSM/anchor/try-run/v1", &[b"own slots"]);
-    step(
-        &mut steps,
-        "a record's own slots take a write, give it back and erase",
-        store.try_record(&sample),
-    );
-    steps.extend(tropic.rehearse_birth());
-    TryRun {
-        steps,
-        release_bytes,
-    }
 }
 
 #[cfg(test)]

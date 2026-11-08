@@ -129,6 +129,10 @@ fn hex_short(b: &[u8; 32]) -> String {
     s
 }
 
+/// What the accounts closed at an install held, per closed bundle: per asset, what was loaded and
+/// what was received offline ([`crate::types::offline_account::OfflineAccount::held`]).
+pub type ClosedAccounts = BTreeMap<[u8; 32], BTreeMap<[u8; 32], u64>>;
+
 /// A device head Core produced: the genesis head, a head restored from this
 /// device's own persisted encoding, or a head one of Core's transitions made
 /// from a realized head. The realization predicate is the only way a state
@@ -205,6 +209,17 @@ impl RealizedHead {
         self.0
             .open_offline_account(bundle, frontier, counter)
             .map(Self)
+    }
+
+    /// This head with every offline account but `keep`'s closed, and what
+    /// each closed account held: see
+    /// [`DeviceState::close_offline_accounts_except`].
+    pub fn close_offline_accounts_except(
+        &self,
+        keep: &[u8; 32],
+    ) -> Result<(RealizedHead, ClosedAccounts), DsmError> {
+        let (state, lost) = self.0.close_offline_accounts_except(keep)?;
+        Ok((Self(state), lost))
     }
 
     /// One offline boundary from this head: see
@@ -1810,6 +1825,42 @@ impl DeviceState {
         })
     }
 
+    /// Close every offline account but `keep`'s: what the install of an
+    /// anchor does to the accounts earlier anchors of this device left. A
+    /// device has one anchor; an account under another bundle followed an
+    /// earlier birth of it, and that birth is over — a trial cleared at its
+    /// board's next boot, so the anchor came back born again, with a new
+    /// bundle, at its origin. Its account is lost with the trial (owner,
+    /// 2026-11-08): it is closed, and what it held is returned so the wallet
+    /// can say it. The device tree is rebuilt over what remains.
+    pub(crate) fn close_offline_accounts_except(
+        &self,
+        keep: &[u8; 32],
+    ) -> Result<(Self, ClosedAccounts), DsmError> {
+        let mut offline_accounts = self.offline_accounts.clone();
+        let mut lost = BTreeMap::new();
+        for (bundle, account) in &self.offline_accounts {
+            if bundle != keep {
+                // What it loaded and what it received offline alike (owner, 2026-11-07: received
+                // money waits in the account for its unload).
+                lost.insert(*bundle, account.held()?);
+                offline_accounts.remove(bundle);
+            }
+        }
+        if lost.is_empty() {
+            return Ok((self.clone(), lost));
+        }
+        let smt = Self::device_tree(&self.tips, &self.extra_leaves, &offline_accounts);
+        Ok((
+            Self {
+                smt,
+                offline_accounts,
+                ..self.clone()
+            },
+            lost,
+        ))
+    }
+
     /// The offline account of `bundle`, if it is open.
     pub fn offline_account(&self, bundle: &[u8; 32]) -> Option<&OfflineAccount> {
         self.offline_accounts.get(bundle)
@@ -2201,7 +2252,7 @@ pub(crate) mod tests {
     /// authorize its own transitions — and a test that cannot sign is a test that
     /// cannot exercise the gate. Same 64-byte length (SPX256f pk = 2n), so every other
     /// fixture is unaffected.
-    fn test_keypair() -> &'static crate::crypto::signatures::SignatureKeyPair {
+    pub(crate) fn test_keypair() -> &'static crate::crypto::signatures::SignatureKeyPair {
         static KP: std::sync::OnceLock<crate::crypto::signatures::SignatureKeyPair> =
             std::sync::OnceLock::new();
         KP.get_or_init(|| {

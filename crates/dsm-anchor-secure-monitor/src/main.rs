@@ -328,7 +328,7 @@ fn request_part(mb: &mut Mailbox) -> u32 {
     if frame.len() < total {
         return SG_MORE;
     }
-    let Some(mut frame) = request.take() else {
+    let Some(frame) = request.take() else {
         return SG_ERR_STATE;
     };
     // A serve runs SPHINCS+ and many chip commands: it gets the watchdog's longest budget, renewed
@@ -339,9 +339,8 @@ fn request_part(mb: &mut Mailbox) -> u32 {
     } else {
         anchor_chip::bring_up::Measurement::Differs
     };
-    let response = unsafe { anchor_glue::service_request(&frame, measurement) };
-    // §4.9 zeroize the Secure request copy.
-    zeroize(&mut frame);
+    // §4.9: the Secure request copy goes to the anchor, which wipes it when it lets it go.
+    let response = unsafe { anchor_glue::service_request(frame, measurement) };
     unsafe { *core::ptr::addr_of_mut!(RESPONSE) = Some(response) };
     response_part(mb, 0)
 }

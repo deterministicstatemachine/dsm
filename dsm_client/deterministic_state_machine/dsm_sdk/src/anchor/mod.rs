@@ -15,5 +15,5 @@ pub mod appliance_client;
 pub use anchor_core::appliance::RecoverOutcome;
 pub use appliance_client::{
     recovery_action, AnchorAppliance, AnchorPin, ApplianceStatus, RecoveryAction, TryRunReport,
-    TryRunStep,
+    TryRunStep, RehearsalOwner,
 };

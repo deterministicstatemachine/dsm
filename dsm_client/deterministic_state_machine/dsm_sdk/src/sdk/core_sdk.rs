@@ -11,7 +11,7 @@
 //! All ambiguous features fail-closed with `DsmError`.
 
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use dsm::core::state_machine::StateMachine;
 use dsm::core::token::policy::TokenPolicySystem;
@@ -1883,7 +1883,10 @@ impl CoreSDK {
             .as_ref()
             .map(|attached| attached.pin.bundle)?;
         let sm = self.state_machine.lock();
-        sm.device_head()?.offline_allocation(&bundle, asset)
+        let account = sm.device_head()?.offline_account(&bundle)?;
+        // An open account keeps an entry only for an asset it holds some of: no entry is none of
+        // it, which is known, not unknown. What it holds is the sum of its entries for the asset.
+        Some(account.allocations().get(asset).into_iter().sum())
     }
 
     /// Get the canonical DeviceState head (§2.2 SMT root).
@@ -2046,7 +2049,13 @@ impl CoreSDK {
                 "this anchor is already installed for this device",
             ));
         }
-        connected_appliance()?.try_run(&self.anchor_provisioning()?)
+        connected_appliance()?.try_run(&self.anchor_provisioning()?, &self.rehearsal_owner()?)
+    }
+
+    /// The rehearsal owner a try-run's payment is authorized under: derived from this device's
+    /// signing key, apart from it ([`crate::anchor::RehearsalOwner`]).
+    fn rehearsal_owner(&self) -> Result<crate::anchor::RehearsalOwner, DsmError> {
+        crate::anchor::RehearsalOwner::derive(&crate::sdk::signing_authority::current_secret_key()?)
     }
 
     /// Install the connected anchor for this device: for good, or as a trial on the trial image,
@@ -2054,7 +2063,7 @@ impl CoreSDK {
     /// to: the anchor goes through its try-run again first and refuses, with nothing written, unless
     /// it passes. One already provisioned for anything else is refused.
     pub fn anchor_install(&self) -> Result<AnchorStatusSnapshot, DsmError> {
-        {
+        let lost = {
             let mut guard = self.anchor_appliance.lock();
             if guard.is_some() {
                 return Err(DsmError::invalid_operation(
@@ -2062,19 +2071,86 @@ impl CoreSDK {
                 ));
             }
             let mut appliance = connected_appliance()?;
-            let pin = match appliance.provision(&self.anchor_provisioning()?) {
-                Ok(pin) => pin,
-                // The anchor's answer is what was lost, or it is refused. What the anchor now
-                // holds decides which: a burned chip is never reported as a failed install.
-                Err(why) => match pin_after_a_lost_answer(appliance.as_mut()) {
-                    Some(pin) => pin,
-                    None => return Err(why),
-                },
-            };
+            let pin =
+                match appliance.provision(&self.anchor_provisioning()?, &self.rehearsal_owner()?) {
+                    Ok(pin) => pin,
+                    // The anchor's answer is what was lost, or it is refused. What the anchor now
+                    // holds decides which: a burned chip is never reported as a failed install.
+                    Err(why) => match pin_after_a_lost_answer(appliance.as_mut()) {
+                        Some(pin) => pin,
+                        None => return Err(why),
+                    },
+                };
             self.require_anchor_for_this_device(&pin)?;
+            let standing = appliance.status()?;
+            let lost = self.close_the_accounts_earlier_anchors_left(&pin.bundle)?;
+            // The new anchor's account opens at its origin now, so the wallet knows what it holds
+            // offline from the first read: none of anything, which is known, not unknown.
+            self.require_offline_account_at(&pin.bundle, &standing.root, standing.anchor_counter)?;
             guard.replace(AttachedAnchor { appliance, pin });
+            lost
+        };
+        let mut snap = self.anchor_appliance_status();
+        if !lost.is_empty() {
+            snap.status = format!(
+                "{} The earlier trial on it ended at its last boot and its account is closed; what \
+                 that account held is gone: {}.",
+                snap.status,
+                lost_words(&lost)
+            );
         }
-        Ok(self.anchor_appliance_status())
+        Ok(snap)
+    }
+
+    /// A device has one anchor. An offline account under a bundle other than the one being
+    /// installed followed an earlier birth of it: a trial cleared at its board's next boot, so the
+    /// anchor came back born again, under a new bundle, at its origin, and the account that
+    /// followed the trial stands where its last payment left it. That account is lost with the
+    /// trial (owner, 2026-11-08): every such account is closed and what it held is returned, so the
+    /// wallet can say it. An anchor installed for good is never born again, so nothing of its own
+    /// is ever closed here; only what a trial before it left.
+    fn close_the_accounts_earlier_anchors_left(
+        &self,
+        bundle: &[u8; 32],
+    ) -> Result<BTreeMap<[u8; 32], u64>, DsmError> {
+        let mut sm = self.state_machine.lock();
+        let Some(ds) = sm.device_head() else {
+            return Ok(BTreeMap::new());
+        };
+        let (closed, lost) = ds.close_offline_accounts_except(bundle)?;
+        if lost.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let bundles: Vec<[u8; 32]> = lost.keys().copied().collect();
+        let payments = crate::storage::client_db::offline_spends::close_offline_accounts(
+            &closed, &bundles,
+        )
+        .map_err(|e| {
+            DsmError::storage(
+                format!("offline account: persist the accounts closed at an install: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        if payments > 0 {
+            log::warn!(
+                "[anchor.install] {payments} payment(s) received offline into a closed account went \
+                 with it"
+            );
+        }
+        sm.set_device_head(closed);
+        let mut held = BTreeMap::new();
+        for (ended, allocations) in &lost {
+            log::warn!(
+                "[anchor.install] the account of an earlier birth of this anchor (bundle {}) is \
+                 closed; what it held is gone: {}",
+                crate::util::text_id::encode_base32_crockford(ended),
+                lost_words(allocations)
+            );
+            for (asset, units) in allocations {
+                *held.entry(*asset).or_insert(0) += units;
+            }
+        }
+        Ok(held)
     }
 
     /// What this device provisions an anchor with: its device id, its online key, the
@@ -2187,23 +2263,12 @@ impl CoreSDK {
             Ok(a) => a,
             Err(e) => {
                 log::info!("[anchor.status] no anchor appliance attached: {e}");
-                let awaiting_install = matches!(
-                    connected_appliance().and_then(|mut blank| blank.provisioned_pin()),
-                    Ok(None)
-                );
-                return AnchorStatusSnapshot {
-                    awaiting_install,
-                    status: if awaiting_install {
-                        "a new anchor is connected. Nothing about it is permanent yet.".to_string()
-                    } else {
-                        format!("no anchor appliance connected: {e}")
-                    },
-                    ..Default::default()
-                };
+                return unattached_status(&e.to_string(), Attachment::Never);
             }
         };
         let pin = attached.pin.clone();
-        match attached.appliance.status() {
+        let standing = attached.appliance.status();
+        match standing {
             Ok(s) => AnchorStatusSnapshot {
                 connected: true,
                 anchor_id: pin.anchor_id,
@@ -2226,17 +2291,13 @@ impl CoreSDK {
                 ..Default::default()
             },
             Err(e) => {
-                log::warn!("[anchor.status] appliance attached but OP_STATUS failed: {e}");
-                AnchorStatusSnapshot {
-                    connected: false,
-                    anchor_id: pin.anchor_id,
-                    pk_chip: pin.pk_chip,
-                    partition_pk: pin.partition_pk,
-                    enrolled_counter: pin.enrolled_counter,
-                    bundle: pin.bundle,
-                    status: "anchor present but status read failed".into(),
-                    ..Default::default()
-                }
+                // The attached anchor no longer answers: the board lost power, or was unplugged. A
+                // trial ends at the board's next boot, so the attachment is dropped and the board
+                // is read again as what it now is; an installed anchor still there is attached
+                // again on the next read.
+                log::warn!("[anchor.status] the attached anchor no longer answers its status: {e}");
+                *guard = None;
+                unattached_status(&e.to_string(), Attachment::Lost)
             }
         }
     }
@@ -2354,6 +2415,22 @@ impl CoreSDK {
             })?
             .appliance;
 
+        // This device authorizes exactly this prepare, under the key the anchor was provisioned for:
+        // the anchor signs for its owner, not for whoever holds the link to it.
+        let digest = anchor_core::appliance::owner_authorization_digest(
+            &staged.pin.bundle,
+            &staged.appliance_prev_root,
+            staged.transition.anchor_counter,
+            &anchor_core::root_advance::transition_digest(
+                &staged.transition.as_transition(),
+                &receiver_challenge,
+            ),
+            &sender_device_root_before,
+            &sender_device_root_after,
+        );
+        let secret = crate::sdk::signing_authority::current_secret_key()?;
+        let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &digest)?;
+        app.authorize(&digest, &signature)?;
         app.prepare(
             &staged.transition.as_transition(),
             &receiver_challenge,
@@ -2520,10 +2597,10 @@ impl CoreSDK {
     }
 
     /// The receiver's board's receive commit, the hardware half of the receive (owner, 2026-11-07):
-    /// the board checks the payer's release itself, then PREPARE → COMMIT → EMIT of the staged
-    /// receive over the device roots the receiver's advance moves between. Answers the receive's
-    /// release, its certificate the acknowledgement. Takes only the anchor's lock: it runs inside the
-    /// receiver's advance, under the state machine's.
+    /// the board checks the payer's release itself, this device authorizes the receive, then
+    /// PREPARE → COMMIT → EMIT of the staged receive over the device roots the receiver's advance
+    /// moves between. Answers the receive's release, its certificate the acknowledgement. Takes only
+    /// the anchor's lock: it runs inside the receiver's advance, under the state machine's.
     pub fn receive_offline_bearer(
         &self,
         staged: &StagedBearerTransition,
@@ -2539,6 +2616,22 @@ impl CoreSDK {
             .ok_or_else(|| DsmError::state_machine("offline receive: the anchor is not attached"))?
             .appliance;
         app.check_payment(paid, payer)?;
+        // This device authorizes exactly this receive, under the key its board was provisioned for,
+        // as it authorizes a release: the board signs for its owner, not for whoever holds the link.
+        let digest = anchor_core::appliance::owner_authorization_digest(
+            &staged.pin.bundle,
+            &staged.appliance_prev_root,
+            staged.transition.anchor_counter,
+            &anchor_core::root_advance::transition_digest(
+                &staged.transition.as_transition(),
+                &receiver_challenge,
+            ),
+            &device_root_before,
+            &device_root_after,
+        );
+        let secret = crate::sdk::signing_authority::current_secret_key()?;
+        let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &digest)?;
+        app.authorize(&digest, &signature)?;
         app.prepare(
             &staged.transition.as_transition(),
             &receiver_challenge,
@@ -2627,6 +2720,71 @@ fn pin_after_a_lost_answer(
         }
     }
     None
+}
+
+/// Whether an anchor had been attached in this process when a status read found none answering.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attachment {
+    /// None was ever attached: a board connected now is new to this wallet.
+    Never,
+    /// One was attached and stopped answering: a board connected now and unprovisioned is a trial
+    /// that ended at its last boot.
+    Lost,
+}
+
+/// The status of a wallet with no anchor attached: whether the connected board, if any, awaits its
+/// install, and the words for it.
+fn unattached_status(why: &str, attachment: Attachment) -> AnchorStatusSnapshot {
+    let awaiting_install = matches!(
+        connected_appliance().and_then(|mut blank| blank.provisioned_pin()),
+        Ok(None)
+    );
+    let status = if !awaiting_install {
+        format!("no anchor appliance connected: {why}")
+    } else if attachment == Attachment::Lost {
+        "the trial on this anchor ended at its last boot: what was loaded on it and not unloaded \
+         before then is gone. Its try-run and install are offered again."
+            .to_string()
+    } else {
+        "a new anchor is connected. Nothing about it is permanent yet.".to_string()
+    };
+    AnchorStatusSnapshot {
+        awaiting_install,
+        status,
+        ..Default::default()
+    }
+}
+
+/// What an ended trial's account held, in each token's own units, for the wallet to say.
+fn lost_words(lost: &BTreeMap<[u8; 32], u64>) -> String {
+    lost.iter()
+        .map(|(asset, units)| {
+            let era = dsm::core::token::token_state_manager::era_policy_commit();
+            // A token the registry cannot name is said in base units, with why.
+            let named: Result<(String, u32), String> = if *asset == era {
+                dsm::core::token::era_policy::era_policy()
+                    .map(|policy| ("ERA".to_string(), policy.decimals))
+                    .map_err(|e| e.to_string())
+            } else {
+                match crate::storage::client_db::token_registry::get_token_by_policy_commit(asset) {
+                    Ok(Some(row)) => Ok((row.ticker, row.decimals)),
+                    Ok(None) => Err("no registry entry for the token".to_string()),
+                    Err(e) => Err(format!("token registry unreadable: {e}")),
+                }
+            };
+            match named {
+                Ok((ticker, decimals)) => format!(
+                    "{} {ticker}",
+                    crate::handlers::wallet_routes::format_base_units_for_display(*units, decimals)
+                ),
+                Err(why) => format!(
+                    "{units} base units of {} ({why})",
+                    crate::util::text_id::encode_base32_crockford(asset)
+                ),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn connected_appliance() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {

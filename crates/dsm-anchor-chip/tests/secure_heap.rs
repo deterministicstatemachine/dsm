@@ -8,10 +8,13 @@ mod support;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anchor_chip::{MAX_REQUEST_BYTES, SECURE_HEAP_BYTES};
+use anchor_chip::bring_up::Measurement;
+use anchor_chip::SECURE_HEAP_BYTES;
 use anchor_core::proto::{encode_request, pb};
 use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
-use support::{provision_request, try_run_request, ModelServer, Served};
+use anchor_core::service::REQUEST_HEAD_MAX;
+use anchor_core::tropic::PartitionSig;
+use support::{authorization_for, provision_request, try_run_request, ModelServer, Served};
 
 struct Counted;
 
@@ -83,12 +86,44 @@ fn every_operation_fits_the_secure_heap() {
         Ok(anchor) => Served::new(anchor),
         Err(e) => panic!("the anchor did not come up: {e:?}"),
     };
-    let run = peak_of("try-run", ceiling, || anchor.request(&try_run_request()));
+    // A try-run is two requests; the wallet's signing between them is the host's work, measured
+    // nowhere here. The anchor's two halves are: the birth into the trial slots, and the payment
+    // with the authorization's frame held and checked.
+    let rehearse = |anchor: &mut Served, request: pb::ApplianceRequest, what: &str| {
+        let begun = peak_of(&format!("{what}, begun"), ceiling, || {
+            anchor.request(&request)
+        });
+        assert!(
+            begun.ok,
+            "{what} begun: error {} {}",
+            begun.error, begun.detail
+        );
+        let digest: [u8; 32] = match begun.awaiting_authorization.as_slice().try_into() {
+            Ok(digest) => digest,
+            Err(e) => panic!("a 32-byte digest: {e}"),
+        };
+        let signature = match anchor_chip::bring_up::SphincsPart::owner_sign(
+            &support::rehearsal_key().0,
+            &digest,
+        ) {
+            Ok(sig) => sig,
+            Err(e) => panic!("the rehearsal key signs: {e:?}"),
+        };
+        drop(begun);
+        let frame = support::authorize_frame(&digest, &signature);
+        drop(signature);
+        peak_of(&format!("{what}, authorized and finished"), ceiling, || {
+            anchor.frame(frame, Measurement::Matches)
+        })
+    };
+    let run = rehearse(&mut anchor, try_run_request(), "try-run");
     assert!(run.ok, "the try-run: {:?}", run.try_run);
     drop(run);
-    let answer = peak_of("provision, its own try-run first", ceiling, || {
-        anchor.request(&provision_request())
-    });
+    let answer = rehearse(
+        &mut anchor,
+        provision_request(),
+        "provision, its own try-run first",
+    );
     assert!(answer.ok, "provision: error {}", answer.error);
     drop(answer);
     let status = peak_of("status", ceiling, || anchor.bare(pb::Op::Status));
@@ -98,6 +133,7 @@ fn every_operation_fits_the_secure_heap() {
         Err(e) => panic!("a 32-byte frontier: {e}"),
     };
 
+    let bundle = status.anchor_bundle.clone();
     let prepare = |proof_bytes| pb::ApplianceRequest {
         op: pb::Op::Prepare as i32,
         transition: Some(transition(root, 0, proof_bytes).to_pb()),
@@ -106,11 +142,23 @@ fn every_operation_fits_the_secure_heap() {
         sender_device_root_after: vec![0x52; 32],
         ..Default::default()
     };
+    // The owner's authorization: signed by the host outside what is measured; the frame, the one
+    // copy the monitor holds, and its check are the anchor's.
+    let authorize = |anchor: &mut Served, request: &pb::ApplianceRequest, name: &str| {
+        let (digest, signature) = authorization_for(request, &bundle);
+        let frame = support::authorize_frame(&digest, &signature);
+        drop(signature);
+        let answer = peak_of(name, ceiling, || anchor.frame(frame, Measurement::Matches));
+        assert!(answer.ok, "authorize: error {}", answer.error);
+    };
 
-    // The largest request the monitor takes, then cancelled so the spend below is the wallet's.
+    // The largest request message the monitor takes, then cancelled so the spend below is the
+    // wallet's. Its authorization first: the frame the monitor holds, one signature long, and its
+    // check.
     let framing = encode_request(&prepare(0)).len();
-    let largest = prepare(MAX_REQUEST_BYTES - framing - 8);
-    assert!(encode_request(&largest).len() <= MAX_REQUEST_BYTES);
+    let largest = prepare(REQUEST_HEAD_MAX - framing - 8);
+    assert!(encode_request(&largest).len() <= REQUEST_HEAD_MAX);
+    authorize(&mut anchor, &largest, "authorize, the largest request's");
     let answer = peak_of("prepare, the largest request", ceiling, || {
         anchor.request(&largest)
     });
@@ -118,8 +166,10 @@ fn every_operation_fits_the_secure_heap() {
     let answer = anchor.bare(pb::Op::Cancel);
     assert!(answer.ok, "cancel: error {}", answer.error);
 
+    let wallets = prepare(0);
+    authorize(&mut anchor, &wallets, "authorize, as the wallet sends it");
     let answer = peak_of("prepare, as the wallet sends it", ceiling, || {
-        anchor.request(&prepare(0))
+        anchor.request(&wallets)
     });
     assert!(answer.ok, "prepare: error {}", answer.error);
     let answer = peak_of("commit", ceiling, || anchor.bare(pb::Op::Commit));
@@ -152,10 +202,9 @@ fn every_operation_fits_the_secure_heap() {
         "the challenge",
     );
     let paid = self_payment(thirty_two(&status.active_root, "h"), 1, &challenge);
-    served(
-        anchor.request(&prepare_of(&paid, &challenge, [0x51; 32], [0x52; 32])),
-        "pay",
-    );
+    let pay = prepare_of(&paid, &challenge, [0x51; 32], [0x52; 32]);
+    authorize(&mut anchor, &pay, "authorize, the payment's");
+    served(anchor.request(&pay), "pay");
     served(anchor.bare(pb::Op::Commit), "commit");
     let release = match served(anchor.bare(pb::Op::Emit), "emit").release {
         Some(release) => match release.to_release() {
@@ -184,11 +233,10 @@ fn every_operation_fits_the_secure_heap() {
     let t = receive_of(&paid, root, 2, &challenge);
     drop(paid);
     drop(check);
+    let receive = prepare_of(&t, &challenge, [0x71; 32], [0x72; 32]);
+    authorize(&mut anchor, &receive, "authorize, the receive's");
     peak_of("receive prepare", ceiling, || {
-        served(
-            anchor.request(&prepare_of(&t, &challenge, [0x71; 32], [0x72; 32])),
-            "receive",
-        )
+        served(anchor.request(&receive), "receive")
     });
     peak_of("receive commit", ceiling, || {
         served(anchor.bare(pb::Op::Commit), "commit")

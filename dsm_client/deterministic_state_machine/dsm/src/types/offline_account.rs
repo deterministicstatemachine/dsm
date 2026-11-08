@@ -520,6 +520,22 @@ impl OfflineAccount {
         &self.allocations
     }
 
+    /// Everything the account holds, per asset: what was loaded for paying and what it received
+    /// offline, which waits there for its unload (owner, 2026-11-07). What a closed account takes
+    /// with it.
+    pub fn held(&self) -> Result<BTreeMap<[u8; 32], u64>, DsmError> {
+        let mut held = self.allocations.clone();
+        for (asset, amount) in &self.received {
+            let total = held.entry(*asset).or_insert(0);
+            *total = total.checked_add(*amount).ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "an offline account holds more of an asset than a u64 counts",
+                )
+            })?;
+        }
+        Ok(held)
+    }
+
     /// What the account holds received of `asset`, if it ever received any.
     pub fn received(&self, asset: &[u8; 32]) -> Option<u64> {
         self.received.get(asset).copied()
@@ -1302,6 +1318,11 @@ mod tests {
             "the loaded allocation is untouched"
         );
         assert_eq!(account.received(&ASSET), Some(2), "received 7, unloaded 5");
+        assert_eq!(
+            account.held().expect("what the account holds"),
+            BTreeMap::from([(ASSET, 12)]),
+            "it holds what was loaded and what was received: a closed account takes both"
+        );
         assert_eq!(account.counter(), 2, "each receive moves the counter once");
         assert_eq!(account.frontier(), [0x03; 32]);
         let rebuilt = OfflineAccount::restore(

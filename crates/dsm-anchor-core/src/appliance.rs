@@ -53,6 +53,10 @@ pub enum ApplianceError {
     Tropic(TropicError),
     /// The partition could not sign `σ^host`; nothing is prepared.
     Partition(PartitionError),
+    /// No authorization of the owner's device key `pk_on` stands for this prepare: none was taken,
+    /// the one taken was for another anchor, frontier or payment ([`owner_authorization_digest`]),
+    /// or a signature did not verify. Nothing is signed, nothing is prepared.
+    OwnerUnauthorized,
     /// A receive was asked for with no challenge open, or under another challenge than the open one.
     NoOpenChallenge,
     /// A receive names no payment this appliance checked, or another than the one it checked.
@@ -137,6 +141,32 @@ pub enum BootRecoveryRefusal {
     OutcomeAfterReset(RecoverOutcome),
 }
 
+/// The digest the owner's device key signs to authorize one prepare: this anchor's bundle `B`,
+/// the frontier `h_i` and counter `u_i` it advances from, the transition digest `D_{i+1}` (which
+/// binds the transition and the receiver's challenge) and the device roots `R_i`/`R_{i+1}` the
+/// release will carry. Bound to all of them, a signature authorizes this one prepare on this one
+/// anchor: replayed elsewhere, or after the anchor has moved, it authorizes nothing.
+pub fn owner_authorization_digest(
+    bundle: &[u8; 32],
+    prev_frontier: &[u8; 32],
+    anchor_counter: u64,
+    transition_digest: &[u8; 32],
+    sender_device_root_before: &[u8; 32],
+    sender_device_root_after: &[u8; 32],
+) -> [u8; 32] {
+    crate::hash::h(
+        crate::domain::OWNER_AUTHORIZATION_V1,
+        &[
+            bundle,
+            prev_frontier,
+            &anchor_counter.to_le_bytes(),
+            transition_digest,
+            sender_device_root_before,
+            sender_device_root_after,
+        ],
+    )
+}
+
 /// The v2 software-authority / hardware-identity appliance for one active frontier.
 pub struct Appliance<T: Tropic, P: PartitionSig> {
     pub h0: u32,
@@ -153,6 +183,13 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     pub active: Active,
     /// What its install made: for good, or a trial.
     pub install: crate::enrollment::Install,
+    /// The device key `pk_on` the anchor was provisioned for (`B` binds `H(pk_on)`): the one key
+    /// whose signature authorizes a prepare.
+    pub owner_pk: Vec<u8>,
+    /// The owner's standing authorization: the digest of the one prepare it allows
+    /// ([`Self::authorize`]), consumed by the prepare that claims it. Held in memory only: a reboot
+    /// drops it, and the owner authorizes again.
+    authorized: Option<[u8; 32]>,
     /// The owner's DSM device id its bundle binds: a payment it receives must name it.
     pub owner_device_id: [u8; 32],
     /// The policy its bundle binds: a payer's anchor must be enrolled under it too.
@@ -168,8 +205,8 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
 }
 
 impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
-    /// Construct from a [`Birth`] result, installed as `install` says. Starts at the genesis
-    /// frontier `h_0`, counter 0.
+    /// Construct from a [`Birth`] result for the owner whose device key is `owner_pk`, installed as
+    /// `install` says. Starts at the genesis frontier `h_0`, counter 0.
     pub fn new(
         tropic: T,
         h0: u32,
@@ -177,6 +214,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         partition_device_id: [u8; 32],
         birth: Birth,
         install: crate::enrollment::Install,
+        owner_pk: Vec<u8>,
     ) -> Self {
         Self {
             h0,
@@ -188,6 +226,8 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             birth_commitment: birth.birth_commitment,
             active: Active::genesis(birth.genesis_frontier),
             install,
+            owner_pk,
+            authorized: None,
             owner_device_id: birth.device_id,
             policy_hash: birth.policy_hash,
             checked: None,
@@ -195,6 +235,24 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             tropic,
             _p: PhantomData,
         }
+    }
+
+    /// The owner's authorization of the next prepare: `signature`, under the device key the anchor
+    /// was provisioned for, over `digest`, the [`owner_authorization_digest`] of the prepare it
+    /// allows. Taken only while Ready and held until a prepare consumes it; a later one replaces it,
+    /// and one that does not verify drops any held. The digest is checked when the prepare arrives,
+    /// against what this anchor recomputes from its own state and the prepare's contents, so an
+    /// authorization for another anchor, another frontier or another payment allows nothing here.
+    pub fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), ApplianceError> {
+        if self.active.status != Status::Ready {
+            return Err(ApplianceError::WrongState);
+        }
+        if !P::owner_verify(&self.owner_pk, digest, signature) {
+            self.authorized = None;
+            return Err(ApplianceError::OwnerUnauthorized);
+        }
+        self.authorized = Some(*digest);
+        Ok(())
     }
 
     /// Close the chip to a second birth ([`Tropic::close_birth`]).
@@ -222,6 +280,10 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// DSM layer (which owns the tree); the appliance signs over them. The receiver
     /// independently verifies their SMT inclusion, so a wrong root yields a release the
     /// receiver rejects fail-closed.
+    ///
+    /// Refused too unless the owner's standing authorization ([`Self::authorize`]) is for this very
+    /// prepare: the anchor serves its owner, not whoever holds the link to it. The authorization is
+    /// consumed by this call whatever its outcome.
     pub fn prepare(
         &mut self,
         t: &Transition,
@@ -277,6 +339,21 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         let h_next = anchor_root_advance(&self.active.root, &d);
         if !ct_eq_32(&h_next, t.next_root) {
             return Err(ApplianceError::NextRootMismatch);
+        }
+
+        // The owner authorized exactly this prepare, from this frontier and counter, or nothing
+        // is signed. The authorization is consumed here whatever follows: it serves one prepare.
+        let expected = owner_authorization_digest(
+            &self.bundle,
+            &self.active.root,
+            t.anchor_counter,
+            &d,
+            sender_device_root_before,
+            sender_device_root_after,
+        );
+        match self.authorized.take() {
+            Some(authorized) if ct_eq_32(&authorized, &expected) => {}
+            _ => return Err(ApplianceError::OwnerUnauthorized),
         }
 
         let m = root_advance_message(

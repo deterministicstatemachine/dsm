@@ -30,6 +30,8 @@ pub enum ProtoError {
     BadOp,
     /// prost failed to decode the frame bytes.
     Decode,
+    /// The frame, or its message, is longer than the anchor reads.
+    FrameTooLarge,
 }
 
 /// Upper bound on the opaque `action_fields` (a small structured tagged-union).
@@ -202,6 +204,31 @@ impl OfflineRelease {
 /// Decode an `ApplianceRequest` frame (firmware/secure-core side).
 pub fn decode_request(bytes: &[u8]) -> Result<pb::ApplianceRequest, ProtoError> {
     pb::ApplianceRequest::decode(bytes).map_err(|_| ProtoError::Decode)
+}
+
+/// A request frame as the anchor reads it: its message, and the owner's signature after it when
+/// the frame carries one. A frame longer than one signature ends in that signature (an
+/// `OP_AUTHORIZE`'s), which is verified from the frame itself and copied nowhere. A frame longer
+/// than a request's largest message that is not one, and a signature after any other op, are
+/// refused unread, so no request makes the anchor hold more than it budgets for.
+pub fn decode_frame(frame: &[u8]) -> Result<(pb::ApplianceRequest, &[u8]), ProtoError> {
+    use crate::service::{MAX_FRAME_LEN, OWNER_AUTHORIZATION_BYTES, REQUEST_HEAD_MAX};
+    if frame.len() > MAX_FRAME_LEN {
+        return Err(ProtoError::FrameTooLarge);
+    }
+    let (head, signature) = if frame.len() > OWNER_AUTHORIZATION_BYTES {
+        frame.split_at(frame.len() - OWNER_AUTHORIZATION_BYTES)
+    } else {
+        frame.split_at(frame.len())
+    };
+    if head.len() > REQUEST_HEAD_MAX {
+        return Err(ProtoError::FrameTooLarge);
+    }
+    let req = decode_request(head)?;
+    if !signature.is_empty() && req.op != pb::Op::Authorize as i32 {
+        return Err(ProtoError::Decode);
+    }
+    Ok((req, signature))
 }
 
 /// Encode an `ApplianceResponse` (firmware/secure-core side).

@@ -6,24 +6,26 @@
 // fingerprint beside the person's name, and says when another contact goes by
 // the same name: a name is what the person chose, the device is who is paid.
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useWallet } from '../../contexts/WalletContext';
 import { useContacts } from '../../contexts/ContactsContext';
 import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
-import { sendTransfer, type SendMode } from '../../domain/sendTransfer';
+import { sendTransfer, sendingWords, type SendMode } from '../../domain/sendTransfer';
+import type { PendingBilateralPhase } from '../../domain/bilateral';
 import { emailReceiptIfDue } from '../../domain/sendReceipt';
 import { Avatar, Icon, PageTitle, Sheet, mainBalance, personName, sendable } from './parts';
 import { modernNav } from './modernNav';
 import type { DomainContact } from '../../domain/types';
 import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
 import { ScreenGuard } from '../common/ScreenGuard';
+import ModernOffline from './ModernOffline';
 
 const QUICK = ['10', '50', '100', '200'];
 
 type Stage =
   | { kind: 'form' }
   | { kind: 'review' }
-  | { kind: 'sending' }
+  | { kind: 'sending'; phase: PendingBilateralPhase | null }
   | { kind: 'done'; sent: 'sent' | 'open'; message: string; receipt: string | null }
   | { kind: 'failed'; message: string };
 
@@ -40,6 +42,8 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
   const [note, setNote] = useState('');
   const [mode, setMode] = useState<SendMode>('online');
   const [stage, setStage] = useState<Stage>({ kind: 'form' });
+  // Leaving the screen while an offline step is in flight: the step goes on, the screen stops waiting.
+  const leave = useRef<AbortController | null>(null);
 
   const contact: DomainContact | null = contacts.find((c) => c.deviceId === recipient) ?? null;
   // Other contacts who go by the same name as the one paid.
@@ -61,9 +65,15 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
 
   const send = () => {
     if (contact === null || token === null) return;
-    setStage({ kind: 'sending' });
+    setStage({ kind: 'sending', phase: null });
     const sentAtLocal = new Date().toLocaleString();
-    sendTransfer({ mode, to: contact.deviceId, tokenId: token.tokenId, amount, note }).then(
+    const controller = new AbortController();
+    leave.current = controller;
+    const watch = {
+      onPhase: (phase: PendingBilateralPhase) => setStage((at) => (at.kind === 'sending' ? { kind: 'sending', phase } : at)),
+      leave: controller.signal,
+    };
+    sendTransfer({ mode, to: contact.deviceId, tokenId: token.tokenId, amount, note }, watch).then(
       (outcome) => {
         if (outcome.kind === 'refused') {
           setStage({ kind: 'failed', message: outcome.message });
@@ -122,8 +132,19 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
 
       {token !== null ? (
         <section className="s-card s-balance" aria-label="Available balance">
-          <div className="s-balance-label">Available Balance</div>
-          <div className="s-balance-amount" style={{ fontSize: 32 }}>{token.displayAmount}<small>{token.symbol}</small></div>
+          <div className="s-balance-label">{mode === 'offline' ? 'Cash in hand' : 'Available Balance'}</div>
+          {mode === 'offline' && !token.offline ? (
+            <div className="s-balance-amount" style={{ fontSize: 32 }} data-testid="send-offline-unknown">—<small>{token.symbol}</small></div>
+          ) : (
+            <div className="s-balance-amount" style={{ fontSize: 32 }}>
+              {mode === 'offline' && token.offline ? token.offline.displayAmount : token.displayAmount}<small>{token.symbol}</small>
+            </div>
+          )}
+          {mode === 'offline' ? (
+            <div className="s-balance-other">
+              {token.offline ? `Online account ${token.displayAmount} ${token.symbol}` : 'Offline allocation unknown until the appliance connects.'}
+            </div>
+          ) : null}
         </section>
       ) : (
         <div className="s-notice">There is nothing to send yet.</div>
@@ -173,8 +194,14 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
             <button type="button" aria-pressed={mode === 'online'} onClick={() => setMode('online')}>Online</button>
             <button type="button" aria-pressed={mode === 'offline'} onClick={() => setMode('offline')}>Offline</button>
           </div>
+          {mode === 'offline' ? (
+            <p className="s-hint" style={{ marginTop: 10 }}>
+              <strong>Offline needs Bluetooth.</strong> Both appliances next to each other, Bluetooth on; the person accepts it in their app.
+            </p>
+          ) : null}
         </div>
       ) : null}
+      {mode === 'offline' ? <ModernOffline token={token} onMoved={wallet.refreshAll} /> : null}
 
       <button
         type="button"
@@ -214,7 +241,22 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
 
       {stage.kind === 'sending' ? (
         <Sheet label="Sending" onClose={() => undefined}>
-          <h2>Sending…</h2>
+          <h2>{mode === 'offline' && contact !== null ? sendingWords(stage.phase, personName(contact)) : 'Sending…'}</h2>
+          {mode === 'offline' ? (
+            <>
+              <p>
+                {stage.phase === 'pending_user_action'
+                  ? 'They accept it on their phone. Nothing moves until they do.'
+                  : 'Over Bluetooth, appliance to appliance.'}
+              </p>
+              <button type="button" className="s-btn s-btn-quiet" onClick={() => leave.current?.abort()}>
+                Leave it open
+              </button>
+              <p className="s-hint" style={{ marginTop: 8 }}>
+                The payment stays open on both appliances and completes when you are together again.
+              </p>
+            </>
+          ) : null}
         </Sheet>
       ) : null}
 

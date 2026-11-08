@@ -187,3 +187,33 @@ pub fn acknowledgement(commitment_hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         )
         .optional()?)
 }
+
+/// Close the offline accounts under `closed` with the head `head` that no longer holds them, in one
+/// transaction: the head, the steps no boundary of theirs will ever carry, and the payments they
+/// received offline, which waited in them for an unload that can no longer happen (an account
+/// closed at an install is lost with its trial, owner 2026-11-08). Answers how many payments
+/// received offline went with them.
+pub fn close_offline_accounts(
+    head: &dsm::types::device_state::DeviceState,
+    closed: &[[u8; 32]],
+) -> Result<usize> {
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let tx = conn.transaction()?;
+    super::bcr::update_bcr_device_head_with_conn(&tx, head)?;
+    let mut payments = 0;
+    for bundle in closed {
+        tx.execute(
+            "DELETE FROM own_offline_hop WHERE bundle = ?1",
+            params![bundle.as_slice()],
+        )?;
+        payments += tx.execute(
+            "DELETE FROM pending_offline_receipt WHERE receiver_bundle = ?1",
+            params![bundle.as_slice()],
+        )?;
+    }
+    tx.commit()?;
+    Ok(payments)
+}

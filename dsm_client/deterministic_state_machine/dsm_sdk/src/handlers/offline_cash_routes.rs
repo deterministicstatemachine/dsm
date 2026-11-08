@@ -338,6 +338,9 @@ mod tests {
         fn status(&mut self) -> Result<crate::anchor::ApplianceStatus, DsmError> {
             self.anchor.status()
         }
+        fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DsmError> {
+            self.anchor.authorize(digest, signature)
+        }
         fn prepare(
             &mut self,
             t: &anchor_core::root_advance::Transition,
@@ -380,16 +383,18 @@ mod tests {
         fn try_run(
             &mut self,
             provisioning: &anchor_core::enrollment::Provisioning,
+            rehearsal: &crate::anchor::RehearsalOwner,
         ) -> Result<crate::anchor::TryRunReport, DsmError> {
-            self.anchor.try_run(provisioning)
+            self.anchor.try_run(provisioning, rehearsal)
         }
         fn provision(
             &mut self,
             provisioning: &anchor_core::enrollment::Provisioning,
+            rehearsal: &crate::anchor::RehearsalOwner,
         ) -> Result<crate::anchor::AnchorPin, DsmError> {
             match self.what_happens {
                 AnswerTo::LostAfterInstalling => {
-                    self.anchor.provision(provisioning)?;
+                    self.anchor.provision(provisioning, rehearsal)?;
                     Err(DsmError::invalid_operation(
                         "USB: no answer from the anchor",
                     ))
@@ -530,14 +535,21 @@ mod tests {
         let r = router_on_a_device();
         let mut chip = crate::test_support::appliance::HostAppliance::unprovisioned([0xD2; 32], 16);
         let other = chip
-            .provision(&anchor_core::enrollment::Provisioning {
-                device_id: *blake3::hash(b"another device").as_bytes(),
-                online_id_pk: blake3::hash(b"another device's online key")
-                    .as_bytes()
-                    .to_vec(),
-                policy_hash: dsm::types::operations::canonical_offline_bearer_policy().policy_id,
-                genesis_root: *blake3::hash(b"another device's genesis").as_bytes(),
-            })
+            .provision(
+                &anchor_core::enrollment::Provisioning {
+                    device_id: *blake3::hash(b"another device").as_bytes(),
+                    online_id_pk: blake3::hash(b"another device's online key")
+                        .as_bytes()
+                        .to_vec(),
+                    policy_hash: dsm::types::operations::canonical_offline_bearer_policy()
+                        .policy_id,
+                    genesis_root: *blake3::hash(b"another device's genesis").as_bytes(),
+                },
+                &crate::anchor::RehearsalOwner::derive(
+                    blake3::hash(b"another device's secret").as_bytes(),
+                )
+                .expect("a rehearsal owner"),
+            )
             .expect("provisioned for the other device");
         let installed = chip.install();
         let snap = r.core_sdk.anchor_appliance_status();

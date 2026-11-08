@@ -2911,7 +2911,7 @@ impl BilateralBleHandler {
         // The receiver's board (owner, 2026-11-07): the anchor whose board drew the challenge and
         // will commit the receive, pinned or admitted from the response, its bundle under σ_B.
         let (receiver_anchor, receiver_pin) = self
-            .receiver_anchor(counterparty_device_id, &receiver_contact, &prepare_response)
+            .receiver_anchor(counterparty_device_id, &receiver_contact, prepare_response)
             .await?;
         let acceptance = dsm::bilateral::offline::decide_prepare_response(
             commitment_hash,

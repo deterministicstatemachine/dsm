@@ -177,6 +177,17 @@ pub trait PartitionSig {
     fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
     /// Verify a partition signature over a 32-byte digest under the pinned `pk`.
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool;
+    /// Verify the owner's authorization of a prepare: a signature over the
+    /// [`crate::appliance::owner_authorization_digest`] under the device key `pk_on` the anchor
+    /// was provisioned for (DSM's device key scheme, BLAKE3-SPHINCS+ SPX256f).
+    fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool;
+    /// A device key in the owner's scheme from a 32-byte seed, `(sk, pk)`: the try-run's rehearsal
+    /// owner, so its payment goes through the same authorization a real one does. A key the anchor
+    /// derives for itself is never the key it was provisioned for, so it authorizes nothing real.
+    fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError>;
+    /// A signature in the owner's scheme over a 32-byte digest: the rehearsal owner's
+    /// authorization of the try-run's own payment.
+    fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
 }
 
 /// Verification of the partition witness `σ^host` alone: what a receiver or a walker of an

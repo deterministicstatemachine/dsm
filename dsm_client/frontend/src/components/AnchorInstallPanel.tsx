@@ -5,11 +5,14 @@
 // Rust and the anchor decide everything here; this renders what they report and carries the taps.
 import React, { useState } from 'react';
 import { Notice } from './common/ScreenFrame';
-import { installAnchor, runAnchorTryRun, type AnchorTryRun } from '../dsm/anchor';
+import { installAnchor, runAnchorTryRun, type AnchorStatus, type AnchorTryRun } from '../dsm/anchor';
 
 type Props = {
-  /** Reads the anchor again once it is installed. */
-  onInstalled: () => Promise<void>;
+  /**
+   * Takes the anchor as the install reported it. The install's own answer says what a status read
+   * afterwards does not: what an earlier trial's account held, when the install closed one.
+   */
+  onInstalled: (installed: AnchorStatus) => Promise<void>;
 };
 
 /** Where the install stands. Only a try-run that passed offers it, and it takes a second tap. */
@@ -40,7 +43,7 @@ export default function AnchorInstallPanel({ onInstalled }: Props) {
     setStage('installing');
     setError(null);
     installAnchor()
-      .then(() => onInstalled())
+      .then((installed) => onInstalled(installed))
       .catch((e: unknown) => {
         setError(reason(e));
         setStage('tried');
