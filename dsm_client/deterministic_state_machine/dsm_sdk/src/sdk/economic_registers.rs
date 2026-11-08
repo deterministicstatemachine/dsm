@@ -444,18 +444,17 @@ impl OfflineRecords for StoredOfflineRecords {
     }
 }
 
-/// What one check of a peer's ancestry cost, logged where it ran (DSM
-/// Amendment A31). A missing predecessor leaves acceptance incomplete.
+/// What one check of a peer's step cost, logged where it ran (DSM Amendment
+/// A14): every count is bounded by a constant, whatever the position.
 fn log_cost(what: &str, devid: &[u8; 32], position: u64, cost: &StepCost) {
     log::info!(
-        "[A31] {what} of {} at position {position}: register_probes={} routed_reads={} \
-         source_steps={} conditional_hops={} steps_validated={}",
+        "[A14] {what} of {} at position {position}: register_probes={} routed_reads={} \
+         source_steps={} conditional_hops={}",
         text_id::encode_base32_crockford(devid),
         cost.register_probes,
         cost.routed_reads,
         cost.source_steps,
-        cost.conditional_hops,
-        cost.steps_validated
+        cost.conditional_hops
     );
 }
 
@@ -483,8 +482,8 @@ fn record_established<T>(
     Ok(checked.into_answer())
 }
 
-/// A peer's step at `peer_economic_position`, validated through every
-/// predecessor from activation (DSM Amendment A31).
+/// A peer's step at `peer_economic_position`, validated from its own parent
+/// (DSM Amendment A14), over WHATEVER fetcher the caller supplies.
 ///
 /// Core answers every time it is asked here. What a validation read is kept
 /// as evidence (`final_reads`: final cells and immutable objects), and the
@@ -511,8 +510,8 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
 }
 
 /// The root a trader selected at a position and the reference a later `P`
-/// names it by (`SofiReads::trader_root_at`), validated from activation
-/// (DSM Amendment A31).
+/// names it by (`SofiReads::trader_root_at`), validated one hop (DSM
+/// Amendment A14).
 pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -535,7 +534,7 @@ pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
 
 /// The claim a trader accepted at a position (`SofiReads::accepted_claim_at`
 /// for another trader): what a setup naming that position is checked against
-/// (SoFi Amendment S35, MR-SOFI-0432), validated from activation.
+/// (SoFi Amendment S15, MR-SOFI-0347), validated one hop (DSM Amendment A14).
 pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -556,7 +555,7 @@ pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     record_established("claim", device_id, position, checked)
 }
 
-/// Validate the ancestry of the offline boundaries among `positions` of a payer,
+/// Validate one hop the offline boundaries among `positions` of a payer,
 /// recording the accounts they left and the payments they exposed. A read that
 /// stops short records what it validated. One that meets a boundary that
 /// verifies as wrong records nothing.
@@ -610,7 +609,7 @@ pub(crate) async fn scan_payer_offline_boundaries(
     .await
     .map_err(|e| e.to_string())?;
     log::info!(
-        "[A31] payer {} scanned from position {from} to {}: {:?}",
+        "[A14] payer {} scanned from position {from} to {}: {:?}",
         text_id::encode_base32_crockford(&device_id),
         scan.reached(),
         scan.stop()
