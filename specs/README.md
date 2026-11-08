@@ -2,6 +2,18 @@
 
 This folder is the authoritative engineering source for the DSM protocol architecture currently in scope. Specifications are kept as ordinary Markdown (`.md`) files so they are easy to diff, search, cite, and convert into implementation requirements.
 
+## Acceptance architecture lock (owner, 2026-11-04)
+
+**DSM Amendment A14 is the authority: a receiver validates a peer's step from that step's own parent and reads nothing behind it. No ancestry walk and no frontier, under any name.**
+
+- No agent changes the acceptance architecture without the owner's own words naming that change. A hypothetical exploit is no reason to.
+- A claimed finding against it comes with a reproducible, end-to-end attack through the actual production protocol, from its very start, showing exactly which check fails. State built by a test harness is not that.
+- Even a demonstrated finding is a report to the owner, never a rewrite. The owner decides.
+- Anything that goes against a position the owner has held is said first, in bold, as its own yes-or-no question, and is not done until the owner has said yes more than once.
+- Nothing is labelled an owner request or ruling without the owner's quoted words and date.
+
+The independent audit assesses A14 as specified. `ci/acceptance_lock.py` enforces this in CI.
+
 ## Current normative scope
 
 For the current architecture and checklist round, the authoritative specification corpus contains **only these four documents**:
