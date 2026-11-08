@@ -19,6 +19,7 @@ import { bridgeEvents } from '../bridge/bridgeEvents';
 import logger from '../utils/logger';
 
 import { GenericTransaction, GenericTxResponse } from './types';
+import type { PendingBilateralPhase } from '../domain/bilateral';
 
 
 /**
@@ -103,7 +104,20 @@ export async function sendOnlineTransferSmart(
     }
 }
 
-export async function offlineSend(transfer: GenericTransaction): Promise<GenericTxResponse> {
+/**
+ * How a send screen follows an offline step while it is in flight. The step's phase is Rust's,
+ * read from its pending list; the screen only says it. Waiting has no clock: a step a peer has not
+ * yet accepted is still in flight, and only the person leaving the screen ends the wait, with the
+ * step open on both appliances.
+ */
+export type SendWatch = {
+  /** Each phase of the step as Rust lists it, whenever it changes. */
+  onPhase?: (phase: PendingBilateralPhase) => void;
+  /** Aborted when the person leaves the screen: the send then answers `open`, and the step goes on. */
+  leave?: AbortSignal;
+};
+
+export async function offlineSend(transfer: GenericTransaction, watch: SendWatch = {}): Promise<GenericTxResponse> {
   try {
     let toBytes: Uint8Array;
     if (typeof transfer.to === 'string') {
@@ -143,11 +157,11 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     // The receiver may process the prepare and fire back a commit/event before
     // wallet.sendOffline returns. By registering listeners first and buffering
     // events until we know the commitmentHash, we never miss fast responses.
-    // Status polling interval: instead of a hard timeout that declares failure,
-    // poll the backend session status and only resolve when the backend confirms
-    // the session is terminal (committed, failed, or rejected).
+    // The step ends on Rust's word alone: its events, or its pending list naming the step
+    // committed, failed or rejected. There is no clock on the wait; a peer takes the time it
+    // takes to accept, and the person may leave the screen with the step open.
     const STATUS_POLL_INTERVAL_MS = 3_000;
-    const STATUS_POLL_MAX_ATTEMPTS = 40; // ~2 minutes max
+    const OPEN_WORDS = 'The transfer is still open. It completes when the two appliances are together again.';
 
     let commitmentHash: Uint8Array | null = null;
     let settled = false;
@@ -155,7 +169,15 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     let statusPollTimer: ReturnType<typeof setTimeout> | null = null;
     const earlyEventBuffer: pb.BilateralEventNotification[] = [];
     let resolvePromise: ((res: GenericTxResponse) => void) | null = null;
+    let lastPhase: PendingBilateralPhase | null = null;
 
+    // Left open by the person: accepted only if Rust had already listed the step committed.
+    const openAnswer = (): GenericTxResponse => ({
+      accepted: lastPhase === 'committed',
+      open: watch.leave?.aborted,
+      result: OPEN_WORDS,
+    });
+    const leaveOpen = () => finish(openAnswer());
     const finish = (res: GenericTxResponse) => {
       if (settled) return;
       settled = true;
@@ -165,22 +187,25 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         statusPollTimer = null;
       }
       offEvent();
+      watch.leave?.removeEventListener('abort', leaveOpen);
       if (resolvePromise) resolvePromise(res);
     };
 
     // Poll backend for authoritative session status. The backend tracks the
     // real phase (Preparing → Accepted → ConfirmPending → Committed/Failed).
     // Only the backend knows whether the transfer actually succeeded or failed.
-    let pollAttempts = 0;
     const pollSessionStatus = async () => {
       if (settled || !commitmentHash) return;
-      pollAttempts++;
       try {
         const { decodeOfflinePendingList } = await import('../domain/bilateral');
         const listBytes = await getPendingBilateralListStrictBridge();
         const pending = await decodeOfflinePendingList(listBytes);
         const hashB32 = (await import('../utils/textId')).encodeBase32Crockford(commitmentHash);
         const session = pending.find(p => p.commitmentHash === hashB32);
+        if (session !== undefined && session.phase !== lastPhase) {
+          lastPhase = session.phase;
+          watch.onPhase?.(session.phase);
+        }
 
         // A step the list does not hold has not completed: only its committed
         // phase says that. Keep polling.
@@ -191,19 +216,9 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         } else if (session?.phase === 'rejected') {
           finish({ accepted: false, result: 'Bilateral transfer rejected' });
         }
-      } catch {
-        // Query failed — keep polling, don't declare failure
-      }
-      if (pollAttempts >= STATUS_POLL_MAX_ATTEMPTS && !settled) {
-        // The screen stops waiting; the step does not end. A lost link fails
-        // no step: it stays open on both devices and completes when they meet
-        // again, and until its confirm its proposer may cancel it.
-        finish({
-          accepted: false,
-          open: true,
-          result: 'The transfer is still open. It completes when the two appliances are together again.',
-        });
-        return;
+      } catch (e) {
+        // A failed read of the list ends nothing: the step is still Rust's, and the next poll reads again.
+        logger.warn('[offlineSend] the pending list could not be read this poll:', e);
       }
       // Self-schedule the next poll only after this one completes to prevent
       // overlapping concurrent invocations when bridge calls take longer than the interval.
@@ -240,6 +255,13 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         processEvent(note);
       } catch { /* ignore */ }
     });
+
+    // The person may already have left, or leave while the step is in flight.
+    if (watch.leave?.aborted) {
+      offEvent();
+      return openAnswer();
+    }
+    watch.leave?.addEventListener('abort', leaveOpen);
 
     // A BLE transport error is not this send's failure: Kotlin raises one for
     // any failed connection, to any peer, and a lost link fails no step. The
@@ -325,13 +347,13 @@ export async function sendOfflineTransfer(params: {
   to: string | Uint8Array;
   amount: string | number | bigint;
   memo?: string;
-}): Promise<GenericTxResponse> {
+}, watch: SendWatch = {}): Promise<GenericTxResponse> {
   return offlineSend({
     tokenId: params.tokenId,
     to: params.to,
     amount: params.amount,
     memo: params.memo,
-  });
+  }, watch);
 }
 
 /** What the SDK answered a bilateral accept, reject or cancel: done, or its reason why not. */

@@ -608,21 +608,43 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
     expect(res.accepted).toBe(true);
   }, 15000);
 
-  test('when the screen stops waiting, the step is reported open, not failed', async () => {
+  test('the wait has no clock: the step is reported open only when the person leaves, and never failed', async () => {
     jest.useFakeTimers();
     try {
-      const promise = dsm.offlineSend({
-        to: DEVICE_B,
-        amount: BigInt(18000 + testIndex),
-        tokenId: 'ERA',
-      } as any);
-      // The pending list never names the step as ended, past every poll.
-      await jest.advanceTimersByTimeAsync(1_500 + 3_000 * 41);
+      const phases: string[] = [];
+      const leave = new AbortController();
+      const promise = dsm.offlineSend(
+        { to: DEVICE_B, amount: BigInt(18000 + testIndex), tokenId: 'ERA' },
+        { onPhase: (phase) => { phases.push(phase); }, leave: leave.signal },
+      );
+      let settled = 'waiting';
+      promise.then(() => { settled = 'settled'; });
+      // The peer has the step and has not yet accepted it; the list says so.
+      bilateralPendingListOverride = () => [
+        new pb.OfflineBilateralTransaction({
+          id: encodeBase32Crockford(COMMITMENT_HASH),
+          commitmentHash: COMMITMENT_HASH,
+          senderId: DEVICE_A,
+          recipientId: DEVICE_B,
+          phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_PENDING_USER_ACTION,
+          direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING,
+          amount: BigInt(18000 + testIndex) * 100n,
+          displayAmount: `${18000 + testIndex}.00`,
+          tokenId: 'ERA',
+        }),
+      ];
+      // Far past the two minutes the screen used to give up after: still waiting, phase reported once.
+      await jest.advanceTimersByTimeAsync(1_500 + 3_000 * 90);
+      expect(settled).toBe('waiting');
+      expect(phases).toEqual(['pending_user_action']);
+      // The person leaves the screen: the send answers open, the step goes on.
+      leave.abort();
       const res = await promise;
-      expect(res.accepted).toBe(false);
-      expect(res.open).toBe(true);
+      expect(res.accepted).toBeFalsy();
+      expect(res.open).toBeTruthy();
       expect(String(res.result)).toMatch(/still open/);
     } finally {
+      bilateralPendingListOverride = null;
       jest.useRealTimers();
     }
   });

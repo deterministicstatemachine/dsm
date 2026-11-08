@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Send tab — transaction form with online/offline mode toggle.
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { sendTransfer } from '../../../domain/sendTransfer';
+import { sendTransfer, sendingWords } from '../../../domain/sendTransfer';
+import type { PendingBilateralPhase } from '../../../domain/bilateral';
 import { emailReceiptIfDue } from '../../../domain/sendReceipt';
 import { appRuntimeStore } from '../../../runtime/appRuntimeStore';
 import { useUX } from '../../../contexts/UXContext';
@@ -66,6 +67,9 @@ function SendTabInner({
   const [txMode, setTxMode] = useState<'online' | 'offline'>('online');
   // Offline sending is not open yet: choosing it says so and the send stays online.
   const [sendingTx, setSendingTx] = useState(false);
+  // An offline step in flight: its phase as Rust lists it, and the way to stop waiting on it.
+  const [sendPhase, setSendPhase] = useState<PendingBilateralPhase | null>(null);
+  const leave = useRef<AbortController | null>(null);
   const [showSendConfirm, setShowSendConfirm] = useState(false);
   const [fundingOpen, setFundingOpen] = useState(false);
   const [applianceOpen, setApplianceOpen] = useState(false);
@@ -155,13 +159,16 @@ function SendTabInner({
       const tokenId = selectedSendBalance.tokenId;
 
       // The send itself is the one both skins make (domain/sendTransfer).
+      const controller = new AbortController();
+      leave.current = controller;
+      setSendPhase(null);
       const outcome = await sendTransfer({
         mode: txMode,
         to: sendForm.selectedContactKey,
         tokenId,
         amount: sendForm.amount,
         note: sendForm.note,
-      });
+      }, { onPhase: setSendPhase, leave: controller.signal });
       if (outcome.kind === 'open') {
         // Not finished and not failed: the step is open on both appliances and
         // completes when they are together again. The form is done with it.
@@ -213,6 +220,8 @@ function SendTabInner({
       fx.play({ anim: 'fail', title: 'Not sent', caption: msg, tone: 'bad', okLabel: 'Back' });
     } finally {
       setSendingTx(false);
+      setSendPhase(null);
+      leave.current = null;
     }
   }, [sendForm, selectedContact, txMode, selectedSendBalance, loadWalletData, setError, onSendComplete, fx, notifyToast]);
 
@@ -363,6 +372,12 @@ function SendTabInner({
             : 'Select a recipient'}
         </div>
 
+        {sendingTx && txMode === 'offline' && selectedContact !== null ? (
+          <div className="sb-field" data-testid="send-in-flight">
+            <div className="sb-hint">{sendingWords(sendPhase, selectedContact.alias)}</div>
+            <button type="button" className="sb-btn" onClick={() => leave.current?.abort()}>Leave it open</button>
+          </div>
+        ) : null}
         <div className="sb-actions">
           <button type="button" onClick={onCancel} className="sb-btn">Cancel</button>
           <button
