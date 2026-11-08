@@ -55,6 +55,12 @@ updates:
     labels:
       - "ci"
       - "dependencies"
+    groups:
+      # Every step of a workflow that uses github/codeql-action must run the
+      # same version, or the analyze step refuses the init step's config.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
     ignore:
       # dtolnay/rust-toolchain's tag IS the Rust version, and every `uses:` pin
       # of it is a MIRROR of rust-toolchain.toml — the sole normative
