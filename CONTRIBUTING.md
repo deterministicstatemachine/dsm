@@ -41,7 +41,7 @@ Open an issue with the **Enhancement** label. Describe the use case, not just th
 See [QUICKSTART.md](QUICKSTART.md) for environment setup.
 
 ```
-Base development: Rust 1.91.0 pinned by rust-toolchain.toml (via rustup), Node.js 20+ (via nvm recommended), protoc
+Base development: Rust 1.98.0 pinned by rust-toolchain.toml (via rustup), Node.js 20+ (via nvm recommended), protoc
 Android work only: cargo-ndk, Android NDK 27.0.12077973, Android SDK with platform-tools (adb), Java 17+, ANDROID_NDK_HOME or ANDROID_NDK_ROOT
 ```
 

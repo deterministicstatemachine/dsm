@@ -86,17 +86,10 @@ echo "[fast_deploy] APK: $APK"
 echo "[fast_deploy] Devices: ${DEVICES[*]}"
 
 if [[ $LOCAL_DEV -eq 1 ]]; then
-  # Warn if local storage nodes are not running — genesis will fail without them.
-  _nodes_ok=0
-  for _p in 8080 8081 8082 8083 8084; do
-    if curl -sf --max-time 2 "http://127.0.0.1:$_p/health" >/dev/null 2>&1; then
-      _nodes_ok=1; break
-    fi
-  done
-  if [[ $_nodes_ok -eq 0 ]]; then
+  # The local set (make nodes-up) must be serving: genesis fails without it.
+  if ! bash "$ROOT_DIR/scripts/dev_net.sh" status; then
     echo ""
-    echo "WARNING: local storage nodes do not appear to be running (no response on 8080-8084)."
-    echo "         Genesis will fail. Start them with: cd dsm_storage_node && ./scripts/dev/start_dev_nodes.sh"
+    echo "WARNING: the local storage set is not serving. Genesis will fail. Start it with: make nodes-up"
     echo ""
   fi
 else
@@ -120,45 +113,9 @@ for d in "${DEVICES[@]}"; do
   fi
 
   if [[ $LOCAL_DEV -eq 1 ]]; then
-    # Local dev: push a localhost override so the app reaches nodes via adb reverse.
-    is_emu=$(adb "${sel[@]}" shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r\n')
-    if [[ "$is_emu" == "1" ]]; then
-      ENV_HOST="10.0.2.2"
-    else
-      ENV_HOST="127.0.0.1"
-    fi
-    ENV_TOML=$(mktemp /tmp/dsm_env_XXXXXX)
-    cat >"$ENV_TOML" <<EOF
-allow_localhost = true
-bitcoin_network = "signet"
-dbtc_min_confirmations = 1
-dbtc_min_vault_balance_sats = 546
-
-[[nodes]]
-name = "storage-node-1"
-endpoint = "http://$ENV_HOST:8080"
-
-[[nodes]]
-name = "storage-node-2"
-endpoint = "http://$ENV_HOST:8081"
-
-[[nodes]]
-name = "storage-node-3"
-endpoint = "http://$ENV_HOST:8082"
-
-[[nodes]]
-name = "storage-node-4"
-endpoint = "http://$ENV_HOST:8083"
-
-[[nodes]]
-name = "storage-node-5"
-endpoint = "http://$ENV_HOST:8084"
-EOF
-    adb "${sel[@]}" push "$ENV_TOML" /data/local/tmp/dsm_env_config.toml
-    adb "${sel[@]}" shell run-as com.dsm.wallet mkdir -p files 2>/dev/null || true
-    adb "${sel[@]}" shell run-as com.dsm.wallet cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
-    rm -f "$ENV_TOML"
-    echo "[fast_deploy] Env config pushed to ${label:-$d} (host=$ENV_HOST)"
+    # Local dev: scripts/phones_local.sh points every device at the local set
+    # once they are all installed (below).
+    echo "[fast_deploy] ${label:-$d} goes on the local set after install"
   else
     # GCP mode: remove any stale local overrides so the app uses the bundled GCP config.
     adb "${sel[@]}" shell run-as com.dsm.wallet rm -f files/dsm_env_config.override.toml 2>/dev/null || true
@@ -171,5 +128,9 @@ EOF
   fi
 
 done
+
+if [[ $LOCAL_DEV -eq 1 ]]; then
+  bash "$ROOT_DIR/scripts/phones_local.sh" point
+fi
 
 echo "[fast_deploy] Done."

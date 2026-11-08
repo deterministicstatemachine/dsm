@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/dsm-anchor-core",
     "crates/dsm-app-host",
+    "crates/dsm-dev-net",
     "crates/dsm-sphincs",
     "crates/dsm-receipt-service",
     "crates/wildstate-duel",

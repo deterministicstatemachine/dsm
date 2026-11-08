@@ -1,0 +1,161 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Starter</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #14171c; --muted: #5d6673; --line: #e2e5ea;
+    --accent: #2457d6; --accent-ink: #ffffff; --good: #137a43; --wait: #a15c00; --bad: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --card: #171b21; --ink: #e8ebef; --muted: #98a1ad; --line: #272d36;
+      --accent: #6b93ff; --accent-ink: #0b0d10; --good: #4cc98a; --wait: #f0b45a; --bad: #ff7a6e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .wide { grid-column: 1 / -1; }
+  button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px;
+           padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.quiet { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: default; }
+  .qr { background: #fff; border-radius: 8px; padding: 8px; width: 220px; max-width: 100%; margin: 12px 0; }
+  .qr svg { display: block; width: 100%; height: auto; }
+  a { color: var(--accent); }
+  .code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; word-break: break-all; color: var(--muted); }
+  .balance { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--line); }
+  .balance:last-child { border-bottom: 0; }
+  .amount { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .session { border-top: 1px solid var(--line); padding: 12px 0; }
+  .session:first-of-type { border-top: 0; padding-top: 0; }
+  .grants { margin: 6px 0 10px; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  input { width: 90px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px;
+          background: var(--bg); color: var(--ink); font: inherit; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  .fact-PAID, .fact-HOLDINGS { color: var(--good); font-weight: 600; }
+  .fact-NONE { color: var(--wait); }
+  .err { color: var(--bad); }
+  .muted { color: var(--muted); }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="name">Connect Starter</h1>
+    <span class="id" id="account"></span>
+  </header>
+  <p class="muted">This page never touches the account's secret: it asks this app's server, and the server asks its DSM account.
+    A payment counts when the account itself accepted the transfer (the <b>fact</b>), not when a wallet says it paid.</p>
+
+  <div class="grid">
+    <section>
+      <h2>Connect a wallet</h2>
+      <button id="offer">Show a connect code</button>
+      <div id="offered" hidden>
+        <div class="qr" id="qr"></div>
+        <p class="row"><a id="open">Open in the DSM wallet on this device</a></p>
+        <p class="code" id="code"></p>
+      </div>
+    </section>
+    <section>
+      <h2>This app's balances</h2>
+      <div id="balances" class="muted">…</div>
+    </section>
+    <section class="wide">
+      <h2>Connected wallets</h2>
+      <div id="sessions" class="muted">No wallet has connected yet.</div>
+    </section>
+    <section class="wide">
+      <h2>Requests made</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th>Asked</th><th>Wallet's answer</th><th>Fact (the evidence)</th></tr></thead>
+        <tbody id="requests"><tr><td colspan="4" class="muted">Nothing asked yet.</td></tr></tbody>
+      </table></div>
+    </section>
+    <section class="wide">
+      <h2>Account activity</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th>Call</th><th>What</th><th>Result</th></tr></thead>
+        <tbody id="activity"></tbody>
+      </table></div>
+    </section>
+  </div>
+</main>
+<script>
+  const el = (id) => document.getElementById(id);
+  const text = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  async function api(path, payload) {
+    const res = await fetch(path, payload === undefined ? {} : {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error);
+    return body;
+  }
+
+  el("offer").onclick = async () => {
+    try {
+      const offer = await api("/api/offer", {});
+      el("qr").innerHTML = offer.qr;
+      el("code").textContent = offer.code;
+      el("open").href = offer.code;
+      el("offered").hidden = false;
+    } catch (e) { alert(e.message); }
+  };
+
+  async function ask(path, payload) {
+    try { await api(path, payload); await refresh(); } catch (e) { alert(e.message); }
+  }
+
+  function render(s) {
+    el("name").textContent = s.name;
+    document.title = s.name;
+    el("account").textContent = "account " + s.account;
+    el("balances").innerHTML = s.balances.map((b) =>
+      `<div class="balance"><span>${text(b.symbol)}</span><span class="amount">${text(b.amount)}</span></div>`).join("");
+    el("sessions").innerHTML = s.sessions.length === 0 ? "No wallet has connected yet." : s.sessions.map((w) => `
+      <div class="session">
+        <div><b>${w.connected ? "Connected" : "Disconnected"}</b> <span class="id">wallet ${text(w.wallet)}</span></div>
+        <ul class="grants">${w.grants.map((g) => `<li>${text(g)}</li>`).join("")}</ul>
+        ${w.connected ? `<div class="row">
+          <input id="amt-${w.id}" value="5" inputmode="numeric" aria-label="Amount in base units">
+          <button onclick="ask('/api/pay', {session: '${w.id}', amount: el('amt-${w.id}').value})">Request payment</button>
+          <button class="quiet" onclick="ask('/api/holdings', {session: '${w.id}'})">Ask for holdings</button>
+        </div>` : ""}
+      </div>`).join("");
+    el("requests").innerHTML = s.requests.length === 0
+      ? `<tr><td colspan="4" class="muted">Nothing asked yet.</td></tr>`
+      : s.requests.slice().reverse().map((r) => `<tr>
+          <td>${text(r.seq)}</td><td>${text(r.what)}</td>
+          <td>${r.error ? `<span class="err">${text(r.error)}</span>` : text(r.outcome || "waiting") + (r.reason ? `<div class="muted">${text(r.reason)}</div>` : "")}</td>
+          <td><span class="fact-${text(r.fact)}">${text(r.fact || "…")}</span><div class="muted">${text(r.detail)}</div></td>
+        </tr>`).join("");
+    el("activity").innerHTML = s.activity.slice().reverse().map((a) =>
+      `<tr><td>${text(a.seq)}</td><td>${text(a.name)}</td><td>${text(a.summary)}</td><td>${text(a.result)}</td></tr>`).join("");
+  }
+
+  async function refresh() {
+    try { render(await api("/api/state")); } catch (e) { el("balances").textContent = e.message; }
+  }
+  refresh();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>

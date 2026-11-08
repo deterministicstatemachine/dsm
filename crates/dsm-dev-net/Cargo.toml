@@ -1,0 +1,19 @@
+[package]
+name = "dsm-dev-net"
+version = "0.1.0-beta.4"
+edition = "2021"
+description = "A developer's own storage set on one machine: the network's pinned register members as local storage nodes, prepared as the SDK's test harness prepares them, and the client config that reaches them"
+repository = "https://github.com/deterministicstatemachine/dsm"
+license = "MIT OR Apache-2.0"
+authors = ["DSM Development Team"]
+publish = false
+
+[[bin]]
+name = "dsm-dev-net"
+path = "src/main.rs"
+
+[dependencies]
+dsm = { version = "0.1.0-beta.4", path = "../../dsm_client/deterministic_state_machine/dsm", default-features = false }
+dsm_storage_node = { version = "0.1.0-beta.4", path = "../../dsm_storage_node" }
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
+rcgen = "0.14.8"

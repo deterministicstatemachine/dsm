@@ -2,7 +2,7 @@
 # Push DSM env config to devices/emulators.
 #
 # Modes:
-#   --local   (default)  Generate localhost config + adb reverse ports (dev nodes)
+#   --local   (default)  The local storage set (make nodes-up), via scripts/phones_local.sh
 #   --gcp-beta          Push the LIVE 5-node GCP beta fleet config (us-central1) + CA
 #   --aws               Push pre-built AWS config + self-signed CA cert (production nodes)
 #   --gcp               REFUSED: the 6-node 3-region fleet is dead (see below)
@@ -44,7 +44,7 @@ for arg in "$@"; do
       ;;
     --help|-h)
       echo "Usage: $0 [--local|--gcp-beta|--aws]"
-      echo "  --local     (default) Local dev nodes via adb reverse"
+      echo "  --local     (default) The local storage set (make nodes-up), via scripts/phones_local.sh"
       echo "  --gcp-beta  LIVE GCP beta fleet (5 nodes, us-central1, q=3)"
       echo "  --aws       AWS storage nodes (6 nodes, 3 regions)"
       echo "  --gcp       REFUSED — dead 6-node fleet; use --gcp-beta"
@@ -55,6 +55,13 @@ for arg in "$@"; do
 done
 
 echo "Mode: $MODE"
+
+# Local mode is the developer's own storage set (make nodes-up): its client
+# config, CA and adb reverse ports come from scripts/phones_local.sh, which
+# also points booted iOS Simulators at it.
+if [[ "$MODE" == "local" ]]; then
+  exec bash "$REPO_ROOT/scripts/phones_local.sh" point
+fi
 
 # --- Remote config paths ---
 AWS_CONFIG="$REPO_ROOT/scripts/dsm_env_config.aws.toml"
@@ -87,36 +94,6 @@ if [[ -n "$REMOTE_CONFIG" ]]; then
   fi
 fi
 
-# --- Local mode: generate config ---
-make_env_toml() {
-  local host="$1"
-  cat <<EOF
-allow_localhost = true
-bitcoin_network = "signet"
-dbtc_min_confirmations = 1
-dbtc_min_vault_balance_sats = 546
-
-[[nodes]]
-name = "storage-node-1"
-endpoint = "http://$host:${PORTS[1]}"
-
-[[nodes]]
-name = "storage-node-2"
-endpoint = "http://$host:${PORTS[2]}"
-
-[[nodes]]
-name = "storage-node-3"
-endpoint = "http://$host:${PORTS[3]}"
-
-[[nodes]]
-name = "storage-node-4"
-endpoint = "http://$host:${PORTS[4]}"
-
-[[nodes]]
-name = "storage-node-5"
-endpoint = "http://$host:${PORTS[5]}"
-EOF
-}
 
 # --- Gather devices ---
 # Address devices by transport id, not serial: wireless (mDNS) serials contain
@@ -160,33 +137,6 @@ for d in $transports; do
     echo "Config: $MODE storage nodes (HTTPS + custom CA, via override file)"
     adb -t "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.override.toml files/ca.crt
 
-  else
-    # --- Local mode ---
-    is_emulator=$(adb -t "$d" shell getprop ro.kernel.qemu | tr -d '\r' | tr -d '\n')
-    if [[ "$is_emulator" == "1" ]]; then
-      host="10.0.2.2"
-      echo "Device $d identified as emulator (ro.kernel.qemu=1). Using host=$host"
-    else
-      host="127.0.0.1"
-      echo "Device $d identified as physical. Using host=$host and setting reverse ports"
-      for p in $PORTS 18443; do
-        adb -t "$d" reverse tcp:$p tcp:$p || echo "reverse failed for $d:$p"
-      done
-    fi
-
-    # Build env TOML in temp
-    _tmpbase=$(mktemp /tmp/dsm_env_XXXXXX)
-    tmpfile="${_tmpbase}.toml"
-    mv "$_tmpbase" "$tmpfile"
-    make_env_toml "$host" > "$tmpfile"
-    echo "Generated local dev config:"; head -10 "$tmpfile"
-
-    adb -t "$d" push "$tmpfile" /data/local/tmp/dsm_env_config.toml
-    adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
-    adb -t "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.toml
-    rm -f "$tmpfile"
-
-    echo "Config: 5 local dev nodes (HTTP via adb reverse)"
   fi
 
   # Uninstall/install APK if not present
