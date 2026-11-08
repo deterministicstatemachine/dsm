@@ -2966,16 +2966,23 @@ fn connect_app_offer_of(params: &[u8]) -> Result<Reply, String> {
 }
 
 /// A request its grant would run, held to the grant's count of requests that
-/// move nothing (SA-78): once they are used, it waits for the player, and every
-/// later request waits behind it. A request that spends is held to the count
-/// too: it can fail and move nothing.
+/// move nothing (SA-78): once they are used, a request that spends nothing
+/// waits for the player, and every later request waits behind it. A request
+/// that spends runs inside its caps past the count, as the approval screen
+/// says. It can fail and move nothing, and that row takes the log one past the
+/// count: from there every request waits, so a grant never signs or logs more
+/// than one request past its count.
 fn free_requests_left(
     session: &store::WalletSession,
     spend: Option<([u8; 32], u64)>,
 ) -> Result<Decision, String> {
     let granted = crate::sdk::connect::wallet::granted_free_requests(&session.accept_body)?;
     let used = store::free_requests_used(&session.session_id).map_err(|e| e.to_string())?;
-    if used < u64::from(granted) {
+    let runs = match spend {
+        Some(..) => used <= u64::from(granted),
+        None => used < u64::from(granted),
+    };
+    if runs {
         return Ok(Decision::InScope { spend });
     }
     Ok(Decision::Outside(format!(
