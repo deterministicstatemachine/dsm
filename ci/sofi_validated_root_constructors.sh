@@ -60,20 +60,25 @@ if [[ "$count" -ne 2 ]]; then
 fi
 echo "  ✓ one caller per type, inside advance_resolved"
 
-# 2a. No peer-memo puncture exists. A signed witness may name an arbitrary
-#     parent; turning it into a ValidatedEconomicRoot would restore the
-#     counterfeiting path. The peer verifier may only advance from a root it
-#     established itself.
+# 2a. The peer-memo puncture is crate-private and called from exactly one
+#     place: the peer lineage walker, as the start of a walk.
 peer_lineage="$core/dsm/src/economic/peer_lineage.rs"
-if grep -rl 'from_verifier_memo' "$core/dsm/src" --include='*.rs'; then
-  echo "[FAIL] a peer-memo root constructor would let a witness name its own validated parent"
+if ! grep -q 'pub(crate) fn from_verifier_memo' "$lineage"; then
+  echo "[FAIL] from_verifier_memo is not pub(crate) in $lineage"
   exit 1
 fi
-grep -q 'fn validated_to(' "$peer_lineage" || {
-  echo "[FAIL] the peer verifier no longer establishes predecessor ancestry"
+callers=$(grep -rln 'from_verifier_memo' "$core/dsm/src" | grep -v "economic/lineage.rs" || true)
+if [[ "$callers" != "$peer_lineage" ]]; then
+  echo "[FAIL] from_verifier_memo must be called only from $peer_lineage"
+  echo "       callers found: ${callers:-none}"
   exit 1
-}
-echo "  ✓ no witness-named root constructor; predecessors are verifier-derived"
+fi
+count=$(grep -c 'from_verifier_memo' "$peer_lineage")
+if [[ "$count" -ne 1 ]]; then
+  echo "[FAIL] $peer_lineage calls from_verifier_memo $count times; the walk's start is one call"
+  exit 1
+fi
+echo "  ✓ one caller of the memo start, inside the peer walk"
 
 # 2c. The resume puncture, `rehydrate_from_admitted_store`, is public — this
 #     device resuming its OWN admitted coordinate needs it from the SDK — so
