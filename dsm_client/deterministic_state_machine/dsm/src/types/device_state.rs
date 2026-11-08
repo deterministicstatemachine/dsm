@@ -212,6 +212,20 @@ impl RealizedHead {
             .map(Self)
     }
 
+    /// This head with the offline account of `bundle` closed and opened
+    /// again at the anchor's origin, and what the closed account held: see
+    /// [`DeviceState::reopen_offline_account_after_trial`].
+    pub fn reopen_offline_account_after_trial(
+        &self,
+        bundle: &[u8; 32],
+        frontier: [u8; 32],
+        counter: u64,
+    ) -> Result<(RealizedHead, BTreeMap<[u8; 32], u64>), DsmError> {
+        self.0
+            .reopen_offline_account_after_trial(bundle, frontier, counter)
+            .map(|(state, lost)| (Self(state), lost))
+    }
+
     /// One offline boundary from this head: see
     /// [`DeviceState::cross_offline_boundary`].
     pub fn cross_offline_boundary(
@@ -1744,6 +1758,42 @@ impl DeviceState {
             offline_accounts,
             ..self.clone()
         })
+    }
+
+    /// Close the offline account of `bundle` and open it again at `frontier`
+    /// and `counter`: what a trial anchor's end does to the account that
+    /// followed it. A trial install clears at the anchor's next boot, so the
+    /// anchor comes back at its origin while the account stands where the
+    /// trial's last payment left it; the account is lost with the trial and
+    /// the wallet starts fresh (owner, 2026-11-08). Returns the allocations the
+    /// closed account held, which are gone. Never for an anchor installed for
+    /// good: its counter never restarts, so an account ahead of it stays a
+    /// refusal ([`DeviceState::offline_account`] and the SDK's check).
+    pub(crate) fn reopen_offline_account_after_trial(
+        &self,
+        bundle: &[u8; 32],
+        frontier: [u8; 32],
+        counter: u64,
+    ) -> Result<(Self, BTreeMap<[u8; 32], u64>), DsmError> {
+        let Some(ended) = self.offline_accounts.get(bundle) else {
+            return Err(DsmError::invalid_operation(
+                "no offline account of this anchor bundle is open to close",
+            ));
+        };
+        let lost = ended.allocations().clone();
+        let account = OfflineAccount::open(frontier, counter);
+        let mut smt = self.smt.clone();
+        smt.update_leaf(&offline_account_leaf_key(bundle), &account.root());
+        let mut offline_accounts = self.offline_accounts.clone();
+        offline_accounts.insert(*bundle, account);
+        Ok((
+            Self {
+                smt,
+                offline_accounts,
+                ..self.clone()
+            },
+            lost,
+        ))
     }
 
     /// The offline account of `bundle`, if it is open.

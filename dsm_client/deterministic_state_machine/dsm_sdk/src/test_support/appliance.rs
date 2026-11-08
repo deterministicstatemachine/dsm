@@ -286,6 +286,8 @@ struct Anchor {
     rmemory: SoftwareRMemory,
     chip_seed: [u8; 32],
     enrolled_counter: u32,
+    /// What an install of this anchor makes: the board's image decides.
+    install: anchor_core::enrollment::Install,
     served: Served,
 }
 
@@ -321,7 +323,7 @@ impl Anchor {
             chip_birth_witness: self.derive("chip birth witness"),
             host_nonce: self.derive("host nonce"),
             partition_key_seed: self.derive("partition key seed"),
-            install: anchor_core::enrollment::Install::ForGood,
+            install: self.install,
         }
     }
 
@@ -381,9 +383,18 @@ impl HostAppliance {
                 closed_births: Arc::new(Mutex::new(0)),
                 chip_seed,
                 enrolled_counter,
+                install: anchor_core::enrollment::Install::ForGood,
                 served: Served::Unprovisioned,
             })),
         }
+    }
+
+    /// A chip as it leaves the factory, on a board running the trial image: its install is a
+    /// trial, which the board's next boot clears.
+    pub fn unprovisioned_trial(chip_seed: [u8; 32], enrolled_counter: u32) -> Self {
+        let appliance = Self::unprovisioned(chip_seed, enrolled_counter);
+        held(&appliance.anchor).install = anchor_core::enrollment::Install::ForTrial;
+        appliance
     }
 
     /// The appliance provisioned for `device`, its chip seeded with
@@ -435,6 +446,13 @@ impl HostAppliance {
             s.power = Power::On;
             s.cut = Cut::Never;
             s.writes = 0;
+        }
+        if anchor.install == anchor_core::enrollment::Install::ForTrial {
+            // The trial image clears the slots a trial wrote at boot: the anchor comes back unborn.
+            *held(&anchor.rmemory.slot) = None;
+            *held(&anchor.rmemory.trial) = None;
+            anchor.served = Served::Unprovisioned;
+            return;
         }
         let restored =
             DurableAppliance::restore(&anchor.chip_birth(), anchor.chip(), anchor.rmemory.clone());
@@ -657,6 +675,12 @@ impl AnchorAppliance for HostAppliance {
                     "provision",
                     anchor_core::durable::DurableError::AlreadyProvisioned,
                 ));
+            }
+            // Before a birth the board sets a counter a used chip left elsewhere back to `h0`,
+            // which only an uncaged chip allows (`ready_for_birth`); a trial never cages the chip,
+            // so a trial born again starts its counter over.
+            if anchor.install == anchor_core::enrollment::Install::ForTrial {
+                *held(&anchor.counter) = anchor.enrolled_counter;
             }
             let d = DurableAppliance::provision(
                 &anchor.chip_birth(),
