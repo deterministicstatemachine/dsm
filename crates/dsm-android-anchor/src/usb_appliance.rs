@@ -22,7 +22,9 @@ use anchor_core::root_advance::{OwnedTransition, Transition};
 use anchor_core::service::err;
 use anchor_core::try_run::Requirement;
 use dsm::types::error::DsmError;
-use dsm_sdk::anchor::{AnchorAppliance, AnchorPin, ApplianceStatus, TryRunReport, TryRunStep};
+use dsm_sdk::anchor::{
+    AnchorAppliance, AnchorPin, ApplianceStatus, RehearsalOwner, TryRunReport, TryRunStep,
+};
 
 use crate::usb_pico::UsbTransceive;
 
@@ -45,8 +47,19 @@ fn exchange(
     usb: &UsbTransceive,
     req: pb::ApplianceRequest,
 ) -> Result<pb::ApplianceResponse, DsmError> {
+    exchange_with_tail(usb, req, &[])
+}
+
+/// One request over the wire with `tail` after its message: an `OP_AUTHORIZE`'s signature, which
+/// the anchor reads from the frame's end (anchor-core `decode_frame`).
+fn exchange_with_tail(
+    usb: &UsbTransceive,
+    req: pb::ApplianceRequest,
+    tail: &[u8],
+) -> Result<pb::ApplianceResponse, DsmError> {
     let op = req.op;
-    let body = encode_request(&req);
+    let mut body = encode_request(&req);
+    body.extend_from_slice(tail);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
     let resp_body = usb(frame)?;
@@ -73,6 +86,31 @@ fn roundtrip(
         return Err(refused(&resp));
     }
     Ok(resp)
+}
+
+/// A try-run or a provisioning, as two requests: `req`, and when the anchor answers with the digest
+/// its rehearsal payment waits on, the rehearsal owner's authorization of it. Answers what the anchor
+/// answered last: the run's report, or for a provisioning that passed, the anchor's status.
+fn rehearse(
+    usb: &UsbTransceive,
+    req: pb::ApplianceRequest,
+    rehearsal: &RehearsalOwner,
+) -> Result<pb::ApplianceResponse, DsmError> {
+    let begun = exchange(usb, req)?;
+    if begun.awaiting_authorization.is_empty() {
+        return Ok(begun);
+    }
+    let digest = arr32(&begun.awaiting_authorization)?;
+    let signature = rehearsal.sign(&digest)?;
+    exchange_with_tail(
+        usb,
+        pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        },
+        &signature,
+    )
 }
 
 /// A refusal as the wallet reports it: the op, the appliance's code and, when it gave one, its reason.
@@ -161,6 +199,19 @@ impl AnchorAppliance for UsbAnchorAppliance {
         })
     }
 
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DsmError> {
+        let req = pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        };
+        let resp = exchange_with_tail(&self.usb, req, signature)?;
+        if !resp.ok {
+            return Err(refused(&resp));
+        }
+        Ok(())
+    }
+
     fn prepare(
         &mut self,
         t: &Transition,
@@ -244,15 +295,17 @@ impl AnchorAppliance for UsbAnchorAppliance {
     fn try_run(
         &mut self,
         provisioning: &anchor_core::enrollment::Provisioning,
+        rehearsal: &RehearsalOwner,
     ) -> Result<TryRunReport, DsmError> {
         // A try-run that does not pass is an answer, and so is an anchor that will not run one: the
         // report says which. Only a transport that failed is an error.
         let req = pb::ApplianceRequest {
             op: pb::Op::TryRun as i32,
             provision: Some(provisioning_pb(provisioning)),
+            rehearsal_pk: rehearsal.public_key().to_vec(),
             ..Default::default()
         };
-        let resp = exchange(&self.usb, req)?;
+        let resp = rehearse(&self.usb, req, rehearsal)?;
         let mut steps: Vec<TryRunStep> = resp
             .try_run
             .iter()
@@ -305,13 +358,18 @@ impl AnchorAppliance for UsbAnchorAppliance {
     fn provision(
         &mut self,
         provisioning: &anchor_core::enrollment::Provisioning,
+        rehearsal: &RehearsalOwner,
     ) -> Result<AnchorPin, DsmError> {
         let req = pb::ApplianceRequest {
             op: pb::Op::Provision as i32,
             provision: Some(provisioning_pb(provisioning)),
+            rehearsal_pk: rehearsal.public_key().to_vec(),
             ..Default::default()
         };
-        self.roundtrip(req)?;
+        let resp = rehearse(&self.usb, req, rehearsal)?;
+        if !resp.ok {
+            return Err(refused(&resp));
+        }
         self.status_pin()
     }
 }

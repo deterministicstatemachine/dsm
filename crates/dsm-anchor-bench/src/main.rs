@@ -31,6 +31,7 @@
 
 use std::time::Duration;
 
+use anchor_core::appliance::owner_authorization_digest;
 use anchor_core::proto::{decode_response, encode_request, pb};
 
 /// Known-good self-test transition shape (mirrors the firmware's `prepare_request`). The on-chip
@@ -186,7 +187,18 @@ fn answer(
     port: &mut dyn serialport::SerialPort,
     req: &pb::ApplianceRequest,
 ) -> Result<pb::ApplianceResponse, String> {
-    let body = encode_request(req);
+    answer_with_tail(port, req, &[])
+}
+
+/// [`answer`] with `tail` after the message: an `OP_AUTHORIZE`'s signature, which the anchor reads
+/// from the frame's end.
+fn answer_with_tail(
+    port: &mut dyn serialport::SerialPort,
+    req: &pb::ApplianceRequest,
+    tail: &[u8],
+) -> Result<pb::ApplianceResponse, String> {
+    let mut body = encode_request(req);
+    body.extend_from_slice(tail);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
     port.write_all(&frame).map_err(|e| format!("write: {e}"))?;
@@ -210,27 +222,106 @@ const OP_WAIT_SECS: u64 = 60;
 /// How long a try-run may: a whole spend and its records, around two chip reboots.
 const TRY_RUN_WAIT_SECS: u64 = 600;
 
-/// A try-run of an install, for a device no wallet holds: the board's own identity is what is tried.
-/// A nonzero exit unless every step passed.
-fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+/// A STATUS request.
+fn status_request() -> pb::ApplianceRequest {
+    pb::ApplianceRequest {
+        op: pb::Op::Status as i32,
+        ..Default::default()
+    }
+}
+
+/// The bench's keys in the owner's scheme (BLAKE3-SPHINCS+ SPX256f), from fixed seeds: the device
+/// key the bench's device provisions a trial board under, and the rehearsal key its try-runs are
+/// authorized under. The seeds are the bench's, not a wallet's, so these authorize nothing on an
+/// anchor a wallet provisioned; and the bench installs nothing for good ([`adopt`]).
+struct BenchKeys {
+    owner_sk: Vec<u8>,
+    owner_pk: Vec<u8>,
+    rehearsal_sk: Vec<u8>,
+    rehearsal_pk: Vec<u8>,
+}
+
+fn bench_keys() -> Result<BenchKeys, String> {
+    let key = |what: &[u8]| -> Result<(Vec<u8>, Vec<u8>), String> {
+        let seed = anchor_core::hash::h("DSM/anchor/try-run/bench/v1", &[what]);
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(dsm_sphincs::SphincsVariant::SPX256f, &seed)
+                .map_err(|e| format!("the bench's key: {e:?}"))?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
+    };
+    let (owner_sk, owner_pk) = key(b"owner key")?;
+    let (rehearsal_sk, rehearsal_pk) = key(b"rehearsal key")?;
+    Ok(BenchKeys {
+        owner_sk,
+        owner_pk,
+        rehearsal_sk,
+        rehearsal_pk,
+    })
+}
+
+fn sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, String> {
+    dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest)
+        .map_err(|e| format!("the bench signs: {e:?}"))
+}
+
+/// The device the bench provisions a trial board for: the bench's own identity, no wallet's.
+fn bench_provisioning(keys: &BenchKeys) -> pb::Provisioning {
     let name = |what: &str| -> Vec<u8> {
         anchor_core::hash::h("DSM/anchor/try-run/bench/v1", &[what.as_bytes()]).to_vec()
     };
+    pb::Provisioning {
+        device_id: name("device"),
+        online_id_pk: keys.owner_pk.clone(),
+        policy_hash: name("policy"),
+        genesis_root: name("genesis"),
+    }
+}
+
+/// A try-run or a provisioning, as the wallet drives it: the request and, when the anchor answers
+/// with the digest its rehearsal payment waits on, the rehearsal key's authorization of it. Answers
+/// what the anchor answered last.
+fn rehearse(
+    port: &mut dyn serialport::SerialPort,
+    req: &pb::ApplianceRequest,
+    keys: &BenchKeys,
+) -> Result<pb::ApplianceResponse, String> {
+    let begun = answer(port, req)?;
+    if begun.awaiting_authorization.is_empty() {
+        return Ok(begun);
+    }
+    let digest: [u8; 32] = begun
+        .awaiting_authorization
+        .as_slice()
+        .try_into()
+        .map_err(|e| format!("a {}-byte digest: {e}", begun.awaiting_authorization.len()))?;
+    let signature = sign(&keys.rehearsal_sk, &digest)?;
+    answer_with_tail(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        },
+        &signature,
+    )
+}
+
+/// A try-run of an install, for a device no wallet holds: the board's own identity is what is tried.
+/// A nonzero exit unless every step passed.
+fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    let keys = bench_keys()?;
     port.set_timeout(Duration::from_secs(TRY_RUN_WAIT_SECS))
         .map_err(|e| format!("the port's wait: {e}"))?;
     let started = std::time::Instant::now();
-    let run = answer(
+    let run = rehearse(
         port,
         &pb::ApplianceRequest {
             op: pb::Op::TryRun as i32,
-            provision: Some(pb::Provisioning {
-                device_id: name("device"),
-                online_id_pk: name("online key"),
-                policy_hash: name("policy"),
-                genesis_root: name("genesis"),
-            }),
+            provision: Some(bench_provisioning(&keys)),
+            rehearsal_pk: keys.rehearsal_pk.clone(),
             ..Default::default()
         },
+        &keys,
     )?;
     let took = started.elapsed();
     let mut broken = Vec::new();
@@ -358,6 +449,72 @@ fn check(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
     Ok(())
 }
 
+/// The board as the bench finds it. One not provisioned is provisioned for the bench's own device,
+/// as a trial only: an image that would install for good is left alone, and the bench stops. One
+/// already provisioned is someone's: the bench's prepares are then refused by the anchor (error 10),
+/// and the bench says so.
+fn adopt(port: &mut dyn serialport::SerialPort, keys: &BenchKeys) -> Result<(), String> {
+    let status = answer(port, &status_request())?;
+    if status.ok {
+        println!("[ADOPT] the anchor is provisioned already; the bench authorizes prepares with its own key, which that anchor takes only if the bench provisioned it");
+        return Ok(());
+    }
+    if status.error != anchor_core::service::err::NOT_PROVISIONED {
+        return Err(format!(
+            "the anchor is not serving (error {}): {}",
+            status.error, status.detail
+        ));
+    }
+    port.set_timeout(Duration::from_secs(TRY_RUN_WAIT_SECS))
+        .map_err(|e| format!("the port's wait: {e}"))?;
+    let request = pb::ApplianceRequest {
+        op: pb::Op::Provision as i32,
+        provision: Some(bench_provisioning(keys)),
+        rehearsal_pk: keys.rehearsal_pk.clone(),
+        ..Default::default()
+    };
+    let begun = answer(port, &request)?;
+    if begun.awaiting_authorization.is_empty() {
+        return Err(format!(
+            "the provisioning did not reach its payment (error {}): {}",
+            begun.error, begun.detail
+        ));
+    }
+    if begun.install != pb::InstallKind::InstallForTrial as i32 {
+        return Err(
+            "FATAL: this image installs for good; the bench provisions nothing permanent. Flash the              trial image (bench_self_enroll) for the bench."
+                .to_string(),
+        );
+    }
+    let digest: [u8; 32] = begun
+        .awaiting_authorization
+        .as_slice()
+        .try_into()
+        .map_err(|e| format!("a {}-byte digest: {e}", begun.awaiting_authorization.len()))?;
+    let signature = sign(&keys.rehearsal_sk, &digest)?;
+    let provisioned = answer_with_tail(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        },
+        &signature,
+    )?;
+    if !provisioned.ok {
+        return Err(format!(
+            "the trial provisioning was refused (error {}): {}",
+            provisioned.error, provisioned.detail
+        ));
+    }
+    port.set_timeout(Duration::from_secs(OP_WAIT_SECS))
+        .map_err(|e| format!("the port's wait: {e}"))?;
+    println!(
+        "[ADOPT] the trial board is provisioned for the bench's device; its next boot ends that"
+    );
+    Ok(())
+}
+
 /// STATUS -> `(u, H0, active_root)`. `u = H0 - live` is the DSM anchor coordinate; the raw counter is
 /// `H = H0 - u`.
 fn status(port: &mut dyn serialport::SerialPort) -> Result<(u64, u64, Vec<u8>), String> {
@@ -375,7 +532,11 @@ fn status(port: &mut dyn serialport::SerialPort) -> Result<(u64, u64, Vec<u8>), 
     ))
 }
 
-fn prepare(port: &mut dyn serialport::SerialPort, prev_root: &[u8]) -> Result<(), String> {
+fn prepare(
+    port: &mut dyn serialport::SerialPort,
+    prev_root: &[u8],
+    keys: &BenchKeys,
+) -> Result<(), String> {
     // v2: the successor frontier is DERIVED, never invented — the appliance enforces
     // `next_root == anchor_root_advance(prev_root, D)` where `D = transition_digest(Δ°, r_R)`
     // (Δ° excludes next_root, so D is computable first). Compute it host-side from the same
@@ -403,6 +564,37 @@ fn prepare(port: &mut dyn serialport::SerialPort, prev_root: &[u8]) -> Result<()
     };
     let d = anchor_core::root_advance::transition_digest(&owned.as_transition(), &RCHAL);
     owned.next_root = anchor_core::root_advance::anchor_root_advance(&prev, &d);
+    // The bench authorizes this prepare under its own device key, as a wallet does under its own.
+    let status = roundtrip(port, &status_request())?;
+    let bundle: [u8; 32] = status
+        .anchor_bundle
+        .as_slice()
+        .try_into()
+        .map_err(|e| format!("a {}-byte bundle: {e}", status.anchor_bundle.len()))?;
+    let digest = owner_authorization_digest(
+        &bundle,
+        &prev,
+        owned.anchor_counter,
+        &d,
+        &BENCH_R_I,
+        &BENCH_R_NEXT,
+    );
+    let signature = sign(&keys.owner_sk, &digest)?;
+    let authorized = answer_with_tail(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        },
+        &signature,
+    )?;
+    if !authorized.ok {
+        return Err(format!(
+            "the anchor took no authorization from the bench (error {}): it was provisioned by              another owner, or is not the bench's; power-cycle a trial board for the bench to              provision it",
+            authorized.error
+        ));
+    }
     roundtrip(
         port,
         &pb::ApplianceRequest {
@@ -639,12 +831,13 @@ fn phase2(
     mut port: Box<dyn serialport::SerialPort>,
     args: &Args,
     expected_id: &str,
+    keys: &BenchKeys,
 ) -> Result<(), String> {
     println!("\n== Phase 2: prepare/cancel proof (no counter movement) ==");
     let (_, h0, _) = status(port.as_mut())?;
     for round in 1..=2 {
         let prev_root = status(port.as_mut())?.2;
-        prepare(port.as_mut(), &prev_root)?;
+        prepare(port.as_mut(), &prev_root, keys)?;
         let (u_prep, h0_prep, _) = status(port.as_mut())?;
         if u_prep != 0 || h0_prep != h0 {
             return Err(format!(
@@ -742,10 +935,12 @@ fn run() -> Result<(), String> {
     // it is an explicitly allow-listed USED bench chip (never the sealed clean/virgin chip), with a
     // typed operator confirmation. Non-mutating: the gate itself only sends STATUS.
     let chip_id = gate_chip(port.as_mut(), &args)?;
+    let keys = bench_keys()?;
+    adopt(port.as_mut(), &keys)?;
     bench_log(port.as_mut(), &args, &chip_id)?;
     println!("[CHIP] confirmed USED bench chip {chip_id} — running Phases 1-2");
     phase1(port.as_mut(), args.repeats)?;
-    phase2(port, &args, &chip_id)?;
+    phase2(port, &args, &chip_id, &keys)?;
 
     println!(
         "\nALL SAFE PHASES PASSED. The used chip is adopted (u=0), reads are stable, and abandoned"

@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::appliance::{Appliance, ApplianceError, RecoverOutcome, Status};
 use crate::durable::{ActiveStore, DurableAppliance, DurableError};
-use crate::proto::{arr32, decode_request, encode_response, pb, ProtoError};
+use crate::proto::{arr32, decode_frame, encode_response, pb, ProtoError};
 use crate::root_advance::Transition;
 use crate::tropic::{PartitionSig, Tropic};
 
@@ -25,6 +25,9 @@ pub mod err {
     pub const NOT_COMMITTED: u32 = 7;
     pub const TROPIC: u32 = 8;
     pub const PARTITION: u32 = 9;
+    /// A prepare its owner did not authorize: no valid signature of the provisioned device key
+    /// over its authorization digest. Nothing was signed.
+    pub const OWNER_UNAUTHORIZED: u32 = 10;
     pub const BAD_PROTO: u32 = 100;
     pub const MISSING_FIELD: u32 = 101;
     pub const BAD_OP: u32 = 102;
@@ -37,6 +40,9 @@ pub mod err {
     pub const STORE: u32 = 106;
     /// The durable store holds bytes that are not an anchor record.
     pub const RECORD: u32 = 107;
+    /// A try-run was waiting on its owner's authorization when another request arrived. The run has
+    /// ended, the anchor is as it was found, and the request was not served: it is asked again.
+    pub const REHEARSAL_ENDED: u32 = 108;
     /// The Non-secure image does not hash to the digest burned for it: no authority op runs and the
     /// chip is not touched.
     pub const MEASUREMENT: u32 = 200;
@@ -54,6 +60,17 @@ pub mod err {
 /// cap at its receive edge.
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
 
+/// The owner's authorization of a prepare: one BLAKE3-SPHINCS+ SPX256f signature of the device key
+/// the anchor was provisioned for, the scheme's own length
+/// (`owner_authorization_is_one_spx256f_signature` holds this to it).
+pub const OWNER_AUTHORIZATION_BYTES: usize = 49_856;
+
+/// The largest message of any request. A prepare holds its transition several times over while it
+/// signs and records it, so a larger one could exhaust a board's heap; the wallet's own messages
+/// are a few hundred bytes. The authorization's signature is not a message: it follows one on the
+/// wire ([`crate::proto::decode_frame`]) and is read in place.
+pub const REQUEST_HEAD_MAX: usize = 4 * 1024;
+
 pub(crate) fn appliance_code(e: ApplianceError) -> u32 {
     match e {
         ApplianceError::WrongState => err::WRONG_STATE,
@@ -65,6 +82,7 @@ pub(crate) fn appliance_code(e: ApplianceError) -> u32 {
         ApplianceError::NotCommitted => err::NOT_COMMITTED,
         ApplianceError::Tropic(_) => err::TROPIC,
         ApplianceError::Partition(_) => err::PARTITION,
+        ApplianceError::OwnerUnauthorized => err::OWNER_UNAUTHORIZED,
     }
 }
 
@@ -83,6 +101,7 @@ pub(crate) fn proto_code(e: ProtoError) -> u32 {
     match e {
         ProtoError::MissingField => err::MISSING_FIELD,
         ProtoError::BadOp => err::BAD_OP,
+        ProtoError::FrameTooLarge => err::FRAME_TOO_LARGE,
         _ => err::BAD_PROTO,
     }
 }
@@ -101,6 +120,7 @@ fn base(op: i32) -> pb::ApplianceResponse {
         ok: false,
         error: err::NONE,
         release: None,
+        awaiting_authorization: Vec::new(),
         active_root: Vec::new(),
         anchor_bundle: Vec::new(),
         active_anchor_counter: 0,
@@ -135,8 +155,38 @@ pub(crate) fn try_run_response(
     run: &crate::try_run::TryRun,
     install: crate::enrollment::Install,
 ) -> pb::ApplianceResponse {
-    let steps = run
-        .steps
+    let answer = match run.blocking(install) {
+        None => ok(op),
+        Some(_stopped) => fail(op, err::TRY_RUN_FAILED),
+    };
+    pb::ApplianceResponse {
+        try_run: steps_pb(&run.steps),
+        permanent: permanent_pb(install),
+        transport_check: crate::try_run::transport_check(run.release_bytes),
+        install: install_kind(install),
+        ..answer
+    }
+}
+
+/// A try-run begun and waiting on its owner's authorization: the steps so far, and the digest
+/// (`awaiting`) whose signature under the rehearsal key finishes it.
+pub(crate) fn awaiting_response(
+    op: i32,
+    steps: &[crate::try_run::TryStep],
+    install: crate::enrollment::Install,
+    awaiting: [u8; 32],
+) -> pb::ApplianceResponse {
+    pb::ApplianceResponse {
+        try_run: steps_pb(steps),
+        permanent: permanent_pb(install),
+        install: install_kind(install),
+        awaiting_authorization: awaiting.to_vec(),
+        ..ok(op)
+    }
+}
+
+fn steps_pb(steps: &[crate::try_run::TryStep]) -> Vec<pb::TryRunStep> {
+    steps
         .iter()
         .map(|step| pb::TryRunStep {
             name: step.name.clone(),
@@ -147,22 +197,14 @@ pub(crate) fn try_run_response(
                 Err(why) => why.clone(),
             },
         })
-        .collect();
-    let permanent = crate::try_run::permanent(install)
+        .collect()
+}
+
+fn permanent_pb(install: crate::enrollment::Install) -> Vec<alloc::string::String> {
+    crate::try_run::permanent(install)
         .iter()
         .map(|line| alloc::string::String::from(*line))
-        .collect();
-    let answer = match run.blocking(install) {
-        None => ok(op),
-        Some(_stopped) => fail(op, err::TRY_RUN_FAILED),
-    };
-    pb::ApplianceResponse {
-        try_run: steps,
-        permanent,
-        transport_check: crate::try_run::transport_check(run.release_bytes),
-        install: install_kind(install),
-        ..answer
-    }
+        .collect()
 }
 
 pub(crate) fn ok(op: i32) -> pb::ApplianceResponse {
@@ -209,6 +251,8 @@ pub trait Served {
         sender_device_root_before: &[u8; 32],
         sender_device_root_after: &[u8; 32],
     ) -> Result<(), u32>;
+    /// The owner's authorization of the next prepare ([`Appliance::authorize`]).
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), u32>;
     fn commit(&mut self) -> Result<(), u32>;
     fn emit(&mut self) -> Result<pb::OfflineRelease, u32>;
     fn finalize(&mut self) -> Result<[u8; 32], u32>;
@@ -230,6 +274,9 @@ impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
         after: &[u8; 32],
     ) -> Result<(), u32> {
         Appliance::prepare(self, t, rc, before, after).map_err(appliance_code)
+    }
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), u32> {
+        Appliance::authorize(self, digest, signature).map_err(appliance_code)
     }
     fn commit(&mut self) -> Result<(), u32> {
         Appliance::commit(self).map_err(appliance_code)
@@ -264,6 +311,9 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Served for DurableAppliance<T, 
         after: &[u8; 32],
     ) -> Result<(), u32> {
         DurableAppliance::prepare(self, t, rc, before, after).map_err(durable_code)
+    }
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), u32> {
+        DurableAppliance::authorize(self, digest, signature).map_err(durable_code)
     }
     fn commit(&mut self) -> Result<(), u32> {
         DurableAppliance::commit(self).map_err(durable_code)
@@ -321,8 +371,13 @@ pub(crate) fn status<T: Tropic, P: PartitionSig>(
     }
 }
 
-/// Dispatch a decoded request against the appliance.
-pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::ApplianceResponse {
+/// Dispatch a decoded request against the appliance. `signature` is what followed the message on
+/// the wire: an `OP_AUTHORIZE`'s owner signature, and nothing for any other op.
+pub fn dispatch<A: Served>(
+    app: &mut A,
+    req: &pb::ApplianceRequest,
+    signature: &[u8],
+) -> pb::ApplianceResponse {
     let op = req.op;
     // Boot is NOT a host operation: the firmware self-measures at startup as an
     // implementation gate. The old wire OP_BOOT (proto enum value 1, reserved) is rejected
@@ -350,6 +405,19 @@ pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::Appli
                 Err(e) => return fail(op, proto_code(e)),
             };
             match app.prepare(&owned.as_transition(), &rc, &r_before, &r_after) {
+                Ok(()) => ok(op),
+                Err(code) => fail(op, code),
+            }
+        }
+        Ok(pb::Op::Authorize) => {
+            if signature.is_empty() {
+                return fail(op, err::MISSING_FIELD);
+            }
+            let digest = match arr32(&req.authorization_digest) {
+                Ok(a) => a,
+                Err(e) => return fail(op, proto_code(e)),
+            };
+            match app.authorize(&digest, signature) {
                 Ok(()) => ok(op),
                 Err(code) => fail(op, code),
             }
@@ -399,11 +467,8 @@ pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::Appli
 /// Decode a request frame, dispatch it, and encode the response frame. The single secure-core
 /// entry point; a malformed frame yields a `BAD_PROTO` error response rather than a panic.
 pub fn handle<A: Served>(app: &mut A, frame: &[u8]) -> Vec<u8> {
-    if frame.len() > MAX_FRAME_LEN {
-        return encode_response(&fail(0, err::FRAME_TOO_LARGE));
-    }
-    match decode_request(frame) {
-        Ok(req) => encode_response(&dispatch(app, &req)),
-        Err(_) => encode_response(&fail(0, err::BAD_PROTO)),
+    match decode_frame(frame) {
+        Ok((req, signature)) => encode_response(&dispatch(app, &req, signature)),
+        Err(e) => encode_response(&fail(0, proto_code(e))),
     }
 }

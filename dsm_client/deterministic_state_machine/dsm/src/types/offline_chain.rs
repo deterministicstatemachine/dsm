@@ -355,6 +355,7 @@ pub fn chain_end(start: &[u8; 32], payments: &[ChainPayment]) -> [u8; 32] {
 /// spending to one counterparty through the device's own `advance`.
 #[cfg(test)]
 pub(crate) mod fixture {
+    use anchor_core::appliance::owner_authorization_digest;
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -454,6 +455,33 @@ pub(crate) mod fixture {
                 ),
                 Ok(valid) if valid
             )
+        }
+        fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+            matches!(
+                crate::crypto::sphincs::verify(
+                    crate::crypto::sphincs::SphincsVariant::SPX256f,
+                    pk_on,
+                    digest,
+                    sig
+                ),
+                Ok(valid) if valid
+            )
+        }
+        fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+            let kp = crate::crypto::sphincs::generate_keypair_from_seed(
+                crate::crypto::sphincs::SphincsVariant::SPX256f,
+                seed,
+            )
+            .expect("the owner keypair");
+            Ok((kp.secret_key.clone(), kp.public_key.clone()))
+        }
+        fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+            Ok(crate::crypto::sphincs::sign(
+                crate::crypto::sphincs::SphincsVariant::SPX256f,
+                sk,
+                digest,
+            )
+            .expect("the owner signs"))
         }
     }
 
@@ -579,6 +607,7 @@ pub(crate) mod fixture {
                 derive(seed, "partition device id"),
                 born,
                 anchor_core::enrollment::Install::ForGood,
+                head.public_key().to_vec(),
             );
             head = head
                 .open_offline_account(&pin.bundle, frontier, 0)
@@ -699,6 +728,24 @@ pub(crate) mod fixture {
                     }),
                 )
                 .expect("the spend advances");
+            // The device authorizes exactly this prepare under its own key, as the wallet does.
+            let authorization = owner_authorization_digest(
+                &self.pin.bundle,
+                &frontier,
+                counter,
+                &transition_digest(&core, &challenge),
+                &out.transition.pre_root(),
+                &out.child_r_a,
+            );
+            let signature = crate::crypto::sphincs::sign(
+                crate::crypto::sphincs::SphincsVariant::SPX256f,
+                crate::types::device_state::tests::test_keypair().secret_key(),
+                &authorization,
+            )
+            .expect("the owner signs");
+            self.app
+                .authorize(&authorization, &signature)
+                .expect("authorized");
             self.app
                 .prepare(
                     &t.as_transition(),

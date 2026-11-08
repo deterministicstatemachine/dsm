@@ -2113,7 +2113,7 @@ pub(crate) mod tests {
     /// authorize its own transitions — and a test that cannot sign is a test that
     /// cannot exercise the gate. Same 64-byte length (SPX256f pk = 2n), so every other
     /// fixture is unaffected.
-    fn test_keypair() -> &'static crate::crypto::signatures::SignatureKeyPair {
+    pub(crate) fn test_keypair() -> &'static crate::crypto::signatures::SignatureKeyPair {
         static KP: std::sync::OnceLock<crate::crypto::signatures::SignatureKeyPair> =
             std::sync::OnceLock::new();
         KP.get_or_init(|| {

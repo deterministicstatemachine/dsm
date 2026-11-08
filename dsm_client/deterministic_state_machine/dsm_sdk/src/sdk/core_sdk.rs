@@ -2028,7 +2028,13 @@ impl CoreSDK {
                 "this anchor is already installed for this device",
             ));
         }
-        connected_appliance()?.try_run(&self.anchor_provisioning()?)
+        connected_appliance()?.try_run(&self.anchor_provisioning()?, &self.rehearsal_owner()?)
+    }
+
+    /// The rehearsal owner a try-run's payment is authorized under: derived from this device's
+    /// signing key, apart from it ([`crate::anchor::RehearsalOwner`]).
+    fn rehearsal_owner(&self) -> Result<crate::anchor::RehearsalOwner, DsmError> {
+        crate::anchor::RehearsalOwner::derive(&crate::sdk::signing_authority::current_secret_key()?)
     }
 
     /// Install the connected anchor for this device: for good, or as a trial on the trial image,
@@ -2044,15 +2050,16 @@ impl CoreSDK {
                 ));
             }
             let mut appliance = connected_appliance()?;
-            let pin = match appliance.provision(&self.anchor_provisioning()?) {
-                Ok(pin) => pin,
-                // The anchor's answer is what was lost, or it is refused. What the anchor now
-                // holds decides which: a burned chip is never reported as a failed install.
-                Err(why) => match pin_after_a_lost_answer(appliance.as_mut()) {
-                    Some(pin) => pin,
-                    None => return Err(why),
-                },
-            };
+            let pin =
+                match appliance.provision(&self.anchor_provisioning()?, &self.rehearsal_owner()?) {
+                    Ok(pin) => pin,
+                    // The anchor's answer is what was lost, or it is refused. What the anchor now
+                    // holds decides which: a burned chip is never reported as a failed install.
+                    Err(why) => match pin_after_a_lost_answer(appliance.as_mut()) {
+                        Some(pin) => pin,
+                        None => return Err(why),
+                    },
+                };
             self.require_anchor_for_this_device(&pin)?;
             guard.replace(AttachedAnchor { appliance, pin });
         }
@@ -2329,6 +2336,22 @@ impl CoreSDK {
             })?
             .appliance;
 
+        // This device authorizes exactly this prepare, under the key the anchor was provisioned for:
+        // the anchor signs for its owner, not for whoever holds the link to it.
+        let digest = anchor_core::appliance::owner_authorization_digest(
+            &staged.pin.bundle,
+            &staged.appliance_prev_root,
+            staged.transition.anchor_counter,
+            &anchor_core::root_advance::transition_digest(
+                &staged.transition.as_transition(),
+                &receiver_challenge,
+            ),
+            &sender_device_root_before,
+            &sender_device_root_after,
+        );
+        let secret = crate::sdk::signing_authority::current_secret_key()?;
+        let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &digest)?;
+        app.authorize(&digest, &signature)?;
         app.prepare(
             &staged.transition.as_transition(),
             &receiver_challenge,

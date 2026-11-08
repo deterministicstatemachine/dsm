@@ -31,7 +31,9 @@ pub trait Board {
 /// operation to it.
 pub const SECURE_HEAP_BYTES: usize = 160 * 1024;
 
-/// The largest request frame the monitor takes. A prepare holds its transition several times over
-/// while it signs and records it, so a larger one could exhaust the heap and halt the board. The
-/// wallet's own requests are a few hundred bytes: it attaches its proofs after the emit.
-pub const MAX_REQUEST_BYTES: usize = 4 * 1024;
+/// The largest request frame the monitor takes: a request's largest message and, after it, the
+/// owner's authorization signature when the request is one (anchor-core's frame rule,
+/// `proto::decode_frame`). A larger frame is refused before any of it is held, and a frame that
+/// long carrying anything but an authorization is refused unread.
+pub const MAX_REQUEST_BYTES: usize =
+    anchor_core::service::REQUEST_HEAD_MAX + anchor_core::service::OWNER_AUTHORIZATION_BYTES;

@@ -89,6 +89,8 @@ enum Op {
   OP_PROVISION   = 9;  // provision an unprovisioned anchor for the device `provision` names, once;
                        // answered with the STATUS pin material of the anchor it made
   OP_RECOVER     = 10; // §26 recovery: complete a durable commit if it can, and answer the outcome
+  OP_AUTHORIZE   = 13; // the owner's authorization of the next OP_PREPARE: the digest it signed in
+                       // the head, its signature after the head on the wire (see ApplianceRequest)
   OP_TRY_RUN     = 11; // go through an install of `provision` with the permanent parts
                        // substituted; nothing is bound. See try_run.rs.
   OP_IDENTIFY    = 12; // what the chip says it is and what it holds, read with nothing written to
@@ -126,6 +128,16 @@ message ApplianceRequest {
   reserved 6;  // the raw-SPI relay's MOSI bytes
   reserved "spi_payload";
   Provisioning provision            = 7;  // OP_PROVISION: the device the anchor is bound to
+  // OP_AUTHORIZE: the owner-authorization digest (anchor-core `owner_authorization_digest`) the owner
+  // signed with the device key the anchor was provisioned for (BLAKE3-SPHINCS+ SPX256f). The
+  // signature is not a field: on the wire it follows this message, as the frame's last
+  // OWNER_AUTHORIZATION_BYTES (49,856) bytes, so the anchor verifies it from the frame it holds and
+  // copies it nowhere. Any frame longer than a signature is read that way; a frame longer than
+  // REQUEST_HEAD_MAX (4 KiB) that is not one is refused unread.
+  bytes authorization_digest        = 8;
+  // OP_TRY_RUN, OP_PROVISION: the wallet's rehearsal owner key (SPX256f), derived apart from its
+  // device key: the try-run's payment is authorized under it, through the same check a real one is.
+  bytes rehearsal_pk                = 9;
 }
 
 // One thing a try-run went through.
@@ -179,6 +191,10 @@ message ApplianceResponse {
   // TROPIC01 CA, Tropic Square root.
   repeated bytes chip_certificates   = 21;
   InstallKind install                = 22; // OP_STATUS, OP_TRY_RUN: what an install here makes
+  // OP_TRY_RUN, OP_PROVISION: the rehearsal payment's owner-authorization digest the run waits on
+  // (32). An OP_AUTHORIZE carrying the rehearsal key's signature of it continues the run; any other
+  // request ends it, and the anchor is left as it was found.
+  bytes awaiting_authorization       = 23;
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the

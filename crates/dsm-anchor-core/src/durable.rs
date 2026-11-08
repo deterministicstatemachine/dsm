@@ -327,12 +327,16 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     /// serves anything. Refused when the store already holds a record: an anchor is provisioned
     /// once, and never for a second device. Refused too, with nothing written, unless a try-run of
     /// this very install passes first ([`crate::try_run`]): nothing permanent happens on a chip that
-    /// has not just gone through it.
+    /// has not just gone through it. The try-run is born for `rehearsal`, the device under its
+    /// rehearsal owner key, and its payment is authorized by `sign`, that key's holder: the anchor
+    /// never signs as an owner, and the owner's device key never signs a rehearsal.
     pub fn provision(
         chip: &ChipBirth,
         mut tropic: T,
         mut store: S,
         provisioning: Provisioning,
+        rehearsal: &Provisioning,
+        sign: impl FnOnce(&[u8; 32]) -> Result<Vec<u8>, String>,
     ) -> Result<Self, ProvisionRefused<T, S>> {
         let refused = |error, tropic, store| ProvisionRefused {
             error,
@@ -344,7 +348,13 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             Ok(Some(_)) => return Err(refused(DurableError::AlreadyProvisioned, tropic, store)),
             Err(e) => return Err(refused(DurableError::Store(e), tropic, store)),
         }
-        let run = crate::try_run::rehearse::<T, P, S>(chip, &mut tropic, &mut store, &provisioning);
+        let run = crate::try_run::rehearse_with::<T, P, S>(
+            chip,
+            &mut tropic,
+            &mut store,
+            rehearsal,
+            sign,
+        );
         if let Some(failed) = run.blocking(chip.install) {
             let why = alloc::format!("{}: {:?}", failed.name, failed.outcome);
             return Err(refused(DurableError::TryRun(why), tropic, store));
@@ -388,6 +398,7 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             chip.partition_device_id,
             birth,
             chip.install,
+            provisioning.online_id_pk.clone(),
         );
         Ok(Self {
             app,
@@ -414,6 +425,7 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             chip.birth::<P>(&provisioning)
                 .map_err(ApplianceError::Partition)?,
             chip.install,
+            provisioning.online_id_pk.clone(),
         );
         app.active = active;
         Ok(Self {
@@ -492,6 +504,13 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             sender_device_root_after,
         )?;
         self.persist()
+    }
+
+    /// [`Appliance::authorize`]: the owner's standing authorization of the next prepare. Held in
+    /// memory only, so nothing is written: a reboot drops it, and the owner authorizes again.
+    pub fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DurableError> {
+        self.app.authorize(digest, signature)?;
+        Ok(())
     }
 
     /// [`Appliance::commit`] with its record written between the phases: the committed candidate

@@ -323,6 +323,19 @@ mod tests {
         fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
             matches!(dsm_sphincs::verify(PARTITION, pk, digest, sig), Ok(valid) if valid)
         }
+        fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+            matches!(dsm_sphincs::verify(dsm_sphincs::SphincsVariant::SPX256f, pk_on, digest, sig), Ok(valid) if valid)
+        }
+        fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+            let kp =
+                dsm_sphincs::generate_keypair_from_seed(dsm_sphincs::SphincsVariant::SPX256f, seed)
+                    .map_err(partition_error)?;
+            Ok((kp.secret_key.clone(), kp.public_key.clone()))
+        }
+        fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+            dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest)
+                .map_err(partition_error)
+        }
     }
     /// The SPHINCS+ failure, as the partition reports it.
     fn partition_error(e: dsm_sphincs::Error) -> PartitionError {

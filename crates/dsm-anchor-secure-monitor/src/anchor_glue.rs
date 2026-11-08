@@ -417,27 +417,29 @@ pub unsafe fn init() -> Result<(), InitFailure> {
 /// that did not come up answers with why.
 ///
 /// SAFETY: single-threaded Secure context; the SG handler is the only caller.
-pub unsafe fn service_request(frame: &[u8], _measurement: Measurement) -> Vec<u8> {
+pub unsafe fn service_request(frame: Vec<u8>, _measurement: Measurement) -> Vec<u8> {
     let slot = &mut *core::ptr::addr_of_mut!(MONITOR_APP);
     match core::mem::replace(slot, Monitor::NotBroughtUp) {
         #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
         Monitor::Up(anchor) => {
+            // The anchor owns the frame from here: it is held no longer than its request needs
+            // it (§4.9: wiped when let go), so a try-run's payment signs with it gone.
             let (anchor, answer) = serve_measured(anchor, frame, _measurement);
             *slot = Monitor::Up(anchor);
             answer
         }
         #[cfg(feature = "identify_chip")]
         Monitor::Identified(survey) => {
-            let answer = anchor_core::identify::answer(frame, &survey);
+            let answer = anchor_core::identify::answer(&frame, &survey);
             *slot = Monitor::Identified(survey);
             answer
         }
         Monitor::Refused(reason) => {
-            let answer = not_up(frame, &reason);
+            let answer = not_up(&frame, &reason);
             *slot = Monitor::Refused(reason);
             answer
         }
-        Monitor::NotBroughtUp => not_up(frame, "the anchor was not brought up"),
+        Monitor::NotBroughtUp => not_up(&frame, "the anchor was not brought up"),
     }
 }
 

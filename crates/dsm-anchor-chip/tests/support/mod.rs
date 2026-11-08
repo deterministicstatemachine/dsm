@@ -23,8 +23,11 @@ use std::time::Duration;
 use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor, BringUpFailure, Measurement};
 use anchor_chip::session::ChipFault;
 use anchor_chip::Board;
+use anchor_core::appliance::owner_authorization_digest;
 use anchor_core::enrollment::{Install, Provisioning};
 use anchor_core::proto::{decode_response, encode_request, pb};
+use anchor_core::root_advance::{transition_digest, OwnedTransition};
+use anchor_core::tropic::PartitionSig;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::{Error, ErrorKind, ErrorType, Operation, SpiDevice};
 use tropic01::Tropic01;
@@ -416,6 +419,26 @@ impl Served {
         self.measured(request, Measurement::Matches)
     }
 
+    /// One frame, as the monitor hands it over: the anchor's own copy, held no longer than its
+    /// request needs it.
+    pub fn frame(&mut self, frame: Vec<u8>, measurement: Measurement) -> pb::ApplianceResponse {
+        let anchor = match self.0.take() {
+            Some(anchor) => anchor,
+            None => panic!("the anchor is held here between requests"),
+        };
+        let (anchor, answer) = serve_measured(anchor, frame, measurement);
+        self.0 = Some(anchor);
+        match decode_response(&answer) {
+            Ok(response) => response,
+            Err(e) => panic!("the anchor answered no response: {e:?}"),
+        }
+    }
+
+    /// The owner's authorization over the wire: its message, the signature after it.
+    pub fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> pb::ApplianceResponse {
+        self.frame(authorize_frame(digest, signature), Measurement::Matches)
+    }
+
     /// Answer a request under a measurement of the Non-secure image.
     pub fn measured(
         &mut self,
@@ -426,7 +449,7 @@ impl Served {
             Some(anchor) => anchor,
             None => panic!("the anchor is held here between requests"),
         };
-        let (anchor, answer) = serve_measured(anchor, &encode_request(request), measurement);
+        let (anchor, answer) = serve_measured(anchor, encode_request(request), measurement);
         self.0 = Some(anchor);
         match decode_response(&answer) {
             Ok(response) => response,
@@ -442,11 +465,83 @@ impl Served {
     }
 }
 
+/// The owner's device key, BLAKE3-SPHINCS+ SPX256f from a fixed seed: the key [`provisioning`]
+/// names, whose signature authorizes a prepare.
+pub fn owner_key() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEY: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEY.get_or_init(
+        || match anchor_chip::bring_up::SphincsPart::owner_keygen(&[0x0A; 32]) {
+            Ok(key) => key,
+            Err(e) => panic!("the owner's key: {e:?}"),
+        },
+    )
+}
+
+/// The owner-authorization digest of `prepare` on the anchor whose bundle is `bundle`, and the
+/// owner's signature of it.
+pub fn authorization_for(prepare: &pb::ApplianceRequest, bundle: &[u8]) -> ([u8; 32], Vec<u8>) {
+    let bundle: [u8; 32] = match bundle.try_into() {
+        Ok(bundle) => bundle,
+        Err(e) => panic!("a 32-byte bundle: {e}"),
+    };
+    let field = |bytes: &[u8], what: &str| -> [u8; 32] {
+        match bytes.try_into() {
+            Ok(array) => array,
+            Err(e) => panic!("a 32-byte {what}: {e}"),
+        }
+    };
+    let transition: OwnedTransition =
+        match prepare.transition.as_ref().map(|t| t.to_owned_transition()) {
+            Some(Ok(t)) => t,
+            other => panic!(
+                "a prepare's transition: {:?}",
+                other.map(|r| r.map(|t| t.anchor_counter))
+            ),
+        };
+    let challenge = field(&prepare.receiver_challenge, "challenge");
+    let digest = owner_authorization_digest(
+        &bundle,
+        &transition.prev_root,
+        transition.anchor_counter,
+        &transition_digest(&transition.as_transition(), &challenge),
+        &field(&prepare.sender_device_root_before, "device root"),
+        &field(&prepare.sender_device_root_after, "device root"),
+    );
+    let signature = match anchor_chip::bring_up::SphincsPart::owner_sign(&owner_key().0, &digest) {
+        Ok(sig) => sig,
+        Err(e) => panic!("the owner signs: {e:?}"),
+    };
+    (digest, signature)
+}
+
+/// The wallet's rehearsal owner key, derived apart from its device key: what a try-run's payment is
+/// authorized under.
+pub fn rehearsal_key() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEY: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEY.get_or_init(
+        || match anchor_chip::bring_up::SphincsPart::owner_keygen(&[0x0B; 32]) {
+            Ok(key) => key,
+            Err(e) => panic!("the rehearsal key: {e:?}"),
+        },
+    )
+}
+
+/// An `OP_AUTHORIZE` frame as it goes over the wire: the message, then the signature after it.
+pub fn authorize_frame(digest: &[u8; 32], signature: &[u8]) -> Vec<u8> {
+    let mut frame = encode_request(&pb::ApplianceRequest {
+        op: pb::Op::Authorize as i32,
+        authorization_digest: digest.to_vec(),
+        ..Default::default()
+    });
+    frame.extend_from_slice(signature);
+    frame
+}
+
 /// What the owner's device provisions the anchor with.
 pub fn provisioning() -> Provisioning {
     Provisioning {
         device_id: [0x77; 32],
-        online_id_pk: vec![0x66; 64],
+        online_id_pk: owner_key().1.clone(),
         policy_hash: [0x33; 32],
         genesis_root: [0x11; 32],
     }
@@ -470,6 +565,7 @@ pub fn provision_request() -> pb::ApplianceRequest {
             policy_hash: provisioning.policy_hash.to_vec(),
             genesis_root: provisioning.genesis_root.to_vec(),
         }),
+        rehearsal_pk: rehearsal_key().1.clone(),
         ..Default::default()
     }
 }

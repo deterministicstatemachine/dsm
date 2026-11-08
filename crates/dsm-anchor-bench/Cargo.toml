@@ -17,6 +17,9 @@ path = "src/main.rs"
 # The appliance wire protocol (ApplianceRequest/Response, Op, TransitionPackage, encode/decode).
 # Package `dsm-anchor-core`, imported as the lib `anchor_core`.
 dsm-anchor-core = { path = "../dsm-anchor-core" }
+# The owner's scheme (BLAKE3-SPHINCS+ SPX256f): the bench's own owner and rehearsal keys, which
+# authorize its prepares and its try-runs on a trial board.
+dsm-sphincs = { path = "../dsm-sphincs" }
 # Host USB-CDC serial transport to the Pico.
 serialport = "4"
 
