@@ -24,6 +24,9 @@
 # UDID) limits it to that one device; with either set, only that kind of
 # device is touched.
 #
+# `make nodes-reset` makes a new set with a new CA: point the phones again,
+# or the wallets refuse every node (invalid peer certificate).
+#
 # A wallet that already made its identity on another storage set keeps it
 # there: clear the app's data first (Android: adb shell pm clear com.dsm.wallet,
 # then grant its Bluetooth permissions again; iOS: delete and reinstall).

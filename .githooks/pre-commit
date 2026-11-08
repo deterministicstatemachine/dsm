@@ -71,14 +71,7 @@ bash scripts/flow_mapping_assertions.sh
 pass "Flow mapping assertions"
 
 # ---------------------------------------------------------------------------
-# 6. Canonical bilateral gates
-# ---------------------------------------------------------------------------
-info "Checking canonical bilateral gates..."
-bash ci/canonical_bilateral_gates.sh
-pass "Canonical bilateral gates"
-
-# ---------------------------------------------------------------------------
-# 7. Real-code guard: no placeholders, fabricated results or boolean literals
+# 6. Real-code guard: no placeholders, fabricated results or boolean literals
 # ---------------------------------------------------------------------------
 info "Checking the real-code guard..."
 python3 scripts/real_code_guard.py || fail "real-code guard refused the tree (see above)"

@@ -44,6 +44,8 @@ make phones-local                                # every adb device and booted i
 make phones-connect CODE=dsm:connect/v1:...      # open the code in each wallet
 ```
 
+After `make nodes-reset` (a new set, with a new CA), clear the phones' wallets and run `make phones-local` again.
+
 Back in the starter, the wallet appears under **Connected wallets**. Request a payment inside the grant and watch it become `PAID`. Request one over the per-request cap and it waits for the player: `make dev-wallet-pending`, then `make wallet ARGS="approve <session> <seq>"` (or approve it on the phone).
 
 `make dev-down` stops everything. `make developer-path` runs this whole path end to end, as CI does.

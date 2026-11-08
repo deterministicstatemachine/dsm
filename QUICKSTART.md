@@ -189,7 +189,7 @@ Point the wallets on your phones at it (debug builds only):
 make phones-local  # every adb device (via adb reverse) and every booted iOS Simulator
 ```
 
-A wallet that already made its identity on another storage set keeps it there: clear the app's data first (Android: `adb shell pm clear com.dsm.wallet`, then grant its Bluetooth permissions again; iOS: delete the app and run `make ios-simulator-run`).
+A wallet that already made its identity on another storage set keeps it there: clear the app's data first (Android: `adb shell pm clear com.dsm.wallet`, then grant its Bluetooth permissions again; iOS: delete the app and run `make ios-simulator-run`). The same holds after `make nodes-reset`: it makes a new set with a new CA, so clear the wallets and run `make phones-local` again, or they refuse every node (`invalid peer certificate`).
 
 ## Build an App on DSM
 
