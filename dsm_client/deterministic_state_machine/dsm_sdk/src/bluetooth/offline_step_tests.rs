@@ -1413,6 +1413,91 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     let standing = core.anchor_appliance_status();
     assert!(standing.connected, "{}", standing.status);
     assert!(!standing.status.contains("gone"), "{}", standing.status);
+
+    // A payment from the new trial, to the receiver that pinned the first: A loads 10 ERA onto it
+    // and pays B 5 base units. B pinned A's first anchor on the first transfer (A24, SA-175) and
+    // the chip came back under a new bundle, so B refuses the confirm — by name, before the
+    // receipt is read under the pinned bundle, where a changed bundle only fails the paths — and
+    // keeps its pin. A's side committed the step with its anchor before B answered: the step's
+    // confirm stays owed, and what it moved is at neither device. What a receiver does with a
+    // sender's anchor born again is the owner's call; this records what stands.
+    let loaded = a
+        .device
+        .invoke(
+            "wallet.loadOffline",
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: "10.00".to_string(),
+            },
+        )
+        .await;
+    assert!(
+        loaded.success,
+        "the second load: {:?}",
+        loaded.error_message
+    );
+    pair.b.sync().await;
+    let second = bearer_transfer(&b, 5);
+    a.device.enter();
+    let (prepare, commitment) = a
+        .adapter()
+        .create_transfer_prepare_with_commitment(
+            b.device.device_id,
+            second.operation.clone(),
+            second.terms.clone().expect("a transfer's terms"),
+        )
+        .await
+        .expect("A prepares the payment");
+    let answered = delivered_over_ble(&a, &b, BleFrameType::BilateralPrepare, &prepare).await;
+    assert!(answered.is_empty(), "the proposal waits for B's user");
+    b.device.enter();
+    let response = b
+        .adapter()
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    let confirm =
+        match delivered_over_ble(&b, &a, BleFrameType::BilateralPrepareResponse, &response)
+            .await
+            .as_slice()
+        {
+            [outbound] if outbound.frame_type == BleFrameType::BilateralConfirm => {
+                outbound.payload.clone()
+            }
+            other => panic!("A answers the acceptance with its confirm, not {other:?}"),
+        };
+    let carried = over_ble(&a, &b, BleFrameType::BilateralConfirm, &confirm).await;
+    b.device.enter();
+    let refused = b
+        .handler
+        .handle_confirm_request(&carried.payload)
+        .await
+        .expect_err("B pinned the first anchor and refuses the one born again");
+    assert!(
+        refused
+            .to_string()
+            .contains("the pinned chip born again under a new bundle"),
+        "{refused}"
+    );
+    assert!(
+        !refused.to_string().contains("not one tree"),
+        "refused by name, not by the receipt's paths: {refused}"
+    );
+    a.device.enter();
+    let after = core
+        .device_head()
+        .and_then(|head| head.offline_account(&again.bundle).cloned())
+        .expect("the new account");
+    assert_eq!(
+        after.counter(),
+        1,
+        "A committed the step with its anchor before B answered"
+    );
+    assert_eq!(
+        after.allocation(&era),
+        Some(995),
+        "10.00 ERA less the 5 base units B refused"
+    );
 }
 
 /// The value of ERA the entered device received offline and has not settled.

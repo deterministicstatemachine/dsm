@@ -40,6 +40,12 @@ object LocalPicoUsb {
     internal const val DSM_ANCHOR_VENDOR_ID = 0x1209
     internal const val DSM_ANCHOR_PRODUCT_ID = 0xD5A1
     private const val WRITE_TIMEOUT_MS = 2000
+    // Android's USB host library (libusbhost) refuses one bulk request longer than 16 KiB, its
+    // MAX_USBFS_BUFFER_SIZE, outright: the 49,896-byte OP_AUTHORIZE frame (a 4 KiB head and the
+    // owner's 49,856-byte SPHINCS+ signature) came back -1 on the phone, at once. A frame goes out
+    // in requests no longer than that; the firmware reads a request by its length prefix, never by
+    // the USB packets it arrived in.
+    internal const val MAX_BULK_REQUEST_BYTES = 16_384
     private const val READ_TIMEOUT_MS = 500
     private const val CONTROL_TIMEOUT_MS = 1000
     // Drain the firmware boot banner / self-test chatter off the CDC before the first transaction
@@ -88,7 +94,9 @@ object LocalPicoUsb {
         val inp = epIn ?: return resetAndFail()
 
         Log.d(TAG, "passthrough req len=${frame.size}")
-        val wrote = conn.bulkTransfer(out, frame, frame.size, WRITE_TIMEOUT_MS)
+        val wrote = writeInRequests(frame) { offset, length ->
+            conn.bulkTransfer(out, frame, offset, length, WRITE_TIMEOUT_MS)
+        }
         if (wrote < frame.size) {
             Log.w(TAG, "USB write short ($wrote/${frame.size}) — recover online")
             return resetAndFail()
@@ -107,6 +115,20 @@ object LocalPicoUsb {
         val body = readExact(conn, inp, bodyLen) ?: return resetAndFail()
         Log.d(TAG, "passthrough resp len=${body.size}")
         return body
+    }
+
+    /** Writes `frame` through `write(offset, length)` in requests of at most [MAX_BULK_REQUEST_BYTES]
+     * each; `write` answers the bytes it took, or a negative error. Answers the bytes written in all,
+     * which falls short of `frame.size` as soon as one request takes less than asked or fails. */
+    internal fun writeInRequests(frame: ByteArray, write: (offset: Int, length: Int) -> Int): Int {
+        var sent = 0
+        while (sent < frame.size) {
+            val length = minOf(MAX_BULK_REQUEST_BYTES, frame.size - sent)
+            val wrote = write(sent, length)
+            if (wrote < length) return sent + maxOf(wrote, 0)
+            sent += wrote
+        }
+        return sent
     }
 
     /** Tear down the cached connection so the next transceive reopens + reconfigures from scratch

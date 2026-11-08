@@ -3667,11 +3667,54 @@ impl BilateralBleHandler {
         sender: [u8; 32],
         contact: &crate::storage::client_db::types::ContactRecord,
         confirm_request: &generated::BilateralConfirmRequest,
+        commitment_hash: [u8; 32],
     ) -> Result<dsm::types::offline_chain::ChainAnchor, DsmError> {
         let store = crate::bridge::anchor_enrollment_store().ok_or_else(|| {
             DsmError::state_machine("offline-bearer confirm: no anchor enrollment store installed")
         })?;
         if let Some(existing) = store.get(&sender) {
+            // A confirm that discloses an anchor other than the pinned one is refused here, by
+            // name, before the receipt is read under the pinned bundle: read that way, a changed
+            // bundle only fails the receipt's Merkle paths, and the person is told nothing of
+            // what changed. The pinned anchor is kept (SA-175: a later identity never replaces
+            // the binding through a transfer). On the rig a trial anchor born again after its
+            // board lost power came back under a new bundle, and its receiver saw only
+            // "the receipt's writes are not one tree's worth of paths".
+            if let Some(disclosure) = confirm_request.anchor_disclosure.as_ref() {
+                let disclosed = disclosed_anchor(disclosure)?;
+                if disclosed.anchor_id != existing.pin.anchor_id
+                    || disclosed.bundle != existing.pin.bundle
+                {
+                    let reason = if disclosed.anchor_id == existing.pin.anchor_id {
+                        "the sender's anchor is the pinned chip born again under a new bundle; the \
+                         pinned anchor is kept and this payment is refused"
+                    } else {
+                        "the sender's anchor is not the one pinned for them; the pinned anchor is \
+                         kept and this payment is refused"
+                    };
+                    warn!(
+                        "[BILATERAL] fused anchor disclosure REJECTED for {} ({reason})",
+                        bytes_to_base32(&sender[..8])
+                    );
+                    self.emit_event(&generated::BilateralEventNotification {
+                        display_amount: None,
+                        event_type: generated::BilateralEventType::BilateralEventAnchorChanged
+                            .into(),
+                        counterparty_device_id: sender.to_vec(),
+                        commitment_hash: commitment_hash.to_vec(),
+                        transaction_hash: None,
+                        amount: None,
+                        token_id: None,
+                        status: "anchor_identity_changed".to_string(),
+                        message: reason.to_string(),
+                        sender_ble_address: None,
+                        failure_reason: None,
+                    });
+                    return Err(DsmError::invalid_operation(format!(
+                        "offline-bearer confirm refused: {reason}"
+                    )));
+                }
+            }
             return Ok(dsm::types::offline_chain::ChainAnchor::from(&existing.pin));
         }
         let contact_verified = {
@@ -4178,6 +4221,7 @@ impl BilateralBleHandler {
                 session.counterparty_device_id,
                 &sender_contact,
                 &confirm_request,
+                commitment_hash,
             )
             .await?;
         let sender_bearer_leaves = crate::bluetooth::anchor_accept::bearer_leaves_of_release(
