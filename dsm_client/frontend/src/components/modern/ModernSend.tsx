@@ -17,6 +17,7 @@ import { modernNav } from './modernNav';
 import type { DomainContact } from '../../domain/types';
 import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
 import { ScreenGuard } from '../common/ScreenGuard';
+import ModernOffline from './ModernOffline';
 
 const QUICK = ['10', '50', '100', '200'];
 
@@ -122,8 +123,19 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
 
       {token !== null ? (
         <section className="s-card s-balance" aria-label="Available balance">
-          <div className="s-balance-label">Available Balance</div>
-          <div className="s-balance-amount" style={{ fontSize: 32 }}>{token.displayAmount}<small>{token.symbol}</small></div>
+          <div className="s-balance-label">{mode === 'offline' ? 'Cash in hand' : 'Available Balance'}</div>
+          {mode === 'offline' && !token.offline ? (
+            <div className="s-balance-amount" style={{ fontSize: 32 }} data-testid="send-offline-unknown">—<small>{token.symbol}</small></div>
+          ) : (
+            <div className="s-balance-amount" style={{ fontSize: 32 }}>
+              {mode === 'offline' && token.offline ? token.offline.displayAmount : token.displayAmount}<small>{token.symbol}</small>
+            </div>
+          )}
+          {mode === 'offline' ? (
+            <div className="s-balance-other">
+              {token.offline ? `Online account ${token.displayAmount} ${token.symbol}` : 'Offline allocation unknown until the appliance connects.'}
+            </div>
+          ) : null}
         </section>
       ) : (
         <div className="s-notice">There is nothing to send yet.</div>
@@ -173,8 +185,14 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
             <button type="button" aria-pressed={mode === 'online'} onClick={() => setMode('online')}>Online</button>
             <button type="button" aria-pressed={mode === 'offline'} onClick={() => setMode('offline')}>Offline</button>
           </div>
+          {mode === 'offline' ? (
+            <p className="s-hint" style={{ marginTop: 10 }}>
+              <strong>Offline needs Bluetooth.</strong> Both appliances next to each other, Bluetooth on; the person accepts it in their app.
+            </p>
+          ) : null}
         </div>
       ) : null}
+      {mode === 'offline' ? <ModernOffline token={token} onMoved={wallet.refreshAll} /> : null}
 
       <button
         type="button"
