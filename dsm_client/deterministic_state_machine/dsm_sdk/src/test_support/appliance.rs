@@ -288,6 +288,9 @@ struct Anchor {
     enrolled_counter: u32,
     /// What an install of this anchor makes: the board's image decides.
     install: anchor_core::enrollment::Install,
+    /// Births so far: the chip's RNG gives each birth its own entropy, so a chip born again has a
+    /// new bundle under the same identity.
+    births: u32,
     served: Served,
 }
 
@@ -295,6 +298,17 @@ impl Anchor {
     fn derive(&self, input: &str) -> [u8; 32] {
         blake3::derive_key(
             &format!("DSM test software TROPIC01 2026-09-27 {input}"),
+            &self.chip_seed,
+        )
+    }
+
+    /// What the chip's RNG gives this birth and no other.
+    fn derive_for_birth(&self, input: &str) -> [u8; 32] {
+        blake3::derive_key(
+            &format!(
+                "DSM test software TROPIC01 2026-09-27 birth {} {input}",
+                self.births
+            ),
             &self.chip_seed,
         )
     }
@@ -319,10 +333,10 @@ impl Anchor {
             partition_device_id: self.derive("partition device id"),
             chip_pk: self.resident().verifying_key().to_bytes().to_vec(),
             enrolled_counter: self.enrolled_counter,
-            birth_entropy: self.derive("birth entropy"),
-            chip_birth_witness: self.derive("chip birth witness"),
-            host_nonce: self.derive("host nonce"),
-            partition_key_seed: self.derive("partition key seed"),
+            birth_entropy: self.derive_for_birth("birth entropy"),
+            chip_birth_witness: self.derive_for_birth("chip birth witness"),
+            host_nonce: self.derive_for_birth("host nonce"),
+            partition_key_seed: self.derive_for_birth("partition key seed"),
             install: self.install,
         }
     }
@@ -384,6 +398,7 @@ impl HostAppliance {
                 chip_seed,
                 enrolled_counter,
                 install: anchor_core::enrollment::Install::ForGood,
+                births: 0,
                 served: Served::Unprovisioned,
             })),
         }
@@ -682,6 +697,7 @@ impl AnchorAppliance for HostAppliance {
             if anchor.install == anchor_core::enrollment::Install::ForTrial {
                 *held(&anchor.counter) = anchor.enrolled_counter;
             }
+            anchor.births += 1;
             let d = DurableAppliance::provision(
                 &anchor.chip_birth(),
                 anchor.chip(),

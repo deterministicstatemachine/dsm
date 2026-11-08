@@ -9,7 +9,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import * as pb from '../../proto/dsm_app_pb';
 import { AppliancePopover } from '../screens/wallet/AppliancePopover';
-import { getAnchorStatus } from '../../dsm/anchor';
+import { getAnchorStatus, type AnchorStatus } from '../../dsm/anchor';
 
 type BridgeAnswer = (bytes: Uint8Array) => Uint8Array;
 
@@ -102,11 +102,12 @@ const PTRNG_UNTESTED: StepOf[] = [
   },
 ];
 
-async function popover(onConnect: () => Promise<void>) {
+async function popover(onInstalled: (installed: AnchorStatus) => Promise<void>) {
   const status = await getAnchorStatus();
   const onClose = () => undefined;
+  const onConnect = async () => undefined;
   return render(
-    <AppliancePopover read={{ kind: 'read', status }} busy={status.connected} onConnect={onConnect} onClose={onClose} />,
+    <AppliancePopover read={{ kind: 'read', status }} busy={status.connected} onConnect={onConnect} onInstalled={onInstalled} onClose={onClose} />,
   );
 }
 
@@ -119,11 +120,11 @@ describe('the install of a new anchor', () => {
     expect(screen.queryByTestId('anchor-install')).toBeNull();
   });
 
-  it('happens only after a passing try-run and a second tap, and reads the anchor again', async () => {
+  it('happens only after a passing try-run and a second tap, and hands over the anchor as installed', async () => {
     const asked = hostWith(report('passed'), 'new anchor');
-    const reads: string[] = [];
-    await popover(async () => {
-      reads.push('read again');
+    const handed: string[] = [];
+    await popover(async (installed) => {
+      handed.push(installed.statusText);
     });
     expect(asked).toEqual(['anchor.status']);
 
@@ -135,7 +136,8 @@ describe('the install of a new anchor', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Install…' }));
     expect(asked).not.toContain('anchor.install');
     fireEvent.click(screen.getByRole('button', { name: 'Yes, make it permanent' }));
-    await waitFor(() => expect(reads).toEqual(['read again']));
+    // The install's own answer reaches the screen: a read afterwards would not carry what it says.
+    await waitFor(() => expect(handed).toEqual(['anchor connected (counter u=0)']));
     expect(asked.filter((route) => route === 'anchor.install')).toHaveLength(1);
   });
 

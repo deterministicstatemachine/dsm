@@ -1304,14 +1304,15 @@ fn bearer_transfer(to: &OfflineDevice, amount: u64) -> Proposal {
     }
 }
 
-/// A trial install clears at the board's next boot, and the anchor comes back at its origin. The
-/// account that followed the earlier trial stands where its last payment left it, so the two no
-/// longer agree: the account is lost with the trial (owner, 2026-11-08). Here A's anchor is a trial,
-/// A loads 20 ERA and pays B 7 base units on it, and the board reboots. The status then offers the
-/// install again and names the ended trial; the install closes the stale account, opens it again
-/// where the anchor stands, and says what it held. An account that still stands where the anchor
-/// does is left alone. MUTATION CONTROL: dropping `close_the_account_an_ended_trial_left` from
-/// `anchor_install` leaves the account at counter 1 and turns this red.
+/// A trial install clears at the board's next boot, and the anchor comes back born again: the same
+/// identity, a new bundle, at its origin. The account that followed the earlier trial stands where
+/// its last payment left it under the old bundle: it is lost with the trial (owner, 2026-11-08).
+/// Here A's anchor is a trial, A loads 20 ERA and pays B 7 base units on it, and the board reboots.
+/// The status then offers the install again and names the ended trial; the install closes the old
+/// bundle's account, says what it held, and opens the new bundle's account at the anchor's origin,
+/// so cash in hand reads as none, not unknown. MUTATION CONTROL: dropping
+/// `close_the_accounts_earlier_anchors_left` from `anchor_install` leaves the old account standing
+/// and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_is_gone() {
@@ -1374,6 +1375,11 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
         .anchor_install()
         .expect("the anchor installs again, for a new trial");
     assert!(again.connected, "{}", again.status);
+    assert_eq!(
+        again.anchor_id, installed.anchor_id,
+        "the same chip, the same identity"
+    );
+    assert_ne!(again.bundle, bundle, "born again: a new bundle");
     assert!(
         again
             .status
@@ -1381,27 +1387,29 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
         "{}",
         again.status
     );
-    let fresh = core
-        .device_head()
-        .and_then(|head| head.offline_account(&bundle).cloned())
-        .expect("the account is open again");
+    let head = core.device_head().expect("a head");
+    assert!(
+        head.offline_account(&bundle).is_none(),
+        "the ended trial's account is closed"
+    );
+    let fresh = head
+        .offline_account(&again.bundle)
+        .cloned()
+        .expect("the new bundle's account is open at the install");
     assert_eq!(
         fresh.counter(),
         0,
         "the account stands at the anchor's origin"
     );
     assert_eq!(fresh.frontier(), again.frontier_root, "and at its frontier");
-    assert!(
-        fresh.allocations().is_empty(),
-        "what the earlier trial held is gone"
-    );
+    assert!(fresh.allocations().is_empty(), "it holds nothing yet");
     assert_eq!(
-        core.offline_cash_balance(bundle, era),
-        None,
-        "nothing is spendable from it"
+        core.offline_allocation_of(&era),
+        Some(0),
+        "none of ERA, known: not unknown"
     );
 
-    // The anchor and the account agree now, so another status read changes nothing.
+    // The anchor and its account agree, so another status read changes nothing.
     let standing = core.anchor_appliance_status();
     assert!(standing.connected, "{}", standing.status);
     assert!(!standing.status.contains("gone"), "{}", standing.status);

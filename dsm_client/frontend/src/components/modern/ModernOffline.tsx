@@ -8,7 +8,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { dsmClient } from '../../services/dsmClient';
-import { getAnchorStatus } from '../../dsm/anchor';
+import { getAnchorStatus, type AnchorStatus } from '../../dsm/anchor';
 import AnchorInstallPanel from '../AnchorInstallPanel';
 import { applianceConnected, applianceStateText, type ApplianceRead } from '../applianceRead';
 import type { TokenBalanceView } from '../../dsm/types';
@@ -51,6 +51,16 @@ export default function ModernOffline({ token, onMoved }: Props): React.JSX.Elem
   useEffect(() => {
     connect();
   }, [connect]);
+
+  // The install's own answer is kept as the read: it says what an earlier trial's account held
+  // when the install closed one, which a status read afterwards does not.
+  const installed = useCallback(
+    async (status: AnchorStatus) => {
+      setRead({ kind: 'read', status });
+      if (status.connected) await onMoved();
+    },
+    [onMoved],
+  );
 
   const move = async () => {
     if (token === null || amount.trim().length === 0) return;
@@ -98,7 +108,7 @@ export default function ModernOffline({ token, onMoved }: Props): React.JSX.Elem
             </div>
           </>
         ) : null}
-        {read.kind === 'read' && read.status.awaitingInstall ? <AnchorInstallPanel onInstalled={connect} /> : null}
+        {read.kind === 'read' && read.status.awaitingInstall ? <AnchorInstallPanel onInstalled={installed} /> : null}
         {read.kind === 'error' ? <div className="s-notice s-error" role="alert">{read.message}</div> : null}
         <button type="button" className="s-btn s-btn-quiet" disabled={busy} onClick={() => connect()}>
           {busy ? 'Connecting…' : connected ? 'Check again' : 'Connect'}

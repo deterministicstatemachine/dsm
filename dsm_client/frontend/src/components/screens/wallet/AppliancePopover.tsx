@@ -10,16 +10,19 @@ import { Notice } from '../../common/ScreenFrame';
 import { useBackButton } from '../../../hooks/useBackButton';
 import AnchorInstallPanel from '../../AnchorInstallPanel';
 import { applianceConnected, applianceStateText, type ApplianceRead } from '../../applianceRead';
+import type { AnchorStatus } from '../../../dsm/anchor';
 
 type Props = {
   read: ApplianceRead;
   busy: boolean;
   /** Reads the appliance through Rust, which attaches it. */
   onConnect: () => Promise<void>;
+  /** Takes the anchor as its install reported it, which says what a read afterwards does not. */
+  onInstalled: (installed: AnchorStatus) => Promise<void>;
   onClose: () => void;
 };
 
-export function AppliancePopover({ read, busy, onConnect, onClose }: Props): React.JSX.Element {
+export function AppliancePopover({ read, busy, onConnect, onInstalled, onClose }: Props): React.JSX.Element {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   useBackButton(true, onClose);
   useEffect(() => {
@@ -72,7 +75,7 @@ export function AppliancePopover({ read, busy, onConnect, onClose }: Props): Rea
             </>
           )}
           {read.kind === 'read' && read.status.awaitingInstall && (
-            <AnchorInstallPanel onInstalled={onConnect} />
+            <AnchorInstallPanel onInstalled={onInstalled} />
           )}
           {read.kind === 'error' && <Notice kind="error">{read.message}</Notice>}
         </div>

@@ -1859,7 +1859,13 @@ impl CoreSDK {
             .as_ref()
             .map(|attached| attached.pin.bundle)?;
         let sm = self.state_machine.lock();
-        sm.device_head()?.offline_allocation(&bundle, asset)
+        let account = sm.device_head()?.offline_account(&bundle)?;
+        // An open account keeps an entry only for an asset it holds some of: no entry is none of
+        // it, which is known, not unknown.
+        Some(match account.allocation(asset) {
+            Some(held) => held,
+            None => 0,
+        })
     }
 
     /// Get the canonical DeviceState head (§2.2 SMT root).
@@ -2062,12 +2068,10 @@ impl CoreSDK {
                 };
             self.require_anchor_for_this_device(&pin)?;
             let standing = appliance.status()?;
-            let lost = match standing.install {
-                anchor_core::enrollment::Install::ForTrial => {
-                    self.close_the_account_an_ended_trial_left(&pin.bundle, &standing)?
-                }
-                anchor_core::enrollment::Install::ForGood => BTreeMap::new(),
-            };
+            let lost = self.close_the_accounts_earlier_anchors_left(&pin.bundle)?;
+            // The new anchor's account opens at its origin now, so the wallet knows what it holds
+            // offline from the first read: none of anything, which is known, not unknown.
+            self.require_offline_account_at(&pin.bundle, &standing.root, standing.anchor_counter)?;
             guard.replace(AttachedAnchor { appliance, pin });
             lost
         };
@@ -2083,45 +2087,45 @@ impl CoreSDK {
         Ok(snap)
     }
 
-    /// A trial anchor comes back from a boot at its origin, the record its trial wrote cleared.
-    /// The offline account that followed the earlier trial stands wherever its last payment left
-    /// it, so the two no longer agree, and the account is lost with the trial (owner, 2026-11-08):
-    /// it is closed and opened again where the anchor stands, and what it held is returned so the
-    /// wallet can say it. An account that still stands where the anchor does is left as it is: no
-    /// payment was made on the earlier trial, and nothing is lost. An anchor installed for good
-    /// never comes back at its origin, so this is never called for one.
-    fn close_the_account_an_ended_trial_left(
+    /// A device has one anchor. An offline account under a bundle other than the one being
+    /// installed followed an earlier birth of it: a trial cleared at its board's next boot, so the
+    /// anchor came back born again, under a new bundle, at its origin, and the account that
+    /// followed the trial stands where its last payment left it. That account is lost with the
+    /// trial (owner, 2026-11-08): every such account is closed and what it held is returned, so the
+    /// wallet can say it. An anchor installed for good is never born again, so nothing of its own
+    /// is ever closed here; only what a trial before it left.
+    fn close_the_accounts_earlier_anchors_left(
         &self,
         bundle: &[u8; 32],
-        standing: &crate::anchor::ApplianceStatus,
     ) -> Result<BTreeMap<[u8; 32], u64>, DsmError> {
         let mut sm = self.state_machine.lock();
         let Some(ds) = sm.device_head() else {
             return Ok(BTreeMap::new());
         };
-        let Some(account) = ds.offline_account(bundle) else {
-            return Ok(BTreeMap::new());
-        };
-        if account.counter() == standing.anchor_counter && account.frontier() == standing.root {
+        let (closed, lost) = ds.close_offline_accounts_except(bundle);
+        if lost.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let stood_at = account.counter();
-        let (reopened, lost) =
-            ds.reopen_offline_account_after_trial(bundle, standing.root, standing.anchor_counter)?;
-        crate::storage::client_db::update_bcr_device_head(&reopened).map_err(|e| {
+        crate::storage::client_db::update_bcr_device_head(&closed).map_err(|e| {
             DsmError::storage(
-                format!("offline account: persist the account reopened after a trial: {e}"),
+                format!("offline account: persist the accounts closed at an install: {e}"),
                 None::<std::io::Error>,
             )
         })?;
-        sm.set_device_head(reopened);
-        log::warn!(
-            "[anchor.install] the trial on this anchor ended: its account stood at counter {stood_at} \
-             and the anchor stands at {}; the account is closed and what it held is gone: {}",
-            standing.anchor_counter,
-            lost_words(&lost)
-        );
-        Ok(lost)
+        sm.set_device_head(closed);
+        let mut held = BTreeMap::new();
+        for (ended, allocations) in &lost {
+            log::warn!(
+                "[anchor.install] the account of an earlier birth of this anchor (bundle {}) is \
+                 closed; what it held is gone: {}",
+                crate::util::text_id::encode_base32_crockford(ended),
+                lost_words(allocations)
+            );
+            for (asset, units) in allocations {
+                *held.entry(*asset).or_insert(0) += units;
+            }
+        }
+        Ok(held)
     }
 
     /// What this device provisions an anchor with: its device id, its online key, the

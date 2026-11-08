@@ -12,7 +12,7 @@ import { TokenSelect } from '../../common/TokenSelect';
 import { Notice } from '../../common/ScreenFrame';
 import { InfoTip } from '../../common/InfoTip';
 import BluetoothIcon from '../../icons/BluetoothIcon';
-import { getAnchorStatus } from '../../../dsm/anchor';
+import { getAnchorStatus, type AnchorStatus } from '../../../dsm/anchor';
 import { OfflineFundingPopover } from './OfflineFundingPopover';
 import { AppliancePopover } from './AppliancePopover';
 import { applianceConnected, type ApplianceRead } from '../../applianceRead';
@@ -99,6 +99,13 @@ function SendTabInner({
   useEffect(() => {
     if (txMode === 'offline') void connectAppliance();
   }, [txMode, connectAppliance]);
+
+  // The install's own answer stands as the read: it says what an earlier trial's account held when
+  // the install closed one, which a status read afterwards does not.
+  const installedAppliance = useCallback(async (status: AnchorStatus) => {
+    setAppliance({ kind: 'read', status });
+    if (status.connected) await loadWalletDataRef.current();
+  }, []);
 
   // Only what Rust listed. With no balances there is nothing to send, and the
   // form says so rather than offering a token the wallet does not hold.
@@ -411,6 +418,7 @@ function SendTabInner({
           read={appliance}
           busy={applianceBusy}
           onConnect={connectAppliance}
+          onInstalled={installedAppliance}
           onClose={() => setApplianceOpen(false)}
         />
       )}
