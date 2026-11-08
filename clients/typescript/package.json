@@ -15,7 +15,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "proto:gen": "protoc --plugin=protoc-gen-es=./node_modules/.bin/protoc-gen-es --es_out=import_extension=.js:./src/generated --es_opt=target=ts -I ../../proto ../../proto/dsm_app.proto",
+    "proto:gen": "mkdir -p src/generated && protoc --plugin=protoc-gen-es=./node_modules/.bin/protoc-gen-es --es_out=import_extension=.js:./src/generated --es_opt=target=ts -I ../../proto ../../proto/dsm_app.proto",
     "build": "npm run proto:gen && tsc -p tsconfig.json",
     "type-check": "npm run proto:gen && tsc -p tsconfig.json --noEmit"
   },

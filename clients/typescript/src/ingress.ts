@@ -62,7 +62,9 @@ export class Ingress {
   readonly #secret: string;
 
   constructor(options: IngressOptions) {
-    this.url = options.url.replace(/\/+$/, "");
+    let end = options.url.length;
+    while (end > 0 && options.url[end - 1] === "/") end--;
+    this.url = options.url.slice(0, end);
     this.#secret = options.secret;
   }
 
