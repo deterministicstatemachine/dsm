@@ -78,17 +78,20 @@ final class BridgeDispatcher {
 
         case "returnToConnectCaller":
             // After an approved connect that a link brought: back to the app
-            // that sent it. One byte: 1 when the wallet stepped back, 0 when no
-            // link opened it. The owner's ruling (2026-11-01) is an automatic
-            // return by a validated return URL bound to the Connect session;
-            // Rust does not yet bind one, so when a link did open the wallet
-            // there is nothing validated to open, and that is said rather
-            // than answered as a step back or as no link.
+            // that sent it. One byte: 1 when the wallet stepped back, 0 when it
+            // did not. iOS opens the sender only through an address for it, and
+            // the owner's ruling (2026-11-01) is a validated return URL bound
+            // to the Connect session, which Rust does not bind yet. So the step
+            // back is not built: the wallet stays, answers 0, and the page says
+            // the connect stands and the way back is the player's. A refusal
+            // here would raise an error over a connect that succeeded.
             let screen = try screen("returnToConnectCaller")
             var opened: String?
             DispatchQueue.main.sync { opened = screen.takeConnectLinkOpened() }
-            guard opened != nil else { return Data([0]) }
-            throw BridgeFailure.invalidState("returnToConnectCaller: no validated return URL is bound to the Connect session yet; the step back is not built")
+            if opened != nil {
+                DsmLog.info("BridgeDispatcher", "returnToConnectCaller: a link opened the wallet; no validated return URL is bound yet, so no step back")
+            }
+            return Data([0])
 
         case "shareText":
             let text = utf8(payload)

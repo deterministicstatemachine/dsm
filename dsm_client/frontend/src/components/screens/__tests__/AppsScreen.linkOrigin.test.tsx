@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Audit 2026-10-15, items 3 and 4: a connect code a link brought is shown as
-// coming from outside the wallet, with the app Android recorded as having
+// coming from outside the wallet, with the app the phone recorded as having
 // opened the link, beside the name the offer gives itself; and the approval
 // holds the confirm guard (other apps' overlay windows hidden) while it is up.
 
@@ -62,14 +62,58 @@ describe('a connect offer', () => {
     unmount();
   });
 
-  it('that a link brought with no app named says Android named none', async () => {
+  it('that a link brought with no app named says the phone named none', async () => {
     phoneWithAnOffer();
     render(<AppsScreen />);
     await act(settle);
     act(() => emit('connect.link', new TextEncoder().encode(`\n${CODE}`)));
     fireEvent.click(screen.getByRole('button', { name: 'READ' }));
     await act(settle);
-    expect(screen.getByTestId('connect-offer-origin')).toHaveTextContent('a link opened by an app Android did not name');
+    expect(screen.getByTestId('connect-offer-origin')).toHaveTextContent('a link opened by an app your phone did not name');
+  });
+
+  // Found on the iOS Simulator, 2026-11-08: iOS cannot step back to the app
+  // that sent the link (no return address is bound to the session yet), and
+  // the connect stood while the page reported it as failed.
+  it('that a link brought, once approved, says it connected whether or not the wallet stepped back', async () => {
+    for (const [stepped, said] of [
+      [1, 'Connected to DSM Wallet Official.'],
+      [0, 'Connected to DSM Wallet Official. Go back to the app that sent you here.'],
+    ] as const) {
+      const phone = installScriptedPhone(
+        {
+          'connect.list': reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [] }) }),
+          'connect.pending': reply({ case: 'pending', value: new pb.ConnectPendingListV1({ pending: [] }) }),
+          'connect.preview': reply({
+            case: 'preview',
+            value: new pb.ConnectPreviewV1({
+              offerDigest: new Uint8Array(32).fill(7),
+              displayName: 'DSM Wallet Official',
+              appDeviceId: new Uint8Array(32).fill(9),
+              endpoint: 'https://game.example',
+              scopeLines: ['Pay up to 10 ERA'],
+            }),
+          }),
+          'connect.approve': reply({
+            case: 'session',
+            value: new pb.ConnectSessionV1({ sessionId: new Uint8Array(32).fill(5), displayName: 'DSM Wallet Official' }),
+          }),
+        },
+        { returnToConnectCaller: new Uint8Array([stepped]) },
+      );
+      const { unmount } = render(<AppsScreen />);
+      await act(settle);
+      act(() => emit('connect.link', new TextEncoder().encode(`\n${CODE}`)));
+      fireEvent.click(screen.getByRole('button', { name: 'READ' }));
+      await act(settle);
+      fireEvent.click(screen.getByRole('button', { name: 'APPROVE' }));
+      await act(settle);
+      expect(screen.getByText(said)).toBeInTheDocument();
+      expect(screen.queryByText(/Connecting failed/)).toBeNull();
+      expect(phone.guards).toContain(CONFIRM);
+      unmount();
+      removeScriptedPhone();
+    }
   });
 
   it('that the player pasted carries no link origin', async () => {
