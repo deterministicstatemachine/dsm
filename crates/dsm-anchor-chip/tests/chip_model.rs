@@ -225,7 +225,10 @@ fn rehearse(anchor: &mut Served, request: &pb::ApplianceRequest) -> pb::Applianc
         Ok(sig) => sig,
         Err(e) => panic!("the rehearsal key signs: {e:?}"),
     };
-    anchor.authorize(&digest, &signature)
+    anchor.frame(
+        support::authorize_frame(&digest, &signature),
+        Measurement::Matches,
+    )
 }
 
 /// The owner authorizes `prepare` for the anchor whose bundle is `bundle`, then sends it.
@@ -235,7 +238,10 @@ fn prepare(
     bundle: &[u8],
 ) -> pb::ApplianceResponse {
     let (digest, signature) = support::authorization_for(prepare, bundle);
-    let authorized = anchor.authorize(&digest, &signature);
+    let authorized = anchor.frame(
+        support::authorize_frame(&digest, &signature),
+        Measurement::Matches,
+    );
     assert!(authorized.ok, "authorize: error {}", authorized.error);
     anchor.request(prepare)
 }
