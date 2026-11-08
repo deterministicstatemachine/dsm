@@ -21,13 +21,7 @@ export async function getAllBalancesStrictBridge(): Promise<Uint8Array> {
 }
 
 export async function getWalletHistoryStrictBridge(): Promise<Uint8Array> {
-  // limit=0, offset=0 (little-endian u64 each)
-  const limitOffset = new Uint8Array(16);
-  const arg = new ArgPack({
-    codec: Codec.PROTO,
-    body: toBytes(limitOffset),
-  });
-  const res = await routerQueryBin("wallet.history", arg.toBinary());
+  const res = await routerQueryBin("wallet.history");
   return res;
 }
 

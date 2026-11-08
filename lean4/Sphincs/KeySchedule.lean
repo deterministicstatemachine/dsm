@@ -10,7 +10,8 @@ import Sphincs.RomDerive
 
    * the three Extract salts are distinct (`ks_salts_nodup`);
    * the `info` of a node determines the node and its context, among all the
-     nodes under the same key (`wnode_info_inj` under the wallet root,
+     nodes under the same key (a match session key, SoFi Amendment S27, is one
+     more node under the wallet root) (`wnode_info_inj` under the wallet root,
      `snode_info_inj` under `s0`, `akInfo_inj` under the device seed):
      every Expand under one key is a query at a distinct input;
    * the three Smaster-keyed inputs (per-step EK seed, ML-KEM coins, ML-KEM
@@ -61,9 +62,11 @@ def lRecAuth := "DSM/recovery-authority/v2"
 def lAk := "DSM/device-ak/v3"
 def lSmaster := "DSM/Smaster/v3"
 def lAtRest := "DSM/chain-head-at-rest/v3"
+def lEscrowSession := "DSM/escrow/session-key/v2"
 
 def ksLabels : List String :=
-  [lNonce, lGrk, lAtta, lDevSeed, lS0, lSdk, lRecAead, lRecAuth, lAk, lSmaster, lAtRest]
+  [lNonce, lGrk, lAtta, lDevSeed, lS0, lSdk, lRecAead, lRecAuth, lAk, lSmaster, lAtRest,
+   lEscrowSession]
 
 theorem ksLabels_nul_free : ∀ l ∈ ksLabels, (0 : UInt8) ∉ utf8 l := by decide
 
@@ -94,6 +97,7 @@ inductive WNode where
   | sdk (devid g : Wire 32)
   | recAead
   | recAuth
+  | escrow (g matchNonce : Wire 32)
 
 def WNode.label : WNode → String
   | .nonce _ _ => lNonce
@@ -104,6 +108,7 @@ def WNode.label : WNode → String
   | .sdk _ _ => lSdk
   | .recAead => lRecAead
   | .recAuth => lRecAuth
+  | .escrow _ _ => lEscrowSession
 
 def WNode.fields : WNode → Bytes
   | .nonce net idx => lp net ++ le32 idx
@@ -114,6 +119,7 @@ def WNode.fields : WNode → Bytes
   | .sdk devid g => devid.val ++ g.val
   | .recAead => []
   | .recAuth => []
+  | .escrow g matchNonce => g.val ++ matchNonce.val
 
 def WNode.info (n : WNode) : Bytes := ksInfo n.label n.fields
 
@@ -128,7 +134,7 @@ def WNode.ok : WNode → Prop
 
 def WNode.tag : WNode → Nat
   | .nonce _ _ => 0 | .grk _ _ _ => 1 | .atta _ _ => 2 | .dseed _ _ => 3 | .s0 _ _ _ => 4
-  | .sdk _ _ => 5 | .recAead => 6 | .recAuth => 7
+  | .sdk _ _ => 5 | .recAead => 6 | .recAuth => 7 | .escrow _ _ => 8
 
 theorem WNode.label_mem (n : WNode) : n.label ∈ ksLabels := by cases n <;> simp only [WNode.label] <;> decide
 
@@ -158,6 +164,8 @@ theorem wnode_info_inj (a b : WNode) (ha : a.ok) (hb : b.ok) (h : a.info = b.inf
     rw [h1, Subtype.ext h2]
   · rfl
   · rfl
+  · obtain ⟨h1, h2⟩ := wire_split hf
+    rw [h1, Subtype.ext h2]
 
 /-! The nodes under `s0` and under the device seed. -/
 

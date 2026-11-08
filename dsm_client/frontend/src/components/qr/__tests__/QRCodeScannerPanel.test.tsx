@@ -11,7 +11,7 @@ const readContactCode = jest.fn<Promise<ContactCard>, [string]>();
 const addContact = jest.fn<Promise<AddContactResult>, [string, ContactCard]>();
 
 jest.mock('../../../contexts/ContactsContext', () => ({
-  useContacts: () => ({ addContact: (alias: string, card: ContactCard) => addContact(alias, card) }),
+  useContacts: () => ({ contacts: [], addContact: (alias: string, card: ContactCard) => addContact(alias, card) }),
 }));
 
 jest.mock('../../../dsm/contacts', () => ({

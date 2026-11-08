@@ -196,3 +196,64 @@ fn a_wait_that_is_not_one_is_refused() {
         );
     });
 }
+
+/// Waits starting together read the store a few at a time, and leave the
+/// rest of the node's connections to everyone else. With the spool table
+/// locked, so every wait reading the store holds its connection, more waits
+/// start at once than the node has connections; a request on another route
+/// still gets a connection and is answered at once. Once the lock is let go,
+/// every wait reads its spools and is answered as always.
+#[test]
+fn waits_starting_together_leave_the_pool_to_everyone_else() {
+    use dsm_storage_node::db::POOL_MAX_SIZE;
+    common::runtime().block_on(async {
+        let app = node("wait_looks", Duration::from_secs(1)).await;
+        let locker_pool = common::reopened_store("wait_looks").await;
+        let mut locker = common::ok_or_panic(locker_pool.get().await, "a connection");
+        let lock = common::ok_or_panic(locker.transaction().await, "a transaction");
+        common::ok_or_panic(
+            lock.batch_execute("LOCK TABLE inbox_spool IN ACCESS EXCLUSIVE MODE")
+                .await,
+            "lock the spool table",
+        );
+
+        let keys: Vec<String> = (0..POOL_MAX_SIZE + 16)
+            .map(|i| spool_key(0x80 + common::ok_or_panic(u8::try_from(i), "a key byte")))
+            .collect();
+        let waits: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                let (app, key) = (app.clone(), key.clone());
+                tokio::spawn(async move {
+                    wait_on(&app, &[(key.as_str(), 1)], "application/octet-stream").await
+                })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let health = common::ok_or_panic(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v2/health")
+                .body(Body::empty()),
+            "request",
+        );
+        match tokio::time::timeout(Duration::from_secs(3), app.clone().oneshot(health)).await {
+            Ok(answer) => assert_eq!(
+                common::ok_or_panic(answer, "the app answers").status(),
+                StatusCode::OK,
+                "a request beside the waits was not served"
+            ),
+            Err(elapsed) => panic!("the waits held every connection of the node: {elapsed}"),
+        }
+
+        common::ok_or_panic(lock.rollback().await, "let the spool table go");
+        for wait in waits {
+            assert_eq!(
+                common::ok_or_panic(wait.await, "the wait's task"),
+                (StatusCode::NO_CONTENT, Vec::new()),
+                "a wait on an empty spool is answered once its bound passes"
+            );
+        }
+    });
+}

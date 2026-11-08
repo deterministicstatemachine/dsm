@@ -47,6 +47,7 @@ export const {
 
 export const {
   getArchitectureInfo,
+  getBuildType,
   getDeviceIdBinBridgeAsync,
   getDiagnosticsLog,
   returnToConnectCaller,

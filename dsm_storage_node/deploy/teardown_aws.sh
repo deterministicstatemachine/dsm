@@ -30,6 +30,23 @@ echo "=============================================="
 echo " DSM Storage Node Multi-Region Teardown"
 echo "=============================================="
 
+# The nodes' instances carry `prevent_destroy` (their PostgreSQL databases
+# live on them; terraform/aws/modules/region/main.tf), and Terraform
+# refuses any destroy that would remove one. Checked before anything is
+# stopped, so a refused teardown leaves every node serving.
+if grep -q 'prevent_destroy = true' "${TERRAFORM_DIR}/modules/region/main.tf"; then
+    echo "REFUSING: the storage node instances are protected by prevent_destroy."
+    echo
+    echo "  Each node's database lives on its instance; destroying it destroys"
+    echo "  every byte that node acknowledged. To retire the fleet deliberately:"
+    echo "    1. hand over or back up every node's database;"
+    echo "    2. remove the lifecycle prevent_destroy line from"
+    echo "       ${TERRAFORM_DIR}/modules/region/main.tf;"
+    echo "    3. run this script again (Terraform shows the plan and asks first)."
+    exit 1
+fi
+
+
 # --- Step 1: Graceful container shutdown ---
 if [ "${FORCE}" = false ] && [ -n "${SSH_KEY}" ]; then
     echo "==> [1/2] Stopping Docker containers on each node..."
@@ -68,10 +85,11 @@ if [ ! -f "terraform.tfstate" ]; then
     exit 0
 fi
 
-# Need ssh_public_key for destroy (Terraform validates all variables)
-# Use a dummy value since we're destroying
-terraform destroy -auto-approve \
-    -var="ssh_public_key=teardown-placeholder" \
+# Terraform validates every variable even to destroy; the values are never
+# applied. It shows what it will destroy and asks first.
+terraform destroy \
+    -var="ssh_public_key=teardown" \
+    -var="allowed_ssh_cidr=127.0.0.1/32" \
     2>&1
 
 echo ""

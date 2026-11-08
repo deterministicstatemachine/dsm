@@ -13,7 +13,7 @@
 //! is not a witness with a suffix; it is not a witness.
 //!
 //! Scope is the witness closure: `0x001D`, `0x001E`, the leaf states
-//! `0x001F`–`0x0022`, and the credit sources `0x0025`, `0x005D` and `0x005F`. The claim and
+//! `0x001F`–`0x0022`, and the credit sources `0x0025`, `0x005D`, `0x005F` and `0x0075`. The claim and
 //! manifest (`0x001B` / `0x001C`) are the register and admission layer and
 //! decode with that work, not here.
 
@@ -21,7 +21,7 @@ use crate::ccb::decode::{invalid, Cursor, DecodeError};
 use crate::ccb::{class, CcbObject};
 use crate::economic::credit::{
     CreditSource, CreditSourceGenesisRelease, CreditSourceNativeReserveRelease,
-    CreditSourceValidatedPeerDebit,
+    CreditSourceOfflineBoundaryDebit, CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::state::{
@@ -32,7 +32,7 @@ use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 use crate::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
 use crate::economic::witness::EconomicTransitionWitness;
 
-/// Decode an `EconomicTransitionWitness` — class `0x001D`, schema 1, strict.
+/// Decode an `EconomicTransitionWitness` — class `0x001D`, schema 2, strict.
 pub fn decode_transition_witness(bytes: &[u8]) -> Result<EconomicTransitionWitness, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     let w = read_witness(&mut c)?;
@@ -56,8 +56,8 @@ pub fn decode_leaf_mutation(bytes: &[u8]) -> Result<EconomicLeafMutation, Decode
     Ok(m)
 }
 
-/// Decode a standalone `CreditSource` — one of classes `0x0025`, `0x005D`
-/// and `0x005F`.
+/// Decode a standalone `CreditSource` — one of classes `0x0025`, `0x005D`,
+/// `0x005F` and `0x0075`.
 pub fn decode_credit_source(bytes: &[u8]) -> Result<CreditSource, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     let s = read_credit_source(&mut c)?;
@@ -315,6 +315,17 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
             Ok(CreditSource::GenesisRelease(CreditSourceGenesisRelease {
                 credit_mutation_index: c.u32()?,
             }))
+        }
+        class::CREDIT_SOURCE_OFFLINE_BOUNDARY_DEBIT => {
+            c.envelope(
+                CreditSourceOfflineBoundaryDebit::CLASS,
+                CreditSourceOfflineBoundaryDebit::SCHEMA,
+            )?;
+            Ok(CreditSource::OfflineBoundaryDebit(
+                CreditSourceOfflineBoundaryDebit {
+                    credit_mutation_index: c.u32()?,
+                },
+            ))
         }
         got => Err(DecodeError::WrongClass { got }),
     }

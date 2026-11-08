@@ -2,6 +2,8 @@
 
 // Domain-only helpers for bilateral flows. UI must not import protobuf types.
 
+import { visibleText } from './displayName';
+
 // Map numeric failure codes (from protobuf enum) to user-friendly messages.
 export function failureReasonMessage(code: number | undefined | null): string | undefined {
   switch (code) {
@@ -101,11 +103,13 @@ export async function decodeOfflinePendingList(bytes: Uint8Array): Promise<Pendi
       throw new Error(`bilateral.pending_list: step ${it.id} names no token`);
     }
     const commitmentHash = encodeBase32Crockford(it.commitmentHash);
+    // The alias as every name is shown, without what renders as nothing (SA-159).
+    const alias = it.counterpartyAlias === undefined ? undefined : visibleText(it.counterpartyAlias);
     return {
       id: commitmentHash,
       direction,
       phase,
-      counterpartyAlias: it.counterpartyAlias,
+      counterpartyAlias: alias !== undefined && alias.length > 0 ? alias : undefined,
       counterpartyDeviceId: encodeBase32Crockford(counterpartyId),
       amount: it.amount,
       displayAmount: it.displayAmount,

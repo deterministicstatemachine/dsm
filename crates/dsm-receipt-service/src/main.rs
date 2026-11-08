@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dsm_receipt_service::server::{app, Service};
+use dsm_receipt_service::server::{serve, Bounds, Service};
 use dsm_receipt_service::Rates;
 use lettre::{AsyncSmtpTransport, Tokio1Executor};
 
@@ -51,12 +51,17 @@ async fn run() -> Result<(), String> {
         per_recipient,
         window: Duration::from_secs(number("RECEIPT_WINDOW_SECS")?),
     };
-    let service = Arc::new(Service::new(mailer, from, rates));
+    let bounds = Bounds::DEPLOYED;
+    let service = Arc::new(Service::new(mailer, from, rates, bounds.in_flight));
+    // Tokio's listener, handed over as the server takes it: already in the
+    // non-blocking mode the server needs.
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
+        .map_err(|e| format!("bind {bind}: {e}"))?
+        .into_std()
         .map_err(|e| format!("bind {bind}: {e}"))?;
     log::info!("the receipt service listens on {bind}");
-    axum::serve(listener, app(service))
+    serve(listener, service, bounds)
         .await
         .map_err(|e| format!("serve: {e}"))
 }

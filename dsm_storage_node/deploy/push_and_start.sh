@@ -116,11 +116,13 @@ set -e
 cd ${REMOTE_DIR}
 docker load -i dsm-storage-node.tar
 rm -f dsm-storage-node.tar
-# The key is readable by the user the image runs as and nobody else.
+# The key, and the config holding the database password, are readable by the
+# user the image runs as and nobody else; .env by the operator alone.
 NODE_UID=\$(docker run --rm --entrypoint id dsm-storage-node:latest -u)
 NODE_GID=\$(docker run --rm --entrypoint id dsm-storage-node:latest -g)
-sudo chown "\${NODE_UID}:\${NODE_GID}" certs/node.key
-sudo chmod 600 certs/node.key
+sudo chown "\${NODE_UID}:\${NODE_GID}" certs/node.key config/node.toml
+sudo chmod 600 certs/node.key config/node.toml
+chmod 600 .env
 docker compose -f docker-compose.node.yml down 2>/dev/null || true
 docker compose -f docker-compose.node.yml up -d
 echo "Services started on ${IP}"

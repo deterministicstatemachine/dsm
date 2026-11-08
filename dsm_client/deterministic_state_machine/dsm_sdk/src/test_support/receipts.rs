@@ -20,7 +20,9 @@ use dsm::core::identity::genesis_v3::{derive_genesis_v3_self_attested, GenesisV3
 use dsm::core::token::token_state_manager::era_policy_commit;
 use dsm::crypto::ephemeral_key;
 use dsm::economic::register::BETA_NETWORK_ID;
-use dsm::types::device_state::{AdvanceOutcome, BalanceDelta, BalanceDirection, DeviceState};
+use dsm::types::device_state::{
+    AdvanceOutcome, BalanceDelta, BalanceDirection, DeviceState, RealizedHead,
+};
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::receipt_types::{DeviceTreeAcceptanceCommitment, StitchedReceiptV2};
 use dsm::types::token_types::Balance;
@@ -31,14 +33,12 @@ pub struct Party {
     kyber_public_key: Vec<u8>,
 }
 
-/// One per-step EK answer: the EK, the prior key's certificate over it, the
-/// EK's signature over the response target, and the ML-KEM ciphertext the
-/// EK's derivation consumed.
+/// One per-step EK answer: the EK, the prior key's certificate over it, and
+/// the EK's signature over the response target.
 pub struct StepAnswer {
     pub ek_pk: Vec<u8>,
     pub ek_cert: Vec<u8>,
     pub sig: Vec<u8>,
-    pub kyber_ct: Vec<u8>,
 }
 
 impl Party {
@@ -92,8 +92,8 @@ impl Party {
     }
 
     /// The device head at genesis.
-    pub fn head(&self) -> DeviceState {
-        DeviceState::new(
+    pub fn head(&self) -> RealizedHead {
+        DeviceState::genesis_head(
             self.genesis(),
             self.device_id(),
             self.signing_public_key().to_vec(),
@@ -123,8 +123,10 @@ impl Party {
         };
         let unsigned = |signature: Vec<u8>| Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
+            to_genesis: receiver.genesis(),
             amount: Balance::amount(amount),
             policy_commit: era_policy_commit(),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: token_id.clone(),
                 nonce: nonce.clone(),
@@ -166,7 +168,7 @@ impl Party {
             c_pre,
             &self.device_id(),
         );
-        let (shared_secret, kyber_ct) =
+        let (shared_secret, _ciphertext) =
             dsm::crypto::kyber::kyber_encapsulate_deterministic(toward.kyber_public_key(), &coins)
                 .expect("the encapsulation to the counterparty's key");
         let k_step = ephemeral_key::derive_kyber_step_key(&shared_secret);
@@ -187,7 +189,6 @@ impl Party {
             ek_pk,
             ek_cert,
             sig,
-            kyber_ct,
         }
     }
 }
@@ -205,7 +206,7 @@ pub struct Step {
 fn step(
     author: &Party,
     toward: &Party,
-    head: DeviceState,
+    head: RealizedHead,
     operation: Operation,
     direction: BalanceDirection,
     amount: u64,
@@ -225,7 +226,6 @@ fn step(
                 amount,
             }],
             None,
-            None,
         )
         .expect("the step");
     let receipt = StitchedReceiptV2::of_step(
@@ -241,7 +241,8 @@ fn step(
         &h_n,
         &operation.with_cleared_signature().to_bytes(),
         &outcome.transition_entropy(),
-    );
+    )
+    .expect("the step's C_pre");
     Step {
         operation,
         outcome,
@@ -251,28 +252,42 @@ fn step(
 }
 
 /// `sender`'s first step toward `receiver`: an online transfer of `amount`
-/// ERA, drawn from the sender's first faucet payout at the Core layer.
+/// ERA, drawn from the sender's first faucet payout at the Core layer. The
+/// claim is advanced as the wallet advances it, carrying its own `Prepared`
+/// admission; the head that results carries none, as once the admission
+/// completed.
 pub fn transfer_step(sender: &Party, receiver: &Party, amount: u64) -> Step {
+    use dsm::economic::admission::{
+        dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission,
+    };
     let me = sender.device_id();
+    let claim = Operation::FaucetClaim {
+        reserve_id: dsm::economic::native_reserve::era_reserve_id(BETA_NETWORK_ID),
+        generation: 1,
+    };
+    let prepared = PendingEconomicAdmission::prepared(
+        PendingAdmissionKind::DsmBacked,
+        1,
+        dsm::economic::tree::empty_economic_root(),
+        dsm_operation_digest(&claim.to_bytes()),
+    );
     let head = sender
         .head()
+        .with_pending_economic_admission(Some(prepared))
         .advance(
             compute_smt_key(&me, &me),
             me,
-            Operation::FaucetClaim {
-                reserve_id: dsm::economic::native_reserve::era_reserve_id(BETA_NETWORK_ID),
-                generation: 1,
-            },
+            claim,
             &[BalanceDelta {
                 policy_commit: era_policy_commit(),
                 direction: BalanceDirection::Credit,
                 amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
             }],
             None,
-            None,
         )
         .expect("the faucet payout")
         .new_device_state
+        .with_pending_economic_admission(None)
         .establish_relationship(receiver.device_id())
         .expect("the relationship is established");
     let h_n = head

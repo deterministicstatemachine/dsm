@@ -29,21 +29,22 @@ use crate::common::domain_tags::{
     TAG_DSM_ESCROW_COMPUTED_OCCUPANT, TAG_DSM_ESCROW_COMPUTED_READY, TAG_DSM_ESCROW_COMPUTED_SETUP,
     TAG_DSM_ESCROW_COMPUTED_START, TAG_DSM_ESCROW_COMPUTED_START_SEED,
     TAG_DSM_ESCROW_COMPUTED_START_STATEMENT, TAG_DSM_ESCROW_COMPUTED_TABLE,
-    TAG_DSM_ESCROW_MOVE_COMMIT, TAG_DSM_ESCROW_TRANSCRIPT, TAG_DSM_ESCROW_TRANSCRIPT_HEAD,
-    TAG_DSM_ESCROW_TRANSCRIPT_STEP,
+    TAG_DSM_ESCROW_MOVE_COMMIT, TAG_DSM_ESCROW_START_COMMIT, TAG_DSM_ESCROW_TRANSCRIPT,
+    TAG_DSM_ESCROW_TRANSCRIPT_HEAD, TAG_DSM_ESCROW_TRANSCRIPT_STEP,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 use crate::route_chain::{
-    completion_proof, evaluate, CellError, CellEvidence, CellFact, CellReading, ChainState,
-    CompletionProof, Missing, RoutedCell,
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
+    CellReading, ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
 
 use super::escrow::VerdictStanding;
 use super::signature::{verify_bytes, SignatureError};
 use super::wire::{
     ComputedEscrowTerms, ComputedTable, EntryKind, EquivocationProof, MatchSide, MatchStart,
-    StartBody, StartKind, TranscriptEntry, TranscriptOutcome, COMPUTED_LABELS, COMPUTED_LABEL_VOID,
+    StartBody, StartKind, StartReveals, TranscriptEntry, TranscriptOutcome, COMPUTED_LABELS,
+    COMPUTED_LABEL_VOID,
 };
 
 type D32 = [u8; 32];
@@ -134,6 +135,24 @@ pub fn occupant_id(cell: &D32, label: &[u8]) -> D32 {
     )
 }
 
+/// `H(DSM/escrow/start-commit/v1 ‖ r)`: the commitment a side's wallet fixes
+/// in the table at lock to its start entropy `r` (SoFi Amendment S33).
+pub fn start_commitment(reveal: &D32) -> D32 {
+    h(TAG_DSM_ESCROW_START_COMMIT, &[reveal])
+}
+
+/// Whether each reveal opens its side's start commitment in `table`. A
+/// reveal that opens a commitment is its only opening, so every recognized
+/// object carries the same two reveals.
+fn reveals_open(table: &ComputedTable, reveals: &StartReveals) -> Result<(), ComputedRefusal> {
+    for side in [MatchSide::A, MatchSide::B] {
+        if start_commitment(reveals.side(side)) != *table.start_commitment(side) {
+            return Err(ComputedRefusal::RevealOpensNothing { side });
+        }
+    }
+    Ok(())
+}
+
 /// `H(DSM/escrow/move-commit/v1 ‖ salt ‖ u32be(|move|) ‖ move)`: a Commit's
 /// commitment.
 pub fn move_commitment(salt: &D32, played: &[u8]) -> D32 {
@@ -201,9 +220,9 @@ pub struct ProgramFault {
 }
 
 /// A deterministic outcome program `P` (SoFi §19.10; Explainer Amendment
-/// A13). It is a total function of the committed setup and the opened
-/// entries: it keeps no state between calls, calls nothing, reads no clock
-/// and fetches nothing. It never sets an amount or a recipient; it names a
+/// A13). It is a total function of the committed setup, both sides' start
+/// entropy (SoFi Amendment S33) and the opened entries: it keeps no state
+/// between calls, calls nothing, reads no clock and fetches nothing. It never sets an amount or a recipient; it names a
 /// label, and Core counts the label only when it is a branch of the terms.
 ///
 /// `outcome` must be final: once it returns `Done` for a transcript, any
@@ -213,8 +232,15 @@ pub trait OutcomeProgram: Send + Sync {
     /// `P`: the hash a computed table pins this program by.
     fn id(&self) -> [u8; 32];
 
-    /// What the match `setup` describes has come to after `opened`.
-    fn outcome(&self, setup: &[u8], opened: &[Opened]) -> Result<ProgramOutcome, ProgramFault>;
+    /// What the match `setup` describes, started on `reveals`, has come to
+    /// after `opened`. Core shows the program only reveals that open the
+    /// table's start commitments.
+    fn outcome(
+        &self,
+        setup: &[u8],
+        reveals: &StartReveals,
+        opened: &[Opened],
+    ) -> Result<ProgramOutcome, ProgramFault>;
 }
 
 /// Why a program was not registered.
@@ -315,11 +341,6 @@ impl VerifiedTranscript {
     pub fn head(&self, index: u32) -> Option<&D32> {
         // A u32 index always fits a usize on the targets DSM builds for.
         self.heads.get(index as usize)
-    }
-
-    /// The head after the last entry.
-    pub fn last_head(&self) -> &D32 {
-        &self.heads[self.heads.len() - 1]
     }
 
     /// The opened entries, in order: what the program sees.
@@ -468,12 +489,14 @@ pub fn sign_ready(
 }
 
 /// The Start the side that readies second writes: both ready signatures,
-/// once each verifies under its side's session key.
+/// once each verifies under its side's session key, and both sides' start
+/// entropy, once each opens its side's commitment (SoFi Amendment S33).
 pub fn assemble_start(
     external_commitment: &D32,
     table: &ComputedTable,
     ready_a: &[u8],
     ready_b: &[u8],
+    reveals: StartReveals,
 ) -> Result<MatchStart, ComputedRefusal> {
     let start = MatchStart::new(
         *external_commitment,
@@ -481,6 +504,7 @@ pub fn assemble_start(
         StartBody::Start {
             ready_a: ready_a.to_vec(),
             ready_b: ready_b.to_vec(),
+            reveals,
         },
     )
     .map_err(ComputedRefusal::NoEncoding)?;
@@ -522,6 +546,9 @@ pub fn sign_withdraw(
 /// from the bytes and the cell's key, with the verifier's own registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputedRefusal {
+    /// A side's start entropy does not open the commitment the table carries
+    /// for it (SoFi Amendment S33).
+    RevealOpensNothing { side: MatchSide },
     /// The bytes are not a canonical object of a class the cell holds.
     DoesNotDecode(crate::ccb::decode::DecodeError),
     /// An object of a class this cell never holds.
@@ -573,7 +600,8 @@ impl MatchOccupant {
 
 /// Whether `outcome` proves its own outcome at the match cell `match_cell`
 /// (SoFi §19.10, "What occupies the match cell"):
-/// 1. its `Y` and table derive the cell;
+/// 1. its `Y` and table derive the cell, and each reveal opens its side's
+///    start commitment;
 /// 2. its entries are a canonical transcript for the table and the setup;
 /// 3. it holds exactly one signature per side that made an entry, each
 ///    verifying under that side's session key over the head of the last
@@ -593,6 +621,7 @@ pub fn transcript_authority(
     if match_cell_of_table(outcome.external_commitment(), table) != *match_cell {
         return Err(ComputedRefusal::NotThisCell);
     }
+    reveals_open(table, outcome.reveals())?;
     let transcript = verify_transcript(match_cell, table, outcome.setup(), outcome.entries())
         .map_err(ComputedRefusal::Transcript)?;
     let played: Vec<MatchSide> = [MatchSide::A, MatchSide::B]
@@ -636,7 +665,7 @@ pub fn transcript_authority(
         })?;
     let opened = transcript.opened();
     let label = match program
-        .outcome(outcome.setup(), opened)
+        .outcome(outcome.setup(), outcome.reveals(), opened)
         .map_err(ComputedRefusal::Program)?
     {
         ProgramOutcome::Done(label) => label,
@@ -646,7 +675,11 @@ pub fn transcript_authority(
         return Err(ComputedRefusal::LabelNotABranch { label });
     }
     match program
-        .outcome(outcome.setup(), &opened[..opened.len() - 1])
+        .outcome(
+            outcome.setup(),
+            outcome.reveals(),
+            &opened[..opened.len() - 1],
+        )
         .map_err(ComputedRefusal::Program)?
     {
         ProgramOutcome::Incomplete => Ok(label),
@@ -721,7 +754,9 @@ pub fn start_occupant(bytes: &[u8], start_cell: &D32) -> Result<StartKind, Compu
 /// and
 /// - a Start holds side A's signature over `m_ready` under `session_a` and
 ///   side B's under `session_b`, for the match cell its `Y` and table
-///   derive; one side's ready alone is no Start;
+///   derive, and both sides' start entropy, each opening its side's
+///   commitment; one side's ready alone, or a reveal that opens nothing, is
+///   no Start;
 /// - a Withdraw holds the signature of the side it names, under that side's
 ///   session key, over `m_withdraw`.
 pub fn start_authority(start: &MatchStart, start_cell: &D32) -> Result<(), ComputedRefusal> {
@@ -741,10 +776,15 @@ pub fn start_authority(start: &MatchStart, start_cell: &D32) -> Result<(), Compu
         .map_err(ComputedRefusal::Signature)
     };
     match start.body() {
-        StartBody::Start { ready_a, ready_b } => {
+        StartBody::Start {
+            ready_a,
+            ready_b,
+            reveals,
+        } => {
             let ready = ready_statement(&match_cell);
             by(MatchSide::A, &ready, ready_a)?;
-            by(MatchSide::B, &ready, ready_b)
+            by(MatchSide::B, &ready, ready_b)?;
+            reveals_open(start.table(), reveals)
         }
         StartBody::Withdraw { side, signature } => {
             by(*side, &withdraw_statement(start_cell), signature)
@@ -819,17 +859,37 @@ impl ComputedCells {
         &self.start_key
     }
 
-    /// `P`, the program the terms pin.
-    pub fn program(&self) -> &D32 {
-        &self.program
-    }
-
     pub fn match_routed(&self) -> &RoutedCell {
         &self.match_cell
     }
 
     pub fn start_routed(&self) -> &RoutedCell {
         &self.start_cell
+    }
+
+    /// What a reader keeps of a seat's log at the start cell: the copies of
+    /// Starts and Withdraws that prove their authority there, the only ones
+    /// its reading can count ([`crate::route_chain::recognized_copies`]).
+    pub fn keeps_start(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.start_cell, move |bytes| {
+            let passed_over = std::cell::RefCell::new(Vec::new());
+            let recognize = start_at(self, &passed_over);
+            recognize(bytes).is_some()
+        })
+    }
+
+    /// What a reader keeps of a seat's log at the match cell: the copies of
+    /// occupants that prove their outcome under `programs`, the only ones
+    /// its reading can count ([`crate::route_chain::recognized_copies`]).
+    pub fn keeps_match<'c>(
+        &'c self,
+        programs: &'c ProgramRegistry,
+    ) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + 'c {
+        crate::route_chain::recognized_copies(&self.match_cell, move |bytes| {
+            let passed_over = std::cell::RefCell::new(Vec::new());
+            let recognize = match_at(self, programs, &passed_over);
+            recognize(bytes).is_some()
+        })
     }
 }
 
@@ -900,11 +960,6 @@ impl MatchCellRead {
     /// The occupant holding the cell, if any.
     pub fn occupant(&self) -> Option<&MatchOccupant> {
         self.held.as_ref().map(|(occupant, _)| occupant)
-    }
-
-    /// The exact bytes holding the cell: what a relay carries.
-    pub fn value(&self) -> Option<&[u8]> {
-        self.held.as_ref().map(|(_, value)| value.as_slice())
     }
 
     /// Why each value ahead of the one holding the cell counts as nothing.
@@ -1129,6 +1184,24 @@ pub fn start_completion(
     Ok(completion_proof(&cells.start_cell, evidence, held)?.map(|(_, proof)| proof))
 }
 
+/// Check a kept completion proof of the Start or Withdraw `read` found at the
+/// start cell against the reads in `evidence` (SoFi Amendment S10): which it
+/// proves final.
+pub fn check_start_completion(
+    cells: &ComputedCells,
+    read: &StartCellRead,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<StartKind, ProofRefusal> {
+    let held = |bytes: &[u8]| match &read.held {
+        Some((kind, value)) if value.as_slice() == bytes => {
+            Some((occupant_id(&cells.start_key, start_label(*kind)), *kind))
+        }
+        Some(..) | None => None,
+    };
+    check_completion_proof(&cells.start_cell, evidence, proof, held)
+}
+
 /// The completion proof of the occupant `read` found final at the match
 /// cell; `None` while no chain of it has three links, or when the cell is
 /// open.
@@ -1145,6 +1218,25 @@ pub fn match_completion(
         Some(..) | None => None,
     };
     Ok(completion_proof(&cells.match_cell, evidence, held)?.map(|(_, proof)| proof))
+}
+
+/// Check a kept completion proof of the occupant `read` found at the match
+/// cell against the reads in `evidence` (SoFi Amendment S10): the occupant
+/// it proves final.
+pub fn check_match_completion(
+    cells: &ComputedCells,
+    read: &MatchCellRead,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<MatchOccupant, ProofRefusal> {
+    let held = |bytes: &[u8]| match &read.held {
+        Some((occupant, value)) if value.as_slice() == bytes => Some((
+            occupant_id(&cells.match_key, occupant.label()),
+            occupant.clone(),
+        )),
+        Some(..) | None => None,
+    };
+    check_completion_proof(&cells.match_cell, evidence, proof, held)
 }
 
 #[cfg(test)]
@@ -1178,7 +1270,12 @@ mod tests {
             SUM_PROGRAM
         }
 
-        fn outcome(&self, setup: &[u8], opened: &[Opened]) -> Result<ProgramOutcome, ProgramFault> {
+        fn outcome(
+            &self,
+            setup: &[u8],
+            _reveals: &StartReveals,
+            opened: &[Opened],
+        ) -> Result<ProgramOutcome, ProgramFault> {
             let rounds = usize::from(*setup.first().ok_or(ProgramFault {
                 reason: "no setup".into(),
             })?);
@@ -1269,7 +1366,12 @@ mod tests {
             SUM_PROGRAM
         }
 
-        fn outcome(&self, setup: &[u8], opened: &[Opened]) -> Result<ProgramOutcome, ProgramFault> {
+        fn outcome(
+            &self,
+            setup: &[u8],
+            _reveals: &StartReveals,
+            opened: &[Opened],
+        ) -> Result<ProgramOutcome, ProgramFault> {
             let rounds = usize::from(setup[0]);
             Ok(match ended_by(rounds, opened) {
                 Some(label) => ProgramOutcome::Done(label),
@@ -1286,7 +1388,12 @@ mod tests {
             SUM_PROGRAM
         }
 
-        fn outcome(&self, _: &[u8], opened: &[Opened]) -> Result<ProgramOutcome, ProgramFault> {
+        fn outcome(
+            &self,
+            _: &[u8],
+            _reveals: &StartReveals,
+            opened: &[Opened],
+        ) -> Result<ProgramOutcome, ProgramFault> {
             Ok(match opened.len() {
                 0..=3 => ProgramOutcome::Incomplete,
                 _ => ProgramOutcome::Done(b"draw".to_vec()),
@@ -1305,6 +1412,8 @@ mod tests {
     struct Player {
         session: EscrowSigner,
         secret: Vec<u8>,
+        /// The side's start entropy; the table commits its hash.
+        reveal: D32,
     }
 
     fn player(seed: u8) -> Player {
@@ -1312,6 +1421,7 @@ mod tests {
         Player {
             session: EscrowSigner::new(ALG, &kp.public_key).expect("a declared key"),
             secret: kp.secret_key.clone(),
+            reveal: [seed ^ 0x5A; 32],
         }
     }
 
@@ -1333,6 +1443,11 @@ mod tests {
                 MatchSide::A => &self.a,
                 MatchSide::B => &self.b,
             }
+        }
+
+        /// Both sides' start entropy, as the Start opens it.
+        fn reveals(&self) -> StartReveals {
+            StartReveals::new(self.a.reveal, self.b.reveal)
         }
 
         /// One side's terms: every branch pays as a match's do, `void` to
@@ -1399,8 +1514,15 @@ mod tests {
             entries: Vec<Vec<u8>>,
             signatures: Vec<SideSignature>,
         ) -> TranscriptOutcome {
-            TranscriptOutcome::new(self.y, self.table.clone(), &self.setup, entries, signatures)
-                .expect("outcome")
+            TranscriptOutcome::new(
+                self.y,
+                self.table.clone(),
+                &self.setup,
+                self.reveals(),
+                entries,
+                signatures,
+            )
+            .expect("outcome")
         }
     }
 
@@ -1408,7 +1530,7 @@ mod tests {
     fn start_of(m: &Match) -> MatchStart {
         let ready_a = sign_ready(&m.y, &m.table, MatchSide::A, &m.a.secret).expect("A ready");
         let ready_b = sign_ready(&m.y, &m.table, MatchSide::B, &m.b.secret).expect("B ready");
-        assemble_start(&m.y, &m.table, &ready_a, &ready_b).expect("a Start")
+        assemble_start(&m.y, &m.table, &ready_a, &ready_b, m.reveals()).expect("a Start")
     }
 
     fn withdraw_by(m: &Match, side: MatchSide) -> MatchStart {
@@ -1424,6 +1546,8 @@ mod tests {
             setup_digest(&setup),
             a.session.clone(),
             b.session.clone(),
+            start_commitment(&a.reveal),
+            start_commitment(&b.reveal),
         )
         .expect("table");
         Match {
@@ -1514,7 +1638,7 @@ mod tests {
         let m = the_match();
         let terms = m.terms(([0x01; 32], [0x02; 32]));
         let bytes = terms.encode();
-        assert_eq!(&bytes[..4], &[0x00, 0x67, 0x00, 0x01]);
+        assert_eq!(&bytes[..4], &[0x00, 0x67, 0x00, 0x02]);
         assert_eq!(ComputedEscrowTerms::decode(&bytes), Ok(terms.clone()));
         assert_eq!(
             super::super::wire::EscrowKind::decode(&bytes),
@@ -1554,13 +1678,33 @@ mod tests {
         let StartBody::Withdraw { signature, .. } = withdraw.body() else {
             panic!("a Withdraw")
         };
-        let mut want = vec![0x00, 0x6B, 0x00, 0x01];
+        let mut want = vec![0x00, 0x6B, 0x00, 0x02];
         want.extend_from_slice(&m.y);
         want.extend_from_slice(&m.table.canonical());
         want.extend_from_slice(&[2, 2]);
         want.extend_from_slice(&(signature.len() as u32).to_be_bytes());
         want.extend_from_slice(signature);
         assert_eq!(withdraw.encode(), want);
+        // A Start's bytes, by hand: both readies, then both reveals (SoFi
+        // Amendment S33).
+        let started = start_of(&m);
+        let StartBody::Start {
+            ready_a, ready_b, ..
+        } = started.body()
+        else {
+            panic!("a Start")
+        };
+        let mut want = vec![0x00, 0x6B, 0x00, 0x02];
+        want.extend_from_slice(&m.y);
+        want.extend_from_slice(&m.table.canonical());
+        want.push(1);
+        for ready in [ready_a, ready_b] {
+            want.extend_from_slice(&(ready.len() as u32).to_be_bytes());
+            want.extend_from_slice(ready);
+        }
+        want.extend_from_slice(&m.a.reveal);
+        want.extend_from_slice(&m.b.reveal);
+        assert_eq!(started.encode(), want);
         let proof = EquivocationProof::new(
             m.y,
             m.table.clone(),
@@ -1593,7 +1737,9 @@ mod tests {
                 SUM_PROGRAM,
                 setup_digest(&m.setup),
                 m.a.session.clone(),
-                m.a.session.clone()
+                m.a.session.clone(),
+                start_commitment(&m.a.reveal),
+                start_commitment(&m.b.reveal),
             ),
             Err(SofiWireError::SessionKeysNotDistinct)
         );
@@ -1655,6 +1801,7 @@ mod tests {
             m.y,
             m.table.clone(),
             &vec![0x01; COMPUTED_MAX_SETUP_BYTES],
+            m.reveals(),
             vec![longest_entry; TRANSCRIPT_MAX_ENTRIES],
             vec![
                 SideSignature::new(MatchSide::A, &signature).expect("signature"),
@@ -1752,7 +1899,14 @@ mod tests {
             want.extend_from_slice(&(s.public_key().len() as u32).to_be_bytes());
             want.extend_from_slice(s.public_key());
         }
+        for reveal in [&m.a.reveal, &m.b.reveal] {
+            want.extend_from_slice(&independent("DSM/escrow/start-commit/v1", &[reveal]));
+        }
         assert_eq!(m.table.canonical(), want);
+        assert_eq!(
+            start_commitment(&m.a.reveal),
+            independent("DSM/escrow/start-commit/v1", &[&m.a.reveal])
+        );
     }
 
     /// `K_match` changes with every byte of `Y` and of the table, and with
@@ -2032,6 +2186,7 @@ mod tests {
             m.y,
             m.table.clone(),
             &[2, 0xC0, 0xDF],
+            m.reveals(),
             other_setup.entries().to_vec(),
             other_setup.signatures().to_vec(),
         )
@@ -2201,9 +2356,10 @@ mod tests {
             fn outcome(
                 &self,
                 setup: &[u8],
+                reveals: &StartReveals,
                 opened: &[Opened],
             ) -> Result<ProgramOutcome, ProgramFault> {
-                HighestSum.outcome(setup, opened)
+                HighestSum.outcome(setup, reveals, opened)
             }
         }
         let others = registry(Elsewhere);
@@ -2278,6 +2434,7 @@ mod tests {
                 StartBody::Start {
                     ready_a: a.to_vec(),
                     ready_b: b.to_vec(),
+                    reveals: m.reveals(),
                 },
             )
             .expect("encodes")
@@ -2316,7 +2473,7 @@ mod tests {
             Err(..)
         ));
         assert!(matches!(
-            assemble_start(&m.y, &m.table, &ready_a, &ready_a),
+            assemble_start(&m.y, &m.table, &ready_a, &ready_a, m.reveals()),
             Err(ComputedRefusal::Signature(..))
         ));
 
@@ -2379,6 +2536,100 @@ mod tests {
     /// `void` is final once the Withdraw is, every other outcome is lost, and
     /// a full Start after it and a transcript at the match cell count for
     /// nothing.
+    /// A program that answers `a-wins` only when Core shows it exactly the
+    /// two reveals the table's commitments open.
+    struct ReadsReveals {
+        expected: StartReveals,
+    }
+
+    impl OutcomeProgram for ReadsReveals {
+        fn id(&self) -> [u8; 32] {
+            SUM_PROGRAM
+        }
+
+        fn outcome(
+            &self,
+            _: &[u8],
+            reveals: &StartReveals,
+            opened: &[Opened],
+        ) -> Result<ProgramOutcome, ProgramFault> {
+            if *reveals != self.expected {
+                return Err(ProgramFault {
+                    reason: "not the reveals the table commits".into(),
+                });
+            }
+            Ok(match opened.len() {
+                0..=3 => ProgramOutcome::Incomplete,
+                _ => ProgramOutcome::Done(COMPUTED_LABEL_A_WINS.to_vec()),
+            })
+        }
+    }
+
+    /// SA-140, SoFi Amendment S33. Each side's start entropy is fixed in the
+    /// table at lock and opened by the Start: a Start or a transcript outcome
+    /// whose reveal does not open its side's commitment is not recognized,
+    /// whichever side's it is, and the program is shown the reveals the
+    /// commitments open.
+    /// MUTATION CONTROL: the openings dropped from `start_authority` let the
+    /// Start with another reveal hold the start cell, and dropped from
+    /// `transcript_authority` let the outcome with another reveal occupy the
+    /// match cell: red.
+    #[test]
+    fn a_start_or_an_outcome_whose_reveal_opens_nothing_is_not_recognized() {
+        let m = the_match();
+        let ks = start_cell_key(&m.key());
+        let ready_a = sign_ready(&m.y, &m.table, MatchSide::A, &m.a.secret).expect("A ready");
+        let ready_b = sign_ready(&m.y, &m.table, MatchSide::B, &m.b.secret).expect("B ready");
+        let honest = start_of(&m);
+        assert_eq!(start_occupant(&honest.encode(), &ks), Ok(StartKind::Start));
+        for side in [MatchSide::A, MatchSide::B] {
+            let other = match side {
+                MatchSide::A => StartReveals::new([0x77; 32], m.b.reveal),
+                MatchSide::B => StartReveals::new(m.a.reveal, [0x77; 32]),
+            };
+            assert_eq!(
+                assemble_start(&m.y, &m.table, &ready_a, &ready_b, other),
+                Err(ComputedRefusal::RevealOpensNothing { side })
+            );
+            let forged = MatchStart::new(
+                m.y,
+                m.table.clone(),
+                StartBody::Start {
+                    ready_a: ready_a.clone(),
+                    ready_b: ready_b.clone(),
+                    reveals: other,
+                },
+            )
+            .expect("encodes");
+            assert_eq!(
+                start_occupant(&forged.encode(), &ks),
+                Err(ComputedRefusal::RevealOpensNothing { side })
+            );
+            let honest_outcome = m.outcome(a_wins());
+            let carried = TranscriptOutcome::new(
+                m.y,
+                m.table.clone(),
+                &m.setup,
+                other,
+                honest_outcome.entries().to_vec(),
+                honest_outcome.signatures().to_vec(),
+            )
+            .expect("outcome");
+            assert_eq!(
+                match_occupant(&carried.encode(), &m.key(), &registry(HighestSum)),
+                Err(ComputedRefusal::RevealOpensNothing { side })
+            );
+        }
+        let shown = registry(ReadsReveals {
+            expected: m.reveals(),
+        });
+        assert_eq!(
+            match_occupant(&m.outcome(a_wins()).encode(), &m.key(), &shown)
+                .map(|o| o.label().to_vec()),
+            Ok(COMPUTED_LABEL_A_WINS.to_vec())
+        );
+    }
+
     #[test]
     fn a_withdraw_by_either_side_holding_the_start_cell_voids_the_match() {
         let m = the_match();
@@ -2392,6 +2643,7 @@ mod tests {
                 StartBody::Start {
                     ready_a: ready_a.clone(),
                     ready_b: ready_a.clone(),
+                    reveals: m.reveals(),
                 },
             )
             .expect("encodes");
@@ -2561,5 +2813,30 @@ mod tests {
             read.matched().map(|r| r.passed_over().to_vec()),
             Some(vec![ComputedRefusal::MatchNotEnded])
         );
+    }
+
+    /// Audit SA-24, SoFi Amendment S22: a Release against a computed vault
+    /// that names any cell but the vault's `K_match` is unbound — nothing
+    /// holds there for that vault, for any outcome — and the vault's own
+    /// `K_match` is never unbound.
+    #[test]
+    fn a_release_naming_another_cell_than_k_match_is_unbound() {
+        use crate::sofi::escrow::{EscrowCellRead, UnboundCell};
+        let m = the_match();
+        let terms = m.terms(([0x0A; 32], [0x0B; 32]));
+        assert_eq!(UnboundCell::of(&terms, &match_cell_of(&terms)), None);
+        for named in [start_cell_key(&m.key()), [0xCE; 32]] {
+            let read = EscrowCellRead::Unbound(
+                UnboundCell::of(&terms, &named).expect("another cell than K_match"),
+            );
+            assert_eq!(read.key(), named, "bound to the cell the release names");
+            for outcome in [
+                COMPUTED_LABEL_A_WINS,
+                COMPUTED_LABEL_B_WINS,
+                COMPUTED_LABEL_VOID,
+            ] {
+                assert_eq!(read.standing_for(outcome), VerdictStanding::Unsettled);
+            }
+        }
     }
 }

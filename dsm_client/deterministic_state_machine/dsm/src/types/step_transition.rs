@@ -3,9 +3,10 @@
 //! What one step wrote to its device tree.
 //!
 //! A step moves the device root from `R_i` to `R_{i+1}` over every leaf it
-//! writes — the relationship leaf, and for an offline-bearer spend the
-//! anchor-state leaf and the offline allocation leaf as well (§9: the counter
-//! and the value source are inside the root). A receipt that proves the step
+//! writes — the relationship leaf, and for an offline-bearer spend the leaf of
+//! the offline account it spends from as well, whose root carries the
+//! allocation debit, the counter step and the frontier's advance (§9: the
+//! counter and the value source are inside the root). A receipt that proves the step
 //! has to prove all of them against the one pre-root, or it proves a different
 //! move. [`StepTransition`] is that move as its producer holds it: each written
 //! leaf with the value it held, the value written and its path against the
@@ -15,18 +16,8 @@ use crate::merkle::batch_fold::{batch_fold, FoldEntry};
 use crate::merkle::smt_path;
 use crate::merkle::sparse_merkle_tree::{DeviceSmtHashes, SparseMerkleTree};
 use crate::types::error::DsmError;
+use crate::types::offline_account::SpendWitness;
 use crate::types::receipt_types::{ReceiptLeaf, ReceiptWrite};
-
-/// The offline allocation a bearer spend drew from, as it stood BEFORE the
-/// step. Its leaf is an opaque hash of `(amount, sequence)`, so a verifier
-/// cannot derive the debit from the leaf alone: this preimage is the minimum
-/// witness a receipt carries for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AllocationBefore {
-    pub key: [u8; 32],
-    pub amount: u64,
-    pub sequence: u64,
-}
 
 /// Every leaf one step wrote, with its path against the step's pre-root, and
 /// both roots. Built only by [`StepTransition::apply`], which refuses to
@@ -37,7 +28,7 @@ pub struct StepTransition {
     pre_root: [u8; 32],
     post_root: [u8; 32],
     writes: Vec<FoldEntry>,
-    allocation_before: Option<AllocationBefore>,
+    offline_account: Option<([u8; 32], SpendWitness)>,
 }
 
 impl StepTransition {
@@ -48,7 +39,7 @@ impl StepTransition {
     pub(crate) fn apply(
         tree: &mut SparseMerkleTree,
         writes: &[([u8; 32], [u8; 32])],
-        allocation_before: Option<AllocationBefore>,
+        offline_account: Option<([u8; 32], SpendWitness)>,
     ) -> Result<Self, DsmError> {
         let pre_root = *tree.root();
         let entries = tree.apply_writes(writes)?;
@@ -60,10 +51,13 @@ impl StepTransition {
                 "a step's writes do not fold from the tree's root before the step to its root after",
             ));
         }
-        if let Some(before) = &allocation_before {
-            if !entries.iter().any(|e| e.key == before.key) {
+        if let Some((key, witness)) = &offline_account {
+            if !entries
+                .iter()
+                .any(|e| &e.key == key && e.pre == Some(witness.pre_account_root))
+            {
                 return Err(DsmError::invalid_operation(
-                    "a step names the allocation it drew from but does not write it",
+                    "a step names the offline account it spent from but does not write it",
                 ));
             }
         }
@@ -71,7 +65,7 @@ impl StepTransition {
             pre_root,
             post_root,
             writes: entries,
-            allocation_before,
+            offline_account,
         })
     }
 
@@ -96,37 +90,33 @@ impl StepTransition {
         self.writes.iter().find(|e| &e.key == key)
     }
 
-    /// The allocation a bearer spend drew from, as it stood before the step.
-    pub fn allocation_before(&self) -> Option<AllocationBefore> {
-        self.allocation_before
+    /// The offline account a bearer spend drew from: its device-SMT key and
+    /// the spend's witness.
+    pub fn offline_account(&self) -> Option<&([u8; 32], SpendWitness)> {
+        self.offline_account.as_ref()
     }
 
     /// The step's writes as its receipt carries them: each leaf named by what
     /// it is, with its path in the one canonical encoding, in key order.
-    /// `relationship_key` is the relationship leaf the step advanced;
-    /// `anchor_key` is the anchor-state leaf a bearer step moved. A step that
-    /// writes any other leaf (a token adoption, a reserve or vault leaf) has no
+    /// `relationship_key` is the relationship leaf the step advanced; an
+    /// offline-bearer spend's account leaf is named by the witness the step
+    /// recorded. A step that writes any other leaf (a token adoption) has no
     /// receipt that names it, and is refused rather than proven in part.
     pub fn receipt_writes(
         &self,
         relationship_key: &[u8; 32],
-        anchor_key: Option<&[u8; 32]>,
     ) -> Result<Vec<ReceiptWrite>, DsmError> {
         self.writes
             .iter()
             .map(|entry| {
                 let leaf = if &entry.key == relationship_key {
                     ReceiptLeaf::Relationship
-                } else if Some(&entry.key) == anchor_key {
-                    ReceiptLeaf::AnchorState
-                } else if let Some(before) = self
-                    .allocation_before
-                    .filter(|before| before.key == entry.key)
+                } else if let Some((_, witness)) = self
+                    .offline_account
+                    .as_ref()
+                    .filter(|(key, _)| key == &entry.key)
                 {
-                    ReceiptLeaf::OfflineAllocation {
-                        pre_amount: before.amount,
-                        pre_sequence: before.sequence,
-                    }
+                    ReceiptLeaf::OfflineAccount(Box::new(witness.clone()))
                 } else {
                     return Err(DsmError::invalid_operation(
                         "the step writes a leaf no receipt names; it has no receipt",
@@ -170,35 +160,40 @@ mod tests {
             .expect("the step moved its leaf");
         assert_eq!(write.post, Some(step.receipt.child_tip));
         assert_eq!(
-            transition
-                .receipt_writes(&rel_key, None)
-                .expect("receipt writes"),
+            transition.receipt_writes(&rel_key).expect("receipt writes"),
             step.receipt.step_writes
         );
         let self_loop = compute_smt_key(&sender.device_id(), &sender.device_id());
-        assert!(
-            transition.receipt_writes(&self_loop, None).is_err(),
-            "a written leaf no receipt names refuses the receipt"
-        );
+        let refused = transition
+            .receipt_writes(&self_loop)
+            .expect_err("a written leaf no receipt names refuses the receipt");
+        assert!(refused.to_string().contains("no receipt names"));
     }
 
-    /// A step that names the allocation it drew from but does not write it
-    /// is refused: the witness would describe a leaf the root never moved.
+    /// A step that names an offline account it does not write is refused:
+    /// the witness would describe a leaf the root never moved.
     #[test]
-    fn an_allocation_the_step_does_not_write_is_refused() {
+    fn an_offline_account_the_step_does_not_write_is_refused() {
         let sender = Party::from_seed(b"step transition sender wallet seed");
         let receiver = Party::from_seed(b"step transition receiver wallet seed");
         let step = transfer_step(&sender, &receiver, 7);
         let rel_key = compute_smt_key(&sender.device_id(), &receiver.device_id());
-        let mut tree = SparseMerkleTree::new();
         let written = [(rel_key, step.receipt.child_tip)];
-        let unwritten = AllocationBefore {
-            key: compute_smt_key(&receiver.device_id(), &receiver.device_id()),
-            amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
-            sequence: 0,
+        let account = crate::types::offline_account::OfflineAccount::open([0x01; 32], 0);
+        let witness = SpendWitness {
+            pre_account_root: account.root(),
+            pre_allocation: 5,
+            pre_counter: 0,
+            pre_frontier: [0x01; 32],
+            next_frontier: [0x02; 32],
+            account_paths: Vec::new(),
         };
-        assert!(StepTransition::apply(&mut tree, &written, Some(unwritten)).is_err());
+        let unwritten = crate::types::offline_account::offline_account_leaf_key(&[0x0B; 32]);
         let mut tree = SparseMerkleTree::new();
-        StepTransition::apply(&mut tree, &written, None).expect("the same writes, no allocation");
+        let refused = StepTransition::apply(&mut tree, &written, Some((unwritten, witness)))
+            .expect_err("an account the step does not write");
+        assert!(refused.to_string().contains("does not write it"));
+        let mut tree = SparseMerkleTree::new();
+        StepTransition::apply(&mut tree, &written, None).expect("the same writes, no account");
     }
 }

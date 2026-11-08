@@ -23,7 +23,6 @@ body:
         - "Hash Chain (state transitions, fork detection, tripwire)"
         - "Frontend / UI (React, balance display, swap cards)"
         - "Wallet (key derivation, address generation, UTXO selection)"
-        - "C-DBRW / Hardware Identity (silicon fingerprint, enrollment)"
         - "SPV / Bitcoin Verification (headers, merkle proofs, confirmations)"
         - "DLV / Vault Operations (create, lock, unlock, claim)"
         - "Token System (mint, burn, balance, token_balances table)"

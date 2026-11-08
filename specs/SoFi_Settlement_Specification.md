@@ -208,6 +208,8 @@ Adding a validity check anywhere outside the constructor. If a check seems neces
 a hole in the constructor: a path that can build a state without every rule holding. Find it and close it in Core.
 A check downstream hides the hole; it does not close it.
 
+> **Amendment S29 (owner, 2026-10-28) — SDK preflight, Core authority.** On 2026-10-28 the owner adopted one set of rulings on the decisions recorded in CONFORMANCE §6.101 and §6.105, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Core authoritative; SDK preflight permitted. Keep the early UX checks. Core must independently enforce every bound." This is the ruling already given for transfers and burns (owner question 9, 2026-10-27: "Core must be the authoritative enforcement boundary, with SDK preflight retained for early rejection"). Rule 5 and its "Do not" read: nothing downstream is an authority for what construction guarantees. An SDK check that refuses bad input before Core sees it is preflight for the person's sake; Core refuses the same input when it arrives without the SDK, and no verifier consults the SDK's answer.
+
 **Why**
 One side door, such as a function that installs a root the SDK computed, or a path that runs with evidence it never
 fetched, would let a state exist that the rules never produced. From that moment the idea above is false, and
@@ -677,6 +679,7 @@ is Unavailable, never Invalid.
 | `lineage_epoch_locator(k, id, e)` | the generation hints and checkpoints of epoch `e` of shared lineage `(k, id)` (Amendment S23) |
 | `vault_baseline_locator(v, g)` | the owner baselines of vault `v` at generation `g`: each its presentation, `OwnerBaselineAuthV1` and `VaultFrontierV1` (Amendment S24) |
 | `history_locator(v, R)` | the history leaf `v ‖ u64be(g) ‖ R` of vault `v` naming root `R`, a candidate generation; it stands only as a proof under an authenticated history root (Amendment S26) |
+| `vault_contradiction_locator(v)` | each `VaultBaselineContradictionV1` published for an owner baseline of vault `v`; it stands only once the reader's own check bears it out (Amendment S34) |
 | ρ | the setup body |
 | PolicyFulfillmentIdj | Gj |
 | the auxiliary reference | auxiliary evidence candidates |
@@ -818,6 +821,8 @@ TAG_DSM_SOFI_VAULT_HISTORY_LEAF             DSM/sofi/vault-history-leaf/v1      
 TAG_DSM_SOFI_VAULT_HISTORY_NODE             DSM/sofi/vault-history-node/v1            a history node's hash, and the namespace of its 64 bytes (Amendment S26)
 TAG_DSM_SOFI_VAULT_HISTORY_HEAD             DSM/sofi/vault-history-head/v1            H_n of a VaultHistoryHeadV1, and its namespace (Amendment S26)
 TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR          DSM/sofi/vault-history-locator/v1         locator of the history leaf naming a root (Amendment S26)
+TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR    DSM/sofi/vault-contradiction-locator/v1   locator of the contradictions of a vault's owner baselines (Amendment S34)
+TAG_DSM_SOFI_VAULT_CONTRADICTION_OBJECT     DSM/sofi/vault-contradiction-object/v1    address of a VaultBaselineContradictionV1 (Amendment S34)
 TAG_DSM_ESCROW_COMPUTED_MATCH_SEED          DSM/escrow/computed-match-seed/v1         s_match, the seed of the match cell
 TAG_DSM_ESCROW_COMPUTED_START               DSM/escrow/computed-start/v1              K_start
 TAG_DSM_ESCROW_COMPUTED_START_SEED          DSM/escrow/computed-start-seed/v1         s_start, the seed of the start cell
@@ -829,8 +834,10 @@ TAG_DSM_ESCROW_TRANSCRIPT                   DSM/escrow/transcript/v1            
 TAG_DSM_ESCROW_TRANSCRIPT_STEP              DSM/escrow/transcript-step/v1             h_i
 TAG_DSM_ESCROW_TRANSCRIPT_HEAD              DSM/escrow/transcript-head/v1             m_head(i, h_i)
 TAG_DSM_ESCROW_MOVE_COMMIT                  DSM/escrow/move-commit/v1                 a Commit's commitment
-The wallet's session-key derivation (§19.10), constant in SDK/sdk/computed_flow.rs.
-TAG_SESSION_KEY                             DSM/escrow/session-key/v1                 the HKDF salt of a match session key
+TAG_DSM_ESCROW_START_COMMIT                 DSM/escrow/start-commit/v1                a side's start commitment, H(r) (Amendment S33)
+The wallet's session-key derivation (§19.10, Amendment S27), constant in CORE/common/domain_tags.
+TAG_DSM_ESCROW_SESSION_KEY_V2               DSM/escrow/session-key/v2                 the Expand label of a match session key under the wallet root
+TAG_DSM_ESCROW_START_ENTROPY_V1             DSM/escrow/start-entropy/v1               the Expand label of a side's start entropy r under the wallet root (Amendment S33)
 
 
 <!-- spec-section: SOFI-014-2 -->
@@ -891,6 +898,7 @@ pre
 0x0072           SOFI_VAULT_FRONTIER_WITNESS                   the state leaf and a relationship proof under a frontier root (Amendment S24)
 0x0073           SOFI_OWNER_BASELINE_AUTH                      a frontier commitment and the owner-authority position its signer is proven at (Amendment S24)
 0x0074           SOFI_VAULT_HISTORY_HEAD                       a vault's history at one generation: its peaks (Amendment S26)
+0x0076           SOFI_VAULT_BASELINE_CONTRADICTION             what an owner baseline contradicts in its vault's history (Amendment S34)
 
 
 <!-- Source PDF page 19 -->
@@ -987,7 +995,7 @@ key
 
 **Code**
 Body:  CORE/sofi/wire/objects.rs:121, class 0x0036.     Signature              check:     verify_setup, CORE/sofi/
-signature.rs:172. Builder: build_setup, SDK/sdk/sofi_sdk.rs:210.
+signature.rs:172. Builder: setup_body, CORE/sofi/lineage.rs:745, packaged by build_setup, SDK/sdk/sofi_sdk.rs:297.
 
 Equality of setups is equality of ρ. Alternative valid envelopes over one body are the same setup. The setup body is
 published as a content addressed object (Section II); Core recomputes ρ from the fetched bytes.
@@ -1553,7 +1561,7 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
 - The three slots of an escrow vault name `A_T = immutable_addr(DSM/escrow/terms-object/v1, CCB bytes)` (§19.9). The class of those bytes decides the kind: `0x0063 EscrowTerms` is a signed escrow vault and `0x0067 ComputedEscrowTerms` a computed one. Bytes of any other class are no escrow terms, and the genesis is refused.
 - The signed kind is unchanged byte for byte: its terms, verdict, cell, statement and release are §19.9's.
 
-**`ComputedEscrowTerms`**, class `0x0067`, schema 1.
+**`ComputedEscrowTerms`**, class `0x0067`, schema 2 (Amendment S33; schema 1 is retired).
 
 | Field | Content |
 |---|---|
@@ -1567,9 +1575,10 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
 | `program` | digest32: `P`, the hash that pins the outcome program |
 | `setup_digest` | digest32: `H(DSM/escrow/computed-setup/v1; setup)`, the program's input fixed at lock. DSM never interprets `setup`. |
 | `session_a`, `session_b` | `(signature_alg, public_key)` each: side A's and side B's session keys (SPHINCS+, §14.3). The two keys differ. |
+| `start_commitment_a`, `start_commitment_b` | digest32 each: `H(DSM/escrow/start-commit/v1; r)` over side A's and side B's start entropy `r` (Amendment S33). |
 
 - `a-wins` is side A's win, `b-wins` side B's, and `void` is the outcome a Withdraw gives (below). A program may also compute `void`.
-- The table's bytes are `P ∥ setup_digest ∥ u16be(alg_a) ∥ u32be(|key_a|) ∥ key_a ∥ u16be(alg_b) ∥ u32be(|key_b|) ∥ key_b`. Its digest is `τ_c = H(DSM/escrow/computed-table/v1; table bytes)`.
+- The table's bytes are `P ∥ setup_digest ∥ u16be(alg_a) ∥ u32be(|key_a|) ∥ key_a ∥ u16be(alg_b) ∥ u32be(|key_b|) ∥ key_b ∥ start_commitment_a ∥ start_commitment_b`. Its digest is `τ_c = H(DSM/escrow/computed-table/v1; table bytes)`.
 
 **The cells**
 
@@ -1596,11 +1605,11 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
   4. `H(DSM/escrow/computed-setup/v1; setup)` is the table's `setup_digest`, and `h_0 … h_n` recompute.
 
   The order of the checks is fixed: decode, re-encode, require byte equality, recompute the chain, then verify signatures.
-- **What the program sees.** The opened entries, in order: each `Reveal`, with its side, its own index, the index of the `Commit` it opened and its move; and a `Resign`, with its side and index. An unopened commitment is not shown.
+- **What the program sees.** Both sides' start entropy, `r_a` and `r_b` (Amendment S33), and the opened entries, in order: each `Reveal`, with its side, its own index, the index of the `Commit` it opened and its move; and a `Resign`, with its side and index. An unopened commitment is not shown.
 
 **The program**
 
-- `P(setup, opened)` returns `Done(o)`, `Incomplete`, or a fault. It is deterministic and total over the bounds above. It keeps no state, calls nothing, reads no clock and fetches nothing (Explainer Amendment A13).
+- `P(setup, r_a, r_b, opened)` returns `Done(o)`, `Incomplete`, or a fault. `r_a` and `r_b` are the match's start entropy: each side fixed its own at lock, before it could know the other's, and both are opened only once the match starts. A program that needs randomness takes it from them; neither side, nor the application relaying the match, chooses their combination (Amendment S33). It is deterministic and total over the bounds above. It keeps no state, calls nothing, reads no clock and fetches nothing (Explainer Amendment A13).
 - A verifier evaluates `P` only when `P` is registered with it under the hash the table pins. An unregistered `P` leaves every fact of the match cell not established. It is never Invalid, and no other program is tried in its place.
 - Core keys its registry by the hash a registered program reports. The binding of code to that hash is the registrar's (owner, 2026-10-06): the SDK registers a program only after the program passes its own frozen conformance vectors, and refuses one that fails them.
 - Core does the canonical, chain and signature checks before `P` sees anything. `P`'s answer counts only when `o` is a label of the branches.
@@ -1609,15 +1618,15 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
 
 The value that counts at `K_match` is the first object at its leader that is recognized there. Everything else at the cell counts as nothing. Two kinds of object are recognized, each from its own bytes alone (Amendment S20).
 
-- **`TranscriptOutcome`**, class `0x0069`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `setup` (1 to 16384 bytes), `entries` (1 to 1024, each `u32be(|entry|) ∥ entry`), and `signatures`: 1 or 2 entries `(side, signature)`, strictly ascending by side. It is recognized at `K` when:
-  1. `H(DSM/escrow/computed-match/v1; Y ∥ τ_c(table)) = K`;
+- **`TranscriptOutcome`**, class `0x0069`, schema 2 (Amendment S33; schema 1 is retired): `external_commitment` (`Y`), `table` (`T_c`), `setup` (1 to 16384 bytes), `reveal_a` and `reveal_b` (digest32 each), `entries` (1 to 1024, each `u32be(|entry|) ∥ entry`), and `signatures`: 1 or 2 entries `(side, signature)`, strictly ascending by side. It is recognized at `K` when:
+  1. `H(DSM/escrow/computed-match/v1; Y ∥ τ_c(table)) = K`, and `H(DSM/escrow/start-commit/v1; reveal_a)` is the table's `start_commitment_a` and `H(DSM/escrow/start-commit/v1; reveal_b)` its `start_commitment_b`;
   2. the entries are a canonical transcript for the table and the setup;
   3. the sides holding a signature are exactly the sides that made an entry. Each side's signature verifies, under that side's session key, over `m_head(i, h_i)` for the last entry `i` that side made;
   4. the last entry is a `Reveal` or a `Resign`;
-  5. `P` is registered, `P(setup, opened)` is `Done(o)` with `o` a label of the branches, and `P` over the opened entries without the last is `Incomplete`.
+  5. `P` is registered, `P(setup, reveal_a, reveal_b, opened)` is `Done(o)` with `o` a label of the branches, and `P` over the opened entries without the last is `Incomplete`.
 
   Its outcome is `o`. A truncated transcript is never recognized: `P` gives it `Incomplete`. Condition 5 makes the occupant exactly the transcript at the entry that ended the match.
-- **`EquivocationProof`**, class `0x006A`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `side`, `index`, and two `(head, signature)` pairs with the heads strictly ascending. It is recognized at `K` when `Y` and the table derive `K`, and both signatures verify, under the session key of `side`, over `m_head(index, head)` for their own heads. Its outcome is the other side's win: `b-wins` when side A equivocated, `a-wins` when side B did.
+- **`EquivocationProof`**, class `0x006A`, schema 2 (its table, Amendment S33; schema 1 is retired): `external_commitment` (`Y`), `table` (`T_c`), `side`, `index`, and two `(head, signature)` pairs with the heads strictly ascending. It is recognized at `K` when `Y` and the table derive `K`, and both signatures verify, under the session key of `side`, over `m_head(index, head)` for their own heads. Its outcome is the other side's win: `b-wins` when side A equivocated, `a-wins` when side B did.
   - A side signs one head per index of its own entries, ever. Two different heads signed at one index are proof that the key's holder cheated.
 - The first recognized occupant holds the cell for good (§8, consequences 2 and 3), whatever arrives after it.
 
@@ -1625,20 +1634,41 @@ The value that counts at `K_match` is the first object at its leader that is rec
 
 A session key is the authority of everything its side does in a match: its ready, its Withdraw and every head it signs. Core reads only the public halves the table commits. How a key is made and kept is the wallet's obligation, and every wallet meets it the same way.
 
-- **Derivation.** A wallet derives its session key for a match from its own wallet seed, its own genesis and the match's 32-byte nonce: `k = HKDF(salt = DSM/escrow/session-key/v1 ∥ 0x00; ikm = wallet seed; info = genesis ∥ match_nonce)`, 32 bytes of HKDF over BLAKE3 (RFC 5869, HMAC-BLAKE3). The key pair is the SPHINCS+ key pair (§14.3) whose deterministic key generation takes `k` as its entropy. The nonce is the one the setup carries; the program reads it, and DSM never does.
+- **Derivation.** A wallet derives its session key for a match from its own wallet seed, its own genesis and the match's 32-byte nonce, under the wallet root of the DSM key schedule like every other secret the wallet derives (Amendment S27): `PRK_w = Extract(salt = DSM/kdf/wallet-root/v1 ∥ 0x00; ikm = wallet seed)` and `k = Expand(PRK_w; info = DSM/escrow/session-key/v2 ∥ 0x00 ∥ genesis ∥ match_nonce)`, 32 bytes of HKDF over BLAKE3 (RFC 5869, HMAC-BLAKE3). The domain is in the Expand `info`, never in the Extract salt, and `genesis` and `match_nonce` are 32 bytes each, so the `info` determines both. The key pair is the SPHINCS+ key pair (§14.3) whose deterministic key generation takes `k` as its entropy. The nonce is the one the setup carries; the program reads it, and DSM never does.
 - **The secret stays in the wallet.** The wallet answers with the public half only. The secret half is derived when it is used, from the seed the wallet holds while unlocked, and is never stored, exported or shown. A locked wallet derives nothing and signs nothing.
 - **One key per match.** Two matches with different nonces have different keys, and a key signs only for the match whose setup names it. A wallet locks a stake only when the setup's session key for its side is exactly the one it derives for the setup's nonce.
 - **Restoring.** The derivation reads nothing but the seed, the genesis and the nonce, so a wallet restored from its seed derives the same key and can still ready, withdraw, play or settle a match it staked in.
+
+> **Amendment S27 (owner, 2026-10-16) — a match session key is a key-schedule Expand.** From the security audit of 2026-10-15 (finding SA-37): the session key was the one wallet secret whose domain sat in an Extract salt over the wallet seed, beside the key schedule's single wallet-root Extract, so the seed had two Extracts under two public salts where the schedule has one. Owner's words, 2026-10-16: "You can do the spec amendments."
+>
+> - **One wallet root.** `PRK_w = Extract(DSM/kdf/wallet-root/v1 ∥ 0x00; wallet seed)` is the wallet seed's one Extract. A session key is an Expand under it, `k = Expand(PRK_w; DSM/escrow/session-key/v2 ∥ 0x00 ∥ genesis ∥ match_nonce)`, beside the genesis nonce, the GRK seed, `AttA`, the device seed, `s0`, the SDK entropy and the two recovery keys.
+> - **A new label.** The label is `DSM/escrow/session-key/v2`; nothing is ever derived under `DSM/escrow/session-key/v1` again. A session key from before this amendment is not carried over (DSM beta does not migrate).
+> - **Unchanged.** The key pair from `k`, one key per match, the secret staying in the wallet, and restoring from the seed are as above.
+
+**The start entropy: committed at lock, revealed at the Start** (Amendment S33)
+
+- **Derivation.** A wallet derives its side's start entropy for a match beside its session key, under the same wallet root: `r = Expand(PRK_w; info = DSM/escrow/start-entropy/v1 ∥ 0x00 ∥ genesis ∥ match_nonce)`, 32 bytes. Its commitment is `c = H(DSM/escrow/start-commit/v1; r)`.
+- **Committed at lock.** With its session public key the wallet answers `c`, never `r`. The table commits both sides' `c`. A wallet locks a stake only when the table's start commitment for its side is exactly the one it derives for the setup's nonce, as it does for its session key.
+- **Revealed at the ready.** A wallet hands out `r` only with its ready signature, once it has checked both vaults. The wallet that readies second checks that the other side's `r` opens that side's commitment before it signs its own ready, and assembles the Start from both readies and both reveals. `r` is derived when it is used and never stored; restoring from the seed derives the same `r`.
+- **What it decides.** Each side's `r` is fixed at lock, before that side could know the other's, so neither side can choose the combination the program reads. The side that readies second sees the other side's `r` before it writes the Start; it may decline to start. Then no Start holds the start cell, either side may withdraw, and both stakes are refunded (`void`). It cannot change what the match would have read.
+
+> **Amendment S33 (owner, 2026-10-31) — a match's start entropy is committed at lock and revealed at the Start.** From the security audit of 2026-10-18 (finding SA-140): the duel program's tiebreak seed was a hash of the match nonce and both sides' session public keys. The side supplying its key second knew the nonce and the other key, and could choose among keys until the seed favoured it. On 2026-10-31 the owner chose "Rules-checked + commit-reveal": each wallet commits `H(r)` at lock and reveals at ready, and the seed is derived from both reveals. On where the reveals go, the owner chose "Start carries reveals (Recommended)", on the stated trade: a side that dislikes the seed can only refuse to start, and both stakes are withdrawn.
+>
+> - **The table** gains `start_commitment_a` and `start_commitment_b`, so `ComputedEscrowTerms` (schema 2), `TranscriptOutcome` (schema 2), `EquivocationProof` (schema 2) and `MatchStart` (schema 2) change with it. Their schema-1 encodings are retired; DSM beta does not migrate.
+> - **The Start** carries both reveals, and is recognized only when each reveal opens its side's commitment.
+> - **The transcript outcome** carries both reveals under the same check, so the match cell is still recognized from its own bytes alone. A reveal that opens a commitment is that commitment's only opening, so the reveals a recognized outcome carries are the Start's.
+> - **The program** reads `P(setup, r_a, r_b, opened)`. Core never interprets `r_a` or `r_b`.
+> - **Unchanged.** `m_ready`, the Withdraw, the cells and the facts.
 
 **The start cell: a ready handshake, or a Withdraw** (owner ruling, 2026-10-06)
 
 - **Ready.** A side is ready when its session key signs `m_ready = H(DSM/escrow/computed-ready/v1; K_match)`. Both sides sign the same statement; the key tells them apart.
 - **What a wallet checks before it signs its ready.** Its own vault and the opponent's vault are both GenesisAccepted and Active, and both bind to this `K_match`. They hold the same token and the same amount. Each is owned by the side its terms say: the recipient of `a-wins` owns side A's vault, the recipient of `b-wins` owns side B's. The branches mirror: `a-wins` and `b-wins` pay the same identities in both vaults, and each vault's `void` pays its own owner. This is the check side B makes against side A's vault under DSM Amendment A12, made by both sides.
-- **`MatchStart`**, class `0x006B`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `kind` (`u8`) and a body:
-  - **Start** (`kind` 1): `ready_a` and `ready_b`, each `u32be(|sig|) ∥ sig`: side A's and side B's signatures over `m_ready`. Whichever side readies second assembles the Start from both signatures and writes it.
+- **`MatchStart`**, class `0x006B`, schema 2 (Amendment S33; schema 1 is retired): `external_commitment` (`Y`), `table` (`T_c`), `kind` (`u8`) and a body:
+  - **Start** (`kind` 1): `ready_a` and `ready_b`, each `u32be(|sig|) ∥ sig`: side A's and side B's signatures over `m_ready`; then `reveal_a` and `reveal_b`, digest32 each: side A's and side B's start entropy. Whichever side readies second assembles the Start from both signatures and both reveals and writes it.
   - **Withdraw** (`kind` 2): `side` (`u8`, 1 or 2) and a `signature`, `u32be(|sig|) ∥ sig`, by that side's session key over `m_withdraw = H(DSM/escrow/computed-start-statement/v1; K_start ∥ u8(2))`. Either side may withdraw.
 - **Recognition**, from the object's own bytes (Amendment S20). A `MatchStart` is recognized at `K` when `Y` and the table derive `K_start = K` and:
-  - for a Start, `ready_a` verifies under `session_a` and `ready_b` under `session_b`, both over `m_ready` for the `K_match` the object derives. A Start holding one side's ready is not a Start;
+  - for a Start, `ready_a` verifies under `session_a` and `ready_b` under `session_b`, both over `m_ready` for the `K_match` the object derives, and each reveal opens its side's start commitment: `H(DSM/escrow/start-commit/v1; reveal_a) = start_commitment_a` and likewise for B. A Start holding one side's ready, or a reveal that does not open its side's commitment, is not a Start;
   - for a Withdraw, its signature verifies under the session key of the side it names, over `m_withdraw`.
 - Whichever is first at the start cell's leader holds it for good. The match begins at once and for both sides when a Start holds the start cell. A Withdraw counts only if it reaches the leader before any Start, and a Withdraw that arrives after a Start counts for nothing. No clock is involved.
 - **The ready timeout is the application's, outside DSM.** DSM has no clock and no deadline. An application that wants a real-world limit on how long a ready may wait asks the waiting wallet to Withdraw. Nothing in DSM reads the time, and nothing in DSM withdraws on its own.
@@ -2049,7 +2079,7 @@ eration to the accepted owner transition, and genesis_root (:575), which gives R
 
 <!-- spec-section: SOFI-029 -->
 ### 29 Setting up with a vault
-1. build_setup builds the signed setup body; Core derives ρ with setup_ref (CORE/sofi/derive.rs:141) and the
+1. setup_body (CORE/sofi/lineage.rs:745) builds the setup body, which build_setup (SDK/sdk/sofi_sdk.rs:297) packages to be signed; Core derives ρ with setup_ref (CORE/sofi/derive.rs:141) and the
 setup id with setup_id (:118).
 2. The setup body is put as an object and indexed under ρ. SetupRegistered holds once it is Stored.
 3. The trader’s transition carries SofiSetup: verify_operation checks it, and the relationship leaf h0 from
@@ -2127,6 +2157,16 @@ to the next. An unresolved attempt ends the walk: the head is Rn and that attemp
 > - **The state at that root.** An operation built on a proven root reads the vault's state leaf there by the value its own core states at the state key, whose path validation folds to that root; the bytes must re-derive that value.
 > - **Records made before.** A baseline signed before this amendment carries the old frontier, which no longer decodes. A reader drops a record it started at one, whole, and adopts a current baseline; an owner drops what it signed and signs again. No other record changes.
 > - **What it costs.** A root below a reader's baseline costs one head, the candidates under one locator and one path of nodes; nothing grows with the vault's age except a path's `log2`. No conforming verifier walks from the genesis to reach it.
+>
+> **Amendment S34 (owner, 2026-11-01) — an owner baseline is tied to its vault's history.** From the security audit of 2026-10-18 (finding SA-03): a reader adopted an owner baseline once its signature, its owner and its frontier's hash held, and nothing checked the frontier's root, its generation or its history against the vault. An owner could sign a root no trade ever built and a reader would start from it. Owner's words, 2026-11-01: "Tie to history (Recommended)": the baseline must match the vault's history, leaf 0 of the history is the accepted `R_0`, the frontier's root is the post root of the exercise final at `g − 1`, and readers check a public contradiction locator before adopting. This amends Amendments S24 and S26.
+>
+> - **What a reader checks before it adopts a baseline at `g`,** after S24's checks (1) to (4): the history head the frontier commits, read by `history_root`, is the vault's at generation `g`; the history holds the accepted genesis root `R_0` at 0; it holds the frontier's root at `g`; for `g ≥ 1`, the frontier's root is the post root of the exercise final at `R_{g−1}`, the root the history holds at `g − 1` (read from its leaf by the path), by the last link or else the full check (below); and every contradiction published for the baseline (below) that it checks does not hold, from a complete read of the locator.
+> - **The last link.** Owner's words, 2026-11-01: "S34 must not reintroduce history-linear verification indirectly by forcing a fresh reader to walk the last trader's entire lineage." The link holds when an exercise `E` holds `R_{g−1}`'s first key (attempt 0), and every leg of `E` is at its first key, final on `E`; `E`'s position pair, routed by the void root `P` names, which routes the read and is trusted for nothing else, is final on `F` and on exactly `derive(P, F)`; a Release's verdict is final on its outcome; `FulfillmentConformance(F)` is Valid; every check of `RouteValidation(P, G, E)` is Valid except that a setup's `claim_ref` is the claim the trader's lineage accepted; and Core's fold over that evidence builds the frontier's root at generation `g`. It reads no trader's lineage and no other vault's chain, and it establishes no generation: it is what a reader adopts a baseline on, and nothing else stands on it.
+> - **What the link leaves out, and the full check.** A link that holds shows `E` is the exercise the network holds at that key, signed and registered by its trader, and that it builds this root. It does not show that `P`'s parent and a setup's claim are the ones the trader's lineage holds, or that another leg's parent is on that vault's chain, which only walks can show (SoFi Amendments S13, S15, S16; DSM Amendment A19). An owner that makes such an exercise itself passes a reader's own checks, as a lie in the middle does (below), and is found the same way. A link that does not hold, for any reason, decides nothing, since anyone can take a first key: the reader takes the full check, in which Core recomputes the exercise final at `R_{g−1}` as a walk recomputes a generation (§30 step 3), and its post root must be the frontier's root at generation `g`. Only the full check says a step does not hold, so only it can publish a `Step` or quarantine.
+> - **Failure classes.** A check that fails on what the owner signed is a contradiction. The reader publishes it, does not adopt the baseline, and quarantines the vault, as for two frontiers at one generation (S24); neither falls back to the genesis walk. Anything not in hand, an exercise not final yet at `R_{g−1}`, or a locator read not complete, is not yet: the reader does not adopt and walks as it would have. It is never a refusal.
+> - **The contradiction.** `VaultBaselineContradictionV1` (CCB class `0x0076`): `vault_id`, the baseline's `frontier_commitment` `c_f`, and a kind: `Genesis` (leaf 0 is not `R_0`), `Top` (the history does not hold the frontier's root at `g`, or the head it commits is not the vault's at `g`), or `Step{g′}`, `g′ ≥ 1` (the exercise final at the root the history holds at `g′ − 1` builds a post root other than the one it holds at `g′`). It is stored under `DSM/sofi/vault-contradiction-object/v1` and indexed under `vault_contradiction_locator(v) = H(DSM/sofi/vault-contradiction-locator/v1; v)`, one locator per vault. It asserts nothing a reader takes on trust: each reader runs the check it names again against the baseline's own history, a `Step{g′}` at any `g′ ≤ g` by the full check, and one that holds is decisive.
+> - **The middle of the history.** A reader checks the history at 0, `g − 1` and `g`, not every step between, and the last of those only as far as its last link. An owner that invents roots between them, keeping leaf 0, leaf `g − 1` and leaf `g` consistent with the vault, passes a reader's own checks. Such a lie is detectable and attributable given one honest walker: a party holding the vault's chain from the genesis MAY check a published baseline's history against it and publish a `Step` contradiction at the lowest generation where they differ, and every later reader then refuses the baseline. Checking every step on adoption would put back the history-linear cost S24 removed.
+> - **What it costs.** On top of S24's constant: one head, three paths of `log2(g)` nodes and one leaf, the last link's exercise and evidence at `R_{g−1}`, and one locator read. Nothing grows with the vault's age or any trader's lineage except the paths. A walk from an adopted baseline reads nothing more. The full check adds a walk of the exercise's trader's lineage, and of any other leg's chain, and it is what a griefer can force: by taking a first key with an exercise whose link does not hold, or by publishing a `Step` its own check does not bear out, at most one for each generation of the baseline's history. Neither refuses anything.
 <!-- spec-section: SOFI-031 -->
 ### 31 A trade and a multihop route
 A single vault trade is a route with one hop. A multihop route is one operation whose hops run through distinct vaults,
@@ -2138,7 +2178,7 @@ bounds the hops.
 | 0 — parent resolved | The trader’s position p must be resolved: `descendant_fence` (`CORE/sofi/lineage.rs:244`) refuses while it is pending. The trader holds the validated root Rp. |
 | 1 — path | `sofi.findRoute` proposes hops v1, …, vn from walked heads R1, …, Rn (Section 30). |
 | 2 — draft | `draft_trade` or `draft_route` builds B◦ = `Swap{hops}` with each hop’s output from `constant_product_output` (`CORE/dlv/route_commit.rs:151`) at that head’s reserves and fee policy; each vault core Vj◦ against Rj; the trader core T◦ against Rp; E with `external_commitment_single` or `external_commitment_route` (`CORE/sofi/derive.rs:256, :285`), the second binding every hop through H(Γ) (`:280`); Rrealize = Fold(T◦, E) by `batch_fold` (`CORE/sofi/smt/fold.rs:178`), with hj+1 from `relationship_leaf_next` (`CORE/sofi/derive.rs:131`); the preimage P(E); and P with Rvoid = Rp, signed. |
-| 3 — validate | `preimage_admissible` (`CORE/sofi/admission.rs:78`); evidence acquired from storage (rebuild step R5); `route_validation` (`CORE/sofi/validation.rs:338`) must return Valid, verifying each core with `verify_batch` (`CORE/sofi/smt/fold.rs:197`) and each leaf pre value with `verify` (`CORE/sofi/smt/tree.rs:402`); `verify_precommit` (`CORE/sofi/signature.rs:215`). Any other result stops the producer. |
+| 3 — validate | `preimage_admissible` (`CORE/sofi/admission.rs:78`); evidence acquired from storage (rebuild step R5); `route_validation` (`CORE/sofi/validation.rs:338`) must return Valid, verifying each core with `verify_batch` (`CORE/sofi/smt/fold.rs:197`) and each leaf pre value against the validated pre root (Amendment S30); `verify_precommit` (`CORE/sofi/signature.rs:215`). Any other result stops the producer. |
 | 4 — publish | P indexed under PrecommitId, P(E) under `preimage_locator(E)` (`CORE/sofi/derive.rs:424`), and every closure object, each put and Stored. |
 | 5 — witnesses | `derive_policy_fulfillments` (`CORE/sofi/conformance.rs:67`) yields Gj for every hop, indexed under `policy_fulfillment_id` (`CORE/sofi/derive.rs:169`), with any auxiliary evidence. |
 | 6 — exercise | `build_fulfillment` picks each hop’s live attempt aj from the walk, advancing with `next_attempt` (`CORE/sofi/wire/mod.rs:341`), builds and signs F; `check_fulfillment_against_precommit` (`CORE/sofi/conformance.rs:100`) must return Valid; Cq comes from `resolution_claim` (`CORE/sofi/derive.rs:193`). The trader’s transition carries `SofiFulfill` through the Core transition, where `verify_operation` checks it. This is the state advancement that holds the key. |
@@ -2213,10 +2253,13 @@ consumed_route,           route_          stage 9
 impossible,     resolve_position,
 effect_of
 advance_resolved                          stage 10
-validate_staged_frontier,                 the trader’s tree store: staged post trees are validated before stage 7, and
-reachable                                 nodes not reachable from a validated root are dropped after stage 10
+trader_post_states                        stage 10 (Amendment S30): the post leaves are recomputed from verified
+                                          evidence and written only when they recompute the installed root; no
+                                          post tree is kept before stage 7
 route_outcome_key,                next_   deleted: used by no stage
 generation
+
+> **Amendment S30 (owner, 2026-10-28) — the staged tree store is replaced by Core-validated post states.** On 2026-10-28 the owner adopted one set of rulings on the decisions recorded in CONFORMANCE §6.101 and §6.105, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Amend the obsolete specification. Describe the existing Core-validated post-state mechanism rather than rebuilding the deleted store." The store was deleted on 2026-09-21 under the owner's ruling "replace the responsibility, not the dead implementation", because the leaves a later acquisition consumes are preimages and a node store returns leaf values. The responsibility, as built: nothing is staged before stage 7. At stage 10 the trader recomputes its post leaves from verified evidence (`trader_post_states`) and writes them only when they recompute the root Core installed; the vault side keeps each selected generation's leaves and returns a tree only when its rebuilt root matches. No leaf that does not recompute a validated root is ever written, so no unreachable node exists to drop. §31 stage 3 and §41.1 name this mechanism.
 
 
 <!-- Source PDF page 35 -->
@@ -2402,7 +2445,7 @@ whose state advances.
 1. One function prepares every transition. No SoFi producer calls a lower level advance.
 2. The SDK supplies no entropy. The value derived in step 3 is the only entropy of the transition.
 3. That same value goes into the relationship tip and into both receipt hashes, Cpre and the symmetric tip.
-4. A transfer nonce, where an operation has one, stays in the operation bytes, where it is already hashed.
+4. A transfer nonce, where an operation has one, is bound into the operation bytes by the salted terms commitment, where it is already hashed, and is never carried in the clear (Amendment S31).
 5. The SDK passes Core’s result into the transition unchanged (rule T4).
 **Gate**
 For each of the three SoFi operations: applying it twice from the same state gives byte identical results; changing
@@ -2653,8 +2696,7 @@ lineage.rs                     advance_resolved, descendant_fence, genesis_accep
 resolution.rs                  effect_of, resolve_position
 signature.rs                   verify_precommit, verify_operation
 smt/fold.rs                    verify_batch
-smt/store.rs                   validate_staged_frontier
-smt/tree.rs                    verify, reachable
+validation.rs                  trader_post_states (Amendment S30)
 validation.rs                  route_validation
 wire/mod.rs                    next_attempt, next_generation
 
@@ -2755,7 +2797,10 @@ tip, then calls DeviceState::advance (CORE/types/device_state.rs:1812).
 app_router_impl.rs:1273, SDK/sdk/core_sdk.rs:3713).
 
 The seam change removes the entropy parameter, puts the one derived value into the relationship tip and both receipt
-hashes, keeps the transfer nonce in the operation bytes, and meets Section 39. Then the seam is frozen.
+hashes, keeps the transfer nonce bound in the operation bytes by the salted terms commitment (Amendment S31), and
+meets Section 39. Then the seam is frozen.
+
+> **Amendment S31 (owner, 2026-10-28) — the transfer nonce stays confidential.** On 2026-10-28 the owner adopted one set of rulings on the decisions recorded in CONFORMANCE §6.101 and §6.105, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Salted commitment in operation bytes. Keep the nonce confidential. Correct the older spec wording." This records the ruling of 2026-10-02 (CONFORMANCE §6.71): "the signed transfer keeps only what admission needs (recipient, amount, policy commit, authority policy) and a salted commitment to the rest". A transfer's operation bytes carry `terms_commitment`, a hash under `DSM/transfer-terms/v1` of the token id, nonce, mode, memo and salt; the recipient opens the terms only against it, and the nonce is never transition entropy.
 
 <!-- spec-section: SOFI-044 -->
 ### 44 Step 5: rebuild
@@ -2791,7 +2836,7 @@ R5       real evidence acquisition         Evidence built only from fetched byte
 R6       the producer fails closed         SDK/sdk/sofi_sdk.rs:376 validates with real evidence and stops on
 Unavailable (T5, G5)
 R7       Core FulfillmentConformance       the full predicate of Part IV, one named test per item
-R8       publication of P , G, F and       build_setup (SDK/sdk/sofi_sdk.rs:210) publishes and indexes the
+R8       publication of P , G, F and       build_setup (SDK/sdk/sofi_sdk.rs:297), over Core's setup_body (CORE/sofi/lineage.rs:745), publishes and indexes the
 the setup body                    setup body, which it does not at 817123c (line 266)
 R9       the two position cells            Kful (q) and Kroot (q) written together at the leader of s(q); Cq computed
 from F and P ; PositionPairAtomic as a test
@@ -2894,6 +2939,12 @@ recipient allowlist                   none, or an inline list of device ids that
 The token’s identity is policy_commit, the hash of the whole blob. Any field that differs makes a different token.
 The ticker is display only; two tokens may share one.
 
+> **Amendment S28 (owner, 2026-10-27) — a ticker is not unique across the network, and a device holds one token per ticker.** Owner's words, 2026-10-27: "Preserve SA-148's device-local anti-spoofing protection. Two independent devices may create tokens with the same display ticker, but the SDK must preserve its restriction against accepting conflicting ticker identities within the same device's holdings. Amend the specification to distinguish global ticker non-uniqueness from device-local enforcement. Token identity remains the cryptographic policy commitment, never the ticker."
+>
+> - **Across the network.** Nothing reserves a ticker. Any device may create a token under any ticker §47 allows, whatever ticker other devices' tokens carry; no node, register or index decides who holds a ticker, and Core never resolves a ticker to a token.
+> - **On one device.** A device holds at most one token per ticker. Its creation of a token, or its adoption of one, under a ticker a token it already holds carries is refused before anything is written, so a token cannot present itself to the holder under the name of one it already trusts. Every device holds ERA and dBTC by construction, so no device creates or adopts another token whose ticker is theirs in any letter case. Adoption is permanent (SA-148), so once a device holds a ticker that ticker names that token on that device for good.
+> - **Identity.** Every protocol path names a token by its policy commit: sends, received transfers, vault legs, policy checks and balances. The device-local rule is a display and anti-spoofing rule of the holder's own wallet; it is not a protocol identity and no verifier consults it.
+
 > **Amendment S8 (owner, 2026-09-23) — the policy names its creator, and a token is created once.** The policy blob also commits the creator: the genesis `G` and device id `DevID` of the device that creates the token, placed after the release rule. A native token's genesis release is admissible only in a `CreateToken` of that device, so anyone else holding the same policy bytes releases nothing. The creating transition also inserts a creation record for the policy commit into the creator's economic tree, from zero (class `0x0060`, key `H(DSM/economic-token-creation-key/v1; G ∥ DevID ∥ policy_commit)`). Its presence under a validated root proves the creation, and a second creation of the same commit on that lineage cannot build its write set. The economic-root register keeps the lineage unforked, so the genesis supply is released exactly once.
 
 > **Amendment S11 (owner, 2026-09-26) — a network-anchored native token names no creator and no signer set; ERA's policy.** A native token whose releases are anchored to the network rather than to a creating device names no creator and no signer set: its blob omits the creator of Amendment S8 and the signer set and threshold of the table above, going from the release rule straight to the ticker, and its release rule alone governs every release. Exactly one such policy exists, ERA's, fixed in Core and checked by its commitment; any other network-anchored blob has no reserve and releases nothing, and it is never registered, adopted or published. The creator and the signer set belong to device-created tokens (release rule all-at-creation), whose layout is unchanged.
@@ -2902,7 +2953,11 @@ The ticker is display only; two tokens may share one.
 >
 > **Amendment S18 (owner, 2026-10-01) — ERA has two decimals.** ERA is divisible to hundredths: its policy's decimals are 2, and every ERA amount is held in base units of 0.01 ERA. The amounts people know are unchanged: the genesis supply is 80,000,000,000.00 ERA, which the policy states in base units as 8,000,000,000,000; one beta faucet claim releases 100.00 ERA (10,000 base units); the token creation fee is 10.00 ERA (1,000 base units). The rest of S11's policy is unchanged. ERA's commitment changes with its bytes, to `NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0` (Crockford base32), and replaces S11's; by S11's rule this is a different ERA identity, so no balance under the old commitment carries over (a clean cut). Amounts are entered and shown in whole tokens with the token's decimals after a point, `100.00` for ERA, never as base units.
 >
-> Open: join-triggered emission (DJTE) replaces the faucet after beta. That is a different release rule, so a different blob, and by the rule above that any differing field makes a different token, a different ERA identity.
+> ~~Open: join-triggered emission (DJTE) replaces the faucet after beta. That is a different release rule, so a different blob, and by the rule above that any differing field makes a different token, a different ERA identity.~~ *Corrected by Amendment S32.*
+>
+> **Amendment S32 (owner, 2026-10-28) — replacing the faucet does not make a new ERA.** On 2026-10-28 the owner adopted one set of rulings on the decisions recorded in CONFORMANCE §6.101 and §6.105, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Your current design releases the existing ERA supply according to verified storage occupancy. Changing the release trigger must not automatically create another ERA identity or supply. The outdated implication must be corrected, without prematurely implementing emissions."
+>
+> *Closed as a replacement, not a migration (owner direction, 2026-10-29).* The owner's words, relayed into the session: "Beta is disposable. There is no requirement to migrate its state, preserve compatibility, or maintain the beta release mechanism. When DSM transitions out of beta, the network and its deployment can be replaced completely, with the finalized protocol, genesis configuration, and ERA release policy established from the beginning", and "close the supposed migration contradiction as a beta-to-production replacement decision, not an unresolved migration problem. No migration code needs to be built." So the beta network is discarded at the end of beta, its faucet policy with it; nothing converts the beta reserve's release rule in place, and no beta balance carries over. The production network starts from its own genesis, whose ERA policy names emissions by verified storage occupancy as its release rule from the beginning. That policy's commitment is the production ERA identity, and its genesis supply is the production supply: one identity and one supply, established once in that genesis, which S11's rule (a differing field makes a different token) never has to bridge.
 
 **Code**
 Balances are keyed by policy_commit (the economic balance leaf; CORE/sofi/validation.rs:553). Issuance

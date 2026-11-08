@@ -5,6 +5,7 @@
 
 use crate::class;
 use crate::codec::{tagged_hash, DecodeError, Reader, Writer};
+use crate::engine::Side;
 use crate::tables::TABLES;
 
 /// The widest session public key a setup carries (SPHINCS+ keys are far smaller).
@@ -246,7 +247,9 @@ impl DuelSide {
     }
 }
 
-/// `0x5702 DuelMatchV1` — what both wallets lock, without the program.
+/// `0x5702 DuelMatchV1` — the match the rules play: a setup's sides under the
+/// tiebreak seed both sides' opened start entropy derives
+/// ([`DuelSetupV2::match_of`]). The conformance vectors hold it directly.
 ///
 /// 1 `match_nonce` digest32 · 2 `turn_cap` u16, the table's cap ·
 /// 3 `tiebreak_seed` digest32 · 4 side a · 5 side b. No creature anchor
@@ -270,26 +273,7 @@ impl DuelMatchV1 {
         a: DuelSide,
         b: DuelSide,
     ) -> Result<Self, DecodeError> {
-        if turn_cap != TABLES.constants.turn_cap {
-            return Err(DecodeError::UnknownValue {
-                field: "match.turn_cap",
-                value: u32::from(turn_cap),
-            });
-        }
-        a.check()?;
-        b.check()?;
-        let mut anchors: Vec<&[u8; 32]> = a
-            .team
-            .iter()
-            .chain(b.team.iter())
-            .map(|c| c.anchor())
-            .collect();
-        anchors.sort();
-        if anchors.windows(2).any(|w| w[0] == w[1]) {
-            return Err(DecodeError::Invalid {
-                what: "a creature anchor is fielded twice",
-            });
-        }
+        check_pairing(turn_cap, &a, &b)?;
         Ok(Self {
             match_nonce,
             turn_cap,
@@ -342,32 +326,160 @@ impl DuelMatchV1 {
     }
 }
 
-/// `0x5703 DuelSetupV1` — the match pinned to the program that decides it.
-///
-/// 1 `program` digest32 (`P`) · 2 `match` nested `0x5702`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuelSetupV1 {
-    pub program: [u8; 32],
-    pub body: DuelMatchV1,
+/// The turn cap is the table's, both sides are well formed, and no creature
+/// anchor is fielded twice across both teams.
+fn check_pairing(turn_cap: u16, a: &DuelSide, b: &DuelSide) -> Result<(), DecodeError> {
+    if turn_cap != TABLES.constants.turn_cap {
+        return Err(DecodeError::UnknownValue {
+            field: "match.turn_cap",
+            value: u32::from(turn_cap),
+        });
+    }
+    a.check()?;
+    b.check()?;
+    let mut anchors: Vec<&[u8; 32]> = a
+        .team
+        .iter()
+        .chain(b.team.iter())
+        .map(|c| c.anchor())
+        .collect();
+    anchors.sort();
+    if anchors.windows(2).any(|w| w[0] == w[1]) {
+        return Err(DecodeError::Invalid {
+            what: "a creature anchor is fielded twice",
+        });
+    }
+    Ok(())
 }
 
-impl DuelSetupV1 {
+/// `0x5703 DuelSetupV2` (schema 2; schema 1 is retired) — what both wallets
+/// lock: the program that decides the match, its nonce and cap, each side's
+/// start commitment, and both sides.
+///
+/// 1 `program` digest32 (`P`) · 2 `match_nonce` digest32 · 3 `turn_cap` u16 ·
+/// 4 `start_commitment_a` digest32 · 5 `start_commitment_b` digest32 · 6 side
+/// a · 7 side b. The tiebreak seed is not in it: it is derived from both
+/// sides' start entropy, each fixed at lock by its commitment here and opened
+/// only by the match's Start (SoFi Amendment S33), so neither side, nor the
+/// application building the setup, chooses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuelSetupV2 {
+    pub program: [u8; 32],
+    match_nonce: [u8; 32],
+    turn_cap: u16,
+    start_commitment_a: [u8; 32],
+    start_commitment_b: [u8; 32],
+    a: DuelSide,
+    b: DuelSide,
+}
+
+impl DuelSetupV2 {
     pub const CLASS: u16 = class::DUEL_SETUP;
+    pub const SCHEMA: u16 = 2;
+
+    pub fn new(
+        program: [u8; 32],
+        match_nonce: [u8; 32],
+        turn_cap: u16,
+        start_commitment_a: [u8; 32],
+        start_commitment_b: [u8; 32],
+        a: DuelSide,
+        b: DuelSide,
+    ) -> Result<Self, DecodeError> {
+        check_pairing(turn_cap, &a, &b)?;
+        Ok(Self {
+            program,
+            match_nonce,
+            turn_cap,
+            start_commitment_a,
+            start_commitment_b,
+            a,
+            b,
+        })
+    }
+    pub fn match_nonce(&self) -> &[u8; 32] {
+        &self.match_nonce
+    }
+    pub fn turn_cap(&self) -> u16 {
+        self.turn_cap
+    }
+    pub fn a(&self) -> &DuelSide {
+        &self.a
+    }
+    pub fn b(&self) -> &DuelSide {
+        &self.b
+    }
+    /// The start commitment `side`'s wallet fixed at lock.
+    pub fn start_commitment(&self, side: Side) -> &[u8; 32] {
+        match side {
+            Side::A => &self.start_commitment_a,
+            Side::B => &self.start_commitment_b,
+        }
+    }
+
+    /// The match the rules play once the Start opened both sides' start
+    /// entropy: each reveal must open its side's commitment
+    /// ([`crate::start_commitment`]), and the tiebreak seed is
+    /// [`crate::tiebreak_seed`] over the nonce, both reveals and both session
+    /// keys.
+    pub fn match_of(
+        &self,
+        reveal_a: &[u8; 32],
+        reveal_b: &[u8; 32],
+    ) -> Result<DuelMatchV1, crate::Refusal> {
+        for (side, reveal) in [(Side::A, reveal_a), (Side::B, reveal_b)] {
+            if crate::start_commitment(reveal) != *self.start_commitment(side) {
+                return Err(crate::Refusal::RevealOpensNothing { side });
+            }
+        }
+        let seed = crate::tiebreak_seed(
+            &self.match_nonce,
+            reveal_a,
+            reveal_b,
+            &self.a.session_public_key,
+            &self.b.session_public_key,
+        );
+        Ok(DuelMatchV1::new(
+            self.match_nonce,
+            self.turn_cap,
+            seed,
+            self.a.clone(),
+            self.b.clone(),
+        )?)
+    }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::object(Self::CLASS);
+        let mut w = Writer::object_at(Self::CLASS, Self::SCHEMA);
         w.digest(&self.program);
-        w.nested(&self.body.encode());
+        w.digest(&self.match_nonce);
+        w.u16(self.turn_cap);
+        w.digest(&self.start_commitment_a);
+        w.digest(&self.start_commitment_b);
+        self.a.write(&mut w);
+        self.b.write(&mut w);
         w.finish()
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut r = Reader::object(bytes, Self::CLASS)?;
+        let mut r = Reader::object_at(bytes, Self::CLASS, Self::SCHEMA)?;
         let program = r.digest("setup.program")?;
-        let body = r.nested(DuelMatchV1::read_body, DuelMatchV1::CLASS)?;
+        let match_nonce = r.digest("setup.match_nonce")?;
+        let turn_cap = r.u16("setup.turn_cap")?;
+        let start_commitment_a = r.digest("setup.start_commitment_a")?;
+        let start_commitment_b = r.digest("setup.start_commitment_b")?;
+        let a = DuelSide::read(&mut r)?;
+        let b = DuelSide::read(&mut r)?;
         r.finish()?;
-        Ok(Self { program, body })
+        Self::new(
+            program,
+            match_nonce,
+            turn_cap,
+            start_commitment_a,
+            start_commitment_b,
+            a,
+            b,
+        )
     }
-    /// `H(DSM/wildstate-duel/setup/v1 ‖ 0x00 ‖ CCB(setup))`.
+    /// `H(DSM/wildstate-duel/setup/v2 ‖ 0x00 ‖ CCB(setup))`.
     pub fn digest(&self) -> [u8; 32] {
         tagged_hash(crate::TAG_SETUP, &[&self.encode()])
     }

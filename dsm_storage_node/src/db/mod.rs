@@ -5,7 +5,9 @@
 mod committed;
 mod pg;
 
-pub use committed::{CommittedCells, KEPT_CYCLES, KEPT_LEAVES};
+pub use committed::{
+    CommittedCells, TreeBuild, TreeBuildsFull, KEPT_CYCLES, KEPT_LEAVES, TREE_BUILDS_QUEUED,
+};
 pub use pg::*;
 
 /// The Postgres database the node's unit tests run on.

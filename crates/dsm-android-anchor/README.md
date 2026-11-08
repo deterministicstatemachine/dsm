@@ -16,7 +16,7 @@ export ANDROID_NDK_HOME=~/Library/Android/sdk/ndk/27.0.12077973
 cargo ndk -t arm64-v8a build --release
 ```
 
-Bench (adds `installAnchorTransport` + the setup writes `counterInitMax`/`birthCageSlot0`):
+Bench (adds `installAnchorTransport`, the sender appliance install):
 
 ```sh
 cargo ndk -t arm64-v8a build --release --features on_device_installs

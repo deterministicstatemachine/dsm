@@ -20,6 +20,8 @@ import { walletAmount } from '../../dsm/amount';
 import { encodeBase32Crockford } from '../../utils/textId';
 import { routerQueryBin } from '../../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
+import { answerInPractice } from '../../bridge/practiceGate';
+import { practiceId, practiceRoutes, type PracticeRouteEvent } from './practiceRoutes';
 import type { AmountForms } from '../../dsm/amount';
 import type {
   DomainContact,
@@ -28,12 +30,8 @@ import type {
 } from '../../domain/types';
 import type { TokenBalanceView } from '../../dsm/types';
 
-export type PracticeEvent = 'sent' | 'claimed' | 'contactAdded';
+export type PracticeEvent = 'sent' | 'claimed' | 'contactAdded' | PracticeRouteEvent;
 
-// Practice ids use only Base32 Crockford characters, so any code that decodes
-// an id keeps working.
-const PAD = '0'.repeat(52);
-const practiceId = (stem: string): string => (stem + PAD).slice(0, 52);
 
 export const PRACTICE_CONTACT_ALIAS = 'alice';
 /** The practice contact's device id: what the send screen names a recipient by. */
@@ -41,6 +39,8 @@ export const PRACTICE_CONTACT_DEVICE_ID = practiceId('PRACT1CEA11CE');
 /** The practice ERA the tour starts with, and what its faucet pays, as people count ERA. */
 export const PRACTICE_ERA_HELD = '1000';
 export const PRACTICE_FAUCET_AMOUNT = '100';
+/** The practice coin's policy anchor: a practice id, so a screen that trades by anchor can trade it in practice. */
+export const PRACTICE_PLAY_ANCHOR = practiceId('PRACT1CEP1AYC01N');
 
 type PracticeState = {
   identity: DomainIdentity;
@@ -51,7 +51,7 @@ type PracticeState = {
 };
 
 function freshState(): PracticeState {
-  return {
+  return withCoinAnchor({
     identity: {
       genesisHash: practiceId('PRACT1CEY0VGENES1S'),
       deviceId: practiceId('PRACT1CEY0VDEV1CE'),
@@ -76,7 +76,17 @@ function freshState(): PracticeState {
     ],
     history: [],
     sequence: 0,
-  };
+  });
+}
+
+/** The practice coin carries its practice anchor, so the screens that trade by anchor offer it. */
+function withCoinAnchor(state: PracticeState): PracticeState {
+  const coin = state.balances.find((b) => b.tokenId === 'PLAY');
+  if (coin) {
+    coin.policyAnchorB32 = PRACTICE_PLAY_ANCHOR;
+    coin.anchorFingerprint = PRACTICE_PLAY_ANCHOR.slice(0, 8);
+  }
+  return state;
 }
 
 /**
@@ -85,14 +95,14 @@ function freshState(): PracticeState {
  * from a ticker (TokenBalanceView.protocolDefined), and practice ERA does not
  * either.
  */
-async function eraIsProtocolDefined(): Promise<boolean> {
+async function eraAsListed(): Promise<{ protocolDefined: boolean; policyAnchorB32: string; anchorFingerprint: string }> {
   const env = decodeFramedEnvelopeV3(await routerQueryBin('balance.list', new Uint8Array(0)));
   if (env.payload.case !== 'balancesListResponse') {
     throw new Error(`balance.list: the SDK answered ${String(env.payload.case)}, not balancesListResponse`);
   }
   const era = env.payload.value.balances.find((row) => row.tokenId === 'ERA');
   if (!era) throw new Error('balance.list: Rust listed no ERA row');
-  return era.protocolDefined;
+  return { protocolDefined: era.protocolDefined, policyAnchorB32: era.policyAnchorB32, anchorFingerprint: era.anchorFingerprint };
 }
 
 /**
@@ -101,7 +111,8 @@ async function eraIsProtocolDefined(): Promise<boolean> {
  */
 async function seedEra(state: PracticeState): Promise<void> {
   const held = await walletAmount({ tokenId: 'ERA' }, { entered: PRACTICE_ERA_HELD });
-  const protocolDefined = await eraIsProtocolDefined();
+  // ERA's protocol flag and anchor are Rust's, as balance.list lists them: a practice trade names ERA by that anchor.
+  const { protocolDefined, policyAnchorB32, anchorFingerprint } = await eraAsListed();
   state.balances.unshift({
     holding: 'currency',
     tokenId: 'ERA',
@@ -111,6 +122,8 @@ async function seedEra(state: PracticeState): Promise<void> {
     baseUnits: held.baseUnits,
     displayAmount: held.displayAmount,
     protocolDefined,
+    policyAnchorB32,
+    anchorFingerprint,
   });
   state.history.push({
     txId: 'practice-welcome',
@@ -197,7 +210,9 @@ function recordSend(state: PracticeState, to: string, tokenId: string, taken: Am
 
 type AnyFn = (...args: never[]) => unknown;
 
-function simulations(state: PracticeState, emit: (event: PracticeEvent) => void): Record<string, AnyFn> {
+type Turns = { ready: () => Promise<void>; inTurn: <T>(change: () => Promise<T>) => Promise<T> };
+
+function practiceTurns(state: PracticeState): Turns {
   // Practice ERA is counted by Rust the first time a call needs it, and every
   // such call waits for that count; a refusal is the call's answer.
   let seeded: Promise<void> | undefined;
@@ -213,6 +228,10 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
     turn = next;
     return next;
   };
+  return { ready, inTurn };
+}
+
+function simulations(state: PracticeState, emit: (event: PracticeEvent) => void, { ready, inTurn }: Turns): Record<string, AnyFn> {
   return {
     getIdentity: async () => ({ ...state.identity }),
     getAllBalances: async () => {
@@ -306,11 +325,22 @@ class PracticeMode {
     this.state = state;
     enterPracticeSandbox();
     const client = dsmClient as unknown as Record<string, unknown>;
-    const answers = simulations(state, (event) => this.listeners.forEach((listener) => listener(event)));
+    const emit = (event: PracticeEvent) => this.listeners.forEach((listener) => listener(event));
+    const turns = practiceTurns(state);
+    const answers = simulations(state, emit, turns);
     for (const key of Object.keys(answers)) {
       this.originals.set(key, client[key]);
       client[key] = answers[key];
     }
+    // The routes the tour walks through (trading, liquidity, escrow, apps,
+    // creating a token) are answered from the same practice wallet.
+    answerInPractice(practiceRoutes({
+      get balances() { return state.balances; },
+      identity: state.identity,
+      inTurn: turns.inTurn,
+      ready: turns.ready,
+      emit,
+    }));
   }
 
   leave(): void {
@@ -321,6 +351,7 @@ class PracticeMode {
     });
     this.originals.clear();
     this.state = null;
+    answerInPractice(undefined);
     leavePracticeSandbox();
   }
 

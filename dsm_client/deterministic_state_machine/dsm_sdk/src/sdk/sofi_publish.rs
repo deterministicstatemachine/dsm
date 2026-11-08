@@ -96,7 +96,31 @@ pub async fn publish_produced(
     produced: &Produced,
     operation_signature: &[u8],
 ) -> Result<Vec<Published>, DsmError> {
-    let publications: Vec<Publication<'_>> = produced
+    let publications = produced_publications(produced, operation_signature);
+    // Every object is built and signed before any is put, and none waits on
+    // another's answer: they are published at once, each put before its
+    // locators are appended ([`publish`]), and reported in the order
+    // produced. The caller reads each back Stored before going on.
+    publish_all(set, &publications).await
+}
+
+/// Publish `publications` at once, each put before its locators are
+/// appended ([`publish`]), reported in the order given.
+pub async fn publish_all(
+    set: &StorageSet,
+    publications: &[Publication<'_>],
+) -> Result<Vec<Published>, DsmError> {
+    futures::future::try_join_all(publications.iter().map(|object| publish(set, object))).await
+}
+
+/// The objects a produced operation hands back, each complete:
+/// `operation_signature` completes the kinds that sign through the
+/// operation (the setup's `m_setup`, the fulfillment's `m_F`).
+pub fn produced_publications<'a>(
+    produced: &'a Produced,
+    operation_signature: &'a [u8],
+) -> Vec<Publication<'a>> {
+    produced
         .publish
         .iter()
         .map(|item| match item {
@@ -116,12 +140,7 @@ pub async fn publish_produced(
             },
             ToPublish::PreBalance(balance) => Publication::TraderPreBalance(balance),
         })
-        .collect();
-    // Every object is built and signed before any is put, and none waits on
-    // another's answer: they are published at once, each put before its
-    // locators are appended ([`publish`]), and reported in the order
-    // produced. The caller reads each back Stored before going on.
-    futures::future::try_join_all(publications.iter().map(|object| publish(set, object))).await
+        .collect()
 }
 
 async fn fetch<T>(

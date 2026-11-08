@@ -165,13 +165,12 @@ pub struct BilateralSessionRecord {
     pub sent_child_root: Option<Vec<u8>>,
     /// Sender, bearer steps: the fused-anchor leaf update the confirm's
     /// proofs were built from (key and new value, both or neither).
-    pub anchor_leaf_key: Option<Vec<u8>>,
-    pub anchor_leaf_value: Option<Vec<u8>>,
     /// Sender, bearer steps: the offline-cash allocation debit (all three or
     /// none).
     pub spend_anchor_bundle: Option<Vec<u8>>,
     pub spend_asset: Option<Vec<u8>>,
     pub spend_amount: Option<i64>,
+    pub spend_next_frontier: Option<Vec<u8>>,
     /// The frame the session owes its counterparty, delivered again when the
     /// link returns.
     pub owed_frame: Option<Vec<u8>>,
@@ -181,7 +180,8 @@ pub struct BilateralSessionRecord {
 }
 
 /// Persisted BLE chunk for durable reassembly across connection drops.
-/// Stored in `ble_reassembly_state` table, keyed by (frame_commitment, chunk_index).
+/// Stored in the `ble_reassembly_chunks` table, keyed by
+/// (peer_link, frame_commitment, chunk_index).
 #[derive(Debug, Clone)]
 pub struct PersistedChunk {
     pub chunk_index: u16,
@@ -195,6 +195,9 @@ pub struct PersistedChunk {
 /// Parameters for persisting a BLE chunk.
 #[derive(Debug, Clone)]
 pub struct ChunkPersistenceParams<'a> {
+    /// The link the chunk arrived on: the peer's BLE address as the radio
+    /// reported it.
+    pub peer_link: &'a str,
     pub frame_commitment: &'a [u8; 32],
     pub chunk_index: u16,
     pub frame_type: i32,
@@ -202,5 +205,4 @@ pub struct ChunkPersistenceParams<'a> {
     pub payload_len: u32,
     pub chunk_data: &'a [u8],
     pub checksum: u32,
-    pub counterparty_id: Option<&'a [u8; 32]>,
 }

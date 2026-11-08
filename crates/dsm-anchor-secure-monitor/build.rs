@@ -21,6 +21,7 @@ fn main() {
     println!("cargo:rerun-if-changed=veneer/dsm_ns_payload.S");
     println!("cargo:rerun-if-changed=veneer/dsm_sg_abi.h");
     println!("cargo:rerun-if-changed=memory.x");
+    println!("cargo:rerun-if-changed=dsm-secure-sram.x");
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

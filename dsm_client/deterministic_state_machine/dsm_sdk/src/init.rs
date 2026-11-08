@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use crate::bridge::install_app_router as install_sdk_app_router;
 use crate::handlers::{
-    handle_create_genesis_v2_query, handle_generate_mnemonic_query, install_app_router_adapter,
+    handle_create_genesis_v2, handle_generate_mnemonic_query, install_app_router_adapter,
     AppRouterImpl, BiImpl,
 };
 
@@ -103,7 +103,7 @@ pub fn current_smaster() -> Result<[u8; 32], dsm::types::error::DsmError> {
 /// (key schedule KS1), a sibling of `Smaster` under `s0`'s Extract. Rooted in `s0`
 /// (the recovery path) and domain-separated from authorship (`Smaster`): a copied database is
 /// undecryptable without the wallet seed, and a leak of the at-rest key does not expose the
-/// authorship root. Replaces the former C-DBRW binding key for SK-at-rest. Fails closed when
+/// authorship root. Fails closed when
 /// the wallet is locked.
 pub fn current_chain_head_at_rest_key() -> Result<[u8; 32], dsm::types::error::DsmError> {
     use dsm::core::identity::genesis_v2::derive_s0;
@@ -263,9 +263,7 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                 let self_device: Option<[u8; 32]> = crate::sdk::app_state::AppState::get_device_id()
                     .and_then(|v| v.as_slice().try_into().ok());
                 if let Some(device_id) = self_device {
-                    match crate::storage::client_db::drain_projection_repairs(&device_id, |token| {
-                        crate::policy::builtin_policy_commit(token)
-                    }) {
+                    match crate::storage::client_db::drain_projection_repairs(&device_id) {
                         Ok((0, 0)) => {}
                         Ok((repaired, remaining)) => log::info!(
                             "[SDK] projection repair ({origin}): {repaired} rebuilt from canonical, \
@@ -376,14 +374,13 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 
         #[async_trait::async_trait]
         impl crate::bridge::AppRouter for MinimalBootstrapRouter {
+            // Pre-genesis wallet CREATION is the bootstrap itself and must be allowed here:
+            // generateMnemonic is pure (OsRng -> BIP39), and createGenesisV2 derives the
+            // wallet seed + establishes the identity — after which a re-init installs the full
+            // router. Without these, a fresh device can never create a wallet (chicken-and-egg).
             async fn query(&self, q: AppQuery) -> AppResult {
                 match q.path.as_str() {
-                    // Pre-genesis wallet CREATION is the bootstrap itself and must be allowed here:
-                    // generateMnemonic is pure (OsRng -> BIP39), and createGenesisV2 derives the
-                    // wallet seed + establishes the identity — after which a re-init installs the full
-                    // router. Without these, a fresh device can never create a wallet (chicken-and-egg).
                     "system.generateMnemonic" => handle_generate_mnemonic_query(),
-                    "system.createGenesisV2" => handle_create_genesis_v2_query(q),
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),
@@ -396,13 +393,16 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             }
 
             async fn invoke(&self, i: AppInvoke) -> AppResult {
-                AppResult {
-                    success: false,
-                    data: Vec::new(),
-                    error_message: Some(format!(
-                        "MinimalBootstrapRouter: invoke '{}' requires genesis",
-                        i.method
-                    )),
+                match i.method.as_str() {
+                    "system.createGenesisV2" => handle_create_genesis_v2(&i.args),
+                    _ => AppResult {
+                        success: false,
+                        data: Vec::new(),
+                        error_message: Some(format!(
+                            "MinimalBootstrapRouter: invoke '{}' requires genesis",
+                            i.method
+                        )),
+                    },
                 }
             }
 
@@ -411,12 +411,8 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             // offline bearer could run over.
             fn sync_balance_cache(&self) {}
 
-            fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+            fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead> {
                 None
-            }
-
-            fn resolve_policy_commit_strict(&self, _token_id: &[u8]) -> Result<[u8; 32], DsmError> {
-                Err(requires_genesis("resolve_policy_commit_strict"))
             }
 
             fn simulate_advance_for_confirm(
@@ -425,7 +421,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _counterparty_devid: [u8; 32],
                 _operation: dsm::types::operations::Operation,
                 _deltas: &[dsm::types::device_state::BalanceDelta],
-                _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
                 _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
             ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
                 Err(requires_genesis("simulate_advance_for_confirm"))
@@ -451,8 +446,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _receiver_challenge: [u8; 32],
                 _sender_device_root_before: [u8; 32],
                 _sender_device_root_after: [u8; 32],
-                _anchor_smt_proof_before: Vec<u8>,
-                _anchor_smt_proof_after: Vec<u8>,
             ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, DsmError> {
                 Err(requires_genesis("release_offline_bearer"))
             }
@@ -461,13 +454,31 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 Err(requires_genesis("cancel_offline_bearer_release"))
             }
 
+            fn reemit_offline_bearer(
+                &self,
+            ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, DsmError> {
+                Err(requires_genesis("reemit_offline_bearer"))
+            }
+
+            fn observe_offline_bearer_recovery(
+                &self,
+            ) -> Result<anchor_core::appliance::RecoverOutcome, DsmError> {
+                Err(requires_genesis("observe_offline_bearer_recovery"))
+            }
+
+            fn finalize_offline_bearer(
+                &self,
+                _appliance_next_root: [u8; 32],
+            ) -> Result<(), DsmError> {
+                Err(requires_genesis("finalize_offline_bearer"))
+            }
+
             fn execute_on_relationship_for_bilateral(
                 &self,
                 _rel_key: [u8; 32],
                 _counterparty_devid: [u8; 32],
                 _operation: dsm::types::operations::Operation,
                 _deltas: &[dsm::types::device_state::BalanceDelta],
-                _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
                 _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
                 _before_commit: Option<
                     &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
@@ -493,16 +504,12 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         log::info!("[SDK Init] Minimal bootstrap router installed (awaiting genesis)");
     }
 
-    // 5) Install recovery handler into core layer
-    let recovery_impl = Arc::new(crate::handlers::RecoveryImpl::new());
-    dsm::core::bridge::install_recovery_handler(recovery_impl);
-
-    log::info!("[SDK Init] Core handlers (Unilateral, Bilateral, Recovery) installed successfully");
+    log::info!("[SDK Init] Core handlers (Unilateral, Bilateral) installed successfully");
 
     // 6) BLE (Android only): this identity's Bluetooth transfer stack. Deferred until an
     // identity exists; the core handlers above stay installed so bootstrap queries work before
     // genesis, and wallet creation builds it once the identity is there.
-    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    #[cfg(feature = "bluetooth")]
     build_ble_stack_for_identity()?;
 
     Ok(())
@@ -516,7 +523,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 /// identity is installed: without it a device that created its wallet in this session paired
 /// over Bluetooth but refused every offline send ("the BLE stack is not live yet") until the
 /// app restarted. With no identity yet it builds nothing and says so.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
     // Create and register BluetoothManager using AppState identity.
     // Identity MUST be available - this is called post-genesis only.
@@ -569,13 +576,14 @@ pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
 
     // Genesis v2: the device signing keypair is the AK keypair derived deterministically
     // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
-    // create_genesis_v2 registered. No DBRW / device secret. The wallet seed is the
+    // create_genesis_v2 registered. There is no device secret. The wallet seed is the
     // unlocked-session secret; it is cached at unlock (RecoverySDK::derive_and_cache_key)
-    // and sealed at rest, so on a cold start we first try the hardware seed vault before
-    // demanding the mnemonic again. Either way init fails without it, and the failure is
-    // the session's fatal error. A vault that cannot be read is that failure in its own
-    // words: reporting it as "not unlocked" sent a device whose store refused its schema
-    // looking for its mnemonic.
+    // and on a device sealed at rest, so on a cold start there we first try the hardware
+    // seed vault before demanding the mnemonic again. Either way init fails without it, and
+    // the failure is the session's fatal error. A vault that cannot be read is that failure
+    // in its own words: reporting it as "not unlocked" sent a device whose store refused its
+    // schema looking for its mnemonic.
+    #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
     if crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_none() {
         match crate::sdk::recovery_sdk::RecoverySDK::load_and_cache_wallet_seed() {
             Ok(true) => log::info!("[SDK Init] Wallet seed unsealed from vault (cold start)"),

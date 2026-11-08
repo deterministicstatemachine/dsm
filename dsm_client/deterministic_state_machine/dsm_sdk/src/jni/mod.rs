@@ -35,6 +35,10 @@ pub mod ble_events;
 #[cfg(target_os = "android")]
 pub mod event_dispatch;
 
+/// Android as the SDK's host (`crate::host::HostBridge`), over JNI.
+#[cfg(target_os = "android")]
+pub mod host_bridge;
+
 /// Unified protobuf bridge (Android only)
 #[cfg(target_os = "android")]
 pub mod unified_protobuf_bridge;
@@ -75,14 +79,16 @@ pub extern "system" fn JNI_OnLoad(
     let _ =
         unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_clearSessionFatalError
             as *const ();
-    // The six `cdbrw*` JNI exports were removed when Protocol 6.2 collapsed
-    // into the single-path router. Kotlin only reaches C-DBRW through the
-    // `cdbrw.*` router-query family in `misc_routes.rs` now; there is no
-    // JNI surface left to keep alive here.
 
     // Initialize Rust logging early so all JNI functions produce logcat output.
     crate::logging::init_android_device_logging();
     crate::logging::init_panic_handler();
+
+    // Kotlin is this process's host: the page, the radio and the Keystore are
+    // reached through it from here on.
+    if let Err(e) = crate::host::install(Box::new(host_bridge::AndroidHost)) {
+        log::error!("[JNI] the Android host was not installed: {e}");
+    }
 
     // Safety: VM pointer is provided by the JVM and remains valid for process lifetime.
     let ok = unsafe { jni::JavaVM::from_raw(vm) };

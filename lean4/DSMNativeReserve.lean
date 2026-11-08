@@ -17,7 +17,9 @@
                          is the claimant that signed it.
     - LEADER FIRST       the winner at the reserve's cell is the first
                          RECOGNIZED object at the leader; Final needs the leader
-                         and two other holders and nothing more; copies never
+                         and two further links (route chains, DSMRouteChain;
+                         G15): later seats holding a copy that carries the
+                         leader's record. A bare copy is no link; copies never
                          change the winner; unrecognized bytes never occupy.
   Correspondence: every theorem below has a same-named test in
   `native_reserve.rs` (Core) or `dsm_sdk/src/sdk/native_reserve.rs` (the fake
@@ -28,6 +30,9 @@
   dropping `recipient = claimant` breaks
   `faucet_claim_names_its_claimant_as_recipient`; counting holders without
   the leader breaks `finality_without_the_deterministic_leader_is_impossible`.
+  Executed 2026-10-27 (G15): counting a bare copy as a link — the copy rule —
+  breaks `a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count`
+  and `bare_copies_are_not_links`.
   What this module does NOT claim: signatures, hashing and the cell's key
   derivation (DSMRecognition, DSMSofiSuccessorCells); liveness of the carry.
 -/
@@ -165,39 +170,79 @@ abbrev Val := Nat
 def winner (leader : List Val) (recognized : Val → Bool) : Option Val :=
   leader.find? recognized
 
-/-- `Final`: leader-held and held by two OTHER members — nothing more. -/
-def final (leader : List Val) (recognized : Val → Bool) (copies : Val → Nat) (v : Val) : Prop :=
-  winner leader recognized = some v ∧ 2 ≤ copies v
+/-- A copy at a later route seat. A link carries the chain so far: its chain
+    begins with the leader's record for its value (`route_chain::valid_links`).
+    A bare copy carries no leader record — written before the leader held the
+    value, or without the chain. -/
+inductive Copy where
+  | link (v : Val)
+  | bare (v : Val)
+deriving DecidableEq, Repr
+
+/-- The further links of `v`: the later seats, each read as the copies it
+    holds, that hold a link of `v`. -/
+def links (seats : List (List Copy)) (v : Val) : Nat :=
+  (seats.filter (fun seat => decide (Copy.link v ∈ seat))).length
+
+/-- `Final`: leader-held and two further links — nothing more. -/
+def final (leader : List Val) (recognized : Val → Bool) (seats : List (List Copy)) (v : Val) :
+    Prop :=
+  winner leader recognized = some v ∧ 2 ≤ links seats v
 
 /-- Finality without the deterministic leader is impossible: an empty
     leader read makes nothing final, however many members hold the value. -/
 theorem finality_without_the_deterministic_leader_is_impossible
-    (recognized : Val → Bool) (copies : Val → Nat) (v : Val) :
-    ¬ final [] recognized copies v := by
+    (recognized : Val → Bool) (seats : List (List Copy)) (v : Val) :
+    ¬ final [] recognized seats v := by
   intro h
   simp [final, winner] at h
 
 /-- Final implies leader-held (the definition, stated as the TLA invariant
     `FinalRequiresLeader`). -/
 theorem final_requires_leader (leader : List Val) (recognized : Val → Bool)
-    (copies : Val → Nat) (v : Val) (h : final leader recognized copies v) :
+    (seats : List (List Copy)) (v : Val) (h : final leader recognized seats v) :
     winner leader recognized = some v :=
   h.1
 
-/-- Three holders — the leader and two others — is finality; an unavailable
-    non-leader member never blocks it. -/
-theorem three_holders_is_final (leader : List Val) (recognized : Val → Bool)
-    (copies : Val → Nat) (v : Val) (hl : winner leader recognized = some v)
-    (hc : 2 ≤ copies v) : final leader recognized copies v :=
+/-- The leader link and two further links is finality; an unavailable
+    non-leader member never blocks it (the TLA invariant
+    `LeaderAndTwoLinksIsFinal`). -/
+theorem the_leader_and_two_links_is_final (leader : List Val) (recognized : Val → Bool)
+    (seats : List (List Copy)) (v : Val) (hl : winner leader recognized = some v)
+    (hc : 2 ≤ links seats v) : final leader recognized seats v :=
   ⟨hl, hc⟩
 
 /-- Additional replicas do not alter the winner: the winner is a function of
     the leader's read alone. -/
 theorem additional_replicas_do_not_alter_the_winner (leader : List Val)
-    (recognized : Val → Bool) (copies copies' : Val → Nat) (v : Val)
-    (h : final leader recognized copies v) (hc : 2 ≤ copies' v) :
-    final leader recognized copies' v :=
+    (recognized : Val → Bool) (seats seats' : List (List Copy)) (v : Val)
+    (h : final leader recognized seats v) (hc : 2 ≤ links seats' v) :
+    final leader recognized seats' v :=
   ⟨h.1, hc⟩
+
+/-- G15, the route chain (`route_chain::tests::a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count`):
+    four later seats hold bare copies of the leader's value and it is not
+    final — the copy rule counted them and called it final (the TLA
+    falsification `_CopyRule` fails `FinalRequiresChainLinks`). -/
+theorem a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count :
+    ¬ final [7] (fun _ => true) [[.bare 7], [.bare 7], [.bare 7], [.bare 7]] 7 := by
+  intro h
+  have hl : links [[.bare 7], [.bare 7], [.bare 7], [.bare 7]] 7 = 0 := by decide
+  have := h.2
+  omega
+
+/-- A bare copy at every seat adds no link: the links of `v` are the same
+    with or without them, whatever value they copy. -/
+theorem bare_copies_are_not_links (seats : List (List Copy)) (u v : Val) :
+    links (seats.map (fun seat => seat ++ [Copy.bare u])) v = links seats v := by
+  unfold links
+  induction seats with
+  | nil => rfl
+  | cons seat rest ih =>
+    have hm : (Copy.link v ∈ seat ++ [Copy.bare u]) = (Copy.link v ∈ seat) := by
+      simp
+    simp only [List.map_cons, List.filter_cons, hm]
+    split <;> simp only [List.length_cons, ih]
 
 /-- Unrecognized bytes never occupy the cell, however early they arrived. -/
 theorem unrecognized_bytes_never_occupy_the_cell (leader : List Val)

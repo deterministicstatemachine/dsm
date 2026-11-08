@@ -636,8 +636,6 @@ impl WalletSDK {
     ) -> Result<(State, A), DsmError> {
         // Everything fallible that is NOT part of the advance runs BEFORE it, so
         // that an `Err` from the staged call keeps meaning "nothing was committed".
-        // `token_sdk` resolves the same policy commit pre-advance already, so this
-        // is a pure re-read — failing it here is strictly correct and costs nothing.
         let sender = self.device_id_string();
         if transaction.token_id.is_empty() {
             return Err(DsmError::invalid_operation(
@@ -652,9 +650,17 @@ impl WalletSDK {
             ));
         }
         let token_id_owned = transaction.token_id.clone();
-        let policy_commit = self
-            .token_sdk
-            .resolve_policy_commit_strict(&token_id_owned)?;
+        // The asset is the policy the signed operation commits to; the ticker
+        // only labels it, and `token_sdk` checks the label is that policy's.
+        let policy_commit = match &op {
+            dsm::types::operations::Operation::Transfer { policy_commit, .. } => *policy_commit,
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "a send signs a transfer, not a {}",
+                    other.get_operation_type()
+                )))
+            }
+        };
         let existing_locked =
             crate::storage::client_db::get_locked_balance(&sender, &token_id_owned).map_err(
                 |e| {
@@ -788,10 +794,7 @@ impl WalletSDK {
         }
 
         log::info!(
-            "send_transfer_op completed: {} -> {}, amount: {}, token: {}",
-            transaction.from_device_id,
-            transaction.to_device_id,
-            transaction.amount,
+            "send_transfer_op completed: token: {}",
             transaction.token_id
         );
 
@@ -1005,7 +1008,7 @@ mod tests {
             token_id: "ERA".to_string(),
             amount: 1,
             tx_hash: vec![0u8; 32],
-            amount_signed: 1,
+            direction: crate::generated::AmountDirection::Credit as i32,
             tx_type: crate::generated::TransactionType::TxTypeUnspecified as i32,
             status: "ok".to_string(),
             recipient: "someone".to_string(),

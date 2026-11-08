@@ -11,6 +11,7 @@ import { useWallet } from '../../../../contexts/WalletContext';
 import { contactsStore, useContactsStore } from '../../../../stores/contactsStore';
 import type { TokenBalanceView } from '../../../../dsm/types';
 import type { DomainContact, DomainIdentity, DomainTransaction } from '../../../../domain/types';
+import { usePendingOffline, type PendingOfflineState } from './usePendingOffline';
 
 export type WalletScreenData = {
   identity: DomainIdentity | null;
@@ -19,6 +20,8 @@ export type WalletScreenData = {
   balances: TokenBalanceView[];
   /** The store has not answered balances yet; nothing is known either way. */
   balancesLoading: boolean;
+  /** Payments received offline and held pending, read again with every balance read. */
+  pendingOffline: PendingOfflineState;
   contacts: DomainContact[];
   transactions: DomainTransaction[];
   loading: boolean;
@@ -104,6 +107,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
   }, [wallet.error, contactsError]);
 
   const contacts: DomainContact[] = contactsState.contacts;
+  const pendingOffline = usePendingOffline(wallet.balances);
 
   return {
     identity,
@@ -111,6 +115,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
     deviceB32: identity?.deviceId ?? '',
     balances: wallet.balances,
     balancesLoading: wallet.isLoading && wallet.balances.length === 0,
+    pendingOffline,
     contacts,
     transactions: wallet.transactions,
     loading,

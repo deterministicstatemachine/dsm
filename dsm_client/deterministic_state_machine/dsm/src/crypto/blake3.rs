@@ -47,17 +47,10 @@ use crate::crypto::domain::TaggedHashDomain;
 /// Returns a `Hasher` pre-loaded with the domain tag (including NUL terminator).
 /// Callers chain `.update()` calls then `.finalize()`.
 ///
-/// The `tag` must follow the `"DSM/<domain>"` convention. The NUL terminator is
-/// appended automatically.
-///
-/// # Panics
-/// Panics if `tag` does not start with `"DSM/"` or `"DJTE."`.
+/// The `tag` is a [`TaggedHashDomain`], so it starts with `"DSM/"` or
+/// `"DJTE."`: the type refuses any other when it is built. The NUL terminator
+/// is appended automatically.
 pub fn dsm_domain_hasher(tag: TaggedHashDomain<'_>) -> Hasher {
-    assert!(
-        tag.source_bytes().starts_with(b"DSM/") || tag.source_bytes().starts_with(b"DJTE."),
-        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {:?}",
-        String::from_utf8_lossy(tag.source_bytes())
-    );
     let mut h = Hasher::new();
     h.update(tag.source_bytes());
     h.update(&[0u8]);
@@ -72,15 +65,7 @@ pub fn dsm_domain_hasher(tag: TaggedHashDomain<'_>) -> Hasher {
 /// with the secret as the key (NOT HKDF)". The secret key is the master seed
 /// `Smaster`; the tag plus the caller's subsequent `update()`s form the
 /// versioned, algorithm- and chain-bound context.
-///
-/// # Panics
-/// Panics if `tag` does not start with `"DSM/"` or `"DJTE."`.
 pub fn dsm_domain_hasher_keyed(tag: TaggedHashDomain<'_>, key: &[u8; 32]) -> Hasher {
-    assert!(
-        tag.source_bytes().starts_with(b"DSM/") || tag.source_bytes().starts_with(b"DJTE."),
-        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {:?}",
-        String::from_utf8_lossy(tag.source_bytes())
-    );
     let mut h = Hasher::new_keyed(key);
     h.update(tag.source_bytes());
     h.update(&[0u8]);
@@ -119,10 +104,6 @@ mod tests_domain_hash {
         crate::tagged_domain!(b"DSM/ab");
     const TAG_DSM_ABC_FIXTURE: crate::crypto::domain::TaggedHashDomain<'static> =
         crate::tagged_domain!(b"DSM/abC");
-    // No longer a valid tag by prefix, but still representable — the prefix
-    // rule is a debug_assert in the hasher, not part of the type.
-    const TAG_NOT_DSM_FIXTURE: crate::crypto::domain::TaggedHashDomain<'static> =
-        crate::tagged_domain!(b"not-dsm");
 
     #[test]
     fn domain_hash_includes_nul_terminator() {
@@ -132,12 +113,6 @@ mod tests_domain_hash {
         let h1 = domain_hash(TAG_DSM_AB_FIXTURE, b"Cxyz");
         let h2 = domain_hash(TAG_DSM_ABC_FIXTURE, b"xyz");
         assert_ne!(h1.as_bytes(), h2.as_bytes());
-    }
-
-    #[test]
-    #[should_panic(expected = "domain tag must start")]
-    fn domain_hash_rejects_non_dsm_tag() {
-        let _ = domain_hash(TAG_NOT_DSM_FIXTURE, b"payload");
     }
 }
 

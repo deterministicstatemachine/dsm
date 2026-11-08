@@ -220,14 +220,15 @@ struct Serving {
 }
 
 /// A node set's CA: it issues every node's certificate, every set-mate is
-/// pinned to it, and a device trusts it and nothing else.
-struct TestCa {
+/// pinned to it, and a device trusts it and nothing else. A test that stands
+/// a member up on its own trusts one of these the same way.
+pub(crate) struct TestCa {
     issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
-    pem: Vec<u8>,
+    pub(crate) pem: Vec<u8>,
 }
 
 impl TestCa {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let key = match rcgen::KeyPair::generate() {
             Ok(key) => key,
             Err(e) => panic!("the CA's key: {e}"),
@@ -256,7 +257,7 @@ impl TestCa {
 
     /// The TLS a node serves `member_id` with: a certificate from this CA
     /// naming the member, as a DNS name, and the loopback address.
-    async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
+    pub(crate) async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
         let key = match rcgen::KeyPair::generate() {
             Ok(key) => key,
             Err(e) => panic!("the node's key: {e}"),
@@ -287,19 +288,65 @@ impl TestCa {
     }
 }
 
+/// Another writer's put at a member, made just before the member takes the
+/// next cell put that `names` says names the rival's cell: the other writer
+/// got there between a flow's read of the cell and its write. `put` makes it
+/// over the member's own put route, as any writer's is.
+pub struct RivalPut {
+    pub names: NamesCell,
+    pub put: PutOnce,
+}
+
+/// Whether a cell put's body names the rival's cell.
+pub type NamesCell = Box<dyn Fn(&[u8]) -> bool + Send + Sync>;
+
+/// The rival's put, made once.
+pub type PutOnce = Box<dyn FnOnce() -> PutFuture + Send>;
+
+/// What making the rival's put waits on.
+pub type PutFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Each member's armed rival put, if any.
+type Rival = Arc<Mutex<Option<RivalPut>>>;
+
+/// Whether `body`, a cell put a member was handed, names the cell of the
+/// rival armed there.
+fn names_the_rival(body: &[u8], rival: &Rival) -> bool {
+    match rival.lock() {
+        Ok(armed) => armed.as_ref().is_some_and(|r| (r.names)(body)),
+        Err(e) => panic!("rival put: {e}"),
+    }
+}
+
+/// Make the rival put armed at a member, once: it is disarmed first, so its
+/// own put passes as any other.
+async fn put_the_rival(rival: &Rival) {
+    let taken = match rival.lock() {
+        Ok(mut armed) => armed.take(),
+        Err(e) => panic!("rival put: {e}"),
+    };
+    if let Some(r) = taken {
+        (r.put)().await;
+    }
+}
+
 /// Serve the binary's app for `state` on `listener` until stopped. Every
 /// request the app is handed is recorded in `requests` first, as the method
 /// and the path: what an operator of this node can see the node was asked.
+/// A cell put naming the cell of the rival armed in `rival` is taken only
+/// after that rival's put.
 fn serve(
     listener: tokio::net::TcpListener,
     tls: axum_server::tls_rustls::RustlsConfig,
     state: Arc<AppState>,
     requests: Arc<Mutex<Vec<String>>>,
+    rival: Rival,
 ) -> Serving {
     let app =
         dsm_storage_node::build_app(state, deployed_limits()).layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let requests = requests.clone();
+                let rival = rival.clone();
                 async move {
                     match requests.lock() {
                         Ok(mut log) => {
@@ -307,7 +354,24 @@ fn serve(
                         }
                         Err(e) => panic!("request log: {e}"),
                     }
-                    next.run(request).await
+                    if request.method() != axum::http::Method::POST
+                        || request.uri().path() != "/api/v2/cells"
+                    {
+                        return next.run(request).await;
+                    }
+                    let (parts, body) = request.into_parts();
+                    let body = match axum::body::to_bytes(body, usize::MAX).await {
+                        Ok(body) => body,
+                        Err(e) => panic!("a cell put's body: {e}"),
+                    };
+                    if names_the_rival(&body, &rival) {
+                        put_the_rival(&rival).await;
+                    }
+                    next.run(axum::extract::Request::from_parts(
+                        parts,
+                        axum::body::Body::from(body),
+                    ))
+                    .await
                 }
             },
         ));
@@ -338,6 +402,7 @@ pub struct Node {
     state: Arc<AppState>,
     serving: Option<Serving>,
     requests: Arc<Mutex<Vec<String>>>,
+    rival: Rival,
 }
 
 /// One entry a node holds in its spool, exactly as the node stored it: the
@@ -568,8 +633,15 @@ impl NodeSet {
                 Err(e) => panic!("app state: {e}"),
             };
             let requests = Arc::new(Mutex::new(Vec::new()));
+            let rival = Arc::new(Mutex::new(None));
             let tls = ca.tls_for(&p.member_id).await;
-            let serving = serve(p.listener, tls.clone(), state.clone(), requests.clone());
+            let serving = serve(
+                p.listener,
+                tls.clone(),
+                state.clone(),
+                requests.clone(),
+                Arc::clone(&rival),
+            );
             nodes.push(Node {
                 member_id: p.member_id,
                 endpoint,
@@ -579,6 +651,7 @@ impl NodeSet {
                 state,
                 serving: Some(serving),
                 requests,
+                rival,
             });
         }
         Self { nodes, ca }
@@ -613,6 +686,25 @@ impl NodeSet {
         self.nodes.iter().map(|n| n.endpoint.clone()).collect()
     }
 
+    /// Arm `rival` at `member_id`: the next cell put naming the rival's cell
+    /// that the member is handed is taken only after the rival's own put.
+    pub fn race_next_put(&self, member_id: &str, rival: RivalPut) {
+        let node = self.node(member_id);
+        match node.rival.lock() {
+            Ok(mut armed) => *armed = Some(rival),
+            Err(e) => panic!("rival put: {e}"),
+        }
+    }
+
+    /// Whether a rival put is still armed at `member_id`: it is not once its
+    /// put was made.
+    pub fn rival_armed(&self, member_id: &str) -> bool {
+        match self.node(member_id).rival.lock() {
+            Ok(armed) => armed.is_some(),
+            Err(e) => panic!("rival put: {e}"),
+        }
+    }
+
     /// Stop serving on each named member: its listener closes and its
     /// connections are shut. Returns once every one has stopped.
     pub async fn take_down(&mut self, member_ids: &[String]) {
@@ -644,6 +736,7 @@ impl NodeSet {
                 node.tls.clone(),
                 node.state.clone(),
                 node.requests.clone(),
+                node.rival.clone(),
             ));
         }
     }
@@ -674,6 +767,25 @@ impl NodeSet {
 
     async fn spool_ddl(&self, member_id: &str, statement: &str) {
         self.ddl(member_id, statement).await;
+    }
+
+    /// List `addr` under `locator` in member `member_id`'s index of
+    /// `namespace`, whether or not it holds the object: a hostile member's
+    /// index, written into its store past the append the node refuses for an
+    /// address it holds no object at (storage spec §7).
+    pub async fn list_unheld(
+        &self,
+        member_id: &str,
+        namespace: &[u8],
+        locator: &[u8; 32],
+        addr: &[u8; 32],
+    ) {
+        let mut scoped = namespace.to_vec();
+        scoped.push(0);
+        scoped.extend_from_slice(locator);
+        if let Err(e) = db::append_index(&self.node(member_id).state.db_pool, &scoped, addr).await {
+            panic!("the hostile member's listing: {e}");
+        }
     }
 
     /// Refuse every write of `keys` at member `member_id`: the member's store
@@ -708,6 +820,52 @@ impl NodeSet {
                 )
                 .await
                 .unwrap_or_else(|e| panic!("{member_id}: refuse a cell key: {e}"));
+        }
+    }
+
+    /// Every member loses every entry of the cell `key`: what a set whose
+    /// stores all lost the cell holds. Nothing else is touched.
+    pub async fn erase_cell(&self, key: &[u8; 32]) {
+        for node in &self.nodes {
+            let client = match node.state.db_pool.get().await {
+                Ok(client) => client,
+                Err(e) => panic!("node db connection: {e}"),
+            };
+            if let Err(e) = client
+                .execute("DELETE FROM cells WHERE cell_key = $1", &[&key.to_vec()])
+                .await
+            {
+                panic!("{}: erase a cell: {e}", node.member_id);
+            }
+        }
+    }
+
+    /// Refuse every immutable object write at each named member: its store
+    /// raises on the insert and the member answers an error — a member whose
+    /// object storage failed. Every read, and every cell write, serves as
+    /// before.
+    pub async fn refuse_object_writes(&self, member_ids: &[String]) {
+        for member_id in member_ids {
+            self.ddl(
+                member_id,
+                "CREATE OR REPLACE FUNCTION refuse_object_write() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the store refused the write'; END $$;
+                 DROP TRIGGER IF EXISTS refuse_object_write ON immutable_objects;
+                 CREATE TRIGGER refuse_object_write BEFORE INSERT ON immutable_objects
+                     FOR EACH ROW EXECUTE FUNCTION refuse_object_write();",
+            )
+            .await;
+        }
+    }
+
+    /// Each named member's object store takes writes again.
+    pub async fn accept_object_writes(&self, member_ids: &[String]) {
+        for member_id in member_ids {
+            self.ddl(
+                member_id,
+                "DROP TRIGGER IF EXISTS refuse_object_write ON immutable_objects",
+            )
+            .await;
         }
     }
 

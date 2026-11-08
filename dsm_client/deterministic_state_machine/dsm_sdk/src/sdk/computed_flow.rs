@@ -34,9 +34,9 @@ use dsm::sofi::resolve::{AcceptedGeneses, VaultGenesis, Verifier};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::wire::{
     next_position, ComputedBranch, ComputedEscrowTerms, ComputedTable, EntryKind, EscrowSigner,
-    EquivocationProof, MatchSide, SideSignature, SignedHead, StartKind, TranscriptEntry,
-    TranscriptOutcome, VaultGenesisPreimage, VaultStateLeaf, COMPUTED_LABEL_A_WINS,
-    COMPUTED_LABEL_B_WINS, COMPUTED_LABEL_VOID, VAULT_STATUS_ACTIVE,
+    EquivocationProof, MatchSide, SideSignature, SignedHead, StartKind, StartReveals,
+    TranscriptEntry, TranscriptOutcome, VaultGenesisPreimage, VaultStateLeaf,
+    COMPUTED_LABEL_A_WINS, COMPUTED_LABEL_B_WINS, COMPUTED_LABEL_VOID, VAULT_STATUS_ACTIVE,
 };
 use dsm::types::device_state::{BalanceDelta, BalanceDirection};
 use dsm::types::error::DsmError;
@@ -47,7 +47,7 @@ use crate::sdk::economic_admission_flow::{
 };
 use crate::sdk::outcome_programs::{read_setup, DuelProgress, MatchSetup};
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
-use crate::sdk::route_seats::write_recorded;
+use crate::sdk::route_seats::{write_recorded, AtLeader};
 use crate::sdk::sofi_flow::{
     identity, publication_addr, refuse, require_stored, sign, standing, storage, vault_at_head,
     PositionOutcome, SIGNATURE_ALG,
@@ -59,10 +59,6 @@ use crate::sdk::storage_set::{as_ccb_members, StorageSet};
 use crate::storage::client_db::duel_matches::{self as store, Advance, DuelEntryRow, DuelMatchRow};
 
 type D32 = [u8; 32];
-
-/// `DSM/escrow/session-key/v1`: the HKDF salt of a match session key.
-const TAG_SESSION_KEY: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::tagged_domain!(b"DSM/escrow/session-key/v1");
 
 fn side_byte(side: MatchSide) -> u8 {
     side.byte()
@@ -80,26 +76,63 @@ fn short(id: &D32) -> String {
 // ── the session key ─────────────────────────────────────────────────────────
 
 /// This wallet's session key for the match whose setup carries
-/// `match_nonce`: `HKDF(salt = DSM/escrow/session-key/v1 ‖ 0x00, ikm = wallet
-/// seed, info = genesis ‖ match_nonce)`, expanded into a SPHINCS+ key pair.
-/// Derived from the seed the wallet holds while unlocked, so it fails closed
-/// when the wallet is locked, and it never leaves the wallet: only its public
-/// half is ever returned.
+/// `match_nonce` (SoFi §19.10, Amendment S27): the seed is an Expand under the
+/// key schedule's wallet root, `Expand(PRK_w, DSM/escrow/session-key/v2 ‖
+/// 0x00 ‖ genesis ‖ match_nonce)`, and the key pair is the SPHINCS+ key pair
+/// generated from it. Derived from the seed the wallet holds while unlocked,
+/// so it fails closed when the wallet is locked, and it never leaves the
+/// wallet: only its public half is ever returned. The copy of the wallet seed
+/// and the derived seed are wiped once the key pair is made; the wallet-root
+/// key wipes itself.
 pub(crate) fn session_keypair(match_nonce: &D32) -> Result<SignatureKeyPair, DsmError> {
+    use dsm::core::identity::key_schedule::escrow_session_seed;
+    use zeroize::Zeroizing;
+    let (root, genesis) = wallet_root()?;
+    let seed = Zeroizing::new(escrow_session_seed(&root, &genesis, match_nonce));
+    SignatureKeyPair::generate_from_entropy(seed.as_slice())
+}
+
+/// This wallet's root and genesis, from the seed it holds while unlocked: what
+/// a match's session key and start entropy are derived from. Fails closed when
+/// the wallet is locked; the copy of the seed is wiped once the root is made,
+/// and the root wipes itself.
+fn wallet_root() -> Result<(dsm::core::identity::key_schedule::Prk, D32), DsmError> {
+    use dsm::core::identity::key_schedule::wallet_prk;
+    use zeroize::Zeroizing;
     let genesis = crate::sdk::app_state::AppState::get_genesis_hash()
         .ok_or_else(|| DsmError::InvalidState("no genesis for a session key".into()))?;
-    let wallet_seed =
+    let genesis: D32 = genesis.as_slice().try_into().map_err(|e| {
+        DsmError::InvalidState(format!(
+            "the stored genesis is {} bytes, not 32: {e}",
+            genesis.len()
+        ))
+    })?;
+    let wallet_seed = Zeroizing::new(
         crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
             DsmError::InvalidState(
                 "wallet seed unavailable for a session key (wallet locked)".into(),
             )
-        })?;
-    let mut salt = TAG_SESSION_KEY.source_bytes().to_vec();
-    salt.push(0);
-    let mut info = genesis;
-    info.extend(match_nonce);
-    let seed = dsm::crypto::hkdf::extract_and_expand(&salt, &wallet_seed, &info, 32);
-    SignatureKeyPair::generate_from_entropy(&seed)
+        })?,
+    );
+    Ok((wallet_prk(&wallet_seed), genesis))
+}
+
+/// This wallet's start entropy for the match whose setup carries
+/// `match_nonce` (SoFi §19.10, Amendment S33): `Expand(PRK_w,
+/// DSM/escrow/start-entropy/v1 ‖ 0x00 ‖ genesis ‖ match_nonce)`. It leaves the
+/// wallet only with its ready, once both vaults are checked; until then only
+/// its commitment does. Derived when used, never stored.
+fn start_entropy(match_nonce: &D32) -> Result<zeroize::Zeroizing<D32>, DsmError> {
+    let (root, genesis) = wallet_root()?;
+    Ok(zeroize::Zeroizing::new(
+        dsm::core::identity::key_schedule::escrow_start_entropy(&root, &genesis, match_nonce),
+    ))
+}
+
+/// This wallet's start commitment for the match: what it answers beside its
+/// session key, and what the setup carries for its side.
+pub fn start_commitment(match_nonce: &D32) -> Result<D32, DsmError> {
+    Ok(computed::start_commitment(&*start_entropy(match_nonce)?))
 }
 
 /// This wallet's session public key for the match nonce: what the setup
@@ -122,6 +155,8 @@ pub fn table_of(setup: &[u8], read: &MatchSetup) -> Result<ComputedTable, DsmErr
         computed::setup_digest(setup),
         session_signer(&read.a.session_public_key)?,
         session_signer(&read.b.session_public_key)?,
+        read.a.start_commitment,
+        read.b.start_commitment,
     )
     .map_err(refuse)
 }
@@ -301,13 +336,17 @@ pub async fn create(
             "the setup's session key for this side is not this wallet's for the match",
         ));
     }
+    if start_commitment(&read.match_nonce)? != mine.start_commitment {
+        return Err(refuse(
+            "the setup's start commitment for this side is not this wallet's for the match",
+        ));
+    }
     let relayed = intent
         .opponent_holdings
         .as_deref()
         .ok_or_else(|| refuse("no proof that the opponent holds the creatures it fields"))?;
     let their_holdings: dsm::types::proto::HoldingsProofV1 =
-        crate::sdk::connect::signed::canonical(relayed, "the opponent's holdings proof")
-            .map_err(refuse)?;
+        dsm::connect::canonical(relayed, "the opponent's holdings proof").map_err(refuse)?;
     crate::sdk::outcome_programs::check_teams(
         core,
         set,
@@ -338,32 +377,74 @@ pub async fn create(
         .await?;
     }
 
+    let (vault_id, position) =
+        create_vault(core, set, me, &terms, intent.token, intent.amount).await?;
+    store::insert_match(&DuelMatchRow {
+        match_cell,
+        side: side_byte(intent.side),
+        terms: terms.encode(),
+        setup: intent.setup.clone(),
+        vault_id,
+        ready: None,
+        start_final: None,
+        last_index: 0,
+        head: computed::genesis_head(&match_cell, terms.table().setup_digest()),
+        open: [None, None],
+        progress: None,
+        equivocation: None,
+    })
+    .map_err(|e| storage("kept matches", e))?;
+    Ok(Locked {
+        vault_id,
+        match_cell,
+        start_cell: computed::start_cell_key(&match_cell),
+        external_commitment: *terms.external_commitment(),
+        program: read.program,
+        session_public_key: session.public_key().to_vec(),
+        position,
+    })
+}
+
+/// Create `owner`'s computed escrow vault under `terms`, holding `amount` of
+/// `token`: the terms and the vault's genesis stored first, then the creation
+/// admitted as one self-loop operation, and the lock recorded for the wallet
+/// to show. The vault id and the admitted position.
+pub(crate) async fn create_vault(
+    core: &CoreSDK,
+    set: &StorageSet,
+    owner: (D32, D32),
+    terms: &ComputedEscrowTerms,
+    token: D32,
+    amount: u64,
+) -> Result<(D32, u64), DsmError> {
+    let funding_policies = crate::sdk::sofi_flow::vault_funding_policies(set, &[token]).await?;
     let validated = validated_root_or_activate(core)?;
     let create_position = next_position(validated.economic_position()).map_err(refuse)?;
-    let terms_object = Publication::ComputedEscrowTerms(&terms);
+    let terms_object = Publication::ComputedEscrowTerms(terms);
     let addr = publication_addr(&terms_object)?;
     let preimage = VaultGenesisPreimage {
-        owner_genesis: me.0,
-        owner_device_id: me.1,
+        owner_genesis: owner.0,
+        owner_device_id: owner.1,
         create_position,
         state: VaultStateLeaf {
-            owner_genesis: me.0,
-            owner_device_id: me.1,
+            owner_genesis: owner.0,
+            owner_device_id: owner.1,
             create_position,
             market_policy: addr,
             fee_policy: addr,
             release_policy: addr,
             storage_set_id: set.id(),
             generation: 0,
-            reserve_a: intent.amount,
+            reserve_a: amount,
             reserve_b: 0,
             status: VAULT_STATUS_ACTIVE,
         },
     };
-    let produced = build_computed_vault_create(&preimage, &terms).map_err(refuse)?;
+    let produced =
+        build_computed_vault_create(&preimage, terms, funding_policies).map_err(refuse)?;
     let genesis_object = Publication::ComputedEscrowVaultGenesis {
         preimage: &preimage,
-        terms: &terms,
+        terms,
     };
     let (terms_published, genesis_published) =
         futures::future::try_join(publish(set, &terms_object), publish(set, &genesis_object))
@@ -378,9 +459,9 @@ pub async fn create(
         .clone()
         .with_signature(sign(produced.signs.bytes())?);
     let deltas = [BalanceDelta {
-        policy_commit: intent.token,
+        policy_commit: token,
         direction: BalanceDirection::Debit,
-        amount: intent.amount,
+        amount,
     }];
     let (outcome, admitted) = admitted_self_loop_operation(
         core,
@@ -400,36 +481,12 @@ pub async fn create(
         admitted.economic_position,
         &[vault_id],
         &[Moved {
-            policy_commit: intent.token,
+            policy_commit: token,
             direction: BalanceDirection::Debit,
-            amount: intent.amount,
+            amount,
         }],
     );
-    let progress = DuelProgress::start(&intent.setup).map_err(|e| refuse(e.reason))?;
-    store::insert_match(&DuelMatchRow {
-        match_cell,
-        side: side_byte(intent.side),
-        terms: terms.encode(),
-        setup: intent.setup.clone(),
-        vault_id,
-        ready: None,
-        start_final: None,
-        last_index: 0,
-        head: computed::genesis_head(&match_cell, terms.table().setup_digest()),
-        open: [None, None],
-        progress: progress.encode(),
-        equivocation: None,
-    })
-    .map_err(|e| storage("kept matches", e))?;
-    Ok(Locked {
-        vault_id,
-        match_cell,
-        start_cell: computed::start_cell_key(&match_cell),
-        external_commitment: *terms.external_commitment(),
-        program: read.program,
-        session_public_key: session.public_key().to_vec(),
-        position: admitted.economic_position,
-    })
+    Ok((vault_id, admitted.economic_position))
 }
 
 // ── the kept match ──────────────────────────────────────────────────────────
@@ -599,6 +656,9 @@ pub struct Readied {
     /// This wallet's signature over `m_ready`: what the other side's wallet
     /// assembles the Start from.
     pub ready_signature: Vec<u8>,
+    /// This wallet's start entropy, opened with its ready (SoFi Amendment
+    /// S33): the other side's wallet puts it in the Start.
+    pub reveal: D32,
     /// What the cells hold after this call: a Start this call wrote, when the
     /// other side's ready was in hand.
     pub view: MatchView,
@@ -608,16 +668,25 @@ pub struct Readied {
 /// players' vaults are verified first — this wallet's own and the other
 /// side's, found on the match cell — each accepted, Active, bound to this
 /// match, of one token and one amount, its owner one of the two players and
-/// its branches mirrored. Only then is the ready signed. When the other
-/// side's ready signature is supplied, this wallet readies second and writes
-/// the Start itself.
+/// its branches mirrored. Only then is the ready signed and this wallet's
+/// start entropy handed out with it. When the other side's ready and start
+/// entropy are supplied, this wallet readies second: the other side's entropy
+/// must open that side's start commitment before this wallet signs anything,
+/// and this wallet writes the Start itself (SoFi Amendment S33).
 pub async fn ready(
     core: &CoreSDK,
     set: &StorageSet,
     match_cell: &D32,
-    opponent_ready: Option<&[u8]>,
+    opponent_ready: Option<(&[u8], &D32)>,
 ) -> Result<Readied, DsmError> {
     let kept = Kept::load(match_cell)?;
+    if let Some((_, reveal)) = opponent_ready {
+        if computed::start_commitment(reveal) != *kept.table().start_commitment(kept.side.other()) {
+            return Err(refuse(
+                "the other side's start entropy does not open its start commitment",
+            ));
+        }
+    }
     let me = identity(core)?;
     let ctx = VerifierContext::new(set, Some(me), None)?;
     let verifier = ctx.verifier();
@@ -671,42 +740,55 @@ pub async fn ready(
             signature
         }
     };
-    if let Some(theirs) = opponent_ready {
-        write_start(set, &kept, &ready_signature, theirs).await?;
+    let reveal = *start_entropy(&kept.read.match_nonce)?;
+    if let Some(their_ready) = opponent_ready {
+        write_start(set, &kept, (&ready_signature, &reveal), their_ready).await?;
     }
     let view = MatchView::of(&read_cells(&verifier, &kept.terms)?);
     Ok(Readied {
         match_cell: *match_cell,
         ready_signature,
+        reveal,
         view,
     })
 }
 
-/// Write the Start of the match: both ready signatures, side A's then side
-/// B's, assembled by Core, which verifies each under its side's session key
-/// before the Start exists. Written to the start cell's leader; whichever of
-/// a Start and a Withdraw is first there holds the cell for good.
+/// Write the Start of the match: both ready signatures and both sides' start
+/// entropy, side A's then side B's, assembled by Core, which verifies each
+/// ready under its side's session key and each entropy against its side's
+/// commitment before the Start exists. Written to the start cell's leader;
+/// whichever of a Start and a Withdraw is first there holds the cell for
+/// good.
 async fn write_start(
     set: &StorageSet,
     kept: &Kept,
-    own_ready: &[u8],
-    opponent_ready: &[u8],
+    (own_ready, own_reveal): (&[u8], &D32),
+    (opponent_ready, opponent_reveal): (&[u8], &D32),
 ) -> Result<(), DsmError> {
-    let (ready_a, ready_b) = match kept.side {
-        MatchSide::A => (own_ready, opponent_ready),
-        MatchSide::B => (opponent_ready, own_ready),
+    let ((ready_a, reveal_a), (ready_b, reveal_b)) = match kept.side {
+        MatchSide::A => ((own_ready, own_reveal), (opponent_ready, opponent_reveal)),
+        MatchSide::B => ((opponent_ready, opponent_reveal), (own_ready, own_reveal)),
     };
-    let start = computed::assemble_start(kept.y(), kept.table(), ready_a, ready_b)
+    let reveals = StartReveals::new(*reveal_a, *reveal_b);
+    let start = computed::assemble_start(kept.y(), kept.table(), ready_a, ready_b, reveals)
         .map_err(|why| refuse(format!("the Start does not assemble: {why:?}")))?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.start_routed(), &start.encode()).await?;
-    if !write.reached_leader() {
-        return Err(storage(
+    let write = write_recorded(
+        set,
+        cells.start_routed(),
+        &cells.keeps_start(),
+        &start.encode(),
+    )
+    .await?;
+    match write.leader() {
+        // This Start, or a Withdraw or another Start first at the cell's
+        // leader: the start cell is decided, and the caller reads which.
+        AtLeader::Link | AtLeader::Taken => Ok(()),
+        AtLeader::Unanswered => Err(storage(
             "start cell",
             "the cell's leader did not take the Start; nothing is started",
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// Withdraw from the match while no Start holds its start cell: this
@@ -729,12 +811,23 @@ pub async fn withdraw(
     }
     let withdrawal = computed::sign_withdraw(kept.y(), kept.table(), kept.side, &kept.secret()?)?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.start_routed(), &withdrawal.encode()).await?;
-    if !write.reached_leader() {
-        return Err(storage(
-            "start cell",
-            "the cell's leader did not take the Withdraw; nothing is withdrawn",
-        ));
+    let write = write_recorded(
+        set,
+        cells.start_routed(),
+        &cells.keeps_start(),
+        &withdrawal.encode(),
+    )
+    .await?;
+    match write.leader() {
+        // This Withdraw, or a Start first at the cell's leader: the start
+        // cell is decided, and the view says which holds it.
+        AtLeader::Link | AtLeader::Taken => {}
+        AtLeader::Unanswered => {
+            return Err(storage(
+                "start cell",
+                "the cell's leader did not take the Withdraw; nothing is withdrawn",
+            ))
+        }
     }
     Ok(MatchView::of(&read_cells(&verifier, &kept.terms)?))
 }
@@ -766,9 +859,28 @@ fn require_started(core: &CoreSDK, set: &StorageSet, kept: &mut Kept) -> Result<
             ))
         }
     };
-    store::set_start_final(&kept.row.match_cell, &value).map_err(|e| storage("kept matches", e))?;
+    let reveals = start_reveals(&value)?;
+    let progress = DuelProgress::start(&kept.row.setup, &reveals)
+        .map_err(|e| refuse(e.reason))?
+        .encode();
+    store::set_started(&kept.row.match_cell, &value, &progress)
+        .map_err(|e| storage("kept matches", e))?;
     kept.row.start_final = Some(value);
+    kept.row.progress = Some(progress);
     Ok(())
+}
+
+/// Both sides' start entropy the Start `start` opened.
+fn start_reveals(start: &[u8]) -> Result<StartReveals, DsmError> {
+    let start = dsm::sofi::wire::MatchStart::decode(start)
+        .map_err(|e| storage("the kept Start", format!("{e:?}")))?;
+    match start.body() {
+        dsm::sofi::wire::StartBody::Start { reveals, .. } => Ok(*reveals),
+        dsm::sofi::wire::StartBody::Withdraw { .. } => Err(storage(
+            "the kept Start",
+            "a Withdraw holds the start cell, not a Start",
+        )),
+    }
 }
 
 // ── applying entries ────────────────────────────────────────────────────────
@@ -806,8 +918,10 @@ impl Applying {
             last_index: row.last_index,
             head: row.head,
             open: row.open,
-            progress: DuelProgress::decode(&row.progress)
-                .map_err(|e| storage("kept match progress", e))?,
+            progress: DuelProgress::decode(row.progress.as_deref().ok_or_else(|| {
+                refuse("the match has not started: no Start is final at its start cell")
+            })?)
+            .map_err(|e| storage("kept match progress", e))?,
             kept: Vec::new(),
         })
     }
@@ -1154,15 +1268,27 @@ pub async fn settle(
         ))
     })?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.match_routed(), &occupant).await?;
-    if !write.reached_leader() {
-        return Err(storage(
-            "match cell",
-            format!(
-                "the cell's leader did not take the {:?} occupant; nothing is settled",
-                String::from_utf8_lossy(recognized.label())
-            ),
-        ));
+    let programs = crate::sdk::outcome_programs::registry();
+    let write = write_recorded(
+        set,
+        cells.match_routed(),
+        &cells.keeps_match(programs),
+        &occupant,
+    )
+    .await?;
+    match write.leader() {
+        // This occupant, or another one first at the cell's leader: the
+        // match cell is decided, and the view says which holds it.
+        AtLeader::Link | AtLeader::Taken => {}
+        AtLeader::Unanswered => {
+            return Err(storage(
+                "match cell",
+                format!(
+                    "the cell's leader did not take the {:?} occupant; nothing is settled",
+                    String::from_utf8_lossy(recognized.label())
+                ),
+            ))
+        }
     }
     view(core, set, match_cell)
 }
@@ -1177,10 +1303,16 @@ fn transcript_outcome(kept: &Kept) -> Result<TranscriptOutcome, DsmError> {
             signatures.push(SideSignature::new(side, &last.signature).map_err(refuse)?);
         }
     }
+    let started = kept
+        .row
+        .start_final
+        .as_deref()
+        .ok_or_else(|| refuse("the match has not started"))?;
     TranscriptOutcome::new(
         *kept.y(),
         kept.table().clone(),
         &kept.row.setup,
+        start_reveals(started)?,
         entries.into_iter().map(|e| e.entry).collect(),
         signatures,
     )
@@ -1230,4 +1362,74 @@ pub async fn release(
         outcome
     };
     crate::sdk::escrow_flow::exercise_release(core, set, vault_id, outcome).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::two_device::TestDevice;
+    use dsm::core::identity::key_schedule::{escrow_session_seed, escrow_start_entropy, wallet_prk};
+    use serial_test::serial;
+
+    /// SoFi Amendment S27: a wallet's session key for a match is the SPHINCS+
+    /// key pair generated from the KS1 Expand under its wallet root, from its
+    /// own genesis and the match's nonce. Another nonce is another key.
+    ///
+    /// MUTATION CONTROL: derive the seed with the tag as the Extract salt
+    /// again and this goes red.
+    #[test]
+    #[serial]
+    fn a_session_key_is_the_wallet_roots_expand_for_the_match() {
+        let device = TestDevice::create("session-key", 0x5E);
+        device.enter();
+        let nonce = [0x4e; 32];
+        let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
+            .expect("the unlocked wallet seed");
+        let expected = SignatureKeyPair::generate_from_entropy(&escrow_session_seed(
+            &wallet_prk(&wallet_seed),
+            &device.genesis,
+            &nonce,
+        ))
+        .expect("the session key pair");
+        assert_eq!(
+            session_public_key(&nonce).expect("a session key"),
+            expected.public_key()
+        );
+        assert_ne!(
+            session_public_key(&[0x4f; 32]).expect("another match's key"),
+            expected.public_key()
+        );
+    }
+
+    /// SoFi Amendment S33: a wallet's start commitment for a match is the
+    /// hash of the Expand under its wallet root, from its own genesis and the
+    /// match's nonce, beside its session key's. Another nonce is another
+    /// commitment, and the entropy is not the session key's seed.
+    ///
+    /// MUTATION CONTROL: derive the entropy under the session-key label and
+    /// this goes red.
+    #[test]
+    #[serial]
+    fn a_start_commitment_is_the_wallet_roots_expand_for_the_match() {
+        let device = TestDevice::create("start-entropy", 0x5F);
+        device.enter();
+        let nonce = [0x4e; 32];
+        let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
+            .expect("the unlocked wallet seed");
+        let root = wallet_prk(&wallet_seed);
+        let entropy = escrow_start_entropy(&root, &device.genesis, &nonce);
+        assert_eq!(
+            start_commitment(&nonce).expect("a start commitment"),
+            computed::start_commitment(&entropy)
+        );
+        assert_ne!(
+            entropy,
+            escrow_session_seed(&root, &device.genesis, &nonce),
+            "the start entropy is not the session key's seed"
+        );
+        assert_ne!(
+            start_commitment(&[0x4f; 32]).expect("another match's commitment"),
+            computed::start_commitment(&entropy)
+        );
+    }
 }

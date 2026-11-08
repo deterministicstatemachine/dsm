@@ -209,17 +209,16 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     throw new Error('Popup blocked and clipboard unavailable.');
   }, [notifyToast]);
 
+  // A report link carries no diagnostics. A URL reaches the browser's
+  // history, GitHub's logs and any page it is copied to, and the diagnostics
+  // name this wallet, its contacts and their chain tips (SA-156, S-K1). The
+  // report asks for the file the share sheet hands over, which the owner
+  // chooses to attach.
   const openGitHubIssue = useCallback(() => {
     void (async () => {
       try {
         const title = `Beta bug: ${envConfigError ? envConfigError.substring(0, 80) : 'diagnostics report'}`;
-        const excerpt = telemetryConsent
-          ? (await buildDiagnosticsBundle()).substring(0, 2200)
-          : '';
-        const diagnosticsSection = telemetryConsent
-          ? `**Diagnostics excerpt**\n\n----BEGIN EXCERPT----\n${excerpt}\n----END EXCERPT----\n\n`
-          : `**Diagnostics**\n\nAttach \`dsm-diagnostics.txt\` from **Share report** in the app's diagnostics if you are comfortable sharing it.\n\n`;
-        const body = `**Describe the problem**\n\nPlease describe the beta issue.\n\n${diagnosticsSection}**Steps to reproduce**\n1. Launch the app\n2. Reproduce the issue\n3. Note the exact screen, flow, and expected result\n\n**Additional info**\n- Attach adb logcat output if available\n`;
+        const body = `**Describe the problem**\n\nPlease describe the beta issue.\n\n**Diagnostics**\n\nAttach \`dsm-diagnostics.txt\` from **Share report** in the app's diagnostics if you are comfortable sharing it.\n\n**Steps to reproduce**\n1. Launch the app\n2. Reproduce the issue\n3. Note the exact screen, flow, and expected result\n\n**Additional info**\n- Attach adb logcat output if available\n`;
         const url = buildGitHubIssueUrl({ title, body, template: BETA_BUG_TEMPLATE });
         await openUrlOrCopy(url, 'Beta bug report opened', 'Bug report link copied to clipboard');
       } catch {
@@ -231,25 +230,22 @@ export function useDiagnostics(notifyToast: NotifyToast) {
         }
       }
     })();
-  }, [buildDiagnosticsBundle, envConfigError, notifyToast, openUrlOrCopy, telemetryConsent]);
+  }, [envConfigError, notifyToast, openUrlOrCopy]);
 
   const openGitHubFeedback = useCallback(() => {
     void (async () => {
       try {
-        const body = telemetryConsent && diagnostics
-          ? `**Feedback**\n\nPlease share your beta feedback.\n\n**Optional diagnostics excerpt**\n\n${(await buildDiagnosticsBundle()).substring(0, 1200)}`
-          : '**Feedback**\n\nPlease share your beta feedback.';
         const url = buildGitHubIssueUrl({
           template: BETA_FEEDBACK_TEMPLATE,
           title: 'Beta feedback',
-          body,
+          body: '**Feedback**\n\nPlease share your beta feedback.',
         });
         await openUrlOrCopy(url, 'Beta feedback form opened', 'Feedback link copied to clipboard');
       } catch {
         notifyToast('error', 'Failed to open feedback form');
       }
     })();
-  }, [buildDiagnosticsBundle, diagnostics, notifyToast, openUrlOrCopy, telemetryConsent]);
+  }, [notifyToast, openUrlOrCopy]);
 
   const sendDiagnosticsTelemetry = useCallback(async () => {
     if (!diagnostics) return;

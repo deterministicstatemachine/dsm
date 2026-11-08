@@ -19,6 +19,7 @@ private def net : Bytes := "dsm-beta".toUTF8.toList
 private def g : Bytes := List.replicate 32 0x47
 private def dev : Bytes := List.replicate 32 0x44
 private def aph : Bytes := List.replicate 32 0x11
+private def matchNonce : Bytes := List.replicate 32 0x4e
 
 private def vectors : List (String × Bytes) :=
   let w := hkdfExtract saltW seed
@@ -37,7 +38,8 @@ private def vectors : List (String × Bytes) :=
    ("ak_seed", expand32 (hkdfExtract (ksSalt "DSM/kdf/device-root/v1") ds) (ksInfo lAk aph)),
    ("smaster", sm),
    ("at_rest_key", expand32 q (ksInfo lAtRest (g ++ dev))),
-   ("ml_kem_seed", Blake3.keyedHash sm mlkemInput 32)]
+   ("ml_kem_seed", Blake3.keyedHash sm mlkemInput 32),
+   ("escrow_session_seed", expand32 w (ksInfo lEscrowSession (g ++ matchNonce)))]
 
 /-- The constants `KS1_VECTORS` in `core::identity::key_schedule`. -/
 private def rust : List (String × String) :=
@@ -52,7 +54,8 @@ private def rust : List (String × String) :=
    ("ak_seed", "3e12319bfccf9bbc9b028ffd60b7c2a51ea1d7eec63e4bdb23252d61a047c3c0"),
    ("smaster", "f35c38410205174d7170802c5573826f187febc46dd1f4932a3192a127487386"),
    ("at_rest_key", "3ba00d357efaf61ddab37275c46b8cb64a334e0a6a9f8d751c23e313f0b54b37"),
-   ("ml_kem_seed", "978325675bbfaee26c23901f843b9bb03ab281f4fc50ed24a287fb5c78ebed0f")]
+   ("ml_kem_seed", "978325675bbfaee26c23901f843b9bb03ab281f4fc50ed24a287fb5c78ebed0f"),
+   ("escrow_session_seed", "7ff7cd6e42869983b9efad16204a09b2ba09df4468f37d8945665316578db5aa")]
 
 def main : IO Unit := do
   require (vectors.length == rust.length) "vector count"

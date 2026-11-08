@@ -82,15 +82,22 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         // One role-dependent economic event, not a Transfer fact and a
         // separate Receive fact: the role follows from whether
         // `to_device_id` is the local device.
-        Transfer {
-            authority_policy, ..
-        } => match authority_policy {
-            Option::None => ClosedWriteSet,
-            // Opting into the offline-bearer tier moves allocation, not
-            // balance. The boundaries (load and unload) are where the online
-            // balance changes, and they are their own operations.
-            Option::Some(_) => OfflineAccountOnly,
-        },
+        //
+        // A transfer that requires offline-bearer authority moves allocation,
+        // not balance. The boundaries (load and unload) are where the online
+        // balance changes, and they are their own operations. Which transfers
+        // those are is decided by the one predicate `advance`, conservation
+        // and the receipt rules also use: an authority policy that declares
+        // `OnlineChecked` is an online transfer.
+        Transfer { .. } => {
+            if crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                operation,
+            ) {
+                OfflineAccountOnly
+            } else {
+                ClosedWriteSet
+            }
+        }
 
         // ── Touches value, predicate unspecified ────────────────────────
         //

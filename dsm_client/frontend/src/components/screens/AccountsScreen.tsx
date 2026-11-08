@@ -10,7 +10,7 @@ import { useDpadNav } from '../../hooks/useDpadNav';
 import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
 import { TokenCreationDialog } from '../TokenCreationDialog';
 import TokenIdentityPanel from '../TokenIdentityPanel';
-import { burnToken, addTokenByAnchor, forgetToken } from '../../dsm/policies';
+import { burnToken, addTokenByAnchor } from '../../dsm/policies';
 import { TokenCoin } from '../TokenCoin';
 import { Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
@@ -133,34 +133,6 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   // adoption that happened while this screen was already open.
   // The listener wants nothing back; loadBalances answers with the rows it read.
   useWalletRefreshListener(() => { void loadBalances(); }, [loadBalances]);
-
-  /// Forget a token's identity, after saying plainly what that means.
-  ///
-  /// It removes the NAMING only — canonical balances are untouched, and Rust
-  /// refuses outright while any balance is held. The token can be adopted
-  /// again from its anchor, so this is reversible while online.
-  const handleForget = useCallback(async (b: TokenBalance) => {
-    const label = b.symbol;
-    if (!window.confirm(
-      `Forget ${label}?\n\nThis removes the token from this device so its ticker ` +
-      `can be used by another token. Your balance is not affected, and you can ` +
-      `add ${label} again from its CPTA anchor while online.`,
-    )) return;
-    setBusy(true);
-    setError(null);
-    setSuccessMsg(null);
-    try {
-      const res = await forgetToken(b.tokenId);
-      if (!res.success) throw new Error(res.message || 'forget failed');
-      setSuccessMsg(res.message || `${label} forgotten`);
-      setExpandedToken(null);
-      await loadBalances();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to forget token');
-    } finally {
-      setBusy(false);
-    }
-  }, [loadBalances]);
 
   const claimFromFaucet = useCallback(async () => {
     setError(null);
@@ -595,31 +567,17 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                                 </button>
                               </div>
                             </>
-                          ) : (
+                          ) : balance.permissions?.burnEnabled && (
+                            /* Offered only where the committed policy permits
+                               burning, as Rust read it; Rust enforces the
+                               policy either way. */
                             <div className="sb-actions" style={{ marginBottom: 0 }}>
-                              {/* Offered only where the committed policy
-                                  permits burning, as Rust read it; Rust
-                                  enforces the policy either way. */}
-                              {balance.permissions?.burnEnabled && (
-                                <button
-                                  type="button"
-                                  className="sb-btn"
-                                  onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'burn' }); setAmount(''); }}
-                                >
-                                  BURN
-                                </button>
-                              )}
-                              {/* Dropping the identity, not the asset. A ticker
-                                  names one token, so a superseded token blocks
-                                  its own ticker until it is forgotten. Rust
-                                  refuses while a balance is held. */}
                               <button
                                 type="button"
                                 className="sb-btn"
-                                disabled={busy}
-                                onClick={() => { void handleForget(balance); }}
+                                onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'burn' }); setAmount(''); }}
                               >
-                                FORGET
+                                BURN
                               </button>
                             </div>
                           )}

@@ -3,6 +3,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React from 'react';
 import '../styles/BilateralTransfer.css';
+import { ScreenGuard } from './common/ScreenGuard';
 
 interface ConfirmModalProps {
   visible: boolean;
@@ -17,6 +18,8 @@ export default function ConfirmModal({ visible, title, message, onConfirm, onCan
   return (
     <div className="bilateral-transfer-overlay" onClick={onCancel}>
       <div className="bilateral-transfer-dialog" onClick={(e) => e.stopPropagation()}>
+        {/* What is confirmed here is irreversible: no other app's window may sit over it. */}
+        <ScreenGuard kind="confirm" />
         <div className="bilateral-transfer-header">
           <h3>{title || 'Confirm'}</h3>
         </div>

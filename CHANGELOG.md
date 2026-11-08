@@ -120,15 +120,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.1.0-beta.3] — 2026-04-22
 
-Major architectural release. **215 commits, 525 files, +66.7k/-43.1k lines** since beta.2. Reshapes the state model around `DeviceState`, unifies the native ingress boundary across platforms (iOS scaffolding added), migrates C-DBRW from C/C++ to pure Rust, purges ~10,000+ lines of legacy code, and hardens APK signing to v2+v3+v4.
+Major architectural release. **215 commits, 525 files, +66.7k/-43.1k lines** since beta.2. Reshapes the state model around `DeviceState`, unifies the native ingress boundary across platforms (iOS scaffolding added), purges ~10,000+ lines of legacy code, and hardens APK signing to v2+v3+v4.
 
 ### Architectural changes
 
 - **`DeviceState` is now the canonical state model** — `State` is a derived view computed from `DeviceState`. `StateMachine` stripped to bare minimum (`DeviceState` + `relationship_manager`). The old dispatch surface (`execute_transition`, `execute_dsm_operation`, `apply_operation`) is gone. All operations — bilateral transfers, mint, burn, fee transfers, DLV unlock, smart commitments — now route through a single uniform `CoreSdk::execute_on_relationship` API. The `advance` path split into `prepare / commit / restore` semantics for cleaner recovery and settlement.
 - **Unified ingress boundary across platforms** — the legacy `appRouter` dispatch is gone. All protocol traffic now flows through `dsm_sdk::ingress` (~1,460 LOC) with platform-specific ABI shims on top. Android JNI (`unified_protobuf_bridge`) routes envelope / router / hardware-facts calls through the shared ingress.
 - **iOS scaffolding** — C FFI surface exported via `dsm_process_envelope_protobuf` / `dsm_free_envelope_bytes`. Platform scaffolding under `dsm_sdk/src/platform/ios/{bluetooth,transport}.rs`. iOS integration documented in `docs/book/11-integration-guide.md`. (iOS app itself is not yet shipped.)
-- **Two new Android bridges** — `NativeBoundaryBridge` for DSM native ingress/startup and `NativeHostBridge` for host-capability requests (QR, BLE, NFC, permissions, biometric). Genesis bootstrap rewritten to emit `BootstrapMeasurementReport` phases, collect DBRW measurements, persist salt, and finalize via ingress.
-- **C-DBRW migrated from C/C++ to pure Rust** — all DBRW native logic (histogram, Wasserstein distance, entropy health, moments, BLAKE3 fallback, JNI wrappers) deleted from C/C++ and re-implemented in Rust under `dsm_sdk/security/cdbrw_*`. Net change: -1,600 lines of native code, zero `unsafe` C surface.
+- **Two new Android bridges** — `NativeBoundaryBridge` for DSM native ingress/startup and `NativeHostBridge` for host-capability requests (QR, BLE, NFC, permissions, biometric).
 - **§4.3 spec compliance: `state_number` purged from canonical hash paths** — removed from the `State` struct and every canonical hash input across `dsm` and `dsm_sdk`. Identity logic switched to hash-based IDs. Multiple §4.3-violating call sites deleted (including the broken `get_state_by_number` helper, with 5 callers migrated).
 
 ### Added
@@ -167,11 +166,10 @@ Major architectural release. **215 commits, 525 files, +66.7k/-43.1k lines** sin
 ### Security
 
 - **DLV settlement anchoring enforced** — token operations now require anchored DLV settlement.
-- **C-DBRW trust gating enforced** — SDK + tests fail closed on DBRW verdict mismatch.
 - **Real signature checks in verification** — replaces prior placeholder paths.
 - **Malformed token-id rejection** — balance-key derivation hard-fails on malformed token IDs instead of admitting ambiguous keys; duplicate hardening in balance checks.
 - **Canonical identity binding** — identity store and invalidation are bound to canonical genesis IDs; prevents cross-identity contamination.
-- **`ThermalStateProto` removed** — obsolete residue from the old reversed-C-DBRW transport/schema; kept the live protocol surface singular.
+- **`ThermalStateProto` removed** — obsolete residue from an old transport schema; kept the live protocol surface singular.
 - **Dependency surface reduction** — `dsm` core crate no longer pulls certificate-generation, host/network-discovery, async utility, or wall-clock crates for normal builds.
 - **Dependabot alerts closed** — upgraded handlebars to 4.7.9, closing 7 advisories.
 
@@ -186,7 +184,6 @@ Made possible by the `DeviceState` migration:
 | `hierarchical_device_management` module | ~1,180 |
 | `protocol_metrics.rs` | ~1,362 |
 | `chain_tip_sync_sdk` module | ~787 |
-| C/C++ C-DBRW native code | ~3,000 |
 | `BilateralStateManager` dead session/chain-tip surface | ~280 |
 | `StateMachine` verification helpers | ~210 |
 | Dead `State` / `RelationshipManager` / `RelationshipStatePair` methods | ~600+ |

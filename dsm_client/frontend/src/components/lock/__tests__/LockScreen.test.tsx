@@ -72,10 +72,15 @@ describe('LockScreen', () => {
       expect.objectContaining({ misses_left: 3 }),
     );
 
+    // While only the phrase opened the wallet, the phone's window held the
+    // secret guard (audit 2026-10-15, items 1 and 2), and let it go once opened.
+    expect(carried(arrivals).filter((c) => c.startsWith('setScreenGuards'))).toEqual(['setScreenGuards 1', 'setScreenGuards 0']);
+
     // Every try reached Rust; nothing was decided here. Opened, the wallet
     // reads what Rust refused it while locked: its identity and its contacts.
-    await waitFor(() => expect(carried(arrivals)).toHaveLength(8));
-    expect(carried(arrivals).slice(0, 6)).toEqual([
+    const toRust = (): string[] => carried(arrivals).filter((c) => !c.startsWith('setScreenGuards'));
+    await waitFor(() => expect(toRust()).toHaveLength(8));
+    expect(toRust().slice(0, 6)).toEqual([
       'session.lock',
       'session.unlock',
       'session.unlock',
@@ -83,6 +88,6 @@ describe('LockScreen', () => {
       'session.unlock',
       'session.unlock',
     ]);
-    expect(carried(arrivals).slice(6).sort()).toEqual(['contacts.list', 'getTransportHeadersV3Bin']);
+    expect(toRust().slice(6).sort()).toEqual(['contacts.list', 'getTransportHeadersV3Bin']);
   });
 });

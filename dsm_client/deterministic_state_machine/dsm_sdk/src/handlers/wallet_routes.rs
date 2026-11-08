@@ -29,7 +29,9 @@ pub fn token_decimals(token_id: &str) -> Result<u32, String> {
         "ERA" => dsm::core::token::era_policy::era_policy()
             .map(|era| era.decimals)
             .map_err(|e| e.to_string()),
-        "DBTC" | "BTC" => Ok(8),
+        // dBTC is built in: one unit is one satoshi. A token a device creates may carry no
+        // built-in ticker, and "BTC" is not one, so it is read from the registry like any other.
+        "DBTC" => Ok(8),
         _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
             .map_err(|e| format!("token registry unreadable for {canonical}: {e}"))?
             .map(|row| row.decimals)
@@ -64,27 +66,6 @@ fn event_type(stored: &str) -> Option<generated::TransactionType> {
     })
 }
 
-/// The stored type of a token or SoFi event's wire type; `None` for every
-/// other type.
-fn event_type_name(kind: generated::TransactionType) -> Option<&'static str> {
-    use crate::sdk::realized_records::Realized;
-    match kind {
-        generated::TransactionType::TxTypeTokenCreate => Some(Realized::TokenCreate.tx_type()),
-        generated::TransactionType::TxTypeVaultCreate => Some(Realized::VaultCreate.tx_type()),
-        generated::TransactionType::TxTypeSofiSetup => Some(Realized::Setup.tx_type()),
-        generated::TransactionType::TxTypeSofiTrade => Some(Realized::Trade.tx_type()),
-        generated::TransactionType::TxTypeSofiClose => Some(Realized::Close.tx_type()),
-        generated::TransactionType::TxTypeEscrowLock => Some(Realized::EscrowLock.tx_type()),
-        generated::TransactionType::TxTypeEscrowRelease => Some(Realized::EscrowRelease.tx_type()),
-        generated::TransactionType::TxTypeUnspecified
-        | generated::TransactionType::TxTypeFaucet
-        | generated::TransactionType::TxTypeBilateralOffline
-        | generated::TransactionType::TxTypeOnline
-        | generated::TransactionType::TxTypeDbtcMint
-        | generated::TransactionType::TxTypeDbtcBurn => None,
-    }
-}
-
 /// A token or SoFi event's history row (phone-rig rulings, 2026-10-01): every
 /// token it moved, signed, and the vault or token it is about. A row whose
 /// movements, ids or subject do not decode is corrupt, and an error.
@@ -93,7 +74,6 @@ fn event_transaction(
     kind: generated::TransactionType,
 ) -> Result<generated::TransactionInfo, String> {
     use crate::sdk::realized_records::{decode_moves, MOVES_KEY, SUBJECT_KEY};
-    use dsm::types::device_state::BalanceDirection;
     let corrupt = |what: String| format!("wallet.history: event {}: {what}", t.tx_id);
     let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
         crate::util::text_id::decode_base32_crockford(text)
@@ -106,18 +86,13 @@ fn event_transaction(
         .ok_or_else(|| corrupt("names no token movements".to_string()))?;
     let mut moves = Vec::new();
     for m in decode_moves(stored).map_err(corrupt)? {
-        let (token_id, ..) = token_of_commit(&m.policy_commit).map_err(corrupt)?;
-        let magnitude = i64::try_from(m.amount)
-            .map_err(|e| corrupt(format!("a movement exceeds a signed amount: {e}")))?;
+        let (token_id, decimals) = token_of_commit(&m.policy_commit).map_err(corrupt)?;
         moves.push(generated::TokenMove {
             policy_commit: m.policy_commit.to_vec(),
             token_id,
-            amount_signed: match m.direction {
-                BalanceDirection::Credit => magnitude,
-                BalanceDirection::Debit => -magnitude,
-            },
-            // Filled at the encoding boundary by enrich_transaction_display.
-            display_amount: String::new(),
+            amount: m.amount,
+            direction: wire_direction(m.direction) as i32,
+            display_amount: format_directed_base_units_for_display(m.amount, m.direction, decimals),
         });
     }
     let subject = match t.metadata.get(SUBJECT_KEY) {
@@ -132,7 +107,6 @@ fn event_transaction(
         token_id: String::new(),
         amount: t.amount,
         tx_hash: bytes32("event id", &t.tx_hash)?,
-        amount_signed: 0,
         tx_type: kind as i32,
         status: t.status.clone(),
         recipient: subject,
@@ -148,6 +122,8 @@ fn event_transaction(
         }),
         display_amount: String::new(),
         moves,
+        // An event moves each token its own way: its moves name directions.
+        direction: generated::AmountDirection::Unspecified as i32,
     })
 }
 
@@ -171,48 +147,33 @@ pub(crate) fn token_of_commit(policy_commit: &[u8; 32]) -> Result<(String, u32),
     Ok((row.ticker, row.decimals))
 }
 
-/// A signed amount rendered for display, sign included.
+/// An amount rendered for display in its direction: a debit with its minus
+/// sign.
 ///
-/// Transaction history shows outgoing amounts negative. The magnitude is
-/// converted by the same function that renders balances, so a transfer and the
-/// balance it moved can never disagree about what a unit is.
-pub fn format_signed_base_units_for_display(amount: i64, decimals: u32) -> String {
-    let magnitude = amount.unsigned_abs();
-    let rendered = format_base_units_for_display(magnitude, decimals);
-    if amount < 0 {
-        format!("-{rendered}")
-    } else {
-        rendered
+/// Transaction history shows outgoing amounts negative. The magnitude is any
+/// `u64` (SA-144: one of 2^63 base units or more has no signed form), and it
+/// is converted by the same function that renders balances, so a transfer and
+/// the balance it moved can never disagree about what a unit is.
+pub fn format_directed_base_units_for_display(
+    amount: u64,
+    direction: dsm::types::device_state::BalanceDirection,
+    decimals: u32,
+) -> String {
+    let rendered = format_base_units_for_display(amount, decimals);
+    match direction {
+        dsm::types::device_state::BalanceDirection::Credit => rendered,
+        dsm::types::device_state::BalanceDirection::Debit => format!("-{rendered}"),
     }
 }
 
-/// Render a transaction's amount for display, from the token's own decimals.
-///
-/// `amount` and `amount_signed` remain canonical base units; this only adds
-/// the string a UI prints. Amounts that predate signed accounting carry
-/// `amount_signed == 0`, so fall back to the unsigned magnitude rather than
-/// rendering every historical row as zero.
-pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) -> Result<(), String> {
-    // An event shows each token it moved, from that token's committed
-    // decimals; it has no single amount of its own.
-    if let Ok(kind) = generated::TransactionType::try_from(tx.tx_type) {
-        if event_type_name(kind).is_some() {
-            for m in tx.moves.iter_mut() {
-                let commit = <[u8; 32]>::try_from(m.policy_commit.as_slice())
-                    .map_err(|e| format!("a token movement's policy commit: {e}"))?;
-                let (.., decimals) = token_of_commit(&commit)?;
-                m.display_amount = format_signed_base_units_for_display(m.amount_signed, decimals);
-            }
-            return Ok(());
-        }
+/// A direction as the history wire names it.
+fn wire_direction(
+    direction: dsm::types::device_state::BalanceDirection,
+) -> generated::AmountDirection {
+    match direction {
+        dsm::types::device_state::BalanceDirection::Credit => generated::AmountDirection::Credit,
+        dsm::types::device_state::BalanceDirection::Debit => generated::AmountDirection::Debit,
     }
-    let decimals = token_decimals(&tx.token_id)?;
-    tx.display_amount = if tx.amount_signed != 0 {
-        format_signed_base_units_for_display(tx.amount_signed, decimals)
-    } else {
-        format_base_units_for_display(tx.amount, decimals)
-    };
-    Ok(())
 }
 
 /// The whole supply of a token that is a state object: it exists once.
@@ -265,7 +226,7 @@ pub(crate) fn enrich_balance_metadata(
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 8);
-            if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
+            if let Some(c) = dsm::core::token::builtin_policy_commit_for_token("dBTC") {
                 set_anchor_and_offline(reply, &c, offline_of);
             }
             reply.protocol_defined = true;
@@ -473,16 +434,15 @@ fn merge_balance_projections(
     }
 }
 
+/// A built-in token's name in its one spelling; any other ticker exactly as
+/// given, since a ticker is any 2 to 8 characters (SoFi §47) and no other
+/// token carries a built-in's (SA-104).
 pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
-    let trimmed = token_id.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    match trimmed.to_ascii_uppercase().as_str() {
+    match token_id.trim().to_ascii_uppercase().as_str() {
+        "" => String::new(),
         "ERA" => "ERA".to_string(),
         "DBTC" => "dBTC".to_string(),
-        _ => trimmed.to_string(),
+        _ => token_id.to_string(),
     }
 }
 
@@ -615,10 +575,12 @@ pub(crate) fn wallet_amount(
 /// item 4).
 pub(crate) fn encode_offline_transfer_operation_canonical(
     to_device_id: &[u8; 32],
+    to_genesis: &[u8; 32],
     amount: u64,
     token_id: &str,
     memo: &str,
     policy_commit: &[u8; 32],
+    token_policy: Vec<u8>,
 ) -> (Vec<u8>, dsm::types::operations::TransferTerms) {
     // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"):
     // the canonical offline-bearer authority policy rides on the transfer so
@@ -637,9 +599,11 @@ pub(crate) fn encode_offline_transfer_operation_canonical(
     );
     let operation = dsm::types::operations::Operation::Transfer {
         to_device_id: to_device_id.to_vec(),
+        to_genesis: *to_genesis,
         amount: dsm::types::token_types::Balance::amount(amount),
         policy_commit: *policy_commit,
         terms_commitment: terms.commitment(),
+        token_policy,
         signature: Vec::new(),
         authority_policy: Some(policy),
     };
@@ -706,34 +670,14 @@ impl AppRouterImpl {
 
             // -------- wallet.history --------
             "wallet.history" => {
-                // Require ArgPack(codec=PROTO) with body = [limit_le_u64 | offset_le_u64].
-                let (limit, offset): (Option<usize>, Option<usize>) =
-                    match generated::ArgPack::decode(&*q.params) {
-                        Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
-                            if pack.body.len() >= 16 {
-                                let mut l = [0u8; 8];
-                                l.copy_from_slice(&pack.body[0..8]);
-                                let mut o = [0u8; 8];
-                                o.copy_from_slice(&pack.body[8..16]);
-                                (
-                                    Some(u64::from_le_bytes(l) as usize),
-                                    Some(u64::from_le_bytes(o) as usize),
-                                )
-                            } else {
-                                (None, None)
-                            }
-                        }
-                        _ => return err("wallet.history: expected ArgPack(codec=PROTO)".into()),
-                    };
-
                 let my_device_id_str =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
 
                 // CRITICAL: Read from SQLite client_db - this is where bilateral transfers store transactions
                 let sqlite_txs = match crate::storage::client_db::get_transaction_history(
                     Some(&my_device_id_str),
-                    limit,
-                    offset,
+                    None,
+                    None,
                 ) {
                     Ok(txs) => txs,
                     Err(e) => return err(format!("wallet.history: history unreadable: {e}")),
@@ -747,236 +691,25 @@ impl AppRouterImpl {
                 );
                 for (i, t) in sqlite_txs.iter().enumerate().take(3) {
                     log::info!(
-                        "[wallet.history] tx[{}]: id={}, amount={}, tx_type={}",
+                        "[wallet.history] tx[{}]: id={}, tx_type={}",
                         i,
                         t.tx_id,
-                        t.amount,
                         t.tx_type
                     );
                 }
 
-                // Build a lookup map from device_id text to alias for resolving transaction counterparties
-                // Use sync contact lookup from SQLite storage
-                let contacts = match crate::storage::client_db::get_all_contacts() {
-                    Ok(contacts) => contacts,
-                    Err(e) => return err(format!("wallet.history: contacts unreadable: {e}")),
-                };
-                let alias_lookup: std::collections::HashMap<String, String> = contacts
-                    .into_iter()
-                    .map(|c| {
-                        let device_txt =
-                            crate::util::text_id::encode_base32_crockford(&c.device_id);
-                        (device_txt, c.alias)
-                    })
-                    .collect();
-
-                // A stored row is this device's own record: a device id or hash
-                // that does not decode, or a transfer with no token, is a
-                // corrupt row and an error, never an empty field.
-                let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
-                    crate::util::text_id::decode_base32_crockford(text)
-                        .filter(|b| b.len() == 32)
-                        .ok_or_else(|| format!("wallet.history: a stored {what} is not 32 bytes"))
+                let alias_lookup = match contact_aliases() {
+                    Ok(aliases) => aliases,
+                    Err(e) => return err(e),
                 };
                 let txs: Result<Vec<generated::TransactionInfo>, String> = sqlite_txs
-                    .into_iter()
-                    .map(|t| {
-                        // A token or SoFi event names every token it moved.
-                        if let Some(event) = event_type(&t.tx_type) {
-                            return event_transaction(&t, event);
-                        }
-                        // PROTO SAFETY:
-                        // TransactionInfo.id is a `string` in dsm_app.proto and must be valid UTF-8.
-                        // Some older records may contain non-UTF8 bytes (or otherwise invalid)
-                        // which will cause strict protobuf decoders (TS) to fail.
-                        // Prefer the stored tx_id, but deterministically fall back to tx_hash
-                        // (canonical base32) if tx_id is not valid UTF-8.
-                        // Deterministic protobuf safety: always use a known-good ASCII identifier.
-                        // `tx_hash` is canonical base32 text in SQLite and is always UTF-8.
-                        // Prefix to avoid ambiguity with other ids and keep stable format.
-                        let safe_id: String = format!("tx_{}", t.tx_hash);
-
-                        // A row that keeps its signed operation shows its amount
-                        // from that operation — the same bytes its receipt badge
-                        // is checked against — and its token and memo from the
-                        // terms it keeps, once they open the operation. Only a
-                        // row with no operation (a faucet claim, a Bitcoin event)
-                        // shows its stored figures.
-                        let (amount, token_id, memo) = match t
-                            .metadata
-                            .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
-                        {
-                            Some(operation) => {
-                                let op = dsm::types::operations::Operation::from_bytes(operation)
-                                    .map_err(|e| {
-                                    format!(
-                                        "wallet.history: transaction {}'s operation does \
-                                             not decode: {e}",
-                                        t.tx_id
-                                    )
-                                })?;
-                                let kept = t
-                                    .metadata
-                                    .get(crate::storage::client_db::HISTORY_TERMS_KEY)
-                                    .ok_or_else(|| {
-                                        format!(
-                                            "wallet.history: transaction {} keeps no terms for \
-                                             its operation",
-                                            t.tx_id
-                                        )
-                                    })?;
-                                let opened =
-                                    dsm::types::operations::TransferTerms::from_bytes(kept)
-                                        .map_err(|e| {
-                                            format!(
-                                                "wallet.history: transaction {}'s terms do not \
-                                                 decode: {e}",
-                                                t.tx_id
-                                            )
-                                        })?;
-                                let terms = super::recipient_accept::transfer_terms(&op, &opened)
-                                    .map_err(|e| {
-                                    format!("wallet.history: transaction {}: {e}", t.tx_id)
-                                })?;
-                                (terms.amount, terms.token_id, terms.memo)
-                            }
-                            None => {
-                                let token = t.metadata.get("token_id").ok_or_else(|| {
-                                    format!(
-                                        "wallet.history: transaction {} names no token",
-                                        t.tx_id
-                                    )
-                                })?;
-                                let token = String::from_utf8(token.clone()).map_err(|e| {
-                                    format!(
-                                        "wallet.history: transaction {}'s token is not text: {e}",
-                                        t.tx_id
-                                    )
-                                })?;
-                                // A row with no memo has none; one whose memo is
-                                // not text is corrupt.
-                                let memo = match t.metadata.get("memo") {
-                                    Some(bytes) => {
-                                        String::from_utf8(bytes.clone()).map_err(|e| {
-                                            format!(
-                                            "wallet.history: transaction {}'s memo is not text: \
-                                             {e}",
-                                            t.tx_id
-                                        )
-                                        })?
-                                    }
-                                    None => String::new(),
-                                };
-                                (t.amount, token, memo)
-                            }
-                        };
-
-                        // Compute signed amount: positive if incoming, negative if outgoing
-                        let amount_signed: i64 = if t.to_device == my_device_id_str {
-                            amount as i64 // incoming: positive
-                        } else {
-                            -(amount as i64) // outgoing: negative
-                        };
-
-                        // Determine recipient/sender for UI display - resolve aliases
-                        let recipient = if t.tx_type == "faucet" {
-                            "ERA reserve (faucet)".to_string()
-                        } else if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
-                            "Bitcoin Network".to_string()
-                        } else if t.to_device == my_device_id_str {
-                            // Incoming: show who sent it - try to resolve alias
-                            alias_lookup
-                                .get(&t.from_device)
-                                .cloned()
-                                .unwrap_or_else(|| t.from_device.clone())
-                        } else {
-                            // Outgoing: show who received it - try to resolve alias
-                            alias_lookup
-                                .get(&t.to_device)
-                                .cloned()
-                                .unwrap_or_else(|| t.to_device.clone())
-                        };
-
-                        // The types this device writes. A stored type the wire
-                        // does not name is a row this history cannot report,
-                        // never an unspecified one.
-                        let tx_type_enum = match t.tx_type.as_str() {
-                            "faucet" => generated::TransactionType::TxTypeFaucet,
-                            "bilateral_offline" => {
-                                generated::TransactionType::TxTypeBilateralOffline
-                            }
-                            "online" => generated::TransactionType::TxTypeOnline,
-                            "dbtc_mint" => generated::TransactionType::TxTypeDbtcMint,
-                            "dbtc_burn" => generated::TransactionType::TxTypeDbtcBurn,
-                            other => {
-                                return Err(format!(
-                                    "wallet.history: transaction {} has type {other:?}, which the \
-                                     wire does not name",
-                                    t.tx_id
-                                ))
-                            }
-                        };
-
-                        Ok(generated::TransactionInfo {
-                            // Filled at the encoding boundary by enrich_transaction_display.
-                            display_amount: String::new(),
-                            id: safe_id,
-                            // Protocol/UI contract: device ids are binary 32-byte values.
-                            // We store canonical base32 in SQLite for indexing, but must return bytes here.
-                            // A faucet row names no sender device: its source is the
-                            // reserve, and a stored faucet row that names one is corrupt.
-                            from_device_id: if t.tx_type == "faucet" {
-                                if !t.from_device.is_empty() {
-                                    return Err(format!(
-                                        "wallet.history: faucet claim {} names a sender device",
-                                        t.tx_id
-                                    ));
-                                }
-                                Vec::new()
-                            } else {
-                                bytes32("sender device id", &t.from_device)?
-                            },
-                            to_device_id: bytes32("recipient device id", &t.to_device)?,
-                            token_id: canonicalize_token_id(&token_id),
-                            amount,
-                            // tx_hash is stored as canonical base32 text in SQLite.
-                            tx_hash: bytes32("transaction hash", &t.tx_hash)?,
-                            amount_signed,
-                            tx_type: tx_type_enum as i32,
-                            status: t.status.clone(),
-                            recipient,
-                            stitched_receipt: t.proof_data.clone().unwrap_or_default(),
-                            memo,
-                            // §4.3#3: Derive R_G from the stored receipt's devid_a for
-                            // display-only consistency check. This is historical UI display
-                            // only; protocol acceptance already enforced at ingest time.
-                            receipt_verified: t.proof_data.as_ref().is_some_and(|b| {
-                                receipt_state_holds(
-                                    b,
-                                    t.metadata
-                                        .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
-                                )
-                            }),
-                            // A transfer moves the one token above.
-                            moves: Vec::new(),
-                        })
-                    })
+                    .iter()
+                    .map(|t| history_info(t, &my_device_id_str, &alias_lookup))
                     .collect();
                 let txs = match txs {
                     Ok(txs) => txs,
                     Err(e) => return err(e),
                 };
-
-                // Rendered at the encoding boundary, for the same reason
-                // balances are: a producer that builds a row without the
-                // display form is easy to add and impossible to notice, and
-                // the frontend has nothing to fall back on but a guess.
-                let mut txs = txs;
-                for tx in txs.iter_mut() {
-                    if let Err(e) = enrich_transaction_display(tx) {
-                        return err(format!("wallet.history: {e}"));
-                    }
-                }
                 let reply = generated::WalletHistoryResponse { transactions: txs };
                 // NEW: Return as Envelope.walletHistoryResponse (field 38)
                 pack_envelope_ok(generated::envelope::Payload::WalletHistoryResponse(reply))
@@ -1001,12 +734,12 @@ impl AppRouterImpl {
                              {{prefix}}|{{token}} key"
                         ));
                     };
+                    // A ticker is any 2 to 8 characters (SoFi §47): each is shown as
+                    // its token carries it, never refused for what it holds (SA-103).
                     let token_id = canonicalize_token_id(ticker);
-                    if token_id.is_empty()
-                        || token_id.chars().any(|c| c.is_control() || (c as u32) > 126)
-                    {
+                    if token_id.is_empty() {
                         return err(format!(
-                            "balance.list: balance key {token_key:?} names no printable token"
+                            "balance.list: balance key {token_key:?} names no token"
                         ));
                     }
                     if !items.iter().any(|i| i.token_id == token_id) {
@@ -1068,6 +801,14 @@ impl AppRouterImpl {
                 }
             }
 
+            // -------- wallet.pendingOffline --------
+            "wallet.pendingOffline" => match pending_offline_value() {
+                Ok(reply) => pack_envelope_ok(
+                    generated::envelope::Payload::PendingOfflineValueResponse(reply),
+                ),
+                Err(e) => err(format!("wallet.pendingOffline: {e}")),
+            },
+
             _ => err(format!("unknown wallet query path: {}", q.path)),
         }
     }
@@ -1100,6 +841,31 @@ impl AppRouterImpl {
                         )
                     }
                 };
+                // The payment names its recipient's genesis beside its device id,
+                // under the signature (SA-133): the genesis the contact pinned.
+                let counterparty_genesis: [u8; 32] =
+                    match crate::storage::client_db::get_contact_by_device_id(
+                        &counterparty_device_id,
+                    ) {
+                        Ok(Some(contact)) => match contact.genesis_hash.as_slice().try_into() {
+                            Ok(genesis) => genesis,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.sendOffline: the contact's genesis: {e}"
+                                ))
+                            }
+                        },
+                        Ok(None) => {
+                            return err(
+                                "wallet.sendOffline: the counterparty is not a contact".into()
+                            )
+                        }
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: the counterparty's contact: {e}"
+                            ))
+                        }
+                    };
                 // The counterparty's device id routes the prepare. Where its
                 // appliance was last seen over BLE — the address its contact
                 // holds, else the one its identity was seen at this session — is
@@ -1140,23 +906,28 @@ impl AppRouterImpl {
                         Ok(amount) => amount,
                         Err(e) => return err(format!("wallet.sendOffline: invalid amount: {e}")),
                     };
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => {
-                        return err(format!(
-                            "wallet.sendOffline: policy_commit resolve failed: {e}"
-                        ))
-                    }
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: policy_commit resolve failed: {e}"
+                            ))
+                        }
+                    };
+                let token_policy =
+                    match crate::sdk::economic_registers::carried_token_policy(&policy_commit) {
+                        Ok(bytes) => bytes,
+                        Err(e) => return err(format!("wallet.sendOffline: {e}")),
+                    };
                 let (operation_bytes, transfer_terms) = encode_offline_transfer_operation_canonical(
                     &counterparty_device_id,
+                    &counterparty_genesis,
                     transfer_amount,
                     &token_id,
                     req.memo.trim(),
                     &policy_commit,
+                    token_policy,
                 );
                 let operation =
                     match dsm::types::operations::Operation::from_bytes(&operation_bytes) {
@@ -1173,7 +944,7 @@ impl AppRouterImpl {
                     return err(format!("wallet.sendOffline: {e}"));
                 }
 
-                #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
+                #[cfg(feature = "bluetooth")]
                 {
                     // The live BLE stack carries the step; `init_dsm_sdk` builds it
                     // once the identity exists, and nothing builds a second one.
@@ -1269,51 +1040,34 @@ impl AppRouterImpl {
                         }
                     };
 
-                    use crate::jni::jni_common::get_java_vm_borrowed;
                     // From here the proposal is prepared and its prepare is owed:
                     // a send that does not complete fails nothing, and the prepare
-                    // is sent again when the link returns.
-                    let vm = match get_java_vm_borrowed() {
-                        Some(vm) => vm,
-                        None => {
-                            return err(
-                                "wallet.sendOffline: Java VM unavailable for BLE dispatch; the \
-                                 prepare is sent when the link returns"
-                                    .into(),
-                            );
-                        }
-                    };
-                    // JNI AttachGuard is !Send — do all JNI work in a sync block,
-                    // drop the guard, THEN handle errors with async.
-                    //
-                    // Send the bilateral prepare chunks via the single BLE dispatch path.
-                    let ble_send_result: Result<bool, String> = (|| {
-                        let mut jni_env = vm.attach_current_thread().map_err(|e| {
-                            format!("wallet.sendOffline: attach_current_thread failed: {e}")
-                        })?;
-                        crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
-                            &mut jni_env,
+                    // is sent again when the link returns. The chunks go on the
+                    // one BLE dispatch path: sealed on the link Rust chose, written
+                    // by the host.
+                    let ble_send_result: Result<crate::host::Delivery, String> =
+                        crate::bluetooth::radio_link::send_to_contact(
                             &counterparty_device_id,
                             address_hint.as_deref(),
                             &chunks,
                         )
-                        .map_err(|e| format!("wallet.sendOffline: BLE dispatch failed: {e}"))
-                    })();
-                    // jni_env is dropped here — safe to .await below
-                    if !matches!(ble_send_result, Ok(true)) {
+                        .map_err(|e| format!("wallet.sendOffline: BLE dispatch failed: {e}"));
+                    if !matches!(ble_send_result, Ok(crate::host::Delivery::Sent)) {
                         crate::bluetooth::owed_frame_driver::kick();
                     }
                     match ble_send_result {
-                        Ok(true) => crate::bluetooth::owed_frame_driver::delivered(
-                            counterparty_device_id,
-                            &[(
-                                commitment_hash,
-                                crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
-                            )],
-                        ),
-                        Ok(false) => {
+                        Ok(crate::host::Delivery::Sent) => {
+                            crate::bluetooth::owed_frame_driver::delivered(
+                                counterparty_device_id,
+                                &[(
+                                    commitment_hash,
+                                    crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
+                                )],
+                            )
+                        }
+                        Ok(crate::host::Delivery::NotNow) => {
                             return err(
-                                "wallet.sendOffline: BLE bridge rejected the prepared chunks; the \
+                                "wallet.sendOffline: no paired link to the counterparty now; the \
                                  prepare is sent again when the link returns"
                                     .into(),
                             );
@@ -1342,10 +1096,10 @@ impl AppRouterImpl {
                     ))
                 }
 
-                #[cfg(not(all(target_os = "android", feature = "bluetooth", feature = "jni")))]
+                #[cfg(not(feature = "bluetooth"))]
                 {
                     let _ = (counterparty_device_id, address_hint, operation);
-                    err("wallet.sendOffline is only available on Android BLE builds".into())
+                    err("wallet.sendOffline is only available on a build with the bluetooth feature".into())
                 }
             }
 
@@ -1381,14 +1135,22 @@ impl AppRouterImpl {
                         }
                     };
 
-                // 2. Parse display amount into canonical base units in the backend.
-                // The token is named exactly: an omitted token is not ERA.
+                // 2. The token, named exactly: an omitted token is not ERA. The
+                // send form names it by ticker, so it is resolved to its policy
+                // commit once, here, and the send carries that commit from
+                // here on. The display amount is parsed into base units at the
+                // decimals of that commit's policy.
                 let token_id = smart_req.token_id.clone();
                 if token_id.is_empty() {
                     return err("wallet.sendSmart: the request names no token".into());
                 }
-                let token_decimals = match token_decimals(&token_id) {
-                    Ok(d) => d,
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
+                    };
+                let token_decimals = match token_of_commit(&policy_commit) {
+                    Ok((_, d)) => d,
                     Err(e) => return err(format!("wallet.sendSmart: {e}")),
                 };
                 let amount: u64 =
@@ -1401,7 +1163,7 @@ impl AppRouterImpl {
                 // the nonce and the signed operation are derived from here on.
                 self.process_online_transfer_logic(super::app_router_impl::OnlineSendIntent {
                     to_device_id,
-                    token_id,
+                    policy_commit,
                     amount,
                     memo: smart_req.memo,
                 })
@@ -1411,6 +1173,250 @@ impl AppRouterImpl {
             _ => err(format!("unknown wallet invoke method: {}", i.method)),
         }
     }
+}
+
+/// Every payment received offline and not yet settled, oldest first, each
+/// with its token's ticker and decimals and its payer as this device names it
+/// (owner ruling, 2026-10-28: "Show it separately from spendable balance,
+/// including asset, amount and pending-settlement status. It must not
+/// contribute to either spendable online funds or offline allocation.").
+///
+/// The value is read from the receipts held pending (§6.103), the rows
+/// `balance.list` never reads: it settles online once the payer's return
+/// online exposes its signed spend chain, and only then is it a balance.
+pub(crate) fn pending_offline_value() -> Result<generated::PendingOfflineValueResponse, String> {
+    let pending = crate::storage::client_db::offline_receipts::pending_offline_receipts()
+        .map_err(|e| format!("the receipts held pending are unreadable: {e}"))?;
+    let aliases = contact_aliases()?;
+    let receipts = pending
+        .into_iter()
+        .map(|receipt| {
+            let (ticker, decimals) = token_of_commit(&receipt.asset)?;
+            let payer_b32 = crate::util::text_id::encode_base32_crockford(&receipt.payer_device);
+            let payer = match aliases.get(&payer_b32) {
+                Some(alias) if !alias.is_empty() => alias.clone(),
+                _ => payer_b32,
+            };
+            Ok(generated::PendingOfflineReceiptView {
+                asset: receipt.asset.to_vec(),
+                ticker,
+                decimals,
+                base_units: receipt.amount,
+                display_amount: format_base_units_for_display(receipt.amount, decimals),
+                payer,
+                release_message: receipt.release_message.to_vec(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(generated::PendingOfflineValueResponse { receipts })
+}
+
+/// This device's contacts' aliases by device id (Base32), for naming a
+/// history row's counterparty.
+pub(crate) fn contact_aliases() -> Result<std::collections::HashMap<String, String>, String> {
+    let contacts = crate::storage::client_db::get_all_contacts()
+        .map_err(|e| format!("wallet.history: contacts unreadable: {e}"))?;
+    Ok(contacts
+        .into_iter()
+        .map(|c| {
+            let device_txt = crate::util::text_id::encode_base32_crockford(&c.device_id);
+            (device_txt, c.alias)
+        })
+        .collect())
+}
+
+/// One stored history row as the history reports it, for this device
+/// (`my_device_id_str`, Base32), its counterparty named from `alias_lookup`.
+pub(crate) fn history_info(
+    t: &crate::storage::client_db::TransactionRecord,
+    my_device_id_str: &str,
+    alias_lookup: &std::collections::HashMap<String, String>,
+) -> Result<generated::TransactionInfo, String> {
+    // A stored row is this device's own record: a device id or hash
+    // that does not decode, or a transfer with no token, is a
+    // corrupt row and an error, never an empty field.
+    let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
+        crate::util::text_id::decode_base32_crockford(text)
+            .filter(|b| b.len() == 32)
+            .ok_or_else(|| format!("wallet.history: a stored {what} is not 32 bytes"))
+    };
+    // A token or SoFi event names every token it moved.
+    if let Some(event) = event_type(&t.tx_type) {
+        return event_transaction(t, event);
+    }
+    // PROTO SAFETY:
+    // TransactionInfo.id is a `string` in dsm_app.proto and must be valid UTF-8.
+    // Some older records may contain non-UTF8 bytes (or otherwise invalid)
+    // which will cause strict protobuf decoders (TS) to fail.
+    // Prefer the stored tx_id, but deterministically fall back to tx_hash
+    // (canonical base32) if tx_id is not valid UTF-8.
+    // Deterministic protobuf safety: always use a known-good ASCII identifier.
+    // `tx_hash` is canonical base32 text in SQLite and is always UTF-8.
+    // Prefix to avoid ambiguity with other ids and keep stable format.
+    let safe_id: String = format!("tx_{}", t.tx_hash);
+
+    // A row that keeps its signed operation shows its amount
+    // and its token from that operation — the same bytes its
+    // receipt badge is checked against — and its memo from
+    // the terms it keeps, once they open the operation. The
+    // token is named and rendered from the policy the
+    // operation commits to: the ticker in the terms is the
+    // sender's word, and two tokens may share one (SoFi
+    // §47). Only a row with no operation (a faucet claim, a
+    // Bitcoin event) shows its stored figures, which this
+    // device wrote.
+    let (amount, token_id, memo, decimals) = match t
+        .metadata
+        .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
+    {
+        Some(operation) => {
+            let op = dsm::types::operations::Operation::from_bytes(operation).map_err(|e| {
+                format!(
+                    "wallet.history: transaction {}'s operation does \
+                         not decode: {e}",
+                    t.tx_id
+                )
+            })?;
+            let kept = t
+                .metadata
+                .get(crate::storage::client_db::HISTORY_TERMS_KEY)
+                .ok_or_else(|| {
+                    format!(
+                        "wallet.history: transaction {} keeps no terms for \
+                         its operation",
+                        t.tx_id
+                    )
+                })?;
+            let opened = dsm::types::operations::TransferTerms::from_bytes(kept).map_err(|e| {
+                format!(
+                    "wallet.history: transaction {}'s terms do not \
+                             decode: {e}",
+                    t.tx_id
+                )
+            })?;
+            let terms = super::recipient_accept::transfer_terms(&op, &opened)
+                .map_err(|e| format!("wallet.history: transaction {}: {e}", t.tx_id))?;
+            let (token, decimals) = token_of_commit(&terms.policy_commit)
+                .map_err(|e| format!("wallet.history: transaction {}: {e}", t.tx_id))?;
+            (terms.amount, token, terms.memo, decimals)
+        }
+        None => {
+            let token = t
+                .metadata
+                .get("token_id")
+                .ok_or_else(|| format!("wallet.history: transaction {} names no token", t.tx_id))?;
+            let token = String::from_utf8(token.clone()).map_err(|e| {
+                format!(
+                    "wallet.history: transaction {}'s token is not text: {e}",
+                    t.tx_id
+                )
+            })?;
+            // A row with no memo has none; one whose memo is
+            // not text is corrupt.
+            let memo = match t.metadata.get("memo") {
+                Some(bytes) => String::from_utf8(bytes.clone()).map_err(|e| {
+                    format!(
+                        "wallet.history: transaction {}'s memo is not text: \
+                         {e}",
+                        t.tx_id
+                    )
+                })?,
+                None => String::new(),
+            };
+            let token = canonicalize_token_id(&token);
+            let decimals = token_decimals(&token).map_err(|e| format!("wallet.history: {e}"))?;
+            (t.amount, token, memo, decimals)
+        }
+    };
+
+    // Credited when this device received it, debited when
+    // it sent it: the magnitude goes on the wire whole,
+    // whatever its size (SA-144).
+    let direction = if t.to_device == my_device_id_str {
+        dsm::types::device_state::BalanceDirection::Credit
+    } else {
+        dsm::types::device_state::BalanceDirection::Debit
+    };
+
+    // Determine recipient/sender for UI display - resolve aliases
+    let recipient = if t.tx_type == "faucet" {
+        "ERA reserve (faucet)".to_string()
+    } else if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
+        "Bitcoin Network".to_string()
+    } else if t.to_device == my_device_id_str {
+        // Incoming: show who sent it - try to resolve alias
+        alias_lookup
+            .get(&t.from_device)
+            .cloned()
+            .unwrap_or_else(|| t.from_device.clone())
+    } else {
+        // Outgoing: show who received it - try to resolve alias
+        alias_lookup
+            .get(&t.to_device)
+            .cloned()
+            .unwrap_or_else(|| t.to_device.clone())
+    };
+
+    // The types this device writes. A stored type the wire
+    // does not name is a row this history cannot report,
+    // never an unspecified one.
+    let tx_type_enum = match t.tx_type.as_str() {
+        "faucet" => generated::TransactionType::TxTypeFaucet,
+        "bilateral_offline" => generated::TransactionType::TxTypeBilateralOffline,
+        "online" => generated::TransactionType::TxTypeOnline,
+        "dbtc_mint" => generated::TransactionType::TxTypeDbtcMint,
+        "dbtc_burn" => generated::TransactionType::TxTypeDbtcBurn,
+        other => {
+            return Err(format!(
+                "wallet.history: transaction {} has type {other:?}, which the \
+                 wire does not name",
+                t.tx_id
+            ))
+        }
+    };
+
+    Ok(generated::TransactionInfo {
+        display_amount: format_directed_base_units_for_display(amount, direction, decimals),
+        id: safe_id,
+        // Protocol/UI contract: device ids are binary 32-byte values.
+        // We store canonical base32 in SQLite for indexing, but must return bytes here.
+        // A faucet row names no sender device: its source is the
+        // reserve, and a stored faucet row that names one is corrupt.
+        from_device_id: if t.tx_type == "faucet" {
+            if !t.from_device.is_empty() {
+                return Err(format!(
+                    "wallet.history: faucet claim {} names a sender device",
+                    t.tx_id
+                ));
+            }
+            Vec::new()
+        } else {
+            bytes32("sender device id", &t.from_device)?
+        },
+        to_device_id: bytes32("recipient device id", &t.to_device)?,
+        token_id,
+        amount,
+        // tx_hash is stored as canonical base32 text in SQLite.
+        tx_hash: bytes32("transaction hash", &t.tx_hash)?,
+        direction: wire_direction(direction) as i32,
+        tx_type: tx_type_enum as i32,
+        status: t.status.clone(),
+        recipient,
+        stitched_receipt: t.proof_data.clone().unwrap_or_default(),
+        memo,
+        // §4.3#3: Derive R_G from the stored receipt's devid_a for
+        // display-only consistency check. This is historical UI display
+        // only; protocol acceptance already enforced at ingest time.
+        receipt_verified: t.proof_data.as_ref().is_some_and(|b| {
+            receipt_state_holds(
+                b,
+                t.metadata
+                    .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
+            )
+        }),
+        // A transfer moves the one token above.
+        moves: Vec::new(),
+    })
 }
 
 /// Whether a stored receipt's state rules hold against its author's
@@ -1483,7 +1489,7 @@ mod tests {
     use super::{
         canonicalize_token_id, encode_offline_transfer_operation_canonical,
         ensure_default_visible_balances, format_base_units_for_display,
-        format_signed_base_units_for_display, merge_balance_projections,
+        format_directed_base_units_for_display, merge_balance_projections,
         parse_display_amount_to_base_units, token_decimals, wallet_amount,
     };
     use crate::storage::client_db::BalanceProjectionRecord;
@@ -1506,15 +1512,20 @@ mod tests {
             format_base_units_for_display(u64::MAX, 2),
             "184467440737095516.15"
         );
+        use dsm::types::device_state::BalanceDirection::{Credit, Debit};
         assert_eq!(
-            format_signed_base_units_for_display(-100_000, 2),
+            format_directed_base_units_for_display(100_000, Debit, 2),
             "-1000.00"
         );
-        assert_eq!(format_signed_base_units_for_display(0, 2), "0.00");
-        // i64::MIN cannot be negated in place.
+        assert_eq!(format_directed_base_units_for_display(0, Credit, 2), "0.00");
+        // SA-144: amounts no signed 64-bit field holds render whole.
         assert_eq!(
-            format_signed_base_units_for_display(i64::MIN, 0),
-            "-9223372036854775808"
+            format_directed_base_units_for_display(1 << 63, Credit, 0),
+            "9223372036854775808"
+        );
+        assert_eq!(
+            format_directed_base_units_for_display(u64::MAX, Debit, 0),
+            "-18446744073709551615"
         );
     }
 
@@ -1637,6 +1648,21 @@ mod tests {
         assert_eq!(canonicalize_token_id("dbtc"), "dBTC");
         assert_eq!(canonicalize_token_id(" dBTC "), "dBTC");
         assert_eq!(canonicalize_token_id("ERA"), "ERA");
+        assert_eq!(canonicalize_token_id("era"), "ERA");
+        assert_eq!(canonicalize_token_id(""), "");
+        assert_eq!(canonicalize_token_id("   "), "");
+    }
+
+    /// SA-103: any other ticker is kept exactly as its token carries it
+    /// (SoFi §47: any 2 to 8 characters), spaces and all.
+    #[test]
+    fn canonicalize_token_id_keeps_any_other_ticker_exactly() {
+        assert_eq!(canonicalize_token_id("USDC"), "USDC");
+        assert_eq!(canonicalize_token_id(" WBTC "), " WBTC ");
+        assert_eq!(
+            canonicalize_token_id("\u{c5}\u{c4}\u{d6}"),
+            "\u{c5}\u{c4}\u{d6}"
+        );
     }
 
     #[test]
@@ -1754,10 +1780,12 @@ mod tests {
         let to_device_id = [0xabu8; 32];
         let (bytes, terms) = encode_offline_transfer_operation_canonical(
             &to_device_id,
+            &[0x6E; 32],
             42,
             "DBTC",
             "memo",
             &[0u8; 32],
+            vec![0x0A; 40],
         );
 
         let op = Operation::from_bytes(&bytes).expect("transfer op should decode");
@@ -1911,6 +1939,28 @@ mod tests {
     /// A created token's facts are its committed policy's, read from bytes
     /// verified against the anchor: the supply in display units, what holders
     /// may do, the icon.
+    /// A token a device created under the ticker BTC is scaled by its own registered decimals,
+    /// never by the built-in dBTC's.
+    #[test]
+    #[serial_test::serial]
+    fn a_created_token_named_btc_takes_its_own_decimals() {
+        fresh_db();
+        crate::storage::client_db::token_registry::insert_token(
+            &crate::storage::client_db::token_registry::TokenRegistryRow {
+                token_id: "token-BTC".to_string(),
+                policy_commit: [0x42; 32],
+                ticker: "BTC".to_string(),
+                alias: "BTC token".to_string(),
+                decimals: 2,
+                genesis_supply: 1_000,
+                creator_device_id: [0x22; 32],
+            },
+        )
+        .expect("the token is registered");
+        assert_eq!(token_decimals("BTC"), Ok(2));
+        assert_eq!(token_decimals("dBTC"), Ok(8));
+    }
+
     #[test]
     #[serial_test::serial]
     fn a_registered_token_reports_its_policy_supply_and_permissions() {
@@ -2000,24 +2050,15 @@ mod history_tests {
     use crate::handlers::app_router_impl::AppRouterImpl;
     use crate::storage::client_db::{store_transaction, TransactionRecord};
     use dsm::types::proto as generated;
-    use prost::Message;
 
-    /// `wallet.history` as the frontend asks for it: limit 16, offset 0.
+    /// `wallet.history` as the frontend asks for it: with no argument.
     async fn history_of(
         router: &AppRouterImpl,
     ) -> Result<generated::WalletHistoryResponse, String> {
-        let mut body = Vec::with_capacity(16);
-        body.extend_from_slice(&16u64.to_le_bytes());
-        body.extend_from_slice(&0u64.to_le_bytes());
         let answer = router
             .query(AppQuery {
                 path: "wallet.history".to_string(),
-                params: generated::ArgPack {
-                    codec: generated::Codec::Proto as i32,
-                    body,
-                    ..Default::default()
-                }
-                .encode_to_vec(),
+                params: Vec::new(),
             })
             .await;
         if !answer.success {
@@ -2068,7 +2109,12 @@ mod history_tests {
         );
         assert_eq!(claim.to_device_id, device.router.device_id_bytes.to_vec());
         assert_eq!(claim.recipient, "ERA reserve (faucet)");
-        assert_eq!(claim.amount_signed, 100, "incoming");
+        assert_eq!(claim.amount, 100);
+        assert_eq!(
+            claim.direction,
+            generated::AmountDirection::Credit as i32,
+            "incoming"
+        );
         assert_eq!(claim.display_amount, "1.00");
         assert_eq!(claim.token_id, "ERA");
 
@@ -2081,6 +2127,94 @@ mod history_tests {
             refused.contains("corrupt") && refused.contains("names a sender device"),
             "{refused}"
         );
+    }
+
+    /// A received transfer's terms carry a token label its sender chose; the
+    /// token it moved is the policy its signed operation commits to. History
+    /// names and renders the row from that commit, so a sender that labels
+    /// ERA "NOSUCH" neither breaks the history nor relabels the row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_mislabelled_received_transfer_does_not_break_history() {
+        use dsm::types::operations::{Operation, TransactionMode, TransferTerms};
+        let device = crate::test_support::one_device::Device::start(0x75).await;
+        let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
+        let peer_id = [0x76u8; 32];
+        let peer = crate::util::text_id::encode_base32_crockford(&peer_id);
+        let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy");
+        // The nonce the sender's send derives (§4.1), over the relationship.
+        let relationship = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &peer_id,
+            &device.router.device_id_bytes,
+        );
+        let terms = TransferTerms::new(
+            b"NOSUCH".to_vec(),
+            crate::handlers::app_router_impl::transfer_nonce(
+                &relationship,
+                100,
+                "NOSUCH",
+                &device.router.device_id_bytes,
+            ),
+            TransactionMode::Unilateral,
+            "a label the sender chose".to_string(),
+        );
+        let unsigned = Operation::Transfer {
+            to_device_id: device.router.device_id_bytes.to_vec(),
+            to_genesis: [0x6E; 32],
+            amount: dsm::types::token_types::Balance::amount(100),
+            policy_commit: era,
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+            terms_commitment: terms.commitment(),
+            signature: Vec::new(),
+            authority_policy: None,
+        };
+        let (_, sender_sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("a sender key");
+        let signature = dsm::crypto::sphincs::sphincs_sign(&sender_sk, &unsigned.to_bytes())
+            .expect("the sender signs");
+        let signed = unsigned.with_signature(signature);
+        // The row the receive path keeps for it: the signed operation, the
+        // terms that open it, and the sender's label beside them.
+        let row = TransactionRecord {
+            tx_id: "mislabelled".to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[0x77; 32]),
+            from_device: peer.clone(),
+            to_device: me.clone(),
+            amount: 100,
+            tx_type: "online".to_string(),
+            status: "confirmed".to_string(),
+            commitment_hash: None,
+            proof_data: None,
+            metadata: [
+                ("token_id".to_string(), b"NOSUCH".to_vec()),
+                (
+                    crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
+                    signed.to_bytes(),
+                ),
+                (
+                    crate::storage::client_db::HISTORY_TERMS_KEY.to_string(),
+                    terms.to_bytes(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        store_transaction(&row).expect("store the received row");
+        let reported = history_of(&device.router)
+            .await
+            .expect("a sender's label does not break the history");
+        assert_eq!(reported.transactions.len(), 1);
+        let received = &reported.transactions[0];
+        assert_eq!(received.token_id, "ERA", "named by the signed commit");
+        assert_eq!(received.amount, 100);
+        assert_eq!(
+            received.direction,
+            generated::AmountDirection::Credit as i32,
+            "incoming"
+        );
+        assert_eq!(received.display_amount, "1.00", "at ERA's decimals");
+        assert_eq!(received.memo, "a label the sender chose");
     }
 
     /// A history row is reported only as one of the types the wire names. A
@@ -2116,7 +2250,12 @@ mod history_tests {
             generated::TransactionType::TxTypeOnline as i32
         );
         assert_eq!(online.status, "confirmed");
-        assert_eq!(online.amount_signed, 7, "incoming");
+        assert_eq!(online.amount, 7);
+        assert_eq!(
+            online.direction,
+            generated::AmountDirection::Credit as i32,
+            "incoming"
+        );
         assert_eq!(online.recipient, peer, "no contact: the sender's device id");
 
         store_transaction(&row("unnamed", "unilateral_send", 0x62)).expect("store the row");
@@ -2126,6 +2265,57 @@ mod history_tests {
         assert!(
             refused.contains("unnamed") && refused.contains("unilateral_send"),
             "{refused}"
+        );
+    }
+
+    /// SA-144. A transfer of 2^63 base units or more has no signed 64-bit
+    /// form. The history carries each amount whole with its direction, so
+    /// such a row is reported, never negated into another amount, and never
+    /// the reason the rest of the history cannot be read (as refusing it by
+    /// name, SA-52's form, made it).
+    /// MUTATION CONTROL: refusing an amount past the signed range turns this
+    /// red.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn history_reports_amounts_beyond_the_signed_range_whole() {
+        let device = crate::test_support::one_device::Device::start(0x73).await;
+        let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
+        let peer = crate::util::text_id::encode_base32_crockford(&[0x74u8; 32]);
+        let sent = |id: &str, amount: u64, hash: u8| TransactionRecord {
+            tx_id: id.to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[hash; 32]),
+            from_device: me.clone(),
+            to_device: peer.clone(),
+            amount,
+            tx_type: "online".to_string(),
+            status: "confirmed".to_string(),
+            commitment_hash: None,
+            proof_data: None,
+            metadata: [("token_id".to_string(), b"ERA".to_vec())]
+                .into_iter()
+                .collect(),
+        };
+        // SA-144: amounts no signed 64-bit field holds are reported whole,
+        // each with its direction, and the history beside them still reads.
+        for (id, amount, hash) in [("half", 1u64 << 63, 0x63), ("largest", u64::MAX, 0x64)] {
+            store_transaction(&sent(id, amount, hash)).expect("store the row");
+        }
+        let reported = history_of(&device.router).await.expect("the history");
+        assert_eq!(reported.transactions.len(), 2);
+        let mut amounts: Vec<(u64, i32, String)> = reported
+            .transactions
+            .iter()
+            .map(|t| (t.amount, t.direction, t.display_amount.clone()))
+            .collect();
+        amounts.sort();
+        let debit = generated::AmountDirection::Debit as i32;
+        assert_eq!(
+            amounts,
+            vec![
+                (1u64 << 63, debit, "-92233720368547758.08".to_string()),
+                (u64::MAX, debit, "-184467440737095516.15".to_string()),
+            ],
+            "outgoing, whole"
         );
     }
 }
@@ -2199,8 +2389,10 @@ mod send_offline_tests {
 
         // A host build has no BLE: the send stops only at the dispatch, past
         // the relationship's send status, the token, the amount and its policy.
-        let host_dispatch =
-            Err("wallet.sendOffline is only available on Android BLE builds".to_string());
+        let host_dispatch = Err(
+            "wallet.sendOffline is only available on a build with the bluetooth feature"
+                .to_string(),
+        );
         assert_eq!(send_offline(&device.router, peer).await, host_dispatch);
 
         update_contact_ble_status(&peer, None, Some("AA:BB:CC:DD:EE:FF"))

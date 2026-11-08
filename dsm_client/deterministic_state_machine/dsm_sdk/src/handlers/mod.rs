@@ -2,9 +2,9 @@
 
 //! # SDK Handler Implementations
 //!
-//! Concrete implementations of the core bridge traits (`AppRouter`,
-//! `RecoveryHandler`) that connect the JNI/FFI boundary to the pure
-//! `dsm` core library, installed during [`init_dsm_sdk`](crate::init::init_dsm_sdk),
+//! The core bridge's `AppRouter` implementation, which connects the JNI/FFI
+//! boundary to the pure `dsm` core library, the recovery receipts behind the
+//! router's `recovery.*` routes, installed during [`init_dsm_sdk`](crate::init::init_dsm_sdk),
 //! and the BLE runtime slot the offline carrier is injected into.
 
 pub mod app_router_impl;
@@ -41,6 +41,8 @@ mod connect_escrow_e2e_tests;
 pub mod connect_routes;
 pub mod contacts_routes;
 #[cfg(test)]
+mod counterfeit_acceptance_tests;
+#[cfg(test)]
 mod escrow_e2e_tests;
 pub mod escrow_routes;
 #[cfg(test)]
@@ -50,7 +52,12 @@ pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
 #[cfg(test)]
+mod money_waiting_tests;
+#[cfg(test)]
 mod node_e2e_tests;
+pub mod offline_boundary_notices;
+#[cfg(test)]
+mod offline_boundary_tests;
 pub mod offline_cash_routes;
 #[cfg(test)]
 mod one_hop_verification_tests;
@@ -79,4 +86,4 @@ pub mod token_routes;
 pub mod transfer_helpers;
 pub mod wallet_routes;
 pub use recovery_impl::RecoveryImpl;
-pub(crate) use system_routes::{handle_create_genesis_v2_query, handle_generate_mnemonic_query};
+pub(crate) use system_routes::{handle_create_genesis_v2, handle_generate_mnemonic_query};

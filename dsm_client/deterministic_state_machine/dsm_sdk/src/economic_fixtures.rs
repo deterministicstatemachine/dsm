@@ -191,7 +191,7 @@ pub struct TestIdentity {
     pub ak_public_key: Vec<u8>,
     pub smt_root: [u8; 32],
     /// The BIP39 wallet seed the mnemonic unlocks.
-    pub wallet_seed: Vec<u8>,
+    pub wallet_seed: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl TestIdentity {
@@ -339,9 +339,6 @@ pub async fn funded_router(fleet: &FleetGuard, seed: u8) -> AppRouterImpl {
 /// re-seeding it would destroy the property under test. The head is whatever
 /// was persisted.
 pub fn restart_router(fleet: &FleetGuard) -> AppRouterImpl {
-    // A new PROCESS: the startup-admission record belongs to the process that
-    // is being modeled as gone.
-    crate::sdk::core_sdk::CoreSDK::forget_process_startup_admissions_for_testing();
     device_router(fleet, "econ-fixture-restart", false)
 }
 
@@ -448,4 +445,32 @@ pub fn pending_state(
         .device_head()
         .and_then(|h| h.pending_economic_admission().cloned())
         .map(|p| p.state)
+}
+
+/// A foreign walk of `position` of this device's lineage. A device records
+/// no frontier for itself, so the walk starts at its activation root, as a
+/// verifier meeting it first would, and nothing below reads local admission
+/// state.
+pub async fn foreign_walk(
+    genesis: [u8; 32],
+    devid: [u8; 32],
+    position: u64,
+) -> dsm::economic::provenance::ValidatedPeerTransition {
+    let handle = tokio::runtime::Handle::current();
+    let walked = tokio::task::spawn_blocking(move || {
+        use dsm::economic::provenance::ProvenanceResolver;
+        let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+        let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
+            set: &set,
+            runtime: handle,
+            expected_network_id: NETWORK.to_vec(),
+        };
+        resolver.validated_peer_transition(&genesis, &devid, position)
+    })
+    .await
+    .expect("join");
+    match walked {
+        Ok(transition) => transition,
+        Err(e) => panic!("position {position} MUST be foreign-walkable: {e:?}"),
+    }
 }

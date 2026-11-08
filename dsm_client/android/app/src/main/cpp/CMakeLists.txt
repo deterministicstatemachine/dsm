@@ -15,9 +15,8 @@ set_target_properties(dsm_sdk PROPERTIES
 )
 
 # ------------------------------------------------------------------
-# No native C++ wrapper. The silicon-fingerprint PUF library (siliconfp.cpp)
-# was removed with C-DBRW: Genesis v2 is mnemonic-rooted and there is no
-# silicon anti-clone. Anti-clone (offline bearer only) is the Boot Fenced
-# Fused Anchor (separate secure-element firmware). The Rust SDK
-# (libdsm_sdk.so) exports the JNI surface directly — single-path router.
+# No native C++ wrapper. Genesis v2 is mnemonic-rooted. Anti-clone (offline
+# bearer only) is the Boot Fenced Fused Anchor (separate secure-element
+# firmware). The Rust SDK (libdsm_sdk.so) exports the JNI surface directly —
+# single-path router.
 # ------------------------------------------------------------------

@@ -42,21 +42,6 @@ pub enum Validation {
     Invalid,
 }
 
-impl Validation {
-    /// The conjunction: any Invalid is Invalid; otherwise Valid.
-    pub fn and(self, other: Validation) -> Validation {
-        match (self, other) {
-            (Validation::Invalid, _) | (_, Validation::Invalid) => Validation::Invalid,
-            _ => Validation::Valid,
-        }
-    }
-
-    /// The conjunction over every per-leg and route-wide result.
-    pub fn all(results: impl IntoIterator<Item = Validation>) -> Validation {
-        results.into_iter().fold(Validation::Valid, Validation::and)
-    }
-}
-
 /// Why a fulfillment is not a fulfillment of its pre-commit: a fact about the
 /// bytes in hand, and so permanent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -784,7 +769,7 @@ pub fn conformance_invalid_in_hand(
 mod tests {
     use std::sync::OnceLock;
 
-    use super::Validation::{Invalid, Valid};
+    use super::Validation::Valid;
     use super::*;
     use crate::ccb::class;
     use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
@@ -797,15 +782,6 @@ mod tests {
         AttemptEntry, PreEClosureIndex, PrecommitLeg, SofiResolutionClaim, SofiSetupBody,
         MAX_AUTH_ENVELOPES, MAX_CLOSURE_OBJECT_BYTES, MAX_VALIDATION_FETCH_BYTES,
     };
-
-    #[test]
-    fn invalid_dominates_the_conjunction() {
-        assert_eq!(Valid.and(Valid), Valid);
-        assert_eq!(Valid.and(Invalid), Invalid);
-        assert_eq!(Invalid.and(Valid), Invalid);
-        assert_eq!(Validation::all([Valid, Invalid, Valid]), Invalid);
-        assert_eq!(Validation::all([]), Valid);
-    }
 
     fn token(byte: u8) -> D32 {
         [byte; 32]

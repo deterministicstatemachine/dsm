@@ -29,7 +29,7 @@ use crate::types::proto::{AddDeviceAdmissionV1, Message as _};
 /// genesis_hash || device_secret)`. Byte-identical to the SDK's secondary-device derivation; the
 /// new device uses it to compute its own `DevID` (the verifier does NOT recompute it — the new
 /// device's self-attestation proves possession instead). `device_secret` is the joining device's
-/// wallet-seed-rooted master seed (Genesis v2 `Smaster`); there is no C-DBRW binding.
+/// wallet-seed-rooted master seed (Genesis v2 `Smaster`).
 pub fn derive_secondary_device_id(
     client_entropy: &[u8],
     genesis_hash: &[u8; 32],

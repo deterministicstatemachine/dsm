@@ -63,7 +63,6 @@ mod tests {
                 enrolled_counter: 1_000_000,
                 partition_pk: vec![0x07; 64],
                 pk_chip,
-                uncompromised: true,
             },
         }
     }
@@ -88,7 +87,6 @@ mod tests {
         assert_eq!(got.pin.bundle, [0xB1; 32]);
         assert_eq!(got.pin.anchor_id, [0xA1; 32]);
         assert_eq!(got.pin.enrolled_counter, 1_000_000);
-        assert!(got.pin.uncompromised);
         assert_eq!(got.pin.pk_chip, vec![0xCC; 32]);
 
         // Overwrite semantics (the CALLER owns the authority rules): re-admit upgrades in place.

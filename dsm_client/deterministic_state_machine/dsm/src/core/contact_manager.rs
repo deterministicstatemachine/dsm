@@ -58,11 +58,37 @@ impl DsmContactManager {
     }
 
     /// Bytes-only: add a **pre-verified** contact (SDK must have verified genesis online already)
+    ///
+    /// Refused: the device's own id, since a device is never its own
+    /// counterparty, and a contact already held under another genesis or
+    /// another signing key. A contact's genesis and AK are what every later
+    /// check of its steps is made against, so re-adding a contact never
+    /// changes either; re-adding the same identity replaces the rest of the
+    /// record (alias, BLE address, chain tip).
     pub fn add_verified_contact(&mut self, contact: DsmVerifiedContact) -> Result<(), DsmError> {
         if contact.device_id == [0u8; 32] || contact.genesis_hash == [0u8; 32] {
             return Err(DsmError::InvalidContact(
                 "Contact must have device_id & genesis_hash".into(),
             ));
+        }
+        if contact.device_id == self.own_device_id {
+            return Err(DsmError::InvalidContact(
+                "a device cannot add its own device id as a contact".into(),
+            ));
+        }
+        if let Some(held) = self.contacts.get(&contact.device_id) {
+            if held.genesis_hash != contact.genesis_hash {
+                return Err(DsmError::InvalidContact(format!(
+                    "contact {} is held under another genesis; re-adding it does not change it",
+                    labeling::hash_to_short_id(&contact.device_id)
+                )));
+            }
+            if held.public_key != contact.public_key {
+                return Err(DsmError::InvalidContact(format!(
+                    "contact {} is held under another signing key; re-adding it does not change it",
+                    labeling::hash_to_short_id(&contact.device_id)
+                )));
+            }
         }
 
         let id = contact.device_id;
@@ -198,5 +224,53 @@ mod tests {
 
         let fingerprint2 = crate::core::utility::labeling::hash_to_short_id(&device_id);
         assert_eq!(fingerprint, fingerprint2);
+    }
+
+    /// A device is never its own contact.
+    #[test]
+    fn the_devices_own_id_is_refused_as_a_contact() {
+        let own_device_id = create_test_device_id(0);
+        let mut manager = DsmContactManager::new(own_device_id);
+        let genesis_hash = create_test_genesis_hash(&own_device_id, 0);
+        let refused = manager
+            .add_verified_contact(create_test_contact(own_device_id, genesis_hash))
+            .expect_err("the device's own id");
+        assert!(matches!(refused, DsmError::InvalidContact(_)), "{refused}");
+        assert!(manager.contacts.is_empty());
+    }
+
+    /// Re-adding a contact never changes its genesis or its signing key: both
+    /// are refused and the held record is kept. Re-adding the same identity
+    /// replaces the rest of the record.
+    #[test]
+    fn a_readd_never_changes_a_contacts_genesis_or_signing_key() {
+        let own_device_id = create_test_device_id(0);
+        let mut manager = DsmContactManager::new(own_device_id);
+        let device_id = create_test_device_id(1);
+        let genesis_hash = create_test_genesis_hash(&device_id, 0);
+        let held = create_test_contact(device_id, genesis_hash);
+        manager.add_verified_contact(held.clone()).unwrap();
+
+        let other_genesis = create_test_genesis_hash(&device_id, 1);
+        let refused = manager
+            .add_verified_contact(create_test_contact(device_id, other_genesis))
+            .expect_err("another genesis");
+        assert!(matches!(refused, DsmError::InvalidContact(_)), "{refused}");
+
+        let mut other_key = held.clone();
+        other_key.public_key = vec![9u8; 32];
+        let refused = manager
+            .add_verified_contact(other_key)
+            .expect_err("another signing key");
+        assert!(matches!(refused, DsmError::InvalidContact(_)), "{refused}");
+
+        let kept = manager.get_contact(&device_id).unwrap();
+        assert_eq!(kept.genesis_hash, held.genesis_hash);
+        assert_eq!(kept.public_key, held.public_key);
+
+        let mut renamed = held.clone();
+        renamed.alias = "Renamed".into();
+        manager.add_verified_contact(renamed).unwrap();
+        assert_eq!(manager.get_contact(&device_id).unwrap().alias, "Renamed");
     }
 }

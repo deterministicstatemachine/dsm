@@ -22,12 +22,14 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Builds and runs every test instrumented. It runs build scripts and tests
+  # from every dependency, so it holds no token that can mint an identity:
+  # the reports leave it as an artifact, and `upload` alone sends them on.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     services:
       postgres:
         image: postgres:16
@@ -48,17 +50,18 @@ jobs:
     env:
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
-          components: llvm-tools-preview
+          # rust-analyzer, rust-src: the G1 negative control (dsm_sdk source_rules).
+          components: llvm-tools-preview, rust-analyzer, rust-src
 
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@671164c891d3e20f5b8ece04798d0154d1262d65 # cargo-llvm-cov
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: npm
@@ -74,6 +77,14 @@ jobs:
         run: npm ci
 
       - name: Generate Rust coverage artifacts
+        # Worker threads take their stack from RUST_MIN_STACK (the SDK runtime
+        # sets none), and the dsm-app-host processes the relay test starts
+        # inherit it. This instrumented, unoptimized build needs about 2.2 MB
+        # on the Connect path, measured from the crashed thread's frames, past
+        # the 2 MiB default; the release build the board and the phones run
+        # needs about 0.3 MB there. Production stacks are unchanged.
+        env:
+          RUST_MIN_STACK: "8388608"
         run: |
           mkdir -p coverage
           cargo llvm-cov clean --workspace
@@ -93,8 +104,36 @@ jobs:
         run: |
           node scripts/aggregate_coverage.mjs
 
+      - name: Upload coverage summary artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: coverage-summary
+          path: |
+            coverage/aggregate.json
+            coverage/rust.lcov
+            dsm_client/frontend/coverage/lcov.info
+
+  # Sends the reports to Codecov under the repository's OIDC identity. The
+  # only job that can mint that identity runs no code from the repository or
+  # its dependencies: it checks the repository out for Codecov's file map and
+  # uploads the reports the coverage job left.
+  upload:
+    name: Upload coverage
+    runs-on: ubuntu-latest
+    needs: [coverage]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Download coverage summary artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: coverage-summary
+
       - name: Upload Rust coverage to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
         with:
           files: coverage/rust.lcov
           flags: rust
@@ -103,20 +142,10 @@ jobs:
           use_oidc: true
 
       - name: Upload frontend coverage to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
         with:
           files: dsm_client/frontend/coverage/lcov.info
           flags: frontend
           name: frontend-coverage
           fail_ci_if_error: true
           use_oidc: true
-
-      - name: Upload coverage summary artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: coverage-summary
-          path: |
-            coverage/aggregate.json
-            coverage/rust.lcov
-            dsm_client/frontend/coverage/lcov.info
-

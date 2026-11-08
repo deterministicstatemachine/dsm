@@ -36,15 +36,15 @@ const SYNC_WAIT: Duration = Duration::from_secs(60);
 /// that completes meanwhile ends the rest early.
 const IDLE_REST: Duration = Duration::from_secs(30);
 
-/// A round answered within this of starting, again and again, is a member
-/// naming a spool the sync it wakes does not read to its end: the waiter
-/// backs off instead of syncing in a loop.
-const QUICK_ROUND: Duration = Duration::from_secs(1);
+/// Wakes in a row whose sync took nothing before the waiter backs off. A
+/// member names a spool on its own word, however soon or late it answers: a
+/// wake is judged by what the sync it asked for took, which only verified
+/// objects make (SA-139). A member naming a spool the sync does not read to
+/// its end, or one naming spools that hold nothing this device takes, is
+/// backed off from the same way.
+const IDLE_WAKES_BEFORE_BACKOFF: u32 = 3;
 
-/// Quick rounds in a row before the waiter backs off.
-const QUICK_ROUNDS_BEFORE_BACKOFF: u32 = 3;
-
-/// The longest back-off between quick rounds.
+/// The longest back-off between wakes whose syncs take nothing.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Waiter tasks running: one at most.
@@ -155,18 +155,45 @@ impl Resting {
     }
 }
 
-/// How soon a member named a spool: before [`QUICK_ROUND`] had passed since
-/// the round began, or after.
+/// What the syncs a wake asked for took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pace {
-    Quick,
-    Held,
+pub(crate) enum WakeSync {
+    /// A sync since the wake processed something: a transfer, a reply, a
+    /// certificate.
+    TookSomething,
+    /// None did.
+    TookNothing,
+}
+
+/// Wakes in a row whose syncs took nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IdleWakes(u32);
+
+impl IdleWakes {
+    pub(crate) fn new() -> Self {
+        Self(0)
+    }
+
+    /// Count a wake whose syncs did `synced`, and say how long to rest
+    /// before the next round, if at all.
+    pub(crate) fn after_wake(&mut self, synced: WakeSync) -> Option<Duration> {
+        self.0 = match synced {
+            WakeSync::TookSomething => 0,
+            WakeSync::TookNothing => self.0.saturating_add(1),
+        };
+        backoff_after(self.0)
+    }
+
+    /// A round in which every wait ran out with nothing new.
+    fn quiet(&mut self) {
+        self.0 = 0;
+    }
 }
 
 /// How a round ended.
 enum Round {
     /// A member named a spool holding something new.
-    Ready(Pace),
+    Ready,
     /// Every member's wait ran out with nothing new, or no member held one.
     Quiet,
     /// A sync moved the routes this device reads: wait on the new ones.
@@ -182,7 +209,7 @@ async fn run() {
 
     let resting = Resting::default();
     let mut holding: HashSet<String> = HashSet::new();
-    let mut quick_rounds: u32 = 0;
+    let mut idle_wakes = IdleWakes::new();
     while !crate::sdk::inbox_poller::poller_stopping() {
         let plan = match plan(&resting) {
             Ok(Some(plan)) => plan,
@@ -205,22 +232,22 @@ async fn run() {
         match round {
             Round::Stopped => break,
             Round::Replan => continue,
-            Round::Quiet => {
-                quick_rounds = 0;
-            }
-            Round::Ready(pace) => {
-                quick_rounds = match pace {
-                    Pace::Quick => quick_rounds.saturating_add(1),
-                    Pace::Held => 0,
-                };
+            Round::Quiet => idle_wakes.quiet(),
+            Round::Ready => {
                 let before = crate::sdk::inbox_poller::cycles_completed();
+                let took_before = crate::sdk::inbox_poller::cycles_that_took();
                 crate::sdk::inbox_poller::resume_poller();
                 wait_for_cycle_after(before, SYNC_WAIT).await;
-                if quick_rounds >= QUICK_ROUNDS_BEFORE_BACKOFF {
-                    let backoff = backoff_after(quick_rounds);
+                let synced = if crate::sdk::inbox_poller::cycles_that_took() > took_before {
+                    WakeSync::TookSomething
+                } else {
+                    WakeSync::TookNothing
+                };
+                if let Some(backoff) = idle_wakes.after_wake(synced) {
                     log::warn!(
-                        "[inbox_waiter] {quick_rounds} waits in a row answered at once; the \
-                         sync they wake does not read what they name — waiting {backoff:?}"
+                        "[inbox_waiter] {} wakes in a row and the syncs they asked for took \
+                         nothing — waiting {backoff:?}",
+                        idle_wakes.0
                     );
                     rest_unless_stopped(backoff).await;
                 }
@@ -229,13 +256,15 @@ async fn run() {
     }
 }
 
-/// The back-off after `quick_rounds` quick rounds in a row: one second at the
-/// first that backs off, doubling, at most [`MAX_BACKOFF`].
-pub(crate) fn backoff_after(quick_rounds: u32) -> Duration {
-    let doublings = quick_rounds
-        .saturating_sub(QUICK_ROUNDS_BEFORE_BACKOFF)
-        .min(5);
-    Duration::from_secs(1u64 << doublings).min(MAX_BACKOFF)
+/// The back-off after `idle_wakes` wakes in a row whose syncs took nothing:
+/// none before [`IDLE_WAKES_BEFORE_BACKOFF`], then one second, doubling, at
+/// most [`MAX_BACKOFF`].
+pub(crate) fn backoff_after(idle_wakes: u32) -> Option<Duration> {
+    if idle_wakes < IDLE_WAKES_BEFORE_BACKOFF {
+        return None;
+    }
+    let doublings = (idle_wakes - IDLE_WAKES_BEFORE_BACKOFF).min(5);
+    Some(Duration::from_secs(1u64 << doublings).min(MAX_BACKOFF))
 }
 
 /// This device's routes and where each member's spool at each was read to,
@@ -329,9 +358,6 @@ async fn hold(plan: &Plan, resting: &Resting, holding: &mut HashSet<String>) -> 
         });
     }
     let cycles_at_start = crate::sdk::inbox_poller::cycles_completed();
-    let quick = tokio::time::sleep(QUICK_ROUND);
-    tokio::pin!(quick);
-    let mut pace = Pace::Quick;
     loop {
         let cycle_done = crate::sdk::inbox_poller::cycle_done();
         tokio::pin!(cycle_done);
@@ -364,7 +390,7 @@ async fn hold(plan: &Plan, resting: &Resting, holding: &mut HashSet<String>) -> 
                             "[inbox_waiter] {endpoint} has new entries on {} route(s): syncing",
                             ready.len()
                         );
-                        return Round::Ready(pace);
+                        return Round::Ready;
                     }
                     Ok(WaitAnswer::Quiet) => {
                         holding.insert(endpoint);
@@ -384,7 +410,6 @@ async fn hold(plan: &Plan, resting: &Resting, holding: &mut HashSet<String>) -> 
                     }
                 }
             }
-            () = &mut quick, if pace == Pace::Quick => pace = Pace::Held,
             () = &mut cycle_done => {}
             () = &mut stop => return Round::Stopped,
         }
@@ -554,14 +579,39 @@ mod tests {
         past_the_end.abort();
     }
 
-    /// The back-off starts at one second after the third quick round in a
-    /// row, doubles with each one after, and stops at thirty seconds.
+    /// The back-off starts at one second after the third wake in a row whose
+    /// syncs took nothing, doubles with each one after, and stops at thirty
+    /// seconds.
     #[test]
-    fn quick_rounds_back_off_doubling_to_thirty_seconds() {
-        assert_eq!(backoff_after(3), Duration::from_secs(1));
-        assert_eq!(backoff_after(4), Duration::from_secs(2));
-        assert_eq!(backoff_after(6), Duration::from_secs(8));
-        assert_eq!(backoff_after(8), Duration::from_secs(30));
-        assert_eq!(backoff_after(u32::MAX), Duration::from_secs(30));
+    fn idle_wakes_back_off_doubling_to_thirty_seconds() {
+        assert_eq!(backoff_after(2), None);
+        assert_eq!(backoff_after(3), Some(Duration::from_secs(1)));
+        assert_eq!(backoff_after(4), Some(Duration::from_secs(2)));
+        assert_eq!(backoff_after(6), Some(Duration::from_secs(8)));
+        assert_eq!(backoff_after(8), Some(Duration::from_secs(30)));
+        assert_eq!(backoff_after(u32::MAX), Some(Duration::from_secs(30)));
+    }
+
+    /// SA-139: a hostile member answers every wait just after the old
+    /// one-second "quick" mark, naming a spool whose syncs take nothing. Its
+    /// timing is its own to choose, so it does not decide the back-off: from
+    /// the third such wake the waiter rests, doubling to thirty seconds, and
+    /// it never again syncs back to back. A wake whose sync takes a transfer,
+    /// a reply or a certificate ends the back-off.
+    #[test]
+    fn a_member_answering_after_the_quick_mark_cannot_skip_the_back_off() {
+        let mut idle = IdleWakes::new();
+        let rests: Vec<Option<Duration>> = (0..10)
+            .map(|_| idle.after_wake(WakeSync::TookNothing))
+            .collect();
+        assert_eq!(&rests[..2], &[None, None]);
+        assert_eq!(rests[2], Some(Duration::from_secs(1)));
+        assert_eq!(rests[3], Some(Duration::from_secs(2)));
+        assert!(
+            rests[7..].iter().all(|r| *r == Some(MAX_BACKOFF)),
+            "{rests:?}"
+        );
+        assert_eq!(idle.after_wake(WakeSync::TookSomething), None);
+        assert_eq!(idle.after_wake(WakeSync::TookNothing), None);
     }
 }

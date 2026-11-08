@@ -24,6 +24,13 @@
 //! failure. With a private field and typed helper inputs there is nothing left
 //! to re-check.
 //!
+//! That includes the family a domain belongs to. Every domain DSM hashes under
+//! starts with `DSM/` or `DJTE.` (the join-triggered emissions family, which
+//! goes with those emissions), and the type refuses any other. The hasher once
+//! asserted the prefix instead, so a domain read off the wire — a storage
+//! member's `x-namespace` answer — panicked the reader at hash time; now it is
+//! refused where it is read, as any other malformed answer is.
+//!
 //! ## What this replaced
 //!
 //! Seven implementations disagreeing on the encoding, including
@@ -42,6 +49,9 @@ pub enum DomainError {
     /// plus payload — exactly the separation failure the delimiter exists to
     /// prevent.
     InvalidDomain,
+    /// Starts with neither `DSM/` nor `DJTE.`, the domain families DSM hashes
+    /// under.
+    Unprefixed,
 }
 
 impl fmt::Display for DomainError {
@@ -50,8 +60,25 @@ impl fmt::Display for DomainError {
             DomainError::InvalidDomain => {
                 write!(f, "domain must be non-empty and contain no NUL byte")
             }
+            DomainError::Unprefixed => {
+                write!(f, "domain must start with \"DSM/\" or \"DJTE.\"")
+            }
         }
     }
+}
+
+/// Whether `bytes` begins with `prefix`, usable in a `const` context.
+const fn starts_with(bytes: &[u8], prefix: &[u8]) -> bool {
+    let mut i = 0;
+    while i < prefix.len() && i < bytes.len() && bytes[i] == prefix[i] {
+        i += 1;
+    }
+    i == prefix.len()
+}
+
+/// Whether `bytes` is in a domain family DSM hashes under.
+const fn has_protocol_prefix(bytes: &[u8]) -> bool {
+    starts_with(bytes, b"DSM/") || starts_with(bytes, b"DJTE.")
 }
 
 impl std::error::Error for DomainError {}
@@ -74,6 +101,13 @@ impl std::error::Error for DomainError {}
 /// # use dsm::crypto::domain::TaggedHashDomain;
 /// const BAD: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/example\0");
 /// ```
+///
+/// So does one outside the `DSM/` and `DJTE.` families:
+///
+/// ```compile_fail
+/// # use dsm::crypto::domain::TaggedHashDomain;
+/// const BAD: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"example");
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TaggedHashDomain<'a>(&'a [u8]);
 
@@ -86,7 +120,7 @@ impl TaggedHashDomain<'static> {
     /// Prefer the [`tagged_domain!`] macro, which forces const evaluation so the
     /// panic below is a compile error and cannot be reached at runtime.
     ///
-    /// The two `panic!`s are the COMPILE-TIME gate, not runtime error handling.
+    /// The three `panic!`s are the COMPILE-TIME gate, not runtime error handling.
     ///
     /// `const fn` has no fallible return in a const context — a `Result` cannot
     /// halt compilation. Evaluated in a `const` position (which is how every
@@ -112,18 +146,27 @@ impl TaggedHashDomain<'static> {
             i += 1;
         }
 
+        if !has_protocol_prefix(bytes) {
+            panic!("tagged-hash domain must start with \"DSM/\" or \"DJTE.\"");
+        }
+
         Self(bytes)
     }
 }
 
 impl<'a> TaggedHashDomain<'a> {
-    /// Build a domain from runtime bytes.
+    /// Build a domain from runtime bytes: non-empty, NUL-free, and starting
+    /// with `DSM/` or `DJTE.`. Bytes another party chose — a member's
+    /// namespace answer — are refused here, never at hash time.
     ///
     /// Prefer [`TaggedHashDomain::from_static`] for protocol domains, so the
     /// check happens at compile time.
     pub fn try_new(bytes: &'a [u8]) -> Result<Self, DomainError> {
         if bytes.is_empty() || bytes.contains(&0) {
             return Err(DomainError::InvalidDomain);
+        }
+        if !has_protocol_prefix(bytes) {
+            return Err(DomainError::Unprefixed);
         }
         Ok(Self(bytes))
     }
@@ -200,6 +243,27 @@ mod tests {
             TaggedHashDomain::try_new(b""),
             Err(DomainError::InvalidDomain)
         );
+    }
+
+    /// A domain outside the families the hasher separates is refused when it
+    /// is built, whoever chose the bytes: before, it was built and then
+    /// panicked the hasher.
+    #[test]
+    fn an_unprefixed_domain_is_rejected() {
+        for unprefixed in [&b"x"[..], b"dsm/lowercase", b"DSM", b"DJTE", b"/DSM/"] {
+            assert_eq!(
+                TaggedHashDomain::try_new(unprefixed),
+                Err(DomainError::Unprefixed),
+                "{:?}",
+                String::from_utf8_lossy(unprefixed)
+            );
+        }
+        for prefixed in [&b"DSM/"[..], b"DJTE.JAP"] {
+            assert_eq!(
+                TaggedHashDomain::try_new(prefixed).map(TaggedHashDomain::source_bytes),
+                Ok(prefixed)
+            );
+        }
     }
 
     /// The const constructor accepts what `try_new` accepts.

@@ -75,7 +75,6 @@ jest.mock('../../../services/dsmClient', () => ({
 jest.mock('../../../dsm/policies', () => ({
   burnToken: jest.fn(),
   addTokenByAnchor: jest.fn(),
-  forgetToken: jest.fn(),
   tokenAdoptionQr: jest.fn().mockResolvedValue({
     uri: 'dsm:token/v1:PAYLOAD',
     ticker: 'MYTOK',
@@ -113,7 +112,7 @@ jest.mock('../../TokenCreationDialog', () => ({
 }));
 
 import AccountsScreen from '../AccountsScreen';
-import { burnToken, addTokenByAnchor, forgetToken, tokenAdoptionQr } from '../../../dsm/policies';
+import { burnToken, addTokenByAnchor, tokenAdoptionQr } from '../../../dsm/policies';
 import { NATIVE_QR_SCANNER_ACTIVE_EVENT } from '../../../dsm/qrScannerState';
 
 describe('AccountsScreen — the screen TOKENS actually opens', () => {
@@ -151,7 +150,7 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
   });
 
   /// Being in the DOM is not being reachable. The screen is a fixed-height
-  /// container, and an expanded card pushes BURN / FORGET below the
+  /// container, and an expanded card pushes BURN below the
   /// fold; with overflow hidden on the vertical axis they rendered (so the test
   /// above passed) and could never be scrolled to or tapped on a device. The
   /// frame's body is its one scrolling region (screen.css, checked as text in
@@ -315,28 +314,6 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     expect(screen.getByLabelText('CPTA policy anchor')).toHaveValue('');
   });
 
-  it('offers FORGET on a token this device holds, and calls it by token id', async () => {
-    (forgetToken as jest.Mock).mockResolvedValue({ success: true, message: 'MYTOK forgotten' });
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
-    render(<AccountsScreen />);
-    fireEvent.click(await screen.findByText('MYTOK'));
-    fireEvent.click(await screen.findByRole('button', { name: /^FORGET$/ }));
-    await waitFor(() => expect(forgetToken).toHaveBeenCalledWith('MYTOK'));
-    confirmSpy.mockRestore();
-  });
-
-  /// Forgetting removes a token from this device, so it must not happen on a
-  /// stray tap.
-  it('does not forget when the confirmation is declined', async () => {
-    (forgetToken as jest.Mock).mockClear();
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
-    render(<AccountsScreen />);
-    fireEvent.click(await screen.findByText('MYTOK'));
-    fireEvent.click(await screen.findByRole('button', { name: /^FORGET$/ }));
-    expect(forgetToken).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
-  });
-
   /// Protocol-defined assets are not user-mintable, so they must not offer the
   /// controls at all.
   it('offers no supply actions on protocol tokens', async () => {
@@ -344,8 +321,6 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     fireEvent.click(await screen.findByText('ERA'));
     expect(screen.queryByRole('button', { name: /^MINT$/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^BURN$/ })).toBeNull();
-    // Nor FORGET: a protocol asset is not an adopted identity to drop.
-    expect(screen.queryByRole('button', { name: /^FORGET$/ })).toBeNull();
   });
 
   /// The faucet tab shows what Rust released, in its words, and its refusal
@@ -521,7 +496,7 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
   });
 
   /// BURN is offered only where the committed policy permits it, as Rust read
-  /// it. FORGET is not a policy action and stays.
+  /// it.
   it('offers no BURN where the policy forbids it, and says so', async () => {
     (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
       row({
@@ -536,7 +511,6 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     fireEvent.click(await screen.findByText('NOBURN'));
     expect((await screen.findByText('Burn')).nextElementSibling).toHaveTextContent(/^not permitted$/);
     expect(screen.queryByRole('button', { name: /^BURN$/ })).toBeNull();
-    expect(screen.getByRole('button', { name: /^FORGET$/ })).toBeInTheDocument();
   });
 
   /// What a token is comes from Rust, never from its ticker: a created token
@@ -556,7 +530,6 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByText('ERA'));
     expect(await screen.findByRole('button', { name: /^BURN$/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^FORGET$/ })).toBeInTheDocument();
     expect(screen.getByText('Defined By').nextElementSibling).toHaveTextContent(/creator/);
   });
 });

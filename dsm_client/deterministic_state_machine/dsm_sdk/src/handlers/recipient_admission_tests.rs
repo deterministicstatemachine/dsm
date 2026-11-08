@@ -78,9 +78,9 @@ async fn a_receiver_that_never_added_the_token_is_not_credited_until_it_adopts()
     let root_before = p.b.router().core_sdk.device_head().expect("B head").root();
     let adopted =
         p.b.router()
-            .query(crate::bridge::AppQuery {
-                path: "tokens.addByAnchor".to_string(),
-                params: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
+            .invoke(crate::bridge::AppInvoke {
+                method: "tokens.addByAnchor".to_string(),
+                args: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
             })
             .await;
     assert!(
@@ -342,11 +342,9 @@ async fn the_same_sender_debit_cannot_fund_a_second_credit() {
 }
 
 /// An outage during prevalidation HOLDS the transfer with zero durable state
-/// (no pending admission, no journal, no frontier, staging not accepted), and
-/// the SAME row completes when the fleet returns — an outage is never an
-/// attack and never a wedge. A frontier becomes trusted only once the whole
-/// segment to it has passed (A8, owner ruling 2026-10-01): a walk the outage
-/// cut short leaves none.
+/// (no pending admission, no journal, staging not accepted), and the SAME row
+/// completes when the fleet returns — an outage is never an attack and never a
+/// wedge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {

@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-//! No storage-node source reads a clock or runs a timer: ordering inside a
-//! node is its arrival sequence, and a cycle closes when asked, never on a
-//! schedule (storage spec §1 rule 4, §14). Every file under `src/` is parsed:
-//! paths and `use` trees are read whole, so a grouped or renamed import is
-//! seen, and an unparsed macro body is read token by token. A name in a
-//! comment or a string never counts. Bounding how long a client waits for a
-//! set-mate is a `Duration` handed to the HTTP client; it reads nothing.
+//! No storage-node source reads a clock or runs a timer, but one: ordering
+//! inside a node is its arrival sequence, and a cycle closes when asked,
+//! never on a schedule (storage spec §1 rule 4, §14). Every file under `src/`
+//! is parsed: paths and `use` trees are read whole, so a grouped or renamed
+//! import is seen, and an unparsed macro body is read token by token. A name
+//! in a comment or a string never counts. Bounding how long a client waits
+//! for a set-mate is a `Duration` handed to the HTTP client; it reads nothing.
+//!
+//! The exception is named, and it is one file: [`TRANSPORT_LIVENESS`], the
+//! node's connection and I/O liveness (an idle connection, a body that
+//! arrives too slowly, a response whose write stalls), which §1 rule 4 allows
+//! timers for (owner decision, 2026-10-16). It is held to naming no protocol
+//! module, so a timer there cannot reach validity, ordering or storage.
 
 mod common;
 
@@ -16,6 +22,14 @@ use syn::UseTree;
 
 /// Names only a clock read, a timestamp or a timer needs.
 const CLOCK_NAMES: [&str; 4] = ["Instant", "SystemTime", "UNIX_EPOCH", "chrono"];
+
+/// The one node source allowed timers: transport liveness alone (storage spec
+/// §1 rule 4, owner decision 2026-10-16).
+const TRANSPORT_LIVENESS: &str = "liveness.rs";
+
+/// The node's protocol modules, which [`TRANSPORT_LIVENESS`] may not name:
+/// what it decides is when a connection or request ends, never a fact.
+const PROTOCOL_MODULES: [&str; 3] = ["db", "api", "dsm"];
 
 #[derive(Default)]
 struct Clocks {
@@ -124,6 +138,44 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// Every path in `source` that names a protocol module: `dsm::…`, or
+/// `crate::db`, `crate::api` and `super::` the same.
+fn protocol_paths(source: &str, context: &str) -> Vec<String> {
+    #[derive(Default)]
+    struct Named(Vec<String>);
+    impl<'ast> Visit<'ast> for Named {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let named = match segments.as_slice() {
+                [first, ..] if first == "dsm" => Some(first.clone()),
+                [root, module, ..] if root == "crate" || root == "super" => PROTOCOL_MODULES
+                    .contains(&module.as_str())
+                    .then(|| module.clone()),
+                _ => None,
+            };
+            if let Some(module) = named {
+                self.0.push(module);
+            }
+            syn::visit::visit_path(self, path);
+        }
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            let mut paths = Vec::new();
+            use_paths(&item.tree, Vec::new(), &mut paths);
+            for path in paths {
+                let syn_path: syn::Path = match syn::parse_str(&path.join("::")) {
+                    Ok(p) => p,
+                    Err(e) => panic!("a use path does not parse: {e}"),
+                };
+                self.visit_path(&syn_path);
+            }
+        }
+    }
+    let file = common::ok_or_panic(syn::parse_file(source), context);
+    let mut named = Named::default();
+    named.visit_file(&file);
+    named.0
+}
+
 fn clock_reads(source: &str, context: &str) -> Vec<String> {
     let file = common::ok_or_panic(syn::parse_file(source), context);
     let mut clocks = Clocks::default();
@@ -157,11 +209,20 @@ fn no_node_source_reads_a_clock() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     sources(&root, &mut files);
-    for expected in ["lib.rs", "main.rs", "api/transport/b0x.rs", "set_client.rs"] {
+    for expected in [
+        "lib.rs",
+        "main.rs",
+        "api/transport/b0x.rs",
+        "set_client.rs",
+        TRANSPORT_LIVENESS,
+    ] {
         assert!(files.contains(&root.join(expected)), "{expected} not swept");
     }
     let mut found = Vec::new();
     for file in &files {
+        if *file == root.join(TRANSPORT_LIVENESS) {
+            continue;
+        }
         let source = common::ok_or_panic(std::fs::read_to_string(file), "read a node source");
         for name in clock_reads(&source, &file.display().to_string()) {
             found.push(format!("{}: {name}", file.display()));
@@ -172,4 +233,28 @@ fn no_node_source_reads_a_clock() {
         Vec::<String>::new(),
         "node sources that read a clock"
     );
+}
+
+/// The exception is the transport liveness module alone, and it names no
+/// protocol module: it does read a clock (else it would not need naming),
+/// and nothing it imports or calls is the store, a route or a protocol type.
+#[test]
+fn only_transport_liveness_reads_a_clock_and_it_names_no_protocol_module() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join(TRANSPORT_LIVENESS);
+    let source = common::ok_or_panic(std::fs::read_to_string(&path), "read the liveness module");
+    let context = path.display().to_string();
+    assert!(
+        !clock_reads(&source, &context).is_empty(),
+        "{TRANSPORT_LIVENESS} reads no clock: the exception names nothing"
+    );
+    assert_eq!(
+        protocol_paths(&source, &context),
+        Vec::<String>::new(),
+        "{TRANSPORT_LIVENESS} names a protocol module"
+    );
+    let named =
+        "use dsm::types::proto; fn f() { crate::db::put_cell(); super::api::cells::get(); }";
+    assert_eq!(protocol_paths(named, "parse named"), ["dsm", "db", "api"]);
 }

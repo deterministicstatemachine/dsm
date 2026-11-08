@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The credit-source descriptors — CCB classes `0x0025`, `0x005D` and
-//! `0x005F`.
+//! The credit-source descriptors — CCB classes `0x0025`, `0x005D`, `0x005F`
+//! and `0x0075`.
 //!
 //! ## Why these are inline, not addressed
 //!
@@ -107,12 +107,32 @@ impl CcbObject for CreditSourceGenesisRelease {
     const SCHEMA: u16 = 1;
 }
 
-/// One funding statement for one credit. Closed: three arms, no `Custom`.
+/// `0x0075` schema 1 — the online credit of an offline unload, funded by the
+/// equal debit of the device's own offline account.
+///
+/// Deliberately carries NO asset, NO amount, NO source id and NO address:
+/// the unload body is the admission's substrate, which the manifest already
+/// names, and Core establishes the account debit, its asset and its amount
+/// by folding the body's account and device paths. The source id is derived
+/// from the boundary's own operation id, so one offline debit funds one online
+/// credit, once. Valid only when the admission's substrate is an unload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditSourceOfflineBoundaryDebit {
+    pub credit_mutation_index: u32,
+}
+
+impl CcbObject for CreditSourceOfflineBoundaryDebit {
+    const CLASS: u16 = class::CREDIT_SOURCE_OFFLINE_BOUNDARY_DEBIT;
+    const SCHEMA: u16 = 1;
+}
+
+/// One funding statement for one credit. Closed: four arms, no `Custom`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreditSource {
     ValidatedPeerDebit(CreditSourceValidatedPeerDebit),
     NativeReserveRelease(CreditSourceNativeReserveRelease),
     GenesisRelease(CreditSourceGenesisRelease),
+    OfflineBoundaryDebit(CreditSourceOfflineBoundaryDebit),
 }
 
 impl CreditSource {
@@ -124,6 +144,7 @@ impl CreditSource {
             Self::ValidatedPeerDebit(_) => CreditSourceValidatedPeerDebit::CLASS,
             Self::NativeReserveRelease(_) => CreditSourceNativeReserveRelease::CLASS,
             Self::GenesisRelease(_) => CreditSourceGenesisRelease::CLASS,
+            Self::OfflineBoundaryDebit(_) => CreditSourceOfflineBoundaryDebit::CLASS,
         }
     }
 
@@ -134,6 +155,7 @@ impl CreditSource {
             Self::ValidatedPeerDebit(s) => s.credit_mutation_index,
             Self::NativeReserveRelease(s) => s.credit_mutation_index,
             Self::GenesisRelease(s) => s.credit_mutation_index,
+            Self::OfflineBoundaryDebit(s) => s.credit_mutation_index,
         }
     }
 
@@ -150,6 +172,9 @@ impl CreditSource {
             // The policy it releases under is addressed by the operation's own
             // policy_commit, not by the descriptor: nothing external to index.
             Self::GenesisRelease(_) => vec![],
+            // The unload body is the admission's substrate, which the
+            // manifest's substrate slot names: nothing further to index.
+            Self::OfflineBoundaryDebit(_) => vec![],
         }
     }
 
@@ -175,6 +200,10 @@ impl CreditSource {
             }
             Self::GenesisRelease(s) => {
                 push_envelope::<CreditSourceGenesisRelease>(&mut out);
+                push_u32(&mut out, s.credit_mutation_index); // 1
+            }
+            Self::OfflineBoundaryDebit(s) => {
+                push_envelope::<CreditSourceOfflineBoundaryDebit>(&mut out);
                 push_u32(&mut out, s.credit_mutation_index); // 1
             }
         }

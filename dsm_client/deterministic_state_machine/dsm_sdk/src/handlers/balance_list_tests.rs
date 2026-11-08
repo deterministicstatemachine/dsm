@@ -10,7 +10,7 @@
 
 use serial_test::serial;
 
-use crate::bridge::{AppQuery, AppRouter};
+use crate::bridge::{AppInvoke, AppQuery, AppRouter};
 use crate::economic_fixtures;
 use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::storage::client_db::token_registry;
@@ -79,6 +79,25 @@ async fn a_held_custom_token_carries_its_decimals_on_the_wire() {
     );
 }
 
+/// SA-103. A ticker is any 2 to 8 characters (SoFi §47). A held token whose
+/// ticker is not ASCII is listed as its token carries it, with its amount,
+/// and the list beside it still reads.
+/// MUTATION CONTROL: refusing a row whose ticker is not printable ASCII
+/// turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_held_token_whose_ticker_is_not_ascii_is_listed_as_it_is() {
+    let d = Device::funded(0x83).await;
+    economic_fixtures::create_asset(&d.router, "\u{c5}\u{c4}\u{d6}\u{dc}\u{c9}", 2, 1_000).await;
+
+    let rows = wire_rows(&d.router).await;
+    let held = row(&rows, "\u{c5}\u{c4}\u{d6}\u{dc}\u{c9}");
+    assert_eq!(held.token_id, "\u{c5}\u{c4}\u{d6}\u{dc}\u{c9}");
+    assert_eq!(held.available, 100_000, "canonical BASE UNITS");
+    assert_eq!(held.display_amount, "1000.00");
+    row(&rows, "ERA");
+}
+
 /// A token this device adopted and holds none of is described too: holding
 /// none of a token does not make its identity unknowable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -90,9 +109,9 @@ async fn an_adopted_zero_balance_token_carries_its_decimals() {
     p.b.enter();
     let adopted =
         p.b.router()
-            .query(AppQuery {
-                path: "tokens.addByAnchor".to_string(),
-                params: crate::util::text_id::encode_base32_crockford(&anchor).into_bytes(),
+            .invoke(AppInvoke {
+                method: "tokens.addByAnchor".to_string(),
+                args: crate::util::text_id::encode_base32_crockford(&anchor).into_bytes(),
             })
             .await;
     assert!(adopted.success, "{:?}", adopted.error_message);

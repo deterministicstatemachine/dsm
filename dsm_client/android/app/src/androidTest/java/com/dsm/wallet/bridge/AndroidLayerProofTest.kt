@@ -360,7 +360,7 @@ class AndroidLayerProofTest {
 
         val requestBytes = encodeBridgeRpcRequest(
             "nativeBoundaryIngress",
-            buildRouterQueryIngressRequest("wallet.history", walletHistoryArgs())
+            buildRouterQueryIngressRequest("wallet.history", ByteArray(0))
         )
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(300L, requestBytes))
         assertTrue("Must get response", framedResp.size > 8)
@@ -418,18 +418,29 @@ class AndroidLayerProofTest {
     fun t29_method_getPreference_setPreference() {
         ensureGenesis()
 
-        // Set preference
-        val key = "test_key_${PREF_KEY_COUNTER.incrementAndGet()}"
+        // A key the page keeps: a contact's photo, under a 52-character Base32 device id.
+        val n = PREF_KEY_COUNTER.incrementAndGet()
+        val key = "contact_photo_" + n.toString().padStart(52, '0')
         val value = "test_value"
         val setPayload = encodePreferencePayload(key, value)
         val setResp = callBridgeMethod("setPreference", setPayload)
         assertTrue("setPreference must succeed", setResp.first)
 
-        // Get preference
         val getPayload = encodePreferencePayload(key, null)
         val getResp = callBridgeMethod("getPreference", getPayload)
         assertTrue("getPreference must succeed", getResp.first)
         assertEquals("Preference value must match", value, getResp.second.toString(Charsets.UTF_8))
+
+        // A key the page does not keep is refused both ways.
+        val other = "test_key_$n"
+        assertFalse(
+            "setPreference must refuse a key the page does not keep",
+            callBridgeMethod("setPreference", encodePreferencePayload(other, value)).first,
+        )
+        assertFalse(
+            "getPreference must refuse a key the page does not keep",
+            callBridgeMethod("getPreference", encodePreferencePayload(other, null)).first,
+        )
     }
 
     @Test
@@ -630,7 +641,7 @@ class AndroidLayerProofTest {
             {
                 callBridgeMethod(
                     "nativeBoundaryIngress",
-                    buildRouterQueryIngressRequest("wallet.history", walletHistoryArgs())
+                    buildRouterQueryIngressRequest("wallet.history", ByteArray(0))
                 )
             },
         )
@@ -841,14 +852,6 @@ class AndroidLayerProofTest {
         assertTrue("getTransportHeadersV3Bin must succeed", resp.first)
         return Headers.parseFrom(resp.second)
     }
-
-    /** `wallet.history`'s argument as the frontend sends it (strictQueries.ts): limit and offset, u64 LE. */
-    private fun walletHistoryArgs(): ByteArray =
-        ArgPack.newBuilder()
-            .setCodec(Codec.CODEC_PROTO)
-            .setBody(ByteString.copyFrom(ByteArray(16)))
-            .build()
-            .toByteArray()
 
     /** The bytes a routed call answered; a refusal fails the test with Rust's reason. */
     private fun okBytes(response: IngressResponse, route: String): ByteArray {

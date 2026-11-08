@@ -285,7 +285,7 @@ export default function SofiScreen(): React.JSX.Element {
               </div>
             </div>
 
-            <div className="sb-field" data-tour="swap-get">
+            <div className="sb-field">
               <label htmlFor="sofi-token-out-anchor">You get</label>
               <TokenSelect
                 label="Token out"

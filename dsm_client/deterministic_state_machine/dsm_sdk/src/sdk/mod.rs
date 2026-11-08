@@ -42,6 +42,7 @@ pub mod app_lock; // The app lock: Rust enrolls and checks the PIN or pattern
 pub mod app_state; // Shared application state management
 pub mod apply_outcome; // §16.6 tri-state full-state apply outcome
 pub mod b0x_sdk;
+pub mod bounded_read; // every answer body read within its kind's limit or a local budget
 pub mod chain_tip_store;
 pub mod connect; // DSM Connect: a Web2 application connected to a wallet (DSM Amendment A11)
 pub mod core_sdk;
@@ -86,7 +87,9 @@ pub mod transfer_hooks;
 pub mod recovery_sdk;
 pub mod recovery_store;
 
-// Hardware-sealed wallet-seed vault (cold-start signer unlock without the mnemonic)
+// Hardware-sealed wallet-seed vault (cold-start signer unlock without the mnemonic),
+// on the builds whose platform holds a key to seal under.
+#[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
 pub mod seed_vault;
 
 // Transport and communication modules
@@ -100,6 +103,7 @@ pub mod receipts;
 pub mod contact_profile; // a person's details as the wallet shows them (DSM Amendment A17)
 pub mod contact_sdk;
 pub mod email_receipts; // a courtesy email receipt after a send (DSM Amendment A17)
+pub mod money_waiting; // the count on the app icon of money received and not yet looked at
 
 pub mod wallet_sdk;
 

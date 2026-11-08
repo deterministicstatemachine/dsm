@@ -21,8 +21,9 @@
 use dsm::economic::claim_envelope::RegisteredEconomicClaim;
 use dsm::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use dsm::economic::peer_lineage::{
-    peer_claim_at, peer_root_at, validate_peer_step, Checked, ConditionalPositionResolver,
-    PeerEvidenceFetcher, StepCost,
+    peer_claim_at, peer_root_at, scan_offline_boundaries, validate_peer_step, Checked, OfflineScan,
+    ConditionalPositionResolver, OfflineRecords, PeerEvidenceFetcher, StepCost,
+    OFFLINE_SCAN_POSITIONS,
 };
 use dsm::sofi::wire::ParentClaimRef;
 use dsm::economic::provenance::{
@@ -99,7 +100,7 @@ pub(crate) async fn next_root_cell(
     let cell = root_cell(set, network_id, genesis, devid, next, root)?;
     let seats = NodeSeats::new(set)?;
     // A claim final at the cell holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+    let evidence = read_cell_kept(&seats, cell.routed(), &cell.keeps(), |evidence| {
         root_claim_final(&cell, evidence)
     })
     .await;
@@ -112,14 +113,16 @@ pub(crate) async fn next_root_cell(
 
 /// Write this device's frozen root claim at its root cell, along the cell's
 /// route (storage spec §9), continuing an earlier write of the same claim.
-/// Which claim holds the cell is read back ([`root_claim_settlement`]),
-/// never inferred from the write.
+/// At the leader the cell's own rule for what can count there decides
+/// whether another claim is first, and the write is then taken. Which claim
+/// holds the cell is read back ([`root_claim_settlement`]), never inferred
+/// from the write.
 pub async fn register_economic_root(
     set: &StorageSet,
     cell: &RootCell,
     frozen_envelope: &[u8],
 ) -> Result<WriteReport, DsmError> {
-    write_recorded(set, cell.routed(), frozen_envelope).await
+    write_recorded(set, cell.routed(), &cell.keeps(), frozen_envelope).await
 }
 
 /// What the root cell settled for one claim.
@@ -146,7 +149,7 @@ pub async fn root_claim_settlement(
 ) -> Result<RootClaimSettlement, DsmError> {
     let seats = NodeSeats::new(set)?;
     // A claim final at the cell holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+    let evidence = read_cell_kept(&seats, cell.routed(), &cell.keeps(), |evidence| {
         root_claim_final(cell, evidence)
     })
     .await;
@@ -170,8 +173,8 @@ pub async fn root_claim_settlement(
 
 /// The LIVE provenance resolver: raw reads of the register cells Core names,
 /// the native reserve walked from its genesis state, immutable objects
-/// re-hash-verified, and peers' steps verified by Core one hop, each from its
-/// own parent (DSM Amendment A14).
+/// re-hash-verified, and peers' steps validated by Core, each from its own
+/// parent (DSM Amendment A14).
 pub struct LiveRegisterResolver<'a> {
     pub set: &'a StorageSet,
     pub runtime: tokio::runtime::Handle,
@@ -221,11 +224,11 @@ impl LiveRegisterResolver<'_> {
             .map_err(|e| incomplete("root register set", e))
     }
 
-    /// A step's manifest names the three objects a walk asks for next: the
+    /// A step's manifest names the three objects a check asks for next: the
     /// authority evidence, the transition witness and the successor evidence.
-    /// They are fetched together into the kept objects, so the walk's three
+    /// They are fetched together into the kept objects, so the check's three
     /// asks find them there instead of each waiting on a round trip of its
-    /// own. A fetch that fails here changes nothing: the walk asks for that
+    /// own. A fetch that fails here changes nothing: the check asks for that
     /// object itself and meets the failure there.
     fn prefetch_step_objects(&self, manifest_bytes: &[u8]) {
         use dsm::common::domain_tags::{
@@ -235,7 +238,7 @@ impl LiveRegisterResolver<'_> {
         let manifest = match dsm::economic::decode::decode_admission_manifest(manifest_bytes) {
             Ok(manifest) => manifest,
             Err(e) => {
-                // The walk decodes the same bytes and refuses them itself.
+                // The check decodes the same bytes and refuses them itself.
                 log::debug!("step prefetch: not a manifest: {e}");
                 return;
             }
@@ -320,14 +323,16 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         asked_cells::note(cell.routed().key());
         // A claim final at a root cell holds it for good (storage spec §9,
         // finality 2): reads Core evaluated as showing one are kept, and a
-        // later walk through the same position evaluates them again instead
-        // of reading the route.
+        // later check of the same position evaluates them again instead of
+        // reading the route.
         if let Some(kept) = crate::sdk::final_reads::final_cell(cell.routed()) {
             return Ok(kept);
         }
         let seats = NodeSeats::new(self.set).map_err(|e| incomplete("register seats", e))?;
-        let evidence =
-            tokio::task::block_in_place(|| self.runtime.block_on(read_cell(&seats, cell.routed())));
+        let evidence = tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(read_cell(&seats, cell.routed(), &cell.keeps()))
+        });
         if matches!(
             read_root_cell(cell, &evidence),
             Ok(CellReading::Held {
@@ -395,12 +400,19 @@ pub(crate) async fn register_key_values(
     #[cfg(test)]
     asked_cells::note(&key);
     let namespace = dsm::economic::register::economic_root_namespace();
+    // Only a claim naming this key is kept: what anyone else wrote under it
+    // costs the read and nothing it holds.
+    let keep = |bytes: &[u8]| {
+        dsm::route_chain::RouteEntry::decode(bytes).is_some_and(|entry| {
+            entry.namespace == namespace
+                && entry.key == key
+                && dsm::economic::register::root_claim_naming(&entry.value, &key).is_some()
+        })
+    };
     let members = seats.members();
-    let answers = futures::future::join_all(
-        members
-            .iter()
-            .map(|member| seats.read_values(member, namespace, &key)),
-    )
+    let answers = futures::future::join_all(members.iter().map(|member| {
+        crate::sdk::route_seats::kept_values(&seats, member, namespace, &key, &keep)
+    }))
     .await;
     if answers.iter().all(Option::is_none) {
         return Err(PeerLineageFailure::Incomplete(format!(
@@ -411,12 +423,33 @@ pub(crate) async fn register_key_values(
     Ok(answers.into_iter().flatten().flatten().collect())
 }
 
+/// The offline accounts this receiver recorded of its peers, as its store
+/// holds them (the owner's receive rule, 2026-10-22).
+pub struct StoredOfflineRecords;
+
+impl OfflineRecords for StoredOfflineRecords {
+    fn offline_account_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        bundle: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineAccount>, PeerLineageFailure> {
+        crate::storage::client_db::economic_lineage::offline_account_below(
+            genesis, device_id, bundle, position,
+        )
+        .map_err(|e| {
+            PeerLineageFailure::Incomplete(format!("the offline account store is unreadable: {e}"))
+        })
+    }
+}
+
 /// What one check of a peer's step cost, logged where it ran (DSM Amendment
 /// A14): every count is bounded by a constant, whatever the position.
 fn log_cost(what: &str, devid: &[u8; 32], position: u64, cost: &StepCost) {
     log::info!(
         "[A14] {what} of {} at position {position}: register_probes={} routed_reads={} \
-         source_steps={} conditional_hops={} history_steps=0 frontier_reads=0",
+         source_steps={} conditional_hops={}",
         text_id::encode_base32_crockford(devid),
         cost.register_probes,
         cost.routed_reads,
@@ -425,14 +458,37 @@ fn log_cost(what: &str, devid: &[u8; 32], position: u64, cost: &StepCost) {
     );
 }
 
+/// Record what a check validated, in one transaction, whatever the check was
+/// for: the offline accounts the boundaries it passed left, the payments they
+/// exposed, and the EK steps it verified. Core returns them only from steps
+/// that passed whole, so nothing a peer sent, registered or signed is recorded
+/// here. A store that cannot be written leaves the check's answer not
+/// established, as a store that cannot be read does.
+fn record_established<T>(
+    what: &str,
+    devid: &[u8; 32],
+    position: u64,
+    checked: Checked<T>,
+) -> Result<T, PeerLineageFailure> {
+    log_cost(what, devid, position, &checked.cost());
+    crate::storage::client_db::economic_lineage::record_validated(
+        checked.offline_accounts(),
+        checked.offline_exposures(),
+        checked.ek_steps(),
+    )
+    .map_err(|e| {
+        PeerLineageFailure::Incomplete(format!("recording what this check validated: {e}"))
+    })?;
+    Ok(checked.into_answer())
+}
+
 /// A peer's step at `peer_economic_position`, validated from its own parent
-/// (DSM Amendment A14), for a caller that accepts nothing from the peer.
+/// (DSM Amendment A14), over WHATEVER fetcher the caller supplies.
 ///
-/// A step is fixed once its claim is final, so this process keeps each one it
-/// validated, by network, peer and position, and answers the same question
-/// from it: a vault's chain names the same traders at the same positions
-/// generation after generation. Only a validation is kept; a refusal or an
-/// incomplete check is checked again.
+/// Core answers every time it is asked here. What a validation read is kept
+/// as evidence (`final_reads`: final cells and immutable objects), and the
+/// process keeps no verdict (SA-92). One SoFi operation's contexts keep the
+/// answers they were given for that operation alone (`sofi_reads`).
 pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -441,34 +497,21 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     peer_economic_position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-    let key = (
-        expected_network_id.to_vec(),
-        *peer_genesis,
-        *peer_devid,
-        peer_economic_position,
-    );
-    if let Some(known) = validated_peers().steps.get(&key) {
-        return Ok(known);
-    }
     let checked = validate_peer_step(
         fetcher,
         expected_network_id,
         peer_genesis,
         peer_devid,
         peer_economic_position,
+        &StoredOfflineRecords,
         conditional,
     )?;
-    log_cost("step", peer_devid, peer_economic_position, &checked.cost());
-    let step = checked.into_answer();
-    validated_peers().steps.keep(key, step.clone());
-    Ok(step)
+    record_established("step", peer_devid, peer_economic_position, checked)
 }
 
 /// The root a trader selected at a position and the reference a later `P`
 /// names it by (`SofiReads::trader_root_at`), validated one hop (DSM
-/// Amendment A14). Kept as [`resolve_peer`] keeps a step, and for the same
-/// reason: a holdings status asked every few seconds, and a vault asked the
-/// same trader's parent for every exercise naming it.
+/// Amendment A14).
 pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -477,28 +520,21 @@ pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
     position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure> {
-    let key = (expected_network_id.to_vec(), *genesis, *device_id, position);
-    if let Some(known) = validated_peers().roots.get(&key) {
-        return Ok(known);
-    }
     let checked = peer_root_at(
         fetcher,
         expected_network_id,
         genesis,
         device_id,
         position,
+        &StoredOfflineRecords,
         conditional,
     )?;
-    log_cost("root", device_id, position, &checked.cost());
-    let known = checked.into_answer();
-    validated_peers().roots.keep(key, known);
-    Ok(known)
+    record_established("root", device_id, position, checked)
 }
 
 /// The claim a trader accepted at a position (`SofiReads::accepted_claim_at`
 /// for another trader): what a setup naming that position is checked against
-/// (SoFi Amendment S15, MR-SOFI-0347), validated one hop (DSM Amendment
-/// A14). Kept as [`resolve_peer_root`] keeps a root.
+/// (SoFi Amendment S15, MR-SOFI-0347), validated one hop (DSM Amendment A14).
 pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -507,100 +543,104 @@ pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<AcceptedClaim, PeerLineageFailure> {
-    let key = (expected_network_id.to_vec(), *genesis, *device_id, position);
-    if let Some(known) = validated_peers().claims.get(&key) {
-        return Ok(known);
-    }
     let checked = peer_claim_at(
         fetcher,
         expected_network_id,
         genesis,
         device_id,
         position,
+        &StoredOfflineRecords,
         conditional,
     )?;
-    log_cost("claim", device_id, position, &checked.cost());
-    let accepted = checked.into_answer();
-    validated_peers().claims.keep(key, accepted);
-    Ok(accepted)
+    record_established("claim", device_id, position, checked)
 }
 
-/// A peer's position on a network: what [`ValidatedPeers`] keeps answers by.
-type PeerKey = (Vec<u8>, [u8; 32], [u8; 32], u64);
-
-/// What complete checks established, by network, peer and position.
-struct Kept<V> {
-    entries: std::sync::Mutex<std::collections::HashMap<PeerKey, V>>,
+/// Validate one hop the offline boundaries among `positions` of a payer,
+/// recording the accounts they left and the payments they exposed. A read that
+/// stops short records what it validated. One that meets a boundary that
+/// verifies as wrong records nothing.
+async fn read_payer_offline_boundaries(
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    positions: std::ops::Range<u64>,
+) -> Result<OfflineScan, PeerLineageFailure> {
+    let network_id = crate::sdk::economic_admission_flow::committed_network_id()
+        .map_err(|e| PeerLineageFailure::Incomplete(format!("the committed network: {e}")))?;
+    let set = crate::sdk::storage_set::canonical_set(&network_id)
+        .map_err(|e| PeerLineageFailure::Incomplete(format!("the register set: {e}")))?;
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let live = LiveRegisterResolver {
+            set: &set,
+            runtime,
+            expected_network_id: network_id.clone(),
+        };
+        let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
+            .map_err(|e| PeerLineageFailure::Incomplete(format!("SoFi reads: {e}")))?;
+        let checked = scan_offline_boundaries(
+            &live,
+            &network_id,
+            &genesis,
+            &device_id,
+            positions,
+            &StoredOfflineRecords,
+            &sofi.peer_position_resolver(),
+        )?;
+        let reached = checked.answer().reached();
+        record_established("offline scan", &device_id, reached, checked)
+    })
+    .await
+    .map_err(|e| PeerLineageFailure::Incomplete(format!("the payer's read did not finish: {e}")))?
 }
 
-impl<V: Clone> Kept<V> {
-    fn new() -> Self {
-        Self {
-            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-    /// The kept answers. A thread that panicked holding the lock left whole
-    /// entries behind (each is inserted in one step), so the map is taken as
-    /// it stands.
-    fn entries(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<PeerKey, V>> {
-        match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-    fn get(&self, key: &PeerKey) -> Option<V> {
-        self.entries().get(key).cloned()
-    }
-    fn keep(&self, key: PeerKey, value: V) {
-        let mut entries = self.entries();
-        if entries.len() >= VALIDATED_PEERS_MAX {
-            entries.clear();
-        }
-        entries.insert(key, value);
-    }
+/// Scan a payer's positions from `from` for the offline boundaries that expose
+/// what it paid this device offline (SA-91), within
+/// [`OFFLINE_SCAN_POSITIONS`].
+pub(crate) async fn scan_payer_offline_boundaries(
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    from: u64,
+) -> Result<(), String> {
+    let scan = read_payer_offline_boundaries(
+        genesis,
+        device_id,
+        from..from.saturating_add(OFFLINE_SCAN_POSITIONS),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    log::info!(
+        "[A14] payer {} scanned from position {from} to {}: {:?}",
+        text_id::encode_base32_crockford(&device_id),
+        scan.reached(),
+        scan.stop()
+    );
+    Ok(())
 }
 
-/// The steps, roots and claims this process validated, kept because a final
-/// claim's answer never changes.
-pub(crate) struct ValidatedPeers {
-    /// The steps [`resolve_peer`] and admission prevalidation validated.
-    steps: Kept<ValidatedPeerTransition>,
-    /// The roots [`resolve_peer_root`] established.
-    roots: Kept<(ValidatedEconomicRoot, ParentClaimRef)>,
-    /// The claims [`resolve_peer_claim`] established.
-    claims: Kept<AcceptedClaim>,
-}
-
-/// More than a phone's traders: past it the memory starts over.
-const VALIDATED_PEERS_MAX: usize = 4096;
-
-impl ValidatedPeers {
-    #[cfg(test)]
-    pub(crate) fn forget(&self) {
-        self.steps.entries().clear();
-        self.roots.entries().clear();
-        self.claims.entries().clear();
-    }
-}
-
-pub(crate) fn validated_peers() -> &'static ValidatedPeers {
-    static PEERS: once_cell::sync::Lazy<ValidatedPeers> =
-        once_cell::sync::Lazy::new(|| ValidatedPeers {
-            steps: Kept::new(),
-            roots: Kept::new(),
-            claims: Kept::new(),
-        });
-    &PEERS
+/// The one position a payer's notice names (DSM Amendment A30), validated one
+/// hop when it is an offline boundary. A constant cost, whatever the position
+/// and however long the payer's history. The notice is believed in nothing:
+/// a step that is no boundary is read and records nothing. The scan has reached
+/// `position` only when the position was read to its end.
+pub(crate) async fn record_peer_offline_boundary(
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    position: u64,
+) -> Result<OfflineScan, PeerLineageFailure> {
+    let next = position.checked_add(1).ok_or_else(|| {
+        PeerLineageFailure::Invalid(format!("position {position} is past every position"))
+    })?;
+    read_payer_offline_boundaries(genesis, device_id, position..next).await
 }
 
 /// The RECORDING fetch boundary for recipient prevalidation. It IS the
-/// `PeerEvidenceFetcher` the walker consumes, so every immutable object any
-/// nested verification fetched lands in `recorded`, exact bytes by exact
+/// `PeerEvidenceFetcher` the step check consumes, so every immutable object
+/// any nested verification fetched lands in `recorded`, exact bytes by exact
 /// address.
 pub struct RecordingResolver<'a> {
     pub inner: &'a LiveRegisterResolver<'a>,
     /// `(namespace, inner addr, exact verified bytes)` for every immutable
-    /// fetch the walk consumed. Register cells are read live along their
+    /// fetch the check consumed. Register cells are read live along their
     /// routes and are not part of the recorded closure.
     pub recorded: std::cell::RefCell<
         Vec<(
@@ -619,42 +659,23 @@ impl<'a> RecordingResolver<'a> {
         }
     }
 
-    /// The peer's step validated from its own parent (DSM Amendment A14),
-    /// recorded at the fetch boundary, with what checking it cost. The step
-    /// is kept as [`resolve_peer`] keeps one: the admission that accepts it
-    /// asks [`resolve_peer`] for the same transition when it advances its own
-    /// root, and finds it there.
+    /// The peer's step validated from its own parent (DSM Amendment A14), its
+    /// evidence recorded at the fetch boundary.
     pub fn validated_peer_step(
         &self,
         peer_genesis: &[u8; 32],
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
         conditional: &dyn ConditionalPositionResolver,
-    ) -> Result<Checked<ValidatedPeerTransition>, PeerLineageFailure> {
-        let checked = validate_peer_step(
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        resolve_peer(
             self,
             &self.inner.expected_network_id,
             peer_genesis,
             peer_devid,
             peer_economic_position,
             conditional,
-        )?;
-        log_cost(
-            "offered step",
-            peer_devid,
-            peer_economic_position,
-            &checked.cost(),
-        );
-        validated_peers().steps.keep(
-            (
-                self.inner.expected_network_id.clone(),
-                *peer_genesis,
-                *peer_devid,
-                peer_economic_position,
-            ),
-            checked.answer().clone(),
-        );
-        Ok(checked)
+        )
     }
 }
 
@@ -672,6 +693,7 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         device_id: &[u8; 32],
         position: u64,
     ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+        // Discovery, not part of the recorded closure.
         dsm::economic::peer_lineage::PeerEvidenceFetcher::register_key_values(
             self.inner, genesis, device_id, position,
         )
@@ -736,8 +758,8 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        // A conditional position in the peer's segment is resolved from
-        // SoFi's public objects for that position (SoFi Amendment S15).
+        // A conditional position is resolved from SoFi's public objects for
+        // that position (SoFi Amendment S15).
         let context =
             crate::sdk::sofi_reads::VerifierContext::new(self.set, None, None).map_err(|e| {
                 PeerLineageFailure::Incomplete(format!("SoFi reads are unavailable: {e}"))
@@ -806,35 +828,73 @@ pub(crate) fn anchored_policy_bytes(
     policy_commit: &[u8; 32],
     runtime: &tokio::runtime::Handle,
 ) -> Result<Vec<u8>, PeerLineageFailure> {
+    match held_policy_bytes(policy_commit)? {
+        Some(bytes) => Ok(bytes),
+        None => tokio::task::block_in_place(|| {
+            runtime.block_on(fetched_policy_bytes(set, policy_commit))
+        }),
+    }
+}
+
+/// [`anchored_policy_bytes`] for a caller already on the runtime.
+pub(crate) async fn anchored_policy_bytes_async(
+    set: &StorageSet,
+    policy_commit: &[u8; 32],
+) -> Result<Vec<u8>, PeerLineageFailure> {
+    match held_policy_bytes(policy_commit)? {
+        Some(bytes) => Ok(bytes),
+        None => fetched_policy_bytes(set, policy_commit).await,
+    }
+}
+
+/// The policy bytes a Transfer or Burn of `policy_commit` carries (owner
+/// question 9, 2026-10-27): the token's committed policy as this device holds
+/// it, ERA's being Core's own bytes. A device moves only a token it holds,
+/// and it adopted that token's policy to hold it. Core re-hashes the bytes to
+/// the commit in the write set; this is only where they come from.
+pub(crate) fn carried_token_policy(policy_commit: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
+    match held_policy_bytes(policy_commit) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err(DsmError::invalid_operation(
+            "this device holds no committed policy for the token: it moves only tokens whose \
+             policy it adopted",
+        )),
+        Err(failure) => Err(DsmError::invalid_operation(format!(
+            "the token's committed policy: {failure}"
+        ))),
+    }
+}
+
+/// The policy this device already holds for `policy_commit`, or none.
+fn held_policy_bytes(policy_commit: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
     // ERA's policy is Core's own (SoFi Amendment S11): answered from its
     // bytes, never fetched and never stored.
     if *policy_commit == dsm::core::token::token_state_manager::era_policy_commit() {
-        return Ok(dsm::core::token::era_policy::era_policy_bytes().to_vec());
+        return Ok(Some(
+            dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+        ));
     }
-    match crate::storage::client_db::token_registry::load_policy_verified(policy_commit) {
-        Ok(Some(bytes)) => return Ok(bytes),
-        Ok(None) => {}
-        Err(e) => {
-            return Err(PeerLineageFailure::Incomplete(format!(
-                "the local token policy store is unreadable: {e}"
-            )))
-        }
-    }
-    let tag = dsm::common::domain_tags::TAG_DSM_POLICY;
-    let bytes = tokio::task::block_in_place(|| {
-        runtime.block_on(crate::sdk::storage_io::fetch_immutable(
-            set,
-            tag,
-            policy_commit,
-        ))
+    crate::storage::client_db::token_registry::load_policy_verified(policy_commit).map_err(|e| {
+        PeerLineageFailure::Incomplete(format!("the local token policy store is unreadable: {e}"))
     })
-    .map_err(|e| incomplete("token policy fetch", e))?
-    .ok_or_else(|| {
-        PeerLineageFailure::Incomplete(format!(
-            "no member holds the policy {}",
-            text_id::encode_base32_crockford(policy_commit)
-        ))
-    })?;
+}
+
+/// The policy object `policy_commit` names, fetched from `set`, re-hashed,
+/// and kept.
+async fn fetched_policy_bytes(
+    set: &StorageSet,
+    policy_commit: &[u8; 32],
+) -> Result<Vec<u8>, PeerLineageFailure> {
+    let tag = dsm::common::domain_tags::TAG_DSM_POLICY;
+    let bytes = crate::sdk::storage_io::fetch_immutable(set, tag, policy_commit)
+        .await
+        .map_err(|e| incomplete("token policy fetch", e))?
+        .ok_or_else(|| {
+            PeerLineageFailure::Incomplete(format!(
+                "no member holds the policy {}",
+                text_id::encode_base32_crockford(policy_commit)
+            ))
+        })?;
     if dsm::crypto::blake3::domain_hash_bytes(tag, &bytes) != *policy_commit {
         return Err(PeerLineageFailure::Incomplete(format!(
             "the bytes served for policy {} are not that policy",
@@ -886,14 +946,17 @@ pub(crate) fn missing_text(missing: Missing) -> String {
         Missing::LeaderLinkUnseen { position } => {
             format!("the seat at position {position} has not seen the leader link yet")
         }
+        Missing::CompletionRefuted => {
+            "fresh reads refuted the completion proof kept for the value final here".into()
+        }
     }
 }
 
-/// Every root-register key a check asked this process's resolver for, its
-/// unrouted probes and its routed reads alike, kept reads included: a one-hop
-/// check asks the key of each position it validates, so this counts the
-/// positions read where the members' request logs cannot (a final cell is
-/// read from its seats once and kept). Observation for tests.
+/// Every register key and routed root-cell key a check asked this process's
+/// resolver for, kept reads included: a check asks the key and the cell of the
+/// position it validates, so this counts the positions read where the members'
+/// request logs cannot (a final cell is read from its seats once and kept).
+/// Observation for tests.
 #[cfg(test)]
 pub(crate) mod asked_cells {
     use std::collections::HashMap;

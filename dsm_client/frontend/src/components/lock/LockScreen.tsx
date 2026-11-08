@@ -18,6 +18,7 @@ import type { NativeSessionReport } from '../../runtime/nativeSessionTypes';
 import { walletStore } from '../../stores/walletStore';
 import { contactsStore } from '../../stores/contactsStore';
 import { Notice } from '../common/ScreenFrame';
+import { ScreenGuard } from '../common/ScreenGuard';
 import './LockScreen.css';
 
 const POW_WORDS = ['POW!', 'ZAP!', 'BAM!', 'BOOM!', '✓ OPEN'];
@@ -84,6 +85,9 @@ export default function LockScreen() {
 
   return (
     <div className={`lock-screen sb-screen${shake}`}>
+      {/* Once only the recovery phrase opens the wallet, it is typed here: the
+          phone takes no screenshot and the keyboard learns nothing meanwhile. */}
+      {phraseRequired ? <ScreenGuard kind="secret" /> : null}
 
       {opened !== null && (
         <div className="lock-pow-overlay">
@@ -117,6 +121,7 @@ export default function LockScreen() {
                 value={phrase}
                 onChange={(e) => setPhrase(e.target.value)}
                 autoComplete="off"
+                autoCorrect="off"
                 autoCapitalize="none"
               />
             </div>

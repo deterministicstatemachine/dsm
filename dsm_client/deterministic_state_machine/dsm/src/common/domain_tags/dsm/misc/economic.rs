@@ -129,10 +129,17 @@ pub const TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT: TaggedHashDomain<'static> =
 /// `network_id` from the AUTHENTICATED Genesis v3, never from the claimant.
 pub const TAG_DSM_NATIVE_RESERVE_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/native-reserve-id/v1");
+/// The step a native reserve's genesis state `R_0` names as its predecessor:
+/// `H(tag ‖ 0x00 ‖ reserve_id)`. Every later state names the release that
+/// installed it, and the root commits it (SA-63).
+pub const TAG_DSM_NATIVE_RESERVE_GENESIS_STEP: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-genesis-step/v1");
 /// The root of a native reserve state:
-/// `R_n = H(tag ‖ 0x00 ‖ reserve_id ‖ policy_commit ‖ u64_be(remaining) ‖ u64_be(generation) ‖ storage_set_id)`.
+/// `R_n = H(tag ‖ 0x00 ‖ reserve_id ‖ policy_commit ‖ u64_be(remaining) ‖ u64_be(generation) ‖
+/// storage_set_id ‖ predecessor)`, where `predecessor` is the step digest of
+/// the release that installed it (SA-63; v1 committed no predecessor).
 pub const TAG_DSM_NATIVE_RESERVE_STATE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/native-reserve-state/v1");
+    crate::tagged_domain!(b"DSM/native-reserve-state/v2");
 /// The successor cell of a reserve state: `K = H(tag ‖ 0x00 ‖ reserve_id ‖ R_n)`.
 /// Its source bytes are also the cell namespace at a member.
 pub const TAG_DSM_NATIVE_RESERVE_CELL: TaggedHashDomain<'static> =
@@ -141,6 +148,11 @@ pub const TAG_DSM_NATIVE_RESERVE_CELL: TaggedHashDomain<'static> =
 /// `s = H(tag ‖ 0x00 ‖ reserve_id ‖ R_n)`; the leader is `FisherYates(s, S)[0]`.
 pub const TAG_DSM_NATIVE_RESERVE_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/native-reserve-seed/v1");
+/// The seal over a reader's checkpoint of the reserve lineage it established
+/// (SA-75): `KH_k(tag ‖ 0x00 ‖ reserve_id ‖ u64_be(n) ‖ d_n ‖ R_n)` under a key
+/// only that reader holds.
+pub const TAG_DSM_NATIVE_RESERVE_CHECKPOINT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-checkpoint/v1");
 /// The signed preimage of a reserve release:
 /// `m = H(tag ‖ 0x00 ‖ canonical NativeReserveReleaseBodyV1 bytes)`.
 pub const TAG_DSM_NATIVE_RESERVE_RELEASE_SIGN: TaggedHashDomain<'static> =
@@ -176,6 +188,36 @@ pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM: TaggedHashDomain<'static> =
 /// domain two meanings; hence `/v2`, and `/v1` is never reused.
 pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-operation-id/dsm/v2");
+/// Identity of an offline boundary (a load into, or an unload out of, an
+/// offline account): `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ kind ‖ B ‖ asset ‖
+/// u64_be(amount) ‖ R_A ‖ R_off)`, over the device root and the account root
+/// the boundary starts from. It is the value of the account's origin leaf, so
+/// its preimage holds no root the boundary produces.
+pub const TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_BOUNDARY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-operation-id/offline-boundary/v1");
+/// The hash of a bearer transfer's operation bytes that an anchor transition
+/// carries as its `payload_hash`: `H(tag ‖ 0x00 ‖ operation bytes)`. The
+/// anchor signs it within the transition digest, so a spend's payment names
+/// the operation that made it, the recipient's lineage included (SA-133).
+pub const TAG_DSM_BEARER_PAYLOAD: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/bearer-payload/v1");
+/// Economic operation id of an offline settlement: `H(tag ‖ 0x00 ‖ G ‖ DevID
+/// ‖ G_payer ‖ DevID_payer ‖ M)`, the receiver's one settlement of the payer's
+/// spend the anchor signed as `M`.
+pub const TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_SETTLEMENT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-operation-id/offline-settlement/v1");
+/// Digest of an offline boundary body for economic binding:
+/// `operation_digest = H(tag ‖ 0x00 ‖ exact body bytes)`.
+pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_OFFLINE_BOUNDARY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-operation-digest/offline-boundary/v1");
+/// Immutable-store namespace of the exact offline boundary body bytes the
+/// manifest's offline-boundary substrate slot names.
+pub const TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-offline-boundary-evidence/v1");
+/// `SourceId` an unload's online credit consumes (`0x0075`):
+/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ boundary id)`. One per unload.
+pub const TAG_DSM_ECON_SOURCE_OFFLINE_BOUNDARY_DEBIT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/offline-boundary-debit/v1");
 
 /// Digest of the exact `EconomicRootClaimV1` envelope bytes a register member
 /// stores and compares: `H(tag ‖ 0x00 ‖ envelope_bytes)`. The settlement

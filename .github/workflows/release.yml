@@ -33,8 +33,11 @@ on:
     tags:
       - 'v*'
 
+# Every job reads the repository and nothing more, except `publish`, the one
+# job that creates the GitHub Release: no build or test step — which runs
+# build scripts and tests from every dependency — holds a token that writes.
 permissions:
-  contents: write   # required to create GitHub Releases
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -93,11 +96,14 @@ jobs:
     env:
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+        with:
+          # rust-analyzer, rust-src: the G1 negative control (dsm_sdk source_rules).
+          components: rust-analyzer, rust-src
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install CI system deps
         run: |
@@ -109,17 +115,32 @@ jobs:
 
       - name: Test (workspace, then the storage node on Postgres)
         run: |
+          set -euo pipefail
           # --test-threads=1 for the same reason as ci.yml: process-global
           # singletons make parallel test threads a nondeterministic flake
           # source, and #[serial] only serializes #[serial] tests against each
           # other. This workflow previously omitted the flag, running a
           # parallelism the merge gate never exercised.
-          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1
+          # The board is kept, headed by the commit it ran on: the
+          # security-assurance record decides each named test from it and
+          # refuses a board that names another commit.
+          mkdir -p board
+          echo "commit $(git rev-parse HEAD)" > board/board.log
+          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board/board.log
+          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board/board.log
+
+      - name: Upload the board log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-board-log
+          path: board/board.log
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Security audit (every tracked Cargo.lock)
         run: |
-          cargo install cargo-audit --quiet --locked || true
+          cargo install cargo-audit --quiet --locked --version 0.22.2
           bash ci/audit_every_lockfile.sh
 
   # --------------------------------------------------------------------------
@@ -129,15 +150,18 @@ jobs:
   build-storage-node:
     name: Build storage node (linux-x86_64)
     runs-on: ubuntu-latest
-    needs: [test-gate]
+    # validate-tag for the version every asset is named with (a job reads only
+    # the outputs of the jobs it needs), test-gate so nothing builds from a
+    # red commit.
+    needs: [validate-tag, test-gate]
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install build deps
         run: |
@@ -166,7 +190,7 @@ jobs:
           echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: Upload storage node artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dsm-storage-node-linux-x86_64
           path: |
@@ -181,13 +205,16 @@ jobs:
   build-frontend:
     name: Build frontend bundle
     runs-on: ubuntu-latest
-    needs: [test-gate]
+    # validate-tag for the version every asset is named with (a job reads only
+    # the outputs of the jobs it needs), test-gate so nothing builds from a
+    # red commit.
+    needs: [validate-tag, test-gate]
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: npm
@@ -221,7 +248,7 @@ jobs:
           echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: Upload frontend bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dsm-frontend-bundle
           path: |
@@ -235,33 +262,64 @@ jobs:
   # the full TLA check, unlike ci.yml's per-push SBOM which skips it).
   # --------------------------------------------------------------------------
   build-sbom:
-    name: Build SBOM (with validation evidence)
+    name: Build SBOM (with validation evidence and security assurance)
     runs-on: ubuntu-latest
-    needs: [test-gate]
+    # validate-tag for the version every asset is named with (a job reads only
+    # the outputs of the jobs it needs), test-gate so nothing builds from a
+    # red commit.
+    needs: [validate-tag, test-gate]
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install SBOM tooling
         run: |
           sudo apt-get update
           sudo apt-get install -y jq protobuf-compiler
-          cargo install cargo-cyclonedx --quiet --locked
+          cargo install cargo-cyclonedx --quiet --locked --version 0.5.9
 
-      - name: Generate SBOM with validation
+      # The security-assurance record kernel-checks every Lean module itself
+      # (scripts/generate-assurance.py); without Lean it records the check as
+      # skipped, never as passed.
+      - name: Cache elan toolchain
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.elan
+          key: elan-${{ hashFiles('lean4/lean-toolchain') }}
+
+      - name: Install elan
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.elan/bin/lean" ]; then
+            # elan v4.2.4's installer, by commit and digest (SA-155), as the CI Lean job pins it.
+            curl -fsSL -o elan-init.sh \
+              https://raw.githubusercontent.com/leanprover/elan/227caca133724d5516bee25c2aeb3e609478f2d8/elan-init.sh
+            echo "a620ff1641616222c8d37c54845492004bb84d6877cdbc944dd65c1aa685bf53  elan-init.sh" | sha256sum -c -
+            sh elan-init.sh -y --default-toolchain "$(cat lean4/lean-toolchain)"
+            rm elan-init.sh
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Download the board log
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-board-log
+          path: board/
+
+      - name: Generate SBOM with validation and the security-assurance record
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
-        run: ./scripts/generate-sbom.sh --run-id "v${VERSION}"
+        run: ./scripts/generate-sbom.sh --run-id "v${VERSION}" --board-log board/board.log
 
       - name: Package SBOM bundle
         env:
@@ -283,7 +341,7 @@ jobs:
           echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: Upload SBOM bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dsm-sbom-bundle
           path: |
@@ -301,28 +359,30 @@ jobs:
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create GitHub Releases
     needs:
       - validate-tag
       - build-storage-node
       - build-frontend
       - build-sbom
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download storage node artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dsm-storage-node-linux-x86_64
           path: dist/
 
       - name: Download frontend bundle
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dsm-frontend-bundle
           path: dist/
 
       - name: Download SBOM bundle
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dsm-sbom-bundle
           path: dist/
@@ -394,7 +454,7 @@ jobs:
           head -40 dist/RELEASE_BODY.md
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ github.ref_name }}
           name: DSM ${{ github.ref_name }}

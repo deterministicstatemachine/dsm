@@ -191,9 +191,8 @@ mod tests {
             payload: payload.to_vec(),
         }
         .encode_to_vec();
-        let digest =
-            dsm::crypto::blake3::domain_hash(authored_objects::TAG_AUTHORED_STATEMENT, &body);
-        let signature = sphincs_sign(&kp.secret_key, digest.as_bytes()).expect("a signature");
+        let signature = sphincs_sign(&kp.secret_key, &dsm::authored_object::statement(&body))
+            .expect("a signature");
         generated::AuthoredObjectV1 { body, signature }.encode_to_vec()
     }
 
@@ -217,13 +216,17 @@ mod tests {
         let me = d.identity.device_id;
         let forged = impostor(&me, topic, b"a modded state");
         let set = canonical_set(NETWORK).expect("the pinned set");
-        let (addr, _) = put_immutable(&set, authored_objects::TAG_AUTHORED_OBJECT, &forged)
-            .await
-            .expect("the put");
+        let (addr, _) = put_immutable(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_AUTHORED_OBJECT,
+            &forged,
+        )
+        .await
+        .expect("the put");
         append_to_index(
             &set,
-            authored_objects::TAG_AUTHORED_LOCATOR.source_bytes(),
-            &authored_objects::locator(&me, &topic),
+            dsm::common::domain_tags::TAG_DSM_AUTHORED_LOCATOR.source_bytes(),
+            &dsm::authored_object::locator(&me, &topic),
             &addr,
         )
         .await

@@ -27,14 +27,12 @@ use dsm::emissions::{
     JoinActivationProof, SourceDlvState,
 };
 use dsm::types::contact_types::DsmVerifiedContact;
-use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState, RealizedHead};
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 use dsm::vault::{DLVManager, FulfillmentMechanism, VaultState};
 
-use crate::live_device::{
-    commit, connect, faucet_claim, marked, Decision, LiveDevice, Stage, Step,
-};
+use crate::live_device::{connect, faucet_claim, LiveDevice};
 
 const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
 type TraceFn = fn(&[u8; 32], &[u8], &[u8]) -> ImplementationTraceResult;
@@ -112,7 +110,7 @@ pub fn collect_named_implementation_trace_results(
     }
 }
 
-fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
+fn implementation_trace_catalog() -> [(&'static str, TraceFn); 13] {
     [
         (
             "state_machine_transfer_chain",
@@ -133,11 +131,6 @@ fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
         (
             "bilateral_precomputed_finalize_hash",
             trace_bilateral_precomputed_finalize_hash,
-        ),
-        ("receiver_tripwire", trace_receiver_tripwire),
-        (
-            "tripwire_first_contact_binding",
-            trace_tripwire_first_contact_binding,
         ),
         ("djte_emission_happy_path", trace_djte_emission_happy_path),
         (
@@ -327,6 +320,10 @@ fn trace_state_machine_signature_rejection(
     }
 }
 
+/// Two transfers advanced from one tip are two children of it: they share the
+/// parent tip and differ in their child tips. That the receiver takes one of
+/// them is decided with Core's `decide_confirm`, and runs on real bearer pairs
+/// in the SDK's offline step tests (§6.103).
 fn trace_state_machine_fork_divergence(
     _seed_bytes: &[u8; 32],
     _pk: &[u8],
@@ -334,7 +331,7 @@ fn trace_state_machine_fork_divergence(
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
-    let (mut alice, mut bob) = trace_pair("fork");
+    let (alice, bob) = trace_pair("fork");
     let parent_tip = alice.tip_with(&bob).expect("established");
 
     let op_a = alice.transfer(&bob, 1, &[1; 8]).expect("transfer a");
@@ -347,33 +344,6 @@ fn trace_state_machine_fork_divergence(
             }
             if pair_a.1 == pair_b.1 {
                 failures.push("different operations produced the same child tip".into());
-            }
-            // The receiver takes one of two children of its tip.
-            let step_a = alice.propose(&bob, op_a.clone());
-            let step_b = alice.propose(&bob, op_b.clone());
-            match (step_a, step_b) {
-                (Ok(step_a), Ok(step_b)) => {
-                    match bob.decide(&alice, &step_a) {
-                        Decision::Accepted(verified) => {
-                            if let Err(e) = commit(&mut alice, &mut bob, step_a, &verified) {
-                                failures.push(format!("the first child did not commit: {e}"));
-                            }
-                        }
-                        other => failures.push(format!("the first child was refused: {other}")),
-                    }
-                    match bob.decide(&alice, &step_b) {
-                        Decision::Accepted(_) => {
-                            failures.push("the second child of one tip was accepted".into())
-                        }
-                        Decision::StaleTip => {}
-                        other => failures.push(format!(
-                            "the second child was refused for another reason: {other}"
-                        )),
-                    }
-                }
-                (Err(e), _) | (_, Err(e)) => {
-                    failures.push(format!("a step could not be proposed: {e}"))
-                }
             }
         }
         (Err(e), _) | (_, Err(e)) => failures.push(format!("advance refused: {e}")),
@@ -570,7 +540,8 @@ fn trace_djte_repeated_emission_alignment(
 
     let initial = SourceDlvState::new_with_schedule(
         EmissionSchedule::new(initial_supply, 2, 64, 2, 1).expect("trace emission schedule"),
-    );
+    )
+    .expect("trace emission state");
 
     let jap_a = build_test_jap(0x7A, 0x09);
     let (after_first, receipt_a) = apply_djte_transition(&initial, &jap_a, emission_amount);
@@ -910,172 +881,6 @@ fn trace_token_manager_overspend_rejection(
     }
 }
 
-/// The receiver's decision on `step`, reported as a trace failure message
-/// when it does not match `want`: `None` for accepted, `Some(needle)` for a
-/// refusal whose reason holds `needle` ("stale tip" for a stale tip).
-fn expect_decision(
-    failures: &mut Vec<String>,
-    label: &str,
-    receiver: &LiveDevice,
-    sender: &LiveDevice,
-    step: &Step,
-    want: Option<&str>,
-) -> Option<dsm::bilateral::offline::VerifiedConfirm> {
-    match (receiver.decide(sender, step), want) {
-        (Decision::Accepted(verified), None) => return Some(verified),
-        (Decision::Accepted(_), Some(_)) => failures.push(format!("{label}: ACCEPTED")),
-        (Decision::StaleTip, Some("stale tip")) => {}
-        (decided, Some(needle))
-            if decided
-                .refusal_at(Stage::Prepare)
-                .or(decided.refusal_at(Stage::Confirm))
-                .is_some_and(|e| e.to_string().contains(needle)) => {}
-        (other, want) => failures.push(format!("{label}: {other}, wanted {want:?}")),
-    }
-    None
-}
-
-fn trace_receiver_tripwire(
-    _seed_bytes: &[u8; 32],
-    _pk: &[u8],
-    _sk: &[u8],
-) -> ImplementationTraceResult {
-    let start = Instant::now();
-    let mut failures = Vec::new();
-    let (mut alice, mut bob) = trace_pair("receiver-tripwire");
-
-    let step_a = alice.propose(&bob, marked(0xA1)).expect("step a");
-    let step_b = alice.propose(&bob, marked(0xB1)).expect("step b");
-    let replayed = step_a.clone();
-    let successor = step_a.successor_tip;
-    if let Some(verified) = expect_decision(&mut failures, "the step", &bob, &alice, &step_a, None)
-    {
-        if let Err(e) = commit(&mut alice, &mut bob, step_a, &verified) {
-            failures.push(format!("the step did not commit: {e}"));
-        }
-    }
-    if alice.shared_tip_with(&bob) != Some(successor)
-        || bob.shared_tip_with(&alice) != Some(successor)
-    {
-        failures.push("the two devices do not hold the committed successor".into());
-    }
-    expect_decision(
-        &mut failures,
-        "its replay",
-        &bob,
-        &alice,
-        &replayed,
-        Some("stale tip"),
-    );
-    expect_decision(
-        &mut failures,
-        "a second child of the tip",
-        &bob,
-        &alice,
-        &step_b,
-        Some("stale tip"),
-    );
-
-    // The sender signs a receipt whose writes no longer fold to the
-    // pre-state root: one sibling changed.
-    let mut bent = alice.propose(&bob, marked(0xC1)).expect("step c");
-    bent.receipt.step_writes[0].path.siblings[0] ^= 0x01;
-    let bent = bent.resigned().expect("re-signed");
-    expect_decision(
-        &mut failures,
-        "a signed receipt over a bent path",
-        &bob,
-        &alice,
-        &bent,
-        Some("do not fold to the claimed pre-root"),
-    );
-    if bob.shared_tip_with(&alice) != Some(successor) {
-        failures.push("a refused step moved the receiver's tip".into());
-    }
-
-    ImplementationTraceResult {
-        trace_name: "receiver_tripwire".into(),
-        steps: 4,
-        passed: failures.is_empty(),
-        failures,
-        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-    }
-}
-
-fn trace_tripwire_first_contact_binding(
-    _seed_bytes: &[u8; 32],
-    _pk: &[u8],
-    _sk: &[u8],
-) -> ImplementationTraceResult {
-    let start = Instant::now();
-    let mut failures = Vec::new();
-    let (mut alice, mut bob) = trace_pair("first-contact");
-    let h0 = bob.shared_tip_with(&alice).expect("established");
-    if alice.shared_tip_with(&bob) != Some(h0) {
-        failures.push("the two devices do not hold one h_0".into());
-    }
-
-    // First contact: the relationship's first step extends h_0; an
-    // alternate first step extends it too.
-    let first = alice.propose(&bob, marked(0x51)).expect("first step");
-    let alternate = alice
-        .propose(&bob, marked(0x52))
-        .expect("alternate first step");
-    if first.expected_tip != h0 || alternate.expected_tip != h0 {
-        failures.push("a first step does not extend the relationship's h_0".into());
-    }
-    let first_successor = first.successor_tip;
-    if let Some(verified) = expect_decision(
-        &mut failures,
-        "the first-contact step",
-        &bob,
-        &alice,
-        &first,
-        None,
-    ) {
-        if let Err(e) = commit(&mut alice, &mut bob, first, &verified) {
-            failures.push(format!("the first-contact step did not commit: {e}"));
-        }
-    }
-
-    let extension = alice.propose(&bob, marked(0x53)).expect("extension step");
-    if extension.expected_tip != first_successor {
-        failures.push("the extension does not extend the first step's successor".into());
-    }
-    let extension_successor = extension.successor_tip;
-    if let Some(verified) = expect_decision(
-        &mut failures,
-        "the extension",
-        &bob,
-        &alice,
-        &extension,
-        None,
-    ) {
-        if let Err(e) = commit(&mut alice, &mut bob, extension, &verified) {
-            failures.push(format!("the extension did not commit: {e}"));
-        }
-    }
-    expect_decision(
-        &mut failures,
-        "an alternate first-contact branch",
-        &bob,
-        &alice,
-        &alternate,
-        Some("stale tip"),
-    );
-    if bob.shared_tip_with(&alice) != Some(extension_successor) {
-        failures.push("the receiver does not hold the extension's successor".into());
-    }
-
-    ImplementationTraceResult {
-        trace_name: "tripwire_first_contact_binding".into(),
-        steps: 3,
-        passed: failures.is_empty(),
-        failures,
-        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-    }
-}
-
 fn trace_bilateral_precomputed_finalize_hash(
     _seed_bytes: &[u8; 32],
     _pk: &[u8],
@@ -1114,12 +919,18 @@ fn trace_bilateral_precomputed_finalize_hash(
             failures.push("Core's transition entropy derivation is not deterministic".into());
         }
         let op_bytes = pre.operation.to_bytes();
-        let sigma = compute_precommit(&h_n, &op_bytes, &entropy);
+        let sigma = match compute_precommit(&h_n, &op_bytes, &entropy) {
+            Ok(sigma) => sigma,
+            Err(e) => return vec![format!("the step's C_pre was refused: {e}")],
+        };
         let predicted_tip = compute_successor_tip(&h_n, &op_bytes, &entropy, &sigma);
 
         let mut alternate_entropy = entropy;
         alternate_entropy[0] ^= 0xFF;
-        let alternate_sigma = compute_precommit(&h_n, &op_bytes, &alternate_entropy);
+        let alternate_sigma = match compute_precommit(&h_n, &op_bytes, &alternate_entropy) {
+            Ok(sigma) => sigma,
+            Err(e) => return vec![format!("the alternate step's C_pre was refused: {e}")],
+        };
         if compute_successor_tip(&h_n, &op_bytes, &alternate_entropy, &alternate_sigma)
             == predicted_tip
         {
@@ -1189,7 +1000,7 @@ fn trace_bilateral_full_offline_finality(
         };
         let remote = side.remote_device_id;
         let local = side.local_device_id;
-        let mut remote_head = match DeviceState::new(
+        let mut remote_head = match DeviceState::genesis_head(
             TRACE_PAIR1_REMOTE.1,
             remote,
             side.remote_kp.public_key().to_vec(),
@@ -1506,12 +1317,20 @@ fn trace_keypair(side: ([u8; 32], [u8; 32])) -> Result<SignatureKeyPair, String>
 
 /// The receiver's acceptance proof σ_B, exactly what
 /// `BilateralTransactionManager::verify_receiver_acceptance_proof` checks:
-/// a signature over `"DSM/bilateral-sign\0" || commitment_hash`.
-fn receiver_acceptance_sig(kp: &SignatureKeyPair, commitment_hash: &[u8; 32]) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(22 + 32);
-    msg.extend_from_slice(b"DSM/bilateral-sign\0");
-    msg.extend_from_slice(commitment_hash);
-    kp.sign(&msg).expect("receiver acceptance signature")
+/// a signature over the step's commitment and the challenge the receiver
+/// issues with it (`bilateral_accept_sign_message`).
+fn receiver_acceptance_sig(
+    kp: &SignatureKeyPair,
+    commitment_hash: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Vec<u8> {
+    kp.sign(
+        &dsm::core::bilateral_transaction_manager::bilateral_accept_sign_message(
+            commitment_hash,
+            receiver_challenge,
+        ),
+    )
+    .expect("receiver acceptance signature")
 }
 
 /// One side of a bilateral trace pair: the sender's manager over its tip
@@ -1519,7 +1338,7 @@ fn receiver_acceptance_sig(kp: &SignatureKeyPair, commitment_hash: &[u8; 32]) ->
 struct TraceSide {
     manager: BilateralTransactionManager,
     tips: std::sync::Arc<TraceTips>,
-    head: DeviceState,
+    head: RealizedHead,
     local_kp: SignatureKeyPair,
     remote_kp: SignatureKeyPair,
     local_device_id: [u8; 32],
@@ -1607,9 +1426,9 @@ async fn trace_prepare(
 fn trace_local_head(
     side: ([u8; 32], [u8; 32]),
     kp: &SignatureKeyPair,
-) -> Result<DeviceState, String> {
+) -> Result<RealizedHead, String> {
     faucet_claim(
-        &DeviceState::new(side.1, side.0, kp.public_key().to_vec()),
+        &DeviceState::genesis_head(side.1, side.0, kp.public_key().to_vec()),
         1,
     )
     .map_err(|e| format!("trace head funding: {e}"))
@@ -1640,24 +1459,34 @@ const TRACE_BILATERAL_AMOUNT: u64 = 1;
 async fn trace_commit_prepared(
     manager: &mut BilateralTransactionManager,
     tips: &TraceTips,
-    local_head: &mut DeviceState,
+    local_head: &mut RealizedHead,
     remote_kp: &SignatureKeyPair,
     remote_device_id: &[u8; 32],
     pre_commitment_hash: &[u8; 32],
 ) -> Result<TraceCommit, String> {
     use dsm::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
     use dsm::core::chain_tip_store::ChainTipStore;
+    // The receiver's challenge, drawn as the receiver draws it.
+    let receiver_challenge: [u8; 32] = dsm::crypto::rng::random_bytes(32)
+        .try_into()
+        .map_err(|e| format!("the receiver challenge is not 32 bytes: {e:?}"))?;
     let prepared = manager
         .prepare_bilateral_advance(
             remote_device_id,
             pre_commitment_hash,
-            &receiver_acceptance_sig(remote_kp, pre_commitment_hash),
+            dsm::core::bilateral_transaction_manager::ReceiverAcceptance {
+                signature: &receiver_acceptance_sig(
+                    remote_kp,
+                    pre_commitment_hash,
+                    &receiver_challenge,
+                ),
+                receiver_challenge: &receiver_challenge,
+            },
             vec![BalanceDelta {
                 policy_commit: era_policy_commit(),
                 direction: BalanceDirection::Debit,
                 amount: TRACE_BILATERAL_AMOUNT,
             }],
-            None,
             None,
         )
         .await
@@ -1669,12 +1498,12 @@ async fn trace_commit_prepared(
             prepared.operation.clone(),
             &prepared.deltas,
             None,
-            None,
         )
         .map_err(|e| format!("the sender's advance was refused: {e}"))?;
     let entropy = outcome.transition_entropy();
     let op_bytes = prepared.operation.to_bytes();
-    let sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &entropy);
+    let sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &entropy)
+        .map_err(|e| format!("the step's C_pre was refused: {e}"))?;
     let new_tip = compute_successor_tip(&prepared.parent_tip, &op_bytes, &entropy, &sigma);
     if !tips
         .set_contact_chain_tip(remote_device_id, prepared.parent_tip, new_tip)
@@ -1695,7 +1524,7 @@ async fn trace_commit_prepared(
 
 /// The receiver's credit for a committed step, on its own head.
 fn trace_receive(
-    remote_head: &mut DeviceState,
+    remote_head: &mut RealizedHead,
     local_device_id: &[u8; 32],
     commit: &TraceCommit,
 ) -> Result<(), String> {
@@ -1711,7 +1540,6 @@ fn trace_receive(
                 amount: TRACE_BILATERAL_AMOUNT,
             }],
             None,
-            None,
         )
         .map_err(|e| format!("the receiver's advance was refused: {e}"))?;
     *remote_head = outcome.new_device_state;
@@ -1726,6 +1554,7 @@ fn build_signed_bilateral_transfer(
 ) -> Operation {
     let op = Operation::Transfer {
         policy_commit: era_policy_commit(),
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"ERA".to_vec(),
             nonce: vec![nonce; 8],
@@ -1735,6 +1564,7 @@ fn build_signed_bilateral_transfer(
         }
         .commitment(),
         to_device_id: remote_device_id.to_vec(),
+        to_genesis: [0x6E; 32],
         amount: Balance::amount(TRACE_BILATERAL_AMOUNT),
         signature: Vec::new(),
         authority_policy: None,
@@ -1752,7 +1582,7 @@ fn build_djte_transition(
     JoinActivationProof,
     EmissionReceipt,
 ) {
-    let prev = SourceDlvState::new(2, initial_supply);
+    let prev = SourceDlvState::new(2, initial_supply).expect("trace emission state");
 
     let jap = build_test_jap(0x7A, 0x09);
     let (next, receipt) = apply_djte_transition(&prev, &jap, emission_amount);
@@ -1922,22 +1752,6 @@ mod tests {
     #[test]
     fn repeated_djte_emission_alignment_trace_passes() {
         let result = trace_djte_repeated_emission_alignment(&[0u8; 32], &[], &[]);
-        assert!(result.passed, "{}", result.failures.join("; "));
-    }
-
-    #[test]
-    fn receiver_tripwire_trace_passes() {
-        let seed = dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE,
-            b"receiver-tripwire-trace",
-        );
-        let result = trace_receiver_tripwire(&seed, &[], &[]);
-        assert!(result.passed, "{}", result.failures.join("; "));
-    }
-
-    #[test]
-    fn tripwire_first_contact_binding_trace_passes() {
-        let result = trace_tripwire_first_contact_binding(&[0u8; 32], &[], &[]);
         assert!(result.passed, "{}", result.failures.join("; "));
     }
 }

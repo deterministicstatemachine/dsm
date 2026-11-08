@@ -2,7 +2,7 @@
 //! While the tour's practice wallet stands in, the bridge lets only reads reach
 //! native code, whatever module makes the call. Practice mode used to patch the
 //! dsmClient object and nothing else, so a screen that imported a write
-//! directly (token creation, burn, forget, every SoFi action, the lock, NFC)
+//! directly (token creation, burn, every SoFi action, the lock)
 //! reached the real wallet during the tour. These tests drive such direct
 //! imports. Reads are answered from Rust's own record of the ingress, and every
 //! request that reaches the bridge is logged, so "blocked" means the bridge
@@ -17,7 +17,7 @@ import { burnToken } from '../../dsm/policies';
 import * as sofi from '../../dsm/sofi';
 import { walletAmount } from '../../dsm/amount';
 import { callBin, setPreference } from '../../dsm/WebViewBridge';
-import { startNativeQrScan, writeNfcTagPayloadHost } from '../../dsm/NativeHostBridge';
+import { startNativeQrScan } from '../../dsm/NativeHostBridge';
 import { dsmClient } from '../../services/dsmClient';
 import { practiceMode, PRACTICE_CONTACT_DEVICE_ID } from '../../components/tour/practiceMode';
 
@@ -71,9 +71,8 @@ describe('the practice sandbox at the bridge', () => {
     expect(carried(arrivals)).toEqual(['ui_theme']);
   });
 
-  it('lets the camera open for a contact code, and blocks a write to an NFC ring', async () => {
+  it('lets the camera open for a contact code', async () => {
     await expect(startNativeQrScan()).rejects.toThrow(/no recorded answer/);
-    await expect(writeNfcTagPayloadHost(new Uint8Array([7]))).rejects.toThrow(PRACTICE_BLOCKED_MESSAGE);
     expect(carried(arrivals)).toEqual(['HOST_CONTROL_QR_START_SCAN']);
   });
 });
@@ -99,7 +98,6 @@ describe('practice mode puts the bridge in its sandbox', () => {
   it('blocks a dsmClient write that practice does not answer', async () => {
     const burned = await client.burnToken({ tokenId: 'ERA', amount: '1' });
     expect(burned).toEqual(expect.objectContaining({ message: expect.stringContaining(PRACTICE_BLOCKED_MESSAGE) }));
-    await expect(client.forgetToken('PLAY')).rejects.toThrow(PRACTICE_BLOCKED_MESSAGE);
     expect(arrivals).toEqual([]);
   });
 

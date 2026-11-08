@@ -10,10 +10,17 @@
 
   The rule under proof:
 
-    [0] if fee_amount > 0: one ERA Debit  of exactly fee_amount
-    [1] one Credit of exactly initial_supply, which is never zero (SoFi §50),
-        under the NEW token's own policy_commit
+    [0] one ERA Debit of exactly the protocol's creation fee
+        (`TOKEN_CREATION_FEE_ERA`, SoFi Amendment S18); a creation naming any
+        other fee is refused
+    [1] one Credit releasing the whole genesis supply (`initial_supply`,
+        `ReleaseRule::AllAtCreation`, SoFi §51), which is never zero (SoFi
+        §50), under the NEW token's own policy_commit
     and no other deltas.
+
+  Mutation control (executed 2026-10-27): dropping `fee = creationFee` from
+  `tryCreateWithSupply` breaks `a_creation_paying_other_than_the_protocol_fee_is_refused`,
+  the same-named test in `dsm/src/types/device_state.rs`.
 
   Conservation is per-asset. ERA is destroyed (no counterparty credit), so
   ERA is conserved only modulo an explicitly tracked burn. The new asset is
@@ -23,8 +30,9 @@
 
 namespace DSMTokenIssuance
 
-/-- ERA destroyed to create a token (`dsm::core::token::TOKEN_CREATION_FEE_ERA`). -/
-def creationFee : Nat := 10
+/-- ERA destroyed to create a token (`dsm::core::token::TOKEN_CREATION_FEE_ERA`),
+    in base units: 10.00 ERA at ERA's two decimals. -/
+def creationFee : Nat := 1000
 
 /--
   The fee leg debits EXACTLY the fee, and the destroyed value is accounted
@@ -98,14 +106,15 @@ theorem create_touches_two_distinct_assets
   · omega
 
 /--
-  A token with no genesis supply is not a token (SoFi §50): a creation that
-  would issue nothing is refused before the fee leg, so it burns nothing and
-  issues nothing. In the implementation this is the conservation guard's
-  refusal of a zero `initial_supply` in `validate_conservation`, which runs
+  The creation as `validate_conservation` accepts it. A token with no genesis
+  supply is not a token (SoFi §50), and the fee is the protocol's (S18): a
+  creation that would issue nothing, or that names another fee, is refused
+  before the fee leg, so it burns nothing and issues nothing. The guard runs
   before any write.
 -/
 def tryCreateWithSupply (era burned fee initialSupply : Nat) : Nat × Nat × Nat :=
-  if 0 < initialSupply ∧ fee ≤ era then (era - fee, burned + fee, initialSupply)
+  if 0 < initialSupply ∧ fee = creationFee ∧ fee ≤ era then
+    (era - fee, burned + fee, initialSupply)
   else (era, burned, 0)
 
 theorem create_with_no_supply_is_refused (era burned fee : Nat) :
@@ -113,11 +122,20 @@ theorem create_with_no_supply_is_refused (era burned fee : Nat) :
   unfold tryCreateWithSupply
   simp
 
-/-- With a supply and an affordable fee, the creation is exactly the burn
-    and the whole supply, released. -/
+/-- A creation naming any fee but the protocol's — a free one included — is
+    refused: nothing is burned and nothing issued. -/
+theorem a_creation_paying_other_than_the_protocol_fee_is_refused
+    (era burned fee initialSupply : Nat) (hf : fee ≠ creationFee) :
+    tryCreateWithSupply era burned fee initialSupply = (era, burned, 0) := by
+  unfold tryCreateWithSupply
+  simp [hf]
+
+/-- With a supply and the protocol's fee affordable, the creation is exactly
+    the burn of the fee and the whole supply, released. -/
 theorem create_with_supply_burns_and_releases
-    (era burned fee initialSupply : Nat) (hs : 0 < initialSupply) (hf : fee ≤ era) :
-    tryCreateWithSupply era burned fee initialSupply = (era - fee, burned + fee, initialSupply) := by
+    (era burned initialSupply : Nat) (hs : 0 < initialSupply) (hf : creationFee ≤ era) :
+    tryCreateWithSupply era burned creationFee initialSupply
+      = (era - creationFee, burned + creationFee, initialSupply) := by
   unfold tryCreateWithSupply
   simp [hs, hf]
 

@@ -8,8 +8,9 @@
 #
 # Output:
 #   deploy/nodes/node-{1..N}/
-#     ├── .env                     (PostgreSQL credentials)
-#     ├── config/node.toml         (node-specific config)
+#     ├── .env                     (PostgreSQL credentials; mode 0600)
+#     ├── config/node.toml         (node-specific config, holding the database
+#     │                             password; mode 0600)
 #     ├── certs/ca.crt             (shared CA certificate)
 #     ├── certs/node.crt           (per-node TLS cert)
 #     ├── certs/node.key           (per-node TLS key)
@@ -79,8 +80,11 @@ mkdir -p "${OUT_DIR}"
 CA_DIR="${OUT_DIR}/ca"
 mkdir -p "${CA_DIR}"
 
+# Every file holding a secret (the CA key, each node's key, the database
+# password in .env and in node.toml) is created at mode 0600 — under umask 077,
+# never chmod-ed after it was written — and the password is never printed.
 echo "Generating CA key and certificate..."
-openssl genrsa -out "${CA_DIR}/ca.key" 4096 2>/dev/null
+(umask 077 && openssl genrsa -out "${CA_DIR}/ca.key" 4096 2>/dev/null)
 openssl req -new -x509 -days 3650 -key "${CA_DIR}/ca.key" \
     -subj "/C=XX/O=DSM/CN=DSM-Storage-CA" \
     -out "${CA_DIR}/ca.crt" 2>/dev/null
@@ -115,7 +119,7 @@ for i in $(seq 1 "${N}"); do
     mkdir -p "${NODE_DIR}/config" "${NODE_DIR}/certs"
 
     # --- TLS cert for this node ---
-    openssl genrsa -out "${NODE_DIR}/certs/node.key" 2048 2>/dev/null
+    (umask 077 && openssl genrsa -out "${NODE_DIR}/certs/node.key" 2048 2>/dev/null)
     openssl req -new -key "${NODE_DIR}/certs/node.key" \
         -subj "/C=XX/O=DSM/CN=${NODE_ID}" \
         -addext "subjectAltName=IP:${IP},DNS:${NODE_ID}" \
@@ -141,20 +145,21 @@ EXTEOF
     DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}&sslmode=disable"
     # Escape '&' in DB_URL so sed doesn't interpret it as backreference
     DB_URL_ESCAPED="${DB_URL//&/\\&}"
-    sed -e "s|__NODE_ID__|${NODE_ID}|g" \
+    (umask 077 && sed -e "s|__NODE_ID__|${NODE_ID}|g" \
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
         -e "s|__DATABASE_URL__|${DB_URL_ESCAPED}|g" \
-        "${TEMPLATE}" > "${NODE_DIR}/config/node.toml"
+        "${TEMPLATE}" > "${NODE_DIR}/config/node.toml")
 
     # --- .env for docker-compose ---
-    cat > "${NODE_DIR}/.env" <<ENVEOF
+    (umask 077 && cat > "${NODE_DIR}/.env" <<ENVEOF
 POSTGRES_DB=dsm_storage
 POSTGRES_USER=dsm
 POSTGRES_PASSWORD=${PG_PASS}
 DSM_PORT=8080
 RUST_LOG=info
 ENVEOF
+)
 
     # --- docker-compose ---
     cp "${COMPOSE_SRC}" "${NODE_DIR}/docker-compose.node.yml"
@@ -164,6 +169,6 @@ echo ""
 echo "Node bundles generated in: ${OUT_DIR}/"
 echo "  Nodes: ${N}"
 echo "  CA cert: ${CA_DIR}/ca.crt"
-echo "  PG password: ${PG_PASS}"
+echo "  PG password: in each node's .env and config/node.toml (mode 0600); not printed"
 echo ""
 echo "Next: run deploy/push_and_start.sh to deploy to EC2 instances."

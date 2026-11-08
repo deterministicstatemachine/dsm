@@ -77,7 +77,7 @@ fn decrypt_secret(enc_key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
 /// Get the at-rest encryption key for Bitcoin account secret material.
 ///
 /// Rooted in the wallet seed via the Genesis v2 chain-head at-rest key (s0-rooted,
-/// domain-separated, re-derived from the session-cached mnemonic — never persisted, no C-DBRW).
+/// domain-separated, re-derived from the session-cached mnemonic — never persisted).
 /// Fails closed when the wallet is locked.
 fn get_enc_key() -> Result<[u8; 32]> {
     let at_rest = crate::init::current_chain_head_at_rest_key()

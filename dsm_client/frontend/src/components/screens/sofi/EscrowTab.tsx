@@ -4,7 +4,11 @@
 // outcome you decide, and release a stake an outcome pays you. It explains the
 // mechanics only: what an escrow is for is the business of the app that uses
 // it. Rust names every party's keys, orders the terms, checks every field and
-// answers every state shown here (SoFi §19.9, Amendment S21).
+// answers every state shown here (SoFi §19.9, Amendment S21). A party is
+// named here as a payment's recipient is in Send (audit 2026-10-18, SA-158):
+// by its name and its device's fingerprint, with any other party that goes by
+// the same name said to, and the stake is locked only from a review of who
+// decides and who is paid.
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import * as escrow from '../../../dsm/escrow';
@@ -14,11 +18,21 @@ import { useContacts } from '../../../contexts/ContactsContext';
 import { Disclosure, Notice, middleTruncate } from '../../common/ScreenFrame';
 import { TokenSelect, type TokenOption } from '../../common/TokenSelect';
 import { copyText } from '../../../utils/anchorDisplay';
+import { contactsNamed, deviceFingerprint, sameName } from '../../../domain/displayName';
+import ConfirmModal from '../../ConfirmModal';
 
 type Status = { kind: 'info' | 'success' | 'error'; text: string };
 
-/** A party the user can name: this device, or a contact, by its device id (Base32). */
-type Party = { id: string; label: string };
+/** A party the user can name: this device, or a contact, by its device id (Base32) and that id's fingerprint. */
+type Party = { id: string; label: string; fingerprint: string };
+
+/** This device's name among the parties. */
+const THIS_DEVICE = 'This device';
+
+/** A party as the form and the review name it: its name, then its device. */
+function partyName(p: Party): string {
+  return `${p.label}, device ${p.fingerprint}`;
+}
 
 /** An outcome as the user fills it in. */
 type OutcomeRow = { key: number; label: string; decidedBy: string[]; pays: string };
@@ -171,12 +185,31 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
   const [linked, setLinked] = useState('');
   const [created, setCreated] = useState<escrow.EscrowLocked | null>(null);
   const [cell, setCell] = useState('');
+  /** The review shown before the stake is locked, as it was when asked for; none while the form is open. */
+  const [reviewing, setReviewing] = useState<string | null>(null);
 
   const myId = me === null ? null : encodeBase32Crockford(me.deviceId);
   const parties: Party[] = useMemo(() => [
-    ...(myId === null ? [] : [{ id: myId, label: 'This device' }]),
-    ...contacts.map((c) => ({ id: c.deviceId, label: c.alias })),
+    ...(myId === null ? [] : [{ id: myId, label: THIS_DEVICE, fingerprint: deviceFingerprint(myId) }]),
+    ...contacts.map((c) => ({ id: c.deviceId, label: c.alias, fingerprint: deviceFingerprint(c.deviceId) })),
   ], [myId, contacts]);
+
+  /** The other parties that go by `p`'s name: contacts by alias or details, and this device by its own. */
+  const namesakesOf = useCallback((p: Party): Party[] => {
+    const named = new Set(contactsNamed(contacts, p.label, p.id).map((c) => c.deviceId));
+    return parties.filter((q) => q.id !== p.id && (q.id === myId ? sameName(THIS_DEVICE, p.label) : named.has(q.id)));
+  }, [contacts, parties, myId]);
+
+  /** What the form and the review say of a party: its name and device, and its namesakes by theirs. */
+  const partyWords = useCallback((id: string): string => {
+    const p = parties.find((q) => q.id === id);
+    if (p === undefined) return `device ${deviceFingerprint(id)}`;
+    const namesakes = namesakesOf(p);
+    const shared = namesakes.length > 0
+      ? ` (also named ${p.label}: ${namesakes.map((q) => q.fingerprint).join(', ')})`
+      : '';
+    return `${partyName(p)}${shared}`;
+  }, [parties, namesakesOf]);
 
   // This device as a party, then the escrow vaults it locked.
   useEffect(() => {
@@ -220,6 +253,18 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
 
   const filled = token !== '' && amount.trim() !== '' && agreement !== ''
     && rows.every((r) => r.label !== '' && r.decidedBy.length > 0 && r.pays !== '');
+
+  /**
+   * What the review asks: the stake, then each outcome with the parties who
+   * decide it and the party it pays, each by name and device.
+   */
+  const review = (): string => {
+    const ticker = tokenOptions.find((o) => o.value === token)?.ticker;
+    const outcomes = rows.map((r, i) =>
+      `Outcome ${i + 1}, "${r.label}": decided by ${r.decidedBy.map(partyWords).join(' and ')}; pays ${partyWords(r.pays)}.`);
+    const link = linked.trim() === '' ? [] : [`Linked to vault ${linked.trim()}.`];
+    return [`Lock ${amount.trim()} ${ticker === undefined ? token : ticker} in an escrow vault?`, ...outcomes, ...link].join(' ');
+  };
 
   const onLock = () => run('Lock stake', async () => {
     const done = await escrow.lock({
@@ -379,11 +424,11 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
                 <label key={p.id} className="sb-hint" style={{ display: 'block' }}>
                   <input
                     type="checkbox"
-                    aria-label={`Outcome ${i + 1} decided by ${p.label}`}
+                    aria-label={`Outcome ${i + 1} decided by ${partyName(p)}`}
                     checked={r.decidedBy.includes(p.id)}
                     onChange={() => toggleDecider(r.key, p.id)}
                   />
-                  {' '}{p.label}
+                  {' '}{p.label} <span className="sb-mono">{p.fingerprint}</span>
                 </label>
               ))}
             </div>
@@ -396,9 +441,19 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
                 onChange={(e) => setRow(r.key, { pays: e.target.value })}
               >
                 <option value="">Choose who it pays</option>
-                {parties.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                {parties.map((p) => <option key={p.id} value={p.id}>{partyName(p)}</option>)}
               </select>
             </div>
+            {/* A chosen party another party shares a name with: said here, by each one's device. */}
+            {[...new Set([...r.decidedBy, r.pays])].flatMap((id) => {
+              const p = parties.find((q) => q.id === id);
+              const namesakes = p === undefined ? [] : namesakesOf(p);
+              return p === undefined || namesakes.length === 0 ? [] : [(
+                <Notice key={id} kind="error">
+                  Also named {p.label}: {namesakes.map((q) => q.fingerprint).join(', ')}. You chose device {p.fingerprint}.
+                </Notice>
+              )];
+            })}
             {rows.length > 1 && (
               <button type="button" className="sb-btn sb-btn--small" onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))}>
                 Remove outcome {i + 1}
@@ -430,12 +485,19 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
         <button
           type="button"
           className="sb-btn sb-btn--primary sb-btn--block"
-          onClick={onLock}
+          onClick={() => setReviewing(review())}
           disabled={busy !== null || !filled}
         >
           Lock stake
         </button>
       </section>
+      <ConfirmModal
+        visible={reviewing !== null}
+        title="Lock stake"
+        message={reviewing === null ? '' : reviewing}
+        onConfirm={() => { setReviewing(null); onLock(); }}
+        onCancel={() => setReviewing(null)}
+      />
 
       <section className="sb-card">
         <div className="sb-card__title">Escrow vaults by verdict cell</div>

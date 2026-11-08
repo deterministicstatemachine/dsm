@@ -18,7 +18,7 @@
 //! |---|---|
 //! | `0x5701` | [`CreatureStateV1`] |
 //! | `0x5702` | [`DuelMatchV1`] (the setup without the program) |
-//! | `0x5703` | [`DuelSetupV1`] |
+//! | `0x5703` | [`DuelSetupV2`] (schema 2; schema 1 retired) |
 //! | `0x5704` | [`DuelMoveV1`] |
 //! | `0x5705` | [`DuelTurnV1`] |
 //! | `0x5706` | [`DuelState`] (`DuelStateV1`) |
@@ -29,7 +29,8 @@
 //! | `0x570B` | [`DuelOpenedTurnV1`] |
 //! | `0x570C` | [`creatures::CreatureRecordV1`] |
 //!
-//! Every object uses the house CCB grammar ([`codec`]), schema 1.
+//! Every object uses the house CCB grammar ([`codec`]), schema 1, except the
+//! setup, at schema 2.
 //!
 //! ## The program hash
 //!
@@ -46,7 +47,10 @@
 //! the ordering rules), with integer damage (×4, halves rounded up as
 //! `Math.round` does) and these staked-match changes:
 //! - a level tie is broken by a bit of `H(tiebreak_seed ‖ turn)`, not the
-//!   match id; no rule favours side a;
+//!   match id; no rule favours side a. The seed is derived from both sides'
+//!   start entropy (SoFi Amendment S33): each wallet fixes its own at lock by
+//!   the commitment the setup carries, and the match's Start opens both, so
+//!   neither side nor the application chooses it ([`tiebreak_seed`]);
 //! - Resign hands the other side the win; both resigning in one turn is
 //!   decided as at the cap;
 //! - an opened move the rules cannot play (an unknown index, an empty charge,
@@ -74,7 +78,7 @@ pub use engine::{
 };
 pub use tables::{Tables, TABLES};
 pub use types::{
-    CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelSetupV1, DuelSide, DuelTurnV1,
+    CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelSetupV2, DuelSide, DuelTurnV1,
     MAX_OPENED_MOVE_BYTES,
 };
 
@@ -100,16 +104,19 @@ pub mod class {
 pub const TAG_OUTCOME_PROGRAM: &str = "DSM/outcome-program/v1";
 pub const TAG_TABLES: &str = "DSM/wildstate-duel/tables/v1";
 pub const TAG_VECTORS: &str = "DSM/wildstate-duel/conformance-vectors/v1";
-pub const TAG_SETUP: &str = "DSM/wildstate-duel/setup/v1";
+pub const TAG_SETUP: &str = "DSM/wildstate-duel/setup/v2";
 pub const TAG_STATE: &str = "DSM/wildstate-duel/state/v1";
 pub const TAG_CREATURE_STATE: &str = "DSM/wildstate-duel/creature-state/v1";
 pub const TAG_FIRST_ACTOR: &str = "DSM/wildstate-duel/first-actor/v1";
 pub const TAG_VECTOR_TRACE: &str = "DSM/wildstate-duel/vector-trace/v1";
-pub const TAG_TIEBREAK: &str = "DSM/wildstate-duel/tiebreak/v1";
+pub const TAG_TIEBREAK: &str = "DSM/wildstate-duel/tiebreak/v2";
+/// DSM's start-commitment domain (SoFi Amendment S33, `TAG_DSM_ESCROW_START_COMMIT`):
+/// the program checks each reveal against the setup's commitment under it.
+pub const TAG_START_COMMIT: &str = "DSM/escrow/start-commit/v1";
 pub const TAG_CREATURE_RECORD: &str = "DSM/wildstate-duel/creature-record/v1";
 
 pub const PROGRAM_NAME: &str = "wildstate-duel";
-pub const RULES_VERSION: u32 = 1;
+pub const RULES_VERSION: u32 = 2;
 
 /// The frozen conformance vectors of rules version 1.
 pub const VECTORS_V1: &[u8] = include_bytes!("../tests/vectors/v1/vectors.ccb");
@@ -121,6 +128,9 @@ pub enum Refusal {
     Decode(DecodeError),
     /// The setup pins another program.
     WrongProgram { pinned: [u8; 32], this: [u8; 32] },
+    /// A side's revealed start entropy does not open the commitment the setup
+    /// carries for it.
+    RevealOpensNothing { side: Side },
     /// A turn after the match was decided.
     MatchOver { turns: u16 },
     /// The transcript ends before the match is decided.
@@ -143,6 +153,10 @@ impl fmt::Display for Refusal {
         match self {
             Self::Decode(e) => write!(f, "not canonical: {e}"),
             Self::WrongProgram { .. } => write!(f, "the setup pins another outcome program"),
+            Self::RevealOpensNothing { side } => write!(
+                f,
+                "side {side:?}'s start entropy does not open its commitment in the setup"
+            ),
             Self::MatchOver { turns } => write!(f, "the match was decided after {turns} turns"),
             Self::Unfinished { turns } => {
                 write!(f, "the match is undecided after {turns} turns")
@@ -182,17 +196,32 @@ pub fn program_hash() -> [u8; 32] {
     program_hash_for(&TABLES, VECTORS_V1)
 }
 
-/// The tiebreak seed a staked match commits: `H(DSM/wildstate-duel/tiebreak/v1
-/// ‖ 0x00 ‖ match_nonce ‖ u32be(|key_a|) ‖ key_a ‖ u32be(|key_b|) ‖ key_b)`
-/// over both sides' session public keys. Each key is fixed by its own wallet
-/// at lock, so neither side alone can grind the seed. Rules never read how
-/// a seed was made; a wallet locking a stake checks the setup's seed is this.
-pub fn tiebreak_seed(match_nonce: &[u8; 32], session_a: &[u8], session_b: &[u8]) -> [u8; 32] {
+/// `H(DSM/escrow/start-commit/v1 ‖ 0x00 ‖ r)`: the commitment a wallet fixes
+/// at lock to its side's start entropy `r` (SoFi Amendment S33).
+pub fn start_commitment(reveal: &[u8; 32]) -> [u8; 32] {
+    tagged_hash(TAG_START_COMMIT, &[reveal])
+}
+
+/// The tiebreak seed of a staked match: `H(DSM/wildstate-duel/tiebreak/v2 ‖
+/// 0x00 ‖ match_nonce ‖ r_a ‖ r_b ‖ u32be(|key_a|) ‖ key_a ‖ u32be(|key_b|) ‖
+/// key_b)` over both sides' start entropy and session public keys. Each `r`
+/// was fixed by its own wallet at lock, before it could know the other's, and
+/// both are opened only by the Start, so no side, and not the application,
+/// chooses the seed.
+pub fn tiebreak_seed(
+    match_nonce: &[u8; 32],
+    reveal_a: &[u8; 32],
+    reveal_b: &[u8; 32],
+    session_a: &[u8],
+    session_b: &[u8],
+) -> [u8; 32] {
     let len = |key: &[u8]| (key.len() as u32).to_be_bytes();
     tagged_hash(
         TAG_TIEBREAK,
         &[
             match_nonce,
+            reveal_a,
+            reveal_b,
             &len(session_a),
             session_a,
             &len(session_b),
@@ -211,9 +240,9 @@ pub fn verify_conformance() -> Result<usize, Refusal> {
     Ok(set.vectors.len())
 }
 
-/// Decodes a setup and checks it pins this program; the state before turn 0.
-pub fn start(setup: &[u8]) -> Result<DuelState, Refusal> {
-    let s = DuelSetupV1::decode(setup)?;
+/// Decodes a setup and checks it pins this program.
+pub fn setup_of(setup: &[u8]) -> Result<DuelSetupV2, Refusal> {
+    let s = DuelSetupV2::decode(setup)?;
     let this = program_hash();
     if s.program != this {
         return Err(Refusal::WrongProgram {
@@ -221,7 +250,14 @@ pub fn start(setup: &[u8]) -> Result<DuelState, Refusal> {
             this,
         });
     }
-    Ok(DuelState::start(&s.body))
+    Ok(s)
+}
+
+/// The state before turn 0 of the match `setup` describes, once its Start
+/// opened both sides' start entropy.
+pub fn start(setup: &[u8], reveal_a: &[u8; 32], reveal_b: &[u8; 32]) -> Result<DuelState, Refusal> {
+    let m = setup_of(setup)?.match_of(reveal_a, reveal_b)?;
+    Ok(DuelState::start(&m))
 }
 
 /// One turn on a verified state: O(1) in the match length.
@@ -231,8 +267,19 @@ pub fn step(state: &DuelState, turn: &DuelTurnV1) -> Result<DuelState, Refusal> 
 
 /// Every turn's log; the transcript may stop before the match is decided,
 /// but no turn may follow its end.
-pub fn replay(setup: &[u8], turns: &[DuelTurnV1]) -> Result<Vec<TurnLog>, Refusal> {
-    let mut state = start(setup)?;
+pub fn replay(
+    setup: &[u8],
+    reveal_a: &[u8; 32],
+    reveal_b: &[u8; 32],
+    turns: &[DuelTurnV1],
+) -> Result<Vec<TurnLog>, Refusal> {
+    replay_match(&setup_of(setup)?.match_of(reveal_a, reveal_b)?, turns)
+}
+
+/// [`replay`] of a match the rules play directly, as a conformance vector
+/// holds it.
+pub fn replay_match(m: &DuelMatchV1, turns: &[DuelTurnV1]) -> Result<Vec<TurnLog>, Refusal> {
+    let mut state = DuelState::start(m);
     let mut logs = Vec::with_capacity(turns.len());
     for t in turns {
         let (next, log) = state.step_logged(t)?;
@@ -243,8 +290,19 @@ pub fn replay(setup: &[u8], turns: &[DuelTurnV1]) -> Result<Vec<TurnLog>, Refusa
 }
 
 /// The decided result of a complete transcript, by full replay.
-pub fn outcome(setup: &[u8], turns: &[DuelTurnV1]) -> Result<Winner, Refusal> {
-    let mut state = start(setup)?;
+pub fn outcome(
+    setup: &[u8],
+    reveal_a: &[u8; 32],
+    reveal_b: &[u8; 32],
+    turns: &[DuelTurnV1],
+) -> Result<Winner, Refusal> {
+    outcome_of_match(&setup_of(setup)?.match_of(reveal_a, reveal_b)?, turns)
+}
+
+/// [`outcome`] of a match the rules play directly, as a conformance vector
+/// holds it.
+pub fn outcome_of_match(m: &DuelMatchV1, turns: &[DuelTurnV1]) -> Result<Winner, Refusal> {
+    let mut state = DuelState::start(m);
     for t in turns {
         state = state.step(t)?;
     }

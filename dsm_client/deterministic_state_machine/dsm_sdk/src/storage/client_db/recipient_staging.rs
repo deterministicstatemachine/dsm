@@ -315,6 +315,64 @@ pub fn unbound_receipts_from(sender: &[u8; 32]) -> Result<Vec<StagedReceipt>> {
     Ok(rows)
 }
 
+/// The most staged transfers, and separately the most staged receipts, one
+/// contact can hold here that no pair holds yet (SA-100). An honest contact
+/// has at most one unresolved transfer toward this device at a time (the
+/// finality barrier allows one unresolved semantic predecessor per
+/// originator), so it never comes near this. A contact that signs more cannot
+/// grow this store past it, nor the signature checks every sync repeats over
+/// what is staged. The bound is per contact: one contact's backlog never holds
+/// another's objects back.
+pub const MAX_UNBOUND_PER_SENDER: usize = 4;
+
+/// How many staged transfers from `sender` no pair holds yet.
+pub fn unbound_transfer_count(sender: &[u8; 32]) -> Result<usize> {
+    let binding = get_connection()?;
+    let conn = lock(&binding)?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recipient_staged_transfer t
+         WHERE t.sender_device_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM recipient_pair p WHERE p.op_id = t.op_id)",
+        params![sender.as_slice()],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n)?)
+}
+
+/// How many staged receipts from `sender` no pair holds yet.
+pub fn unbound_receipt_count(sender: &[u8; 32]) -> Result<usize> {
+    let binding = get_connection()?;
+    let conn = lock(&binding)?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recipient_staged_receipt r
+         WHERE r.sender_device_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM recipient_pair p WHERE p.commitment = r.commitment)",
+        params![sender.as_slice()],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n)?)
+}
+
+/// Whether the operation `canonical_operation_bytes`, signed `signature`, is
+/// staged as a transfer from `sender`: a copy of an object already staged.
+pub fn transfer_is_staged(
+    sender: &[u8; 32],
+    canonical_operation_bytes: &[u8],
+    signature: &[u8],
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = lock(&binding)?;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM recipient_staged_transfer
+             WHERE sender_device_id = ?1 AND canonical_operation_bytes = ?2 AND signature = ?3",
+            params![sender.as_slice(), canonical_operation_bytes, signature],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// Bind a staged transfer to the staged receipt whose child tip it produces.
 /// The caller has recomputed that child; the pair is keyed by both objects,
 /// so neither can be bound twice.
@@ -563,24 +621,27 @@ pub fn step_decided(relationship_key: &[u8; 32], parent_tip: &[u8; 32]) -> Resul
         .is_some())
 }
 
-/// Whether an INBOUND transfer from `counterparty_device_id` is recognized
-/// here and can still execute. The finality barrier treats this as
-/// PendingCatchup for originating toward that peer: an inbound step is in
-/// flight on the relationship and originating under it would cross it.
+/// Whether a staged receipt from `counterparty_device_id` names a step the
+/// apply has not taken: it can still execute once its transfer is here. This
+/// is the send barrier toward that peer (`relationship_status`): an inbound
+/// step is in flight on the relationship.
+///
+/// It reads only signed material and this device's own decisions: the parent
+/// the receipt signs, against the parents the canonical apply took, never the
+/// projection (AWYPCNK8). A receipt from a parent already taken — a copy of
+/// the sender forking from a position the sender's step consumed — holds
+/// nothing. A transfer half holds nothing on its own: until its receipt is here
+/// no signed parent says which step it is, and a send that crosses it settles
+/// with it (owner ruling, 2026-10-29: "both settle").
 ///
 /// The counterparty is the contact whose key verified the object — never a
-/// field the object carries. An object the apply has decided (its nonce spent,
-/// its step taken) no longer holds the barrier.
-pub fn counterparty_has_unconverged_inbound(counterparty_device_id: &[u8]) -> Result<bool> {
+/// field the object carries.
+pub fn has_undecided_staged_receipt_from(counterparty_device_id: &[u8]) -> Result<bool> {
     let binding = get_connection()?;
     let conn = lock(&binding)?;
     Ok(conn
         .query_row(
-            "SELECT 1 FROM recipient_staged_transfer t
-             WHERE t.sender_device_id = ?1
-               AND NOT EXISTS (SELECT 1 FROM spent_nonces s WHERE s.nonce_hash = t.nonce_hash)
-             UNION ALL
-             SELECT 1 FROM recipient_staged_receipt r
+            "SELECT 1 FROM recipient_staged_receipt r
              WHERE r.sender_device_id = ?1
                AND NOT EXISTS (SELECT 1 FROM canonical_apply_identity c
                                WHERE c.relationship_key = r.relationship_key

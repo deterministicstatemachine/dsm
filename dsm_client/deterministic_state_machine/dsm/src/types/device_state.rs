@@ -28,6 +28,7 @@ use std::fmt;
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
 use crate::types::error::DsmError;
+use crate::types::offline_account::{offline_account_leaf_key, OfflineAccount};
 use crate::types::operations::Operation;
 
 /// The canonical per-device head per §2.2.
@@ -75,9 +76,7 @@ pub struct DeviceState {
     legacy_anchor: Option<[u8; 32]>,
 
     /// Non-relationship SMT leaves that also commit into the device root `r_A`:
-    /// offline-bearer anchor-state leaves ([`Self::with_anchor_state_leaf`], and the
-    /// `anchor_leaf` replaced inside [`Self::advance`]) and the token adoption leaves
-    /// [`Self::advance`] writes. The [`SparseMerkleTree`] is the canonical source
+    /// the token adoption leaves [`Self::advance`] writes. The [`SparseMerkleTree`] is the canonical source
     /// of truth for their VALUE, but — exactly like [`Self::tips`] — this map is the
     /// enumerable record needed to REPLAY them in [`Self::restore`]. Without it a state that
     /// has any such leaf recomputes a different root on reload (the leaf is in the stored root
@@ -85,15 +84,13 @@ pub struct DeviceState {
     /// iteration during persistence.
     extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
 
-    /// Offline-cash allocations: value deliberately loaded from the online balance into this
-    /// device's device-bound offline-bearer regime ("cash in hand"). Keyed by
-    /// `offline_allocation_key(genesis, devid, anchor_bundle_B, asset)`; the value is the
-    /// extractable `(amount, sequence)` behind the committed allocation leaf (whose hash lives
-    /// in [`Self::extra_leaves`]). The leaf hash is not reversible to the amount, so this map is
-    /// the enumerable, persisted record of the allocation balance — mutated only by the
-    /// load/unload/spend chokepoints, never by the online per-token spend path. `BTreeMap` for
-    /// deterministic iteration during persistence.
-    offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
+    /// The offline accounts, one per enrolled anchor bundle `B`: value moved out of the online
+    /// balance by a canonical load, held in an SMT of its own whose root is the device-SMT leaf
+    /// at `offline_account_leaf_key(B)` (see [`crate::types::offline_account`]). Each account
+    /// holds its allocations, the software counter and the offline frontier. The device leaf is
+    /// derived from the account, so [`Self::restore`] rebuilds it from this map. Mutated only by
+    /// opening, the boundaries and the offline-bearer spend inside [`Self::advance`].
+    offline_accounts: BTreeMap<[u8; 32], OfflineAccount>,
 
     /// The economic admission in flight, if any — the authoritative fence
     /// state for [`Self::advance`].
@@ -110,17 +107,6 @@ pub struct DeviceState {
     /// its own table and re-attached on load; [`Self::restore`] requires it as
     /// an argument so every rebuild path must supply it or fail to compile.
     pending_economic_admission: Option<crate::economic::admission::PendingEconomicAdmission>,
-}
-
-/// Extractable state of one offline-cash allocation (see [`DeviceState::offline_allocations`]).
-/// The committed allocation leaf value is `offline_allocation_value(amount, sequence)`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct OfflineAllocation {
-    /// Current allocation balance in the asset's base units.
-    pub amount: u64,
-    /// Monotone per-allocation transition counter; advances on every load/unload/spend so a
-    /// repeated `amount` still produces a distinct committed leaf value (no replay).
-    pub sequence: u64,
 }
 
 impl fmt::Debug for DeviceState {
@@ -141,6 +127,116 @@ fn hex_short(b: &[u8; 32]) -> String {
         s.push_str(&format!("{byte:02x}"));
     }
     s
+}
+
+/// A device head Core produced: the genesis head, a head restored from this
+/// device's own persisted encoding, or a head one of Core's transitions made
+/// from a realized head. The realization predicate is the only way a state
+/// comes into existence (DSM §78, MR-DSM-0243/0244): this is the only kind
+/// [`StateMachine::set_device_head`](crate::core::state_machine::StateMachine::set_device_head)
+/// installs, its field is private, and nothing outside Core builds one, so a
+/// head assembled any other way does not compile into an install. Reading goes
+/// through `Deref`; every transition is a method here, taking a realized head
+/// and returning one.
+#[derive(Clone)]
+pub struct RealizedHead(DeviceState);
+
+impl RealizedHead {
+    /// A head one of Core's own transitions produced.
+    pub(crate) fn of(state: DeviceState) -> Self {
+        Self(state)
+    }
+
+    /// The head as a plain value, for a caller that only reads, persists or
+    /// simulates from it. It is never installed again without passing back
+    /// through Core.
+    pub fn into_head(self) -> DeviceState {
+        self.0
+    }
+
+    /// One transition on `rel_key`: see [`DeviceState::advance`].
+    pub fn advance(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: Operation,
+        deltas: &[BalanceDelta],
+        offline_spend: Option<OfflineSpend>,
+    ) -> Result<AdvanceOutcome, DsmError> {
+        self.0.advance(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            offline_spend,
+        )
+    }
+
+    /// The relationship with `counterparty_devid` established at its `h_0`:
+    /// see [`DeviceState::establish_relationship`].
+    pub fn establish_relationship(
+        &self,
+        counterparty_devid: [u8; 32],
+    ) -> Result<RealizedHead, DsmError> {
+        self.0.establish_relationship(counterparty_devid).map(Self)
+    }
+
+    /// This head with `pending` as its admission in flight: see
+    /// [`DeviceState::with_pending_economic_admission`].
+    pub fn with_pending_economic_admission(
+        &self,
+        pending: Option<crate::economic::admission::PendingEconomicAdmission>,
+    ) -> RealizedHead {
+        Self(self.0.with_pending_economic_admission(pending))
+    }
+
+    /// This head after a resolved SoFi position: see
+    /// [`DeviceState::with_resolved_position`].
+    pub fn with_resolved_position(
+        &self,
+        balances: &crate::sofi::lineage::ResolvedBalances,
+    ) -> Result<RealizedHead, DsmError> {
+        self.0.with_resolved_position(balances).map(Self)
+    }
+
+    /// This head with the offline account of `bundle` opened: see
+    /// [`DeviceState::open_offline_account`].
+    pub fn open_offline_account(
+        &self,
+        bundle: &[u8; 32],
+        frontier: [u8; 32],
+        counter: u64,
+    ) -> Result<RealizedHead, DsmError> {
+        self.0
+            .open_offline_account(bundle, frontier, counter)
+            .map(Self)
+    }
+
+    /// One offline boundary from this head: see
+    /// [`DeviceState::cross_offline_boundary`].
+    pub fn cross_offline_boundary(
+        &self,
+        bundle: &[u8; 32],
+        kind: OfflineBoundaryKind,
+        asset: &[u8; 32],
+        amount: u64,
+    ) -> Result<OfflineBoundaryOutcome, DsmError> {
+        self.0.cross_offline_boundary(bundle, kind, asset, amount)
+    }
+}
+
+impl core::ops::Deref for RealizedHead {
+    type Target = DeviceState;
+
+    fn deref(&self) -> &DeviceState {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RealizedHead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// Canonical value-capability of a relationship, for recovery gate-set construction
@@ -241,7 +337,7 @@ pub struct RelChainTip {
     /// which is why it is retained explicitly instead of being recovered from
     /// a 50 KB state copy. Empty for a relationship established but not yet
     /// stepped (its tip is `h_0`, which no transition produced) and for a
-    /// digest-only tip restored from a recovery capsule; an advance on such a
+    /// digest-only tip restored by recovery; an advance on such a
     /// tip falls back to the SMT-root derivation.
     pub tip_entropy: Vec<u8>,
 
@@ -366,21 +462,25 @@ pub enum BalanceDirection {
     Debit,
 }
 
-/// The value source for an [`DeviceState::advance`] that spends from the device-bound
-/// offline-cash allocation instead of the online balance (an offline-bearer transfer).
+/// The value source for an [`DeviceState::advance`] that spends from the offline account of
+/// an enrolled anchor bundle instead of the online balance (an offline-bearer transfer).
 ///
-/// When present, the transfer's value is conserved by debiting the allocation by `amount` — the
-/// online balance is NOT touched (it was already debited when the cash was loaded) and
-/// `deltas` MUST be empty. The allocation debit and the relationship + anchor-state advance land in
-/// ONE atomic device-root replacement, so the value move and the transition are inseparable.
+/// When present, the transfer's value is conserved by debiting the account's allocation of the
+/// operation's asset by `amount` — the online balance is NOT touched (the canonical load already
+/// moved the value out of it) and `deltas` MUST be empty. The allocation debit, the counter's
+/// `u → u + 1` and the frontier's advance are one write set over the account, and the account's
+/// new root lands with the relationship leaf in ONE atomic device-root replacement: the value
+/// move, the counter step and the transition are inseparable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OfflineSpend {
-    /// Chip-rooted anchor bundle `B` binding the allocation to this device's offline-bearer island.
+    /// The enrolled anchor bundle `B` whose offline account is spent from.
     pub anchor_bundle_b: [u8; 32],
     /// Asset (CPTA `policy_commit`) whose allocation is being spent.
     pub asset: [u8; 32],
     /// Amount drawn from the allocation — must equal the transfer operation's amount.
     pub amount: u64,
+    /// The frontier the spend advances the account to, `h_{i+1} = H(h_i ‖ D_{i+1})`.
+    pub next_frontier: [u8; 32],
 }
 
 /// By-construction balance-conservation guard for [`DeviceState::advance`].
@@ -400,7 +500,9 @@ pub struct OfflineSpend {
 ///   transfer (`OfflineBearerRequired`). This keeps ONE conservation chokepoint across both
 ///   value regimes — the allocation debit is the conserved source, exactly as an online `Debit` is.
 /// - `Burn`: exactly one `Debit` delta of `amount`.
-/// - `CreateToken`: the ERA fee debit, if any, then the release of the whole
+/// - `CreateToken`: the debit of the protocol's ERA creation fee,
+///   [`TOKEN_CREATION_FEE_ERA`](crate::core::token::TOKEN_CREATION_FEE_ERA)
+///   and no other amount (SoFi Amendment S18), then the release of the whole
 ///   genesis supply.
 /// - `SofiVaultCreate`: exactly the debits of its two funded legs.
 /// - `EscrowVaultCreate`: exactly the debit of the held amount of the terms'
@@ -446,19 +548,61 @@ fn validate_conservation(
             policy_commit,
             ..
         } => {
-            // Offline-bearer transfer: allocation-backed, no online balance movement.
-            if let Some(allocation_amount) = offline_spend {
-                if !deltas.is_empty() {
-                    return Err(DsmError::invalid_operation(
-                        "conservation: offline-bearer transfer must not apply an online balance delta",
-                    ));
+            // An offline-bearer transfer, on either side, moves only a token its committed policy
+            // lets move: no economic write set checks it offline.
+            let is_recipient =
+                to_device_id.len() == 32 && to_device_id.as_slice() == local_devid.as_slice();
+            if crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                operation,
+            ) {
+                crate::bilateral::offline::bearer_token_moves(operation)
+                    .map_err(|e| DsmError::invalid_operation(format!("conservation: {e}")))?;
+                // The side of the transfer this device is on.
+                enum Side {
+                    Sender,
+                    Recipient,
                 }
-                if allocation_amount != amount.value() {
-                    return Err(DsmError::invalid_operation(
-                        "conservation: offline-cash allocation debit != transfer amount",
-                    ));
-                }
-                return Ok(());
+                let side = if is_recipient {
+                    Side::Recipient
+                } else {
+                    Side::Sender
+                };
+                return match (offline_spend, side) {
+                    // The sender draws the value from its offline account, never the online
+                    // balance.
+                    (Some(allocation_amount), Side::Sender) => {
+                        if !deltas.is_empty() {
+                            return Err(DsmError::invalid_operation(
+                                "conservation: offline-bearer transfer must not apply an online balance delta",
+                            ));
+                        }
+                        if allocation_amount != amount.value() {
+                            return Err(DsmError::invalid_operation(
+                                "conservation: offline-cash allocation debit != transfer amount",
+                            ));
+                        }
+                        Ok(())
+                    }
+                    // The receiver credits nothing online: value received offline is pending
+                    // until it is validated online, and its settlement is an admitted economic
+                    // step of its own (SA-91; the owner's rule that offline receipts stay
+                    // unspendable until then).
+                    (None, Side::Recipient) => match deltas {
+                        [] => Ok(()),
+                        _ => Err(DsmError::invalid_operation(
+                            "conservation: an offline-bearer receipt credits nothing online — its \
+                             value is pending until it is reconciled online (SA-91)",
+                        )),
+                    },
+                    (Some(_), Side::Recipient) => Err(DsmError::invalid_operation(
+                        "conservation: a transfer to this device spends nothing of its offline \
+                         account",
+                    )),
+                    (None, Side::Sender) => Err(DsmError::invalid_operation(
+                        "conservation: an offline-bearer transfer's sender draws it from its \
+                         offline account",
+                    )),
+                };
             }
             if deltas.len() != 1 {
                 return Err(DsmError::invalid_operation(
@@ -471,8 +615,6 @@ fn validate_conservation(
                     "conservation: transfer delta amount != operation amount",
                 ));
             }
-            let is_recipient =
-                to_device_id.len() == 32 && to_device_id.as_slice() == local_devid.as_slice();
             let expected = if is_recipient {
                 BalanceDirection::Credit
             } else {
@@ -514,8 +656,9 @@ fn validate_conservation(
         // pay the creation fee and releases the new token's whole genesis
         // supply to its creator (`ReleaseRule::AllAtCreation`, SoFi §51) in one
         // advance, so either the token exists and the fee was paid, or neither
-        // happened. The rule is positional and exact: the ERA fee debit when
-        // there is a fee, then the release credit, and nothing else.
+        // happened. The rule is positional and exact: the ERA fee debit, then
+        // the release credit, and nothing else. The fee is the protocol's
+        // (SoFi Amendment S18), never the operation's to choose.
         Operation::CreateToken {
             initial_supply,
             policy_commit,
@@ -535,23 +678,29 @@ fn validate_conservation(
                     "conservation: a token with no genesis supply is not a token",
                 ));
             }
-            let mut expected = Vec::with_capacity(2);
-            if *fee_amount > 0 {
-                expected.push(BalanceDelta {
+            if *fee_amount != crate::core::token::TOKEN_CREATION_FEE_ERA {
+                return Err(DsmError::invalid_operation(format!(
+                    "conservation: a token creation pays the protocol's creation fee of {} ERA \
+                     base units, not {fee_amount}",
+                    crate::core::token::TOKEN_CREATION_FEE_ERA
+                )));
+            }
+            let expected = [
+                BalanceDelta {
                     policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
                     direction: BalanceDirection::Debit,
                     amount: *fee_amount,
-                });
-            }
-            expected.push(BalanceDelta {
-                policy_commit: *policy_commit,
-                direction: BalanceDirection::Credit,
-                amount: initial_supply.value(),
-            });
+                },
+                BalanceDelta {
+                    policy_commit: *policy_commit,
+                    direction: BalanceDirection::Credit,
+                    amount: initial_supply.value(),
+                },
+            ];
             if deltas != expected.as_slice() {
                 return Err(DsmError::invalid_operation(
-                    "conservation: create-token must apply exactly its ERA fee debit, if any, \
-                     then the release of its whole initial supply under its own policy_commit",
+                    "conservation: create-token must apply exactly its ERA fee debit, then the \
+                     release of its whole initial supply under its own policy_commit",
                 ));
             }
             Ok(())
@@ -642,32 +791,19 @@ fn validate_conservation(
 /// The caller must CAS-swap the device head from `parent_r_a` to
 /// `child_r_a`. If the CAS fails, another advance landed first and this
 /// outcome is stale; discard and rebuild from the new head.
-/// A fused-anchor-state leaf replacement to apply in the SAME device-SMT batch as a bearer
-/// transfer's relationship-leaf advance (Software-Authority / Hardware-Identity). `key` is the stable
-/// per-device anchor-state leaf key `H("DSM/fused-anchor-state-leaf/v1" ‖ B)`; `new_value` is the
-/// SUCCESSOR commit `H("DSM/fused-anchor-state/v1" ‖ B ‖ A_{i+1} ‖ J_{b'} ‖ uᵢ+1)`. The key is
-/// stable; only the value changes, so the successor root changes because the value changes and a
-/// receiver verifies both roots independently.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnchorLeafUpdate {
-    pub key: [u8; 32],
-    pub new_value: [u8; 32],
-}
-
-/// Inclusion proofs for the anchor-state leaf across a bearer advance (`Π_i`/`Π_{i+1}`): `parent`
-/// proves the OLD leaf under the pre-advance device root `R_i`, `child` proves the SUCCESSOR leaf
-/// under the post-advance device root `R_{i+1}` (`child_r_a`). Both are
-/// `SmtInclusionProof::to_bytes()` and verify via `verify_anchor_state_leaf`.
+/// The proofs that the device roots before and after an offline-bearer spend commit the
+/// spent offline account at the spend's frontier and counter (`Π_i`/`Π_{i+1}`): each is an
+/// encoded `OfflineStateProof` (see [`crate::types::offline_account::verify_offline_state`]).
 #[derive(Clone, Debug)]
-pub struct AnchorLeafProofs {
+pub struct OfflineStateProofs {
     pub parent: Vec<u8>,
     pub child: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
 pub struct AdvanceOutcome {
-    /// The new [`DeviceState`] to install on CAS success.
-    pub new_device_state: DeviceState,
+    /// The new head to install on CAS success.
+    pub new_device_state: RealizedHead,
 
     /// The new chain state for the advanced relationship. Signatures are
     /// `None` in this outcome — the caller attaches them via the stitched
@@ -685,10 +821,10 @@ pub struct AdvanceOutcome {
     /// Child device root `r'_A` produced by the leaf replace.
     pub child_r_a: [u8; 32],
 
-    /// Fused-anchor-state leaf inclusion proofs, `Some` iff an [`AnchorLeafUpdate`] was applied
-    /// (a bearer advance). `parent` binds the old commit under `parent_r_a`;
-    /// `child` binds the successor commit under `child_r_a`. `None` for ordinary transitions.
-    pub anchor_proofs: Option<AnchorLeafProofs>,
+    /// Offline-state proofs, `Some` exactly for an offline-bearer spend: `parent` proves the
+    /// spent account at its frontier and counter under `parent_r_a`, `child` the account after
+    /// the spend under `child_r_a`. `None` for ordinary transitions.
+    pub offline_state_proofs: Option<OfflineStateProofs>,
 
     /// The transition's one entropy, as `advance` derived it. Only `advance`
     /// sets it.
@@ -748,12 +884,22 @@ impl DeviceState {
             tips: BTreeMap::new(),
             legacy_anchor: None,
             extra_leaves: BTreeMap::new(),
-            offline_allocations: BTreeMap::new(),
+            offline_accounts: BTreeMap::new(),
             pending_economic_admission: None,
         };
         // A device's own relationship exists from its creation.
         state.insert_relationship_leaf(devid);
         state
+    }
+
+    /// The genesis head of a device: its own relationship at `h_0` and
+    /// nothing else, with the genesis digest `G` as its compat anchor. The base
+    /// case of the realization predicate: every other head is reached from one
+    /// of these through Core's transitions.
+    pub fn genesis_head(genesis: [u8; 32], devid: [u8; 32], public_key: Vec<u8>) -> RealizedHead {
+        let mut state = Self::new(genesis, devid, public_key);
+        state.legacy_anchor = Some(genesis);
+        RealizedHead::of(state)
     }
 
     /// Write the relationship with `counterparty_devid` into this device's
@@ -785,7 +931,10 @@ impl DeviceState {
     /// value. Every step on the relationship then replaces a leaf the device
     /// committed, so the step's parent root is one the device held. Refused
     /// when the relationship is already established.
-    pub fn establish_relationship(&self, counterparty_devid: [u8; 32]) -> Result<Self, DsmError> {
+    pub(crate) fn establish_relationship(
+        &self,
+        counterparty_devid: [u8; 32],
+    ) -> Result<Self, DsmError> {
         let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(
             &self.devid,
             &counterparty_devid,
@@ -812,7 +961,7 @@ impl DeviceState {
     /// The persistence layer calls this inside the same transaction that
     /// writes the pending row, so the head and the fence state can never
     /// disagree about whether an admission is in flight.
-    pub fn with_pending_economic_admission(
+    pub(crate) fn with_pending_economic_admission(
         &self,
         pending: Option<crate::economic::admission::PendingEconomicAdmission>,
     ) -> Self {
@@ -833,9 +982,9 @@ impl DeviceState {
     ///    tree over them once. The tree is a pure function of its leaves, so
     ///    the root is determined.
     /// 3. Installs `balances`, `tips`, and `legacy_anchor` directly.
-    ///
-    /// The caller is responsible for verifying that the resulting `root()`
-    /// matches the stored sanity-check digest.
+    /// 4. Refuses unless the rebuilt root is `stored_root`, the root this
+    ///    device persisted with the fields: a head is restored as it was
+    ///    realized, or not at all.
     #[allow(clippy::too_many_arguments)]
     pub fn restore(
         genesis: [u8; 32],
@@ -845,43 +994,82 @@ impl DeviceState {
         balances: BTreeMap<[u8; 32], u64>,
         tips_in_order: Vec<([u8; 32], RelChainTip)>,
         extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
-        offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
+        offline_accounts: BTreeMap<[u8; 32], OfflineAccount>,
         // The admission in flight, from its own durable table. REQUIRED, not
         // defaulted: every rebuild path must state it or fail to compile. A
         // defaulted `None` here would be a silent fence-open on any path that
         // forgot — a gate precondition with no mandatory producer.
         pending_economic_admission: Option<crate::economic::admission::PendingEconomicAdmission>,
-    ) -> Result<Self, DsmError> {
+        stored_root: [u8; 32],
+    ) -> Result<RealizedHead, DsmError> {
         let mut state = Self::new(genesis, devid, public_key);
         state.legacy_anchor = legacy_anchor;
         state.balances = balances;
-        state.offline_allocations = offline_allocations;
-        // The reserve LEAVES replay through `extra_leaves` below, which is what
-        // rebuilds the root; this map carries the amounts behind them, which the
-        // leaf hash cannot yield. A funded vault that reloaded without it would
-        // recompute a root that does not match the stored one.
+        // Each offline account's leaf is its root, so the accounts themselves
+        // are what the device tree replays below.
+        state.offline_accounts = offline_accounts;
         state.pending_economic_admission = pending_economic_admission;
 
         for (rel_key, tip) in tips_in_order.into_iter() {
             state.tips.insert(rel_key, tip);
         }
 
-        // Non-tip leaves (offline-bearer anchor-state, SoFi vault-state) go into the tree after
+        // Non-tip leaves (token adoptions, offline accounts) go into the tree after
         // the tips, so the recomputed root matches the stored one. Omitting these was the
         // reload-brick bug: a state with any such leaf recomputed a different root after a restart.
         state.extra_leaves = extra_leaves;
 
         // One build over every leaf, each node hashed once: the device's own relationship `new`
         // wrote, each tip, then each other leaf.
-        state.smt = SparseMerkleTree::from_leaves(
-            state
-                .tips
-                .iter()
-                .map(|(rel_key, tip)| (*rel_key, tip.chain_tip))
-                .chain(state.extra_leaves.iter().map(|(key, value)| (*key, *value))),
-        );
+        state.smt = Self::device_tree(&state.tips, &state.extra_leaves, &state.offline_accounts);
 
-        Ok(state)
+        if state.root() != stored_root {
+            return Err(DsmError::invalid_operation(format!(
+                "restore: the rebuilt device root {} is not the stored root {}",
+                crate::utils::text_id::encode_base32_crockford(&state.root()),
+                crate::utils::text_id::encode_base32_crockford(&stored_root)
+            )));
+        }
+        Ok(RealizedHead::of(state))
+    }
+
+    /// The device tree over a head's leaves: each relationship tip, then every
+    /// other leaf, then each offline account's root. A pure function of its
+    /// leaves, so the root is determined; [`Self::restore`] builds a head over
+    /// exactly this tree.
+    fn device_tree(
+        tips: &BTreeMap<[u8; 32], RelChainTip>,
+        extra_leaves: &BTreeMap<[u8; 32], [u8; 32]>,
+        offline_accounts: &BTreeMap<[u8; 32], OfflineAccount>,
+    ) -> SparseMerkleTree {
+        SparseMerkleTree::from_leaves(
+            tips.iter()
+                .map(|(rel_key, tip)| (*rel_key, tip.chain_tip))
+                .chain(extra_leaves.iter().map(|(key, value)| (*key, *value)))
+                .chain(
+                    offline_accounts.iter().map(|(bundle, account)| {
+                        (offline_account_leaf_key(bundle), account.root())
+                    }),
+                ),
+        )
+    }
+
+    /// The root [`Self::restore`] rebuilds for these fields: the device's own
+    /// relationship at `h_0`, the tips (a later one at a key replaces an earlier
+    /// one), every other leaf and each offline account. Only a root: nothing
+    /// built from it is a head.
+    pub fn root_over(
+        devid: [u8; 32],
+        tips_in_order: &[([u8; 32], RelChainTip)],
+        extra_leaves: &BTreeMap<[u8; 32], [u8; 32]>,
+        offline_accounts: &BTreeMap<[u8; 32], OfflineAccount>,
+    ) -> [u8; 32] {
+        let own = Self::new(devid, devid, Vec::new());
+        let mut tips = own.tips;
+        for (rel_key, tip) in tips_in_order {
+            tips.insert(*rel_key, tip.clone());
+        }
+        *Self::device_tree(&tips, extra_leaves, offline_accounts).root()
     }
 
     /// Current device head `r_A` — the Per-Device SMT root (§2.2).
@@ -902,14 +1090,6 @@ impl DeviceState {
             .map_err(|e| DsmError::invalid_operation(format!("rel_inclusion_proof: {e}")))
     }
 
-    /// Stash a legacy `State.hash` as a verification anchor. Callers that
-    /// hold a legacy State and want `legacy_anchor()` to return its hash
-    /// (for hash-adjacency verification) use this. Strictly compat path —
-    /// not part of the §2.2 SMT.
-    pub fn bootstrap_legacy_root(&mut self, legacy_root: [u8; 32]) {
-        self.legacy_anchor = Some(legacy_root);
-    }
-
     /// Returns the legacy anchor if set (compat path).
     pub fn legacy_anchor(&self) -> Option<[u8; 32]> {
         self.legacy_anchor
@@ -918,27 +1098,6 @@ impl DeviceState {
     /// Device genesis digest.
     pub fn genesis_digest(&self) -> [u8; 32] {
         self.genesis
-    }
-
-    /// Install the canonical genesis authority root `G` on an ALREADY
-    /// CONSTRUCTED head.
-    ///
-    /// Only the constructor used to write `genesis`, which made
-    /// `CoreSDK::write_genesis_device_head` silently unable to honour its own
-    /// contract: it takes the existing head when one is present, so on that
-    /// branch `genesis` kept whatever the head was built with. Genesis install
-    /// always hits that branch — `StateMachine::set_state` materialises a head
-    /// first — so every freshly created wallet ended up with a head whose
-    /// `genesis` was the `[0u8; 32]` that `set_state` invented. Every consumer
-    /// reading `genesis_digest()` as the authority root then compared against
-    /// zeros: the ERA faucet's authority evidence re-derived the real seed-rooted
-    /// `v3.g` and fail-closed on every device, correctly.
-    ///
-    /// This is the narrow repair for that: a head that HAS the canonical root
-    /// can be told it. It does not make the root optional and does not add a
-    /// second notion of `G` — there is one, the seed-derived `v3.g`.
-    pub fn set_genesis_digest(&mut self, genesis: [u8; 32]) {
-        self.genesis = genesis;
     }
 
     /// Device identifier.
@@ -1011,7 +1170,7 @@ impl DeviceState {
     /// `prior_entropy` input to the next advance (§11 eq. 14).
     ///
     /// `None` when the relationship is unknown, or when its tip carries no
-    /// entropy (a digest-only tip restored from a recovery capsule). Both
+    /// entropy (a digest-only tip restored by recovery). Both
     /// cases mean the caller must fall back to the SMT-root derivation.
     pub fn tip_entropy(&self, rel_key: &[u8; 32]) -> Option<&[u8]> {
         self.tips
@@ -1087,7 +1246,7 @@ impl DeviceState {
     /// position.
     ///
     /// [`advance_resolved`]: crate::sofi::lineage::advance_resolved
-    pub fn with_resolved_position(
+    pub(crate) fn with_resolved_position(
         &self,
         balances: &crate::sofi::lineage::ResolvedBalances,
     ) -> Result<Self, DsmError> {
@@ -1109,6 +1268,69 @@ impl DeviceState {
             }
         }
         Ok(next)
+    }
+
+    /// MR-DSM-0201: a zero-effect transition is not a transition (the
+    /// explainer's spam-resistance aside: "send nothing a million times" is not
+    /// representable). Refuses an operation that this advance gives no effect
+    /// and that no verifier reads as one.
+    ///
+    /// An operation is not zero-effect merely because it moves no value: an
+    /// adoption writes its policy leaf, a setup its relationship leaf, a vault
+    /// operation the vault lifecycle the vault manager records, and each of
+    /// those is admitted. A second adoption of a policy rewrites the leaf the
+    /// first wrote, so it changes nothing and is refused (owner ruling,
+    /// 2026-10-28). The match has no wildcard arm, so a variant added to
+    /// `Operation` does not compile until it is classified here.
+    fn refuse_zero_effect(&self, operation: &Operation) -> Result<(), DsmError> {
+        match operation {
+            // Nothing at all.
+            Operation::Noop
+            // An application payload: this advance applies none of it, and no
+            // verifier reads it.
+            | Operation::Generic { .. }
+            // An identity's genesis is not a step on a relationship.
+            | Operation::Genesis
+            // Legacy operations with no producer: this advance applies nothing
+            // for them, and no verifier reads them.
+            | Operation::Create { .. }
+            | Operation::Update { .. }
+            | Operation::Delete { .. }
+            | Operation::AddRelationship { .. }
+            | Operation::RemoveRelationship { .. }
+            | Operation::Link { .. }
+            | Operation::Unlink { .. }
+            | Operation::Invalidate { .. }
+            // Value operations this advance moves nothing for: conservation
+            // admits each only with no balance delta, nothing here writes a
+            // credit or an encumbrance, and the economic classifier gives each
+            // no write set (`economic::classifier`, UnsupportedValueTransition).
+            | Operation::Receive { .. }
+            | Operation::Lock { .. }
+            | Operation::Unlock { .. }
+            | Operation::LockToken { .. }
+            | Operation::UnlockToken { .. } => Err(DsmError::ZeroEffectTransition),
+            Operation::AdoptToken { policy_commit, .. } if self.has_adopted(policy_commit) => {
+                Err(DsmError::ZeroEffectTransition)
+            }
+            Operation::AdoptToken { .. }
+            | Operation::CreateToken { .. }
+            | Operation::Transfer { .. }
+            | Operation::Burn { .. }
+            | Operation::FaucetClaim { .. }
+            | Operation::SofiSetup { .. }
+            | Operation::SofiVaultCreate { .. }
+            | Operation::SofiFulfill { .. }
+            | Operation::EscrowVaultCreate { .. }
+            | Operation::DlvCreate { .. }
+            | Operation::DlvUnlock { .. }
+            | Operation::DlvClaim { .. }
+            | Operation::DlvInvalidate { .. }
+            // Recovery's own operations; recovery's verifiers read them
+            // (`recovery::chain_segment`, `recovery::succession_binding`).
+            | Operation::CreateRelationship { .. }
+            | Operation::Recovery { .. } => Ok(()),
+        }
     }
 
     /// Attempt to build an advance by one transition on `rel_key`.
@@ -1141,15 +1363,30 @@ impl DeviceState {
     /// snapshots and build valid candidates; the caller's CAS layer
     /// enforces first-commit-wins.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance(
+    pub(crate) fn advance(
         &self,
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: Operation,
         deltas: &[BalanceDelta],
-        anchor_leaf: Option<AnchorLeafUpdate>,
         offline_spend: Option<OfflineSpend>,
     ) -> Result<AdvanceOutcome, DsmError> {
+        // A zero-effect transition is not a transition (MR-DSM-0201), online or
+        // offline, refused before anything else is computed.
+        self.refuse_zero_effect(&operation)?;
+        // The leaf a step moves is the one its two device ids name (§18.1),
+        // whatever key the caller passed beside them.
+        if rel_key
+            != crate::core::bilateral_transaction_manager::compute_smt_key(
+                &self.devid,
+                &counterparty_devid,
+            )
+        {
+            return Err(DsmError::invalid_operation(
+                "advance: the relationship key is not the one this device and the counterparty \
+                 derive",
+            ));
+        }
         // The one entropy of this transition, derived from the tip before
         // anything else reads the relationship (Part VII step 3).
         let transition_entropy = self.derive_transition_entropy(&rel_key, &operation);
@@ -1226,6 +1463,12 @@ impl DeviceState {
         // established by the provenance verifier (0x005D), where the
         // authenticated network id exists; this layer holds only the genesis
         // digest.
+        //
+        // The credit is accepted only as the economic admission the head
+        // carries for it: `Prepared`, for exactly this operation's digest. The
+        // admission is what establishes, through the release's provenance
+        // (0x005D), that the units left the reserve; a claim the head carries
+        // no admission for would credit units nothing released.
         if let Operation::FaucetClaim { generation, .. } = &operation {
             if *generation == 0 {
                 return Err(DsmError::invalid_operation(
@@ -1233,21 +1476,32 @@ impl DeviceState {
                      installs, which is never the genesis generation 0",
                 ));
             }
+            let digest = crate::economic::admission::dsm_operation_digest(&operation.to_bytes());
+            let admitted = self
+                .pending_economic_admission
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.state == crate::economic::admission::EconomicAdmissionState::Prepared
+                        && pending.operation_digest == digest
+                });
+            if !admitted {
+                return Err(DsmError::invalid_operation(
+                    "advance: a faucet claim is accepted only as the prepared economic \
+                     admission the head carries for exactly this claim",
+                ));
+            }
         }
 
-        // Offline-bearer spend: draw the value from the device-bound offline-cash allocation instead of
-        // the online balance. Requires the anchor-state advance (a bearer transfer always advances
-        // the anchor leaf), so the allocation debit and the transition land in ONE atomic device root.
-        let allocation_update = match offline_spend {
+        // Offline-bearer spend: draw the value from the offline account of the
+        // spend's bundle instead of the online balance. The allocation debit,
+        // the counter step and the frontier's advance are one write set over the
+        // account, and the account's new root is written with the relationship
+        // leaf below, so they land in ONE atomic device root.
+        let account_spend = match offline_spend {
             None => None,
             Some(os) => {
-                if anchor_leaf.is_none() {
-                    return Err(DsmError::invalid_operation(
-                        "advance: offline-bearer spend requires an anchor-state leaf advance",
-                    ));
-                }
                 // The allocation drawn from is the one for the operation's own
-                // asset: its receipt's verifier derives the key from it.
+                // asset: its receipt's verifier derives the leaf from it.
                 if !matches!(
                     &operation,
                     Operation::Transfer { policy_commit, .. } if *policy_commit == os.asset
@@ -1256,37 +1510,22 @@ impl DeviceState {
                         "advance: an offline-cash spend draws from the allocation of the operation's own asset",
                     ));
                 }
-                let key = crate::types::offline_allocation_leaf::offline_allocation_key(
-                    &self.genesis,
-                    &self.devid,
-                    &os.anchor_bundle_b,
-                    &os.asset,
-                );
-                let cur = self.offline_allocations.get(&key).copied().ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "advance: this device holds no offline-cash allocation for the anchor bundle and asset",
-                    )
-                })?;
-                let new_amount = cur.amount.checked_sub(os.amount).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "advance: offline-cash allocation underflow (insufficient offline cash)",
-                    )
-                })?;
-                let new_sequence = cur.sequence.checked_add(1).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "advance: offline-cash allocation sequence overflow",
-                    )
-                })?;
-                let value = crate::types::offline_allocation_leaf::offline_allocation_value(
-                    new_amount,
-                    new_sequence,
-                );
-                let before = crate::types::step_transition::AllocationBefore {
-                    key,
-                    amount: cur.amount,
-                    sequence: cur.sequence,
-                };
-                Some((key, value, new_amount, new_sequence, before))
+                let account = self
+                    .offline_accounts
+                    .get(&os.anchor_bundle_b)
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "advance: this device holds no offline account for the anchor bundle",
+                        )
+                    })?;
+                let spent =
+                    account.step(&crate::types::offline_account::OfflineAccountStep::Spend {
+                        asset: os.asset,
+                        amount: os.amount,
+                        next_frontier: os.next_frontier,
+                    })?;
+                let witness = crate::types::offline_account::SpendWitness::of(account, &spent)?;
+                Some((os.anchor_bundle_b, spent.account, witness))
             }
         };
 
@@ -1377,48 +1616,41 @@ impl DeviceState {
         let parent_r_a = *self.smt.root();
         let mut new_smt = self.smt.clone();
         // One move of the tree over every leaf the step writes: the
-        // relationship leaf; for a bearer transition the anchor-state leaf and,
-        // for an offline-bearer spend, the allocation leaf (§9: the counter and
-        // the value source are inside the root); and any adoption or reserve
-        // leaves. Every write's path is against the one pre-root, and the
-        // transition proves its own move before it is returned.
+        // relationship leaf; for an offline-bearer spend the offline account's
+        // leaf, whose new root carries the allocation debit, the counter step
+        // and the frontier's advance (§9: the counter and the value source are
+        // inside the root); and any adoption leaves. Every write's path is
+        // against the one pre-root, and the transition proves its own move
+        // before it is returned.
         let mut writes: Vec<([u8; 32], [u8; 32])> = vec![(rel_key, child_chain_tip)];
-        if let Some(al) = &anchor_leaf {
-            writes.push((al.key, al.new_value));
-        }
-        if let Some((k, v, _, _, _)) = &allocation_update {
-            writes.push((*k, *v));
+        if let Some((bundle, account, _)) = &account_spend {
+            writes.push((offline_account_leaf_key(bundle), account.root()));
         }
         writes.extend(batch_leaves.iter().copied());
         let transition = crate::types::step_transition::StepTransition::apply(
             &mut new_smt,
             &writes,
-            allocation_update
+            account_spend
                 .as_ref()
-                .map(|(_, _, _, _, before)| *before),
+                .map(|(bundle, _, witness)| (offline_account_leaf_key(bundle), witness.clone())),
         )?;
 
-        // The anchor appliance's release hashes the anchor-state leaf's paths
-        // at both roots into its transition digest (`Π_i`, `Π_{i+1}`); until
-        // its firmware takes the counter record from the receipt, they are
-        // given to it. `Π_i` is the transition's own path for the leaf.
-        let anchor_proofs = match &anchor_leaf {
+        // The anchor appliance's release carries, beside each device root, the
+        // proof that the root commits the spent account at the release's
+        // frontier and counter (`Π_i`, `Π_{i+1}`).
+        let offline_state_proofs = match &account_spend {
             None => None,
-            Some(al) => {
-                let pre = transition.write_at(&al.key).ok_or_else(|| {
-                    DsmError::invalid_operation("advance: the anchor-state leaf was not written")
+            Some((bundle, account, _)) => {
+                let before = self.offline_accounts.get(bundle).ok_or_else(|| {
+                    DsmError::invalid_operation("advance: the spent offline account is not held")
                 })?;
-                let parent = crate::merkle::sparse_merkle_tree::SmtInclusionProof {
-                    key: al.key,
-                    value: pre.pre,
-                    siblings: pre.path.to_vec(),
-                };
-                let child = new_smt
-                    .get_inclusion_proof(&al.key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("anchor child proof: {e}")))?;
-                Some(AnchorLeafProofs {
-                    parent: parent.to_bytes(),
-                    child: child.to_bytes(),
+                Some(OfflineStateProofs {
+                    parent: crate::types::offline_account::offline_state_proof(
+                        &self.smt, bundle, before,
+                    )?,
+                    child: crate::types::offline_account::offline_state_proof(
+                        &new_smt, bundle, account,
+                    )?,
                 })
             }
         };
@@ -1451,22 +1683,17 @@ impl DeviceState {
             },
         );
 
-        // A bearer transition replaces the per-device anchor-state leaf (and, for an offline-bearer
-        // spend, the allocation leaf) as part of the SAME atomic root update; record their new
-        // values so `restore` replays them (else reload root-mismatches).
         let mut new_extra_leaves = self.extra_leaves.clone();
-        if let Some(al) = &anchor_leaf {
-            new_extra_leaves.insert(al.key, al.new_value);
-        }
         // Adoption leaves replay through `extra_leaves` too, or a reloaded
         // device recomputes a root missing them and refuses to start.
         for (k, v) in &batch_leaves {
             new_extra_leaves.insert(*k, *v);
         }
-        let mut new_offline_allocations = self.offline_allocations.clone();
-        if let Some((k, v, amount, sequence, _)) = allocation_update {
-            new_extra_leaves.insert(k, v);
-            new_offline_allocations.insert(k, OfflineAllocation { amount, sequence });
+        // The spent account replaces its predecessor; `restore` rebuilds its
+        // device leaf from it.
+        let mut new_offline_accounts = self.offline_accounts.clone();
+        if let Some((bundle, account, _)) = account_spend {
+            new_offline_accounts.insert(bundle, account);
         }
         let new_device_state = Self {
             genesis: self.genesis,
@@ -1477,253 +1704,281 @@ impl DeviceState {
             tips: new_tips,
             legacy_anchor: self.legacy_anchor,
             extra_leaves: new_extra_leaves,
-            offline_allocations: new_offline_allocations,
+            offline_accounts: new_offline_accounts,
             pending_economic_admission: self.pending_economic_admission.clone(),
         };
 
         Ok(AdvanceOutcome {
-            new_device_state,
+            new_device_state: RealizedHead::of(new_device_state),
             new_chain_state,
             transition,
             parent_r_a,
             child_r_a,
-            anchor_proofs,
+            offline_state_proofs,
             transition_entropy,
         })
     }
 
-    /// Bootstrap the per-device anchor-state leaf into the device SMT (Software-Authority /
-    /// Anchor §12): insert `key → value` where `key = H("DSM/fused-anchor-state-leaf/v1" ‖ B)` and
-    /// `value = commit_0 = H("DSM/fused-anchor-state/v1" ‖ B ‖ A_0 ‖ J_0 ‖ 0)`. Called ONCE when
-    /// the device's fused anchor is admitted; the resulting device root becomes the first valid
-    /// offline-bearer parent root. Returns the new [`DeviceState`] (the caller CAS-installs it).
-    pub fn with_anchor_state_leaf(
+    /// Open the offline account of an enrolled anchor bundle `B` at the
+    /// anchor's frontier and counter: the account's root becomes the device-SMT
+    /// leaf at `offline_account_leaf_key(B)`. Once per bundle; an account that
+    /// is open is never opened again, so its counter is never reset.
+    pub(crate) fn open_offline_account(
         &self,
-        key: &[u8; 32],
-        value: &[u8; 32],
+        bundle: &[u8; 32],
+        frontier: [u8; 32],
+        counter: u64,
     ) -> Result<Self, DsmError> {
-        let mut new_smt = self.smt.clone();
-        new_smt.update_leaf(key, value);
-        let mut new_extra_leaves = self.extra_leaves.clone();
-        new_extra_leaves.insert(*key, *value);
+        if self.offline_accounts.contains_key(bundle) {
+            return Err(DsmError::invalid_operation(
+                "the offline account of this anchor bundle is already open",
+            ));
+        }
+        let account = OfflineAccount::open(frontier, counter);
+        let mut smt = self.smt.clone();
+        smt.update_leaf(&offline_account_leaf_key(bundle), &account.root());
+        let mut offline_accounts = self.offline_accounts.clone();
+        offline_accounts.insert(*bundle, account);
         Ok(Self {
-            genesis: self.genesis,
-            devid: self.devid,
-            public_key: self.public_key.clone(),
-            smt: new_smt,
-            balances: self.balances.clone(),
-            tips: self.tips.clone(),
-            legacy_anchor: self.legacy_anchor,
-            extra_leaves: new_extra_leaves,
-            offline_allocations: self.offline_allocations.clone(),
-            pending_economic_admission: self.pending_economic_admission.clone(),
+            smt,
+            offline_accounts,
+            ..self.clone()
         })
     }
 
-    // ---------------------------------------------------------------------
-    // Offline-cash allocation transitions (device-bound "cash in hand").
-    //
-    // Each is a real device-SMT state change: it rewrites the allocation leaf
-    // (advancing the device root) and, for load/unload, moves online balance.
-    // These are balance-mutation chokepoints alongside `advance`: conservation is
-    // by construction — the online debit/credit and the allocation credit/debit are
-    // computed together from the same `amount`, so value is moved, never created
-    // or destroyed. `advance` remains the sole chokepoint for relationship transfers.
-    // ---------------------------------------------------------------------
-
-    /// Current offline-cash allocation balance for the allocation `key`, or 0 if none.
-    pub fn offline_allocation(&self, key: &[u8; 32]) -> u64 {
-        self.offline_allocations
-            .get(key)
-            .map(|a| a.amount)
-            .unwrap_or(0)
+    /// The offline account of `bundle`, if it is open.
+    pub fn offline_account(&self, bundle: &[u8; 32]) -> Option<&OfflineAccount> {
+        self.offline_accounts.get(bundle)
     }
 
-    /// Enumerable snapshot of every offline-cash allocation, for persistence.
-    pub fn offline_allocations_snapshot(&self) -> &BTreeMap<[u8; 32], OfflineAllocation> {
-        &self.offline_allocations
+    /// Every open offline account, keyed by its bundle, for persistence.
+    pub fn offline_accounts(&self) -> &BTreeMap<[u8; 32], OfflineAccount> {
+        &self.offline_accounts
     }
 
-    /// Rewrite the allocation leaf for `key` to `(new_amount, new_sequence)` and return the
-    /// new device state + inclusion proof. Internal helper for the load/unload/spend
-    /// chokepoints; `new_balances` is the already-computed online balance map.
-    fn set_offline_allocation(
+    /// The allocation of `asset` in the offline account of `bundle`, if the
+    /// account is open and holds one.
+    pub fn offline_allocation(&self, bundle: &[u8; 32], asset: &[u8; 32]) -> Option<u64> {
+        self.offline_accounts.get(bundle)?.allocation(asset)
+    }
+
+    /// Whether any offline account holds value.
+    pub fn holds_offline_value(&self) -> bool {
+        self.offline_accounts
+            .values()
+            .any(|account| account.allocations().values().any(|amount| *amount > 0))
+    }
+
+    /// The proof that this device's root commits the offline account of
+    /// `bundle` at the account's frontier and counter.
+    pub fn offline_state_proof(&self, bundle: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
+        let account = self.offline_accounts.get(bundle).ok_or_else(|| {
+            DsmError::invalid_operation("no offline account is open for this anchor bundle")
+        })?;
+        crate::types::offline_account::offline_state_proof(&self.smt, bundle, account)
+    }
+
+    /// Cross an offline boundary: a load moves `amount` of `asset` from the
+    /// online balance into the offline account of `bundle`, an unload moves it
+    /// back. The online balance and the account move together, from the same
+    /// amount, so value is moved and never made; the account's new root is
+    /// the one device leaf written.
+    ///
+    /// The boundary's operation id is derived here, from the roots it starts
+    /// from ([`OfflineBoundaryId::operation_id`]), and becomes the account's
+    /// funding chain: the funding origin is never the caller's to name.
+    pub(crate) fn cross_offline_boundary(
         &self,
-        key: [u8; 32],
-        new_balances: BTreeMap<[u8; 32], u64>,
-        new_amount: u64,
-        new_sequence: u64,
-    ) -> Result<OfflineAllocationOutcome, DsmError> {
-        let leaf_value = crate::types::offline_allocation_leaf::offline_allocation_value(
-            new_amount,
-            new_sequence,
-        );
-        let mut new_smt = self.smt.clone();
-        new_smt.update_leaf(&key, &leaf_value);
-        let new_root = *new_smt.root();
-        let proof = new_smt
-            .get_inclusion_proof(&key, 256)
-            .map_err(|e| DsmError::merkle(format!("offline-allocation proof: {e}")))?;
-
-        let mut new_extra_leaves = self.extra_leaves.clone();
-        new_extra_leaves.insert(key, leaf_value);
-        // Keep the entry even at amount 0 so `sequence` stays monotone (never replay a leaf value).
-        let mut new_offline_allocations = self.offline_allocations.clone();
-        new_offline_allocations.insert(
-            key,
-            OfflineAllocation {
-                amount: new_amount,
-                sequence: new_sequence,
-            },
-        );
-
-        let new_device_state = Self {
+        bundle: &[u8; 32],
+        kind: OfflineBoundaryKind,
+        asset: &[u8; 32],
+        amount: u64,
+    ) -> Result<OfflineBoundaryOutcome, DsmError> {
+        use crate::types::offline_account::OfflineAccountStep;
+        let account = self.offline_accounts.get(bundle).ok_or_else(|| {
+            DsmError::invalid_operation("no offline account is open for this anchor bundle")
+        })?;
+        let pre_device_root = *self.smt.root();
+        let boundary_id = OfflineBoundaryId {
             genesis: self.genesis,
-            devid: self.devid,
-            public_key: self.public_key.clone(),
-            smt: new_smt,
-            balances: new_balances,
-            tips: self.tips.clone(),
-            legacy_anchor: self.legacy_anchor,
-            extra_leaves: new_extra_leaves,
-            offline_allocations: new_offline_allocations,
-            pending_economic_admission: self.pending_economic_admission.clone(),
+            device_id: self.devid,
+            kind,
+            bundle: *bundle,
+            asset: *asset,
+            amount,
+            pre_device_root,
+            pre_account_root: account.root(),
+        }
+        .operation_id();
+        let held = self.balances.get(asset).copied();
+        let (step, balance) = match kind {
+            OfflineBoundaryKind::Load => (
+                OfflineAccountStep::Load {
+                    asset: *asset,
+                    amount,
+                    boundary_id,
+                },
+                held.and_then(|b| b.checked_sub(amount)).ok_or_else(|| {
+                    DsmError::invalid_operation("a load moves more than the online balance holds")
+                })?,
+            ),
+            OfflineBoundaryKind::Unload => (
+                OfflineAccountStep::Unload {
+                    asset: *asset,
+                    amount,
+                    boundary_id,
+                },
+                match held {
+                    Some(b) => b.checked_add(amount).ok_or_else(|| {
+                        DsmError::invalid_operation("an unload overflows the online balance")
+                    })?,
+                    None => amount,
+                },
+            ),
+            OfflineBoundaryKind::Settle => {
+                return Err(DsmError::invalid_operation(
+                    "a settlement moves no offline account of its own: it is a credit of what \
+                     this device received offline (settle_offline_receipt)",
+                ))
+            }
         };
-        Ok(OfflineAllocationOutcome {
-            new_device_state,
-            new_root,
-            proof: proof.to_bytes(),
-            amount: new_amount,
-            sequence: new_sequence,
+        let account_move = account.step(&step)?;
+        let mut balances = self.balances.clone();
+        // The advance's rule: a balance that reaches zero is removed.
+        match balance {
+            0 => balances.remove(asset),
+            b => balances.insert(*asset, b),
+        };
+        let mut smt = self.smt.clone();
+        let device_writes = smt.apply_writes(&[(
+            offline_account_leaf_key(bundle),
+            account_move.account.root(),
+        )])?;
+        let mut offline_accounts = self.offline_accounts.clone();
+        offline_accounts.insert(*bundle, account_move.account.clone());
+        let post_device_root = *smt.root();
+        Ok(OfflineBoundaryOutcome {
+            new_device_state: RealizedHead::of(Self {
+                smt,
+                balances,
+                offline_accounts,
+                ..self.clone()
+            }),
+            operation_id: boundary_id,
+            pre_device_root,
+            post_device_root,
+            pre_account_root: account.root(),
+            device_writes,
+            account_move,
         })
-    }
-
-    /// **Load** `amount` of `asset` from the online balance into this device's offline-cash allocation
-    /// (`anchor_bundle_b` binds the allocation to this device's offline-bearer island). Debits online
-    /// `available` and credits the allocation by the same amount — conserved. Fails closed on
-    /// insufficient online balance.
-    pub fn load_offline_cash(
-        &self,
-        anchor_bundle_b: &[u8; 32],
-        asset: &[u8; 32],
-        amount: u64,
-    ) -> Result<OfflineAllocationOutcome, DsmError> {
-        if amount == 0 {
-            return Err(DsmError::invalid_operation(
-                "load_offline_cash: amount must be > 0",
-            ));
-        }
-        let key = crate::types::offline_allocation_leaf::offline_allocation_key(
-            &self.genesis,
-            &self.devid,
-            anchor_bundle_b,
-            asset,
-        );
-        let cur_bal = self.balances.get(asset).copied().unwrap_or(0);
-        let new_bal = cur_bal.checked_sub(amount).ok_or_else(|| {
-            DsmError::invalid_operation("load_offline_cash: insufficient online balance")
-        })?;
-        let mut new_balances = self.balances.clone();
-        if new_bal == 0 {
-            new_balances.remove(asset);
-        } else {
-            new_balances.insert(*asset, new_bal);
-        }
-        let cur = self
-            .offline_allocations
-            .get(&key)
-            .copied()
-            .unwrap_or_default();
-        let new_amount = cur.amount.checked_add(amount).ok_or_else(|| {
-            DsmError::invalid_operation("load_offline_cash: allocation balance overflow")
-        })?;
-        self.set_offline_allocation(key, new_balances, new_amount, cur.sequence + 1)
-    }
-
-    /// **Unload** `amount` from the offline-cash allocation back to the online balance (reconcile).
-    /// Credits online `available` and debits the allocation — conserved. Fails closed if the allocation
-    /// holds less than `amount`.
-    pub fn unload_offline_cash(
-        &self,
-        anchor_bundle_b: &[u8; 32],
-        asset: &[u8; 32],
-        amount: u64,
-    ) -> Result<OfflineAllocationOutcome, DsmError> {
-        if amount == 0 {
-            return Err(DsmError::invalid_operation(
-                "unload_offline_cash: amount must be > 0",
-            ));
-        }
-        let key = crate::types::offline_allocation_leaf::offline_allocation_key(
-            &self.genesis,
-            &self.devid,
-            anchor_bundle_b,
-            asset,
-        );
-        let cur = self
-            .offline_allocations
-            .get(&key)
-            .copied()
-            .unwrap_or_default();
-        let new_amount = cur.amount.checked_sub(amount).ok_or_else(|| {
-            DsmError::invalid_operation("unload_offline_cash: insufficient offline-cash allocation")
-        })?;
-        let cur_bal = self.balances.get(asset).copied().unwrap_or(0);
-        let new_bal = cur_bal.checked_add(amount).ok_or_else(|| {
-            DsmError::invalid_operation("unload_offline_cash: online balance overflow")
-        })?;
-        let mut new_balances = self.balances.clone();
-        new_balances.insert(*asset, new_bal);
-        self.set_offline_allocation(key, new_balances, new_amount, cur.sequence + 1)
-    }
-
-    /// **Spend** `amount` from the offline-cash allocation for an offline-bearer transfer. Draws the
-    /// allocation down; the online balance is NOT touched (the value goes to the receiver via the
-    /// bearer release, off the online books). Fails closed if the allocation holds less than `amount`.
-    pub fn spend_offline_cash(
-        &self,
-        anchor_bundle_b: &[u8; 32],
-        asset: &[u8; 32],
-        amount: u64,
-    ) -> Result<OfflineAllocationOutcome, DsmError> {
-        if amount == 0 {
-            return Err(DsmError::invalid_operation(
-                "spend_offline_cash: amount must be > 0",
-            ));
-        }
-        let key = crate::types::offline_allocation_leaf::offline_allocation_key(
-            &self.genesis,
-            &self.devid,
-            anchor_bundle_b,
-            asset,
-        );
-        let cur = self
-            .offline_allocations
-            .get(&key)
-            .copied()
-            .unwrap_or_default();
-        let new_amount = cur.amount.checked_sub(amount).ok_or_else(|| {
-            DsmError::invalid_operation("spend_offline_cash: insufficient offline-cash allocation")
-        })?;
-        self.set_offline_allocation(key, self.balances.clone(), new_amount, cur.sequence + 1)
     }
 }
 
-/// Outcome of an offline-cash allocation transition ([`DeviceState::load_offline_cash`] /
-/// [`DeviceState::unload_offline_cash`] / [`DeviceState::spend_offline_cash`]). The caller
-/// CAS-installs `new_device_state` as the device head once persistence succeeds.
-#[derive(Debug, Clone)]
-pub struct OfflineAllocationOutcome {
-    /// New device state (post-transition). Install as the head.
-    pub new_device_state: DeviceState,
-    /// Post-transition device SMT root.
-    pub new_root: [u8; 32],
-    /// Inclusion proof (`SmtInclusionProof::to_bytes()`) of the allocation leaf under `new_root`.
-    pub proof: Vec<u8>,
-    /// New allocation balance.
+impl RealizedHead {
+    /// Settle what this device received offline: its online balance credited
+    /// by `amount` of `asset`, the payment a payer's spend made to it and the
+    /// payer's online history exposed (SA-91). The credit is an admitted
+    /// economic transition, funded by that spend
+    /// (`economic::offline_boundary::OfflineSettlementBody`); this is the head
+    /// it leaves. No offline account moves.
+    pub fn settle_offline_receipt(
+        &self,
+        asset: &[u8; 32],
+        amount: u64,
+    ) -> Result<RealizedHead, DsmError> {
+        if amount == 0 {
+            return Err(DsmError::invalid_operation(
+                "a settlement credits a positive amount",
+            ));
+        }
+        let mut balances = self.0.balances.clone();
+        let credited = match balances.get(asset) {
+            Some(held) => held.checked_add(amount).ok_or_else(|| {
+                DsmError::invalid_operation("a settlement overflows the online balance")
+            })?,
+            None => amount,
+        };
+        balances.insert(*asset, credited);
+        Ok(RealizedHead::of(DeviceState {
+            balances,
+            ..self.0.clone()
+        }))
+    }
+}
+
+/// Which way an offline boundary moves value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfflineBoundaryKind {
+    /// From the online balance into the offline account.
+    Load,
+    /// From the offline account back to the online balance.
+    Unload,
+    /// A receiver's settlement of value it received offline: its online balance
+    /// credited by the payer's spend the payer's online history exposed
+    /// (SA-91). It moves no offline account of its own.
+    Settle,
+}
+
+impl OfflineBoundaryKind {
+    /// The byte the boundary's identity commits for its kind.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Load => 1,
+            Self::Unload => 2,
+            Self::Settle => 3,
+        }
+    }
+}
+
+/// What identifies one offline boundary: who crosses it, which way, what,
+/// and the roots it starts from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfflineBoundaryId {
+    pub genesis: [u8; 32],
+    pub device_id: [u8; 32],
+    pub kind: OfflineBoundaryKind,
+    pub bundle: [u8; 32],
+    pub asset: [u8; 32],
     pub amount: u64,
-    /// New allocation transition sequence.
-    pub sequence: u64,
+    pub pre_device_root: [u8; 32],
+    pub pre_account_root: [u8; 32],
+}
+
+impl OfflineBoundaryId {
+    /// `H(DSM/economic-operation-id/offline-boundary/v1 ‖ G ‖ DevID ‖ kind ‖ B
+    /// ‖ asset ‖ u64_be(amount) ‖ R_A ‖ R_off)`. The two pre-roots make it
+    /// unique: the account's origin or counter leaf moves on every transition
+    /// of the account, so it never stands at the same root twice.
+    pub fn operation_id(&self) -> [u8; 32] {
+        let mut h = dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_BOUNDARY,
+        );
+        h.update(&self.genesis);
+        h.update(&self.device_id);
+        h.update(&[self.kind.code()]);
+        h.update(&self.bundle);
+        h.update(&self.asset);
+        h.update(&self.amount.to_be_bytes());
+        h.update(&self.pre_device_root);
+        h.update(&self.pre_account_root);
+        *h.finalize().as_bytes()
+    }
+}
+
+/// One offline boundary as Core took it: the device after it, the
+/// boundary's operation id, both device roots and the account's pre-root,
+/// the device-SMT write of the account leaf against the pre-root, and the
+/// account's own write set. The caller installs `new_device_state` only once
+/// the boundary is admitted.
+#[derive(Debug, Clone)]
+pub struct OfflineBoundaryOutcome {
+    pub new_device_state: RealizedHead,
+    pub operation_id: [u8; 32],
+    pub pre_device_root: [u8; 32],
+    pub post_device_root: [u8; 32],
+    pub pre_account_root: [u8; 32],
+    pub device_writes: Vec<crate::merkle::batch_fold::FoldEntry>,
+    pub account_move: crate::types::offline_account::OfflineAccountMove,
 }
 
 /// Test-only transitions on a device, built through the real `advance`.
@@ -1735,55 +1990,86 @@ impl DeviceState {
     /// `generation` of the reserve. A test that needs more claims more
     /// generations — there is no amount to ask for, because the claim has
     /// none.
+    ///
+    /// The claim is advanced as production advances it: the head carries the
+    /// `Prepared` admission for exactly this claim's digest. The returned head
+    /// carries the admission this head carried, as once the claim's own
+    /// admission completed.
     pub fn admitted_faucet_claim(&self, generation: u64) -> Result<Self, DsmError> {
         let rel_key = self.self_loop_key();
-        self.advance(
-            rel_key,
-            self.devid,
-            Operation::FaucetClaim {
-                reserve_id: crate::economic::native_reserve::era_reserve_id(b"dsm-testnet"),
-                generation: generation.max(1),
-            },
-            &[BalanceDelta {
-                policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
-                direction: BalanceDirection::Credit,
-                amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
-            }],
-            None,
-            None,
-        )
-        .map(|o| o.new_device_state)
+        let claim = Operation::FaucetClaim {
+            reserve_id: crate::economic::native_reserve::era_reserve_id(b"dsm-testnet"),
+            generation: generation.max(1),
+        };
+        let prepared = crate::economic::admission::PendingEconomicAdmission::prepared(
+            crate::economic::admission::PendingAdmissionKind::DsmBacked,
+            1,
+            crate::economic::tree::empty_economic_root(),
+            crate::economic::admission::dsm_operation_digest(&claim.to_bytes()),
+        );
+        self.with_pending_economic_admission(Some(prepared))
+            .advance(
+                rel_key,
+                self.devid,
+                claim,
+                &[BalanceDelta {
+                    policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
+                    direction: BalanceDirection::Credit,
+                    amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
+                }],
+                None,
+            )
+            .map(|o| {
+                o.new_device_state
+                    .with_pending_economic_admission(self.pending_economic_admission.clone())
+                    .into_head()
+            })
     }
 
     /// TEST-ONLY. A native token created on this device's self-loop by the
-    /// `CreateToken` advance its creator makes: the whole genesis supply
-    /// released to this device, with no creation fee (Core fixes no fee
-    /// amount; the fee schedule is the SDK's).
+    /// `CreateToken` advance its creator makes: the protocol's ERA creation
+    /// fee debited from this device and the whole genesis supply released to
+    /// it. A device that does not hold the fee first claims one faucet payout
+    /// (ten fees) through [`Self::admitted_faucet_claim`], as a wallet with no
+    /// ERA would before creating a token.
     pub fn created_token(&self, policy_commit: [u8; 32], supply: u64) -> Result<Self, DsmError> {
-        let rel_key = self.self_loop_key();
-        self.advance(
-            rel_key,
-            self.devid,
-            Operation::CreateToken {
-                token_id: b"TEST".to_vec(),
-                initial_supply: crate::types::token_types::Balance::amount(supply),
-                policy_commit,
-                fee_amount: 0,
-                name: "Test Token".to_string(),
-                symbol: "TEST".to_string(),
-                decimals: 0,
-                metadata_uri: None,
-                signature: Vec::new(),
-            },
-            &[BalanceDelta {
-                policy_commit,
-                direction: BalanceDirection::Credit,
-                amount: supply,
-            }],
-            None,
-            None,
-        )
-        .map(|o| o.new_device_state)
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let funded = if self.balance(&era) < crate::core::token::TOKEN_CREATION_FEE_ERA {
+            self.admitted_faucet_claim(1)?
+        } else {
+            self.clone()
+        };
+        let rel_key = funded.self_loop_key();
+        funded
+            .advance(
+                rel_key,
+                funded.devid,
+                Operation::CreateToken {
+                    token_id: b"TEST".to_vec(),
+                    initial_supply: crate::types::token_types::Balance::amount(supply),
+                    policy_commit,
+                    fee_amount: crate::core::token::TOKEN_CREATION_FEE_ERA,
+                    name: "Test Token".to_string(),
+                    symbol: "TEST".to_string(),
+                    decimals: 0,
+                    metadata_uri: None,
+                    signature: Vec::new(),
+                },
+                &[
+                    BalanceDelta {
+                        policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
+                        direction: BalanceDirection::Debit,
+                        amount: crate::core::token::TOKEN_CREATION_FEE_ERA,
+                    },
+                    BalanceDelta {
+                        policy_commit,
+                        direction: BalanceDirection::Credit,
+                        amount: supply,
+                    },
+                ],
+                None,
+            )
+            .map(|o| o.new_device_state.into_head())
     }
 
     /// TEST-ONLY. Adopt `policy_commit` on this device: the authenticated
@@ -1800,9 +2086,8 @@ impl DeviceState {
                 },
                 &[],
                 None,
-                None,
             )
-            .map(|o| o.new_device_state)
+            .map(|o| o.new_device_state.into_head())
     }
 
     /// The device's self-loop relationship key — where every self-authored
@@ -1813,7 +2098,7 @@ impl DeviceState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::types::operations::{Operation, TransactionMode};
 
@@ -1883,7 +2168,7 @@ mod tests {
     fn creating_a_token_releases_its_supply_to_the_creator_and_pays_the_fee() {
         const PC: [u8; 32] = [0x7C; 32];
         const SUPPLY: u64 = 500;
-        const FEE: u64 = 100;
+        const FEE: u64 = crate::core::token::TOKEN_CREATION_FEE_ERA;
         let era = crate::core::token::token_state_manager::era_policy_commit();
         let dev = DeviceState::new(devid(0xA4), devid(0xA4), vec![0x04; 32])
             .admitted_faucet_claim(0)
@@ -1917,7 +2202,6 @@ mod tests {
                 op.clone(),
                 &[fee.clone(), release.clone()],
                 None,
-                None,
             )
             .expect("a creation with its fee and its release")
             .new_device_state;
@@ -1941,20 +2225,214 @@ mod tests {
             ],
         ] {
             assert!(
-                dev.advance(rk, dev.devid, op.clone(), &deltas, None, None)
+                dev.advance(rk, dev.devid, op.clone(), &deltas, None)
                     .is_err(),
                 "{deltas:?} is not this creation's exact effect"
             );
         }
     }
 
-    /// A token with no genesis supply is not a token (SoFi §50): a zero-supply
-    /// creation is refused, and its fee is not spent.
+    /// The creation fee is the protocol's (SoFi Amendment S18): a creation
+    /// naming any other fee is refused at the accepting transition, however
+    /// exactly its deltas realize the fee it names. A fee of 0 used to pass,
+    /// creating a token for nothing.
+    ///
+    /// MUTATION CONTROL: delete the fee check in the `CreateToken` arm of
+    /// `validate_conservation` and the free creation is accepted.
+    #[test]
+    fn a_creation_paying_other_than_the_protocol_fee_is_refused() {
+        const PC: [u8; 32] = [0x7E; 32];
+        let fee = crate::core::token::TOKEN_CREATION_FEE_ERA;
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let dev = DeviceState::new(devid(0xA6), devid(0xA6), vec![0x06; 32])
+            .admitted_faucet_claim(1)
+            .expect("faucet claim");
+        let rk = dev.self_loop_key();
+        for named in [0, fee - 1, fee + 1] {
+            let op = Operation::CreateToken {
+                token_id: b"NEWCOIN".to_vec(),
+                initial_supply: bal(9),
+                policy_commit: PC,
+                fee_amount: named,
+                name: "New Coin".to_string(),
+                symbol: "NEW".to_string(),
+                decimals: 0,
+                metadata_uri: None,
+                signature: Vec::new(),
+            };
+            let mut deltas = Vec::new();
+            if named > 0 {
+                deltas.push(BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Debit,
+                    amount: named,
+                });
+            }
+            deltas.push(BalanceDelta {
+                policy_commit: PC,
+                direction: BalanceDirection::Credit,
+                amount: 9,
+            });
+            let refused = dev
+                .advance(rk, dev.devid, op, &deltas, None)
+                .expect_err("a fee other than the protocol's");
+            assert!(
+                refused.to_string().contains("creation fee"),
+                "{named}: {refused}"
+            );
+        }
+        assert_eq!(dev.balance(&PC), 0);
+        assert_eq!(
+            dev.balance(&era),
+            crate::economic::native_reserve::ERA_FAUCET_PAYOUT
+        );
+    }
+
+    /// A faucet claim is accepted only as the prepared admission the head
+    /// carries for exactly that claim, as `Operation::FaucetClaim` and the
+    /// state machine document. It used to credit the payout with none.
+    ///
+    /// MUTATION CONTROL: delete the admission check in `advance`'s faucet
+    /// arm and the claim the head carries no admission for credits.
+    #[test]
+    fn a_faucet_claim_is_accepted_only_as_its_prepared_admission() {
+        use crate::economic::admission::{
+            dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission,
+        };
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let dev = DeviceState::new(devid(0xA7), devid(0xA7), vec![0x07; 32]);
+        let rk = dev.self_loop_key();
+        let claim = |generation: u64| Operation::FaucetClaim {
+            reserve_id: crate::economic::native_reserve::era_reserve_id(b"dsm-testnet"),
+            generation,
+        };
+        let payout = [BalanceDelta {
+            policy_commit: era,
+            direction: BalanceDirection::Credit,
+            amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
+        }];
+        let prepared_for = |op: &Operation| {
+            Some(PendingEconomicAdmission::prepared(
+                PendingAdmissionKind::DsmBacked,
+                1,
+                crate::economic::tree::empty_economic_root(),
+                dsm_operation_digest(&op.to_bytes()),
+            ))
+        };
+
+        let refused = dev
+            .advance(rk, dev.devid, claim(1), &payout, None)
+            .expect_err("no admission");
+        assert!(
+            refused.to_string().contains("prepared economic admission"),
+            "{refused}"
+        );
+
+        let another = dev.with_pending_economic_admission(prepared_for(&claim(2)));
+        let refused = another
+            .advance(rk, another.devid, claim(1), &payout, None)
+            .expect_err("another claim's admission");
+        assert!(
+            refused.to_string().contains("prepared economic admission"),
+            "{refused}"
+        );
+
+        let own = dev.with_pending_economic_admission(prepared_for(&claim(1)));
+        let credited = own
+            .advance(rk, own.devid, claim(1), &payout, None)
+            .expect("the claim's own prepared admission")
+            .new_device_state;
+        assert_eq!(
+            credited.balance(&era),
+            crate::economic::native_reserve::ERA_FAUCET_PAYOUT
+        );
+    }
+
+    /// The leaf a step moves is the one its two device ids name. A step that
+    /// names one counterparty beside another relationship's key used to move
+    /// that other relationship's leaf.
+    ///
+    /// MUTATION CONTROL: delete the relationship-key check at the top of
+    /// `advance` and the step on the other relationship's leaf is accepted.
+    #[test]
+    fn a_step_moves_only_the_leaf_its_counterparty_names() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        let bob = devid(0xB0);
+        let carol = devid(0xC0);
+        let dev = fresh_device(0xA8)
+            .establish_relationship(bob)
+            .expect("establish bob")
+            .establish_relationship(carol)
+            .expect("establish carol");
+        let bob_key = compute_smt_key(&dev.devid, &bob);
+        let carol_key = compute_smt_key(&dev.devid, &carol);
+
+        let refused = dev
+            .advance(carol_key, bob, op(), &[], None)
+            .expect_err("carol's leaf named for bob");
+        assert!(
+            refused.to_string().contains("relationship key"),
+            "{refused}"
+        );
+        dev.advance(bob_key, bob, op(), &[], None)
+            .expect("bob's own leaf");
+    }
+
+    /// MR-DSM-0020, MR-DSM-0102, MR-DSM-0245, MR-DSM-0095: no global order
+    /// enters a device's state. The order relationships are established in is
+    /// not state: either order gives one root. And once a relationship has a
+    /// chain, its next step is a function of that chain alone: Bob's step
+    /// lands after any number of Carol's exactly as it would have at once, so
+    /// no step waits on a deadline or a count kept across relationships. (A
+    /// relationship's first step is seeded from the device root it is taken
+    /// from, which is that step's parent state.)
+    ///
+    /// MUTATION CONTROL: folding a device-wide step count (any sequence kept
+    /// across relationships) into a step's entropy or tip turns this red.
+    #[test]
+    fn a_relationships_steps_depend_on_its_own_chain_and_have_no_deadline() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        let (bob, carol) = (devid(0xB1), devid(0xC1));
+        let base = fresh_device(0xA9);
+        let (bob_key, carol_key) = (
+            compute_smt_key(&base.devid, &bob),
+            compute_smt_key(&base.devid, &carol),
+        );
+        let establish = |first: [u8; 32], second: [u8; 32]| {
+            base.establish_relationship(first)
+                .and_then(|d| d.establish_relationship(second))
+                .expect("both relationships")
+        };
+        let step = |dev: &DeviceState, key: [u8; 32], counterparty: [u8; 32]| {
+            dev.advance(key, counterparty, op(), &[], None)
+                .expect("a step on the relationship")
+                .new_device_state
+                .into_head()
+        };
+        let bob_first = establish(bob, carol);
+        assert_eq!(
+            bob_first.root(),
+            establish(carol, bob).root(),
+            "the order relationships were established in is not state"
+        );
+
+        let stepped = step(&step(&bob_first, bob_key, bob), carol_key, carol);
+        let mut late = stepped.clone();
+        for _ in 0..5 {
+            late = step(&late, carol_key, carol);
+        }
+        assert_eq!(
+            step(&late, bob_key, bob).chain_tip(&bob_key),
+            step(&stepped, bob_key, bob).chain_tip(&bob_key),
+            "Bob's step lands after Carol's five exactly as it would have at once"
+        );
+    }
+
     #[test]
     fn creating_a_token_with_zero_supply_is_refused() {
         const PC: [u8; 32] = [0x7D; 32];
         const SUPPLY: u64 = 0;
-        const FEE: u64 = 100;
+        const FEE: u64 = crate::core::token::TOKEN_CREATION_FEE_ERA;
         let era = crate::core::token::token_state_manager::era_policy_commit();
         let dev = DeviceState::new(devid(0xA5), devid(0xA5), vec![0x05; 32])
             .admitted_faucet_claim(0)
@@ -1982,7 +2460,6 @@ mod tests {
                     amount: FEE,
                 }],
                 None,
-                None,
             )
             .expect_err("a zero-supply creation is refused")
         );
@@ -1997,16 +2474,25 @@ mod tests {
 
     // ── amendment 2c-H: a route settle's movement and its receipt leaves ────
 
-    fn fresh_device(b: u8) -> DeviceState {
+    pub(crate) fn fresh_device(b: u8) -> DeviceState {
         DeviceState::new([0u8; 32], devid(b), pubkey())
     }
 
+    /// A step that moves no value but changes state: it records a vault's
+    /// creation, which the vault manager reads (MR-DSM-0201 admits it).
     fn op() -> Operation {
-        Operation::Generic {
-            operation_type: b"test".to_vec(),
-            data: vec![],
-            message: "t".to_string(),
+        vault_record(b"test")
+    }
+
+    fn vault_record(vault_id: &[u8]) -> Operation {
+        Operation::DlvCreate {
+            vault_id: vault_id.to_vec(),
+            creator_public_key: vec![],
+            parameters_hash: vec![],
+            fulfillment_condition: vec![],
+            intended_recipient: None,
             signature: vec![],
+            mode: TransactionMode::Bilateral,
         }
     }
 
@@ -2021,6 +2507,7 @@ mod tests {
             amount: bal(amount),
             token_id: b"ERA".to_vec(),
             policy_commit,
+            token_policy: Vec::new(),
             message: String::new(),
         }
     }
@@ -2040,8 +2527,10 @@ mod tests {
     fn credit_transfer_op(amount: u64, policy_commit: [u8; 32]) -> Operation {
         Operation::Transfer {
             to_device_id: devid(0xAA).to_vec(),
+            to_genesis: [0x6E; 32],
             amount: bal(amount),
             policy_commit,
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![0x11; 32],
@@ -2088,6 +2577,7 @@ mod tests {
             genesis_preimage: Vec::new(),
             creation: creation.encode(),
             terms: terms.encode(),
+            funding_policies: Vec::new(),
             signature: Vec::new(),
         };
         let debit = |amount: u64, policy_commit: [u8; 32]| BalanceDelta {
@@ -2132,6 +2622,7 @@ mod tests {
             market_policy_preimage: Vec::new(),
             funding_a_policy_commit: asset_a,
             funding_b_policy_commit: asset_b,
+            funding_policies: Vec::new(),
             signature: Vec::new(),
         };
         let debit = |amount: u64, policy_commit: [u8; 32]| BalanceDelta {
@@ -2188,8 +2679,10 @@ mod tests {
         let pcx = pc(0xCC);
         let xfer = |to: [u8; 32], amt: u64, pcv: [u8; 32]| Operation::Transfer {
             to_device_id: to.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: bal(amt),
             policy_commit: pcv,
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![],
@@ -2230,31 +2723,38 @@ mod tests {
             None
         )
         .is_err());
-        // CreateToken: the release of its whole supply under its own commit;
-        // Burn: one debit==amount.
+        // CreateToken: the protocol's ERA fee debit, then the release of its
+        // whole supply under its own commit; Burn: one debit==amount.
+        let fee = crate::core::token::TOKEN_CREATION_FEE_ERA;
+        let era = crate::core::token::token_state_manager::era_policy_commit();
         let create = |supply: u64| Operation::CreateToken {
             token_id: b"NEW".to_vec(),
             initial_supply: bal(supply),
             policy_commit: pcx,
-            fee_amount: 0,
+            fee_amount: fee,
             name: "New".to_string(),
             symbol: "NEW".to_string(),
             decimals: 0,
             metadata_uri: None,
             signature: Vec::new(),
         };
-        assert!(validate_conservation(&me, &create(9), &[credit(9, pcx)], None).is_ok());
-        assert!(validate_conservation(&me, &create(9), &[debit(9, pcx)], None).is_err());
-        assert!(validate_conservation(&me, &create(9), &[credit(8, pcx)], None).is_err());
-        assert!(validate_conservation(&me, &create(0), &[], None).is_err());
+        let paid = debit(fee, era);
+        validate_conservation(&me, &create(9), &[paid.clone(), credit(9, pcx)], None)
+            .expect("the fee, then the release");
+        validate_conservation(&me, &create(9), &[paid.clone(), debit(9, pcx)], None)
+            .expect_err("a release debited");
+        validate_conservation(&me, &create(9), &[paid.clone(), credit(8, pcx)], None)
+            .expect_err("a release short of the supply");
+        validate_conservation(&me, &create(9), &[credit(9, pcx)], None)
+            .expect_err("a release with no fee paid");
+        validate_conservation(&me, &create(0), std::slice::from_ref(&paid), None)
+            .expect_err("no genesis supply");
         assert!(validate_conservation(&me, &burn_op_for(9, pcx), &[debit(9, pcx)], None).is_ok());
         assert!(validate_conservation(&me, &burn_op_for(9, pcx), &[credit(9, pcx)], None).is_err());
         // ASSET BINDING: a creation or burn may not move an asset other than
         // the one the signed operation names.
-        assert!(
-            validate_conservation(&me, &create(9), &[credit(9, pc(0xEE))], None).is_err(),
-            "the release must be bound to the operation's policy_commit"
-        );
+        validate_conservation(&me, &create(9), &[paid.clone(), credit(9, pc(0xEE))], None)
+            .expect_err("the release must be bound to the operation's policy_commit");
         assert!(
             validate_conservation(&me, &burn_op_for(9, pcx), &[debit(9, pc(0xEE))], None).is_err(),
             "burn delta must be bound to the operation's policy_commit"
@@ -2274,20 +2774,21 @@ mod tests {
         // A bearer transfer sourced from the allocation: empty deltas + Some(offline_spend) is accepted;
         // but empty deltas WITHOUT offline_spend is rejected before commit (the fail-closed case the
         // activation seam must never produce — empty deltas and Some(offline_spend) are one choice).
-        let bearer_xfer = |amt: u64| {
+        let bearer_to = |to: [u8; 32], amt: u64| {
             use crate::types::operations::{AuthorityMode, AuthorityPolicy};
-            match xfer(other, amt, pcx) {
+            match xfer(to, amt, pcx) {
                 Operation::Transfer {
                     to_device_id,
                     amount,
-                    policy_commit,
                     terms_commitment,
                     signature,
                     ..
                 } => Operation::Transfer {
                     to_device_id,
+                    to_genesis: [0x6E; 32],
                     amount,
-                    policy_commit,
+                    policy_commit: moving_token().0,
+                    token_policy: moving_token().1,
                     terms_commitment,
                     signature,
                     authority_policy: Some(AuthorityPolicy {
@@ -2299,6 +2800,7 @@ mod tests {
                 other => other,
             }
         };
+        let bearer_xfer = |amt: u64| bearer_to(other, amt);
         assert!(
             validate_conservation(&me, &bearer_xfer(5), &[], Some(5)).is_ok(),
             "bearer transfer with empty deltas + matching allocation debit must be accepted"
@@ -2315,6 +2817,25 @@ mod tests {
             validate_conservation(&me, &bearer_xfer(5), &[], Some(6)).is_err(),
             "bearer allocation debit must equal the transfer amount"
         );
+        // The receiver credits nothing online: the value is pending until its
+        // settlement is admitted online (SA-91). A receipt that applies the
+        // credit an online transfer would is refused, as is one that spends
+        // from the receiver's own account.
+        let (moving, _) = moving_token();
+        validate_conservation(&me, &bearer_to(me, 5), &[], None)
+            .expect("a receipt that credits nothing is the receiver's step");
+        let credited = validate_conservation(&me, &bearer_to(me, 5), &[credit(5, moving)], None)
+            .expect_err("a receipt credited online before it is settled");
+        assert!(
+            credited.to_string().contains("credits nothing online"),
+            "refused for the credit: {credited}"
+        );
+        let spent = validate_conservation(&me, &bearer_to(me, 5), &[], Some(5))
+            .expect_err("a receipt that spends the receiver's own account");
+        assert!(
+            spent.to_string().contains("spends nothing of its offline"),
+            "refused for the spend: {spent}"
+        );
     }
 
     /// The credit shape the recipient path builds for a custom token: a
@@ -2322,8 +2843,10 @@ mod tests {
     fn custom_credit_op(to: &DeviceState, policy_commit: [u8; 32], amount: u64) -> Operation {
         Operation::Transfer {
             to_device_id: to.devid.to_vec(),
+            to_genesis: to.genesis,
             amount: bal(amount),
             policy_commit,
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"CUSTOM".to_vec(),
                 nonce: vec![0x5C; 32],
@@ -2362,7 +2885,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 50,
                 }],
-                None,
                 None,
             )
             .expect_err("a credit of a token this device never adopted must be refused");
@@ -2409,7 +2931,6 @@ mod tests {
                     amount: 50,
                 }],
                 None,
-                None,
             )
             .expect("after adoption the same credit is accepted");
         assert_eq!(
@@ -2420,12 +2941,14 @@ mod tests {
                 .copied(),
             Some(50)
         );
-        // Re-adopting is idempotent: same leaf, same value, no refusal.
+        // A second adoption changes nothing, so it is no transition
+        // (MR-DSM-0201), and the first adoption stands.
         let again = outcome
             .new_device_state
             .adopt_token(custom_token)
-            .expect("adopt");
-        assert!(again.has_adopted(&custom_token));
+            .expect_err("a second adoption is refused");
+        assert!(matches!(again, DsmError::ZeroEffectTransition), "{again}");
+        assert!(outcome.new_device_state.has_adopted(&custom_token));
     }
 
     #[test]
@@ -2468,7 +2991,6 @@ mod tests {
                     amount: 50,
                 }],
                 None,
-                None,
             )
             .expect("credit advance succeeds");
 
@@ -2485,95 +3007,6 @@ mod tests {
         assert!(
             !bob.balances.contains_key(&custom_token),
             "advance must not mutate &self"
-        );
-    }
-
-    #[test]
-    fn offline_cash_load_spend_unload_conserves_and_advances_root() {
-        use crate::types::offline_allocation_leaf::offline_allocation_key;
-        let dev = fresh_device(0xC1);
-        let token = pc(0xA1);
-        let bundle = [0x7B; 32];
-
-        // 100 of the token, created on this device; the subject is what
-        // happens to the funds afterwards.
-        let funded = dev.created_token(token, 100).expect("token created");
-
-        let key = offline_allocation_key(&funded.genesis, &funded.devid, &bundle, &token);
-        let online = |s: &DeviceState| s.balances.get(&token).copied().unwrap_or(0);
-        assert_eq!(online(&funded), 100);
-        assert_eq!(funded.offline_allocation(&key), 0);
-
-        // Load 30: online 70, allocation 30 — conserved — and the device root advances (real state change).
-        let loaded = funded
-            .load_offline_cash(&bundle, &token, 30)
-            .expect("load 30")
-            .new_device_state;
-        assert_eq!(online(&loaded), 70);
-        assert_eq!(loaded.offline_allocation(&key), 30);
-        assert_eq!(
-            online(&loaded) + loaded.offline_allocation(&key),
-            100,
-            "load conserves"
-        );
-        assert_ne!(
-            loaded.root(),
-            funded.root(),
-            "load must advance the device root"
-        );
-
-        // Spend 10 offline: allocation 20, online unchanged (value leaves via the bearer release).
-        let spent = loaded
-            .spend_offline_cash(&bundle, &token, 10)
-            .expect("spend 10")
-            .new_device_state;
-        assert_eq!(spent.offline_allocation(&key), 20);
-        assert_eq!(online(&spent), 70);
-        assert_ne!(
-            spent.root(),
-            loaded.root(),
-            "spend must advance the device root"
-        );
-
-        // Unload 5: allocation 15, online 75 — conserved back.
-        let unloaded = spent
-            .unload_offline_cash(&bundle, &token, 5)
-            .expect("unload 5")
-            .new_device_state;
-        assert_eq!(unloaded.offline_allocation(&key), 15);
-        assert_eq!(online(&unloaded), 75);
-
-        // Fail-closed guards.
-        assert!(
-            unloaded.load_offline_cash(&bundle, &token, 76).is_err(),
-            "load > online balance"
-        );
-        assert!(
-            unloaded.spend_offline_cash(&bundle, &token, 16).is_err(),
-            "spend > allocation"
-        );
-        assert!(
-            unloaded.unload_offline_cash(&bundle, &token, 16).is_err(),
-            "unload > allocation"
-        );
-        assert!(
-            unloaded.load_offline_cash(&bundle, &token, 0).is_err(),
-            "zero amount rejected"
-        );
-    }
-
-    #[test]
-    fn offline_cash_allocation_is_disjoint_from_online_token_balance() {
-        // The allocation leaf key never collides with the token's policy_commit balance key: an online
-        // per-token spend reads `balances[token]`, which the allocation never occupies.
-        use crate::types::offline_allocation_leaf::offline_allocation_key;
-        let dev = fresh_device(0xC2);
-        let token = pc(0xA2);
-        let bundle = [0x7C; 32];
-        let key = offline_allocation_key(&dev.genesis, &dev.devid, &bundle, &token);
-        assert_ne!(
-            key, token,
-            "allocation key must not equal the token policy_commit"
         );
     }
 
@@ -2603,181 +3036,120 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bearer_advance_commits_fused_anchor_leaf_into_real_device_roots() {
-        use crate::core::bilateral_transaction_manager::{
-            anchor_state_leaf_key, compute_smt_key, verify_anchor_state_leaf,
-        };
-        // Fused anchor identity + two opaque v2 anchor-state leaf VALUES (the anchor-core leaf
-        // `anchor_state_leaf(B, h_i, u_i)` — dsm treats them as opaque 32-byte values).
-        let b = [0xB1u8; 32];
-        let key = anchor_state_leaf_key(&b);
-        let commit0 = [0xC0u8; 32];
-        let commit1 = [0xC1u8; 32];
-
-        // (bootstrap) The admitted device SMT carries commit_0 at the stable anchor-state key.
-        // Three created tokens to burn from: a burn is value-bearing, so it
-        // exercises the same advance path this test is about.
-        let dev = fresh_device(0xAB)
-            .created_token(pc(0xF1), 1_000)
+    /// A device holding 100 of `token` online with the offline account of
+    /// `bundle` open at frontier `[0x01; 32]` and counter 0.
+    fn with_offline_account(tag: u8, token: [u8; 32], bundle: [u8; 32]) -> DeviceState {
+        fresh_device(tag)
+            .created_token(token, 100)
             .expect("token created")
-            .created_token(pc(0xF2), 1_000)
-            .expect("token created")
-            .created_token(pc(0xF3), 1_000)
-            .expect("token created");
-        let dev = dev
-            .with_anchor_state_leaf(&key, &commit0)
-            .expect("bootstrap");
+            .open_offline_account(&bundle, [0x01; 32], 0)
+            .expect("account opened")
+    }
 
-        let cp = devid(0xC0);
-        let rk = compute_smt_key(&dev.devid, &cp);
-        let dev = dev.establish_relationship(cp).expect("establish");
-
-        // (bearer advance) updates the SAME anchor leaf key old→successor in the same root batch.
-        let out = dev
-            .advance(
-                rk,
-                cp,
-                burn_op_for(10, pc(0xF1)),
-                &[BalanceDelta {
-                    policy_commit: pc(0xF1),
-                    direction: BalanceDirection::Debit,
-                    amount: 10,
-                }],
-                Some(AnchorLeafUpdate {
-                    key,
-                    new_value: commit1,
-                }),
-                None,
-            )
-            .expect("bearer advance");
-        let ap = out
-            .anchor_proofs
-            .clone()
-            .expect("bearer advance emits anchor proofs");
-
-        // prev proof verifies commit_0 ONLY against the prev root; next proof verifies commit_1
-        // ONLY against the next root — and each rejects the other root/value pairing.
-        assert!(verify_anchor_state_leaf(
-            &out.transition.pre_root(),
-            &b,
-            &commit0,
-            &ap.parent
-        ));
-        assert!(verify_anchor_state_leaf(
-            &out.child_r_a,
-            &b,
-            &commit1,
-            &ap.child
-        ));
-        assert!(!verify_anchor_state_leaf(
-            &out.child_r_a,
-            &b,
-            &commit0,
-            &ap.parent
-        ));
-        assert!(!verify_anchor_state_leaf(
-            &out.transition.pre_root(),
-            &b,
-            &commit1,
-            &ap.child
-        ));
-        // a wrong leaf VALUE under the right root rejects (value binding).
-        assert!(!verify_anchor_state_leaf(
-            &out.child_r_a,
-            &b,
-            &commit0,
-            &ap.child
-        ));
-        // an empty proof rejects (a release with no attached Π routes online).
-        assert!(!verify_anchor_state_leaf(&out.child_r_a, &b, &commit1, &[]));
-
-        // (non-bearer) an ordinary advance (anchor_leaf=None) emits no anchor proofs and does NOT
-        // mutate the fused anchor state — a subsequent bearer advance still sees commit_0 as parent.
-        let cp2 = devid(0xC2);
-        let rk2 = compute_smt_key(&dev.devid, &cp2);
-        let dev = dev.establish_relationship(cp2).expect("establish");
-        let plain = dev
-            .advance(
-                rk2,
-                cp2,
-                burn_op_for(5, pc(0xF2)),
-                &[BalanceDelta {
-                    policy_commit: pc(0xF2),
-                    direction: BalanceDirection::Debit,
-                    amount: 5,
-                }],
-                None,
-                None,
-            )
-            .expect("plain advance");
-        assert!(plain.anchor_proofs.is_none());
-
-        let cp3 = devid(0xC3);
-        let rk3 = compute_smt_key(&dev.devid, &cp3);
-        let out2 = plain
-            .new_device_state
-            .establish_relationship(cp3)
-            .expect("establish")
-            .advance(
-                rk3,
-                cp3,
-                burn_op_for(7, pc(0xF3)),
-                &[BalanceDelta {
-                    policy_commit: pc(0xF3),
-                    direction: BalanceDirection::Debit,
-                    amount: 7,
-                }],
-                Some(AnchorLeafUpdate {
-                    key,
-                    new_value: commit1,
-                }),
-                None,
-            )
-            .expect("bearer advance after a plain one");
-        let ap2 = out2.anchor_proofs.clone().expect("anchor proofs");
-        assert!(
-            verify_anchor_state_leaf(&out2.transition.pre_root(), &b, &commit0, &ap2.parent),
-            "a non-bearer transition must not mutate the fused anchor state (commit_0 survives)"
-        );
+    fn online(s: &DeviceState, token: &[u8; 32]) -> Option<u64> {
+        s.balances.get(token).copied()
     }
 
     #[test]
-    fn bearer_advance_draws_from_allocation_not_online_balance() {
-        use crate::core::bilateral_transaction_manager::{anchor_state_leaf_key, compute_smt_key};
-        use crate::types::offline_allocation_leaf::offline_allocation_key;
-        use crate::types::operations::{AuthorityMode, AuthorityPolicy, Operation, TransactionMode};
+    fn a_load_and_an_unload_move_value_between_the_online_balance_and_the_account() {
+        use crate::merkle::batch_fold::verify_batch;
+        use crate::merkle::sparse_merkle_tree::DeviceSmtHashes;
+        use crate::types::offline_account::{verify_step, OfflineAccountStep};
+        let (token, bundle) = (pc(0xA1), [0x7B; 32]);
+        let dev = with_offline_account(0xC1, token, bundle);
 
-        let b = [0xB2u8; 32];
-        let key = anchor_state_leaf_key(&b);
-        let token = pc(0xA1);
+        let load = dev
+            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 30)
+            .expect("load 30");
+        let loaded = &load.new_device_state;
+        assert_eq!(online(loaded, &token), Some(70));
+        assert_eq!(loaded.offline_allocation(&bundle, &token), Some(30));
+        assert_eq!(
+            loaded
+                .offline_account(&bundle)
+                .expect("open")
+                .funding_chain(),
+            Some(load.operation_id),
+            "the load's own identity funds the account"
+        );
+        // The device moves by exactly the account leaf, and the account by
+        // exactly the load's write set.
+        assert_eq!(
+            verify_batch::<DeviceSmtHashes>(&dev.root(), &load.device_writes)
+                .expect("the device write folds"),
+            loaded.root()
+        );
+        let paths: Vec<_> = load
+            .account_move
+            .entries
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        assert_eq!(
+            verify_step(
+                &load.pre_account_root,
+                &OfflineAccountStep::Load {
+                    asset: token,
+                    amount: 30,
+                    boundary_id: load.operation_id,
+                },
+                &load.account_move.before,
+                &paths,
+            )
+            .expect("the account step folds"),
+            loaded.offline_account(&bundle).expect("open").root()
+        );
 
-        // Bootstrap the anchor, hold 100 online from the token's creation, then
-        // load 40 into the offline allocation.
-        let dev = fresh_device(0xD5)
-            .with_anchor_state_leaf(&key, &[0xC0u8; 32])
-            .expect("bootstrap");
-        let funded = dev.created_token(token, 100).expect("token created");
-        let loaded = funded
-            .load_offline_cash(&b, &token, 40)
-            .expect("load 40")
+        let unloaded = loaded
+            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Unload, &token, 5)
+            .expect("unload 5")
             .new_device_state;
-        let alloc_key = offline_allocation_key(&loaded.genesis, &loaded.devid, &b, &token);
-        assert_eq!(loaded.balances.get(&token).copied().unwrap_or(0), 60);
-        assert_eq!(loaded.offline_allocation(&alloc_key), 40);
+        assert_eq!(online(&unloaded, &token), Some(75));
+        assert_eq!(unloaded.offline_allocation(&bundle, &token), Some(25));
 
-        // Build an offline-bearer transfer of `amt` to a counterparty.
-        let cp = devid(0xC5);
-        let rk = compute_smt_key(&loaded.devid, &cp);
-        let loaded = loaded.establish_relationship(cp).expect("establish");
-        let anchor_leaf = AnchorLeafUpdate {
-            key,
-            new_value: [0xC1u8; 32],
+        let refused = |r: Result<OfflineBoundaryOutcome, DsmError>, reason: &str| {
+            let e = r.expect_err(reason);
+            assert!(e.to_string().contains(reason), "{e}");
         };
-        let bearer_op = |amt: u64| Operation::Transfer {
+        refused(
+            unloaded.cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 76),
+            "more than the online balance",
+        );
+        refused(
+            unloaded.cross_offline_boundary(&bundle, OfflineBoundaryKind::Unload, &token, 26),
+            "more than the offline allocation holds",
+        );
+        refused(
+            unloaded.cross_offline_boundary(&[0x7C; 32], OfflineBoundaryKind::Load, &token, 1),
+            "no offline account is open",
+        );
+        let reopened = unloaded
+            .open_offline_account(&bundle, [0x09; 32], 0)
+            .expect_err("an open account is not reopened");
+        assert!(reopened.to_string().contains("already open"), "{reopened}");
+    }
+
+    /// A token whose committed policy lets it move between holders, and that
+    /// policy's bytes.
+    fn moving_token() -> ([u8; 32], Vec<u8>) {
+        crate::sofi::validation::fixtures::committed(
+            crate::sofi::validation::fixtures::token_policy_bytes_with(
+                0xA1,
+                crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+            ),
+        )
+    }
+
+    /// A bearer transfer of `amt` of [`moving_token`] to `cp`, or of another
+    /// `token` carrying the moving token's policy bytes, which are not its own.
+    fn bearer_op(cp: [u8; 32], token: [u8; 32], amt: u64) -> Operation {
+        use crate::types::operations::{AuthorityMode, AuthorityPolicy, TransactionMode};
+        Operation::Transfer {
             to_device_id: cp.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: bal(amt),
             policy_commit: token,
+            token_policy: moving_token().1,
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![],
@@ -2792,180 +3164,444 @@ mod tests {
                 policy_id: [0u8; 32],
                 anchor_set_id: [0u8; 32],
             }),
-        };
-        let spend = |amt: u64| {
-            Some(OfflineSpend {
-                anchor_bundle_b: b,
-                asset: token,
-                amount: amt,
-            })
-        };
-
-        // Bearer spend of 25: allocation 40 -> 15, online balance UNTOUCHED (60), anchor leaf advanced.
-        let spent = loaded
-            .advance(
-                rk,
-                cp,
-                bearer_op(25),
-                &[],
-                Some(anchor_leaf.clone()),
-                spend(25),
-            )
-            .expect("bearer advance from allocation")
-            .new_device_state;
-        assert_eq!(
-            spent.balances.get(&token).copied().unwrap_or(0),
-            60,
-            "online balance must be untouched by a bearer spend"
-        );
-        assert_eq!(
-            spent.offline_allocation(&alloc_key),
-            15,
-            "allocation debited by the bearer amount"
-        );
-
-        // Determinism (the sim==guard==commit invariant): re-running the SAME bearer advance
-        // (identical op, empty deltas, anchor_leaf, and offline_spend) against the same head yields
-        // a byte-identical device root. This is why threading the SAME `prepared.offline_spend` into
-        // the confirm-build sim, the determinism-guard sim, and the canonical commit keeps all three
-        // sender roots equal.
-        let spent_again = loaded
-            .advance(
-                rk,
-                cp,
-                bearer_op(25),
-                &[],
-                Some(anchor_leaf.clone()),
-                spend(25),
-            )
-            .expect("re-run bearer advance from allocation")
-            .new_device_state;
-        assert_eq!(
-            spent.root(),
-            spent_again.root(),
-            "identical bearer advance inputs must produce a byte-identical device root"
-        );
-
-        // Fail-closed: an online delta alongside a allocation spend is a double-source → rejected.
-        assert!(
-            loaded
-                .advance(
-                    rk,
-                    cp,
-                    bearer_op(25),
-                    &[BalanceDelta {
-                        policy_commit: token,
-                        direction: BalanceDirection::Debit,
-                        amount: 25,
-                    }],
-                    Some(anchor_leaf.clone()),
-                    spend(25),
-                )
-                .is_err(),
-            "bearer advance must reject an online delta alongside a allocation spend"
-        );
-
-        // Fail-closed: allocation underflow (spend 100 from a 40 allocation).
-        assert!(
-            loaded
-                .advance(
-                    rk,
-                    cp,
-                    bearer_op(100),
-                    &[],
-                    Some(anchor_leaf.clone()),
-                    spend(100),
-                )
-                .is_err(),
-            "bearer advance must reject a allocation underflow"
-        );
-
-        // Fail-closed: a allocation spend without the anchor-state advance (anchor_leaf None) is rejected.
-        assert!(
-            loaded
-                .advance(rk, cp, bearer_op(10), &[], None, spend(10),)
-                .is_err(),
-            "offline-bearer spend requires the anchor-state advance"
-        );
+        }
     }
 
     #[test]
-    fn two_transfer_adoption_advances_receiver_frontier_and_rejects_replay() {
-        use crate::core::bilateral_transaction_manager::{
-            anchor_state_leaf_key, compute_smt_key, verify_anchor_state_leaf,
-        };
-        let b = [0xB1u8; 32];
-        let key = anchor_state_leaf_key(&b);
-        // Opaque v2 anchor-state leaf values for u=0,1,2 (anchor-core computes the real ones).
-        let (leaf0, leaf1, leaf2) = ([0xC0u8; 32], [0xC1u8; 32], [0xC2u8; 32]);
-
-        // Sender device: bootstrap the anchor-state leaf at leaf_0.
-        let dev = (0u8..8)
-            .fold(fresh_device(0xAB), |d, u| {
-                d.created_token(pc(0xF0 + u), 1_000).expect("token created")
+    fn a_bearer_spend_draws_from_the_account_and_moves_its_counter_and_frontier() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        use crate::types::offline_account::verify_offline_state;
+        let (token, bundle) = (moving_token().0, [0xB2; 32]);
+        let loaded = with_offline_account(0xD5, token, bundle)
+            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 40)
+            .expect("load 40")
+            .new_device_state;
+        let cp = devid(0xC5);
+        let rk = compute_smt_key(&loaded.devid, &cp);
+        let loaded = loaded.establish_relationship(cp).expect("establish");
+        let spend = |amt: u64, asset: [u8; 32]| {
+            Some(OfflineSpend {
+                anchor_bundle_b: bundle,
+                asset,
+                amount: amt,
+                next_frontier: [0x02; 32],
             })
-            .with_anchor_state_leaf(&key, &leaf0)
-            .expect("bootstrap");
+        };
 
-        // One bearer advance installing the successor leaf on relationship `cp_tag`.
-        let bearer = |dev: &DeviceState, cp_tag: u8, new_value: [u8; 32], u: u64| {
-            let cp = devid(cp_tag);
-            let rk = compute_smt_key(&dev.devid, &cp);
-            let dev = dev.establish_relationship(cp).expect("establish");
-            dev.advance(
+        let out = loaded
+            .advance(rk, cp, bearer_op(cp, token, 25), &[], spend(25, token))
+            .expect("bearer advance from the account");
+        let spent = &out.new_device_state;
+        assert_eq!(
+            online(spent, &token),
+            Some(60),
+            "the online balance is untouched"
+        );
+        let account = spent.offline_account(&bundle).expect("open");
+        assert_eq!(account.allocation(&token), Some(15));
+        assert_eq!(account.counter(), 1, "the counter steps with the spend");
+        assert_eq!(account.frontier(), [0x02; 32]);
+
+        // Each device root commits the account at its own frontier and
+        // counter, and not at the other's.
+        let proofs = out
+            .offline_state_proofs
+            .clone()
+            .expect("a bearer spend's proofs");
+        verify_offline_state(&out.parent_r_a, &bundle, &[0x01; 32], 0, &proofs.parent)
+            .expect("the parent root commits the account before");
+        verify_offline_state(&out.child_r_a, &bundle, &[0x02; 32], 1, &proofs.child)
+            .expect("the child root commits the account after");
+        for (root, frontier, counter, proof, reason) in [
+            (
+                &out.child_r_a,
+                [0x01; 32],
+                0,
+                &proofs.parent,
+                "does not hold",
+            ),
+            (
+                &out.parent_r_a,
+                [0x01; 32],
+                1,
+                &proofs.parent,
+                "counter named",
+            ),
+            (
+                &out.parent_r_a,
+                [0x02; 32],
+                0,
+                &proofs.parent,
+                "frontier named",
+            ),
+        ] {
+            let e =
+                verify_offline_state(root, &bundle, &frontier, counter, proof).expect_err(reason);
+            assert!(
+                e.to_string().contains(reason) || e.to_string().contains("does not commit"),
+                "{e}"
+            );
+        }
+        let other_bundle =
+            verify_offline_state(&out.parent_r_a, &[0xB3; 32], &[0x01; 32], 0, &proofs.parent)
+                .expect_err("another bundle's account");
+        assert!(
+            other_bundle.to_string().contains("does not commit"),
+            "{other_bundle}"
+        );
+
+        // The same inputs give the same root: the sim, the guard and the
+        // commit all build this one advance.
+        let again = loaded
+            .advance(rk, cp, bearer_op(cp, token, 25), &[], spend(25, token))
+            .expect("the same bearer advance");
+        assert_eq!(again.child_r_a, out.child_r_a);
+
+        let refused = |r: Result<AdvanceOutcome, DsmError>, reason: &str| {
+            let e = r.expect_err(reason);
+            assert!(e.to_string().contains(reason), "{e}");
+        };
+        refused(
+            loaded.advance(
                 rk,
                 cp,
-                burn_op_for(1, pc(0xF0 + u as u8)),
+                bearer_op(cp, token, 25),
                 &[BalanceDelta {
-                    policy_commit: pc(0xF0 + u as u8),
+                    policy_commit: token,
                     direction: BalanceDirection::Debit,
-                    amount: 1,
+                    amount: 25,
                 }],
-                Some(AnchorLeafUpdate { key, new_value }),
+                spend(25, token),
+            ),
+            "must not apply an online balance delta",
+        );
+        refused(
+            loaded.advance(rk, cp, bearer_op(cp, token, 100), &[], spend(100, token)),
+            "more than the offline allocation holds",
+        );
+        refused(
+            loaded.advance(rk, cp, bearer_op(cp, token, 25), &[], spend(25, pc(0xA2))),
+            "the operation's own asset",
+        );
+    }
+
+    /// A bearer spend's receipt proves the account leaf it moved, folded from
+    /// the account it states it started from — and that account must be the
+    /// one the spend's release advances: its counter and both frontiers.
+    #[test]
+    fn the_receipt_of_a_bearer_spend_proves_the_account_its_release_advances() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        use crate::types::receipt_types::{
+            DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2,
+        };
+        use crate::verification::receipt_verification::{
+            verify_receipt_state, BearerLeaves, ReceiptStateContext,
+        };
+        let (token, bundle, genesis) = (moving_token().0, [0xB5; 32], [0x6E; 32]);
+        let mut loaded = with_offline_account(0xD7, token, bundle)
+            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 40)
+            .expect("load 40")
+            .new_device_state
+            .into_head();
+        loaded.genesis = genesis;
+        let cp = devid(0xC7);
+        let rk = compute_smt_key(&loaded.devid, &cp);
+        let loaded = loaded.establish_relationship(cp).expect("establish");
+        let out = loaded
+            .advance(
+                rk,
+                cp,
+                bearer_op(cp, token, 25),
+                &[],
+                Some(OfflineSpend {
+                    anchor_bundle_b: bundle,
+                    asset: token,
+                    amount: 25,
+                    next_frontier: [0x02; 32],
+                }),
+            )
+            .expect("bearer advance");
+        let commitment = DeviceTreeAcceptanceCommitment::from_root(
+            crate::common::device_tree::DeviceTree::single(loaded.devid).root(),
+        );
+        let release = |counter: u64, frontier: u8, next: u8| BearerLeaves {
+            bundle,
+            counter,
+            frontier: [frontier; 32],
+            next_frontier: [next; 32],
+        };
+        let receipt = StitchedReceiptV2::of_step(
+            genesis,
+            loaded.devid,
+            cp,
+            &out,
+            Some(release(0, 0x01, 0x02)),
+            &commitment,
+        )
+        .expect("the receipt proves the spend its release advances");
+        let check = |receipt: &StitchedReceiptV2, bearer: Option<BearerLeaves>| {
+            verify_receipt_state(
+                receipt,
+                &ReceiptStateContext {
+                    device_tree_commitment: &commitment,
+                    author_genesis: genesis,
+                    operation: &out.new_chain_state.operation,
+                    bearer,
+                },
+            )
+        };
+        let refused = |result: Result<(), DsmError>, reason: &str| {
+            let e = result.expect_err(reason);
+            assert!(e.to_string().contains(reason), "{e}");
+        };
+        for other in [
+            release(1, 0x01, 0x02),
+            release(0, 0x03, 0x02),
+            release(0, 0x01, 0x03),
+        ] {
+            refused(
+                check(&receipt, Some(other)),
+                "not the one its release advances",
+            );
+        }
+        refused(
+            check(&receipt, None),
+            "verified against the release it advances",
+        );
+        // A receipt stating another allocation before the spend folds to
+        // another account root.
+        let mut inflated = receipt.clone();
+        for write in inflated.step_writes.iter_mut() {
+            if let ReceiptLeaf::OfflineAccount(witness) = &mut write.leaf {
+                witness.pre_allocation = 1_000;
+            }
+        }
+        refused(
+            check(&inflated, Some(release(0, 0x01, 0x02))),
+            "the offline account step:",
+        );
+    }
+
+    /// The writes a model receipt names (`tla/DSM_ReceiptWriteSet.tla`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ModelWrites {
+        rel: Presence,
+        anchor: Presence,
+        alloc: Presence,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Presence {
+        Named,
+        Absent,
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): Core's receipt state
+    /// rules refine `tla/DSM_ReceiptWriteSet.tla` (its checked configuration:
+    /// two peers, an allocation of 3, amounts 1 and 2, three accepted steps).
+    /// Every reachable state of the model is reproduced on a real device with
+    /// a real offline account, and in each, every receipt the model's
+    /// unconstrained author can form — each subset of the three leaves, each
+    /// amount, the counter moved or not, the allocation debited by 0, 1 or 2
+    /// — is judged by `verify_receipt_state` exactly as the model's verifier
+    /// `Holds` judges it. Core proves the counter and the allocation as one
+    /// offline-account leaf, so a receipt naming one of them and not the
+    /// other is a receipt without that leaf. An accepted receipt moves the
+    /// device's account exactly as the model's `Accept`: the counter by one
+    /// (`CounterMovesWithRoot`), the allocation by the amount, which the
+    /// receiver is credited (`AllocationConserved`); and the honest spend is
+    /// accepted whenever the allocation can pay it (`HonestSpendAcceptable`).
+    /// MUTATION CONTROL: checking the relationship write alone (the model's
+    /// `RelationshipOnlyCheck`), or not deriving the account's post-root from
+    /// the spend, turns this red.
+    #[test]
+    fn the_receipt_state_rules_refine_the_receipt_write_set_model() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        use crate::types::receipt_types::{
+            DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2,
+        };
+        use crate::verification::receipt_verification::{
+            verify_receipt_state, BearerLeaves, ReceiptStateContext,
+        };
+        const INIT_ALLOC: u64 = 3;
+        const MAX_STEPS: u64 = 3;
+        let (token, bundle, genesis) = (moving_token().0, [0xB6; 32], [0x6F; 32]);
+        let mut loaded = with_offline_account(0xD8, token, bundle)
+            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, INIT_ALLOC)
+            .expect("load")
+            .new_device_state
+            .into_head();
+        loaded.genesis = genesis;
+        let peers = [devid(0xC8), devid(0xC9)];
+        let mut start = loaded;
+        for p in peers {
+            start = start.establish_relationship(p).expect("establish");
+        }
+        let commitment = DeviceTreeAcceptanceCommitment::from_root(
+            crate::common::device_tree::DeviceTree::single(start.devid).root(),
+        );
+        let all_writes = [Presence::Named, Presence::Absent];
+        // (device, steps taken, value spent)
+        let mut pending = vec![(start, 0u64, 0u64)];
+        let mut states = 0usize;
+        while let Some((dev, steps, spent)) = pending.pop() {
+            states += 1;
+            let account = dev.offline_account(&bundle).expect("the account is open");
+            let counter = account.counter();
+            let alloc = INIT_ALLOC - spent;
+            assert_eq!(counter, steps, "CounterMovesWithRoot");
+            assert_eq!(
+                account.allocation(&token),
+                Some(alloc),
+                "AllocationConserved: the account holds the load less what receivers were credited"
+            );
+            if steps == MAX_STEPS {
+                continue;
+            }
+            let frontier = account.frontier();
+            let next_frontier = [0x10 + steps as u8; 32];
+            for p in peers {
+                let rk = compute_smt_key(&dev.devid, &p);
+                for amount in [1u64, 2] {
+                    let advanced = dev.advance(
+                        rk,
+                        p,
+                        bearer_op(p, token, amount),
+                        &[],
+                        Some(OfflineSpend {
+                            anchor_bundle_b: bundle,
+                            asset: token,
+                            amount,
+                            next_frontier,
+                        }),
+                    );
+                    let Ok(out) = advanced else {
+                        // Core cannot make a step the allocation cannot pay:
+                        // no receipt of it exists, honest or not, and the
+                        // model's verifier holds none (`Derived`).
+                        assert!(amount > alloc, "an affordable spend refused: {advanced:?}");
+                        continue;
+                    };
+                    let leaves = BearerLeaves {
+                        bundle,
+                        counter,
+                        frontier,
+                        next_frontier,
+                    };
+                    let honest = StitchedReceiptV2::of_step(
+                        genesis,
+                        dev.devid,
+                        p,
+                        &out,
+                        Some(leaves),
+                        &commitment,
+                    )
+                    .expect("HonestSpendAcceptable: the honest receipt holds");
+                    let check = |r: &StitchedReceiptV2| {
+                        verify_receipt_state(
+                            r,
+                            &ReceiptStateContext {
+                                device_tree_commitment: &commitment,
+                                author_genesis: genesis,
+                                operation: &out.new_chain_state.operation,
+                                bearer: Some(leaves),
+                            },
+                        )
+                    };
+                    for rel in all_writes {
+                        for anchor_w in all_writes {
+                            for alloc_w in all_writes {
+                                let writes = ModelWrites {
+                                    rel,
+                                    anchor: anchor_w,
+                                    alloc: alloc_w,
+                                };
+                                for ctr_post in [counter, counter + 1] {
+                                    for alloc_post in
+                                        [alloc, alloc.wrapping_sub(1), alloc.wrapping_sub(2)]
+                                            .into_iter()
+                                            .filter(|a| *a <= alloc)
+                                    {
+                                        let every = writes
+                                            == ModelWrites {
+                                                rel: Presence::Named,
+                                                anchor: Presence::Named,
+                                                alloc: Presence::Named,
+                                            };
+                                        let derived =
+                                            ctr_post == counter + 1 && alloc_post + amount == alloc;
+                                        let holds = every && derived;
+                                        let mut r = honest.clone();
+                                        if !derived {
+                                            // Any post-state but the derived one folds to another
+                                            // child root than the step's.
+                                            r.child_root = r.parent_root;
+                                        }
+                                        r.step_writes.retain(|w| match &w.leaf {
+                                            ReceiptLeaf::Relationship => rel == Presence::Named,
+                                            ReceiptLeaf::OfflineAccount(_) => {
+                                                anchor_w == Presence::Named
+                                                    && alloc_w == Presence::Named
+                                            }
+                                        });
+                                        match check(&r) {
+                                            Ok(()) => assert!(
+                                                holds,
+                                                "Core accepts what the model refuses: {writes:?}, counter {ctr_post}, allocation {alloc_post}"
+                                            ),
+                                            Err(e) => assert!(
+                                                !holds,
+                                                "Core refuses what the model accepts: {writes:?}: {e}"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let mut next = out.new_device_state.into_head();
+                    next.genesis = genesis;
+                    pending.push((next, steps + 1, spent + amount));
+                }
+            }
+        }
+        assert!(states > 10, "the model's states were reached: {states}");
+    }
+
+    #[test]
+    fn an_ordinary_advance_leaves_the_offline_account_where_it_was() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        let (token, bundle) = (pc(0xA1), [0xB4; 32]);
+        let dev = with_offline_account(0xD6, token, bundle);
+        let cp = devid(0xC6);
+        let rk = compute_smt_key(&dev.devid, &cp);
+        let plain = dev
+            .establish_relationship(cp)
+            .expect("establish")
+            .advance(
+                rk,
+                cp,
+                burn_op_for(5, token),
+                &[BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Debit,
+                    amount: 5,
+                }],
                 None,
             )
-            .expect("bearer advance")
-        };
-
-        // Receiver's accepted leaf frontier starts at the admitted genesis value.
-        let mut accepted = leaf0;
-
-        // ---- Transfer 1: leaf_0 -> leaf_1 ----
-        let out1 = bearer(&dev, 0xC0, leaf1, 1);
-        let ap1 = out1.anchor_proofs.clone().unwrap();
-        assert!(
-            verify_anchor_state_leaf(&out1.transition.pre_root(), &b, &accepted, &ap1.parent),
-            "transfer 1 consumes the accepted leaf frontier"
-        );
-        assert!(verify_anchor_state_leaf(
-            &out1.child_r_a,
-            &b,
-            &leaf1,
-            &ap1.child
-        ));
-        accepted = leaf1; // adopt
-
-        // ---- Replay: presenting Transfer 1's parent proof against the ADOPTED frontier rejects ----
-        assert!(
-            !verify_anchor_state_leaf(&out1.transition.pre_root(), &b, &accepted, &ap1.parent),
-            "after adoption the consumed leaf_0 state no longer matches the accepted frontier"
-        );
-
-        // ---- Transfer 2: leaf_1 -> leaf_2, from the adopted state ----
-        let out2 = bearer(&out1.new_device_state, 0xC1, leaf2, 2);
-        let ap2 = out2.anchor_proofs.clone().unwrap();
-        assert!(
-            verify_anchor_state_leaf(&out2.transition.pre_root(), &b, &accepted, &ap2.parent),
-            "transfer 2 must consume exactly the successor the receiver adopted"
-        );
-        assert!(verify_anchor_state_leaf(
-            &out2.child_r_a,
-            &b,
-            &leaf2,
-            &ap2.child
-        ));
-        accepted = leaf2;
-        assert_eq!(accepted, leaf2);
+            .expect("plain advance");
+        assert!(plain.offline_state_proofs.is_none());
+        crate::types::offline_account::verify_offline_state(
+            &plain.child_r_a,
+            &bundle,
+            &[0x01; 32],
+            0,
+            &plain
+                .new_device_state
+                .offline_state_proof(&bundle)
+                .expect("the account's proof"),
+        )
+        .expect("the account is where it was");
     }
 
     #[test]
@@ -2996,7 +3632,6 @@ mod tests {
                     amount: 10,
                 }],
                 None,
-                None,
             )
             .expect("value advance");
         assert_eq!(
@@ -3011,7 +3646,7 @@ mod tests {
         // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
         let o2 = o1
             .new_device_state
-            .advance(rk, cp, op(), &[], None, None)
+            .advance(rk, cp, op(), &[], None)
             .expect("non-value advance");
         assert_eq!(
             o2.new_device_state
@@ -3026,7 +3661,7 @@ mod tests {
         let rk2 = compute_smt_key(&dev.devid, &cp2);
         let dev = dev.establish_relationship(cp2).expect("establish");
         let o3 = dev
-            .advance(rk2, cp2, op(), &[], None, None)
+            .advance(rk2, cp2, op(), &[], None)
             .expect("first non-value advance");
         assert_eq!(
             o3.new_device_state
@@ -3066,7 +3701,6 @@ mod tests {
                     direction: BalanceDirection::Debit,
                     amount: 30,
                 }],
-                None,
                 None,
             )
             .expect("advance")
@@ -3131,7 +3765,6 @@ mod tests {
                     amount: 30,
                 }],
                 None,
-                None,
             )
             .expect("advance");
         let cs = &out.new_chain_state;
@@ -3183,7 +3816,6 @@ mod tests {
                     amount: 10,
                 }],
                 None,
-                None,
             )
             .expect("advance A");
         let b = dev
@@ -3196,7 +3828,6 @@ mod tests {
                     direction: BalanceDirection::Debit,
                     amount: 20,
                 }],
-                None,
                 None,
             )
             .expect("advance B");
@@ -3249,7 +3880,6 @@ mod tests {
                     amount: 10,
                 }],
                 None,
-                None,
             )
             .expect("advance A");
         let b = dev
@@ -3262,7 +3892,6 @@ mod tests {
                     direction: BalanceDirection::Debit,
                     amount: 20,
                 }],
-                None,
                 None,
             )
             .expect("advance B");
@@ -3306,7 +3935,6 @@ mod tests {
                 amount: 10,
             }],
             None,
-            None,
         );
         assert!(
             r.is_err(),
@@ -3343,7 +3971,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 1,
                 }],
-                None,
                 None,
             )
             .expect_err("u64::MAX + 1 must overflow")
@@ -3396,10 +4023,12 @@ mod tests {
                         amount: amt,
                     }],
                     None,
-                    None,
                 )
                 .expect("advance");
-            dev = out.new_device_state.with_pending_economic_admission(None);
+            dev = out
+                .new_device_state
+                .with_pending_economic_admission(None)
+                .into_head();
         }
 
         let expected = (1000_i64 + net_delta) as u64;
@@ -3418,6 +4047,136 @@ mod tests {
     // A relationship is established before its first step (§26)
     // ─────────────────────────────────────────────────────────────
 
+    /// MR-DSM-0201: a zero-effect transition is not a transition (the
+    /// explainer's spam-resistance aside), so Core's advance — the one
+    /// chokepoint of a step, online and offline — refuses `Noop` on an
+    /// established relationship with the typed [`DsmError::ZeroEffectTransition`].
+    /// MUTATION CONTROL: dropping the refusal lets the `Noop` advance and turns
+    /// this red.
+    #[test]
+    fn a_noop_is_no_transition() {
+        let dev = fresh_device(0x73);
+        let cp = devid(0x74);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let established = dev.establish_relationship(cp).expect("establish");
+        let refused = established
+            .advance(rk, cp, Operation::Noop, &[], None)
+            .expect_err("a Noop advances nothing");
+        assert!(
+            matches!(refused, DsmError::ZeroEffectTransition),
+            "{refused}"
+        );
+        established
+            .advance(rk, cp, op(), &[], None)
+            .expect("the relationship still steps by an operation");
+    }
+
+    /// MR-DSM-0201 (owner ruling, 2026-10-28: "Refuse genuine no-effect
+    /// operations in Core"): an application payload Core applies nowhere, a
+    /// receipt or a lock that moves nothing, and a second adoption of a policy
+    /// already adopted are each refused with the typed error, and the device's
+    /// head does not move.
+    /// MUTATION CONTROL: dropping the `Generic`, the `Receive`/lock or the
+    /// re-adoption arm of `refuse_zero_effect` lets that step advance and
+    /// turns this red.
+    #[test]
+    fn a_step_that_changes_nothing_is_no_transition() {
+        let dev = fresh_device(0x75);
+        let cp = devid(0x76);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let established = dev.establish_relationship(cp).expect("establish");
+        let policy = [0x5Au8; 32];
+        let adopted = established.adopt_token(policy).expect("first adoption");
+        let head = *adopted.smt.root();
+        let nothing = [
+            (
+                "an application payload",
+                Operation::Generic {
+                    operation_type: b"lock".to_vec(),
+                    data: b"amount".to_vec(),
+                    message: "Lock".to_string(),
+                    signature: vec![],
+                },
+            ),
+            (
+                "a bare receipt",
+                Operation::Receive {
+                    token_id: b"ERA".to_vec(),
+                    from_device_id: cp.to_vec(),
+                    amount: bal(1),
+                    recipient: dev.devid.to_vec(),
+                    message: String::new(),
+                    mode: TransactionMode::Bilateral,
+                    nonce: vec![1],
+                    sender_state_hash: None,
+                },
+            ),
+            (
+                "a lock",
+                Operation::LockToken {
+                    token_id: b"ERA".to_vec(),
+                    amount: 1,
+                    purpose: b"exit".to_vec(),
+                    signature: vec![],
+                    mode: TransactionMode::Bilateral,
+                },
+            ),
+            (
+                "a second adoption",
+                Operation::AdoptToken {
+                    policy_commit: policy,
+                    signature: vec![],
+                },
+            ),
+        ];
+        for (what, operation) in nothing {
+            let refused = adopted
+                .advance(rk, cp, operation, &[], None)
+                .expect_err(what);
+            assert!(
+                matches!(refused, DsmError::ZeroEffectTransition),
+                "{what}: {refused}"
+            );
+            assert_eq!(*adopted.smt.root(), head, "{what} moved the head");
+        }
+    }
+
+    /// MR-DSM-0201's other half (owner ruling, 2026-10-28: "A meaningful state
+    /// mutation isn't a no-op merely because its monetary delta is zero"): an
+    /// adoption of a policy not yet adopted and a vault's creation move no value
+    /// and are transitions, each writing what it carries.
+    #[test]
+    fn a_step_that_moves_no_value_but_writes_state_is_a_transition() {
+        let dev = fresh_device(0x77);
+        let cp = devid(0x78);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let established = dev.establish_relationship(cp).expect("establish");
+        let policy = [0x5Bu8; 32];
+        assert!(!established.has_adopted(&policy));
+        let adopted = established
+            .advance(
+                rk,
+                cp,
+                Operation::AdoptToken {
+                    policy_commit: policy,
+                    signature: vec![],
+                },
+                &[],
+                None,
+            )
+            .expect("an adoption moves no value and writes its leaf")
+            .new_device_state;
+        assert!(adopted.has_adopted(&policy));
+        assert_eq!(adopted.balances, established.balances);
+        let recorded = adopted
+            .advance(rk, cp, vault_record(b"vault"), &[], None)
+            .expect("a vault's creation moves no value and is recorded");
+        assert_ne!(
+            recorded.new_device_state.chain_tip(&rk),
+            adopted.chain_tip(&rk)
+        );
+    }
+
     /// Establishing a relationship is a root advance that writes `h_0` into
     /// the tree; a step on a relationship this device never established is
     /// refused; and the first step's pre-state root is the root the device
@@ -3428,7 +4187,7 @@ mod tests {
         let cp = devid(0x72);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
 
-        let refused = dev.advance(rk, cp, op(), &[], None, None);
+        let refused = dev.advance(rk, cp, op(), &[], None);
         assert!(
             refused.is_err(),
             "a step on an unestablished relationship must be refused"
@@ -3450,7 +4209,7 @@ mod tests {
         );
 
         let first = established
-            .advance(rk, cp, op(), &[], None, None)
+            .advance(rk, cp, op(), &[], None)
             .expect("first step");
         assert_eq!(first.parent_r_a, established.root());
         assert_eq!(
@@ -3509,9 +4268,10 @@ mod tests {
         let mut proofs = vec![holds_only_its_current_head(&head, &rk, &[])];
         for _ in 0..2 {
             head = head
-                .advance(rk, cp, op(), &[], None, None)
+                .advance(rk, cp, op(), &[], None)
                 .expect("a step on the relationship")
-                .new_device_state;
+                .new_device_state
+                .into_head();
             let proof = holds_only_its_current_head(&head, &rk, &proofs);
             proofs.push(proof);
         }
@@ -3615,7 +4375,6 @@ mod tests {
                 },
                 &[],
                 None,
-                None,
             )
         };
 
@@ -3673,11 +4432,9 @@ mod tests {
     #[test]
     fn advance_derives_the_one_entropy_and_nothing_else_supplies_it() {
         let (dev, cp, rk) = seam_fixture();
-        let a = dev
-            .advance(rk, cp, op(), &[], None, None)
-            .expect("first advance");
+        let a = dev.advance(rk, cp, op(), &[], None).expect("first advance");
         let b = dev
-            .advance(rk, cp, op(), &[], None, None)
+            .advance(rk, cp, op(), &[], None)
             .expect("second advance from the same state");
         assert_eq!(a.transition_entropy(), b.transition_entropy());
         assert_eq!(
@@ -3711,15 +4468,10 @@ mod tests {
     #[test]
     fn changing_a_carried_byte_changes_the_derived_value_and_the_tip() {
         let (dev, cp, rk) = seam_fixture();
-        let base = dev.advance(rk, cp, op(), &[], None, None).expect("advance");
-        let flipped = Operation::Generic {
-            operation_type: b"test".to_vec(),
-            data: vec![1],
-            message: "t".to_string(),
-            signature: vec![],
-        };
+        let base = dev.advance(rk, cp, op(), &[], None).expect("advance");
+        let flipped = vault_record(b"tesu");
         let other = dev
-            .advance(rk, cp, flipped, &[], None, None)
+            .advance(rk, cp, flipped, &[], None)
             .expect("advance with one more carried byte");
         assert_ne!(base.transition_entropy(), other.transition_entropy());
         assert_ne!(
@@ -3729,7 +4481,7 @@ mod tests {
         // Same operation again, one step later: e_n and h_n moved, so e_{n+1} moves.
         let next = base
             .new_device_state
-            .advance(rk, cp, op(), &[], None, None)
+            .advance(rk, cp, op(), &[], None)
             .expect("second step");
         assert_ne!(base.transition_entropy(), next.transition_entropy());
         assert_eq!(
@@ -3746,7 +4498,7 @@ mod tests {
     fn tip_and_both_receipt_hashes_contain_the_one_derived_value() {
         use crate::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
         let (dev, cp, rk) = seam_fixture();
-        let out = dev.advance(rk, cp, op(), &[], None, None).expect("advance");
+        let out = dev.advance(rk, cp, op(), &[], None).expect("advance");
         let e = out.transition_entropy();
         let op_bytes = out.new_chain_state.operation.to_bytes();
         let parent = out.new_chain_state.embedded_parent;
@@ -3767,22 +4519,267 @@ mod tests {
             relationship_chain_tip_v2(&rk, &parent, &cp, &op_bytes, &e_other, None)
         );
         // C_pre and the symmetric tip take the same value and nothing else.
-        let c_pre = compute_precommit(&parent, &op_bytes, &e);
+        let c_pre = compute_precommit(&parent, &op_bytes, &e).expect("C_pre");
         let sym = compute_successor_tip(&parent, &op_bytes, &e, &c_pre);
-        let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other);
+        let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other).expect("C_pre");
         assert_ne!(c_pre, c_pre_other);
         assert_ne!(
             sym,
             compute_successor_tip(&parent, &op_bytes, &e_other, &c_pre_other)
         );
-        assert_eq!(c_pre, compute_precommit(&parent, &op_bytes, &e));
+        assert_eq!(
+            c_pre,
+            compute_precommit(&parent, &op_bytes, &e).expect("C_pre")
+        );
         assert_eq!(sym, compute_successor_tip(&parent, &op_bytes, &e, &c_pre));
     }
 
+    /// SoFi §39, MR-SOFI-0284: each SoFi operation is one deterministic
+    /// transition with one derived entropy. A setup, a vault creation and a
+    /// fulfillment, each signed by its own rule: applied twice from one head,
+    /// each gives byte-identical outcomes; with a carried byte changed (and
+    /// signed again) its entropy and tip move; with its signature changed it
+    /// is refused; and its relationship tip and both receipt hashes contain
+    /// its entropy.
+    ///
+    /// MUTATION CONTROL: deriving the entropy without the operation's bytes
+    /// turns the "a carried byte moves it" assertions red.
+    #[test]
+    fn each_sofi_operation_is_one_deterministic_transition_with_one_entropy() {
+        use crate::core::bilateral_transaction_manager::{
+            compute_precommit, compute_smt_key, compute_successor_tip,
+        };
+        use crate::crypto::sphincs::sphincs_sign;
+        use crate::sofi::{derive, wire};
+
+        let keys = test_keypair();
+        let alg = crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F;
+        let att_a = [0x5A; 32];
+        let devid = crate::core::identity::genesis_v2::derive_devid(&keys.public_key, &att_a);
+        let genesis = [0x6E; 32];
+        let token = pc(0x42);
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let head = DeviceState::new(genesis, devid, keys.public_key.clone())
+            .admitted_faucet_claim(0)
+            .expect("ERA")
+            .created_token(token, 1_000)
+            .expect("a token");
+        let self_loop = compute_smt_key(&devid, &devid);
+        let sign = |message: &[u8]| sphincs_sign(&keys.secret_key, message).expect("signs");
+        let forged = |mut signature: Vec<u8>| {
+            signature[0] ^= 0x01;
+            signature
+        };
+
+        let setup = |position: u64| {
+            let body = wire::SofiSetupBody::new(
+                genesis,
+                devid,
+                position,
+                [0xC1; 32],
+                [0x66; 32],
+                [0x67; 32],
+                alg,
+                &keys.public_key,
+            )
+            .expect("a setup body");
+            let signature = sign(&derive::setup_signing_digest(&body));
+            (body.encode(), signature)
+        };
+        let vault = |amount_b: u64, signed: &dyn Fn(Vec<u8>) -> Vec<u8>| {
+            let creation = wire::VaultCreation {
+                vault_id: [0x51; 32],
+                genesis_root: [0x52; 32],
+                amount_a: 100,
+                amount_b,
+            }
+            .encode();
+            let unsigned = Operation::SofiVaultCreate {
+                genesis_preimage: Vec::new(),
+                creation: creation.clone(),
+                market_policy_preimage: Vec::new(),
+                funding_a_policy_commit: era,
+                funding_b_policy_commit: token,
+                funding_policies: Vec::new(),
+                signature: Vec::new(),
+            };
+            let signature = signed(sign(&unsigned.signing_bytes()));
+            let deltas = vec![
+                BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Debit,
+                    amount: 100,
+                },
+                BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Debit,
+                    amount: amount_b,
+                },
+            ];
+            (
+                Operation::SofiVaultCreate {
+                    genesis_preimage: Vec::new(),
+                    creation,
+                    market_policy_preimage: Vec::new(),
+                    funding_a_policy_commit: era,
+                    funding_b_policy_commit: token,
+                    funding_policies: Vec::new(),
+                    signature,
+                },
+                deltas,
+            )
+        };
+        let fulfillment = |position: u64| {
+            let body = wire::TraderFulfillmentBody::new(
+                [0x0E; 32],
+                vec![[0x21; 32]],
+                vec![wire::AttemptEntry {
+                    vault_id: [0x51; 32],
+                    attempt: 0,
+                }],
+                position,
+                alg,
+                &keys.public_key,
+                att_a,
+            )
+            .expect("a fulfillment body");
+            let signature = sign(&derive::fulfillment_signing_digest(&body));
+            (body.encode(), signature)
+        };
+
+        let unchanged = |signature: Vec<u8>| signature;
+        let (setup_body, setup_signature) = setup(5);
+        let (other_setup_body, other_setup_signature) = setup(6);
+        let (vault_op, vault_deltas) = vault(300, &unchanged);
+        let (other_vault_op, other_vault_deltas) = vault(301, &unchanged);
+        let (forged_vault_op, _) = vault(300, &forged);
+        let (fulfill_body, fulfill_signature) = fulfillment(6);
+        let (other_fulfill_body, other_fulfill_signature) = fulfillment(7);
+        let fulfill = |body: Vec<u8>, signature: Vec<u8>| Operation::SofiFulfill {
+            fulfillment_body: body,
+            precommit_id: vec![0x0E; 32],
+            signature,
+        };
+        // Each case: its name, the operation and its deltas, the operation
+        // with one carried byte changed and its deltas, and the operation
+        // under a changed signature, which is refused.
+        type Case = (
+            &'static str,
+            Operation,
+            Vec<BalanceDelta>,
+            Operation,
+            Vec<BalanceDelta>,
+            Operation,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "SofiSetup",
+                Operation::SofiSetup {
+                    setup_body: setup_body.clone(),
+                    signature: setup_signature.clone(),
+                },
+                Vec::new(),
+                Operation::SofiSetup {
+                    setup_body: other_setup_body,
+                    signature: other_setup_signature,
+                },
+                Vec::new(),
+                Operation::SofiSetup {
+                    setup_body,
+                    signature: forged(setup_signature),
+                },
+            ),
+            (
+                "SofiVaultCreate",
+                vault_op,
+                vault_deltas.clone(),
+                other_vault_op,
+                other_vault_deltas,
+                forged_vault_op,
+            ),
+            (
+                "SofiFulfill",
+                fulfill(fulfill_body.clone(), fulfill_signature.clone()),
+                Vec::new(),
+                fulfill(other_fulfill_body, other_fulfill_signature),
+                Vec::new(),
+                fulfill(fulfill_body, forged(fulfill_signature)),
+            ),
+        ];
+
+        for (name, op, deltas, changed, changed_deltas, refused) in cases {
+            let refused_deltas = match &refused {
+                Operation::SofiVaultCreate { .. } => vault_deltas.clone(),
+                _ => Vec::new(),
+            };
+            let advanced = |op: Operation, deltas: &[BalanceDelta], what: &str| match head
+                .advance(self_loop, devid, op, deltas, None)
+            {
+                Ok(outcome) => outcome,
+                Err(e) => panic!("{name} {what}: {e}"),
+            };
+            let once = advanced(op.clone(), &deltas, "advances");
+            let twice = advanced(op, &deltas, "advances again");
+            assert_eq!(
+                once.transition_entropy(),
+                twice.transition_entropy(),
+                "{name}"
+            );
+            assert_eq!(
+                once.new_chain_state.compute_chain_tip(),
+                twice.new_chain_state.compute_chain_tip(),
+                "{name}"
+            );
+            assert_eq!(
+                once.new_device_state.root(),
+                twice.new_device_state.root(),
+                "{name}"
+            );
+
+            let other = advanced(
+                changed,
+                &changed_deltas,
+                "with a carried byte changed advances",
+            );
+            assert_ne!(
+                once.transition_entropy(),
+                other.transition_entropy(),
+                "{name}"
+            );
+            assert_ne!(
+                once.new_chain_state.compute_chain_tip(),
+                other.new_chain_state.compute_chain_tip(),
+                "{name}"
+            );
+            let Err(..) = head.advance(self_loop, devid, refused, &refused_deltas, None) else {
+                panic!("{name} under a changed signature is refused");
+            };
+
+            let e = once.transition_entropy();
+            let parent = once.new_chain_state.embedded_parent;
+            let op_bytes = once.new_chain_state.operation.to_bytes();
+            assert_eq!(
+                once.new_chain_state.compute_chain_tip(),
+                relationship_chain_tip_v2(&self_loop, &parent, &devid, &op_bytes, &e, None),
+                "{name}: the tip is the preimage over its entropy"
+            );
+            let mut e_other = e;
+            e_other[0] ^= 0x01;
+            let c_pre = compute_precommit(&parent, &op_bytes, &e).expect("C_pre");
+            let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other).expect("C_pre");
+            assert_ne!(c_pre, c_pre_other, "{name}: C_pre contains the entropy");
+            assert_ne!(
+                compute_successor_tip(&parent, &op_bytes, &e, &c_pre),
+                compute_successor_tip(&parent, &op_bytes, &e_other, &c_pre_other),
+                "{name}: the symmetric tip contains the entropy"
+            );
+        }
+    }
+
     /// A head rebuilt from its persisted tips and other leaves recomputes the
-    /// root the live head committed, the tree built once over every leaf. A
-    /// tip or a leaf left out of the build moves the root, so the loader's
-    /// root check refuses the head.
+    /// root the live head committed, the tree built once over every leaf, and
+    /// is restored. A tip or a leaf left out of the build moves the root, and
+    /// restore refuses the head against the stored root.
     #[test]
     fn a_restored_head_recomputes_the_live_root() {
         let mut live = DeviceState::new(devid(0xC1), devid(0xC2), vec![0x01; 32]);
@@ -3792,14 +4789,18 @@ mod tests {
                 .expect("a new relationship");
         }
         let live = live
-            .with_anchor_state_leaf(&pc(0xD1), &pc(0xD2))
-            .expect("an anchor-state leaf");
+            .adopt_token(pc(0xD1))
+            .expect("an adoption leaf")
+            .open_offline_account(&pc(0xD3), pc(0xD4), 0)
+            .expect("an offline account");
         let tips: Vec<([u8; 32], RelChainTip)> = live
             .relationship_keys()
             .iter()
             .map(|k| (*k, live.rel_chain_tip(k).expect("a held tip").clone()))
             .collect();
-        let restore = |tips: Vec<([u8; 32], RelChainTip)>, extra: BTreeMap<[u8; 32], [u8; 32]>| {
+        let restore = |tips: Vec<([u8; 32], RelChainTip)>,
+                       extra: BTreeMap<[u8; 32], [u8; 32]>,
+                       accounts: BTreeMap<[u8; 32], OfflineAccount>| {
             DeviceState::restore(
                 live.genesis_digest(),
                 live.devid(),
@@ -3808,13 +4809,26 @@ mod tests {
                 live.balances_snapshot().clone(),
                 tips,
                 extra,
-                live.offline_allocations_snapshot().clone(),
+                accounts,
                 None,
+                live.root(),
             )
-            .expect("restore")
+        };
+        let refused = |restored: Result<RealizedHead, DsmError>, why: &str| match restored {
+            Err(e) => assert!(
+                e.to_string().contains("is not the stored root"),
+                "{why}: {e}"
+            ),
+            Ok(head) => panic!("{why}: restored at root {:?}", head.root()),
         };
         let extra = live.extra_leaves_snapshot().clone();
-        assert_eq!(restore(tips.clone(), extra.clone()).root(), live.root());
+        let accounts = live.offline_accounts().clone();
+        assert_eq!(
+            restore(tips.clone(), extra.clone(), accounts.clone())
+                .expect("the full set of leaves restores")
+                .root(),
+            live.root()
+        );
         let dropped =
             crate::core::bilateral_transaction_manager::compute_smt_key(&live.devid(), &devid(7));
         let fewer: Vec<([u8; 32], RelChainTip)> = tips
@@ -3823,15 +4837,17 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(fewer.len() + 1, tips.len());
-        assert_ne!(
-            restore(fewer, extra).root(),
-            live.root(),
-            "a tip left out of the build moves the root"
+        refused(
+            restore(fewer, extra.clone(), accounts.clone()),
+            "a tip left out of the build moves the root",
         );
-        assert_ne!(
-            restore(tips, BTreeMap::new()).root(),
-            live.root(),
-            "an extra leaf left out of the build moves the root"
+        refused(
+            restore(tips.clone(), BTreeMap::new(), accounts),
+            "an extra leaf left out of the build moves the root",
+        );
+        refused(
+            restore(tips, extra, BTreeMap::new()),
+            "an offline account left out of the build moves the root",
         );
     }
 }

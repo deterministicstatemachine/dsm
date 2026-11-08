@@ -29,8 +29,8 @@ use crate::common::domain_tags::{
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 use crate::route_chain::{
-    completion_proof, evaluate, CellError, CellEvidence, CellFact, CellReading, ChainState,
-    CompletionProof, Missing, RoutedCell,
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
+    CellReading, ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
 use crate::storage_object::immutable_addr;
 
@@ -331,12 +331,37 @@ impl VerdictCell {
         })
     }
 
-    pub fn key(&self) -> &D32 {
-        &self.key
-    }
-
     pub fn routed(&self) -> &RoutedCell {
         &self.cell
+    }
+
+    /// What a reader keeps of a seat's log at this cell: the copies of
+    /// verdicts whose `Y` and table derive its key. Those its reading counts
+    /// are among them, and so is every verdict for this cell it passes over
+    /// and says why (`VerdictCellRead::passed_over`); bytes that are no
+    /// verdict for this cell are no object naming its key, and never count
+    /// (storage spec §9, route chains, rule 3).
+    pub fn keeps(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
+            EscrowVerdict::decode(bytes).is_ok_and(|verdict| {
+                verdict_cell_key(
+                    verdict.external_commitment(),
+                    &table_digest(verdict.table()),
+                ) == self.key
+            })
+        })
+    }
+
+    /// The copies of verdicts that prove their authority for this cell: the
+    /// values its reading recognizes ([`verdict_resolution`]), narrower than
+    /// what [`Self::keeps`] keeps. What a writer reads as first at the
+    /// leader, so it records the cell taken only for a value that holds it.
+    pub fn recognizes(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
+            let refused = std::cell::RefCell::new(Vec::new());
+            let recognize = verdict_at(self, &refused);
+            recognize(bytes).is_some()
+        })
     }
 }
 
@@ -379,11 +404,6 @@ impl VerdictCellRead {
         self.held.as_ref().map(|(verdict, _)| verdict)
     }
 
-    /// The exact bytes of the verdict holding the cell: what a relay carries.
-    pub fn value(&self) -> Option<&[u8]> {
-        self.held.as_ref().map(|(_, value)| value.as_slice())
-    }
-
     /// Why each value the leader holds ahead of the one deciding the cell
     /// counts as nothing there, in the leader's arrival order: a verdict for
     /// another cell, under signers its table does not assign, or with a
@@ -418,24 +438,49 @@ impl VerdictCellRead {
 pub enum EscrowCellRead {
     Signed(VerdictCellRead),
     Computed(super::computed::ComputedCellRead),
+    /// A Release against a computed vault that names a cell other than the
+    /// vault's `K_match`. Nothing is read for it: at a computed vault the
+    /// verdict facts hold at `K_match` and nothing else holds (SoFi
+    /// Amendment S22), and the release is Invalid
+    /// (`VerdictCellIsNotTheTerms`).
+    Unbound(UnboundCell),
 }
 
 impl EscrowCellRead {
     /// The cell a Release against the vault names: `K_verdict` or
-    /// `K_match`.
+    /// `K_match`, or the cell an unbound release names.
     pub fn key(&self) -> D32 {
         match self {
             Self::Signed(read) => read.key,
             Self::Computed(read) => read.key(),
+            Self::Unbound(cell) => cell.named,
         }
     }
 
-    /// Where a release naming `outcome` stands.
+    /// Where a release naming `outcome` stands. No verdict holds for an
+    /// unbound release, ever.
     pub fn standing_for(&self, outcome: &[u8]) -> VerdictStanding {
         match self {
             Self::Signed(read) => read.standing_for(outcome),
             Self::Computed(read) => read.standing_for(outcome),
+            Self::Unbound(..) => VerdictStanding::Unsettled,
         }
+    }
+}
+
+/// The cell a Release names when the computed terms of its vault bind it to
+/// another one. Built by [`UnboundCell::of`] from those terms and by nothing
+/// else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnboundCell {
+    named: D32,
+}
+
+impl UnboundCell {
+    /// `named` when it is not the `K_match` that `terms` derive; `None` when
+    /// it is.
+    pub fn of(terms: &super::wire::ComputedEscrowTerms, named: &D32) -> Option<Self> {
+        (super::computed::match_cell_of(terms) != *named).then_some(Self { named: *named })
     }
 }
 
@@ -500,6 +545,18 @@ pub fn verdict_completion(
     evidence: &CellEvidence,
 ) -> Result<Option<(EscrowVerdict, CompletionProof)>, Missing> {
     completion_proof(&cell.cell, evidence, held_verdict(read))
+}
+
+/// Check a kept completion proof of the verdict `read` found at the cell
+/// against the reads in `evidence` (SoFi Amendment S10): the verdict it
+/// proves final.
+pub fn check_verdict_completion(
+    cell: &VerdictCell,
+    read: &VerdictCellRead,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<EscrowVerdict, ProofRefusal> {
+    check_completion_proof(&cell.cell, evidence, proof, held_verdict(read))
 }
 
 #[cfg(test)]

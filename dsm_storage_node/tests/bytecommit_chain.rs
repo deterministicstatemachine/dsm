@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! ByteCommits on the served assembly (storage spec §14): a node's own chain,
 //! proofs that it commits a cell's entries, and a mirror filled only by
-//! fetching from the set-mate itself — two real nodes over real HTTP.
+//! fetching from the set-mate itself — two real nodes over real HTTPS, each
+//! serving a certificate from the set's CA and pinned to it.
 
 #![allow(clippy::disallowed_methods)]
 
 mod common;
 
-use std::future::IntoFuture;
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request, http::StatusCode, Router};
@@ -50,10 +50,10 @@ async fn node_state(
     node_state_on(common::fresh_store(store).await, id, set, endpoints)
 }
 
+/// A loopback listener and the `https://` endpoint a set-mate's
+/// configuration names for it.
 async fn listener() -> (tokio::net::TcpListener, String) {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", l.local_addr().unwrap());
-    (l, url)
+    common::tls_listener().await
 }
 
 /// What the node answers when asked to sync its mirror.
@@ -183,6 +183,7 @@ async fn cycles_close_over_new_entries_and_commit_their_records() {
     assert!(c2.follows(&c1), "cycle 2 links to cycle 1");
 
     let held = values(&a, key).await;
+    let held = dsm::storage_cell::replay(NS.as_bytes(), &key, &held);
     let p1 = proof(&a, key, 1).await.expect("proof at cycle 1");
     let p2 = proof(&a, key, 2).await.expect("proof at cycle 2");
     assert!(dsm::storage_cell::record_is_committed(&r1, &held, &c1, &p1));
@@ -230,8 +231,8 @@ async fn a_set_mate_mirrors_by_fetching_from_the_member_itself() {
     let sa = node_state("bc_mirror_a", "dsm-node-a", &set, &[("dsm-node-b", &ub)]).await;
     let sb = node_state("bc_mirror_b", "dsm-node-b", &set, &[("dsm-node-a", &ua)]).await;
     let (a, b) = (app(sa), app(sb));
-    tokio::spawn(axum::serve(la, a.clone()).into_future());
-    tokio::spawn(axum::serve(lb, b.clone()).into_future());
+    common::serve_tls(la, a.clone()).await;
+    common::serve_tls(lb, b.clone()).await;
 
     let key = [0x21; 32];
     let rec = put(&a, key, b"at a").await;
@@ -251,6 +252,7 @@ async fn a_set_mate_mirrors_by_fetching_from_the_member_itself() {
 
     // The verifier's check: A's record, A's values, B's mirror of A, A's proof.
     let held = values(&a, key).await;
+    let held = dsm::storage_cell::replay(NS.as_bytes(), &key, &held);
     let p = proof(&a, key, 1).await.unwrap();
     assert!(dsm::storage_cell::record_is_committed(
         &rec,
@@ -278,8 +280,8 @@ async fn an_impostor_at_a_set_mates_endpoint_is_not_mirrored() {
     )
     .await;
     let (c, b) = (app(sc), app(sb));
-    tokio::spawn(axum::serve(lc, c.clone()).into_future());
-    tokio::spawn(axum::serve(lb, b.clone()).into_future());
+    common::serve_tls(lc, c.clone()).await;
+    common::serve_tls(lb, b.clone()).await;
 
     put(&c, [0x31; 32], b"at c").await;
     close(&c).await.expect("C closes cycle 1");
@@ -302,8 +304,8 @@ async fn a_rewritten_cycle_is_kept_beside_the_first() {
     // A, and a rebuilt A: two stores answering as dsm-node-a.
     let a = app(node_state("bc_rewrite_a", "dsm-node-a", &["dsm-node-a"], &[]).await);
     let a2 = app(node_state("bc_rewrite_a2", "dsm-node-a", &["dsm-node-a"], &[]).await);
-    tokio::spawn(axum::serve(la, a.clone()).into_future());
-    tokio::spawn(axum::serve(la2, a2.clone()).into_future());
+    common::serve_tls(la, a.clone()).await;
+    common::serve_tls(la2, a2.clone()).await;
     // B, then B again over the same store with its configuration pointing at
     // the rebuilt A.
     let b_db = common::fresh_store("bc_rewrite_b").await;
@@ -385,46 +387,54 @@ async fn a_set_mate_that_never_answers_fails_the_sync_and_frees_it() {
 /// end, counting what it gets to send before the node hangs up on it.
 #[tokio::test]
 async fn a_set_mate_whose_answer_never_ends_is_read_no_further_than_a_byte_commit() {
+    use axum::response::IntoResponse;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     /// Where the set-mate stops on its own, for a node that never hangs up.
     const FLOOD: usize = 128 << 20;
-    let (flood, flood_url) = listener().await;
-    let sent = Arc::new(AtomicUsize::new(0));
-    // How the set-mate's stream ended: the error its next write met once the
-    // node had hung up, or nothing while it is still sending.
-    let hung_up = Arc::new(tokio::sync::Mutex::new(None::<std::io::ErrorKind>));
-    let (counted, ended) = (sent.clone(), hung_up.clone());
-    tokio::spawn(async move {
-        while let Ok((mut socket, _)) = flood.accept().await {
-            let (counted, ended) = (counted.clone(), ended.clone());
-            tokio::spawn(async move {
-                let mut request = [0u8; 4096];
-                match socket.read(&mut request).await {
-                    Ok(n) if n > 0 => {}
-                    _ => return,
-                }
-                let streamed: std::io::Result<()> = async {
-                    socket
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nx-dsm-node-id: dsm-node-a\r\n\
-                              content-type: application/octet-stream\r\n\r\n",
-                        )
-                        .await?;
-                    let chunk = [0xA5u8; 64 * 1024];
-                    while counted.load(Ordering::SeqCst) < FLOOD {
-                        socket.write_all(&chunk).await?;
-                        counted.fetch_add(chunk.len(), Ordering::SeqCst);
-                    }
-                    Ok(())
-                }
-                .await;
-                if let Err(e) = streamed {
-                    *ended.lock().await = Some(e.kind());
-                }
-            });
+    static CHUNK: [u8; 64 * 1024] = [0xA5; 64 * 1024];
+    /// The set-mate's endless answer: counts every chunk it hands over, and
+    /// counts its own end, which comes when the node hangs up on it.
+    struct Flood {
+        sent: Arc<AtomicUsize>,
+        ended: Arc<AtomicUsize>,
+    }
+    impl Drop for Flood {
+        fn drop(&mut self) {
+            self.ended.fetch_add(1, Ordering::SeqCst);
         }
-    });
+    }
+    let (flood, flood_url) = listener().await;
+    let (sent, ended) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let set_mate = {
+        let (sent, ended) = (sent.clone(), ended.clone());
+        Router::new().fallback(move || {
+            let answer = Flood {
+                sent: sent.clone(),
+                ended: ended.clone(),
+            };
+            async move {
+                let chunks = futures::stream::unfold(answer, |answer| async move {
+                    if answer.sent.load(Ordering::SeqCst) >= FLOOD {
+                        return None;
+                    }
+                    answer.sent.fetch_add(CHUNK.len(), Ordering::SeqCst);
+                    Some((
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(&CHUNK)),
+                        answer,
+                    ))
+                });
+                (
+                    [
+                        ("x-dsm-node-id", "dsm-node-a"),
+                        ("content-type", "application/octet-stream"),
+                    ],
+                    Body::from_stream(chunks),
+                )
+                    .into_response()
+            }
+        })
+    };
+    common::serve_tls(flood, set_mate).await;
     let b = app(node_state(
         "bc_flood_b",
         "dsm-node-b",
@@ -433,25 +443,64 @@ async fn a_set_mate_whose_answer_never_ends_is_read_no_further_than_a_byte_commi
     )
     .await);
     assert_eq!(sync(&b).await, StatusCode::BAD_GATEWAY);
-    // The set-mate learns the node hung up at its next write that the
-    // socket's buffers cannot take.
-    let mut how = None;
+    // The set-mate's answer ends once the node has hung up on it.
     for _ in 0..50 {
-        how = *hung_up.lock().await;
-        if how.is_some() {
+        if ended.load(Ordering::SeqCst) > 0 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let read = sent.load(Ordering::SeqCst);
     assert!(
-        how.is_some(),
+        ended.load(Ordering::SeqCst) > 0,
         "the node never hung up on an answer that kept coming ({read} bytes sent)"
     );
     assert!(
         read < 16 << 20,
         "the node took in {read} bytes of one answer, where a ByteCommit is a few hundred"
     );
+}
+
+/// A redirect from a set-mate's endpoint is an answer, never followed: the
+/// node fetches a set-mate's ByteCommits at the endpoint its configuration
+/// names and nowhere else (storage spec §14, mirror provenance 1). Here the
+/// endpoint B names for A redirects every request to A itself, which would
+/// answer truly; B still mirrors nothing, because the answer did not come
+/// from the endpoint it fetched.
+#[tokio::test]
+async fn a_set_mates_redirect_is_not_followed() {
+    use axum::response::IntoResponse;
+    let ((la, ua), (lr, ur)) = (listener().await, listener().await);
+    let a = app(node_state("bc_redirect_a", "dsm-node-a", &["dsm-node-a"], &[]).await);
+    common::serve_tls(la, a.clone()).await;
+    let redirector = Router::new().fallback(move |uri: axum::http::Uri| {
+        let to = format!("{ua}{uri}");
+        async move {
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [(axum::http::header::LOCATION, to)],
+            )
+                .into_response()
+        }
+    });
+    common::serve_tls(lr, redirector).await;
+    let b = app(node_state(
+        "bc_redirect_b",
+        "dsm-node-b",
+        &["dsm-node-a", "dsm-node-b"],
+        &[("dsm-node-a", &ur)],
+    )
+    .await);
+
+    put(&a, [0x51; 32], b"at a").await;
+    close(&a).await.expect("A closes cycle 1");
+
+    assert_eq!(
+        sync(&b).await,
+        StatusCode::BAD_GATEWAY,
+        "a redirect is not a set-mate's answer"
+    );
+    assert!(mirrored(&b, b"dsm-node-a", 1).await.is_empty());
 }
 
 /// A set-mate that does not answer at its configured endpoint fails the
@@ -515,7 +564,7 @@ async fn a_sync_keeps_cycles_in_order_and_stops_at_the_first_it_cannot_fetch() {
             )
             .fallback_service(rest_of_a)
     };
-    tokio::spawn(axum::serve(lr, relay).into_future());
+    common::serve_tls(lr, relay).await;
     let b = app(node_state(
         "bc_many_b",
         "dsm-node-b",
@@ -547,6 +596,100 @@ async fn a_sync_keeps_cycles_in_order_and_stops_at_the_first_it_cannot_fetch() {
             mirrored(&b, b"dsm-node-a", t).await,
             vec![commit.clone()],
             "cycle {t}"
+        );
+    }
+}
+
+/// The distinct cycles from `from` through `through` that `node`'s store
+/// mirrors for `member`, counted by the store itself.
+async fn mirrored_count(node: &AppState, member: &[u8], from: u64, through: u64) -> i64 {
+    node.db_pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(DISTINCT cycle_index) FROM bytecommit_mirror
+             WHERE member_id = $1 AND cycle_index BETWEEN $2 AND $3",
+            &[
+                &member,
+                &i64::try_from(from).unwrap(),
+                &i64::try_from(through).unwrap(),
+            ],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// A member that closed far more cycles than one sync fetches (anyone can
+/// close a cycle once one entry has arrived) is mirrored at its newest
+/// cycles by the first sync: the cycle a reader verifies at and its parent
+/// are mirrored byte for byte, with the oldest cycles beside them and the
+/// gap between left for the next sync, which fills it, so the mirror holds
+/// every cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_inflated_past_one_sync_is_mirrored_at_its_newest_cycles_at_once() {
+    use dsm_storage_node::api::objects::bytecommit::{BACKFILL_CYCLES, NEWEST_CYCLES};
+    let ((la, ua), (lb, ub)) = (listener().await, listener().await);
+    let set = ["dsm-node-a", "dsm-node-b"];
+    let sa = node_state("bc_inflated_a", "dsm-node-a", &set, &[("dsm-node-b", &ub)]).await;
+    let sb = node_state("bc_inflated_b", "dsm-node-b", &set, &[("dsm-node-a", &ua)]).await;
+    let (a, b) = (app(sa.clone()), app(sb.clone()));
+    common::serve_tls(la, a).await;
+    common::serve_tls(lb, b.clone()).await;
+
+    let backfill = u64::try_from(BACKFILL_CYCLES).unwrap();
+    let cycles = backfill + NEWEST_CYCLES + 300;
+    let mut commits = Vec::new();
+    for t in 1..=cycles {
+        db::put_cell(&sa.db_pool, NS.as_bytes(), &[0x5A; 32], &t.to_be_bytes())
+            .await
+            .unwrap();
+        let commit = db::close_cycle(&sa.db_pool, &sa.committed, b"dsm-node-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(commit.cycle_index, t);
+        commits.push(commit);
+    }
+
+    assert_eq!(sync(&b).await, StatusCode::NO_CONTENT);
+    for t in [cycles, cycles - 1] {
+        assert_eq!(
+            mirrored(&b, b"dsm-node-a", t).await,
+            vec![commits[usize::try_from(t - 1).unwrap()].clone()],
+            "one sync mirrors A's cycle {t}, of {cycles}"
+        );
+    }
+    let newest = cycles - NEWEST_CYCLES;
+    let member = b"dsm-node-a".as_slice();
+    assert_eq!(
+        mirrored_count(&sb, member, newest, cycles).await,
+        i64::try_from(NEWEST_CYCLES + 1).unwrap(),
+        "the newest cycles"
+    );
+    assert_eq!(
+        mirrored_count(&sb, member, 1, backfill).await,
+        i64::try_from(backfill).unwrap(),
+        "the oldest cycles"
+    );
+    assert_eq!(
+        mirrored_count(&sb, member, backfill + 1, newest - 1).await,
+        0,
+        "the gap between, for the next sync"
+    );
+
+    assert_eq!(sync(&b).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        mirrored_count(&sb, member, 1, cycles).await,
+        i64::try_from(cycles).unwrap(),
+        "the next sync fills the gap"
+    );
+    for t in [1, backfill + 1, newest - 1, cycles] {
+        assert_eq!(
+            mirrored(&b, member, t).await,
+            vec![commits[usize::try_from(t - 1).unwrap()].clone()],
+            "cycle {t} byte for byte"
         );
     }
 }

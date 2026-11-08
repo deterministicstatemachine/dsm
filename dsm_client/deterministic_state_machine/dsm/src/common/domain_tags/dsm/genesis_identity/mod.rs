@@ -57,5 +57,4 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_IDENTITY_SEED_ENTROPY,
     TAG_DSM_LOCAL_ID,
     TAG_DSM_MANIFOLD_SEED,
-    TAG_DSM_SYSTEM_FEE_DEVICE,
 ];

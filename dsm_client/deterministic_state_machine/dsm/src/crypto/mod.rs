@@ -57,6 +57,7 @@ use crate::common::domain_tags::TAG_HASH_DATA;
 pub mod aead;
 pub mod anchor_enrollment;
 pub mod blake3;
+pub mod ble_link;
 pub mod canonical_lp;
 pub mod classical_verify;
 pub mod domain;
@@ -70,6 +71,7 @@ pub mod kyber;
 pub mod rng;
 pub mod signatures;
 pub mod sphincs;
+pub mod spool_address;
 pub mod spool_seal;
 
 // Micro-level determinism property tests.

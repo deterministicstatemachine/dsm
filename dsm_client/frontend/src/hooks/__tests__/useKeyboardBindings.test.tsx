@@ -29,6 +29,35 @@ describe('useKeyboardBindings', () => {
     delete (window as any).__dsmComboEntryActive;
   });
 
+  // Typing "alice and I bet" into the escrow agreement on a phone selected the
+  // highlighted menu item at the first space and left the screen.
+  describe('typing in a field', () => {
+    it('leaves a space, Enter, the arrows and Tab to the field', () => {
+      const intents = makeIntents();
+      render(<Harness intents={intents} />);
+      const field = document.createElement('textarea');
+      document.body.appendChild(field);
+      for (const key of [' ', 'Enter', 'ArrowLeft', 'Tab', 'Shift']) {
+        expect(fireEvent.keyDown(field, { key })).toBeTruthy();
+      }
+      expect(intents.select).not.toHaveBeenCalled();
+      expect(intents.prevItem).not.toHaveBeenCalled();
+      expect(intents.toggleTheme).not.toHaveBeenCalled();
+      expect(intents.start).not.toHaveBeenCalled();
+      field.remove();
+    });
+
+    it('still backs out on Escape from a field', () => {
+      const intents = makeIntents();
+      render(<Harness intents={intents} />);
+      const field = document.createElement('input');
+      document.body.appendChild(field);
+      fireEvent.keyDown(field, { key: 'Escape' });
+      expect(intents.back).toHaveBeenCalled();
+      field.remove();
+    });
+  });
+
   describe('keyboard events', () => {
     it('ArrowUp calls prevItem', () => {
       const intents = makeIntents();

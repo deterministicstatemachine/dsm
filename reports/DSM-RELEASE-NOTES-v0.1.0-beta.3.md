@@ -23,13 +23,9 @@ The legacy `appRouter` dispatch is gone. All protocol traffic now flows through 
 - **Android**: JNI bridge (`unified_protobuf_bridge`) routes envelope/router/hardware-facts calls through shared ingress
 - **iOS**: C FFI surface exported via `dsm_process_envelope_protobuf` / `dsm_free_envelope_bytes`; platform scaffolding in `dsm_sdk/src/platform/ios/{bluetooth,transport}.rs`; iOS integration documented in `docs/book/11-integration-guide.md`
 
-Two new Android bridges (`NativeBoundaryBridge`, `NativeHostBridge`) now cleanly separate *DSM native ingress* from *host-capability* requests (QR, BLE, NFC, permissions, biometric). Genesis bootstrap was rewritten to emit `BootstrapMeasurementReport` phases, collect DBRW measurements, persist salt, and finalize via ingress.
+Two new Android bridges (`NativeBoundaryBridge`, `NativeHostBridge`) now cleanly separate *DSM native ingress* from *host-capability* requests (QR, BLE, NFC, permissions, biometric).
 
-### 3. C-DBRW migrated from C/C++ to pure Rust
-
-All DBRW native logic (histogram, Wasserstein distance, entropy health, moments, BLAKE3 fallback, JNI wrappers) has been **deleted from C/C++ and re-implemented in Rust** under `dsm_sdk/security/cdbrw_*`. Net change: -1,600 lines of native code, zero `unsafe` C surface. CMakeLists keeps only the `siliconfp` probe library.
-
-### 4. §4.3 spec compliance — `state_number` purged from canonical hash paths
+### 3. §4.3 spec compliance — `state_number` purged from canonical hash paths
 
 `state_number` has been **removed from the `State` struct and from every canonical hash input** across `dsm` and `dsm_sdk`. Identity logic now uses hash-based IDs. Multiple §4.3-violating call sites were deleted, including the broken `get_state_by_number` helper (5 callers migrated). The Pixel 9 faucet brick bug was traced to the §4.3 violation and fixed.
 
@@ -54,7 +50,6 @@ All DBRW native logic (histogram, Wasserstein distance, entropy health, moments,
 ## Security
 
 - **DLV settlement anchoring enforced** — token operations now require anchored DLV settlement.
-- **C-DBRW trust gating enforced** — SDK + tests updated to fail closed on DBRW verdict mismatch.
 - **Real signature checks in verification** — replaces prior placeholder paths.
 - **Malformed token-id rejection** — balance-key derivation hard-fails on malformed token IDs instead of admitting ambiguous keys; duplicate hardening in balance checks.
 - **Canonical identity binding** — identity store and invalidation are bound to canonical genesis IDs; prevents cross-identity contamination.
@@ -73,7 +68,6 @@ Major deletions made possible by the `DeviceState` migration:
 | `hierarchical_device_management` module | ~1,180 |
 | `protocol_metrics.rs` | ~1,362 |
 | `chain_tip_sync_sdk` module | ~787 |
-| C/C++ C-DBRW native code | ~3,000 |
 | `BilateralStateManager` dead session/chain-tip surface | ~280 |
 | `StateMachine` verification helpers | ~210 |
 | Assorted `State` / `RelationshipManager` / `RelationshipStatePair` dead methods | ~600+ |

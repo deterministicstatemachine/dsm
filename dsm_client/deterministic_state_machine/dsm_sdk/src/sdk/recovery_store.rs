@@ -4,7 +4,8 @@
 //! lives in its keyed cell, [`dsm::recovery::RecoveryCell`].
 //!
 //! A member stores every entry it is sent and refuses nothing (§6), so a read
-//! gathers every entry any member holds, and the caller keeps what verifies.
+//! gathers every entry any member holds that is an object of the cell's kind
+//! ([`RecoveryCell::holds`]), and the caller keeps what verifies.
 //! Nothing a member returns is authority: every recovery object is signed, and
 //! the rule that picks among verified entries is the reader's.
 
@@ -35,14 +36,27 @@ pub(crate) async fn put(cell: &RecoveryCell, bytes: &[u8]) -> Result<u32, DsmErr
     Ok(took)
 }
 
-/// Every distinct entry any member holds in `cell`, members in set order and
-/// each member's entries in arrival order. An error when no member answered;
-/// an empty list when the members that answered hold nothing there.
+/// Every distinct entry any member holds in `cell` that is an object of the
+/// cell's kind, members in set order and each member's entries in arrival
+/// order; anything else a member holds there costs the read and is not
+/// kept. An error when no member answered; an empty list when the members
+/// that answered hold nothing there.
 pub(crate) async fn entries(cell: &RecoveryCell) -> Result<Vec<Vec<u8>>, DsmError> {
+    use crate::sdk::route_seats::RouteSeats;
     let set = pinned_set()?;
-    let reads = SetClient::new(&set)?
-        .get_cell(RecoveryCell::namespace(), &cell.key())
-        .await;
+    let seats = crate::sdk::route_seats::NodeSeats::new(&set)?;
+    let key = cell.key();
+    let holds = |bytes: &[u8]| cell.holds(bytes);
+    let reads = futures::future::join_all(seats.members().iter().map(|member| {
+        crate::sdk::route_seats::kept_values(
+            &seats,
+            member,
+            RecoveryCell::namespace(),
+            &key,
+            &holds,
+        )
+    }))
+    .await;
     if reads.iter().all(Option::is_none) {
         return Err(DsmError::network(
             "recovery store: no member of the pinned set answered the read",

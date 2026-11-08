@@ -24,7 +24,7 @@ use crate::root_advance::{
     anchor_root_advance, root_advance_message, transition_digest, Certificate, OfflineRelease,
     OwnedTransition, Transition,
 };
-use crate::tropic::{PartitionSig, Tropic, TropicError};
+use crate::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use crate::util::{ct_eq_32, zeroize_vec};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,6 +51,8 @@ pub enum ApplianceError {
     /// A committed release is not yet present to emit/finalize.
     NotCommitted,
     Tropic(TropicError),
+    /// The partition could not sign `σ^host`; nothing is prepared.
+    Partition(PartitionError),
 }
 
 /// Prepared record (§12.2): the certificate carrying the appliance's two on-device identity
@@ -88,6 +90,18 @@ pub struct Active {
     pub record: Record,
 }
 
+impl Active {
+    /// The state an anchor is born into: the genesis frontier `h_0`, counter 0, nothing pending.
+    pub fn genesis(root: [u8; 32]) -> Self {
+        Self {
+            root,
+            anchor_counter: 0,
+            status: Status::Ready,
+            record: Record::Empty,
+        }
+    }
+}
+
 /// Recovery outcomes (§26).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecoverOutcome {
@@ -103,6 +117,17 @@ pub enum RecoverOutcome {
     OnlineCancelOrResolve,
 }
 
+/// Why [`Appliance::recover_at_boot`] refused to let the appliance serve.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BootRecoveryRefusal {
+    /// §26 recovery returned an outcome the appliance cannot serve from.
+    Outcome(RecoverOutcome),
+    /// The boot-time reset of a prepared record could not cancel it.
+    PreparedReset(ApplianceError),
+    /// After the reset, recovery did not return `Accept`.
+    OutcomeAfterReset(RecoverOutcome),
+}
+
 /// The v2 software-authority / hardware-identity appliance for one active frontier.
 pub struct Appliance<T: Tropic, P: PartitionSig> {
     pub h0: u32,
@@ -113,10 +138,10 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     pub partition_pk: Vec<u8>,
     /// PUBLIC resident chip (`σ^chip`) verification key `pk_chip` — receiver pin material.
     pub chip_pk: Vec<u8>,
+    /// PUBLIC birth commitment `S_birth` that `B` commits — receiver pin material: with the other
+    /// pin keys, the owner's online key and its device id, `B` recomputes from what is disclosed.
+    pub birth_commitment: [u8; 32],
     pub active: Active,
-    /// Set when recovery sees a firmware-boundary / R-memory-map event (downgrades to online).
-    pub firmware_boundary_invalid: bool,
-    pub rmemory_map_invalid: bool,
     /// SECRET partition signing key (non-exportable on device).
     partition_sk: Vec<u8>,
     tropic: T,
@@ -139,18 +164,17 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             partition_device_id,
             partition_pk: birth.partition_pk,
             chip_pk: birth.chip_pk,
-            active: Active {
-                root: birth.genesis_frontier,
-                anchor_counter: 0,
-                status: Status::Ready,
-                record: Record::Empty,
-            },
-            firmware_boundary_invalid: false,
-            rmemory_map_invalid: false,
+            birth_commitment: birth.birth_commitment,
+            active: Active::genesis(birth.genesis_frontier),
             partition_sk: birth.partition_sk,
             tropic,
             _p: PhantomData,
         }
+    }
+
+    /// Close the chip to a second birth ([`Tropic::close_birth`]).
+    pub fn close_birth(&mut self) -> Result<(), ApplianceError> {
+        self.tropic.close_birth().map_err(ApplianceError::Tropic)
     }
 
     /// Live anchor counter `u = H₀ − H` from the chip. The counter only counts down, so
@@ -228,7 +252,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         );
         // σ^chip on the die (key never leaves the chip) and σ^host from the partition.
         let sigma_chip = self.tropic.chip_sign(&m).map_err(ApplianceError::Tropic)?;
-        let sigma_host = P::part_sign(&self.partition_sk, &m);
+        let sigma_host = P::part_sign(&self.partition_sk, &m).map_err(ApplianceError::Partition)?;
 
         let cert = Certificate {
             anchor_bundle: self.bundle,
@@ -260,7 +284,17 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// before the counter moves, so an interrupted commit is completable by [`recover`].
     /// Nothing is exported before phase 2. The DSM SMT inclusion proofs are attached by the
     /// SDK (which owns the tree) after emit — the appliance carries them as empty here.
+    ///
+    /// The phases are [`Self::commit_candidate`] and [`Self::commit_counter`]; an appliance
+    /// whose state outlives a power cut writes its record between them.
     pub fn commit(&mut self) -> Result<(), ApplianceError> {
+        self.commit_candidate()?;
+        self.commit_counter()
+    }
+
+    /// §12.3 commit, phase 1: the committed candidate, its counter not yet moved, in place of the
+    /// prepared record. The counter has not moved and nothing is exported.
+    pub fn commit_candidate(&mut self) -> Result<(), ApplianceError> {
         let p = match &self.active.record {
             Record::Prepared(p) => p,
             _ => return Err(ApplianceError::WrongState),
@@ -284,8 +318,8 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
 
         let release = OfflineRelease {
             transition: p.txn.clone(),
-            anchor_smt_proof_before: Vec::new(),
-            anchor_smt_proof_after: Vec::new(),
+            offline_state_proof_before: Vec::new(),
+            offline_state_proof_after: Vec::new(),
             cert: p.cert.clone(),
             branch_proof: Vec::new(),
         };
@@ -304,12 +338,28 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             release,
             committed: false,
         }));
+        Ok(())
+    }
+
+    /// §12.3 commit, phases 2 and 3: move the counter for the committed candidate, then mark it
+    /// committed. Refused unless the record is a candidate whose counter has not moved, so the
+    /// counter moves once per release.
+    pub fn commit_counter(&mut self) -> Result<(), ApplianceError> {
+        let (anchor_counter, next_anchor_counter) = match &self.active.record {
+            Record::Committed(c) if !c.committed => (c.anchor_counter, c.next_anchor_counter),
+            _ => return Err(ApplianceError::WrongState),
+        };
+        if self.live_index()? != anchor_counter {
+            return Err(ApplianceError::CounterMismatch);
+        }
 
         // Phase 2: move the counter (the non-rewind floor). On failure nothing is exported;
         // recovery completes the durable candidate.
-        self.tropic
-            .counter_update()
-            .map_err(|_| ApplianceError::CounterExhausted)?;
+        match self.tropic.counter_update() {
+            Ok(()) => {}
+            Err(TropicError::CounterExhausted) => return Err(ApplianceError::CounterExhausted),
+            Err(e) => return Err(ApplianceError::Tropic(e)),
+        }
 
         // Phase 3: mark counter-committed.
         if let Record::Committed(c) = &mut self.active.record {
@@ -362,9 +412,6 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// §26 power-loss recovery. Never signs a new successor — a committed record is re-emitted
     /// and finalized as the *same* successor.
     pub fn recover(&mut self) -> RecoverOutcome {
-        if self.firmware_boundary_invalid || self.rmemory_map_invalid {
-            return RecoverOutcome::DowngradeOnline;
-        }
         let live_u = match self.live_index() {
             Ok(u) => u,
             Err(_) => return RecoverOutcome::DowngradeOnline,
@@ -417,35 +464,62 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                     return RecoverOutcome::DowngradeOnline;
                 }
                 // Both on-device witnesses (σ^chip, σ^host) are formed atomically in prepare and
-                // no counter has moved, so a Prepared record is always safe to complete when its
-                // frontier + signatures are intact.
-                let (root_ok, sigs_present) = match &self.active.record {
-                    Record::Prepared(p) => (
-                        ct_eq_32(&p.cert.prev_frontier, &self.active.root),
-                        !p.cert.sigma_chip.is_empty() && !p.cert.sigma_host.is_empty(),
-                    ),
+                // no counter has moved, so a Prepared record is safe to complete when it is the
+                // record this appliance signed: its message recomputes from its own fields and
+                // transition, σ^host verifies under the pinned partition key, and σ^chip is what
+                // the chip signs over that message now (Ed25519 is deterministic).
+                let (root_ok, holds, m, sigma_chip, sigma_host) = match &self.active.record {
+                    Record::Prepared(p) => {
+                        let c = &p.cert;
+                        let d = transition_digest(&p.txn.as_transition(), &c.receiver_challenge);
+                        let next = anchor_root_advance(&c.prev_frontier, &d);
+                        let m = root_advance_message(
+                            &self.bundle,
+                            &c.sender_device_root_before,
+                            &c.sender_device_root_after,
+                            &c.prev_frontier,
+                            &next,
+                            c.anchor_counter,
+                            c.next_anchor_counter,
+                            &d,
+                            &c.recipient,
+                            &c.receiver_challenge,
+                        );
+                        let holds = ct_eq_32(&c.anchor_bundle, &self.bundle)
+                            && ct_eq_32(&d, &c.transition_digest)
+                            && ct_eq_32(&next, &c.next_frontier)
+                            && ct_eq_32(&m, &c.root_advance_message);
+                        (
+                            ct_eq_32(&c.prev_frontier, &self.active.root),
+                            holds,
+                            m,
+                            c.sigma_chip.clone(),
+                            c.sigma_host.clone(),
+                        )
+                    }
                     _ => return RecoverOutcome::DowngradeOnline,
                 };
                 if !root_ok {
                     return RecoverOutcome::DowngradeOnline;
                 }
-                if sigs_present {
-                    RecoverOutcome::AcceptPreparedCanComplete
-                } else {
-                    RecoverOutcome::OnlineCancelOrResolve
+                if !holds || !P::part_verify(&self.partition_pk, &m, &sigma_host) {
+                    return RecoverOutcome::OnlineCancelOrResolve;
+                }
+                match self.tropic.chip_sign(&m) {
+                    Ok(signed) if signed == sigma_chip => RecoverOutcome::AcceptPreparedCanComplete,
+                    Ok(_other) => RecoverOutcome::OnlineCancelOrResolve,
+                    Err(_unreachable_chip) => RecoverOutcome::DowngradeOnline,
                 }
             }
             Status::Ready => {
-                // The chip's monotonic counter is the source of truth (it can only fall). If it
-                // reads LOWER than our model (`active < live_u` — more steps consumed than we
-                // tracked), ADOPT the live position rather than downgrading: it only shrinks the
-                // remaining budget, never mints value, and restores `active.u == live_u` so
-                // prepare's counter check passes. `active > live_u` is impossible for a real
-                // down-counter -> fail closed.
-                if self.active.anchor_counter < live_u {
-                    self.active.anchor_counter = live_u;
-                }
-                if self.active.anchor_counter > live_u {
+                // The software counter `active.u` is the authority; the TROPIC01 counter is its
+                // hardware mirror. With no durable transaction, the two must agree exactly. A chip
+                // counter ahead of `active.u` means a transition advanced the mirror that this
+                // frontier never recorded, so pairing the advanced counter with the old frontier
+                // would re-spend it; a chip counter behind `active.u` is impossible for a real
+                // down-counter. Either way the transition is missing or inconsistent -> fail
+                // closed, leaving the active state untouched.
+                if self.active.anchor_counter != live_u {
                     return RecoverOutcome::FailClosed;
                 }
                 let h = match self.tropic.counter_get() {
@@ -457,6 +531,28 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                 }
                 RecoverOutcome::Accept(self.active.root)
             }
+        }
+    }
+
+    /// §26 recovery at boot, for a device that serves the appliance itself: decide whether it
+    /// may serve.
+    ///
+    /// `Accept` (no durable transaction, counters agree) and `ReemitCommitted` (a committed
+    /// release whose counter already moved; the host re-emits and finalizes the same successor)
+    /// serve. `AcceptPreparedCanComplete` (prepared, counter unchanged) takes the reset rule: no
+    /// host session can own a prepared record across a reboot, so the record is cancelled and
+    /// recovery must then return `Accept`. Every other outcome refuses.
+    pub fn recover_at_boot(&mut self) -> Result<(), BootRecoveryRefusal> {
+        match self.recover() {
+            RecoverOutcome::Accept(_) | RecoverOutcome::ReemitCommitted(_) => Ok(()),
+            RecoverOutcome::AcceptPreparedCanComplete => {
+                self.cancel().map_err(BootRecoveryRefusal::PreparedReset)?;
+                match self.recover() {
+                    RecoverOutcome::Accept(_) => Ok(()),
+                    other => Err(BootRecoveryRefusal::OutcomeAfterReset(other)),
+                }
+            }
+            other => Err(BootRecoveryRefusal::Outcome(other)),
         }
     }
 }

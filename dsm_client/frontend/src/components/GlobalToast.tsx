@@ -26,7 +26,6 @@ const GlobalToast: React.FC = () => {
     type === 'transaction_sent' ? 'Transaction sent' :
     type === 'exit_completed' ? 'Withdrawal completed' :
     type === 'inbox_received' ? 'New inbox item received' :
-    type === 'ring_backup_prompt' ? 'BACKUP UPDATED \u2014 HOLD RING TO PHONE' :
     'Refreshed'
   );
   return (

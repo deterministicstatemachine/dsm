@@ -35,37 +35,17 @@ fn ingress_error(code: u32, message: impl Into<String>) -> pb::Error {
     }
 }
 
-#[cfg(all(target_os = "android", feature = "jni"))]
-fn encode_framed_envelope(payload: pb::envelope::Payload) -> Result<Vec<u8>, pb::Error> {
-    let envelope = crate::envelope::local_answer(payload);
-    let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
-    buf.push(0x03);
-    envelope.encode(&mut buf).map_err(|e| {
-        ingress_error(
-            ERROR_CODE_PROCESSING_FAILED,
-            format!("ingress: envelope encode failed: {e}"),
-        )
-    })?;
-    Ok(buf)
-}
-
+/// Hand the page a canonical envelope event through the host.
 fn push_canonical_envelope_event(payload: pb::envelope::Payload) -> Result<(), pb::Error> {
-    #[cfg(all(target_os = "android", feature = "jni"))]
-    {
-        let framed = encode_framed_envelope(payload)?;
-        crate::jni::event_dispatch::post_event_to_webview("canonical.envelope.bin", &framed)
-            .map_err(|e| {
-                ingress_error(
-                    ERROR_CODE_PROCESSING_FAILED,
-                    format!("ingress: canonical envelope dispatch failed: {e}"),
-                )
-            })?;
-    }
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    {
-        let _ = payload;
-    }
-    Ok(())
+    let framed = crate::host::framed_local_answer(payload);
+    crate::host::host()
+        .and_then(|host| host.post_event("canonical.envelope.bin", &framed))
+        .map_err(|e| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                format!("ingress: canonical envelope dispatch failed: {e}"),
+            )
+        })
 }
 
 /// Push a genesis lifecycle event to the WebView (EventBridge maps kinds to the
@@ -284,7 +264,7 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
 fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) -> Result<(), pb::Error> {
     // Re-derive the canonical device signing (AK) public key from the unlocked wallet seed
     // via the single Genesis v2 derivation (`derive_device_ak_keypair`, byte-identical to the
-    // key `create_genesis_v2` registered). No C-DBRW binding key. Fails closed if the wallet
+    // key `create_genesis_v2` registered). Fails closed if the wallet
     // is locked (the seed is re-derived from the session-cached mnemonic, never persisted).
     if device_id.len() != 32 {
         return Err(ingress_error(
@@ -602,13 +582,11 @@ pub fn dispatch_startup(request: StartupRequest) -> StartupResponse {
         }
         Some(startup_request::Operation::InitializeSdk(_)) => initialize_sdk_core(),
         Some(startup_request::Operation::InitializeIdentityContext(op)) => {
-            // op.binding_key is a reserved/ignored legacy C-DBRW field (Genesis v2 roots
-            // identity in the wallet seed).
+            // Genesis v2 roots identity in the wallet seed.
             initialize_identity_context_core(op.device_id, op.genesis_hash)
         }
         Some(startup_request::Operation::RestoreIdentityContext(op)) => {
-            // op.cdbrw_hw_entropy / op.cdbrw_env_fingerprint / op.cdbrw_salt are reserved/ignored
-            // legacy C-DBRW fields; identity restores deterministically from the wallet seed.
+            // Identity restores deterministically from the wallet seed.
             restore_identity_context_core(op.device_id, op.genesis_hash)
         }
         None => Err(ingress_error(
@@ -832,30 +810,41 @@ mod tests {
         );
     }
 
+    /// A preferences request as the WebView sends it: `prefs.get` reads and
+    /// is a `RouterQuery`, `prefs.set` writes and is a `RouterInvoke`.
+    fn pref_request(path: &str, key: &str, value: &str) -> IngressRequest {
+        let args = pb::ArgPack {
+            codec: pb::Codec::Proto as i32,
+            body: pb::AppStateRequest {
+                key: key.to_string(),
+                operation: String::new(),
+                value: value.to_string(),
+            }
+            .encode_to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let method = path.to_string();
+        let operation = match path {
+            "prefs.set" => {
+                ingress_request::Operation::RouterInvoke(pb::RouterInvokeOp { method, args })
+            }
+            _ => ingress_request::Operation::RouterQuery(pb::RouterQueryOp { method, args }),
+        };
+        IngressRequest {
+            operation: Some(operation),
+        }
+    }
+
     /// The device's router answers through the ingress byte for byte: a
-    /// preference set and read back through `RouterQuery`.
+    /// preference set through `RouterInvoke` and read back through
+    /// `RouterQuery`.
     #[test]
     #[serial]
     fn a_router_query_answer_passes_through_unchanged() {
         device_with_router(0x44);
-        let pref = |path: &str, value: &str| {
-            dispatch_ingress(IngressRequest {
-                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                    method: path.to_string(),
-                    args: pb::ArgPack {
-                        codec: pb::Codec::Proto as i32,
-                        body: pb::AppStateRequest {
-                            key: "ingress.test".to_string(),
-                            operation: String::new(),
-                            value: value.to_string(),
-                        }
-                        .encode_to_vec(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                })),
-            })
-        };
+        let pref =
+            |path: &str, value: &str| dispatch_ingress(pref_request(path, "ingress.test", value));
         expect_ok_bytes(pref("prefs.set", "through the ingress"));
         let answer = expect_ok_bytes(pref("prefs.get", ""));
         let envelope = crate::handlers::response_helpers::decode_local_envelope(&answer)
@@ -909,6 +898,33 @@ mod tests {
             // Finer than ERA counts, and nothing at all.
             (Unit::Decimals(2), Amount::Entered("1.234".to_string())),
             (Unit::Decimals(2), Amount::Entered("0".to_string())),
+            // The routes the tour walks through (practiceRoutes.test.ts): the
+            // practice market's reserves, a 10 PLAY swap and its 4.45 ERA, a
+            // vault of 20 PLAY against 10 ERA and its close, a 5 PLAY escrow
+            // stake, the practice app's 5 PLAY grant and its 8 PLAY request,
+            // and a token of 1000 created for a 10 ERA fee.
+            (Unit::Decimals(0), Amount::Entered("1000".to_string())),
+            (Unit::Decimals(2), Amount::Entered("500".to_string())),
+            (Unit::Decimals(0), Amount::Entered("10".to_string())),
+            (Unit::Decimals(2), Amount::BaseUnits(445)),
+            (Unit::Decimals(2), Amount::Entered("4.45".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(40)),
+            (Unit::Decimals(2), Amount::BaseUnits(100_445)),
+            (Unit::Decimals(2), Amount::Entered("5".to_string())),
+            (Unit::Decimals(0), Amount::Entered("20".to_string())),
+            (Unit::Decimals(2), Amount::Entered("10".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(30)),
+            (Unit::Decimals(2), Amount::BaseUnits(99_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(20)),
+            (Unit::Decimals(2), Amount::BaseUnits(1_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(50)),
+            (Unit::Decimals(2), Amount::BaseUnits(100_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(0)),
+            (Unit::Decimals(2), Amount::BaseUnits(0)),
+            (Unit::Decimals(0), Amount::BaseUnits(15)),
+            (Unit::Decimals(0), Amount::Entered("8".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(42)),
+            (Unit::Decimals(0), Amount::BaseUnits(8)),
         ];
         let mut record = Vec::new();
         let mut answers = Vec::new();
@@ -1024,24 +1040,8 @@ mod tests {
     #[serial]
     fn the_preferences_route_refuses_the_app_locks_settings() {
         device_with_router(0x4A);
-        let pref = |path: &str, key: &str, value: &str| {
-            dispatch_ingress(IngressRequest {
-                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                    method: path.to_string(),
-                    args: pb::ArgPack {
-                        codec: pb::Codec::Proto as i32,
-                        body: pb::AppStateRequest {
-                            key: key.to_string(),
-                            operation: String::new(),
-                            value: value.to_string(),
-                        }
-                        .encode_to_vec(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                })),
-            })
-        };
+        let pref =
+            |path: &str, key: &str, value: &str| dispatch_ingress(pref_request(path, key, value));
         for key in crate::sdk::app_lock::OWNED_KEYS {
             for (path, value) in [("prefs.get", ""), ("prefs.set", "open")] {
                 let refused = expect_error(pref(path, key, value));
@@ -1054,6 +1054,49 @@ mod tests {
         }
         expect_ok_bytes(pref("prefs.set", "lock_prompt_dismissed", "never"));
         expect_ok_bytes(pref("prefs.get", "lock_prompt_dismissed", ""));
+    }
+
+    /// A route that changes state is an invoke, never a query (SA-22). Sent
+    /// as a `RouterQuery` each is refused by name and nothing runs; sent as a
+    /// `RouterInvoke` it reaches its own route, which reads its own request (a
+    /// malformed one here, so nothing is written either way).
+    #[test]
+    #[serial]
+    fn the_routes_that_change_state_are_invokes_never_queries() {
+        device_with_router(0x4C);
+        for route in [
+            "system.createGenesisV2",
+            "prefs.set",
+            "storage.sync",
+            "tokens.addByAnchor",
+        ] {
+            let asked = expect_error(dispatch_ingress(IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: route.to_string(),
+                    args: vec![0xFF],
+                })),
+            }));
+            assert!(
+                asked
+                    .message
+                    .contains(&format!("unknown query path: {route}")),
+                "{route} is not a query: {}",
+                asked.message
+            );
+            let invoked = expect_error(dispatch_ingress(IngressRequest {
+                operation: Some(ingress_request::Operation::RouterInvoke(
+                    pb::RouterInvokeOp {
+                        method: route.to_string(),
+                        args: vec![0xFF],
+                    },
+                )),
+            }));
+            assert!(
+                !invoked.message.contains("unknown invoke method"),
+                "{route} is an invoke: {}",
+                invoked.message
+            );
+        }
     }
 
     /// While the session is locked the ingress runs nothing the app asks but
@@ -1097,11 +1140,13 @@ mod tests {
                 .encode_to_vec(),
             )
         };
-        let forget = || {
+        let burn = || {
             invoke(
-                "token.forget",
-                pb::TokenForgetRequest {
+                "token.burn",
+                pb::TokenBurnRequest {
                     token_id: "NONE".to_string(),
+                    amount_entered: "1".to_string(),
+                    ..Default::default()
                 }
                 .encode_to_vec(),
             )
@@ -1109,7 +1154,7 @@ mod tests {
         let asked = || {
             [
                 query("balance.list"),
-                forget(),
+                burn(),
                 IngressRequest {
                     operation: Some(ingress_request::Operation::Envelope(pb::EnvelopeOp {
                         envelope_bytes: vec![0x03, 0x0a, 0x00],
@@ -1151,9 +1196,9 @@ mod tests {
         expect_ok_bytes(dispatch_ingress(unlock("2468")));
         expect_ok_bytes(dispatch_ingress(query("balance.list")));
         // The write reaches its route, which answers for itself.
-        let reached = expect_error(dispatch_ingress(forget()));
+        let reached = expect_error(dispatch_ingress(burn()));
         assert!(
-            reached.message.contains("no token named NONE"),
+            reached.message.contains("unknown token NONE"),
             "{}",
             reached.message
         );
@@ -1619,11 +1664,13 @@ mod tests {
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterInvoke(
                 pb::RouterInvokeOp {
-                    method: "token.forget".to_string(),
+                    method: "token.burn".to_string(),
                     args: pb::ArgPack {
                         codec: pb::Codec::Proto as i32,
-                        body: pb::TokenForgetRequest {
+                        body: pb::TokenBurnRequest {
                             token_id: "NOTHELD".to_string(),
+                            amount_entered: "1".to_string(),
+                            ..Default::default()
                         }
                         .encode_to_vec(),
                         ..Default::default()
@@ -1633,7 +1680,11 @@ mod tests {
             )),
         });
         let error = expect_error(response);
-        assert!(error.message.contains("token.forget"), "{}", error.message);
+        assert!(
+            error.message.contains("token.burn: unknown token NOTHELD"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

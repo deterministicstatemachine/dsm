@@ -143,6 +143,7 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
         <OverviewTab
           balances={data.balances}
           balancesLoading={data.balancesLoading}
+          pendingOffline={data.pendingOffline}
           transactions={data.transactions}
           genesisB32={data.genesisB32}
           deviceB32={data.deviceB32}

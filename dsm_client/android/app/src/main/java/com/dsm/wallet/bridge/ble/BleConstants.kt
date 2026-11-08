@@ -8,15 +8,19 @@ import java.util.UUID
  * BLE-related constants used across components.
  */
 object BleConstants {
-    // Service UUID - versioned to defeat Android GATT service caching
-    val DSM_SERVICE_UUID_V2: UUID = UUID.fromString("8e7f1001-7c07-4f3f-9b32-7bf3ba6c2a01")
+    // Service UUID - versioned to defeat Android GATT service caching. Version 3:
+    // the service has no identity or pairing characteristics; a link's peer is
+    // learned only by the link handshake on TX_REQUEST / TX_RESPONSE (DSM
+    // Amendment A27).
+    val DSM_SERVICE_UUID: UUID = UUID.fromString("8e7f1002-7c07-4f3f-9b32-7bf3ba6c2a01")
 
     // Characteristic UUIDs
     val TX_REQUEST_UUID: UUID = UUID.fromString("8e7f0002-7c07-4f3f-9b32-7bf3ba6c2a01")
     val TX_RESPONSE_UUID: UUID = UUID.fromString("8e7f0003-7c07-4f3f-9b32-7bf3ba6c2a01")
-    val IDENTITY_UUID: UUID = UUID.fromString("8e7f00ff-7c07-4f3f-9b32-7bf3ba6c2a01")
-    val PAIRING_UUID: UUID = UUID.fromString("8e7f00fe-7c07-4f3f-9b32-7bf3ba6c2a01")
-    val PAIRING_ACK_UUID: UUID = UUID.fromString("8e7f00fd-7c07-4f3f-9b32-7bf3ba6c2a01")
+
+    // This device's side of a link, as Rust names it across the JNI boundary.
+    const val LINK_ROLE_CLIENT = 1
+    const val LINK_ROLE_SERVER = 2
 
     // Client Characteristic Configuration Descriptor
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -30,8 +34,9 @@ object BleConstants {
     // MTU settings — request Android max (517) to trigger DLE at the controller level.
     // Actual negotiated MTU may be lower; chunk size adapts dynamically.
     const val MTU_SIZE = 517
-    const val IDENTITY_MTU_REQUEST = 512
-    const val MIN_IDENTITY_MTU = 67
+    // The MTU a link asks for: at 512 a notification carries 509 bytes, one
+    // sealed record of 500 bytes behind its one-byte tag.
+    const val LINK_MTU_REQUEST = 512
 
     // ── Reconnection backoff ──
     // Exponential backoff for BLE reconnection after unexpected disconnect.

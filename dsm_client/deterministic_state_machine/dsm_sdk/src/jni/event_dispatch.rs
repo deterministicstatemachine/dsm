@@ -31,3 +31,20 @@ pub fn post_event_to_webview(topic: &str, payload: &[u8]) -> Result<(), DsmError
     })
     .map_err(DsmError::invalid_operation)
 }
+
+/// The count on the app icon (`MoneyReceivedNotice.show`): the received
+/// transfers Rust holds as not yet looked at. Zero takes the notice down.
+pub fn show_money_received(count: i32) -> Result<(), DsmError> {
+    crate::jni::jni_common::with_env(|env| {
+        let mut env =
+            unsafe { jni::JNIEnv::from_raw(env.get_raw() as *mut _).map_err(|e| e.to_string())? };
+        let class = crate::jni::jni_common::find_class_with_app_loader(
+            &mut env,
+            "com/dsm/wallet/service/MoneyReceivedNotice",
+        )?;
+        env.call_static_method(class, "show", "(I)V", &[JValue::Int(count)])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .map_err(DsmError::invalid_operation)
+}

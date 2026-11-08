@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Holding a token created on another device: adoption by its CPTA anchor,
-//! resolution of the adopted policy on the receiving device, and forgetting an
-//! identity so a superseded ticker can be adopted again.
+//! resolution of the adopted policy on the receiving device, and the
+//! permanence of an adoption: a ticker this device holds never names another
+//! token.
 //!
 //! Every token here is created through `token.create` on a device created as
 //! wallet creation creates it, on the network's pinned set of storage nodes;
@@ -24,26 +25,9 @@ use crate::test_support::two_device::{Pair, TestDevice};
 /// `dsm:token/v1:` payload. Decoding it is Rust's job.
 async fn adopt(router: &AppRouterImpl, text: &str) -> AppResult {
     router
-        .query(AppQuery {
-            path: "tokens.addByAnchor".to_string(),
-            params: text.as_bytes().to_vec(),
-        })
-        .await
-}
-
-async fn forget(router: &AppRouterImpl, key: &str) -> AppResult {
-    router
         .invoke(AppInvoke {
-            method: "token.forget".to_string(),
-            args: crate::generated::ArgPack {
-                codec: crate::generated::Codec::Proto as i32,
-                body: crate::generated::TokenForgetRequest {
-                    token_id: key.to_string(),
-                }
-                .encode_to_vec(),
-                ..Default::default()
-            }
-            .encode_to_vec(),
+            method: "tokens.addByAnchor".to_string(),
+            args: text.as_bytes().to_vec(),
         })
         .await
 }
@@ -108,18 +92,60 @@ fn adopted_token(result: &AppResult) -> crate::generated::TokenCreateResponse {
 #[serial]
 async fn an_adopted_token_resolves_on_the_receiving_device() {
     let (p, anchor) = created_on_a_adopted_on_b("RIGB").await;
-    let core = &p.b.router().core_sdk;
+    p.b.enter();
     assert_eq!(
-        core.resolve_policy_commit_strict(b"RIGB")
+        crate::policy::resolve_policy_commit_strict(b"RIGB")
             .expect("an adopted token resolves on the receiving device"),
         anchor
     );
     let token_id = derive_token_id(&anchor, "RIGB");
     assert_eq!(
-        core.resolve_policy_commit_strict(token_id.as_bytes())
+        crate::policy::resolve_policy_commit_strict(token_id.as_bytes())
             .expect("resolve by token id"),
         anchor
     );
+}
+
+/// Adoption registers a token exactly when its state stands behind it. B
+/// already holds a row under the token id A's anchor derives, written
+/// straight into the store under another ticker and adopted by nothing, so
+/// the adoption's own row cannot be written: the adoption is refused whole,
+/// B's head does not adopt the token, and the row stays what it was.
+/// MUTATION CONTROL: writing the row after the adoption commits, outside its
+/// transaction, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_adoption_whose_registry_row_cannot_be_written_adopts_nothing() {
+    let p = Pair::boot(100, 0).await;
+    p.a.enter();
+    let anchor = economic_fixtures::create_asset(p.a.router(), "ROLL", 2, 1_000).await;
+    p.b.enter();
+    let token_id = derive_token_id(&anchor, "ROLL");
+    token_registry::insert_token(&token_registry::TokenRegistryRow {
+        token_id: token_id.clone(),
+        policy_commit: [0x5E; 32],
+        ticker: "STALE".to_string(),
+        alias: "a row no adoption wrote".to_string(),
+        decimals: 2,
+        genesis_supply: 1_000,
+        creator_device_id: [0x5F; 32],
+    })
+    .expect("the row in the way");
+
+    let refused = adopt(p.b.router(), &anchor_text(&anchor)).await;
+    assert!(
+        !refused.success,
+        "an adoption whose row cannot be written is refused"
+    );
+    let head = p.b.router().core_sdk.device_head().expect("a head");
+    assert!(
+        !head.has_adopted(&anchor),
+        "B's head adopts nothing it registered no row for"
+    );
+    let row = token_registry::get_token(&token_id)
+        .expect("registry")
+        .expect("the row in the way");
+    assert_eq!(row.ticker, "STALE");
 }
 
 /// `balance.get` for `token_id`, as the wallet asks it.
@@ -223,12 +249,12 @@ async fn a_policy_whose_stored_bytes_do_not_hash_to_its_commit_does_not_resolve(
             .expect("damage the stored policy");
         assert_eq!(damaged, 1, "B held the adopted policy");
     }
+    p.b.enter();
+    let refused = crate::policy::resolve_policy_commit_strict(b"LIAR")
+        .expect_err("a row that no longer carries the real policy must not resolve");
     assert!(
-        p.b.router()
-            .core_sdk
-            .resolve_policy_commit_strict(b"LIAR")
-            .is_err(),
-        "a row that no longer carries the real policy must not resolve"
+        matches!(refused, dsm::types::error::DsmError::Storage { .. }),
+        "bytes that do not re-hash are a storage error, not an uninstalled token: {refused}"
     );
 }
 
@@ -237,14 +263,17 @@ async fn a_policy_whose_stored_bytes_do_not_hash_to_its_commit_does_not_resolve(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn builtins_resolve_and_an_unknown_token_fails_closed() {
-    let d = Device::start(0xA1).await;
+    let _device = Device::start(0xA1).await;
     assert_eq!(
-        d.core()
-            .resolve_policy_commit_strict(b"ERA")
-            .expect("ERA is builtin"),
+        crate::policy::resolve_policy_commit_strict(b"ERA").expect("ERA is builtin"),
         dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA")
     );
-    assert!(d.core().resolve_policy_commit_strict(b"NEVERSEEN").is_err());
+    let unknown = crate::policy::resolve_policy_commit_strict(b"NEVERSEEN")
+        .expect_err("an unknown token fails closed");
+    assert!(
+        matches!(unknown, dsm::types::error::DsmError::NotFound { .. }),
+        "a token with no registry row is not installed, not a storage error: {unknown}"
+    );
 }
 
 /// A protocol asset is held by every device by construction and is never
@@ -269,7 +298,8 @@ async fn a_protocol_asset_is_never_adopted_by_its_anchor() {
 
 /// EVERY token query route is reachable through the production dispatcher:
 /// the failure where a handler arm exists but the dispatch table does not name
-/// it has happened twice.
+/// it has happened twice. `tokens.addByAnchor` writes the registry, so it is
+/// an invoke; its own check answering below shows the invoke reaches it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn every_token_query_route_is_reachable_through_the_dispatcher() {
@@ -278,7 +308,6 @@ async fn every_token_query_route_is_reachable_through_the_dispatcher() {
         "tokens.getPolicy",
         "tokens.listCachedPolicies",
         "tokens.getFeeSchedule",
-        "tokens.addByAnchor",
         "token.adoptionQr",
     ] {
         let res = d
@@ -363,7 +392,7 @@ async fn an_adopted_token_survives_a_restart() {
     let before = token_registry::get_token_by_ticker("PERSIST")
         .expect("registry")
         .expect("adopted");
-    let restarted = economic_fixtures::restart_router(&p.fleet);
+    let _restarted = economic_fixtures::restart_router(&p.fleet);
     let after = token_registry::get_token_by_ticker("PERSIST")
         .expect("registry")
         .expect("still adopted after restart");
@@ -371,9 +400,7 @@ async fn an_adopted_token_survives_a_restart() {
     assert_eq!(before.policy_commit, after.policy_commit);
     assert_eq!(before.decimals, after.decimals);
     assert_eq!(
-        restarted
-            .core_sdk
-            .resolve_policy_commit_strict(b"PERSIST")
+        crate::policy::resolve_policy_commit_strict(b"PERSIST")
             .expect("the restarted device resolves it"),
         anchor
     );
@@ -417,91 +444,95 @@ async fn a_scanned_payload_adopts_and_a_lying_payload_is_refused() {
     assert_eq!(row.token_id, token_id);
 }
 
-/// THE DEAD END (D3): a device held an adopted RIGB whose creator was wiped
-/// and whose ticker was re-created by another device — a different policy,
-/// so a different token. Adopting the live RIGB was refused (the ticker was
-/// taken) with no way out. Forgetting the zero-balance identity frees the
-/// ticker, and the live token adopts.
+/// SoFi Amendment S28 (MR-SOFI-0305): nothing reserves a ticker across the
+/// network, and a device holds one token per ticker. A and B each create a
+/// token named TWIN, independently: both creations stand, as two tokens,
+/// two policy commits, each held by its own creator. On each device the
+/// ticker still names one token: B, holding its own TWIN, refuses A's, and A
+/// cannot create a second TWIN.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn forgetting_a_superseded_zero_balance_token_frees_its_ticker() {
-    let (p, superseded) = created_on_a_adopted_on_b("RIGB").await;
+async fn two_devices_each_create_a_token_under_one_ticker_and_each_holds_its_own() {
+    let p = Pair::boot(100, 100).await;
+    p.a.enter();
+    let a_twin = economic_fixtures::create_asset(p.a.router(), "TWIN", 2, 1_000).await;
+    p.b.enter();
+    let b_twin = economic_fixtures::create_asset(p.b.router(), "TWIN", 2, 1_000).await;
+    assert_ne!(a_twin, b_twin, "two creations are two tokens");
+    for (d, held) in [(&p.a, a_twin), (&p.b, b_twin)] {
+        d.enter();
+        assert_eq!(
+            token_registry::get_token_by_ticker("TWIN")
+                .expect("read")
+                .expect("row")
+                .policy_commit,
+            held,
+            "{} holds its own TWIN",
+            d.slot
+        );
+    }
+
+    // What a refusal before anything is written leaves as it was: the
+    // device's ERA and its admitted position.
+    let standing = |d: &TestDevice| {
+        (
+            super::node_e2e_tests::balance(d, &super::node_e2e_tests::era()),
+            super::node_e2e_tests::admitted_position(d),
+        )
+    };
+    let b_before = standing(&p.b);
+    p.b.enter();
+    let refused = adopt(p.b.router(), &anchor_text(&a_twin)).await;
+    assert!(!refused.success, "B already holds a TWIN");
+    let reason = refused.error_message.expect("a refusal carries its reason");
+    assert!(reason.contains("TICKER_CONFLICT"), "{reason}");
+    assert_eq!(standing(&p.b), b_before, "B's refusal wrote nothing");
+
+    let a_before = standing(&p.a);
+    // Another policy under the same ticker: only the alias differs.
+    let mut another = super::sender_admission_tests::create_request("TWIN", 2, 1_000);
+    another.alias = "Another twin".into();
+    let second =
+        super::node_e2e_tests::invoke(&p.a, "token.create", super::node_e2e_tests::args(&another))
+            .await;
+    assert!(!second.success, "A already holds a TWIN");
+    let why = second.error_message.expect("a refusal carries its reason");
+    assert!(why.contains("already held by a different token"), "{why}");
+    assert_eq!(standing(&p.a), a_before, "A's refusal spent nothing");
+    assert_eq!(
+        token_registry::get_token_by_ticker("TWIN")
+            .expect("read")
+            .expect("row")
+            .policy_commit,
+        a_twin,
+        "A's TWIN is still the one it created"
+    );
+}
+
+/// Adoption is permanent (SA-148): a device holding RIGB never adopts a
+/// different token that another creator named RIGB. The ticker would then
+/// name two assets, and a transfer could credit the wrong one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_ticker_held_by_one_token_never_names_another() {
+    let (p, held) = created_on_a_adopted_on_b("RIGB").await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
     c.fund_admitted(100).await;
     c.enter();
-    let live = economic_fixtures::create_asset(c.router(), "RIGB", 2, 1_000).await;
-    assert_ne!(live, superseded, "another creator is another policy");
+    let other = economic_fixtures::create_asset(c.router(), "RIGB", 2, 1_000).await;
+    assert_ne!(other, held, "another creator is another policy");
 
     p.b.enter();
-    let refused = adopt(p.b.router(), &anchor_text(&live)).await;
-    assert!(
-        !refused.success,
-        "the ticker is taken by the superseded token"
-    );
-
-    let forgotten = forget(p.b.router(), "RIGB").await;
-    assert!(forgotten.success, "forget: {:?}", forgotten.error_message);
-    assert!(token_registry::get_token_by_ticker("RIGB")
-        .expect("read")
-        .is_none());
-
-    let adopted = adopt(p.b.router(), &anchor_text(&live)).await;
-    assert!(
-        adopted.success,
-        "adopt the live RIGB: {:?}",
-        adopted.error_message
-    );
+    let refused = adopt(p.b.router(), &anchor_text(&other)).await;
+    assert!(!refused.success, "the ticker is held by another token");
+    let reason = refused.error_message.expect("a refusal carries its reason");
+    assert!(reason.contains("TICKER_CONFLICT"), "{reason}");
     assert_eq!(
         token_registry::get_token_by_ticker("RIGB")
             .expect("read")
             .expect("row")
             .policy_commit,
-        live
+        held
     );
-}
-
-/// Forgetting removes the NAMING only, and never an asset the device holds:
-/// canonical balances decide. A creator holding its supply cannot forget it;
-/// protocol assets are never forgettable; an unknown name is an error, not a
-/// silent success; and a token can be forgotten by its id.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn forget_refuses_held_protocol_and_unknown_tokens_and_takes_an_id() {
-    let (p, anchor) = created_on_a_adopted_on_b("HELD").await;
-
-    p.a.enter();
-    let held = forget(p.a.router(), "HELD").await;
-    assert!(!held.success, "a held token must not be forgettable");
-    let msg = held.error_message.unwrap_or_default();
-    assert!(
-        msg.contains("100000") && msg.to_lowercase().contains("still holds"),
-        "the refusal names the held base units, got: {msg}"
-    );
-    assert!(token_registry::get_token_by_ticker("HELD")
-        .expect("read")
-        .is_some());
-
-    for builtin in ["ERA", "dBTC"] {
-        let res = forget(p.a.router(), builtin).await;
-        assert!(!res.success, "{builtin} must not be forgettable");
-        assert!(res
-            .error_message
-            .unwrap_or_default()
-            .contains("protocol asset"));
-    }
-
-    let unknown = forget(p.a.router(), "NEVERSEEN").await;
-    assert!(!unknown.success);
-    assert!(unknown
-        .error_message
-        .unwrap_or_default()
-        .contains("no token named"));
-
-    p.b.enter();
-    let by_id = forget(p.b.router(), &derive_token_id(&anchor, "HELD")).await;
-    assert!(by_id.success, "forget by id: {:?}", by_id.error_message);
-    assert!(token_registry::get_token_by_ticker("HELD")
-        .expect("read")
-        .is_none());
 }

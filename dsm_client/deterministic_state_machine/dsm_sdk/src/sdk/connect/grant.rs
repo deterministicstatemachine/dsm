@@ -427,7 +427,9 @@ pub enum Request {
     /// Ready for the match; with the other side's ready, write the Start.
     DuelReady {
         match_cell: [u8; 32],
-        opponent_ready: Option<Vec<u8>>,
+        /// The other side's ready signature and start entropy, when this
+        /// wallet readies second.
+        opponent: Option<(Vec<u8>, [u8; 32])>,
     },
     DuelWithdraw {
         match_cell: [u8; 32],
@@ -448,6 +450,10 @@ pub enum Request {
     },
     /// The DSM identities of this wallet's contacts (DSM Amendment A16).
     Contacts,
+    /// Sign a statement (DSM Amendment A29): shown whole, and never in a grant.
+    Sign {
+        statement: String,
+    },
 }
 
 /// The longest setup a duel lock carries.
@@ -471,7 +477,7 @@ fn duel_lock_from_wire(r: &generated::ConnectDuelLockV1) -> Result<DuelLock, Str
         2 => Side::B,
         other => return Err(format!("side {other} is neither A (1) nor B (2)")),
     };
-    let program = wildstate_duel::DuelSetupV1::decode(&r.setup)
+    let program = wildstate_duel::DuelSetupV2::decode(&r.setup)
         .map_err(|e| format!("the match setup: {e}"))?
         .program;
     let counterpart = match r.counterpart_vault_id.as_slice() {
@@ -495,7 +501,9 @@ fn duel_lock_from_wire(r: &generated::ConnectDuelLockV1) -> Result<DuelLock, Str
     })
 }
 
-fn duel_entries(given: &[generated::ConnectDuelSignedEntryV1]) -> Result<Vec<DuelSigned>, String> {
+pub(crate) fn duel_entries(
+    given: &[generated::ConnectDuelSignedEntryV1],
+) -> Result<Vec<DuelSigned>, String> {
     if given.len() > MAX_DUEL_ENTRIES {
         return Err(format!(
             "a duel request carries at most {MAX_DUEL_ENTRIES} entries, not {}",
@@ -577,6 +585,30 @@ fn escrow_lock_from_wire(r: &generated::ConnectEscrowLockV1) -> Result<EscrowLoc
     })
 }
 
+/// The words a person is asked to sign, as they will read them: one line, with
+/// nothing a screen would hide or reorder.
+fn statement_to_sign(statement: &str) -> Result<String, String> {
+    if statement.trim().is_empty() || statement.trim() != statement {
+        return Err("a statement to sign has words, and no space around them".into());
+    }
+    if statement.len() > MAX_STATEMENT_BYTES {
+        return Err(format!(
+            "a statement to sign is at most {MAX_STATEMENT_BYTES} bytes"
+        ));
+    }
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+    };
+    if statement.chars().any(hidden) {
+        return Err("a statement to sign holds a character a screen would not show".into());
+    }
+    Ok(statement.to_string())
+}
+
+const MAX_STATEMENT_BYTES: usize = 512;
+
 pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, String> {
     use generated::app_request_body_v1::Kind;
     let pair = |a: &[u8], b: &[u8]| -> Result<([u8; 32], [u8; 32]), String> {
@@ -636,6 +668,9 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
         }
         Some(Kind::EscrowLock(r)) => Ok(Request::EscrowLock(escrow_lock_from_wire(r)?)),
         Some(Kind::Contacts(..)) => Ok(Request::Contacts),
+        Some(Kind::Sign(r)) => Ok(Request::Sign {
+            statement: statement_to_sign(&r.statement)?,
+        }),
         Some(Kind::EscrowRelease(r)) => Ok(Request::EscrowRelease {
             vault_ids: vault_list(&r.vault_ids)?,
         }),
@@ -645,9 +680,17 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
         Some(Kind::DuelLock(r)) => Ok(Request::DuelLock(duel_lock_from_wire(r)?)),
         Some(Kind::DuelReady(r)) => Ok(Request::DuelReady {
             match_cell: d32(&r.match_cell, "the match cell")?,
-            opponent_ready: match r.opponent_ready.as_slice() {
-                [] => None,
-                bytes => Some(bytes.to_vec()),
+            opponent: match (r.opponent_ready.as_slice(), r.opponent_reveal.as_slice()) {
+                ([], []) => None,
+                ([], _) | (_, []) => {
+                    return Err(
+                        "the other side's ready comes with its start entropy, never alone".into(),
+                    )
+                }
+                (ready, reveal) => Some((
+                    ready.to_vec(),
+                    d32(reveal, "the other side's start entropy")?,
+                )),
             },
         }),
         Some(Kind::DuelWithdraw(r)) => Ok(Request::DuelWithdraw {
@@ -728,6 +771,9 @@ pub fn decide(
             Some(..) => Decision::InScope { spend: None },
             None => Decision::Outside("the grant does not accept issued objects".into()),
         },
+        Request::Sign { .. } => {
+            Decision::Outside("only you can sign this, so it always waits for you".into())
+        }
         Request::Contacts => match of_kind(ScopeKind::Contacts).next() {
             Some(..) => Decision::InScope { spend: None },
             None => Decision::Outside("the grant does not let it see your contacts".into()),
@@ -799,10 +845,21 @@ pub fn decide(
             ),
             None => Decision::Outside("the grant does not let it stake in matches".into()),
         },
+        // A Resign ends the match against this side: the application writes
+        // the entries it asks this wallet to sign, so a resignation is the
+        // player's to make, never the grant's (SA-102). It waits for them.
+        Request::DuelSign { entry, .. } if resigns(entry) => {
+            match of_kind(ScopeKind::Duel).next() {
+                Some(..) => Decision::Outside(
+                    "resigning the match is yours to decide, not the game's".into(),
+                ),
+                None => Decision::Outside("the grant does not let it play matches".into()),
+            }
+        }
         // Every other step of a match spends nothing and acts only on a match
         // this wallet locked under the grant: it runs without the player, so
-        // a move never waits on a screen. The wallet's own checks still
-        // decide what it signs and writes.
+        // a move never waits on a screen. The wallet signs only an entry the
+        // match's program accepts after the transcript so far.
         Request::DuelSessionKey { .. }
         | Request::DuelReady { .. }
         | Request::DuelWithdraw { .. }
@@ -813,6 +870,15 @@ pub fn decide(
             None => Decision::Outside("the grant does not let it play matches".into()),
         },
     }
+}
+
+/// Whether `entry` is a Resign. Bytes that are no entry are not: the wallet
+/// refuses them when it would sign.
+fn resigns(entry: &[u8]) -> bool {
+    matches!(
+        dsm::sofi::wire::TranscriptEntry::decode(entry).map(|e| e.kind().clone()),
+        Ok(dsm::sofi::wire::EntryKind::Resign)
+    )
 }
 
 #[cfg(test)]
@@ -1227,10 +1293,17 @@ mod tests {
     fn setup_pinning(pinned: [u8; 32]) -> Vec<u8> {
         let set = wildstate_duel::vectors::DuelVectorSetV1::decode(wildstate_duel::VECTORS_V1)
             .expect("the vectors");
-        wildstate_duel::DuelSetupV1 {
-            program: pinned,
-            body: set.vectors[0].body.clone(),
-        }
+        let v = &set.vectors[0];
+        wildstate_duel::DuelSetupV2::new(
+            pinned,
+            *v.body.match_nonce(),
+            v.body.turn_cap(),
+            wildstate_duel::start_commitment(&v.reveal_a),
+            wildstate_duel::start_commitment(&v.reveal_b),
+            v.body.a().clone(),
+            v.body.b().clone(),
+        )
+        .expect("a setup")
         .encode()
     }
 
@@ -1254,6 +1327,45 @@ mod tests {
                 },
             )),
         }
+    }
+
+    /// SA-102. Under a duel grant the application writes the entries it asks
+    /// this wallet to sign. A move runs without the player; a Resign, which
+    /// ends the match against this side, waits for the player.
+    /// MUTATION CONTROL: the Resign arm removed lets the grant run it: red.
+    #[test]
+    fn a_resignation_waits_for_the_player() {
+        use dsm::sofi::wire::{EntryKind, MatchSide, TranscriptEntry};
+        let sign = |kind: EntryKind| Request::DuelSign {
+            match_cell: [0x31; 32],
+            preceding: Vec::new(),
+            entry: TranscriptEntry::new(3, MatchSide::A, kind)
+                .expect("an entry")
+                .encode(),
+        };
+        let none = |_token: &[u8; 32]| 0;
+        let resign = decide(
+            &duel_grant(),
+            &sign(EntryKind::Resign),
+            &none,
+            &BTreeSet::new(),
+        );
+        assert!(
+            matches!(&resign, Decision::Outside(why) if why.contains("yours to decide")),
+            "{resign:?}"
+        );
+        let commit = decide(
+            &duel_grant(),
+            &sign(EntryKind::Commit {
+                commitment: [0x32; 32],
+            }),
+            &none,
+            &BTreeSet::new(),
+        );
+        assert!(
+            matches!(commit, Decision::InScope { spend: None }),
+            "{commit:?}"
+        );
     }
 
     #[test]
@@ -1342,10 +1454,49 @@ mod tests {
         let line = super::super::wallet::describe_scope(&duel_grant()[0], &Default::default());
         assert!(
             line.starts_with("Stake up to")
-                && line.contains("in battles decided by program wildstate-duel v1 ("),
+                && line.contains("in battles decided by program wildstate-duel v2 ("),
             "{line}"
         );
         assert!(line.ends_with("and play your moves"), "{line}");
+    }
+
+    // ── a signature (DSM Amendment A29) ─────────────────────────────────
+
+    #[test]
+    fn a_signature_is_never_in_a_grant() {
+        let sign = Request::Sign {
+            statement: "Sign in as admin. Code 7K3M.".into(),
+        };
+        let spent = |_: &[u8; 32]| 0;
+        for scopes in [grant(), duel_grant(), vec![contacts_scope()], Vec::new()] {
+            assert!(matches!(
+                decide(&scopes, &sign, &spent, &BTreeSet::new()),
+                Decision::Outside(..)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_statement_is_one_line_with_nothing_hidden() {
+        for fits in [
+            "Sign in as admin. Code 7K3M.".to_string(),
+            "x".repeat(MAX_STATEMENT_BYTES),
+        ] {
+            assert_eq!(statement_to_sign(&fits).as_ref(), Ok(&fits));
+        }
+        for (refused, why) in [
+            (String::new(), "has words"),
+            ("   ".to_string(), "has words"),
+            (" leading space".to_string(), "has words"),
+            ("two\nlines".to_string(), "would not show"),
+            ("a tab\there".to_string(), "would not show"),
+            ("reordered \u{202e}text".to_string(), "would not show"),
+            ("hidden\u{200b}space".to_string(), "would not show"),
+            ("x".repeat(MAX_STATEMENT_BYTES + 1), "at most"),
+        ] {
+            let said = statement_to_sign(&refused).expect_err("refused");
+            assert!(said.contains(why), "{refused:?}: {said}");
+        }
     }
 
     // ── the contacts scope (DSM Amendment A16) ────────────────────────────

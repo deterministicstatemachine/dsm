@@ -81,10 +81,14 @@ mod tests {
             prefix in proptest::collection::vec(any::<u8>(), 0..=16),
             suffix in proptest::collection::vec(any::<u8>(), 0..=16)
         ) {
-            let mut d = prefix.clone();
+            let mut d = b"DSM/".to_vec();
+            d.extend_from_slice(&prefix);
             d.push(0);
             d.extend_from_slice(&suffix);
-            prop_assert!(TaggedHashDomain::try_new(&d).is_err());
+            prop_assert_eq!(
+                TaggedHashDomain::try_new(&d),
+                Err(crate::crypto::domain::DomainError::InvalidDomain)
+            );
         }
 
         #[test]
@@ -93,9 +97,10 @@ mod tests {
             // representable domain — the delimiter belongs to the encoder.
             // Skip those here and assert the refusal explicitly below.
             prop_assume!(!domain.contains(&0));
-            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL domain");
-            let h1 = hash_lp1(d, &a);
-            let h2 = hash_lp1(d, &a);
+            let domain = [&b"DSM/"[..], &domain[..]].concat();
+            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL DSM/ domain");
+            let h1 = hash_lp1(d, &a)?;
+            let h2 = hash_lp1(d, &a)?;
             prop_assert_eq!(h1, h2);
         }
 
@@ -106,9 +111,10 @@ mod tests {
             b in proptest::collection::vec(any::<u8>(), 0..=256)
         ) {
             prop_assume!(!domain.contains(&0));
-            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL domain");
-            let h1 = hash_lp2(d, &a, &b);
-            let h2 = hash_lp2(d, &a, &b);
+            let domain = [&b"DSM/"[..], &domain[..]].concat();
+            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL DSM/ domain");
+            let h1 = hash_lp2(d, &a, &b)?;
+            let h2 = hash_lp2(d, &a, &b)?;
             prop_assert_eq!(h1, h2);
         }
 
@@ -120,9 +126,10 @@ mod tests {
             c in proptest::collection::vec(any::<u8>(), 0..=256)
         ) {
             prop_assume!(!domain.contains(&0));
-            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL domain");
-            let h1 = hash_lp3(d, &a, &b, &c);
-            let h2 = hash_lp3(d, &a, &b, &c);
+            let domain = [&b"DSM/"[..], &domain[..]].concat();
+            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL DSM/ domain");
+            let h1 = hash_lp3(d, &a, &b, &c)?;
+            let h2 = hash_lp3(d, &a, &b, &c)?;
             prop_assert_eq!(h1, h2);
         }
 

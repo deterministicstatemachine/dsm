@@ -5,9 +5,13 @@
 //! Every property drives real device heads (`DeviceState::advance`) with
 //! seeded random transfers and checks an invariant against a value the
 //! harness derives independently: the tip the parent path must carry, the
-//! transition entropy by its formula, the sum of two balances, the verifier's
-//! verdict on a second child. TLA+ proves the bounded abstract invariants;
-//! this harness checks the concrete transition keeps them.
+//! transition entropy by its formula, the sum of two balances. TLA+ proves the
+//! bounded abstract invariants; this harness checks the concrete transition
+//! keeps them.
+//!
+//! The property a receiver decides with Core's `decide_confirm` — of two
+//! children of one tip, the receiver takes one — moved to the SDK's offline
+//! step tests, on real bearer pairs (§6.103).
 
 // Validation harness: panicking on crypto setup failures is correct behavior.
 #![allow(clippy::expect_used)]
@@ -22,7 +26,7 @@ use dsm::common::domain_tags::{TAG_DSM_GENESIS_ENTROPY, TAG_DSM_STATE_ENTROPY};
 use dsm::crypto::blake3::dsm_domain_hasher;
 use dsm::crypto::sphincs::{sphincs_sign, sphincs_verify};
 
-use crate::live_device::{commit, connect, marked, Decision, LiveDevice};
+use crate::live_device::{connect, LiveDevice};
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -92,7 +96,7 @@ pub fn collect_property_test_results(seed: u64, iterations: u64) -> PropertyTest
     let advance_iters = iterations.min(100);
 
     type Property = fn(u64, u64) -> PropertyTestResult;
-    let properties: [(&str, u64, Property); 6] = [
+    let properties: [(&str, u64, Property); 5] = [
         (
             "relationship_chain_continuity",
             signed_iters,
@@ -109,7 +113,6 @@ pub fn collect_property_test_results(seed: u64, iterations: u64) -> PropertyTest
             two_device_conservation,
         ),
         ("overspend_refused", advance_iters, overspend_refused),
-        ("fork_exclusion", signed_iters, fork_exclusion),
         ("signature_binding", iterations.min(20), signature_binding),
     ];
 
@@ -328,60 +331,7 @@ fn overspend_refused(iterations: u64, seed: u64) -> PropertyTestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Property 5: of two children of one tip, the receiver takes one
-// ---------------------------------------------------------------------------
-
-fn fork_exclusion(iterations: u64, seed: u64) -> PropertyTestResult {
-    let start = Instant::now();
-    let mut failures = Vec::new();
-    let mut rng = ChaCha20Rng::seed_from_u64(seed ^ 0x464f_524b);
-    let (mut alice, mut bob) = funded_pair(1);
-
-    for i in 0..iterations {
-        // Two different operations proposed on one tip: two children of it.
-        let mark = random_nonce(&mut rng)[0] & 0xFE;
-        let (child_a, child_b) = match (
-            alice.propose(&bob, marked(mark)),
-            alice.propose(&bob, marked(mark | 1)),
-        ) {
-            (Ok(a), Ok(b)) => (a, b),
-            (Err(e), _) | (_, Err(e)) => {
-                failures.push(format!("iter {i}: a step could not be proposed: {e}"));
-                continue;
-            }
-        };
-        if child_a.successor_tip == child_b.successor_tip {
-            failures.push(format!(
-                "iter {i}: two different operations produced one successor tip"
-            ));
-        }
-        match bob.decide(&alice, &child_a) {
-            Decision::Accepted(verified) => {
-                if let Err(e) = commit(&mut alice, &mut bob, child_a, &verified) {
-                    failures.push(format!("iter {i}: the first child did not commit: {e}"));
-                    continue;
-                }
-            }
-            other => {
-                failures.push(format!("iter {i}: the first child was refused: {other}"));
-                continue;
-            }
-        }
-        match bob.decide(&alice, &child_b) {
-            Decision::Accepted(_) => failures.push(format!(
-                "iter {i}: FORK ACCEPTED: a second child of one tip"
-            )),
-            Decision::StaleTip => {}
-            other => failures.push(format!(
-                "iter {i}: the second child was refused for another reason: {other}"
-            )),
-        }
-    }
-    finish("fork_exclusion", iterations, failures, start)
-}
-
-// ---------------------------------------------------------------------------
-// Property 6: an operation's signature binds every field it covers
+// Property 5: an operation's signature binds every field it covers
 // ---------------------------------------------------------------------------
 
 fn signature_binding(iterations: u64, seed: u64) -> PropertyTestResult {

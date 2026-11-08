@@ -15,14 +15,22 @@ use super::{
 
 /// Every v8 object ships at schema 1.
 pub const SCHEMA_V1: u16 = 1;
+/// The computed-escrow objects that nest the computed table (SoFi Amendment
+/// S33): `ComputedEscrowTerms`, `TranscriptOutcome`, `EquivocationProof` and
+/// `MatchStart`. Their schema 1 is retired.
+pub const SCHEMA_V2: u16 = 2;
 
 type D32 = [u8; 32];
 
 // ── shared validation and primitive helpers ────────────────────────────────
 
 fn push_env(out: &mut Vec<u8>, object_class: u16) {
+    push_env_at(out, object_class, SCHEMA_V1);
+}
+
+fn push_env_at(out: &mut Vec<u8>, object_class: u16, schema: u16) {
     push_u16(out, object_class);
-    push_u16(out, SCHEMA_V1);
+    push_u16(out, schema);
 }
 
 fn wire_invalid(e: SofiWireError) -> DecodeError {
@@ -253,12 +261,6 @@ impl ParentClaimRef {
             }
             got => Err(DecodeError::WrongClass { got }),
         }
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
     }
 
     /// The typed parent reference `𝒞_E^pre` carries for this parent, named by
@@ -636,20 +638,6 @@ impl SofiResolutionClaim {
         push_digest32(&mut out, &self.void_root);
         out
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::SOFI_RESOLUTION_CLAIM, SCHEMA_V1)?;
-        let v = Self {
-            genesis: c.digest32()?,
-            device_id: c.digest32()?,
-            position: c.u64()?,
-            fulfillment_id: c.digest32()?,
-            realize_root: c.digest32()?,
-            void_root: c.digest32()?,
-        };
-        finish(&c, v)
-    }
 }
 
 // ── 0x0062 SignedSofiResolutionClaim ───────────────────────────────────────
@@ -782,9 +770,9 @@ const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
 ///
 /// **`body_class` is not a dispatch hint.** It is checked against the class
 /// the inner canonical bytes actually carry, and the signing preimage is
-/// rederived from the DECODED object — see `signature::verify_signed_object`,
-/// which is where the class-specific rules live. The envelope is generic; the
-/// verification deliberately is not.
+/// rederived from the DECODED object — see `publication::recognize_precommit`
+/// and its siblings, which is where the class-specific rules live. The
+/// envelope is generic; the verification deliberately is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedSofiObject {
     body_class: u16,
@@ -795,10 +783,10 @@ pub struct SignedSofiObject {
 
 impl SignedSofiObject {
     /// The only constructor. It refuses a body class this envelope does not
-    /// carry, so no producer in this codebase can emit one — the matching
-    /// refusal on the consumer side is in `verify_signed_object`, and both
-    /// exist because a producer check and a verifier check answer different
-    /// questions.
+    /// carry, so no producer in this codebase can emit one — on the consumer
+    /// side no recognizer takes an envelope of such a class as an object, and
+    /// both exist because a producer check and a verifier check answer
+    /// different questions.
     pub fn new(
         body_class: u16,
         body_ccb: &[u8],
@@ -1160,12 +1148,6 @@ impl ValidationRef {
             got => Err(DecodeError::WrongClass { got }),
         }
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 // ── 0x0041 PreEClosureIndex ────────────────────────────────────────────────
@@ -1185,7 +1167,7 @@ pub const CLOSURE_FORBIDDEN_CONTENT_CLASSES: &[u16] = &[
     class::SOFI_TRADER_FULFILLMENT_BODY,
     class::SOFI_RESOLUTION_CLAIM,
     class::SOFI_PRE_E_CLOSURE_INDEX,
-    class::SOFI_POLICY_FULFILLMENT_AUX_REF,
+    crate::ccb::declared_unencoded::SOFI_POLICY_FULFILLMENT_AUX_REF,
     // The signed envelope wraps P and F, both of which commit E. Without this
     // entry the wrapper would be a back door into `𝒞_E^pre` for the two
     // objects the acyclicity argument most depends on keeping out — the list
@@ -1233,8 +1215,10 @@ impl PreEClosureIndex {
     }
 
     /// This index with `reference` among its refs, in canonical order. An
-    /// index that already references it is returned unchanged.
-    pub fn with(&self, reference: ValidationRef) -> Result<Self, SofiWireError> {
+    /// index that already references it is returned unchanged. Only tests
+    /// grow an index; production builds it whole (`new`).
+    #[cfg(test)]
+    pub(crate) fn with(&self, reference: ValidationRef) -> Result<Self, SofiWireError> {
         let mut refs = self.refs.clone();
         if !refs.contains(&reference) {
             refs.push(reference);
@@ -1261,46 +1245,6 @@ impl PreEClosureIndex {
             refs.push(ValidationRef::at(c)?);
         }
         Self::new(refs).map_err(wire_invalid)
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
-}
-
-// ── 0x0042 PolicyFulfillmentAuxRef ─────────────────────────────────────────
-
-/// One content-addressed auxiliary evidence candidate for a policy-fulfillment
-/// witness. Many may exist per `(policy_fulfillment_id, evidence_class)`; there
-/// is no singleton slot, and a candidate can only ever establish validity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PolicyFulfillmentAuxRef {
-    pub policy_fulfillment_id: D32,
-    pub evidence_class: u16,
-    pub addr: D32,
-}
-
-impl PolicyFulfillmentAuxRef {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        push_env(&mut out, class::SOFI_POLICY_FULFILLMENT_AUX_REF);
-        push_digest32(&mut out, &self.policy_fulfillment_id);
-        push_u16(&mut out, self.evidence_class);
-        push_digest32(&mut out, &self.addr);
-        out
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::SOFI_POLICY_FULFILLMENT_AUX_REF, SCHEMA_V1)?;
-        let v = Self {
-            policy_fulfillment_id: c.digest32()?,
-            evidence_class: c.u16()?,
-            addr: c.digest32()?,
-        };
-        finish(&c, v)
     }
 }
 
@@ -1329,10 +1273,6 @@ impl RouteLegSet {
         Ok(Self { legs })
     }
 
-    pub fn legs(&self) -> &[RouteLegEntry] {
-        &self.legs
-    }
-
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         push_env(&mut out, class::SOFI_ROUTE_LEG_SET);
@@ -1344,23 +1284,6 @@ impl RouteLegSet {
             push_digest32(&mut out, &l.shadow_core);
         }
         out
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::SOFI_ROUTE_LEG_SET, SCHEMA_V1)?;
-        let n = read_count(&mut c, "route legs", ROUTE_MIN_LEGS, CANONICAL_MAX_LEGS)?;
-        let mut legs = Vec::with_capacity(n);
-        for _ in 0..n {
-            legs.push(RouteLegEntry {
-                vault_id: c.digest32()?,
-                parent_root: c.digest32()?,
-                setup_ref: c.digest32()?,
-                shadow_core: c.digest32()?,
-            });
-        }
-        let v = Self::new(legs).map_err(wire_invalid)?;
-        finish(&c, v)
     }
 }
 
@@ -1620,6 +1543,92 @@ impl VaultHistoryHeadV1 {
     }
 }
 
+// ── 0x0076 VaultBaselineContradictionV1 ────────────────────────────────────
+
+/// `kind`: leaf 0 of the history is not the vault's accepted genesis root.
+const BASELINE_CONTRADICTION_GENESIS: u16 = 1;
+/// `kind`: the history does not hold the frontier's root at its generation.
+const BASELINE_CONTRADICTION_TOP: u16 = 2;
+/// `kind`: one step of the history does not follow from the exercise final
+/// at the root before it.
+const BASELINE_CONTRADICTION_STEP: u16 = 3;
+
+/// What an owner baseline's history contradicts (SoFi Amendment S34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineContradiction {
+    /// Leaf 0 is not the vault's accepted genesis root `R_0`.
+    Genesis,
+    /// The history the frontier commits does not hold the frontier's root at
+    /// the frontier's generation.
+    Top,
+    /// The exercise final at the root the history holds at
+    /// `generation − 1` builds a post root other than the one the history
+    /// holds at `generation`.
+    Step { generation: u64 },
+}
+
+/// A reader's finding that an owner baseline contradicts its vault's
+/// history (SoFi Amendment S34), published under the vault's contradiction
+/// locator. It names the baseline by its frontier's commitment `c_f` and
+/// says what to check; it carries nothing a reader takes on trust; each
+/// reader runs the check again against the baseline's own history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultBaselineContradictionV1 {
+    pub vault_id: D32,
+    pub frontier_commitment: D32,
+    pub kind: BaselineContradiction,
+}
+
+impl VaultBaselineContradictionV1 {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_BASELINE_CONTRADICTION);
+        push_digest32(&mut out, &self.vault_id);
+        push_digest32(&mut out, &self.frontier_commitment);
+        match self.kind {
+            BaselineContradiction::Genesis => push_u16(&mut out, BASELINE_CONTRADICTION_GENESIS),
+            BaselineContradiction::Top => push_u16(&mut out, BASELINE_CONTRADICTION_TOP),
+            BaselineContradiction::Step { generation } => {
+                push_u16(&mut out, BASELINE_CONTRADICTION_STEP);
+                push_u64(&mut out, generation);
+            }
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_BASELINE_CONTRADICTION, SCHEMA_V1)?;
+        let vault_id = c.digest32()?;
+        let frontier_commitment = c.digest32()?;
+        let kind = match c.u16()? {
+            BASELINE_CONTRADICTION_GENESIS => BaselineContradiction::Genesis,
+            BASELINE_CONTRADICTION_TOP => BaselineContradiction::Top,
+            BASELINE_CONTRADICTION_STEP => match c.u64()? {
+                0 => {
+                    return Err(wire_invalid(SofiWireError::UnknownBaselineContradiction {
+                        kind: BASELINE_CONTRADICTION_STEP,
+                    }))
+                }
+                generation => BaselineContradiction::Step { generation },
+            },
+            kind => {
+                return Err(wire_invalid(SofiWireError::UnknownBaselineContradiction {
+                    kind,
+                }))
+            }
+        };
+        finish(
+            &c,
+            Self {
+                vault_id,
+                frontier_commitment,
+                kind,
+            },
+        )
+    }
+}
+
 // ── 0x0073 OwnerBaselineAuthV1 ─────────────────────────────────────────────
 
 /// What an owner baseline's anchor signs: a frontier's commitment, and the
@@ -1769,12 +1778,6 @@ impl TraderRelationshipLeaf {
             vault_id: c.digest32()?,
             leaf: c.digest32()?,
         })
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
     }
 }
 
@@ -1976,12 +1979,6 @@ impl CoreEntry {
             got => Err(DecodeError::WrongClass { got }),
         }
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 fn check_entries(entries: &[CoreEntry]) -> Result<(), SofiWireError> {
@@ -2072,12 +2069,6 @@ impl TraderCore {
         let entries = read_entries(c)?;
         Self::new(genesis, device_id, position, pre_root, entries).map_err(wire_invalid)
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 // ── 0x0052 DlvCore ─────────────────────────────────────────────────────────
@@ -2163,12 +2154,6 @@ impl DlvCore {
         )
         .map_err(wire_invalid)
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 // ── 0x0055 | 0x0056 OwnerAuthority ─────────────────────────────────────────
@@ -2228,12 +2213,6 @@ impl OwnerAuthority {
             }
             got => Err(DecodeError::WrongClass { got }),
         }
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
     }
 }
 
@@ -2368,41 +2347,6 @@ impl RouteDigestPreimage {
             }
         }
         Ok(out)
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = match c.peek_class()? {
-            class::SOFI_ROUTE_DIGEST_SWAP => {
-                c.envelope(class::SOFI_ROUTE_DIGEST_SWAP, SCHEMA_V1)?;
-                Self::Swap {
-                    hops: read_hops(&mut c)?,
-                }
-            }
-            class::SOFI_ROUTE_DIGEST_CLOSE => {
-                c.envelope(class::SOFI_ROUTE_DIGEST_CLOSE, SCHEMA_V1)?;
-                Self::Close {
-                    vault_id: c.digest32()?,
-                    parent_root: c.digest32()?,
-                    setup_ref: c.digest32()?,
-                    reserve_a: c.u64()?,
-                    reserve_b: c.u64()?,
-                }
-            }
-            class::SOFI_ROUTE_DIGEST_RELEASE => {
-                c.envelope(class::SOFI_ROUTE_DIGEST_RELEASE, SCHEMA_V1)?;
-                Self::Release {
-                    vault_id: c.digest32()?,
-                    parent_root: c.digest32()?,
-                    setup_ref: c.digest32()?,
-                    verdict_cell: c.digest32()?,
-                    outcome: read_var_bytes(&mut c, ESCROW_MAX_OUTCOME_BYTES)?,
-                    amount: c.u64()?,
-                }
-            }
-            got => return Err(DecodeError::WrongClass { got }),
-        };
-        finish(&c, v)
     }
 }
 
@@ -2644,12 +2588,6 @@ impl SettlementBody {
             }
             got => Err(DecodeError::WrongClass { got }),
         }
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
     }
 }
 
@@ -2948,10 +2886,6 @@ impl OutcomeTable {
         let labels: Vec<&[u8]> = entries.iter().map(EscrowOutcome::outcome).collect();
         check_strictly_ascending("outcome table", &labels)?;
         Ok(Self { entries })
-    }
-
-    pub fn entries(&self) -> &[EscrowOutcome] {
-        &self.entries
     }
 
     /// The exact signer set that decides `outcome`, when the table has it.
@@ -3334,6 +3268,8 @@ pub struct ComputedTable {
     setup_digest: D32,
     session_a: EscrowSigner,
     session_b: EscrowSigner,
+    start_commitment_a: D32,
+    start_commitment_b: D32,
 }
 
 impl ComputedTable {
@@ -3344,6 +3280,8 @@ impl ComputedTable {
         setup_digest: D32,
         session_a: EscrowSigner,
         session_b: EscrowSigner,
+        start_commitment_a: D32,
+        start_commitment_b: D32,
     ) -> Result<Self, SofiWireError> {
         if session_a == session_b {
             return Err(SofiWireError::SessionKeysNotDistinct);
@@ -3353,7 +3291,18 @@ impl ComputedTable {
             setup_digest,
             session_a,
             session_b,
+            start_commitment_a,
+            start_commitment_b,
         })
+    }
+
+    /// `H(DSM/escrow/start-commit/v1 ‖ r)`: the commitment `side`'s wallet
+    /// fixed at lock to its start entropy `r` (SoFi Amendment S33).
+    pub fn start_commitment(&self, side: MatchSide) -> &D32 {
+        match side {
+            MatchSide::A => &self.start_commitment_a,
+            MatchSide::B => &self.start_commitment_b,
+        }
     }
 
     /// `P`, the hash that pins the outcome program.
@@ -3374,8 +3323,9 @@ impl ComputedTable {
         }
     }
 
-    /// `P ‖ setup_digest ‖ key_a ‖ key_b`, each key `u16be(alg) ‖
-    /// u32be(|key|) ‖ key`: what `τ_c` hashes, and how the table nests.
+    /// `P ‖ setup_digest ‖ key_a ‖ key_b ‖ start_commitment_a ‖
+    /// start_commitment_b`, each key `u16be(alg) ‖ u32be(|key|) ‖ key`: what
+    /// `τ_c` hashes, and how the table nests.
     pub fn canonical(&self) -> Vec<u8> {
         let mut out = Vec::new();
         self.push(&mut out);
@@ -3395,6 +3345,8 @@ impl ComputedTable {
             self.session_b.signature_alg,
             &self.session_b.public_key,
         );
+        push_digest32(out, &self.start_commitment_a);
+        push_digest32(out, &self.start_commitment_b);
     }
 
     fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
@@ -3402,7 +3354,17 @@ impl ComputedTable {
         let setup_digest = c.digest32()?;
         let session_a = EscrowSigner::at(c)?;
         let session_b = EscrowSigner::at(c)?;
-        Self::new(program, setup_digest, session_a, session_b).map_err(wire_invalid)
+        let start_commitment_a = c.digest32()?;
+        let start_commitment_b = c.digest32()?;
+        Self::new(
+            program,
+            setup_digest,
+            session_a,
+            session_b,
+            start_commitment_a,
+            start_commitment_b,
+        )
+        .map_err(wire_invalid)
     }
 }
 
@@ -3494,7 +3456,7 @@ impl ComputedEscrowTerms {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_env(&mut out, class::ESCROW_COMPUTED_TERMS);
+        push_env_at(&mut out, class::ESCROW_COMPUTED_TERMS, SCHEMA_V2);
         push_digest32(&mut out, &self.token);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
@@ -3509,7 +3471,7 @@ impl ComputedEscrowTerms {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::ESCROW_COMPUTED_TERMS, SCHEMA_V1)?;
+        c.envelope(class::ESCROW_COMPUTED_TERMS, SCHEMA_V2)?;
         let token = c.digest32()?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
@@ -3674,6 +3636,7 @@ pub struct TranscriptOutcome {
     external_commitment: D32,
     table: ComputedTable,
     setup: Vec<u8>,
+    reveals: StartReveals,
     entries: Vec<Vec<u8>>,
     signatures: Vec<SideSignature>,
 }
@@ -3683,6 +3646,7 @@ impl TranscriptOutcome {
         external_commitment: D32,
         table: ComputedTable,
         setup: &[u8],
+        reveals: StartReveals,
         entries: Vec<Vec<u8>>,
         signatures: Vec<SideSignature>,
     ) -> Result<Self, SofiWireError> {
@@ -3703,6 +3667,7 @@ impl TranscriptOutcome {
             external_commitment,
             table,
             setup: setup.to_vec(),
+            reveals,
             entries,
             signatures,
         })
@@ -3720,6 +3685,11 @@ impl TranscriptOutcome {
         &self.setup
     }
 
+    /// Both sides' start entropy, as the Start opened it.
+    pub fn reveals(&self) -> &StartReveals {
+        &self.reveals
+    }
+
     /// The entries' bytes, in order, exactly as carried.
     pub fn entries(&self) -> &[Vec<u8>] {
         &self.entries
@@ -3731,10 +3701,11 @@ impl TranscriptOutcome {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_env(&mut out, class::ESCROW_TRANSCRIPT_OUTCOME);
+        push_env_at(&mut out, class::ESCROW_TRANSCRIPT_OUTCOME, SCHEMA_V2);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
         push_part(&mut out, &self.setup);
+        self.reveals.push(&mut out);
         push_u32(&mut out, self.entries.len() as u32);
         for entry in &self.entries {
             push_part(&mut out, entry);
@@ -3749,10 +3720,11 @@ impl TranscriptOutcome {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::ESCROW_TRANSCRIPT_OUTCOME, SCHEMA_V1)?;
+        c.envelope(class::ESCROW_TRANSCRIPT_OUTCOME, SCHEMA_V2)?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
         let setup = read_var_bytes(&mut c, COMPUTED_MAX_SETUP_BYTES)?;
+        let reveals = StartReveals::at(&mut c)?;
         let n = read_count(&mut c, "transcript entries", 1, TRANSCRIPT_MAX_ENTRIES)?;
         let mut entries = Vec::with_capacity(n);
         for _ in 0..n {
@@ -3765,8 +3737,15 @@ impl TranscriptOutcome {
             let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
             signatures.push(SideSignature { side, signature });
         }
-        let v = Self::new(external_commitment, table, &setup, entries, signatures)
-            .map_err(wire_invalid)?;
+        let v = Self::new(
+            external_commitment,
+            table,
+            &setup,
+            reveals,
+            entries,
+            signatures,
+        )
+        .map_err(wire_invalid)?;
         finish(&c, v)
     }
 }
@@ -3873,7 +3852,7 @@ impl EquivocationProof {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_env(&mut out, class::ESCROW_EQUIVOCATION_PROOF);
+        push_env_at(&mut out, class::ESCROW_EQUIVOCATION_PROOF, SCHEMA_V2);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
         out.push(self.side.byte());
@@ -3885,7 +3864,7 @@ impl EquivocationProof {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::ESCROW_EQUIVOCATION_PROOF, SCHEMA_V1)?;
+        c.envelope(class::ESCROW_EQUIVOCATION_PROOF, SCHEMA_V2)?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
         let side = MatchSide::at(&mut c)?;
@@ -3914,11 +3893,51 @@ impl StartKind {
     }
 }
 
+/// Both sides' start entropy `r`, side A's then side B's: what a Start opens
+/// and a transcript outcome carries (SoFi Amendment S33). Each `r` opens the
+/// commitment its side's wallet fixed in the table at lock; whether it does is
+/// recognition's, not this type's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartReveals {
+    a: D32,
+    b: D32,
+}
+
+impl StartReveals {
+    pub fn new(a: D32, b: D32) -> Self {
+        Self { a, b }
+    }
+
+    /// `side`'s start entropy.
+    pub fn side(&self, side: MatchSide) -> &D32 {
+        match side {
+            MatchSide::A => &self.a,
+            MatchSide::B => &self.b,
+        }
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_digest32(out, &self.a);
+        push_digest32(out, &self.b);
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let a = c.digest32()?;
+        let b = c.digest32()?;
+        Ok(Self { a, b })
+    }
+}
+
 /// The body of a `MatchStart` (SoFi §19.10, the ready handshake).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartBody {
-    /// Both sides' signatures over `m_ready`: side A's, then side B's.
-    Start { ready_a: Vec<u8>, ready_b: Vec<u8> },
+    /// Both sides' signatures over `m_ready`, side A's then side B's, and
+    /// both sides' start entropy (SoFi Amendment S33).
+    Start {
+        ready_a: Vec<u8>,
+        ready_b: Vec<u8>,
+        reveals: StartReveals,
+    },
     /// One side's signature over `m_withdraw`. Either side may withdraw.
     Withdraw { side: MatchSide, signature: Vec<u8> },
 }
@@ -3952,7 +3971,9 @@ impl MatchStart {
         body: StartBody,
     ) -> Result<Self, SofiWireError> {
         match &body {
-            StartBody::Start { ready_a, ready_b } => {
+            StartBody::Start {
+                ready_a, ready_b, ..
+            } => {
                 check_signature_bytes("ready signature", ready_a)?;
                 check_signature_bytes("ready signature", ready_b)?;
             }
@@ -3985,14 +4006,19 @@ impl MatchStart {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_env(&mut out, class::ESCROW_MATCH_START);
+        push_env_at(&mut out, class::ESCROW_MATCH_START, SCHEMA_V2);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
         out.push(self.kind().byte());
         match &self.body {
-            StartBody::Start { ready_a, ready_b } => {
+            StartBody::Start {
+                ready_a,
+                ready_b,
+                reveals,
+            } => {
                 push_part(&mut out, ready_a);
                 push_part(&mut out, ready_b);
+                reveals.push(&mut out);
             }
             StartBody::Withdraw { side, signature } => {
                 out.push(side.byte());
@@ -4004,13 +4030,14 @@ impl MatchStart {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::ESCROW_MATCH_START, SCHEMA_V1)?;
+        c.envelope(class::ESCROW_MATCH_START, SCHEMA_V2)?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
         let body = match c.u8()? {
             1 => StartBody::Start {
                 ready_a: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
                 ready_b: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
+                reveals: StartReveals::at(&mut c)?,
             },
             2 => StartBody::Withdraw {
                 side: MatchSide::at(&mut c)?,
@@ -4049,26 +4076,11 @@ impl EscrowKind {
         }
     }
 
-    pub fn encode(&self) -> Vec<u8> {
-        match self {
-            Self::Signed(terms) => terms.encode(),
-            Self::Computed(terms) => terms.encode(),
-        }
-    }
-
     /// The policy commit of the held token.
     pub fn token(&self) -> &D32 {
         match self {
             Self::Signed(terms) => terms.token(),
             Self::Computed(terms) => terms.token(),
-        }
-    }
-
-    /// `Y`.
-    pub fn external_commitment(&self) -> &D32 {
-        match self {
-            Self::Signed(terms) => terms.external_commitment(),
-            Self::Computed(terms) => terms.external_commitment(),
         }
     }
 
@@ -4085,3 +4097,6 @@ impl EscrowKind {
         }
     }
 }
+
+#[cfg(test)]
+mod parse_tests;

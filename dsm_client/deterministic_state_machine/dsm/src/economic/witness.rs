@@ -41,7 +41,9 @@ use crate::economic::credit::CreditSource;
 use crate::utils::text_id::encode_base32_crockford;
 use crate::economic::mutation::EconomicLeafMutation;
 
-/// `0x001D` schema 1 — a complete pre-root → post-root economic transition.
+/// `0x001D` schema 2 — a complete pre-root → post-root economic transition.
+/// Schema 2 admits the offline unload credit source (`0x0075`); schema 1 is
+/// burned.
 ///
 /// `operation_digest` and `economic_operation_id` are both members, and both
 /// are load-bearing. Without a shared `operation_digest` binding the witness to
@@ -61,7 +63,7 @@ pub struct EconomicTransitionWitness {
     pub operation_digest: [u8; 32],
     pub mutations: Vec<EconomicLeafMutation>,
     /// Strictly ascending by `credit_mutation_index`. Inline, heterogeneous
-    /// CCB objects of classes `0x0025`, `0x005D` and `0x005F`; each carries its own envelope,
+    /// CCB objects of classes `0x0025`, `0x005D`, `0x005F` and `0x0075`; each carries its own envelope,
     /// which is what keeps the sequence parseable without a side-channel
     /// discriminant.
     pub credit_sources: Vec<CreditSource>,
@@ -69,7 +71,7 @@ pub struct EconomicTransitionWitness {
 
 impl CcbObject for EconomicTransitionWitness {
     const CLASS: u16 = class::ECONOMIC_TRANSITION_WITNESS;
-    const SCHEMA: u16 = 1;
+    const SCHEMA: u16 = 2;
 }
 
 impl EconomicTransitionWitness {

@@ -70,7 +70,7 @@ impl AppRouterImpl {
             return Err(format!("contacts.add: establishing the relationship: {e}"));
         }
 
-        #[cfg(all(target_os = "android", feature = "bluetooth"))]
+        #[cfg(feature = "bluetooth")]
         {
             let Some(stored) = cm.get_verified_contact(device_id).await else {
                 return Err("contact added, but it is not held in memory".into());
@@ -125,7 +125,7 @@ impl AppRouterImpl {
                         .get_session_status(&contact.device_id)
                         .await;
                     item.pairing = crate::bluetooth::pairing_orchestrator::contact_pairing_phase(
-                        record.ble_address.as_deref().is_some_and(|a| !a.is_empty()),
+                        record.ble_address.as_deref().filter(|a| !a.is_empty()),
                         session.as_ref(),
                     ) as i32;
                     items.push(item);

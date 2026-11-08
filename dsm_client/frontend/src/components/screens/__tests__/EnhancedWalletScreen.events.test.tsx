@@ -210,29 +210,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     });
   });
 
-  test('inbox badge updates before the user opens the inbox', async () => {
-    (dsmClient.getIdentity as any) = jest
-      .fn()
-      .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
-    (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
-    (dsmClient.getAllBalances as any) = jest
-      .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
-    (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
-    (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({ items: [] });
-
-    await renderWallet();
-
-    await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
-
-    await act(async () => {
-      bridgeEvents.emit('inbox.updated', { newItems: 2, source: 'poll' });
-    });
-
-    const button = screen.getByRole('button', { name: 'Inbox (2 new)' });
-    expect(button.className).toContain('has-items');
-  });
-
   // The refresh button re-reads both stores: balances and history, and the
   // contacts the send tab offers.
   test('the refresh button re-reads balances, history and contacts', async () => {

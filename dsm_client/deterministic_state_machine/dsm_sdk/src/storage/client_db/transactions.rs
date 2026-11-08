@@ -10,7 +10,7 @@ use super::tokens::{upsert_balance_projection_with_conn, BalanceProjectionRecord
 use super::types::TransactionRecord;
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
 
-fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord) -> Result<usize> {
+pub(super) fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord) -> Result<usize> {
     let affected = conn.execute(
         "INSERT INTO transactions (
             tx_id, tx_hash, from_device, to_device, amount, tx_type,
@@ -48,6 +48,42 @@ fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord) -> Result<u
         ],
     )?;
     Ok(affected)
+}
+
+/// Whether `tip` is one the relationship with `counterparty` has moved past:
+/// a tip a step or a tip sync left, recorded where the tip moved
+/// ([`record_passed_tip_in_tx`]).
+pub fn relationship_passed_tip(counterparty: &[u8; 32], tip: &[u8; 32]) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow::anyhow!("the database lock: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM relationship_passed_tips
+             WHERE counterparty_device_id = ?1 AND tip = ?2",
+            params![&counterparty[..], &tip[..]],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Record `parent` as a tip the relationship with `counterparty` has moved
+/// past, inside the transaction that moves the tip. A proposal made on it and
+/// delivered later is an old one, never evidence of where the sender stands
+/// (SA-114).
+pub(crate) fn record_passed_tip_in_tx(
+    conn: &Connection,
+    counterparty: &[u8; 32],
+    parent: &[u8; 32],
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO relationship_passed_tips (counterparty_device_id, tip)
+         VALUES (?1, ?2)",
+        params![&counterparty[..], &parent[..]],
+    )?;
+    Ok(())
 }
 
 /// How a relationship step's tip write ended when it did not refuse.
@@ -89,6 +125,7 @@ pub(crate) fn advance_relationship_tip_in_tx(
         params![&child[..], &commitment[..], &counterparty[..], &parent[..]],
     )?;
     if moved == 1 {
+        record_passed_tip_in_tx(conn, counterparty, parent)?;
         return Ok(TipAdvance::Applied);
     }
     let (tip, bound): (Option<Vec<u8>>, Option<Vec<u8>>) = conn
@@ -146,10 +183,7 @@ pub(crate) fn settle_step_in_tx(conn: &Connection, step: &SettledStep<'_>) -> Re
 }
 
 pub fn store_transaction(tx: &TransactionRecord) -> Result<()> {
-    info!(
-        "Storing transaction: {} ({} -> {})",
-        tx.tx_id, tx.from_device, tx.to_device
-    );
+    info!("Storing transaction: {}", tx.tx_id);
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
@@ -160,25 +194,34 @@ pub fn store_transaction(tx: &TransactionRecord) -> Result<()> {
     // Important: never downgrade proof_data from non-empty to empty.
     let affected = upsert_transaction_row(&conn, tx)?;
     if affected > 0 {
-        info!("Transaction upserted successfully, amount={}", tx.amount);
+        info!("Transaction upserted: {}", tx.tx_id);
     } else {
         info!("Transaction unchanged after upsert: {}", tx.tx_id);
     }
 
-    // Debug: verify the transaction was stored
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM transactions WHERE from_device = ?1 OR to_device = ?1",
-            params![tx.from_device],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    info!(
-        "Total transactions for device {}: {}",
-        &tx.from_device[..tx.from_device.len().min(20)],
-        count
-    );
+    Ok(())
+}
 
+/// The receipt of the step `tx_id`, written into its history row inside `conn`
+/// — the transaction its acknowledgment is recorded in. The row must exist and
+/// hold no receipt yet: an offline-bearer sender's row is written with none
+/// when its anchor commits, and its receiver's counter-signed receipt is the
+/// one the acknowledgment brings.
+pub(crate) fn backfill_transaction_proof_with_conn(
+    conn: &Connection,
+    tx_id: &str,
+    proof_data: &[u8],
+) -> Result<()> {
+    let affected = conn.execute(
+        "UPDATE transactions SET proof_data = ?1
+         WHERE tx_id = ?2 AND (proof_data IS NULL OR length(proof_data) = 0)",
+        params![proof_data, tx_id],
+    )?;
+    if affected != 1 {
+        return Err(anyhow::anyhow!(
+            "the step {tx_id} has no history row awaiting its receipt"
+        ));
+    }
     Ok(())
 }
 

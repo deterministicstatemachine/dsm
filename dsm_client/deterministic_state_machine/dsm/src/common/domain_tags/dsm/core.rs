@@ -15,10 +15,22 @@ pub const TAG_ENTITY_ID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM
 pub const TAG_DEVICE_ID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/device-id");
 pub const TAG_DSM_NODE_ID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/node-id");
 pub const TAG_DSM_BYTECOMMIT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/bytecommit");
+/// A relationship's `h_0`: `H(tag ‖ G_lo ‖ DevID_lo ‖ G_hi ‖ DevID_hi)`. Only
+/// `h_0`; the step precommitment has its own tag, `TAG_BILATERAL_PRECOMMIT`.
 pub const TAG_BILATERAL_SESSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/bilateral-session");
+/// A bilateral step precommitment: `H(tag ‖ lp(h_n) ‖ lp(op))`. Separate from
+/// `h_0`'s tag, so a precommitment and a relationship's first tip can never
+/// be the same hash of differently framed bytes.
+pub const TAG_BILATERAL_PRECOMMIT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/bilateral-precommit/v1");
 pub const TAG_SMT_KEY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/smt-key");
 pub const TAG_TIP: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/tip");
+/// The relationship tip two concurrent accepted steps from one tip leave:
+/// `H(tag ‖ h_n ‖ lo ‖ hi)`, `lo`/`hi` the two steps' successor tips in byte
+/// order (owner ruling, 2026-10-29: "both settle").
+pub const TAG_RELATIONSHIP_JOIN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-join/v1");
 pub const TAG_STATE_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/state-hash");
 /// The relationship successor commitment `h_n = C_dsm+`:
 /// `H(tag ‖ rel_key ‖ embedded_parent ‖ counterparty_devid ‖ len(op) ‖ op ‖
@@ -35,23 +47,28 @@ pub const TAG_STATE_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DS
 /// domain, one meaning, per protocol.
 pub const TAG_DSM_RELATIONSHIP_CHAIN_TIP_V2: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-chain-tip/v2");
-/// SMT key of the single per-device anchor-state leaf: `H(tag ‖ B)`. One stable key per
-/// device (the fused anchor is device-level: one appliance, one counter); its VALUE is the
-/// anchor-core v2 leaf `anchor_state_leaf(B, h_i, u_i)`, replaced old→successor on every
-/// bearer transfer's device-SMT advance. Never keyed by relationship/root/frontier/counter.
-pub const TAG_FUSED_ANCHOR_STATE_LEAF: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/fused-anchor-state-leaf/v1");
-/// SMT key of the per-(device, asset) offline-cash allocation leaf:
-/// `H(tag ‖ genesis_id ‖ device_id ‖ anchor_bundle_B ‖ asset_id)`. Accounts for value
-/// deliberately loaded from the online balance into this device's offline-bearer allocation
-/// (device-bound single-device cash). Distinct from the anchor-state leaf, which proves
-/// offline position/counter; this leaf accounts for the loaded VALUE.
-pub const TAG_OFFLINE_ALLOCATION_LEAF: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/offline-allocation/v1");
-/// Value of the offline-cash allocation leaf: `H(tag ‖ amount_be ‖ sequence_be)`. The
-/// sequence advances on every load/unload/spend so a repeated amount still changes the leaf.
-pub const TAG_OFFLINE_ALLOCATION_STATE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/offline-allocation-state/v1");
+/// Device-SMT key of the offline account of anchor bundle `B`: `H(tag ‖ B)`. Its value is
+/// the account root `R_off`, the root of the smaller SMT the offline account is.
+pub const TAG_OFFLINE_ACCOUNT_LEAF: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/v1");
+/// Offline-account key of the allocation of one asset: `H(tag ‖ asset)`.
+pub const TAG_OFFLINE_ACCOUNT_ALLOCATION_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/allocation/v1");
+/// Offline-account value of an allocation: `H(tag ‖ amount_be)`.
+pub const TAG_OFFLINE_ACCOUNT_ALLOCATION_VALUE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/allocation-value/v1");
+/// Offline-account key of the software counter: `H(tag)`.
+pub const TAG_OFFLINE_ACCOUNT_COUNTER_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/counter/v1");
+/// Offline-account value of the software counter: `H(tag ‖ u_be)`.
+pub const TAG_OFFLINE_ACCOUNT_COUNTER_VALUE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/counter-value/v1");
+/// Offline-account key of the offline frontier: `H(tag)`.
+pub const TAG_OFFLINE_ACCOUNT_FRONTIER_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/frontier/v1");
+/// Offline-account key of the funding chain: `H(tag)`.
+pub const TAG_OFFLINE_ACCOUNT_FUNDING_CHAIN_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/funding-chain/v1");
 /// SMT key of the per-(vault, asset) reserve leaf:
 /// `H(tag ‖ genesis_id ‖ device_id ‖ vault_id ‖ policy_commit)`. Accounts for value the
 /// owner has ENCUMBERED into a specific vault. Deliberately not a `balances` entry: a
@@ -138,13 +155,19 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_NODE_ID,
     TAG_DSM_BYTECOMMIT,
     TAG_BILATERAL_SESSION,
+    TAG_BILATERAL_PRECOMMIT,
     TAG_SMT_KEY,
     TAG_TIP,
+    TAG_RELATIONSHIP_JOIN,
     TAG_STATE_HASH,
     TAG_DSM_RELATIONSHIP_CHAIN_TIP_V2,
-    TAG_FUSED_ANCHOR_STATE_LEAF,
-    TAG_OFFLINE_ALLOCATION_LEAF,
-    TAG_OFFLINE_ALLOCATION_STATE,
+    TAG_OFFLINE_ACCOUNT_LEAF,
+    TAG_OFFLINE_ACCOUNT_ALLOCATION_KEY,
+    TAG_OFFLINE_ACCOUNT_ALLOCATION_VALUE,
+    TAG_OFFLINE_ACCOUNT_COUNTER_KEY,
+    TAG_OFFLINE_ACCOUNT_COUNTER_VALUE,
+    TAG_OFFLINE_ACCOUNT_FRONTIER_KEY,
+    TAG_OFFLINE_ACCOUNT_FUNDING_CHAIN_KEY,
     TAG_VAULT_RESERVE_LEAF,
     TAG_VAULT_RESERVE_STATE,
     TAG_SETTLEMENT_RECEIPT_LEAF,

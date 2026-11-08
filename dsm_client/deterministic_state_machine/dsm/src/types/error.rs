@@ -501,6 +501,9 @@ pub enum DsmError {
     },
     /// The requested operation is not valid in the current context.
     InvalidOperation(String),
+    /// A transition whose operation does nothing (MR-DSM-0201): a zero-effect
+    /// transition is not a transition, so Core advances no relationship by it.
+    ZeroEffectTransition,
     /// Token subsystem error (creation, transfer, policy).
     TokenError {
         /// Description of the token operation that failed.
@@ -1469,6 +1472,11 @@ impl Display for DsmError {
                 )
             }
             DsmError::InvalidOperation(msg) => write!(f, "Invalid operation: {msg}"),
+            DsmError::ZeroEffectTransition => write!(
+                f,
+                "Zero-effect transition: an operation that does nothing is no transition \
+                 (MR-DSM-0201)"
+            ),
             DsmError::TokenError { context, source } => {
                 write!(f, "Token error: {context}")?;
                 if let Some(s) = source {
@@ -1666,6 +1674,7 @@ impl Error for DsmError {
             DsmError::Runtime { source: None, .. } => None,
             DsmError::Bluetooth(_) => None,
             DsmError::InvalidOperation(_) => None,
+            DsmError::ZeroEffectTransition => None,
             DsmError::DeterministicSafety { .. } => None,
             DsmError::Generic { source: None, .. } => None,
             DsmError::Serialization { source, .. } => {

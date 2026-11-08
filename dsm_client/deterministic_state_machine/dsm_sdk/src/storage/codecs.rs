@@ -284,6 +284,7 @@ mod tests {
         let balance = dsm::types::token_types::Balance::amount(1000);
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"dBTC".to_vec(),
                 nonce: vec![0xBBu8; 16],
@@ -293,6 +294,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: vec![0xAAu8; 32],
+            to_genesis: [0x6E; 32],
             amount: balance,
             signature: vec![0xEEu8; 64],
             authority_policy: None,

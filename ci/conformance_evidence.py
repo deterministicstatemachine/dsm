@@ -25,17 +25,24 @@
 #          `dsm::route_chain::tests::only_links_of_one_chain_count_toward_final`
 #          `dsm_sdk::supply_cap_partial_history::cap_is_exact_...`   (tests/*.rs)
 #          `dsm_storage_node::main::tests::...`                      (src/main.rs)
+#      or a Jest test of the frontend's own behaviour (owner ruling,
+#      2026-10-27), named by its file under dsm_client/frontend, its describe
+#      titles and its own title as Jest prints them:
+#          `frontend:src/components/__tests__/X.test.tsx::describe › test`
 #      or a formal property: `tla/<File>.tla::<Name>`, `lean4/<File>.lean::<name>`.
-#      A Met row and a matrix Negative-test cell need at least one CARGO test:
-#      a formal property beside it is evidence too, but never the only one.
+#      A Met row and a matrix Negative-test cell need at least one executed
+#      test, cargo or Jest: a formal property beside it is evidence too, but
+#      never the only one. A skipped or table-driven (`.each`) Jest test is not
+#      evidence, as an ignored cargo test is not.
 #      Every test reference in CONFORMANCE §8, the verification matrix's
 #      Negative test column and the §5A Evidence column must resolve to a test
 #      function (or property) that exists. A "Met" row must name at least one code item and at least one
 #      test, and every name in its Code and Test cells must be canonical. A
 #      ticked §5A row must name a test.
-#   5. EXECUTION (`--board-log`, repeatable). Every referenced test must have
-#      run and passed in the given `cargo test` logs; an ignored test is not
-#      evidence. With `--write`, the commit the logs were produced at
+#   5. EXECUTION (`--board-log` and `--jest-log`, repeatable). Every
+#      referenced test must have run and passed in the given logs: a cargo test
+#      in a `cargo test` log, a Jest test in Jest's `--json` results; an
+#      ignored test is not evidence. With `--write`, the commit the logs were produced at
 #      (`--tested-at`, default HEAD) is recorded in CONFORMANCE §1, and only
 #      when the code the boards compile is exactly that commit's: nothing in
 #      the crates, the proto or the Cargo manifests and lockfiles differs from
@@ -76,6 +83,7 @@ TESTED_CODE = [
     "proto",
     "Cargo.toml",
     "Cargo.lock",
+    "dsm_client/frontend",
 ]
 SPEC_PREFIX = {
     "MR-DSM": "DSM high-level (MR-DSM)",
@@ -259,6 +267,335 @@ def build_index():
     return index, stems
 
 
+# ── Frontend (Jest) test index ──────────────────────────────────────────────
+#
+# A Jest test is evidence for the frontend's own behaviour (owner ruling,
+# 2026-10-27). Its canonical name is the file under the frontend root, then
+# its describe titles and its own title as Jest prints them:
+#     `frontend:src/components/__tests__/TokenCreationDialog.test.tsx::TokenCreationDialog token kind selector › offers only the fungible token kind`
+# The index is read from the files' structure: comments, strings, template
+# literals, regular expressions and JSX are lexed, never searched, so `it(` in
+# a comment and `/x/.test(v)` are not tests.
+
+FRONTEND = "dsm_client/frontend"
+FRONTEND_REF = re.compile(r"^frontend:([^:]+\.(?:ts|tsx))::(.+)$")
+JEST_SEP = " › "
+JEST_TEST_FILE = re.compile(r"(?:^|/)__tests__/[^/]+\.tsx?$|\.(?:test|spec)\.tsx?$")
+# What may precede a `/` that starts a regular expression, or a `<` that
+# starts JSX: an operator, an opening bracket, or a keyword.
+EXPR_START = set("([{,;:?=!&|+-*%^~<>") | {"return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await", "=>"}
+
+
+class JsScan:
+    """Walks one TypeScript source, recording every `describe`, `it` and
+    `test` call: (kind, modifier, title, start, end), where start..end spans
+    its argument list and title is None unless the first argument is a plain
+    string. Raises ValueError on a source it cannot lex to the end."""
+
+    def __init__(self, text, jsx):
+        self.t, self.n, self.jsx = text, len(text), jsx
+        self.calls = []
+
+    def fail(self, i, why):
+        line = self.t.count("\n", 0, i) + 1
+        raise ValueError(f"line {line}: {why}")
+
+    def string(self, i):
+        """The string literal at i: (end, value)."""
+        q, j, out = self.t[i], i + 1, []
+        esc = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "b": "\b", "f": "\f", "v": "\v"}
+        while j < self.n and self.t[j] != q:
+            if self.t[j] == "\\":
+                c = self.t[j + 1 : j + 2]
+                out.append(esc.get(c, c))
+                j += 2
+                continue
+            if self.t[j] == "\n":
+                self.fail(i, "unterminated string")
+            out.append(self.t[j])
+            j += 1
+        if j >= self.n:
+            self.fail(i, "unterminated string")
+        return j + 1, "".join(out)
+
+    def template(self, i):
+        """The template literal at i: (end, value or None when it interpolates)."""
+        j, out, plain = i + 1, [], True
+        while j < self.n:
+            c = self.t[j]
+            if c == "\\":
+                out.append(self.t[j + 1 : j + 2])
+                j += 2
+            elif c == "`":
+                return j + 1, "".join(out) if plain else None
+            elif self.t.startswith("${", j):
+                plain = False
+                j = self.code(j + 2, "}")
+            else:
+                out.append(c)
+                j += 1
+        self.fail(i, "unterminated template literal")
+
+    def regex(self, i):
+        j, cls = i + 1, False
+        while j < self.n:
+            c = self.t[j]
+            if c == "\\":
+                j += 2
+                continue
+            if c == "\n":
+                self.fail(i, "unterminated regular expression")
+            if cls:
+                cls = c != "]"
+            elif c == "[":
+                cls = True
+            elif c == "/":
+                j += 1
+                while j < self.n and (self.t[j].isalnum() or self.t[j] == "_"):
+                    j += 1
+                return j
+            j += 1
+        self.fail(i, "unterminated regular expression")
+
+    def skip_space(self, i):
+        while i < self.n:
+            if self.t[i].isspace():
+                i += 1
+            elif self.t.startswith("//", i):
+                j = self.t.find("\n", i)
+                i = self.n if j < 0 else j
+            elif self.t.startswith("/*", i):
+                j = self.t.find("*/", i + 2)
+                if j < 0:
+                    self.fail(i, "unterminated comment")
+                i = j + 2
+            else:
+                return i
+        return i
+
+    def jsx_element(self, i):
+        """The JSX element or fragment at i (its `<`): its end."""
+        j = i + 1
+        m = re.compile(r"[A-Za-z0-9_.:-]*").match(self.t, j)
+        j = m.end()
+        # attributes, up to `>` or `/>`
+        while True:
+            j = self.skip_space(j)
+            if self.t.startswith("/>", j):
+                return j + 2
+            if j < self.n and self.t[j] == ">":
+                j += 1
+                break
+            if j >= self.n:
+                self.fail(i, "unterminated JSX tag")
+            c = self.t[j]
+            if c == "{":
+                j = self.code(j + 1, "}")
+            elif c in "\"'":
+                j = self.string(j)[0]
+            else:
+                a = re.compile(r"[A-Za-z0-9_.:=-]+").match(self.t, j)
+                if not a:
+                    self.fail(j, f"unexpected {c!r} in a JSX tag")
+                j = a.end()
+        # children, up to the closing tag
+        while j < self.n:
+            c = self.t[j]
+            if self.t.startswith("</", j):
+                k = self.t.find(">", j)
+                if k < 0:
+                    self.fail(j, "unterminated JSX closing tag")
+                return k + 1
+            if c == "<":
+                j = self.jsx_element(j)
+            elif c == "{":
+                j = self.code(j + 1, "}")
+            else:
+                j += 1
+        self.fail(i, "unterminated JSX element")
+
+    def code(self, i, close=None):
+        """Code from i to the `close` bracket matching the one before i (or to
+        the end): returns the index after it."""
+        stack = []
+        prev = "("  # what came before: a token, or "(" for "an expression may start"
+        while i < self.n:
+            i = self.skip_space(i)
+            if i >= self.n:
+                break
+            c = self.t[i]
+            if c in "\"'":
+                i, _ = self.string(i)
+                prev = "lit"
+            elif c == "`":
+                i, _ = self.template(i)
+                prev = "lit"
+            elif c == "/" and prev in EXPR_START:
+                i = self.regex(i)
+                prev = "lit"
+            elif c == "<" and self.jsx and prev in EXPR_START and re.match(r"<[A-Za-z>]", self.t[i : i + 2]):
+                i = self.jsx_element(i)
+                prev = "lit"
+            elif c in "([{":
+                stack.append((c, i))
+                i += 1
+                prev = c
+            elif c in ")]}":
+                if not stack:
+                    if c == close:
+                        return i + 1
+                    self.fail(i, f"unbalanced {c!r}")
+                o, at = stack.pop()
+                if "([{".index(o) != ")]}".index(c):
+                    self.fail(i, f"{o!r} closed by {c!r}")
+                if o == "(":
+                    self.closed(at, i)
+                i += 1
+                prev = "lit"
+            elif c.isalpha() or c in "_$":
+                m = re.compile(r"[A-Za-z0-9_$]+").match(self.t, i)
+                word = m.group(0)
+                if word in ("describe", "it", "test") and prev != ".":
+                    self.callee(word, m.end())
+                i = m.end()
+                prev = word if word in EXPR_START else "ident"
+            elif c.isdigit():
+                m = re.compile(r"[0-9A-Za-z_.]+").match(self.t, i)
+                i = m.end()
+                prev = "lit"
+            elif self.t.startswith("=>", i):
+                i += 2
+                prev = "=>"
+            elif self.t.startswith("?.", i) or c == ".":
+                i += 2 if c == "?" else 1
+                prev = "."
+            else:
+                i += 1
+                prev = c
+        if close is not None:
+            self.fail(i, f"no closing {close!r}")
+        if stack:
+            self.fail(stack[-1][1], f"unclosed {stack[-1][0]!r}")
+        return i
+
+    def callee(self, word, j):
+        """`word` at a call position: note the call whose `(` follows, through
+        `.each(table)` and `.only`/`.skip`/`.todo` if present."""
+        modifier = None
+        k = self.skip_space(j)
+        m = re.compile(r"\.(each|only|skip|todo|concurrent|failing)\b").match(self.t, k)
+        if m:
+            modifier = m.group(1)
+            k = self.skip_space(m.end())
+        if k < self.n and self.t[k] == "(":
+            self.pending.append((word, modifier, k))
+
+    def closed(self, open_at, close_at):
+        """A `(` at open_at closed at close_at: if it opened a noted call,
+        record it with its title. An `.each(table)` call's title is in the
+        argument list after the table's."""
+        for p in list(self.pending):
+            word, modifier, at = p
+            if at != open_at:
+                continue
+            self.pending.remove(p)
+            if modifier == "each":
+                nxt = self.skip_space(close_at + 1)
+                if nxt < self.n and self.t[nxt] == "(":
+                    self.pending.append((word, "each-titled", nxt))
+                return
+            self.calls.append((word, modifier, self.title(open_at + 1), open_at, close_at))
+            return
+
+    def title(self, i):
+        i = self.skip_space(i)
+        if i < self.n and self.t[i] in "\"'":
+            return self.string(i)[1]
+        if i < self.n and self.t[i] == "`":
+            return self.template(i)[1]
+        return None
+
+    def run(self):
+        self.pending = []
+        self.code(0)
+        return self.calls
+
+
+def jest_tests_in(text, jsx):
+    """[(describe titles, title, kind, not-evidence reason or None, offset)]
+    for every `it`/`test` call: the describe calls whose arguments enclose it,
+    outermost first. A test whose title, or an enclosing describe's, is not a
+    plain string has no stable name and is listed with title None."""
+    calls = JsScan(text, jsx).run()
+    describes = [c for c in calls if c[0] == "describe"]
+    found = []
+    for word, modifier, title, start, end in calls:
+        if word == "describe":
+            continue
+        outer = sorted((d for d in describes if d[3] < start and end <= d[4]), key=lambda d: d[3])
+        titles = [d[2] for d in outer]
+        why = None
+        mods = [modifier] + [d[1] for d in outer]
+        if any(m in ("skip", "todo") for m in mods):
+            why = "skipped"
+        elif any(m in ("each", "each-titled") for m in mods):
+            why = "table-driven (`.each`): Jest names each case by its row"
+        if title is None or any(t is None for t in titles):
+            titles, title = None, None
+        found.append((titles, title, word, why, start))
+    return found
+
+
+def build_frontend_index():
+    """canonical name -> (file:line, not-evidence reason or None); and every
+    file the indexer could not lex, with why."""
+    index, unread = {}, {}
+    src = os.path.join(FRONTEND, "src")
+    if not os.path.isdir(src):
+        return index, unread
+    for dirpath, _, files in os.walk(src):
+        if "/node_modules" in dirpath:
+            continue
+        for f in files:
+            path = os.path.join(dirpath, f)
+            rel = os.path.relpath(path, FRONTEND)
+            if f.endswith(".d.ts") or not JEST_TEST_FILE.search(rel):
+                continue
+            text = read(path)
+            try:
+                tests = jest_tests_in(text, f.endswith(".tsx"))
+            except ValueError as e:
+                unread[rel] = str(e)
+                continue
+            for titles, title, _, why, at in tests:
+                if title is None:
+                    continue
+                canon = f"frontend:{rel}::" + JEST_SEP.join(titles + [title]) if titles else f"frontend:{rel}::{title}"
+                loc = f"{path}:{text.count(chr(10), 0, at) + 1}"
+                index.setdefault(canon, []).append((loc, why))
+    return index, unread
+
+
+def parse_jest_logs(paths):
+    """canonical name -> 'ok' | 'failed' | 'skipped', from Jest's `--json`
+    results: each assertion is named by its file, ancestor titles and title."""
+    import json
+
+    results = {}
+    root = os.path.abspath(FRONTEND)
+    for p in paths:
+        report = json.loads(read(p))
+        for suite in report.get("testResults", []):
+            rel = os.path.relpath(os.path.abspath(suite["name"]), root)
+            for a in suite.get("assertionResults", []):
+                canon = f"frontend:{rel}::" + JEST_SEP.join(a["ancestorTitles"] + [a["title"]])
+                status = a["status"]
+                outcome = "ok" if status == "passed" else "failed" if status == "failed" else "skipped"
+                if results.get(canon) not in ("failed",):
+                    results[canon] = outcome
+    return results
+
+
 ITEM = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern\s+\"C\")\s+)*"
     r"(?:fn|struct|enum|trait|const|static|type|mod|union)\s+([A-Za-z_]\w*)"
@@ -432,7 +769,34 @@ def requirement_statuses():
     return {i: status[i] for i in ids}
 
 
-def check_ref(ref, index, results, where, use_logs):
+def check_frontend_ref(ref, findex, unread, jest_results, where, use_logs):
+    rel = FRONTEND_REF.match(ref).group(1)
+    if rel in unread:
+        fail(f"{where}: test {ref} is in a file the indexer cannot read ({unread[rel]})")
+        return
+    found = findex.get(ref)
+    if not found:
+        fail(f"{where}: test {ref} does not exist")
+        return
+    if len(found) > 1:
+        fail(f"{where}: test {ref} is ambiguous: " + ", ".join(loc for loc, _ in found))
+        return
+    loc, why = found[0]
+    if why:
+        fail(f"{where}: test {ref} is {why} ({loc}) and is not evidence")
+    if use_logs:
+        outcome = jest_results.get(ref)
+        if outcome is None:
+            fail(f"{where}: test {ref} did not run in the given Jest logs")
+        elif outcome != "ok":
+            fail(f"{where}: test {ref} {outcome} in the given Jest logs")
+
+
+def check_ref(ref, index, results, where, use_logs, frontend=None):
+    if FRONTEND_REF.match(ref):
+        findex, unread, jest_results = frontend
+        check_frontend_ref(ref, findex, unread, jest_results, where, use_logs)
+        return
     if FORMAL.match(ref):
         if not formal_exists(ref):
             fail(f"{where}: formal property {ref} does not exist")
@@ -478,7 +842,7 @@ def code_at(ref):
 
 def is_test_ref(ref):
     head = ref.split("::")[0]
-    return (CANON.match(ref) and head in CRATES) or FORMAL.match(ref)
+    return (CANON.match(ref) and head in CRATES) or FORMAL.match(ref) or FRONTEND_REF.match(ref)
 
 
 def is_cargo_test_ref(ref):
@@ -486,15 +850,27 @@ def is_cargo_test_ref(ref):
     return bool(CANON.match(ref)) and ref.split("::")[0] in CRATES
 
 
+def is_executed_test_ref(ref):
+    """A test that runs: a cargo test, or a Jest test of the frontend's own
+    behaviour (owner ruling, 2026-10-27). A formal property is not one."""
+    return is_cargo_test_ref(ref) or bool(FRONTEND_REF.match(ref))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--board-log", action="append", default=[])
+    ap.add_argument("--jest-log", action="append", default=[], help="Jest's --json results")
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--tested-at", default="HEAD")
+    ap.add_argument("--gaps", default=GAPS, help="the CONFORMANCE_GAPS file to check")
+    ap.add_argument("--matrix", default=MATRIX, help="the VERIFICATION_MATRIX file to check")
     args = ap.parse_args()
-    use_logs = bool(args.board_log)
+    # Given logs of either framework, every referenced test must have run in
+    # them: a cargo test in a board log, a Jest test in a Jest log.
+    use_logs = bool(args.board_log or args.jest_log)
+    gaps_path, matrix_path = args.gaps, args.matrix
 
-    req, gaps, matrix = read(REQ), read(GAPS), read(MATRIX)
+    req, gaps, matrix = read(REQ), read(gaps_path), read(matrix_path)
 
     # 1. pins
     pins = dict(re.findall(r"^\| `(specs/[^`]+)` \| `([0-9a-f]{40})` \|", req, re.M))
@@ -515,10 +891,10 @@ def main():
         for i in id_range(r[0]):
             seen[i] = seen.get(i, 0) + 1
             if i.startswith("MR-") and i not in sources:
-                fail(f"{GAPS} §8 names {i}, which {REQ} does not define")
+                fail(f"{gaps_path} §8 names {i}, which {REQ} does not define")
     for i in ids:
         if seen.get(i, 0) != 1:
-            fail(f"{GAPS} §8 has {seen.get(i, 0)} rows for {i}")
+            fail(f"{gaps_path} §8 has {seen.get(i, 0)} rows for {i}")
 
     # 3. counts
     amended = {p: sum(1 for i, s in sources.items() if i.startswith(p + "-") and s.startswith("amendment")) for p in SPEC_PREFIX}
@@ -534,7 +910,7 @@ def main():
     counts = {label: {s: 0 for s in STATUSES} for label in SPEC_PREFIX.values()}
     for r in rows:
         if r[1] not in STATUSES:
-            fail(f"{GAPS} §8 {r[0]}: status {r[1]!r} is not one of {STATUSES}")
+            fail(f"{gaps_path} §8 {r[0]}: status {r[1]!r} is not one of {STATUSES}")
             continue
         prefix = "STOR-014" if r[0].startswith("STOR-014/") else "-".join(r[0].split("-")[:2])
         counts[SPEC_PREFIX[prefix]][r[1]] += len(id_range(r[0]))
@@ -551,13 +927,15 @@ def main():
         if args.write and totals_block:
             gaps = gaps[: totals_block.start(2)] + generated + "\n" + gaps[totals_block.end(2) :]
         else:
-            fail(f"{GAPS} §7 Totals differ from the §8 rows; run ci/conformance_evidence.py --write")
+            fail(f"{gaps_path} §7 Totals differ from the §8 rows; run ci/conformance_evidence.py --write")
 
     # 4 + 5. evidence
     index, stems = build_index()
     results = parse_logs(args.board_log, stems) if use_logs else {}
+    findex, unread = build_frontend_index()
+    frontend = (findex, unread, parse_jest_logs(args.jest_log) if use_logs else {})
     for r in rows:
-        where = f"{GAPS} §8 {r[0]}"
+        where = f"{gaps_path} §8 {r[0]}"
         code_cell = r[2] if len(r) > 2 else ""
         test_cell = r[3] if len(r) > 3 else ""
         for ref in refs(code_cell):
@@ -565,7 +943,7 @@ def main():
                 fail(f"{where}: code item {ref} does not exist")
         for ref in refs(test_cell):
             if is_test_ref(ref):
-                check_ref(ref, index, results, where, use_logs)
+                check_ref(ref, index, results, where, use_logs, frontend)
         if r[1] == "Met":
             for label, cell in (("code item", code_cell), ("test", test_cell)):
                 named = refs(cell)
@@ -574,20 +952,20 @@ def main():
                 for t in named:
                     if not is_test_ref(t):
                         fail(f"{where}: Met names {t!r} as a {label}, which is not a canonical name")
-            if not any(is_cargo_test_ref(t) for t in refs(test_cell)):
-                fail(f"{where}: Met names no cargo test; a formal property alone is not executed evidence")
+            if not any(is_executed_test_ref(t) for t in refs(test_cell)):
+                fail(f"{where}: Met names no cargo or Jest test; a formal property alone is not executed evidence")
 
     # The matrix's Negative test column (the third) names tests only by their
-    # canonical names; prose may describe what has no cargo test.
+    # canonical names, cargo or Jest; prose may describe what has no test.
     for r in table_rows(section(matrix, "## Rows")):
         if r[0] in ("Requirement",) or set(r[0]) <= set("-"):
             continue
-        where = f"{MATRIX} {r[0][:40]}"
+        where = f"{matrix_path} {r[0][:40]}"
         for ref in refs(r[2]):
-            if is_cargo_test_ref(ref):
-                check_ref(ref, index, results, where, use_logs)
+            if is_executed_test_ref(ref):
+                check_ref(ref, index, results, where, use_logs, frontend)
             else:
-                fail(f"{where}: negative test {ref!r} is not a canonical cargo test name")
+                fail(f"{where}: negative test {ref!r} is not a canonical cargo or Jest test name")
 
     # §5A: the Evidence column (the last) names the end-to-end tests. A
     # ticked row needs one, and every name there must be a test that exists
@@ -597,14 +975,14 @@ def main():
         if r[0] == "Done" or set(r[0]) <= set("-"):
             continue
         if r[0] not in ("[ ]", "[x]"):
-            fail(f"{GAPS} §5A: Done cell {r[0]!r} is neither [ ] nor [x]")
+            fail(f"{gaps_path} §5A: Done cell {r[0]!r} is neither [ ] nor [x]")
             continue
-        where = f"{GAPS} §5A {r[1][:40]}"
+        where = f"{gaps_path} §5A {r[1][:40]}"
         named = [t for t in refs(r[-1]) if is_test_ref(t)]
         if r[0] == "[x]" and not named:
             fail(f"{where}: ticked without a named end-to-end test")
         for t in named:
-            check_ref(t, index, results, where, use_logs)
+            check_ref(t, index, results, where, use_logs, frontend)
 
     if errors:
         for e in errors:
@@ -623,11 +1001,14 @@ def main():
                 gaps = re.sub(r"^\| Evidence \|.*$", line, gaps, flags=re.M)
             else:
                 gaps = gaps.replace("| Crates |", line + "\n| Crates |", 1)
-        with open(GAPS, "w", encoding="utf-8") as f:
+        with open(gaps_path, "w", encoding="utf-8") as f:
             f.write(gaps)
         with open(REQ, "w", encoding="utf-8") as f:
             f.write(req)
-    print(f"conformance evidence: {len(rows)} rows, {len(index)} tests indexed, " + ("board logs checked" if use_logs else "static"))
+    print(
+        f"conformance evidence: {len(rows)} rows, {len(index)} cargo and {len(findex)} Jest tests indexed, "
+        + ("logs checked" if use_logs else "static")
+    )
     return 0
 
 

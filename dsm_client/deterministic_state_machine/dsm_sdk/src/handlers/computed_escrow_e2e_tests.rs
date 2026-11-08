@@ -18,7 +18,7 @@ use dsm::types::error::DsmError;
 use serial_test::serial;
 use wildstate_duel::vectors::DuelVectorSetV1;
 use wildstate_duel::creatures::CreatureRecordV1;
-use wildstate_duel::{CreatureStateV1, DuelMatchV1, DuelSetupV1, DuelSide, DuelTurnV1};
+use wildstate_duel::{CreatureStateV1, DuelMatchV1, DuelSetupV2, DuelSide, DuelTurnV1};
 
 use super::node_e2e_tests::{balance, era, pending_position};
 use crate::economic_fixtures::{whole_era, NETWORK};
@@ -48,6 +48,13 @@ pub(super) fn frozen() -> (DuelMatchV1, Vec<DuelTurnV1>) {
 fn session_key(d: &TestDevice, nonce: &D32) -> Vec<u8> {
     d.enter();
     computed_flow::session_public_key(nonce).expect("a session key")
+}
+
+/// `d`'s start commitment for the match, as its wallet answers it beside its
+/// session key (SoFi Amendment S33).
+fn start_commitment_of(d: &TestDevice, nonce: &D32) -> D32 {
+    d.enter();
+    computed_flow::start_commitment(nonce).expect("a start commitment")
 }
 
 /// `d` issues the creatures of its side of the frozen match, `of`, as its
@@ -123,14 +130,34 @@ pub(super) async fn issue_team(
 }
 
 /// The setup of a match between `a` and `b` fielding `team_a` and `team_b`
-/// in the frozen match, each side naming its wallet's identity and its
-/// session key, and the tiebreak seed both keys and the nonce derive.
+/// in the frozen match, each side naming its wallet's identity, its session
+/// key and its wallet's start commitment for the match.
 pub(super) fn setup_with_keys(
     a: &TestDevice,
     b: &TestDevice,
     nonce: D32,
     (key_a, team_a): (&[u8], &[CreatureStateV1]),
     (key_b, team_b): (&[u8], &[CreatureStateV1]),
+) -> Vec<u8> {
+    let commit_a = start_commitment_of(a, &nonce);
+    let commit_b = start_commitment_of(b, &nonce);
+    setup_with_answers(
+        a,
+        b,
+        nonce,
+        (key_a, &commit_a, team_a),
+        (key_b, &commit_b, team_b),
+    )
+}
+
+/// [`setup_with_keys`] with each side's session key and start commitment as
+/// its wallet answered them.
+pub(super) fn setup_with_answers(
+    a: &TestDevice,
+    b: &TestDevice,
+    nonce: D32,
+    (key_a, commit_a, team_a): (&[u8], &D32, &[CreatureStateV1]),
+    (key_b, commit_b, team_b): (&[u8], &D32, &[CreatureStateV1]),
 ) -> Vec<u8> {
     let (body, _) = frozen();
     let side = |of: &DuelSide, d: &TestDevice, key: &[u8], team: &[CreatureStateV1]| DuelSide {
@@ -142,12 +169,16 @@ pub(super) fn setup_with_keys(
     };
     let side_a = side(body.a(), a, key_a, team_a);
     let side_b = side(body.b(), b, key_b, team_b);
-    let seed = wildstate_duel::tiebreak_seed(&nonce, key_a, key_b);
-    let body = DuelMatchV1::new(nonce, body.turn_cap(), seed, side_a, side_b).expect("a match");
-    DuelSetupV1 {
-        program: wildstate_duel::program_hash(),
-        body,
-    }
+    DuelSetupV2::new(
+        wildstate_duel::program_hash(),
+        nonce,
+        body.turn_cap(),
+        *commit_a,
+        *commit_b,
+        side_a,
+        side_b,
+    )
+    .expect("a setup")
     .encode()
 }
 
@@ -176,7 +207,7 @@ pub(super) fn holdings_of(
     setup: &[u8],
     side: MatchSide,
 ) -> dsm::types::proto::HoldingsProofV1 {
-    let body = DuelSetupV1::decode(setup).expect("a setup").body;
+    let body = DuelSetupV2::decode(setup).expect("a setup");
     let team = match side {
         MatchSide::A => &body.a().team,
         MatchSide::B => &body.b().team,
@@ -212,7 +243,11 @@ async fn lock(
     .await
 }
 
-async fn ready(d: &TestDevice, cell: &D32, theirs: Option<&[u8]>) -> computed_flow::Readied {
+async fn ready(
+    d: &TestDevice,
+    cell: &D32,
+    theirs: Option<(&[u8], &D32)>,
+) -> computed_flow::Readied {
     d.enter();
     computed_flow::ready(&d.router().core_sdk, &set(), cell, theirs)
         .await
@@ -264,14 +299,17 @@ async fn open_match(p: &Pair, nonce: D32) -> (Match, Vec<u8>) {
 }
 
 /// A readies first; B readies second with A's ready and writes the Start.
-async fn start(p: &Pair, m: &Match) {
+/// Both wallets ready, B second, writing the Start; both sides' start
+/// entropy, as the Start opened it.
+async fn start(p: &Pair, m: &Match) -> ([u8; 32], [u8; 32]) {
     let a = ready(&p.a, &m.cell, None).await;
     assert_eq!(a.view.start, None, "one ready is no Start");
-    let b = ready(&p.b, &m.cell, Some(&a.ready_signature)).await;
+    let b = ready(&p.b, &m.cell, Some((&a.ready_signature, &a.reveal))).await;
     assert_eq!(
         b.view.start,
         Some((StartKind::Start, dsm::route_chain::ChainState::Final))
     );
+    (a.reveal, b.reveal)
 }
 
 /// The transcript as the test's relay carries it between the two wallets.
@@ -454,12 +492,12 @@ async fn the_winner_by_computation_takes_both_stakes() {
         refused.to_string().contains("no Start is final"),
         "{refused}"
     );
-    start(&p, &m).await;
+    let (reveal_a, reveal_b) = start(&p, &m).await;
 
     // Three turns, then B resigns: nothing is written to storage.
     forget_requests(&p);
     let (_, turns) = frozen();
-    let mut state = wildstate_duel::start(&setup).expect("the setup");
+    let mut state = wildstate_duel::start(&setup, &reveal_a, &reveal_b).expect("the setup");
     for turn in turns.iter().take(3) {
         play_turn(&p, &mut relay, turn);
         state = wildstate_duel::step(&state, turn).expect("a turn of a frozen match");
@@ -604,7 +642,7 @@ async fn tampered_entries_are_refused_and_an_equivocation_settles_for_the_honest
     // A's key signs a second head at index 1 outside its wallet, as a cheater
     // holding the key would. B's wallet catches it and keeps the proof.
     p.a.enter();
-    let nonce = DuelSetupV1::decode(&setup).expect("the setup").body;
+    let nonce = DuelSetupV2::decode(&setup).expect("the setup");
     let secret = computed_flow::session_keypair(nonce.match_nonce())
         .expect("A's session key")
         .secret_key()
@@ -707,7 +745,12 @@ async fn a_withdraw_before_the_start_voids_the_match_and_refunds_both() {
     assert_eq!(withdrawn.final_outcome(), Some(b"void".to_vec()));
 
     // B's ready no longer starts anything: the Withdraw holds the cell.
-    let late = ready(&p.b, &m.cell, Some(&a_ready.ready_signature)).await;
+    let late = ready(
+        &p.b,
+        &m.cell,
+        Some((&a_ready.ready_signature, &a_ready.reveal)),
+    )
+    .await;
     assert_eq!(
         late.view.start,
         Some((StartKind::Withdraw, dsm::route_chain::ChainState::Final))
@@ -730,6 +773,442 @@ async fn a_withdraw_before_the_start_voids_the_match_and_refunds_both() {
     collect(&p.b, &m.b_vault).await;
     assert_eq!(balance(&p.a, &era()), m.a_start);
     assert_eq!(balance(&p.b, &era()), m.b_start);
+}
+
+/// Audit SA-24, SoFi Amendment S22: a Release of a computed vault that names
+/// another cell than the vault's `K_match` is Invalid, so the key it lands
+/// at first is skipped, not held: no verdict ever holds at the cell it
+/// names for that vault. B, set up with A's vault, writes a Release of it
+/// on `b-wins` naming the match's start cell at the vault's first key after
+/// A voided the match. A's walk skips that key, and A collects its stake at
+/// the next one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
+    use dsm::sofi::resolve::{AcceptedGeneses, Acquired, ExerciseObjects, WALK_BUDGET};
+    use dsm::sofi::validation::{Invalid, Refusal, VaultTerms};
+    use dsm::sofi::wire::{AttemptEntry, TraderFulfillmentBody, COMPUTED_LABEL_B_WINS};
+    use dsm::sofi::{derive, resolution::WalkOutcome};
+
+    let p = Pair::boot(100, 100).await;
+    let setup = setup(&p, rand::random(), &teams(&p).await);
+    let a_start = balance(&p.a, &era());
+    let stake = whole_era(25);
+    let a = lock(&p.a, &p.b, &setup, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock");
+    lock(&p.b, &p.a, &setup, MatchSide::B, stake, Some(a.vault_id))
+        .await
+        .expect("B's lock");
+    ready(&p.a, &a.match_cell, None).await;
+    p.a.enter();
+    let withdrawn = computed_flow::withdraw(&p.a.router().core_sdk, &set(), &a.match_cell)
+        .await
+        .expect("A withdraws");
+    assert_eq!(withdrawn.final_outcome(), Some(b"void".to_vec()));
+
+    // B's Release of A's vault, drafted as a release is and naming the
+    // match's start cell, exercised at the vault's first key.
+    let set = set();
+    let accepted = AcceptedGeneses::default();
+    p.b.enter();
+    let core = &p.b.router().core_sdk;
+    crate::sdk::sofi_flow::set_up_with(core, &set, &[a.vault_id], &accepted)
+        .await
+        .expect("B sets up with A's vault");
+    let standing = crate::sdk::sofi_flow::standing(core).expect("B's standing");
+    let ctx = standing
+        .context(&set, &accepted)
+        .expect("B as the verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&a.vault_id).expect("A's vault's chain");
+    let (vault, ..) = crate::sdk::sofi_flow::head_of(&set, &verifier, &a.vault_id, chain)
+        .await
+        .expect("A's vault at its head");
+    let VaultTerms::Computed(terms) = &vault.terms else {
+        panic!("A's vault is a computed escrow vault")
+    };
+    let start_cell = computed::start_cell_key(&computed::match_cell_of(terms));
+    let setup_ref = crate::sdk::sofi_flow::own_setup_ref(
+        &set,
+        &standing.genesis,
+        &standing.device_id,
+        &a.vault_id,
+    )
+    .await
+    .expect("B's setup with A's vault");
+    let base = crate::sdk::sofi_flow::relationship_base(&standing, &a.vault_id)
+        .expect("B's relationship with A's vault");
+    let retired =
+        dsm::sofi::validation::retire_vault_post(&vault.state).expect("the vault retires");
+    let dlv = crate::sdk::sofi_flow::vault_core(&standing, &vault, &retired, base).expect("V°");
+    let trader = crate::sdk::sofi_flow::trader_core(
+        &standing,
+        &[(*terms.token(), vault.state.reserve_a, 0)],
+        &[(a.vault_id, base)],
+    )
+    .expect("T°");
+    let public_key = crate::sdk::signing_authority::current_public_key().expect("B's key");
+    let trader_ctx = crate::sdk::sofi_flow::context(&standing, &set, &public_key, trader)
+        .expect("B's trader context");
+    let draft = crate::sdk::sofi_sdk::draft_release(
+        crate::sdk::sofi_sdk::ReleaseNames {
+            vault_id: a.vault_id,
+            parent_root: vault.root,
+            setup_ref,
+            verdict_cell: start_cell,
+            outcome: COMPUTED_LABEL_B_WINS.to_vec(),
+            amount: vault.state.reserve_a,
+        },
+        dlv,
+        &trader_ctx,
+        &standing.local,
+    )
+    .expect("a release draft");
+    let precommit = draft.precommit().clone();
+    let preimage = draft.preimage().clone();
+    let precommit_signature =
+        crate::sdk::sofi_flow::sign(&derive::precommit_signing_digest(&precommit))
+            .expect("B signs P");
+    let shadows: Vec<D32> = derive::canonical_legs(&preimage)
+        .expect("the legs P(E) derives")
+        .iter()
+        .map(|leg| leg.shadow_core)
+        .collect();
+    let mut witnesses: Vec<D32> =
+        dsm::sofi::conformance::derive_policy_fulfillments(&precommit, &shadows)
+            .expect("the canonical witnesses")
+            .iter()
+            .map(derive::policy_fulfillment_id)
+            .collect();
+    witnesses.sort();
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    let fulfillment = TraderFulfillmentBody::new(
+        derive::precommit_id(&precommit),
+        witnesses,
+        vec![AttemptEntry {
+            vault_id: a.vault_id,
+            attempt: 0,
+        }],
+        dsm::sofi::wire::next_position(precommit.position()).expect("B's next position"),
+        precommit.signature_alg(),
+        precommit.claimant_public_key(),
+        att_a,
+    )
+    .expect("F");
+    let fulfillment_signature =
+        crate::sdk::sofi_flow::sign(&derive::fulfillment_signing_digest(&fulfillment))
+            .expect("B signs F");
+    let mut own = crate::sdk::sofi_advance::own_closure_objects(&set, &precommit, &preimage)
+        .await
+        .expect("B's closure objects");
+    own.extend(draft.carried());
+    let objects = ExerciseObjects {
+        precommit: &precommit,
+        precommit_signature: &precommit_signature,
+        preimage: &preimage,
+        fulfillment: &fulfillment,
+        fulfillment_signature: &fulfillment_signature,
+        own_objects: &own,
+    };
+    let evidence = match verifier
+        .acquire_conformance_evidence(&objects)
+        .expect("acquire")
+    {
+        Acquired::Complete(evidence) => evidence,
+        Acquired::Exhausted(_) => panic!("B's objects are in hand, so none is missing"),
+    };
+    let claim = {
+        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
+        dsm::sofi::signature::sign_resolution_claim(
+            derive::resolution_claim(&precommit, &fulfillment),
+            fulfillment.signature_alg(),
+            &pk,
+            att_a,
+            &sk,
+        )
+        .expect("B signs its own C_q")
+        .encode()
+    };
+    let exercise = dsm::sofi::exercise::exercise_from_objects(&objects, &claim, &evidence)
+        .expect("B's exercise");
+    let recognized = dsm::sofi::exercise::recognize_exercise(&exercise.encode())
+        .expect("one operation's exercise");
+    // Nothing in its own bytes refutes it; the cell it names is its one
+    // defect, and RouteValidation names it.
+    assert_eq!(dsm::sofi::facts::refuted_in_hand(&recognized), None);
+    let route_evidence = match verifier
+        .acquire_evidence(&precommit, &preimage, &own)
+        .expect("acquire")
+    {
+        Acquired::Complete(evidence) => evidence,
+        Acquired::Exhausted(_) => panic!("the route's evidence is public, so none is missing"),
+    };
+    assert_eq!(
+        dsm::sofi::validation::validate(&precommit, &preimage, &route_evidence),
+        Err(Refusal::Invalid(Invalid::VerdictCellIsNotTheTerms))
+    );
+    let written = crate::sdk::sofi_exercise::write_exercise(&set, &exercise, &recognized)
+        .await
+        .expect("any party may write an exercise");
+    assert!(
+        written
+            .iter()
+            .all(|leg| leg.leader == crate::sdk::route_seats::AtLeader::Link),
+        "{written:?}"
+    );
+    let held = verifier
+        .read_attempt_cell(&a.vault_id, &vault.root, 0)
+        .expect("read")
+        .expect("decided");
+    assert_eq!(
+        held.fact(),
+        dsm::route_chain::CellFact::Held {
+            id: *recognized.external_commitment(),
+            state: dsm::route_chain::ChainState::Final,
+        },
+        "B's release holds the vault's first key, final"
+    );
+
+    // A's walk skips that key: the release can never realize.
+    p.a.enter();
+    let standing_a = crate::sdk::sofi_flow::standing(&p.a.router().core_sdk).expect("A's standing");
+    let ctx_a = standing_a
+        .context(&set, &accepted)
+        .expect("A as the verifier");
+    let verifier_a = ctx_a.verifier();
+    let chains = std::collections::BTreeMap::from([(
+        a.vault_id,
+        verifier_a.chain(&a.vault_id).expect("A's vault's chain"),
+    )]);
+    let walked = verifier_a
+        .walk_parent(&chains, &a.vault_id, &vault.root, 0, WALK_BUDGET)
+        .expect("the walk");
+    assert_eq!(walked.not_established, None);
+    assert_eq!(walked.outcome, WalkOutcome::Unresolved { attempt: 1 });
+
+    // And A takes its stake back at the next key.
+    collect(&p.a, &a.vault_id).await;
+    assert_eq!(balance(&p.a, &era()), a_start);
+}
+
+/// SoFi Amendments S22 and S27, MR-SOFI-0396: a wallet locks a stake only
+/// when the setup names, for its side, exactly the session key it derives for
+/// the setup's nonce; only against a counterpart vault that mirrors its own
+/// stake — the same match and the same amount; and it derives no session key
+/// while it is locked. Each refusal moves nothing and keeps no match. A
+/// counterpart's terms are its own, so each mirror check refuses on its own:
+/// a vault that is not the opponent's, one under another `Y` that keeps this
+/// match's table and branches, one in another token, one whose branches do
+/// not mirror, one no longer Active and one holding another amount.
+///
+/// MUTATION CONTROL: dropping the session-key comparison from `create`, or the
+/// commitment or amount check from `mirrors`, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lock_is_refused_for_a_foreign_session_key_or_a_counterpart_that_does_not_mirror() {
+    let p = Pair::boot(100, 100).await;
+    let teams = teams(&p).await;
+    let nonce = [0x71; 32];
+    let stake = whole_era(25);
+    let b_start = balance(&p.b, &era());
+    let refused = |result: Result<Locked, DsmError>, reason: &str| match result {
+        Err(e) => assert!(
+            e.to_string().contains(reason),
+            "refused for another reason: {e}"
+        ),
+        Ok(locked) => panic!("locked where {reason}: {locked:?}"),
+    };
+
+    // A setup naming A's key on B's side.
+    let key_a = session_key(&p.a, &nonce);
+    let foreign = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &teams.0), (&key_a, &teams.1));
+    refused(
+        lock(&p.b, &p.a, &foreign, MatchSide::B, stake, None).await,
+        "session key for this side is not this wallet's",
+    );
+    // A setup naming B's key on B's side but A's start commitment: B never
+    // fixed that entropy, so it could be the one that picks the seed (SA-140).
+    let key_b = session_key(&p.b, &nonce);
+    let commit_a = start_commitment_of(&p.a, &nonce);
+    let borrowed = setup_with_answers(
+        &p.a,
+        &p.b,
+        nonce,
+        (&key_a, &commit_a, &teams.0),
+        (&key_b, &commit_a, &teams.1),
+    );
+    refused(
+        lock(&p.b, &p.a, &borrowed, MatchSide::B, stake, None).await,
+        "start commitment for this side is not this wallet's",
+    );
+
+    // A locks in one match; B's lock in another names A's vault.
+    let first = setup(&p, nonce, &teams);
+    let a = lock(&p.a, &p.b, &first, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock");
+    let second = setup(&p, [0x72; 32], &teams);
+    refused(
+        lock(&p.b, &p.a, &second, MatchSide::B, stake, Some(a.vault_id)).await,
+        "bound to another match",
+    );
+    // A vault of A's whose terms are this match's, table and branches, under
+    // another `Y`: another match cell, however much else it mirrors.
+    let first_read = crate::sdk::outcome_programs::read_setup(&first).expect("the setup");
+    let honest = computed_flow::terms_of(&first, &first_read, era(), (p.a.genesis, p.a.device_id))
+        .expect("A's terms");
+    let other_y = dsm::sofi::wire::ComputedEscrowTerms::new(
+        *honest.token(),
+        [0x5A; 32],
+        honest.table().clone(),
+        honest.branches().to_vec(),
+    )
+    .expect("terms under another Y");
+    p.a.enter();
+    let (elsewhere, _) = computed_flow::create_vault(
+        &p.a.router().core_sdk,
+        &set(),
+        (p.a.genesis, p.a.device_id),
+        &other_y,
+        era(),
+        stake,
+    )
+    .await
+    .expect("A's vault under another Y");
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(elsewhere)).await,
+        "bound to another match",
+    );
+    // And B's stake in A's match is another amount than A's.
+    refused(
+        lock(
+            &p.b,
+            &p.a,
+            &first,
+            MatchSide::B,
+            stake + 1,
+            Some(a.vault_id),
+        )
+        .await,
+        "this stake matches",
+    );
+    assert_eq!(
+        balance(&p.b, &era()),
+        b_start,
+        "no refused lock moved B's ERA"
+    );
+    assert_eq!(pending_position(&p.b), None);
+
+    // A locked wallet derives no session key.
+    p.b.enter();
+    crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
+    match computed_flow::session_public_key(&nonce) {
+        Err(e) => assert!(e.to_string().contains("wallet locked"), "{e}"),
+        Ok(..) => panic!("a locked wallet derived a session key"),
+    }
+    p.b.enter();
+
+    // Each mirror check refuses on its own. A vault of B's own under A's
+    // terms is not the opponent's.
+    let small = whole_era(1);
+    let (bs_own, _) = computed_flow::create_vault(
+        &p.b.router().core_sdk,
+        &set(),
+        (p.b.genesis, p.b.device_id),
+        &honest,
+        era(),
+        small,
+    )
+    .await
+    .expect("B's vault under A's terms");
+    let b_mid = balance(&p.b, &era());
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(bs_own)).await,
+        "not the expected player's",
+    );
+    // A vault of A's whose a-wins branch pays B does not mirror the match.
+    let crossed = dsm::sofi::wire::ComputedEscrowTerms::new(
+        *honest.token(),
+        *honest.external_commitment(),
+        honest.table().clone(),
+        honest
+            .branches()
+            .iter()
+            .map(|branch| match branch.label() {
+                label if label == dsm::sofi::wire::COMPUTED_LABEL_A_WINS => {
+                    dsm::sofi::wire::ComputedBranch::new(label, p.b.genesis, p.b.device_id)
+                }
+                _ => branch.clone(),
+            })
+            .collect(),
+    )
+    .expect("terms whose a-wins pays B");
+    // A vault of A's under this match's terms in another token A holds.
+    let tkn = super::node_e2e_tests::create_token(&p.a, "TKN", 10_000).await;
+    let other_token = dsm::sofi::wire::ComputedEscrowTerms::new(
+        tkn,
+        *honest.external_commitment(),
+        honest.table().clone(),
+        honest.branches().to_vec(),
+    )
+    .expect("terms in another token");
+    p.a.enter();
+    let mut hostile = Vec::new();
+    for (terms, token, amount) in [(&crossed, era(), small), (&other_token, tkn, 1)] {
+        let (vault, _) = computed_flow::create_vault(
+            &p.a.router().core_sdk,
+            &set(),
+            (p.a.genesis, p.a.device_id),
+            terms,
+            token,
+            amount,
+        )
+        .await
+        .expect("A's hostile vault");
+        hostile.push(vault);
+    }
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(hostile[0])).await,
+        "branches are not this match's mirrored",
+    );
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(hostile[1])).await,
+        "bound to another match",
+    );
+    // A stake A withdrew and took back is no longer Active.
+    let third = setup(&p, [0x73; 32], &teams);
+    let withdrawn = lock(&p.a, &p.b, &third, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock in a third match");
+    p.a.enter();
+    let voided = computed_flow::withdraw(&p.a.router().core_sdk, &set(), &withdrawn.match_cell)
+        .await
+        .expect("A withdraws");
+    assert_eq!(voided.final_outcome(), Some(b"void".to_vec()));
+    collect(&p.a, &withdrawn.vault_id).await;
+    refused(
+        lock(
+            &p.b,
+            &p.a,
+            &third,
+            MatchSide::B,
+            stake,
+            Some(withdrawn.vault_id),
+        )
+        .await,
+        "no longer Active",
+    );
+    assert_eq!(
+        balance(&p.b, &era()),
+        b_mid,
+        "no refused lock moved B's ERA"
+    );
+
+    // The mirrored stake locks.
+    lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(a.vault_id))
+        .await
+        .expect("B's mirrored lock");
 }
 
 /// A wallet locks a stake only in a setup whose teams are the creatures as

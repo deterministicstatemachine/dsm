@@ -58,13 +58,14 @@ message RootAdvanceCertificate {
 }
 
 // The exported release package Pkg = (Δ, Π_i, Π_{i+1}, Cert, BranchProof) (§10, Def. 9).
-// The SMT inclusion proofs are attached by the SDK (which owns the device tree). branch_proof
+// The offline-state proofs are attached by the SDK (which owns the device tree): each proves the
+// sender's device root commits its offline account at the release's frontier and counter. branch_proof
 // is an ordered list of prior certificates for forward-only frontier catch-up (Def. 10);
 // empty for a direct-from-frontier release.
 message OfflineRelease {
   TransitionPackage transition               = 1;
-  bytes anchor_smt_proof_before              = 2;  // Π_i
-  bytes anchor_smt_proof_after               = 3;  // Π_{i+1}
+  bytes offline_state_proof_before          = 2;  // Π_i
+  bytes offline_state_proof_after           = 3;  // Π_{i+1}
   RootAdvanceCertificate cert                = 4;
   repeated RootAdvanceCertificate branch_proof = 5;
 }
@@ -82,8 +83,24 @@ enum Op {
   OP_FINALIZE    = 5;  // advance the active frontier
   OP_STATUS      = 6;  // read active state (no state change)
   OP_CANCEL      = 7;  // discard a prepared (uncommitted) record
-  OP_SPI_PASSTHROUGH = 8; // raw-SPI relay bridge: clock spi_payload to TROPIC01, return the MISO
-                          // bytes. NOT an appliance op — the bytes are not interpreted.
+  // 8 was a raw-SPI relay to the chip; the appliance provisions itself and relays nothing.
+  reserved 8;
+  reserved "OP_SPI_PASSTHROUGH";
+  OP_PROVISION   = 9;  // provision an unprovisioned anchor for the device `provision` names, once;
+                       // answered with the STATUS pin material of the anchor it made
+  OP_RECOVER     = 10; // §26 recovery: complete a durable commit if it can, and answer the outcome
+}
+
+// The §26 recovery outcome, as OP_RECOVER answers it.
+enum Recovery {
+  RECOVERY_UNSPECIFIED                  = 0;
+  RECOVERY_ACCEPT                       = 1; // ready; active_root is the frontier h_i
+  RECOVERY_REEMIT_COMMITTED             = 2; // a committed release; active_root is its h_{i+1}
+  RECOVERY_DOWNGRADE_ONLINE             = 3;
+  RECOVERY_FAIL_CLOSED                  = 4;
+  RECOVERY_EXHAUSTED_ONLINE_ONLY        = 5;
+  RECOVERY_ACCEPT_PREPARED_CAN_COMPLETE = 6;
+  RECOVERY_ONLINE_CANCEL_OR_RESOLVE     = 7;
 }
 
 // A request from the (non-secure) host transport into the secure core. The device roots
@@ -95,7 +112,9 @@ message ApplianceRequest {
   bytes receiver_challenge          = 3;  // OP_PREPARE (32, r_R)
   bytes sender_device_root_before   = 4;  // OP_PREPARE (32, R_i)
   bytes sender_device_root_after    = 5;  // OP_PREPARE (32, R_{i+1})
-  bytes spi_payload                 = 6;  // OP_SPI_PASSTHROUGH: raw MOSI bytes to clock to the chip
+  reserved 6;  // the raw-SPI relay's MOSI bytes
+  reserved "spi_payload";
+  Provisioning provision            = 7;  // OP_PROVISION: the device the anchor is bound to
 }
 
 // The secure core's response.
@@ -108,7 +127,8 @@ message ApplianceResponse {
   bytes anchor_bundle          = 6;  // OP_STATUS: B
   uint64 active_anchor_counter = 7;  // OP_STATUS: u_i
   uint32 status                = 8;  // OP_STATUS: 0=Ready 1=Prepared 2=Committed
-  bytes spi_response           = 9;  // OP_SPI_PASSTHROUGH: raw MISO bytes read back from the chip
+  reserved 9;  // the raw-SPI relay's MISO bytes
+  reserved "spi_response";
   // OP_STATUS pin material — the chip self-describing the identity a receiver pins. anchor_bundle
   // (field 6) is B; these complete the AnchorPin so a USB client sources it from one STATUS
   // round-trip and the sender's disclosure carries the REAL pin.
@@ -116,4 +136,50 @@ message ApplianceResponse {
   uint64 pin_enrolled_counter  = 11; // OP_STATUS: H0 (the live provisioned enrollment counter)
   bytes  pin_partition_pk      = 12; // OP_STATUS: partition public key pk_host
   bytes  pin_chip_pk           = 13; // OP_STATUS: resident chip public key pk_chip
+  // OP_STATUS: the public birth commitment S_birth B commits. With fields 6 and 10–13 and the
+  // owner's online key and device id, B recomputes from what the chip discloses.
+  bytes  pin_birth_commitment  = 14;
+  Recovery recovery            = 15; // OP_RECOVER: the outcome (its frontier in active_root)
+}
+
+// The appliance's durable record (§26): everything it holds across a power cut except the
+// chip's own monotonic counter. Written whole at each durable point of the flow; a store holds
+// the last record written in full. The status is the record's kind: none is Ready.
+message DurablePrepared {
+  TransitionPackage transition     = 1;
+  RootAdvanceCertificate cert      = 2;
+}
+
+message DurableCommitted {
+  bytes prev_frontier              = 1;  // 32  h_i
+  bytes next_frontier              = 2;  // 32  h_{i+1}
+  uint64 anchor_counter            = 3;  //     u_i
+  uint64 next_anchor_counter       = 4;  //     u_i+1
+  OfflineRelease release           = 5;
+  bool counter_committed           = 6;  // the counter has moved for this release
+}
+
+message DurableActive {
+  bytes root                       = 1;  // 32  h_i, the active frontier
+  uint64 anchor_counter            = 2;  //     u_i
+  oneof record {
+    DurablePrepared prepared       = 3;
+    DurableCommitted committed     = 4;
+  }
+}
+
+// What the host supplies when it provisions an anchor for its device, once: the identity the
+// anchor's bundle B binds. The chip contributes its own identity and entropy.
+message Provisioning {
+  bytes device_id                  = 1;  // 32  the owner's DSM device id
+  bytes online_id_pk               = 2;  //     the owner's online key pk_on (B binds H(pk_on))
+  bytes policy_hash                = 3;  // 32  the policy the anchor is enrolled under
+  bytes genesis_root               = 4;  // 32  the genesis that seeds the offline frontier h_0
+}
+
+// Everything the anchor keeps across a power cut besides its counter: what it was provisioned
+// for, and its active state. One record, replaced whole.
+message DurableAnchor {
+  Provisioning provisioning        = 1;
+  DurableActive active             = 2;
 }

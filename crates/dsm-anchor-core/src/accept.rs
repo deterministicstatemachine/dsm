@@ -3,12 +3,20 @@
 //! holds. Acceptance verifies **software objects only**: the three signatures over
 //! `M_{i+1}` (`σ^DSM` seed, `σ^chip` resident-chip, `σ^host` partition), the device-SMT
 //! inclusion proofs `Π_i`/`Π_{i+1}`, the forward-only frontier (directly or via a
-//! `BranchProof`), the challenge, the recipient, the checked counter increment, and — at
-//! genesis — the upgrade certificate. **No step reads hardware.** There is no verify-live
+//! `BranchProof`), the challenge, the recipient and the checked counter increment. **No step
+//! reads hardware.** There is no verify-live
 //! and no optional audit path: the verifier has no live-hardware dependency — it verifies
 //! signed identity evidence (`σ^chip`/`σ^host`) against the public keys enrolled in `B`.
 //! Removing the live hardware checks does not remove the chip and host witness requirements
 //! (§ Corollary 1).
+//!
+//! The anchor's identity is pinned on first use (DSM Amendment A24): a receiver pins a
+//! holder's bundle `B`, `anchor_id`, `pk_chip` and `pk_host` when the bundle recomputes for the
+//! holder's online key, device id and policy, and a later release under any other identity
+//! fails step 1, the pin kept. Nothing here can learn of a compromise or revocation of the
+//! anchor found elsewhere: an offline receiver checks the evidence it is handed, and the
+//! answer to a compromised anchor is the holder's online unload. Delivery to this receiver is
+//! the DSM receipt's, which Core checks before the predicate runs.
 //!
 //! Uniqueness is a software property of the DSM device SMT: one parent root `R_i` admits
 //! at most one accepted successor per receiver (the adopted frontier is forward-only, so a
@@ -16,18 +24,28 @@
 //! forks are position collisions exposed by Tripwire on reconciliation, not prevented here.
 
 use crate::root_advance::{
-    anchor_root_advance, anchor_state_leaf, root_advance_message, transition_digest, Certificate,
-    OfflineRelease,
+    anchor_root_advance, root_advance_message, transition_digest, Certificate, OfflineRelease,
 };
-use crate::tropic::{ChipSig, PartitionSig};
+use crate::tropic::{ChipSig, HostSig};
 use crate::util::ct_eq_32;
 
 /// The DSM-state verifier the receiver supplies. The device SMT is the software authority;
 /// these checks are implemented by the dsm layer (SMT inclusion + DSM transition validity,
 /// the latter carrying `σ^DSM`).
 pub trait DsmVerifier {
-    /// The device SMT `root` commits the anchor-state `leaf` (`= H(B ‖ h ‖ u)`) via `proof`.
-    fn verify_smt_leaf(&self, root: &[u8; 32], proof: &[u8], leaf: &[u8; 32]) -> bool;
+    /// The device SMT `root` commits the offline account of `bundle` with its software
+    /// counter at `counter` and its frontier at `frontier`, via `proof`. The account is its
+    /// own SMT whose root is one device-SMT leaf; the counter in it is the authority the
+    /// hardware counter mirrors. The verifier records why a proof is refused;
+    /// the predicate needs only that it was.
+    fn verify_offline_state(
+        &self,
+        root: &[u8; 32],
+        bundle: &[u8; 32],
+        frontier: &[u8; 32],
+        counter: u64,
+        proof: &[u8],
+    ) -> Result<(), OfflineStateRefused>;
     /// The DSM transition (`σ^DSM` + whole-state consumption `R_i → R_{i+1}`) verifies. The
     /// transition is located by its canonical digest `D` plus the frontier pair so the dsm
     /// layer can check it without re-borrowing the wire `Transition`.
@@ -37,11 +55,6 @@ pub trait DsmVerifier {
         prev_root: &[u8; 32],
         next_root: &[u8; 32],
     ) -> bool;
-    /// The transfer delivers the claimed object/value to this receiver.
-    fn delivers_to_receiver(&self, transition_digest: &[u8; 32], recipient: &[u8; 32]) -> bool;
-    /// At genesis (first transfer to this holder) the upgrade certificate binds `I_off` to
-    /// `I_on` under the online identity's own signature.
-    fn verify_upgrade_cert(&self, bundle: &[u8; 32]) -> bool;
 }
 
 /// Receiver-side pinned/supplied context.
@@ -62,11 +75,12 @@ pub struct VerifierContext<'a> {
     pub expected_recipient: &'a [u8; 32],
     /// The authority policy hash bound to the previous state.
     pub expected_policy_hash: &'a [u8; 32],
-    /// `true` iff no firmware-boundary / physical-compromise / policy event invalidates the anchor.
-    pub anchor_uncompromised: bool,
-    /// `true` for the first transfer to this holder (requires the upgrade certificate).
-    pub is_genesis: bool,
 }
+
+/// The DSM verifier refused an offline-state proof: the device root does not
+/// commit the offline account at the frontier and counter named.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct OfflineStateRefused;
 
 /// Which Def. 12 check failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -95,16 +109,10 @@ pub enum AcceptError {
     HostSigInvalid,
     /// The DSM transition (`σ^DSM` + `R_i → R_{i+1}`) is invalid.
     TransitionProofInvalid,
-    /// Transfer not delivered to this receiver.
-    NotDeliveredToReceiver,
     /// `Π_{i+1}` does not prove `R_{i+1}` commits `(B, h_{i+1}, u_i+1)`.
     NextStateUncommitted,
     /// Authority policy hash mismatch.
     PolicyMismatch,
-    /// Genesis upgrade certificate invalid.
-    UpgradeCertInvalid,
-    /// Anchor invalidated by a firmware/physical/policy event.
-    AnchorCompromised,
     /// A BranchProof hop does not chain / verify.
     BranchProofInvalid,
 }
@@ -114,7 +122,7 @@ pub enum AcceptError {
 /// `BranchProof` hop — a hop carries its own `transition_digest`, so no `Δ` is needed. Note
 /// this does NOT recompute `D` from `Δ°`; that Δ°-binding check is done once, on the accepted
 /// release only, in [`accept_offline`].
-fn verify_cert_frontier_and_sigs<C: ChipSig, P: PartitionSig>(
+pub fn verify_cert_frontier_and_sigs<C: ChipSig, P: HostSig>(
     cert: &Certificate,
     pk_chip: &[u8],
     pk_host: &[u8],
@@ -141,7 +149,7 @@ fn verify_cert_frontier_and_sigs<C: ChipSig, P: PartitionSig>(
     if !C::verify(pk_chip, &m, &cert.sigma_chip) {
         return Err(AcceptError::ChipSigInvalid);
     }
-    if !P::part_verify(pk_host, &m, &cert.sigma_host) {
+    if !P::verify(pk_host, &m, &cert.sigma_host) {
         return Err(AcceptError::HostSigInvalid);
     }
     Ok(())
@@ -160,7 +168,7 @@ pub fn accept_offline<D, C, P>(
 where
     D: DsmVerifier,
     C: ChipSig,
-    P: PartitionSig,
+    P: HostSig,
 {
     let t = rel.transition.as_transition();
     let cert = &rel.cert;
@@ -196,15 +204,15 @@ where
         }
     }
 
-    // (3) Π_i proves R_i commits the anchor-state leaf (B, h_i, u_i).
-    let leaf_i = anchor_state_leaf(ctx.pinned_bundle, &cert.prev_frontier, cert.anchor_counter);
-    if !dsm.verify_smt_leaf(
+    // (3) Π_i proves R_i commits the offline account of B at (h_i, u_i).
+    dsm.verify_offline_state(
         &cert.sender_device_root_before,
-        &rel.anchor_smt_proof_before,
-        &leaf_i,
-    ) {
-        return Err(AcceptError::PrevStateUncommitted);
-    }
+        ctx.pinned_bundle,
+        &cert.prev_frontier,
+        cert.anchor_counter,
+        &rel.offline_state_proof_before,
+    )
+    .map_err(|OfflineStateRefused| AcceptError::PrevStateUncommitted)?;
 
     // (4) u_{i+1} = u_i + 1 (checked).
     if t.anchor_counter.checked_add(1) != Some(t.next_anchor_counter) {
@@ -240,38 +248,19 @@ where
         return Err(AcceptError::TransitionProofInvalid);
     }
 
-    // (13) Delivered to this receiver.
-    if !dsm.delivers_to_receiver(&cert.transition_digest, &cert.recipient) {
-        return Err(AcceptError::NotDeliveredToReceiver);
-    }
-
-    // (14) Π_{i+1} proves R_{i+1} commits (B, h_{i+1}, u_i+1).
-    let leaf_next = anchor_state_leaf(
+    // (14) Π_{i+1} proves R_{i+1} commits the offline account of B at (h_{i+1}, u_i+1).
+    dsm.verify_offline_state(
+        &cert.sender_device_root_after,
         ctx.pinned_bundle,
         &cert.next_frontier,
         cert.next_anchor_counter,
-    );
-    if !dsm.verify_smt_leaf(
-        &cert.sender_device_root_after,
-        &rel.anchor_smt_proof_after,
-        &leaf_next,
-    ) {
-        return Err(AcceptError::NextStateUncommitted);
-    }
+        &rel.offline_state_proof_after,
+    )
+    .map_err(|OfflineStateRefused| AcceptError::NextStateUncommitted)?;
 
     // (15) Authority policy hash matches the previous state.
     if !ct_eq_32(t.authority_policy_hash, ctx.expected_policy_hash) {
         return Err(AcceptError::PolicyMismatch);
-    }
-
-    // (16) Genesis adoption: the upgrade certificate binds I_off to I_on.
-    if ctx.is_genesis && !dsm.verify_upgrade_cert(ctx.pinned_bundle) {
-        return Err(AcceptError::UpgradeCertInvalid);
-    }
-
-    // (17) No firmware-boundary / physical-compromise / policy event.
-    if !ctx.anchor_uncompromised {
-        return Err(AcceptError::AnchorCompromised);
     }
 
     Ok(())
@@ -283,77 +272,132 @@ mod tests {
     use super::*;
     use crate::hash::h;
     use crate::root_advance::OwnedTransition;
+    use crate::tropic::{PartitionError, PartitionSig};
     use alloc::vec::Vec;
 
-    // --- deterministic mock signature schemes (host-only; no chip touched) ---
+    // --- the real signature schemes: the receiver verifies what the appliance signs ---
 
-    /// Mock resident-chip signature: `σ^chip = H("mock/chip" ‖ pk_chip ‖ M)`.
-    struct MockChip;
-    impl ChipSig for MockChip {
+    /// The resident chip key, Ed25519 as on the TROPIC01: `σ^chip` verifies only under the
+    /// pinned `pk_chip`, and only its holder can sign.
+    struct Ed25519Chip;
+    impl ChipSig for Ed25519Chip {
         fn verify(pk_chip: &[u8], message: &[u8; 32], sig: &[u8]) -> bool {
-            sig == h("mock/chip", &[pk_chip, message])
+            use ed25519_dalek::Verifier;
+            let key: Result<[u8; 32], _> = pk_chip.try_into();
+            let signature: Result<[u8; 64], _> = sig.try_into();
+            matches!(
+                (key, signature),
+                (Ok(key), Ok(signature)) if matches!(
+                    ed25519_dalek::VerifyingKey::from_bytes(&key).map(|vk| vk
+                        .verify(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                    Ok(Ok(()))
+                )
+            )
         }
     }
-    fn chip_sign(pk_chip: &[u8], m: &[u8; 32]) -> Vec<u8> {
-        h("mock/chip", &[pk_chip, m]).to_vec()
+    fn chip_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[0x33; 32])
+    }
+    fn pk_chip() -> &'static [u8] {
+        static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| chip_key().verifying_key().to_bytes())
+    }
+    fn chip_sign(m: &[u8; 32]) -> Vec<u8> {
+        use ed25519_dalek::Signer;
+        chip_key().sign(m).to_bytes().to_vec()
     }
 
-    /// Mock partition (`σ^host`) scheme: keygen derives `pk = H("mock/hostpk" ‖ seed)`,
-    /// sign/verify use `H("mock/host" ‖ pk ‖ M)`.
-    struct MockHost;
-    impl PartitionSig for MockHost {
-        fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-            let pk = h("mock/hostpk", &[seed]).to_vec();
-            (seed.to_vec(), pk)
+    /// The partition key, BLAKE3-SPHINCS+ SPX128f as on the RP2350: `σ^host` verifies only
+    /// under the pinned `pk_host`.
+    const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX128f;
+    struct SphincsHost;
+    impl PartitionSig for SphincsHost {
+        fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+            let kp = dsm_sphincs::generate_keypair_from_seed(PARTITION, seed)
+                .map_err(partition_error)?;
+            Ok((kp.secret_key.clone(), kp.public_key.clone()))
         }
-        fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
-            let pk = h("mock/hostpk", &[sk]).to_vec();
-            h("mock/host", &[&pk, digest]).to_vec()
+        fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+            dsm_sphincs::sign(PARTITION, sk, digest).map_err(partition_error)
         }
         fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
-            sig == h("mock/host", &[pk, digest])
+            matches!(dsm_sphincs::verify(PARTITION, pk, digest, sig), Ok(valid) if valid)
         }
     }
-    fn host_sign(pk_host: &[u8], m: &[u8; 32]) -> Vec<u8> {
-        h("mock/host", &[pk_host, m]).to_vec()
-    }
-
-    /// Mock DSM verifier: every software check configurable; SMT/transition true by default.
-    struct MockDsm {
-        transition_ok: bool,
-        delivery_ok: bool,
-        smt_ok: bool,
-        upgrade_ok: bool,
-    }
-    impl Default for MockDsm {
-        fn default() -> Self {
-            Self {
-                transition_ok: true,
-                delivery_ok: true,
-                smt_ok: true,
-                upgrade_ok: true,
+    /// The SPHINCS+ failure, as the partition reports it.
+    fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
+        match e {
+            dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
+                PartitionError::SecretKey
+            }
+            dsm_sphincs::Error::Crypto(
+                dsm_sphincs::CryptoFailure::EmptySigningMessage
+                | dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
+            ) => PartitionError::Message,
+            dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
+                PartitionError::SelfCheck
             }
         }
     }
-    impl DsmVerifier for MockDsm {
-        fn verify_smt_leaf(&self, _r: &[u8; 32], _p: &[u8], _l: &[u8; 32]) -> bool {
-            self.smt_ok
+    fn host_keys() -> &'static (Vec<u8>, Vec<u8>) {
+        static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        KEYS.get_or_init(|| match SphincsHost::part_keygen(&[0x44; 32]) {
+            Ok(keys) => keys,
+            Err(e) => panic!("the partition key: {e:?}"),
+        })
+    }
+    fn pk_host() -> &'static [u8] {
+        &host_keys().1
+    }
+    fn host_sign(m: &[u8; 32]) -> Vec<u8> {
+        match SphincsHost::part_sign(&host_keys().0, m) {
+            Ok(sig) => sig,
+            Err(e) => panic!("the partition signs: {e:?}"),
+        }
+    }
+
+    /// Which of the dsm layer's checks the test has it refuse: the predicate's handling of the
+    /// SMT and transition answers, which the dsm layer computes and this crate only consumes.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Refuse {
+        Nothing,
+        OfflineState,
+        /// The offline state at this counter only: `Π_{i+1}` when it names `u_i + 1`.
+        OfflineStateAt(u64),
+        Transition,
+    }
+    struct DsmChecks {
+        refuse: Refuse,
+    }
+    impl Default for DsmChecks {
+        fn default() -> Self {
+            Self {
+                refuse: Refuse::Nothing,
+            }
+        }
+    }
+    impl DsmVerifier for DsmChecks {
+        fn verify_offline_state(
+            &self,
+            _r: &[u8; 32],
+            _b: &[u8; 32],
+            _f: &[u8; 32],
+            u: u64,
+            _p: &[u8],
+        ) -> Result<(), OfflineStateRefused> {
+            match self.refuse {
+                Refuse::OfflineState => Err(OfflineStateRefused),
+                Refuse::OfflineStateAt(counter) if counter == u => Err(OfflineStateRefused),
+                Refuse::OfflineStateAt(..) | Refuse::Nothing | Refuse::Transition => Ok(()),
+            }
         }
         fn verify_transition(&self, _d: &[u8; 32], _p: &[u8; 32], _n: &[u8; 32]) -> bool {
-            self.transition_ok
-        }
-        fn delivers_to_receiver(&self, _d: &[u8; 32], _r: &[u8; 32]) -> bool {
-            self.delivery_ok
-        }
-        fn verify_upgrade_cert(&self, _b: &[u8; 32]) -> bool {
-            self.upgrade_ok
+            self.refuse != Refuse::Transition
         }
     }
 
     const B: [u8; 32] = [0x11; 32];
     const ANCHOR_ID: [u8; 32] = [0x22; 32];
-    const PK_CHIP: [u8; 32] = [0x33; 32];
-    const PK_HOST: [u8; 32] = [0x44; 32];
     const RECIPIENT: [u8; 32] = [0x55; 32];
     const R_CHALLENGE: [u8; 32] = [0x66; 32];
     const POLICY: [u8; 32] = [0x77; 32];
@@ -414,16 +458,16 @@ mod tests {
             transition_digest: d,
             root_advance_message: m,
             anchor_id: ANCHOR_ID,
-            sigma_chip: chip_sign(&PK_CHIP, &m),
-            sigma_host: host_sign(&PK_HOST, &m),
+            sigma_chip: chip_sign(&m),
+            sigma_host: host_sign(&m),
             receiver_challenge: R_CHALLENGE,
             recipient: RECIPIENT,
         };
 
         OfflineRelease {
             transition: owned,
-            anchor_smt_proof_before: alloc::vec![0xCC],
-            anchor_smt_proof_after: alloc::vec![0xDD],
+            offline_state_proof_before: alloc::vec![0xCC],
+            offline_state_proof_after: alloc::vec![0xDD],
             cert,
             branch_proof: Vec::new(),
         }
@@ -433,14 +477,12 @@ mod tests {
         VerifierContext {
             pinned_bundle: &B,
             pinned_anchor_id: &ANCHOR_ID,
-            pinned_pk_chip: &PK_CHIP,
-            pinned_pk_host: &PK_HOST,
+            pinned_pk_chip: pk_chip(),
+            pinned_pk_host: pk_host(),
             accepted_frontier,
             expected_receiver_challenge: &R_CHALLENGE,
             expected_recipient: &RECIPIENT,
             expected_policy_hash: &POLICY,
-            anchor_uncompromised: true,
-            is_genesis: false,
         }
     }
 
@@ -525,7 +567,7 @@ mod tests {
         let mut rel = valid_release(H0, 0);
         rel.cert.root_advance_message[0] ^= 1;
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&H0), &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
             Err(AcceptError::MessageMismatch)
         );
     }
@@ -535,7 +577,7 @@ mod tests {
     fn accepts_valid_release() {
         let rel = valid_release(H0, 0);
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&H0), &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
             Ok(())
         );
     }
@@ -544,13 +586,42 @@ mod tests {
     #[test]
     fn rejects_missing_dsm_signature() {
         let rel = valid_release(H0, 0);
-        let dsm = MockDsm {
-            transition_ok: false,
-            ..MockDsm::default()
+        let dsm = DsmChecks {
+            refuse: Refuse::Transition,
         };
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&H0), &dsm),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &dsm),
             Err(AcceptError::TransitionProofInvalid)
+        );
+    }
+
+    // (3b) The device SMT does not commit the holder's offline account before the advance.
+    #[test]
+    fn rejects_an_uncommitted_offline_state() {
+        let rel = valid_release(H0, 0);
+        let dsm = DsmChecks {
+            refuse: Refuse::OfflineState,
+        };
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &dsm),
+            Err(AcceptError::PrevStateUncommitted)
+        );
+    }
+
+    // (4a) A chip signature by any key but the pinned chip's is refused: a signature a holder
+    // of only the public key could make does not verify.
+    #[test]
+    fn rejects_a_chip_signature_by_another_key() {
+        use ed25519_dalek::Signer;
+        let mut rel = valid_release(H0, 0);
+        let other = ed25519_dalek::SigningKey::from_bytes(&[0x34; 32]);
+        rel.cert.sigma_chip = other
+            .sign(&rel.cert.root_advance_message)
+            .to_bytes()
+            .to_vec();
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
+            Err(AcceptError::ChipSigInvalid)
         );
     }
 
@@ -560,7 +631,7 @@ mod tests {
         let mut rel = valid_release(H0, 0);
         rel.cert.sigma_chip.clear();
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&H0), &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
             Err(AcceptError::ChipSigInvalid)
         );
     }
@@ -571,7 +642,7 @@ mod tests {
         let mut rel = valid_release(H0, 0);
         rel.cert.sigma_host.clear();
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&H0), &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
             Err(AcceptError::HostSigInvalid)
         );
     }
@@ -585,14 +656,14 @@ mod tests {
         let mut c = ctx(&H0);
         c.pinned_pk_chip = &wrong;
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &c, &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &c, &DsmChecks::default()),
             Err(AcceptError::ChipSigInvalid)
         );
 
         let mut c = ctx(&H0);
         c.pinned_pk_host = &wrong;
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &c, &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &c, &DsmChecks::default()),
             Err(AcceptError::HostSigInvalid)
         );
     }
@@ -619,10 +690,10 @@ mod tests {
             &rel.cert.receiver_challenge,
         );
         rel.cert.root_advance_message = m;
-        rel.cert.sigma_chip = chip_sign(&PK_CHIP, &m);
-        rel.cert.sigma_host = host_sign(&PK_HOST, &m);
+        rel.cert.sigma_chip = chip_sign(&m);
+        rel.cert.sigma_host = host_sign(&m);
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&H0), &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
             Err(AcceptError::BadNextAnchorCounter)
         );
     }
@@ -635,7 +706,7 @@ mod tests {
         let mut c = ctx(&H0);
         c.expected_receiver_challenge = &other;
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &c, &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &c, &DsmChecks::default()),
             Err(AcceptError::ChallengeMismatch)
         );
     }
@@ -648,7 +719,7 @@ mod tests {
         let mut c = ctx(&H0);
         c.expected_recipient = &other;
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &c, &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &c, &DsmChecks::default()),
             Err(AcceptError::RecipientMismatch)
         );
     }
@@ -659,25 +730,21 @@ mod tests {
         let rel = valid_release(H0, 0);
         let already_consumed = [0xF0; 32];
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(
                 &rel,
                 &ctx(&already_consumed),
-                &MockDsm::default()
+                &DsmChecks::default()
             ),
             Err(AcceptError::FrontierNotAccepted)
         );
     }
 
-    // (11) Stale frontier WITH a valid BranchProof chaining adopted → cert.prev_frontier.
-    #[test]
-    fn accepts_stale_frontier_with_branch_proof() {
-        // Receiver adopted `old`. A prior hop advanced old --(u:0→1)--> h_bridge; the current
-        // release then advances from h_bridge (u:1→2). The branch proof bridges the gap.
-        let old = [0xF1; 32];
-        let d_hop = h("mock/hop-digest", &[&old]);
+    /// A prior advance from `old` (u:0→1), signed by the pinned chip and host.
+    fn bridge_from(old: [u8; 32]) -> Certificate {
+        let d_hop = h("anchor-test/hop-digest", &[&old]);
         let h_bridge = anchor_root_advance(&old, &d_hop);
-        let r_b = h("mock/hop-rb", &[&old]);
-        let r_a = h("mock/hop-ra", &[&h_bridge]);
+        let r_b = h("anchor-test/hop-rb", &[&old]);
+        let r_a = h("anchor-test/hop-ra", &[&h_bridge]);
         let m_hop = root_advance_message(
             &B,
             &r_b,
@@ -690,7 +757,7 @@ mod tests {
             &RECIPIENT,
             &R_CHALLENGE,
         );
-        let hop = Certificate {
+        Certificate {
             anchor_bundle: B,
             sender_device_root_before: r_b,
             sender_device_root_after: r_a,
@@ -701,16 +768,134 @@ mod tests {
             transition_digest: d_hop,
             root_advance_message: m_hop,
             anchor_id: ANCHOR_ID,
-            sigma_chip: chip_sign(&PK_CHIP, &m_hop),
-            sigma_host: host_sign(&PK_HOST, &m_hop),
+            sigma_chip: chip_sign(&m_hop),
+            sigma_host: host_sign(&m_hop),
             receiver_challenge: R_CHALLENGE,
             recipient: RECIPIENT,
+        }
+    }
+
+    // (1) Δ, Cert, bundle and anchor must describe one advance: each field bent alone is
+    // refused here, before anything is recomputed from it.
+    #[test]
+    fn rejects_a_release_whose_parts_describe_different_advances() {
+        let bends: [fn(&mut OfflineRelease); 7] = [
+            |rel| rel.cert.prev_frontier = [0xA1; 32],
+            |rel| rel.cert.next_frontier = [0xA2; 32],
+            |rel| rel.cert.anchor_counter += 1,
+            |rel| rel.cert.next_anchor_counter += 1,
+            |rel| rel.cert.anchor_bundle = [0xA3; 32],
+            |rel| rel.cert.anchor_id = [0xA4; 32],
+            |rel| rel.cert.recipient = [0xA5; 32],
+        ];
+        for (field, bend) in bends.iter().enumerate() {
+            let mut rel = valid_release(H0, 0);
+            bend(&mut rel);
+            assert_eq!(
+                accept_offline::<_, Ed25519Chip, SphincsHost>(
+                    &rel,
+                    &ctx(&H0),
+                    &DsmChecks::default()
+                ),
+                Err(AcceptError::NonCanonical),
+                "field {field}"
+            );
+        }
+    }
+
+    // (7) A transition other than the one the certificate's digest commits.
+    #[test]
+    fn rejects_a_digest_that_does_not_recompute_from_its_transition() {
+        let mut rel = valid_release(H0, 0);
+        rel.transition.payload_hash = [0xA6; 32];
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
+            Err(AcceptError::DigestMismatch)
+        );
+    }
+
+    // (8) A successor frontier other than H(h_i ‖ D), named alike by Δ and the certificate:
+    // Δ° excludes it, so only the recompute catches it.
+    #[test]
+    fn rejects_a_next_frontier_that_does_not_recompute() {
+        let mut rel = valid_release(H0, 0);
+        let invented = [0xA7; 32];
+        rel.transition.next_root = invented;
+        rel.cert.next_frontier = invented;
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
+            Err(AcceptError::FrontierMismatch)
+        );
+    }
+
+    // (14) The device SMT commits the account before the advance, but not after it.
+    #[test]
+    fn rejects_an_uncommitted_successor_offline_state() {
+        let rel = valid_release(H0, 0);
+        let dsm = DsmChecks {
+            refuse: Refuse::OfflineStateAt(rel.cert.next_anchor_counter),
         };
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &dsm),
+            Err(AcceptError::NextStateUncommitted)
+        );
+    }
+
+    // (15) A release under another authority policy than the previous state's.
+    #[test]
+    fn rejects_another_authority_policy() {
+        let rel = valid_release(H0, 0);
+        let other = [0xA8; 32];
+        let mut c = ctx(&H0);
+        c.expected_policy_hash = &other;
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &c, &DsmChecks::default()),
+            Err(AcceptError::PolicyMismatch)
+        );
+    }
+
+    // (2) A BranchProof hop that starts anywhere but the adopted frontier, or whose signature
+    // is not the pinned chip's, bridges nothing.
+    #[test]
+    fn rejects_a_branch_proof_hop_that_does_not_chain_or_verify() {
+        use ed25519_dalek::Signer;
+        let old = [0xF1; 32];
+        let hop = bridge_from(old);
+        let mut rel = valid_release(hop.next_frontier, 1);
+
+        rel.branch_proof = alloc::vec![bridge_from([0xF2; 32])];
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&old), &DsmChecks::default()),
+            Err(AcceptError::BranchProofInvalid),
+            "a hop from another frontier"
+        );
+
+        let mut forged = hop.clone();
+        forged.sigma_chip = ed25519_dalek::SigningKey::from_bytes(&[0x34; 32])
+            .sign(&forged.root_advance_message)
+            .to_bytes()
+            .to_vec();
+        rel.branch_proof = alloc::vec![forged];
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&old), &DsmChecks::default()),
+            Err(AcceptError::BranchProofInvalid),
+            "a hop another key signed"
+        );
+    }
+
+    // (11) Stale frontier WITH a valid BranchProof chaining adopted → cert.prev_frontier.
+    #[test]
+    fn accepts_stale_frontier_with_branch_proof() {
+        // Receiver adopted `old`. A prior hop advanced old --(u:0→1)--> h_bridge; the current
+        // release then advances from h_bridge (u:1→2). The branch proof bridges the gap.
+        let old = [0xF1; 32];
+        let hop = bridge_from(old);
+        let h_bridge = hop.next_frontier;
 
         let mut rel = valid_release(h_bridge, 1); // current advance starts at the bridged frontier
         rel.branch_proof = alloc::vec![hop];
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&old), &MockDsm::default()),
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&old), &DsmChecks::default()),
             Ok(())
         );
     }
@@ -721,9 +906,9 @@ mod tests {
     fn replay_idempotence() {
         let rel = valid_release(H0, 0);
         let c = ctx(&H0);
-        let dsm = MockDsm::default();
-        let first = accept_offline::<_, MockChip, MockHost>(&rel, &c, &dsm);
-        let second = accept_offline::<_, MockChip, MockHost>(&rel, &c, &dsm);
+        let dsm = DsmChecks::default();
+        let first = accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &c, &dsm);
+        let second = accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &c, &dsm);
         assert_eq!(first, Ok(()));
         assert_eq!(second, Ok(()));
     }

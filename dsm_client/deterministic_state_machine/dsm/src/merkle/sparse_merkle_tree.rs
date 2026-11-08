@@ -616,7 +616,12 @@ impl SmtInclusionProof {
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(&data[..32]);
-        let has_value = data[32] != 0;
+        // One byte, 0 or 1: any other value would be a second encoding of
+        // the same proof.
+        let has_value = match data[32] {
+            flag @ (0 | 1) => flag == 1,
+            _ => return None,
+        };
         let mut offset = 33;
         let value = if has_value {
             if data.len() < offset + 32 {
@@ -682,6 +687,35 @@ mod tests {
                 SmtInclusionProof::from_bytes(&bytes).is_none(),
                 "count {count:#x}"
             );
+        }
+    }
+
+    /// The value flag is one byte, 0 or 1. Any other byte used to read as
+    /// "present", a second encoding of the same proof.
+    #[test]
+    fn an_inclusion_proof_whose_value_flag_is_not_0_or_1_is_refused() {
+        for value in [Some([6u8; 32]), None] {
+            let proof = SmtInclusionProof {
+                key: [5u8; 32],
+                value,
+                siblings: vec![[7u8; 32]; 3],
+            };
+            let bytes = proof.to_bytes();
+            let decoded = SmtInclusionProof::from_bytes(&bytes).expect("the canonical encoding");
+            assert_eq!(decoded.value, value);
+            for flag in [2u8, 0x80, 0xFF] {
+                let mut other = bytes[..32].to_vec();
+                other.push(flag);
+                if value.is_none() {
+                    // Room for a value, so only the flag can refuse it.
+                    other.extend_from_slice(&[6u8; 32]);
+                }
+                other.extend_from_slice(&bytes[33..]);
+                assert!(
+                    SmtInclusionProof::from_bytes(&other).is_none(),
+                    "flag {flag:#x}"
+                );
+            }
         }
     }
 

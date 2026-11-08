@@ -30,8 +30,9 @@ pub(crate) async fn republish_unpublished_artifacts() -> Result<u32, String> {
 }
 
 /// Shared-lineage objects owed per pass (SoFi Amendment S23). A reader that
-/// walked a long history owes a hint per generation it found unhinted; they
-/// are put at once, apart from the admission evidence the main pass bounds.
+/// walked a long history owes a hint per generation whose own hint it did
+/// not find; they are put at once, apart from the admission evidence the
+/// main pass bounds.
 pub(crate) const LINEAGE_OBJECTS_PER_POLL: u32 = 64;
 
 /// Put the shared-lineage objects this device owes and read them back, then

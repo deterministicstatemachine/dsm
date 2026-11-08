@@ -1,0 +1,9 @@
+# Never commit signing keys, sealed secrets, signed images, or OTP dumps. The scripts keep them
+# outside the repository; these catch a copy made by hand.
+bootkey.pem
+bootkey-otp.json
+host-secret.*
+mu-enrolled.bin
+signed.elf
+otp-before.*
+otp-*.json

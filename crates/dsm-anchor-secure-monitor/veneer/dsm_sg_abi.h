@@ -7,27 +7,29 @@
 #define DSM_SG_ABI_H
 
 // Fixed request/response mailbox: exactly ONE slot in Non-secure SRAM (data plane behind the SG).
-#define DSM_SG_SLOT_INDEX      0u          // the only valid slot in v1
-#define DSM_SG_SLOT_MAX_LEN    4096u       // bounded request/response length; larger => rejected
+// ABI v2: a frame up to DSM_SG_FRAME_MAX_LEN moves through the slot in parts. The slot header names
+// each part's offset and the whole frame's length; the Secure handler assembles a request frame from
+// its parts and serves the response frame in parts. Nothing is cut short.
+#define DSM_SG_SLOT_INDEX      0u          // the only valid slot
+#define DSM_SG_SLOT_MAX_LEN    4096u       // the largest part
+#define DSM_SG_FRAME_MAX_LEN   65536u      // the largest frame (anchor-core MAX_FRAME_LEN)
+#define DSM_SG_ABI_VERSION     2u
 
-// Request opcodes (published by the Non-secure app in the slot header; validated from the Secure
-// copy). The narrow state machine — no generic sign op exists.
-#define DSM_SG_OP_STATUS       1u
-#define DSM_SG_OP_PREPARE      2u
-#define DSM_SG_OP_COMMIT       3u
-#define DSM_SG_OP_EMIT         4u
-#define DSM_SG_OP_FINALIZE     5u
-#define DSM_SG_OP_RECOVER      6u
+// Transport opcodes (published by the Non-secure app in the slot header).
+#define DSM_SG_OP_KEEPALIVE      1u        // feed the watchdog; touches no frame
+#define DSM_SG_OP_REQUEST_PART   2u        // one part of a request frame
+#define DSM_SG_OP_RESPONSE_PART  3u        // one part of the response frame, from `offset`
 
 // dsm_secure_dispatch return status.
 #define DSM_SG_OK              0u
 #define DSM_SG_ERR_SLOT        1u          // bad slot index
-#define DSM_SG_ERR_SEQ         2u          // stale / replayed sequence number
-#define DSM_SG_ERR_SIZE        3u          // oversized / misaligned request
+#define DSM_SG_ERR_SEQ         2u          // stale / replayed sequence number, or a part out of order
+#define DSM_SG_ERR_SIZE        3u          // a part past its frame, or a frame past the largest frame
 #define DSM_SG_ERR_OPCODE      4u          // unknown opcode
 #define DSM_SG_ERR_ENCODING    5u          // canonical encoding invalid (from the Secure copy)
-#define DSM_SG_ERR_STATE       6u          // wrong appliance state for this op
+#define DSM_SG_ERR_STATE       6u          // wrong mailbox or ABI state for this op
 #define DSM_SG_ERR_MEASUREMENT 7u          // measurement_ok == false: fail closed, no signing
 #define DSM_SG_ERR_INTERNAL    8u
+#define DSM_SG_MORE            9u          // request part taken; the frame is not complete
 
 #endif // DSM_SG_ABI_H

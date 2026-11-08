@@ -220,10 +220,10 @@ echo "  ✓ one construction path, inside decode-and-verify"
 #    from an accepted genesis by Core-recomputed post states. None of these
 #    has a field visible outside the crate (`pub(crate)` is allowed: the
 #    ladder's own tests state facts), and the advance takes no `Resolution`
-#    argument — a caller cannot name the verdict. The chain's one memo
-#    puncture, `VaultChain::from_recorded_generations`, is this device's own
-#    earlier conclusion read back, and has exactly one caller: the chain
-#    walker's start.
+#    argument — a caller cannot name the verdict. A vault chain starts only
+#    at the accepted genesis or at an owner baseline Core authenticated
+#    (MR-DSM-0331): nothing builds one from this device's record of the
+#    vault.
 echo "[5] SoFi facts: Core-built, and the advance derives the verdict..."
 resolution="$core/dsm/src/sofi/resolution.rs"
 facts="$core/dsm/src/sofi/facts.rs"
@@ -305,31 +305,14 @@ if ! grep -q 'pub(crate) fn resolve_position' "$resolution"; then
 fi
 echo "  ✓ advance_resolved runs the ladder over the established facts and takes no verdict"
 
-# The memo constructor has exactly one production caller: the verifier's
-# chain walk (`dsm/src/sofi/resolve.rs`), which anchors the recorded rows at
-# the genesis it accepted and checks their links before it stands on them.
-# Test text (ci/production_text.py) may state a chain for a fixture.
-memo_callers=""
-while IFS= read -r f; do
-  [[ -z "$f" ]] && continue
-  prod=$(python3 ci/production_text.py "$f")
-  grep -q 'from_recorded(' <<<"$prod" && memo_callers="$memo_callers$f"$'\n'
-done < <(grep -rln 'from_recorded(' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
-  | grep -v "sofi/resolution.rs" | sort)
-memo_callers=${memo_callers%$'\n'}
+# No constructor takes this device's record of a vault as a chain, in
+# production or in a test (MR-DSM-0331): a record says where to read, never
+# what holds. The chain walk's start is `Verifier::start_chain`, at the
+# genesis or the adopted baseline.
 expected_memo="$core/dsm/src/sofi/resolve.rs"
-if [[ "$memo_callers" != "$expected_memo" ]]; then
-  echo "[FAIL] VaultChain::from_recorded must be called only from $expected_memo"
-  echo "       production callers found: ${memo_callers:-none}"
-  exit 1
-fi
-count=$(python3 ci/production_text.py "$expected_memo" | grep -c 'from_recorded(')
-if [[ "$count" -ne 1 ]]; then
-  echo "[FAIL] $expected_memo references from_recorded $count times; the chain's start is one call"
-  exit 1
-fi
-if grep -rn 'from_recorded_generations' "$core/dsm/src" "$core/dsm_sdk/src" >/dev/null 2>&1; then
-  echo "[FAIL] the unchecked memo constructor from_recorded_generations is back"
+if grep -rnE 'fn from_recorded|from_recorded\(|struct RecordedGeneration\b' "$core/dsm/src" dsm_storage_node/src >/dev/null 2>&1; then
+  echo "[FAIL] a vault chain is built from this device's record again:"
+  grep -rnE 'fn from_recorded|from_recorded\(|struct RecordedGeneration\b' "$core/dsm/src" dsm_storage_node/src
   exit 1
 fi
 literals=$(grep -rn 'EstablishedFacts {' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
@@ -394,7 +377,7 @@ frontier="$core/dsm/src/sofi/frontier/mod.rs"
 check_no_pub_field VerifiedFrontier "$frontier"
 check_no_pub_field VaultWitness "$frontier"
 prod=$(python3 ci/production_text.py "$frontier")
-literals=$(grep -E 'VerifiedFrontier \{' <<<"$prod" | grep -vE '^(pub struct|impl) ' | wc -l | tr -d ' ')
+literals=$(grep -E 'VerifiedFrontier \{' <<<"$prod" | grep -vE '^(pub struct|impl) |-> &?VerifiedFrontier \{' | wc -l | tr -d ' ')
 if [[ "$literals" -ne 1 ]]; then
   echo "[FAIL] VerifiedFrontier is stated $literals times in $frontier; exactly one construction earns it"
   exit 1
@@ -409,6 +392,29 @@ if [[ -n "$others" ]]; then
   echo "$others"
   exit 1
 fi
+# A baseline is adopted only once Core tied it to its vault's history (SoFi
+# Amendment S34): `TiedBaseline` has no public field, one literal, inside
+# its crate-visible constructor, and that constructor one caller, the
+# verifier's `tie_baseline`.
+check_no_pub_field TiedBaseline "$frontier"
+prod=$(python3 ci/production_text.py "$frontier")
+tied_literals=$(grep -E 'TiedBaseline \{' <<<"$prod" | grep -vE '^(pub struct|impl) |-> &?TiedBaseline \{' | wc -l | tr -d ' ')
+if [[ "$tied_literals" -ne 1 ]]; then
+  echo "[FAIL] TiedBaseline is stated $tied_literals times in $frontier; exactly one construction earns it"
+  exit 1
+fi
+tied_callers=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  p=$(python3 ci/production_text.py "$f")
+  grep -q 'TiedBaseline::tied(' <<<"$p" && tied_callers="$tied_callers$f"$'\n'
+done < <(grep -rln 'TiedBaseline::tied(' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null | sort)
+tied_callers=${tied_callers%$'\n'}
+if [[ "$tied_callers" != "$core/dsm/src/sofi/resolve.rs" ]]; then
+  echo "[FAIL] TiedBaseline::tied must be called only from $core/dsm/src/sofi/resolve.rs"
+  echo "       production callers found: ${tied_callers:-none}"
+  exit 1
+fi
 baseline_callers=""
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
@@ -421,7 +427,7 @@ if [[ "$baseline_callers" != "$expected_memo" ]]; then
   echo "       production callers found: ${baseline_callers:-none}"
   exit 1
 fi
-echo "  ✓ one authentication builds a verified frontier; one chain walk starts from it"
+echo "  ✓ one authentication builds a verified frontier; one tie adopts it; one chain walk starts from it"
 
 # [8] A vault's history (SoFi Amendment S26). A root below a chain's
 #     baseline enters the chain only as a `ProvenRoot`, which only the

@@ -2,7 +2,9 @@
 //! Inbox route handlers extracted from AppRouterImpl.
 //!
 //! Query: `inbox.pull` — fetch inbox items (on-demand).
+//! Query: `inbox.moneyWaiting` — the received transfers not yet looked at.
 //! Invoke: `inbox.startPoller` / `inbox.stopPoller` / `inbox.resume` — poller lifecycle.
+//! Invoke: `inbox.moneySeen` — the user was shown the received transfers.
 
 use prost::Message;
 
@@ -16,9 +18,32 @@ use super::app_router_impl::{collect_tagged_inbox_addresses, RouteFreshness};
 /// The most items one `inbox.pull` returns.
 const INBOX_PULL_MAX: u32 = 200;
 
+/// The received transfers waiting, each as the history reports it.
+fn money_waiting_response(device_id: &[u8]) -> Result<generated::MoneyWaitingResponse, String> {
+    let waiting = crate::storage::client_db::money_received::money_waiting()
+        .map_err(|e| format!("the received notices are unreadable: {e}"))?;
+    let me = crate::util::text_id::encode_base32_crockford(device_id);
+    let aliases = super::wallet_routes::contact_aliases()?;
+    let received = waiting
+        .received
+        .iter()
+        .map(|t| super::wallet_routes::history_info(t, &me, &aliases))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(generated::MoneyWaitingResponse {
+        received,
+        through: waiting.through,
+    })
+}
+
 impl AppRouterImpl {
     pub(crate) async fn handle_inbox_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
+            "inbox.moneyWaiting" => match money_waiting_response(&self.device_id_bytes) {
+                Ok(resp) => {
+                    pack_envelope_ok(generated::envelope::Payload::MoneyWaitingResponse(resp))
+                }
+                Err(e) => err(format!("inbox.moneyWaiting: {e}")),
+            },
             "inbox.pull" => {
                 let pack = match generated::ArgPack::decode(&*q.params) {
                     Ok(pack) => pack,
@@ -146,25 +171,30 @@ impl AppRouterImpl {
                                         &recognized.staged.sender,
                                     );
                                     let terms = &recognized.terms;
-                                    // The amount in the token's own decimals when
-                                    // they are known here; otherwise the exact
-                                    // base units, and why.
-                                    let amount =
-                                        match super::wallet_routes::token_decimals(&terms.token_id)
-                                        {
-                                            Ok(decimals) => format!(
-                                                "{} {}",
-                                                super::wallet_routes::format_base_units_for_display(
-                                                    terms.amount,
-                                                    decimals
-                                                ),
-                                                terms.token_id
+                                    // The token the signed operation commits to,
+                                    // named and in its own decimals when this
+                                    // device holds its policy; otherwise the
+                                    // exact base units of that commit, and why.
+                                    // The ticker in the terms is the sender's
+                                    // word and is not shown.
+                                    let amount = match super::wallet_routes::token_of_commit(
+                                        &terms.policy_commit,
+                                    ) {
+                                        Ok((ticker, decimals)) => format!(
+                                            "{} {ticker}",
+                                            super::wallet_routes::format_base_units_for_display(
+                                                terms.amount,
+                                                decimals
                                             ),
-                                            Err(e) => format!(
-                                                "{} base units of {} ({e})",
-                                                terms.amount, terms.token_id
-                                            ),
-                                        };
+                                        ),
+                                        Err(e) => format!(
+                                            "{} base units of {} ({e})",
+                                            terms.amount,
+                                            crate::util::text_id::encode_base32_crockford(
+                                                &terms.policy_commit
+                                            )
+                                        ),
+                                    };
                                     (format!("From: {sender} Amount: {amount}"), Some(sender))
                                 }
                             }
@@ -218,6 +248,33 @@ impl AppRouterImpl {
                 log::info!("[DSM_SDK] inbox.resume called");
                 crate::sdk::inbox_poller::resume_poller();
                 pack_bytes_ok(Vec::new())
+            }
+            "inbox.moneySeen" => {
+                let pack = match generated::ArgPack::decode(&*i.args) {
+                    Ok(pack) => pack,
+                    Err(e) => return err(format!("inbox.moneySeen: decode ArgPack failed: {e}")),
+                };
+                if pack.codec != generated::Codec::Proto as i32 {
+                    return err("inbox.moneySeen: ArgPack.codec must be PROTO".into());
+                }
+                let seen = match generated::MoneySeenRequest::decode(&*pack.body) {
+                    Ok(seen) => seen,
+                    Err(e) => {
+                        return err(format!(
+                            "inbox.moneySeen: decode MoneySeenRequest failed: {e}"
+                        ))
+                    }
+                };
+                if let Err(e) = crate::storage::client_db::money_received::mark_seen(seen.through) {
+                    return err(format!("inbox.moneySeen: {e}"));
+                }
+                crate::sdk::money_waiting::publish();
+                match money_waiting_response(&self.device_id_bytes) {
+                    Ok(resp) => {
+                        pack_envelope_ok(generated::envelope::Payload::MoneyWaitingResponse(resp))
+                    }
+                    Err(e) => err(format!("inbox.moneySeen: {e}")),
+                }
             }
             other => err(format!("inbox invoke: unknown method '{other}'")),
         }

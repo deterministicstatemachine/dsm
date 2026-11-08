@@ -113,6 +113,34 @@ pub enum WriteSetError {
         object: &'static str,
         reason: String,
     },
+    /// A token creation whose fee is not the protocol's creation fee,
+    /// [`TOKEN_CREATION_FEE_ERA`](crate::core::token::TOKEN_CREATION_FEE_ERA)
+    /// (SoFi Amendment S18). The fee is never the operation's to choose.
+    CreationFeeNotTheProtocols { fee_amount: u64 },
+    /// A vault creation's carried token policies are not exactly the
+    /// committed policies of its funded tokens that are not pre-rooted, in
+    /// the funded order (MR-SOFI-0311).
+    FundingPoliciesNotTheFundedTokens,
+    /// A funded token's committed policy does not parse, and why.
+    FundingPolicyDoesNotParse { token: [u8; 32], reason: String },
+    /// A funded token's committed policy forbids it to move between holders,
+    /// so it cannot be locked in a vault (SoFi §49; MR-SOFI-0311).
+    FundedTokenNotPermitted {
+        token: [u8; 32],
+        refusal: crate::economic::issuance::MarketLegRefusal,
+    },
+    /// A Transfer or Burn carries policy bytes that are not its token's
+    /// committed policy: they do not re-hash to `policy_commit` (owner
+    /// question 9).
+    TokenPolicyNotTheToken { token: [u8; 32] },
+    /// A moved token's committed policy does not parse, and why.
+    TokenPolicyDoesNotParse { token: [u8; 32], reason: String },
+    /// A Transfer of a token whose committed policy does not let it move
+    /// between holders (SoFi §49; MR-SOFI-0311, owner question 9).
+    TokenNotTransferable { token: [u8; 32] },
+    /// A Burn of a token whose committed policy does not let it be burned
+    /// (DSM §61; MR-DSM-0191, owner question 9).
+    TokenNotBurnable { token: [u8; 32] },
     /// A mutation or state constructor refused (zero-amount leaf, sibling
     /// arity, ...) — carried through from the CCB layer.
     Ccb(String),
@@ -166,6 +194,47 @@ impl core::fmt::Display for WriteSetError {
             Self::MalformedEscrowObject { object, reason } => write!(
                 f,
                 "the escrow vault creation's {object} is not canonical: {reason}"
+            ),
+            Self::CreationFeeNotTheProtocols { fee_amount } => write!(
+                f,
+                "a token creation pays the protocol's creation fee of {} ERA base units, not \
+                 {fee_amount}",
+                crate::core::token::TOKEN_CREATION_FEE_ERA
+            ),
+            Self::FundingPoliciesNotTheFundedTokens => write!(
+                f,
+                "a vault creation carries exactly the committed policy of each funded token \
+                 that is not pre-rooted, in the funded order"
+            ),
+            Self::FundingPolicyDoesNotParse { token, reason } => write!(
+                f,
+                "the committed policy of funded token {} does not parse: {reason}",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::FundedTokenNotPermitted { token, refusal } => write!(
+                f,
+                "funded token {} cannot be locked in a vault: {refusal}",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::TokenPolicyNotTheToken { token } => write!(
+                f,
+                "the policy bytes carried are not the committed policy of token {}",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::TokenPolicyDoesNotParse { token, reason } => write!(
+                f,
+                "the committed policy of token {} does not parse: {reason}",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::TokenNotTransferable { token } => write!(
+                f,
+                "token {}'s committed policy does not let it move between holders",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::TokenNotBurnable { token } => write!(
+                f,
+                "token {}'s committed policy does not let it be burned",
+                crate::utils::text_id::encode_base32_crockford(token)
             ),
             Self::Ccb(e) => write!(f, "write set: {e}"),
         }
@@ -221,11 +290,14 @@ impl<'a> EconomicPreState<'a> {
 }
 
 /// The producer's output: key-ordered mutations with progressive proofs, the
-/// matching credit sources, and the resulting root.
+/// matching credit sources, the root they start from and the resulting root.
+/// Both roots are the builder's own, so a producer that names them in a
+/// witness computes none (SoFi §2.1).
 #[derive(Debug, Clone)]
 pub struct BuiltWriteSet {
     pub mutations: Vec<EconomicLeafMutation>,
     pub credit_sources: Vec<CreditSource>,
+    pub pre_root: [u8; 32],
     pub post_root: [u8; 32],
 }
 
@@ -350,10 +422,20 @@ fn semantic_write_set(
             to_device_id,
             amount,
             policy_commit,
-            authority_policy,
+            token_policy,
             ..
         } => {
-            if authority_policy.is_some() {
+            // Before anything moves (SoFi §49): the producer's device refuses
+            // here, before its head commits, and every verifier refuses the
+            // same bytes.
+            if !moved_token_policy(policy_commit, token_policy)?.transferable {
+                return Err(WriteSetError::TokenNotTransferable {
+                    token: *policy_commit,
+                });
+            }
+            if crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                operation,
+            ) {
                 // Offline-bearer tier: moves allocation, not balance.
                 return Err(WriteSetError::NoEconomicWriteSet);
             }
@@ -377,14 +459,24 @@ fn semantic_write_set(
         Operation::Burn {
             amount,
             policy_commit,
+            token_policy,
             ..
-        } => Ok(SemanticWriteSet::DebitOnly {
-            policy_commit: *policy_commit,
-            amount: amount.value(),
-        }),
+        } => {
+            if !moved_token_policy(policy_commit, token_policy)?.burn_enabled {
+                return Err(WriteSetError::TokenNotBurnable {
+                    token: *policy_commit,
+                });
+            }
+            Ok(SemanticWriteSet::DebitOnly {
+                policy_commit: *policy_commit,
+                amount: amount.value(),
+            })
+        }
         // Creation releases the token's whole genesis supply to its creator
         // (`ReleaseRule::AllAtCreation`, SoFi §51) in the same write set as
-        // the ERA fee. A token with no supply is not a token (§50).
+        // the ERA fee. A token with no supply is not a token (§50), and the
+        // fee is the protocol's (S18): the producer builds and the verifier
+        // checks the one write set this table gives, so both refuse any other.
         Operation::CreateToken {
             initial_supply,
             fee_amount,
@@ -393,6 +485,11 @@ fn semantic_write_set(
         } => {
             if initial_supply.value() == 0 {
                 return Err(WriteSetError::NoEconomicWriteSet);
+            }
+            if *fee_amount != crate::core::token::TOKEN_CREATION_FEE_ERA {
+                return Err(WriteSetError::CreationFeeNotTheProtocols {
+                    fee_amount: *fee_amount,
+                });
             }
             Ok(SemanticWriteSet::CreateTokenRelease {
                 fee: (
@@ -456,6 +553,7 @@ fn semantic_write_set(
             market_policy_preimage,
             funding_a_policy_commit,
             funding_b_policy_commit,
+            funding_policies,
             ..
         } => {
             let preimage = crate::sofi::wire::VaultGenesisPreimage::decode(genesis_preimage)
@@ -571,6 +669,10 @@ fn semantic_write_set(
                     detail: "the funded assets are not the pair the market policy authorizes",
                 });
             }
+            funded_tokens_permitted(
+                &[*funding_a_policy_commit, *funding_b_policy_commit],
+                funding_policies,
+            )?;
             let (vault_id, leg_a, leg_b) = pair_legs(
                 &vault_id,
                 (*funding_a_policy_commit, record.amount_a),
@@ -590,11 +692,12 @@ fn semantic_write_set(
             genesis_preimage,
             creation,
             terms,
+            funding_policies,
             ..
         } => escrow_creation_write_set(
             genesis_preimage,
             creation,
-            terms,
+            (terms, funding_policies),
             (local_genesis, local_devid),
             economic_position,
         ),
@@ -607,6 +710,88 @@ fn semantic_write_set(
     }
 }
 
+/// The committed policy a Transfer or Burn moves its token under (owner
+/// question 9, 2026-10-27). Every token's committed `TokenPolicyV3` bytes,
+/// ERA's included, ride in the signed operation and are re-hashed to its
+/// commit before anything is read out of them, so the check is a function of
+/// the operation alone: the producer and every verifier read the same bytes,
+/// and bytes that are not the token's make the operation itself invalid.
+pub(crate) fn moved_token_policy(
+    policy_commit: &[u8; 32],
+    carried: &[u8],
+) -> Result<crate::economic::token_policy::TokenPolicy, WriteSetError> {
+    let derived = crate::crypto::blake3::domain_hash_bytes(
+        crate::common::domain_tags::TAG_DSM_POLICY,
+        carried,
+    );
+    if derived != *policy_commit {
+        return Err(WriteSetError::TokenPolicyNotTheToken {
+            token: *policy_commit,
+        });
+    }
+    crate::economic::token_policy::parse_token_policy(carried).map_err(|reason| {
+        WriteSetError::TokenPolicyDoesNotParse {
+            token: *policy_commit,
+            reason,
+        }
+    })
+}
+
+/// The funded tokens whose committed policies a vault creation carries, in
+/// the funded order: every one that is not pre-rooted (ERA, dBTC).
+pub fn carried_policy_commits(funded: &[[u8; 32]]) -> Vec<[u8; 32]> {
+    funded
+        .iter()
+        .filter(|commit| crate::core::token::builtin_token_id_for_policy_commit(commit).is_none())
+        .copied()
+        .collect()
+}
+
+/// `transferable` binds vault creation (SoFi §49; MR-SOFI-0311). A vault's
+/// units leave it only by trades, releases and its owner's close, each a
+/// movement between holders, and every verifier refuses the genesis of a
+/// vault whose token forbids that (`sofi::lineage::genesis_accepted`): a
+/// creation not refused here would debit reserves nobody could ever move
+/// again, its owner's close included. So it is refused in the write set,
+/// before anything is debited. ERA and dBTC are pre-rooted and consult no
+/// policy. Every other funded token's policy is carried in the funded order
+/// and re-hashed to that token's commit before anything is read out of it.
+///
+/// Public so the producer can ask the same question before it publishes or
+/// signs anything; this, in the write set, is where the creation is refused.
+pub fn funded_tokens_permitted(
+    funded: &[[u8; 32]],
+    carried: &[Vec<u8>],
+) -> Result<(), WriteSetError> {
+    let policied = carried_policy_commits(funded);
+    if policied.len() != carried.len() {
+        return Err(WriteSetError::FundingPoliciesNotTheFundedTokens);
+    }
+    for (commit, bytes) in policied.iter().zip(carried) {
+        let derived = crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_POLICY,
+            bytes,
+        );
+        if derived != *commit {
+            return Err(WriteSetError::FundingPoliciesNotTheFundedTokens);
+        }
+        let policy =
+            crate::economic::token_policy::parse_token_policy(bytes).map_err(|reason| {
+                WriteSetError::FundingPolicyDoesNotParse {
+                    token: *commit,
+                    reason,
+                }
+            })?;
+        crate::economic::issuance::check_market_leg_permitted(&policy).map_err(|refusal| {
+            WriteSetError::FundedTokenNotPermitted {
+                token: *commit,
+                refusal,
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// The write set of an escrow vault's creation (SoFi Amendment S21), every
 /// conjunct a separate reason to refuse: the preimage is the owner's own and
 /// agrees with itself, `p_create` is the position the operation lands at,
@@ -616,7 +801,7 @@ fn semantic_write_set(
 fn escrow_creation_write_set(
     genesis_preimage: &[u8],
     creation: &[u8],
-    terms: &[u8],
+    (terms, funding_policies): (&[u8], &[Vec<u8>]),
     (local_genesis, local_devid): (&[u8; 32], &[u8; 32]),
     economic_position: u64,
 ) -> Result<SemanticWriteSet, WriteSetError> {
@@ -693,6 +878,7 @@ fn escrow_creation_write_set(
             "the carried terms are not the object all three of the genesis state's slots name",
         ));
     }
+    funded_tokens_permitted(&[*parsed.token()], funding_policies)?;
     Ok(SemanticWriteSet::EscrowVaultCreate {
         vault_id,
         stake: (*parsed.token(), record.amount_a),
@@ -729,6 +915,7 @@ pub fn build_write_set(
     tree: &mut EconomicSmt,
     facts: &CreditSourceFacts,
 ) -> Result<BuiltWriteSet, WriteSetError> {
+    let pre_root = tree.root();
     let pre_balances = pre_state.balances;
     let economic_position = pre_state.economic_position;
     let semantic = semantic_write_set(operation, genesis, device_id, economic_position)?;
@@ -960,15 +1147,13 @@ pub fn build_write_set(
             if *facts != CreditSourceFacts::GenesisRelease {
                 return Err(WriteSetError::FactsDoNotMatchOperation);
             }
-            if fee.1 > 0 {
-                planned.push(plan_balance_debit(
-                    genesis,
-                    device_id,
-                    pre_balances,
-                    fee.0,
-                    fee.1,
-                )?);
-            }
+            planned.push(plan_balance_debit(
+                genesis,
+                device_id,
+                pre_balances,
+                fee.0,
+                fee.1,
+            )?);
             let (policy_commit, amount) = release;
             let record =
                 EconomicLeafState::TokenCreation(EconomicTokenCreationState { policy_commit });
@@ -1070,6 +1255,7 @@ pub fn build_write_set(
     Ok(BuiltWriteSet {
         mutations,
         credit_sources,
+        pre_root,
         post_root: tree.root(),
     })
 }
@@ -1440,8 +1626,8 @@ pub fn verify_operation_write_set(
             }
             Ok(())
         }
-        // SoFi §51: the fee debit, if any, and the release credit, funded by
-        // the one genesis-release source. The source's arm establishes what
+        // SoFi §51: the fee debit and the release credit, funded by the one
+        // genesis-release source. The source's arm establishes what
         // the release funds; this layer pins that the witness is exactly this
         // operation's effect.
         SemanticWriteSet::CreateTokenRelease { fee, release } => {
@@ -1460,10 +1646,7 @@ pub fn verify_operation_write_set(
                     detail: "a token creation inserts exactly one creation record",
                 });
             };
-            let expected_balances = if fee.1 > 0 { 2 } else { 1 };
-            if balances.len() != expected_balances
-                || witness.mutations.len() != expected_balances + 1
-            {
+            if balances.len() != 2 || witness.mutations.len() != 3 {
                 return Err(WriteSetError::WrongWriteSet {
                     detail: "a token creation is its fee debit, one release credit and its \
                              creation record",
@@ -1474,13 +1657,11 @@ pub fn verify_operation_write_set(
                     detail: "the creation record names another token than the operation creates",
                 });
             }
-            if fee.1 > 0 {
-                let observed = expect_one_balance(&balances, fee.0)?;
-                if observed.pre_amount.checked_sub(observed.post_amount) != Some(fee.1) {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "the fee debit is not the operation's fee",
-                    });
-                }
+            let observed = expect_one_balance(&balances, fee.0)?;
+            if observed.pre_amount.checked_sub(observed.post_amount) != Some(fee.1) {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the fee debit is not the operation's fee",
+                });
             }
             let credit = expect_one_balance(&balances, release.0)?;
             if credit.post_amount.checked_sub(credit.pre_amount) != Some(release.1) {
@@ -1529,6 +1710,253 @@ fn expect_one_balance(
     })
 }
 
+/// The economic effect of one offline boundary, as Core took it: which way
+/// it moved value, what and how much, and its identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundaryEffect {
+    pub kind: crate::types::device_state::OfflineBoundaryKind,
+    pub asset: [u8; 32],
+    pub amount: u64,
+    pub boundary_id: [u8; 32],
+}
+
+/// Build the write set of an offline boundary against the producer's own
+/// pre-state: a load is one balance debit of the asset it loads; an unload is
+/// one balance credit of the asset it unloads, funded by the offline debit the
+/// unload body proves (`0x0075`), with the source that debit names consumed
+/// from ZERO in the same witness.
+///
+/// The boundary is what Core took ([`OfflineBoundaryOutcome`]): its asset,
+/// amount and identity are the ones Core derived, never chosen here.
+///
+/// [`OfflineBoundaryOutcome`]: crate::types::device_state::OfflineBoundaryOutcome
+pub fn build_boundary_write_set(
+    boundary: &BoundaryEffect,
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    pre_state: &EconomicPreState<'_>,
+    tree: &mut EconomicSmt,
+) -> Result<BuiltWriteSet, WriteSetError> {
+    use crate::types::device_state::OfflineBoundaryKind;
+    let pre_root = tree.root();
+    let BoundaryEffect {
+        kind,
+        asset,
+        amount,
+        boundary_id,
+    } = boundary;
+    let (kind, asset, amount, boundary_id) = (*kind, asset, *amount, boundary_id);
+    if amount == 0 {
+        return Err(WriteSetError::WrongWriteSet {
+            detail: "a boundary moves a positive amount",
+        });
+    }
+    let have = pre_state.balances.get(asset).copied();
+    // (key, pre, post)
+    let mut planned: Vec<(
+        [u8; 32],
+        Option<EconomicLeafState>,
+        Option<EconomicLeafState>,
+    )> = Vec::new();
+    match kind {
+        OfflineBoundaryKind::Load => {
+            let held = have.ok_or(WriteSetError::InsufficientBalance {
+                policy_commit: *asset,
+                have: 0,
+                need: amount,
+            })?;
+            let rest = held
+                .checked_sub(amount)
+                .ok_or(WriteSetError::InsufficientBalance {
+                    policy_commit: *asset,
+                    have: held,
+                    need: amount,
+                })?;
+            planned.push((
+                crate::economic::keys::balance_key(genesis, device_id, asset),
+                balance_state(*asset, held)?,
+                balance_state(*asset, rest)?,
+            ));
+        }
+        // An unload credits what its own account debit funds; a settlement
+        // credits what the payer's exposed spend funds (SA-91). Each consumes
+        // the source its own identity derives, once.
+        OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle => {
+            let next = match have {
+                Some(held) => held
+                    .checked_add(amount)
+                    .ok_or(WriteSetError::BalanceOverflow)?,
+                None => amount,
+            };
+            let pre = match have {
+                Some(held) => balance_state(*asset, held)?,
+                None => None,
+            };
+            planned.push((
+                crate::economic::keys::balance_key(genesis, device_id, asset),
+                pre,
+                balance_state(*asset, next)?,
+            ));
+            let consumed = EconomicLeafState::ConsumedSource(EconomicConsumedSourceState {
+                source_id: crate::economic::offline_boundary::offline_boundary_debit_source_id(
+                    genesis,
+                    device_id,
+                    boundary_id,
+                ),
+                consumer_economic_operation_id: *boundary_id,
+            });
+            let key = consumed.leaf_key(genesis, device_id);
+            if tree.get(&key).is_some() {
+                return Err(WriteSetError::SourceAlreadyConsumed);
+            }
+            planned.push((key, None, Some(consumed)));
+        }
+    }
+    planned.sort_by_key(|(key, ..)| *key);
+    let mut mutations = Vec::with_capacity(planned.len());
+    let mut credit_sources = Vec::new();
+    for (index, (key, pre, post)) in planned.into_iter().enumerate() {
+        let siblings = tree.siblings(&key).to_vec();
+        let funded = matches!(
+            kind,
+            OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle
+        ) && matches!(&post, Some(EconomicLeafState::Balance(_)));
+        let mutation = EconomicLeafMutation::new(pre, post.clone(), siblings)
+            .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
+        match &post {
+            Some(state) => {
+                let value = state
+                    .leaf_value()
+                    .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
+                tree.insert(key, value);
+            }
+            None => tree.remove(&key),
+        }
+        if funded {
+            let credit_mutation_index = u32::try_from(index)
+                .map_err(|e| WriteSetError::Ccb(format!("index overflow: {e}")))?;
+            credit_sources.push(CreditSource::OfflineBoundaryDebit(
+                crate::economic::credit::CreditSourceOfflineBoundaryDebit {
+                    credit_mutation_index,
+                },
+            ));
+        }
+        mutations.push(mutation);
+    }
+    Ok(BuiltWriteSet {
+        mutations,
+        credit_sources,
+        pre_root,
+        post_root: tree.root(),
+    })
+}
+
+/// The VERIFIER half of [`build_boundary_write_set`]: the witness's mutations
+/// must be exactly the effect of the verified boundary — for a load, one
+/// balance debit of its asset by its amount and nothing else; for an unload,
+/// one balance credit of its asset by its amount, funded by the boundary's
+/// offline debit, and the consumed-source leaf that debit names, inserted from
+/// ZERO and naming the boundary as its consumer.
+pub fn verify_boundary_write_set(
+    boundary: &crate::economic::offline_boundary::VerifiedOfflineBoundary,
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    witness: &EconomicTransitionWitness,
+) -> Result<(), WriteSetError> {
+    use crate::types::device_state::OfflineBoundaryKind;
+    let asset = boundary.asset();
+    let amount = boundary.amount();
+    let balance_of = |m: &EconomicLeafMutation| -> Result<(u64, u64), WriteSetError> {
+        let amount_of = |s: &Option<EconomicLeafState>| match s {
+            None => Ok(0),
+            Some(EconomicLeafState::Balance(b)) if b.policy_commit == asset => Ok(b.amount),
+            Some(_) => Err(WriteSetError::WrongWriteSet {
+                detail: "a boundary moves the balance of the asset it names and nothing else",
+            }),
+        };
+        Ok((amount_of(&m.pre_state)?, amount_of(&m.post_state)?))
+    };
+    match boundary.kind() {
+        OfflineBoundaryKind::Load => {
+            let [debit] = witness.mutations.as_slice() else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a load is exactly one balance mutation",
+                });
+            };
+            let (pre, post) = balance_of(debit)?;
+            if pre.checked_sub(post) != Some(amount) {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a load's debit is not exactly the amount it loads",
+                });
+            }
+            if !witness.credit_sources.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a load has no credit to fund",
+                });
+            }
+            Ok(())
+        }
+        OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle => {
+            let expected_source =
+                crate::economic::offline_boundary::offline_boundary_debit_source_id(
+                    genesis,
+                    device_id,
+                    &boundary.operation_id(),
+                );
+            let mut credit_index = None;
+            let mut consumed_seen = None;
+            for (i, m) in witness.mutations.iter().enumerate() {
+                match (&m.pre_state, &m.post_state) {
+                    (None, Some(EconomicLeafState::ConsumedSource(c))) => {
+                        if c.source_id != expected_source
+                            || c.consumer_economic_operation_id != boundary.operation_id()
+                        {
+                            return Err(WriteSetError::WrongWriteSet {
+                                detail: "the consumed source is not the unload's own offline debit",
+                            });
+                        }
+                        if consumed_seen.replace(i).is_some() {
+                            return Err(WriteSetError::WrongWriteSet {
+                                detail: "an unload consumes its offline debit once",
+                            });
+                        }
+                    }
+                    _ => {
+                        let (pre, post) = balance_of(m)?;
+                        if post.checked_sub(pre) != Some(amount) {
+                            return Err(WriteSetError::WrongWriteSet {
+                                detail: "an unload's credit is not exactly the amount it unloads",
+                            });
+                        }
+                        let index = u32::try_from(i)
+                            .map_err(|e| WriteSetError::Ccb(format!("index overflow: {e}")))?;
+                        if credit_index.replace(index).is_some() {
+                            return Err(WriteSetError::WrongWriteSet {
+                                detail: "an unload credits one balance",
+                            });
+                        }
+                    }
+                }
+            }
+            let (Some(credit_index), Some(_)) = (credit_index, consumed_seen) else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "an unload is one balance credit and the consumption of its debit",
+                });
+            };
+            match witness.credit_sources.as_slice() {
+                [CreditSource::OfflineBoundaryDebit(d)]
+                    if d.credit_mutation_index == credit_index =>
+                {
+                    Ok(())
+                }
+                _ => Err(WriteSetError::WrongWriteSet {
+                    detail: "an unload's credit is funded by its offline debit and nothing else",
+                }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod sofi_refusal_tests {
@@ -1547,6 +1975,7 @@ mod sofi_refusal_tests {
                 market_policy_preimage: vec![0x00, 0x07],
                 funding_a_policy_commit: [0x5C; 32],
                 funding_b_policy_commit: [0x5D; 32],
+                funding_policies: vec![vec![0x5C], vec![0x5D]],
                 signature: vec![0xA1; 8],
             },
             Operation::SofiFulfill {
@@ -1647,10 +2076,35 @@ mod vault_create_binding_tests {
         state: VaultStateLeaf,
         policy_bytes: Vec<u8>,
         pair: ([u8; 32], [u8; 32]),
+        /// The funded tokens' committed policies the creation carries.
+        funding_policies: Vec<Vec<u8>>,
+    }
+
+    /// Fixture token `i` with the policy flags `flags`: its commit, and the
+    /// policy bytes that commit names.
+    fn token(i: u8, flags: u8) -> ([u8; 32], Option<Vec<u8>>) {
+        let (commit, bytes) = crate::sofi::validation::fixtures::committed(
+            crate::sofi::validation::fixtures::token_policy_bytes_with(i, flags),
+        );
+        (commit, Some(bytes))
+    }
+
+    /// ERA: pre-rooted, so a creation carries no policy for it.
+    fn era() -> ([u8; 32], Option<Vec<u8>>) {
+        (crate::core::token::era_policy::era_policy_commit(), None)
     }
 
     fn valid() -> Valid {
-        let (a, b) = (tok(0x40), tok(0x41));
+        let transferable = crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE;
+        valid_over(token(1, transferable), token(2, transferable))
+    }
+
+    /// A valid creation over the two tokens, in canonical order, carrying
+    /// the policy of each that is not pre-rooted.
+    fn valid_over(x: ([u8; 32], Option<Vec<u8>>), y: ([u8; 32], Option<Vec<u8>>)) -> Valid {
+        let (first, second) = if x.0 < y.0 { (x, y) } else { (y, x) };
+        let (a, b) = (first.0, second.0);
+        let funding_policies = [first.1, second.1].into_iter().flatten().collect();
         let market = MarketPolicy::beta_constant_product(a, b).unwrap();
         let policy_bytes = market.encode();
         let fee = FeePolicy::new(30).unwrap();
@@ -1672,6 +2126,7 @@ mod vault_create_binding_tests {
             state,
             policy_bytes,
             pair: (a, b),
+            funding_policies,
         }
     }
 
@@ -1685,7 +2140,6 @@ mod vault_create_binding_tests {
         root: Option<[u8; 32]>,
         vault_id: Option<[u8; 32]>,
     ) -> Operation {
-        let _ = v;
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
             owner_device_id: DEV,
@@ -1706,6 +2160,7 @@ mod vault_create_binding_tests {
             market_policy_preimage: policy_bytes.to_vec(),
             funding_a_policy_commit: pair.0,
             funding_b_policy_commit: pair.1,
+            funding_policies: v.funding_policies.clone(),
             signature: vec![0xA1; 8],
         }
     }
@@ -1910,6 +2365,85 @@ mod vault_create_binding_tests {
             "the funded assets are not the pair the market policy authorizes"
         );
     }
+    /// MR-SOFI-0311: a vault over a token whose committed policy forbids
+    /// transfer is refused in the write set, so nothing is debited. Every
+    /// verifier refuses such a vault's genesis, its owner's close included,
+    /// so a creation that went through would strand both reserves.
+    #[test]
+    fn a_creation_over_a_token_whose_policy_forbids_transfer_has_no_write_set() {
+        let transferable = crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE;
+        let locked = token(3, crate::economic::token_policy::POLICY_FLAG_BURN);
+        let locked_commit = locked.0;
+        for v in [
+            valid_over(token(1, transferable), locked.clone()),
+            valid_over(era(), locked),
+        ] {
+            match semantic_write_set(&good(&v), &G, &DEV, POS) {
+                Err(WriteSetError::FundedTokenNotPermitted { token, refusal }) => {
+                    assert_eq!(token, locked_commit, "the refused token is the locked one");
+                    assert_eq!(
+                        refusal,
+                        crate::economic::issuance::MarketLegRefusal::NotTransferable
+                    );
+                }
+                Err(e) => panic!("expected the funded token refused, got {e:?}"),
+                Ok(_) => panic!("a vault over a non-transferable token has no write set"),
+            }
+        }
+    }
+
+    /// The carried policies are the funded tokens' committed policies, each
+    /// re-hashed to its token before it is read: another token's policy, the
+    /// two in the wrong order, one missing or one extra establish nothing.
+    #[test]
+    fn carried_policies_that_are_not_exactly_the_funded_tokens_are_refused() {
+        let v = valid();
+        let other = token(4, crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE)
+            .1
+            .expect("a fixture token carries its policy");
+        let carried = &v.funding_policies;
+        for wrong in [
+            vec![carried[0].clone(), other.clone()],
+            vec![carried[1].clone(), carried[0].clone()],
+            vec![carried[0].clone()],
+            vec![carried[0].clone(), carried[1].clone(), other],
+            Vec::new(),
+        ] {
+            let mut carrying = valid();
+            carrying.funding_policies = wrong;
+            match semantic_write_set(&good(&carrying), &G, &DEV, POS) {
+                Err(WriteSetError::FundingPoliciesNotTheFundedTokens) => {}
+                Err(e) => panic!("expected the carried policies refused, got {e:?}"),
+                Ok(_) => {
+                    panic!("carried policies that are not the funded tokens' authorize nothing")
+                }
+            }
+        }
+    }
+
+    /// ERA is pre-rooted: a creation funding it carries no policy for it,
+    /// and carrying one anyway is not the creation's encoding.
+    #[test]
+    fn a_pre_rooted_leg_carries_no_policy() {
+        let transferable = crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE;
+        let v = valid_over(era(), token(1, transferable));
+        assert_eq!(v.funding_policies.len(), 1);
+        match semantic_write_set(&good(&v), &G, &DEV, POS) {
+            Ok(SemanticWriteSet::SofiVaultCreate { leg_a, leg_b, .. }) => {
+                assert_eq!((leg_a.0, leg_b.0), v.pair, "both legs are debited");
+            }
+            Ok(_) => panic!("expected a creation write set, got another variant"),
+            Err(e) => panic!("an ERA leg needs no carried policy, got {e:?}"),
+        }
+        let mut carrying_era = v;
+        carrying_era
+            .funding_policies
+            .push(crate::core::token::era_policy::era_policy_bytes().to_vec());
+        assert!(matches!(
+            semantic_write_set(&good(&carrying_era), &G, &DEV, POS),
+            Err(WriteSetError::FundingPoliciesNotTheFundedTokens)
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1928,13 +2462,27 @@ mod escrow_create_binding_tests {
     const DEV: [u8; 32] = [0x22; 32];
     const POS: u64 = 7;
     const STAKE: u64 = 2_500;
-    const TOKEN: [u8; 32] = [0x40; 32];
+    /// The staked token: a fixture token whose committed policy transfers,
+    /// and the policy bytes its commit names.
+    fn token() -> ([u8; 32], Vec<u8>) {
+        token_with(crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE)
+    }
+
+    fn token_with(flags: u8) -> ([u8; 32], Vec<u8>) {
+        crate::sofi::validation::fixtures::committed(
+            crate::sofi::validation::fixtures::token_policy_bytes_with(1, flags),
+        )
+    }
 
     fn terms() -> EscrowTerms {
+        terms_over(token().0)
+    }
+
+    fn terms_over(staked: [u8; 32]) -> EscrowTerms {
         let referee = EscrowSigner::new(crate::ccb::sigalg::SPHINCS_PLUS_SPX256F, &[0x5A; 64])
             .expect("a declared key");
         EscrowTerms::new(
-            TOKEN,
+            staked,
             crate::sofi::escrow::external_commitment(b"a match"),
             vec![EscrowBranch::new(
                 EscrowOutcome::new(b"void", vec![referee]).expect("an outcome"),
@@ -1965,6 +2513,16 @@ mod escrow_create_binding_tests {
     /// The creation from its parts, with the record funding `amounts` and the
     /// record's root and vault the ones the preimage derives.
     fn op_from(state: &VaultStateLeaf, terms_bytes: &[u8], amounts: (u64, u64)) -> Operation {
+        op_carrying(state, terms_bytes, amounts, vec![token().1])
+    }
+
+    /// The creation carrying `funding_policies` as the staked token's policy.
+    fn op_carrying(
+        state: &VaultStateLeaf,
+        terms_bytes: &[u8],
+        amounts: (u64, u64),
+        funding_policies: Vec<Vec<u8>>,
+    ) -> Operation {
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
             owner_device_id: DEV,
@@ -1982,6 +2540,7 @@ mod escrow_create_binding_tests {
             genesis_preimage: preimage.encode().expect("a preimage"),
             creation: creation.encode(),
             terms: terms_bytes.to_vec(),
+            funding_policies,
             signature: vec![0xA1; 8],
         }
     }
@@ -2015,26 +2574,28 @@ mod escrow_create_binding_tests {
         else {
             panic!("a valid escrow creation has a write set")
         };
+        let staked = token().0;
         assert_eq!(
             stake,
-            (TOKEN, STAKE),
+            (staked, STAKE),
             "the one debit is the stake of the terms' token"
         );
         assert_eq!((creation.amount_a, creation.amount_b), (STAKE, 0));
 
         // The witness the producer builds: the stake leaves the owner's
         // balance and the record is inserted from nothing, and that is all.
-        let balances = BTreeMap::from([(TOKEN, STAKE + 40)]);
+        let balances = BTreeMap::from([(staked, STAKE + 40)]);
         let mut tree = EconomicSmt::new();
         tree.insert(
-            crate::economic::keys::balance_key(&G, &DEV, &TOKEN),
+            crate::economic::keys::balance_key(&G, &DEV, &staked),
             EconomicLeafState::Balance(crate::economic::state::EconomicBalanceState {
-                policy_commit: TOKEN,
+                policy_commit: staked,
                 amount: STAKE + 40,
             })
             .leaf_value()
             .expect("a leaf"),
         );
+        let pre = tree.root();
         let built = build_write_set(
             &op,
             &G,
@@ -2045,12 +2606,16 @@ mod escrow_create_binding_tests {
             &CreditSourceFacts::None,
         )
         .expect("a write set");
+        // Both roots a witness names are the builder's: the tree it started
+        // from, and the tree it left (SoFi §2.1).
+        assert_eq!((built.pre_root, built.post_root), (pre, tree.root()));
+        assert_ne!(built.pre_root, built.post_root);
         assert_eq!(built.mutations.len(), 2);
         let posts: Vec<&Option<EconomicLeafState>> =
             built.mutations.iter().map(|m| &m.post_state).collect();
         assert!(posts.iter().any(|p| matches!(
             p,
-            Some(EconomicLeafState::Balance(b)) if b.policy_commit == TOKEN && b.amount == 40
+            Some(EconomicLeafState::Balance(b)) if b.policy_commit == staked && b.amount == 40
         )));
         assert!(posts.iter().any(
             |p| matches!(p, Some(EconomicLeafState::VaultCreation(c)) if c.amount_a == STAKE)
@@ -2068,9 +2633,17 @@ mod escrow_create_binding_tests {
                 .expect("a declared key")
         };
         let computed = ComputedEscrowTerms::new(
-            [0x42; 32],
+            token().0,
             crate::sofi::escrow::external_commitment(b"a match"),
-            ComputedTable::new([0x9A; 32], [0x5E; 32], key(0x3A), key(0x3B)).expect("table"),
+            ComputedTable::new(
+                [0x9A; 32],
+                [0x5E; 32],
+                key(0x3A),
+                key(0x3B),
+                crate::sofi::computed::start_commitment(&[0x3C; 32]),
+                crate::sofi::computed::start_commitment(&[0x3D; 32]),
+            )
+            .expect("table"),
             vec![
                 ComputedBranch::new(b"a-wins", G, DEV),
                 ComputedBranch::new(b"b-wins", G, DEV),
@@ -2089,7 +2662,7 @@ mod escrow_create_binding_tests {
         else {
             panic!("a valid computed escrow creation has a write set")
         };
-        assert_eq!(stake, ([0x42; 32], STAKE));
+        assert_eq!(stake, (token().0, STAKE));
     }
 
     #[test]
@@ -2161,5 +2734,171 @@ mod escrow_create_binding_tests {
             Err(WriteSetError::MalformedVaultOperation { detail })
                 if detail.contains("its own owner's balances")
         ));
+    }
+
+    /// MR-SOFI-0311 for escrow: a stake of a token whose committed policy
+    /// forbids transfer could never be released to any branch, so the
+    /// creation has no write set and nothing is debited.
+    #[test]
+    fn an_escrow_over_a_token_whose_policy_forbids_transfer_has_no_write_set() {
+        let (locked, bytes) = token_with(crate::economic::token_policy::POLICY_FLAG_BURN);
+        let t = terms_over(locked);
+        let op = op_carrying(
+            &state(crate::sofi::escrow::terms_address(&t)),
+            &t.encode(),
+            (STAKE, 0),
+            vec![bytes],
+        );
+        match semantic_write_set(&op, &G, &DEV, POS) {
+            Err(WriteSetError::FundedTokenNotPermitted { token, refusal }) => {
+                assert_eq!(token, locked);
+                assert_eq!(
+                    refusal,
+                    crate::economic::issuance::MarketLegRefusal::NotTransferable
+                );
+            }
+            Err(e) => panic!("expected the staked token refused, got {e:?}"),
+            Ok(_) => panic!("an escrow over a non-transferable token has no write set"),
+        }
+    }
+
+    /// The staked token's policy is carried and re-hashed to it; an ERA
+    /// stake carries none.
+    #[test]
+    fn an_escrow_carries_exactly_its_staked_tokens_policy() {
+        let t = terms();
+        let addr = crate::sofi::escrow::terms_address(&t);
+        let other = token_with(
+            crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE
+                | crate::economic::token_policy::POLICY_FLAG_BURN,
+        )
+        .1;
+        for wrong in [Vec::new(), vec![other], vec![token().1, token().1]] {
+            let op = op_carrying(&state(addr), &t.encode(), (STAKE, 0), wrong);
+            assert!(matches!(
+                semantic_write_set(&op, &G, &DEV, POS),
+                Err(WriteSetError::FundingPoliciesNotTheFundedTokens)
+            ));
+        }
+        let era = crate::core::token::era_policy::era_policy_commit();
+        let on_era = terms_over(era);
+        let op = op_carrying(
+            &state(crate::sofi::escrow::terms_address(&on_era)),
+            &on_era.encode(),
+            (STAKE, 0),
+            Vec::new(),
+        );
+        match semantic_write_set(&op, &G, &DEV, POS) {
+            Ok(SemanticWriteSet::EscrowVaultCreate { stake, .. }) => {
+                assert_eq!(stake, (era, STAKE))
+            }
+            Ok(_) => panic!("expected an escrow creation write set, got another variant"),
+            Err(e) => panic!("an ERA stake needs no carried policy, got {e:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod creation_fee_and_bearer_tests {
+    use super::*;
+    use crate::economic::classifier::{classify, EconomicEffect};
+    use crate::types::operations::{AuthorityMode, AuthorityPolicy, TransactionMode, TransferTerms};
+
+    const G: [u8; 32] = [0x11; 32];
+    const DEV: [u8; 32] = [0x22; 32];
+
+    fn create_paying(fee_amount: u64) -> Operation {
+        Operation::CreateToken {
+            token_id: b"NEWCOIN".to_vec(),
+            initial_supply: crate::types::token_types::Balance::amount(9),
+            policy_commit: [0x7E; 32],
+            fee_amount,
+            name: "New Coin".to_string(),
+            symbol: "NEW".to_string(),
+            decimals: 0,
+            metadata_uri: None,
+            signature: Vec::new(),
+        }
+    }
+
+    /// The one table the producer builds from and the verifier checks
+    /// against pins the creation fee to the protocol's (SoFi Amendment S18),
+    /// so neither side has a write set for any other fee. A fee of 0 used to
+    /// give a write set with no fee debit at all.
+    ///
+    /// MUTATION CONTROL: delete the fee check in `semantic_write_set`'s
+    /// `CreateToken` arm and the free creation gets a write set.
+    #[test]
+    fn a_creation_paying_other_than_the_protocol_fee_has_no_write_set() {
+        let fee = crate::core::token::TOKEN_CREATION_FEE_ERA;
+        match semantic_write_set(&create_paying(fee), &G, &DEV, 1) {
+            Ok(SemanticWriteSet::CreateTokenRelease { fee: (_, paid), .. }) => {
+                assert_eq!(paid, fee)
+            }
+            Ok(_) => panic!("a token creation's write set is its release"),
+            Err(refused) => panic!("the protocol fee: {refused}"),
+        }
+        for named in [0, fee - 1, fee + 1] {
+            match semantic_write_set(&create_paying(named), &G, &DEV, 1) {
+                Err(refused) => assert_eq!(
+                    refused,
+                    WriteSetError::CreationFeeNotTheProtocols { fee_amount: named }
+                ),
+                Ok(_) => panic!("a creation paying {named} has a write set"),
+            }
+        }
+    }
+
+    fn transfer(authority_policy: Option<AuthorityPolicy>) -> Operation {
+        Operation::Transfer {
+            to_device_id: vec![0x33; 32],
+            to_genesis: [0x6E; 32],
+            amount: crate::types::token_types::Balance::amount(5),
+            policy_commit: crate::core::token::era_policy::era_policy_commit(),
+            token_policy: crate::core::token::era_policy::era_policy_bytes().to_vec(),
+            terms_commitment: TransferTerms {
+                token_id: b"TOK".to_vec(),
+                nonce: vec![1, 2, 3],
+                mode: TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
+            signature: Vec::new(),
+            authority_policy,
+        }
+    }
+
+    /// One predicate decides which transfers are offline-bearer, the one
+    /// `advance`, conservation and the receipt rules use: a transfer whose
+    /// authority policy declares `OnlineChecked` is an online transfer with an
+    /// online write set. The classifier and this table used to treat any
+    /// policy at all as offline-bearer, so such a transfer moved balance under
+    /// `advance` while its economic effect read as allocation only.
+    ///
+    /// MUTATION CONTROL: classify any `authority_policy: Some(_)` as
+    /// offline-bearer again and the online-checked transfer has no write set.
+    #[test]
+    fn only_an_offline_bearer_requirement_makes_a_transfer_allocation_only() {
+        let policy = |mode| {
+            Some(AuthorityPolicy {
+                mode,
+                policy_id: [3u8; 32],
+                anchor_set_id: [4u8; 32],
+            })
+        };
+        let online = transfer(policy(AuthorityMode::OnlineChecked));
+        let bearer = transfer(policy(AuthorityMode::OfflineBearerRequired));
+        assert_eq!(classify(&transfer(None)), EconomicEffect::ClosedWriteSet);
+        assert_eq!(classify(&online), EconomicEffect::ClosedWriteSet);
+        assert_eq!(classify(&bearer), EconomicEffect::OfflineAccountOnly);
+        assert!(matches!(
+            semantic_write_set(&online, &G, &DEV, 1),
+            Ok(SemanticWriteSet::DebitOnly { amount: 5, .. })
+        ));
+        match semantic_write_set(&bearer, &G, &DEV, 1) {
+            Err(refused) => assert_eq!(refused, WriteSetError::NoEconomicWriteSet),
+            Ok(_) => panic!("an offline-bearer transfer moves allocation, not balance"),
+        }
     }
 }

@@ -20,11 +20,11 @@ function freshModule() {
 
 const reported: StorageStatus = {
   networkId: 'dsm-testnet',
-  storageSetIdB32: '7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0',
+  storageSetIdB32: 'YTSBGCJFS144MK92CN6FNK4ZAQ60JGYW05N89XXKT25ZRKSA03GG',
   members: [
     {
       memberId: 'dsm-node-1',
-      registerIncarnationB32: 'B6DZ4TFJ2Y1GSJ8X57CE8BWX0QM5JRVAJP08JRQTV65DEQ53DYKG',
+      registerIncarnationB32: '0Y3VWSHQXT8C5K9PGQWRT5DS7492HKNT6J2P69DSHR53XSVD26M0',
       endpoint: 'https://node-1:8080',
       answer: { kind: 'noCycle' },
       answeredAs: 'dsm-node-1',

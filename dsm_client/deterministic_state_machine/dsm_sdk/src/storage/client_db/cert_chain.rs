@@ -43,8 +43,8 @@ use super::get_connection;
 // 2. The SK lifetime is bounded: encrypted at receipt-build time for step n,
 //    used at receipt-build time for step n+1, then wiped (overwritten with
 //    NULL) when chain head advances.
-// 3. We use XChaCha20-Poly1305 (matching the recovery capsule choice in
-//    §16.10) for nonce-misuse resistance and consistency.
+// 3. We use XChaCha20-Poly1305 (whitepaper §16.10) for nonce-misuse resistance
+//    and consistency.
 //
 // AEAD AD: a fixed domain marker. Per-blob random 24-byte nonce is prepended
 // to the ciphertext on disk so each encryption is independent.
@@ -682,17 +682,99 @@ pub fn stash_pending_local_head_with_conn(
     is_init: bool,
 ) -> Result<()> {
     let encrypted_sk = encrypt_chain_sk(ek_secret_key, chain_head_wrap_key)?;
+    let prev = local_head_with_conn(conn, relationship_key)?;
     conn.execute(
         "INSERT OR REPLACE INTO pending_local_cert_heads
-            (relationship_key, commitment_hash, ek_pubkey, ek_sk_encrypted, is_init)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+            (relationship_key, commitment_hash, ek_pubkey, ek_sk_encrypted, is_init, prev_pubkey)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             relationship_key.as_slice(),
             commitment_hash.as_slice(),
             ek_pubkey,
             encrypted_sk,
-            is_init as i64
+            is_init as i64,
+            prev
         ],
+    )?;
+    Ok(())
+}
+
+/// The committed Local head of `relationship_key`, read inside `conn`.
+fn local_head_with_conn(conn: &Connection, relationship_key: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+    Ok(conn
+        .query_row(
+            "SELECT chain_head_pubkey FROM cert_chain_heads
+             WHERE relationship_key = ?1 AND side = 0",
+            params![relationship_key.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// The predecessor recorded for the pending Local key `pending_pubkey` of
+/// `relationship_key`: `Some(prev)` when that key is pending (`prev` the head
+/// it was certified by, `None` at the relationship's first step), `None`
+/// when no pending row holds it.
+fn pending_predecessor_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    pending_pubkey: &[u8],
+) -> Result<Option<Option<Vec<u8>>>> {
+    Ok(conn
+        .query_row(
+            "SELECT prev_pubkey FROM pending_local_cert_heads
+             WHERE relationship_key = ?1 AND ek_pubkey = ?2",
+            params![relationship_key.as_slice(), pending_pubkey],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?)
+}
+
+/// Advance the Local head to `new_pubkey` for a step this device signed with
+/// a key chained from its own step still in flight, `pending_pubkey` (owner
+/// ruling, 2026-10-29: "both settle"): the countersignature of a transfer that
+/// crossed this device's own send. While that send is pending, the committed
+/// head is still the one its key was certified by; this step is the later one
+/// in the device's lineage, so the head moves from there straight to its key,
+/// and the send's promotion later leaves it there. Any other head is a
+/// conflict.
+pub fn cas_advance_local_cert_chain_head_past_pending_with_sk(
+    relationship_key: &[u8; 32],
+    pending_pubkey: &[u8],
+    new_pubkey: &[u8],
+    new_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+) -> Result<CasHeadOutcome> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database connection is poisoned: {e}"))?;
+    let current = local_head_with_conn(&conn, relationship_key)?;
+    match pending_predecessor_with_conn(&conn, relationship_key, pending_pubkey)? {
+        Some(prev) if prev == current => cas_advance_local_cert_chain_head_with_conn(
+            &conn,
+            relationship_key,
+            prev.as_deref(),
+            new_pubkey,
+            new_secret_key,
+            chain_head_wrap_key,
+        ),
+        _ => Ok(CasHeadOutcome::Conflict { current }),
+    }
+}
+
+/// Drop the Local chain-head advance stashed for the step `commitment_hash`,
+/// inside `conn`: the step was reset before anything it signed was delivered,
+/// so the head it would have moved to is never promoted.
+pub fn discard_pending_local_head_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM pending_local_cert_heads
+         WHERE relationship_key = ?1 AND commitment_hash = ?2",
+        params![relationship_key.as_slice(), commitment_hash.as_slice()],
     )?;
     Ok(())
 }
@@ -712,17 +794,58 @@ pub fn promote_pending_local_head_with_conn(
     relationship_key: &[u8; 32],
     commitment_hash: &[u8; 32],
 ) -> Result<Option<u64>> {
-    let row: Option<(Vec<u8>, Vec<u8>, i64)> = tx
+    let row: Option<(Vec<u8>, Vec<u8>, i64, Option<Vec<u8>>)> = tx
         .query_row(
-            "SELECT ek_pubkey, ek_sk_encrypted, is_init FROM pending_local_cert_heads
+            "SELECT ek_pubkey, ek_sk_encrypted, is_init, prev_pubkey FROM pending_local_cert_heads
              WHERE relationship_key = ?1 AND commitment_hash = ?2",
             params![relationship_key.as_slice(), commitment_hash.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((ek_pk, sk_ct, is_init)) = row else {
+    let Some((ek_pk, sk_ct, is_init, prev)) = row else {
         return Ok(None);
     };
+    // The head moves only from the key this one was certified by. A later
+    // step of this device's lineage chained from this pending key — the
+    // countersignature of a transfer that crossed it (owner ruling,
+    // 2026-10-29) — may already have moved it past; the head then stays
+    // there. Any other head is a conflict and aborts the caller's
+    // transaction.
+    let current = local_head_with_conn(tx, relationship_key)?;
+    if current != prev {
+        let superseded: Option<i64> = match current.as_deref() {
+            Some(head) => tx
+                .query_row(
+                    "SELECT 1 FROM acceptance_fold_journal
+                     WHERE relationship_key = ?1 AND expected_local_b_head = ?2
+                       AND new_local_b_head = ?3",
+                    params![relationship_key.as_slice(), ek_pk, head],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            None => None,
+        };
+        if superseded.is_none() {
+            return Err(anyhow!(
+                "pending EK head promotion: the Local head moved since this key was stashed, \
+                 and not by a step chained from it"
+            ));
+        }
+        tx.execute(
+            "DELETE FROM pending_local_cert_heads
+             WHERE relationship_key = ?1 AND commitment_hash = ?2",
+            params![relationship_key.as_slice(), commitment_hash.as_slice()],
+        )?;
+        let step: Option<i64> = tx
+            .query_row(
+                "SELECT step_count FROM cert_chain_heads
+                 WHERE relationship_key = ?1 AND side = 0",
+                params![relationship_key.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return Ok(step.map(|s| s as u64));
+    }
     if is_init != 0 {
         // Relationship genesis: the sign fell back to the root AK because
         // no Local row existed. Record EK_1 as the step-0 head. If a row
@@ -840,6 +963,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn init_inserts_then_idempotent() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xAA);
         let pk_v1 = vec![0x01; 64];
@@ -861,6 +985,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn local_and_counterparty_are_independent() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xBB);
         let local_pk = vec![0x11; 64];
@@ -886,6 +1011,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn advance_bumps_step_and_replaces_pubkey() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xCC);
         let ak_pk = vec![0xAA; 64];
@@ -920,6 +1046,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn a_head_move_needs_the_head_it_names() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xDD);
         assert_eq!(
@@ -934,6 +1061,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn load_returns_none_for_unknown_relationship() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xFE);
         assert!(load_cert_chain_head_pubkey(&r, CertChainSide::Local)
@@ -950,6 +1078,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn init_for_relationship_seeds_both_sides() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xA1);
         let local_ak = vec![0x01; 64];
@@ -1033,6 +1162,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn local_chain_head_sk_init_load_round_trip() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xB1);
         let pk = vec![0xAA; 64];
@@ -1059,6 +1189,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn local_chain_head_sk_advance_round_trip() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xB2);
         let pk0 = vec![0x10; 64];
@@ -1098,6 +1229,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn local_chain_head_sk_wipe_clears_only_sk() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xB3);
         let pk = vec![0x44; 64];
@@ -1126,6 +1258,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn local_chain_head_sk_advance_requires_init() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xB4);
         let result = cas_advance_local_cert_chain_head_with_sk(
@@ -1148,6 +1281,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn pending_local_head_stash_promote_genesis() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xC1);
         let commitment = [0xD1; 32];
@@ -1183,6 +1317,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn pending_local_head_promote_advances_existing_row() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xC2);
         let wrap = [0x21; 32];
@@ -1210,6 +1345,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn pending_local_head_drop_on_failure_leaves_head_untouched() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xC3);
         let wrap = [0x31; 32];
@@ -1237,6 +1373,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn pending_local_head_restash_replaces() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xC4);
         let wrap = [0x41; 32];
@@ -1257,6 +1394,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn different_relationships_isolated() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r1 = rel(0x01);
         let r2 = rel(0x02);
@@ -1327,6 +1465,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn stash_does_not_advance_committed_head() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xE0);
         let wrap = [0x77u8; 32];
@@ -1357,6 +1496,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn promote_genesis_seeds_head() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xE1);
         let wrap = [0x77u8; 32];
@@ -1375,6 +1515,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn promote_steady_state_bumps_step() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xE2);
         let wrap = [0x77u8; 32];
@@ -1395,6 +1536,7 @@ mod tests {
     #[serial_test::serial]
     fn promote_none_leaves_head_unchanged() {
         // Lost PREPARE / no stash: nothing to promote, committed head untouched.
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xE3);
         let ak = vec![0xA0u8; 64];
@@ -1412,6 +1554,7 @@ mod tests {
     #[serial_test::serial]
     fn drop_for_relationship_leaves_committed_head() {
         // Rejection / timeout / BLE failure: drop the stash, committed head stays.
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xE4);
         let wrap = [0x77u8; 32];
@@ -1431,6 +1574,7 @@ mod tests {
     #[serial_test::serial]
     fn promote_twice_is_idempotent_no_double_advance() {
         // A redelivered acceptance artifact must not double-advance the head.
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xE5);
         let wrap = [0x77u8; 32];
@@ -1456,6 +1600,7 @@ mod tests {
         // names exactly one commitment and advances exactly that one step — a
         // pending row belonging to a different attempt is neither promoted nor
         // silently destroyed by this call.
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let r = rel(0xE6);
         let wrap = [0x77u8; 32];
@@ -1504,6 +1649,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cas_accepts_an_unchanged_head_and_a_declared_first_step() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         let r = rel(0xC1);
@@ -1546,6 +1692,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cas_fails_closed_when_the_head_moved_after_signing() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         let r = rel(0xC2);
@@ -1587,6 +1734,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cas_refuses_to_treat_an_unexplained_absence_as_genesis() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         let r = rel(0xC3);

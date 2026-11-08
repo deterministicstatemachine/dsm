@@ -104,6 +104,13 @@ pub mod prelude;
 #[cfg(all(target_os = "android", feature = "jni"))]
 pub mod jni;
 
+/// The app that hosts the SDK: what Rust asks of the platform, and who answers.
+pub mod host;
+
+/// The C ABI the iOS host calls.
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 pub mod bridge;
 pub mod envelope;
 pub mod handlers;
@@ -130,6 +137,8 @@ pub(crate) mod test_support {
     mod nodes_tests;
     pub mod one_device;
     pub mod receipts;
+    pub mod reserve;
+    pub mod rival;
     pub mod two_device;
 }
 #[cfg(test)]
@@ -161,13 +170,13 @@ pub mod bluetooth;
 pub mod runtime;
 
 use crate::storage_utils::ensure_storage_base_dir;
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Readiness flags (core + bilateral). Core readiness lives in unified_protobuf_bridge (SDK_READY)
 // but we expose bilateral readiness here after preconditions succeed so JNI / UI can query
 // deterministically without racing the initialization sequence.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 static BILATERAL_READY: AtomicBool = AtomicBool::new(false);
 
 /// STRICT init: requires the storage dir and the env config.
@@ -296,7 +305,7 @@ pub fn initialize_sdk_context(
 /// Production entropy derivation (deterministic, wallet-seed-rooted).
 ///
 /// SDK-context entropy roots in the BIP39 wallet seed (the canonical Genesis v2 root
-/// secret, re-derived from the session-cached mnemonic — never persisted, no C-DBRW).
+/// secret, re-derived from the session-cached mnemonic — never persisted).
 ///
 /// `Expand(PRK_w, "DSM/sdk-entropy/v3" ‖ DevID ‖ G)` (key schedule KS1): the wallet seed
 /// enters only the wallet-root Extract. `device_id`/`genesis_hash` are 32 bytes (anything
@@ -324,8 +333,10 @@ pub(crate) fn derive_production_entropy(
 }
 
 /// The session-cached BIP39 wallet seed (unlocked via the mnemonic). Fails closed when the
-/// wallet is locked — the SDK context cannot be brought up without it.
-pub(crate) fn fetch_wallet_seed() -> Result<Vec<u8>, dsm::types::error::DsmError> {
+/// wallet is locked — the SDK context cannot be brought up without it. The copy is zeroized
+/// when the caller drops it.
+pub(crate) fn fetch_wallet_seed() -> Result<zeroize::Zeroizing<Vec<u8>>, dsm::types::error::DsmError>
+{
     crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
         dsm::types::error::DsmError::invalid_parameter(
             "wallet seed unavailable; unlock the wallet (mnemonic) before SDK context",
@@ -399,7 +410,7 @@ pub fn get_transport_headers_v3_bytes() -> Result<Vec<u8>, dsm::types::error::Ds
 
 /// Mark the bilateral SDK ready once its preconditions hold: the SDK context
 /// is initialized and the BLE stack is live.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmError> {
     use dsm::types::error::DsmError;
 
@@ -427,31 +438,31 @@ pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmErro
 
 /// A build without the Android BLE stack has no bilateral runtime to make
 /// ready, and says so rather than reporting one.
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+#[cfg(not(feature = "bluetooth"))]
 pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmError> {
     Err(dsm::types::error::DsmError::invalid_operation(
-        "no bilateral stack on this build: the offline protocol runs on Android with the bluetooth feature",
+        "no bilateral stack on this build: the offline protocol runs on a build with the bluetooth feature",
     ))
 }
 
 /// Returns true once bilateral preconditions have been verified (context + handler).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub fn is_bilateral_ready() -> bool {
     BILATERAL_READY.load(Ordering::SeqCst)
 }
 
 /// Convenience aggregate readiness – usable by UI gating logic.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub fn is_sdk_fully_ready() -> bool {
     is_sdk_context_initialized() && is_bilateral_ready()
 }
 
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+#[cfg(not(feature = "bluetooth"))]
 pub fn is_bilateral_ready() -> bool {
     false
 }
 
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+#[cfg(not(feature = "bluetooth"))]
 pub fn is_sdk_fully_ready() -> bool {
     is_sdk_context_initialized() && is_bilateral_ready()
 }

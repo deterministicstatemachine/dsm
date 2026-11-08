@@ -13,8 +13,7 @@
 //!    - `"balance.list"`, `"wallet.history"`, `"contacts.list"`,
 //!      `"bitcoin.balance"`, `"bilateral.pending_list"`, etc.
 //! 3. Use [`AppRouter::invoke()`] for state-mutating operations:
-//!    - `"wallet.sendSmart"`, `"token.create"`, `"faucet.claim"`, `"prefs.set"`,
-//!      `"dbrw.export_report"`, etc.
+//!    - `"wallet.sendSmart"`, `"token.create"`, `"faucet.claim"`, `"prefs.set"`, etc.
 //! 4. All parameters (`AppQuery::params`, `AppInvoke::args`) and return values
 //!    (`AppResult::data`) are prost-encoded protobuf bytes. See `dsm_app.proto`.
 //!
@@ -93,17 +92,7 @@ pub trait AppRouter: Send + Sync {
     /// from the device head's authoritative balance scalar — never to mutate
     /// it. `None` when the router does not yet hold an identity (the
     /// pre-genesis bootstrap router).
-    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState>;
-
-    /// §9.5: resolve a token's canonical `policy_commit` from the local
-    /// source-of-truth installed policy (builtins -> canonical constants;
-    /// custom -> the device's own registration history). Returns `Err` when the
-    /// policy is not locally installed — callers MUST fail closed and never
-    /// absorb a peer-supplied commit.
-    fn resolve_policy_commit_strict(
-        &self,
-        token_id: &[u8],
-    ) -> Result<[u8; 32], dsm::types::error::DsmError>;
+    fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead>;
 
     /// Pure-prepare view of the canonical AdvanceOutcome — used by the BLE
     /// sender to build a stitched receipt with the real post-advance SMT
@@ -118,7 +107,6 @@ pub trait AppRouter: Send + Sync {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 
@@ -141,23 +129,42 @@ pub trait AppRouter: Send + Sync {
         receiver_challenge: [u8; 32],
     ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError>;
 
-    /// v2 producer phase 2: PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT → FINALIZE with the real
-    /// device SMT roots from the caller's advance simulation, attaching `Π_i`/`Π_{i+1}` to the
-    /// release package. Delegates to [`CoreSDK::release_offline_bearer`].
+    /// v2 producer phase 2, the hardware half of the one motion: PREPARE(t, r_R, R_i, R_{i+1}) →
+    /// COMMIT → EMIT with the real device SMT roots from the caller's advance simulation. The
+    /// frontier advances only after the step commits
+    /// ([`finalize_offline_bearer`](Self::finalize_offline_bearer)). Delegates to
+    /// [`CoreSDK::release_offline_bearer`].
     fn release_offline_bearer(
         &self,
         staged: &crate::sdk::core_sdk::StagedBearerTransition,
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        anchor_smt_proof_before: Vec<u8>,
-        anchor_smt_proof_after: Vec<u8>,
     ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError>;
 
     /// Cleanup: release an ABANDONED prepared bearer (e.g. the confirm build failed between
     /// PREPARE and COMMIT) so the appliance returns to `Ready` and future offline-bearer sends do
     /// not fail closed. Delegates to [`CoreSDK::cancel_offline_bearer_release`].
     fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError>;
+
+    /// The committed release the appliance holds, emitted again — the same release, the counter
+    /// unmoved (§26). Delegates to [`CoreSDK::reemit_offline_bearer`].
+    fn reemit_offline_bearer(
+        &self,
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError>;
+
+    /// The appliance's recovery state (§26), observed. Delegates to
+    /// [`CoreSDK::observe_offline_bearer_recovery`].
+    fn observe_offline_bearer_recovery(
+        &self,
+    ) -> Result<anchor_core::appliance::RecoverOutcome, dsm::types::error::DsmError>;
+
+    /// Advance the appliance's frontier to the committed successor once the step that spends it
+    /// is committed. Delegates to [`CoreSDK::finalize_offline_bearer`].
+    fn finalize_offline_bearer(
+        &self,
+        appliance_next_root: [u8; 32],
+    ) -> Result<(), dsm::types::error::DsmError>;
 
     /// Execute a prepared bilateral advance through the canonical
     /// [`CoreSDK::execute_on_relationship`] chokepoint.
@@ -188,7 +195,6 @@ pub trait AppRouter: Send + Sync {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
         before_commit: Option<
             &dyn Fn(
@@ -498,13 +504,13 @@ pub fn ble_runtime() -> Option<Arc<crate::handlers::BiImpl>> {
     BLE_RUNTIME.get().cloned()
 }
 
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 fn installed_ble_runtime() -> Result<Arc<crate::handlers::BiImpl>, String> {
     ble_runtime().ok_or_else(|| "BLE runtime not installed".to_string())
 }
 
 /// Inject the BleFrameCoordinator into the BLE runtime (Android only).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn inject_ble_coordinator(
     coordinator: std::sync::Arc<crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator>,
 ) -> Result<(), String> {
@@ -516,7 +522,7 @@ pub async fn inject_ble_coordinator(
 }
 
 /// Inject the bilateral transport adapter into the BLE runtime (Android only).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn inject_ble_transport_adapter(
     adapter: std::sync::Arc<
         crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter,
@@ -530,7 +536,7 @@ pub async fn inject_ble_transport_adapter(
 }
 
 /// Get the BleFrameCoordinator from the BLE runtime (Android only).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn get_ble_coordinator(
 ) -> Result<std::sync::Arc<crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator>, String> {
     installed_ble_runtime()?
@@ -540,7 +546,7 @@ pub async fn get_ble_coordinator(
 }
 
 /// Get the bilateral transport adapter from the BLE runtime (Android only).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn get_ble_transport_adapter() -> Result<
     std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
     String,

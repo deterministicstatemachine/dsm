@@ -3,6 +3,7 @@
 package com.dsm.wallet.bridge
 
 import android.util.Log
+import com.dsm.wallet.bridge.ble.BleConstants
 import com.dsm.wallet.bridge.ble.BleCoordinator
 import kotlinx.coroutines.runBlocking
 
@@ -46,16 +47,15 @@ internal object UnifiedBleBridge {
     }
 
     /**
-     * Send a reply on the link at [deviceAddress] that the frame it answers
-     * arrived on. Nothing reconnects for it: a reply whose link is gone is
-     * answered again when the counterparty sends its frame again.
-     * [useReliableWrite] prefers our client link to the peer's subscription to
-     * our server when both exist.
+     * Write [chunks], sealed by Rust, on exactly the link at [deviceAddress]
+     * where this device is [role] (DSM Amendment A27: Rust chooses the link).
+     * Nothing switches to another link: a link that is gone fails closed, and
+     * Rust's frame stays owed.
      */
     fun dispatchRustFollowUp(
         deviceAddress: String,
+        role: Int,
         chunks: Array<ByteArray>,
-        useReliableWrite: Boolean,
     ): Boolean {
         val svc = bleCoordinator ?: return false
         if (chunks.isEmpty()) {
@@ -63,16 +63,16 @@ internal object UnifiedBleBridge {
         }
         return try {
             runBlocking {
-                val client = svc.hasActiveClientSession(deviceAddress)
-                val server = svc.isGattServerClient(deviceAddress) &&
-                    svc.isServerClientSubscribedToTxResponse(deviceAddress)
-                when {
-                    client && (useReliableWrite || !server) ->
-                        sendOverClientLink(svc, deviceAddress, chunks, "followup_client_send_failed")
-                    server ->
-                        sendOverServerLink(svc, deviceAddress, chunks, "followup_server_notify_failed")
+                when (role) {
+                    BleConstants.LINK_ROLE_CLIENT ->
+                        svc.hasActiveClientSession(deviceAddress) &&
+                            sendOverClientLink(svc, deviceAddress, chunks, "followup_client_send_failed")
+                    BleConstants.LINK_ROLE_SERVER ->
+                        svc.isGattServerClient(deviceAddress) &&
+                            svc.isServerClientSubscribedToTxResponse(deviceAddress) &&
+                            sendOverServerLink(svc, deviceAddress, chunks, "followup_server_notify_failed")
                     else -> {
-                        Log.w("UnifiedBleBridge", "dispatchRustFollowUp: the link at $deviceAddress is gone; the reply is not sent")
+                        Log.e("UnifiedBleBridge", "dispatchRustFollowUp: role $role names no link at $deviceAddress")
                         false
                     }
                 }
@@ -83,8 +83,8 @@ internal object UnifiedBleBridge {
         }
     }
 
-    // The GATT server reads the identity from Rust when a peer asks for it;
-    // advertising without one would answer every identity read with a failure.
+    // A link's handshake needs this device's identity and keys; advertising
+    // without them would answer every Hello with nothing.
     private fun localIdentityAvailable(): Boolean = try {
         Unified.getDeviceIdBin().size == 32 && Unified.getGenesisHashBin().size == 32
     } catch (_: Throwable) {
@@ -128,42 +128,17 @@ internal object UnifiedBleBridge {
 
 
     /**
-     * Send one message to the appliance [deviceId]. Only a link whose identity
-     * is anchored to it carries the message; with none, the coordinator
-     * reaches for it — [addressHint] first. False is "not delivered now": the
-     * SDK's frame stays owed and is delivered again when the appliance is
-     * reached.
+     * Rust asks for a link to the contact [deviceId], [addressHint] first: the
+     * coordinator connects, and the link it opens names [deviceId] as its
+     * handshake's target.
      */
-    fun requestGattWriteChunks(deviceId: ByteArray, addressHint: String, chunks: Array<ByteArray>): Boolean {
-        val svc = bleCoordinator ?: return false
-        if (deviceId.size != 32) {
-            Log.e("UnifiedBleBridge", "requestGattWriteChunks: a device id of ${deviceId.size} bytes routes nowhere")
-            return false
-        }
-        val target = BridgeEncoding.base32CrockfordEncode(deviceId).take(8)
-        return try {
-            runBlocking {
-                val route = svc.resolveRoute(deviceId, addressHint) ?: svc.reach(deviceId, addressHint)
-                if (route == null) {
-                    Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route to $target; the frame stays owed")
-                    return@runBlocking false
-                }
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: $target at ${route.address} (client link=${route.clientLink})")
-                if (route.clientLink) {
-                    sendOverClientLink(svc, route.address, chunks, "tx_chunk_send_failed")
-                } else {
-                    sendOverServerLink(svc, route.address, chunks, "server_notify_failed")
-                }
-            }
-        } catch (t: Throwable) {
-            Log.e("UnifiedBleBridge", "requestGattWriteChunks failed for $target", t)
-            false
-        }
-    }
-
-    fun deliverDeferredPairingAck(deviceAddress: String, ackBytes: ByteArray) {
+    fun requestGattConnect(deviceId: ByteArray, addressHint: String) {
         val svc = bleCoordinator ?: return
-        svc.deliverDeferredPairingAck(deviceAddress, ackBytes)
+        if (deviceId.size != 32) {
+            Log.e("UnifiedBleBridge", "requestGattConnect: a device id of ${deviceId.size} bytes reaches nothing")
+            return
+        }
+        svc.requestConnect(deviceId, addressHint)
     }
 
     fun getBleStats(deviceAddress: String): ByteArray {

@@ -1,33 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-// Inbox (b0x) overlay — transient notices for applied transfers, and the items
-// still queued on the storage nodes as Rust lists them.
+// Inbox (b0x) overlay — the transfers received and not yet looked at, and the
+// items still queued on the storage nodes, both as Rust lists them.
 //
-// Transfers are applied by the background poller (`storage.sync`). When it
-// reports processed transfers via `inbox.updated`, a short-lived in-memory
-// notice is shown; the screen's own listener reloads the wallet data. Opening
-// the overlay lists what `inbox.pull` finds queued, every item as Rust
-// described it, including those Rust marked as found on a previous-tip route.
+// The count on the b0x button is Rust's count of received transfers the user
+// has not opened the b0x on (owner, 2026-10-23) — the same count Rust hands
+// the app icon. Rust announces a change with `money.waiting`. Opening the
+// overlay shows those transfers and reports them seen, which clears the count;
+// one that lands while it is open counts until the next opening. Opening it
+// also lists what `inbox.pull` finds queued, every item as Rust described it,
+// including those Rust marked as found on a previous-tip route.
 import React, { useState, useCallback, useEffect } from 'react';
 import { dsmClient } from '../../../services/dsmClient';
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
 import type { InboxItemView } from '../../../dsm/types';
-
-// ---------------------------------------------------------------------------
-// Notification record — ephemeral UI state only.
-// unix_ts is display-only; it never enters any hash preimage.
-// ---------------------------------------------------------------------------
-type NotificationRecord = {
-  id: string;
-  count: number;
-  unix_ts: number;
-};
-
-const APPLIED_NOTICE_TTL_MS = 8_000;
-
-function formatTime(ts: number): string {
-  try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
-  catch { return ''; }
-}
+import type { DomainTransaction } from '../../../domain/types';
+import { getMoneyWaiting, markMoneySeen, type MoneyWaiting } from '../../../dsm/moneyWaiting';
 
 // ---------------------------------------------------------------------------
 // Component
@@ -36,31 +23,41 @@ type Props = { headerHeight: number };
 
 function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false);
-  const [records, setRecords] = useState<NotificationRecord[]>([]);
+  const [waiting, setWaiting] = useState<MoneyWaiting | null>(null);
+  const [shown, setShown] = useState<DomainTransaction[]>([]);
   const [pending, setPending] = useState<InboxItemView[]>([]);
   const [loadingPending, setLoadingPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Badge = total transfer count across all active transient notices.
-  const badgeCount = records.reduce((acc, r) => acc + r.count, 0);
+  // Rust's count of received transfers not yet looked at; none drawn until read.
+  const badgeCount = waiting === null ? 0 : waiting.received.length;
 
-  // Append a short-lived notice whenever the poller processes transfers.
-  useEffect(() => {
-    return bridgeEvents.on('inbox.updated', (detail) => {
-      const processed = detail?.newItems ?? 0;
-      if (processed > 0) {
-        const rec: NotificationRecord = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          count: processed,
-          unix_ts: Date.now(),
-        };
-        setRecords((prev) => [rec, ...prev]);
-        window.setTimeout(() => {
-          setRecords((prev) => prev.filter((item) => item.id !== rec.id));
-        }, APPLIED_NOTICE_TTL_MS);
-      }
-    });
+  // A read that fails is shown, and the count stays as it was last read.
+  const report = useCallback((e: unknown) => {
+    setError(e instanceof Error ? e.message : 'The received transfers could not be read');
   }, []);
+
+  const readWaiting = useCallback(
+    () => getMoneyWaiting().then(setWaiting, report),
+    [report],
+  );
+
+  useEffect(() => {
+    readWaiting();
+    return bridgeEvents.on('money.waiting', () => { readWaiting(); });
+  }, [readWaiting]);
+
+  // Show what is waiting, then report it seen: the count clears for exactly
+  // what was shown.
+  const showReceived = useCallback(
+    () => getMoneyWaiting()
+      .then((now) => {
+        setShown(now.received);
+        return markMoneySeen(now.through);
+      })
+      .then(setWaiting, report),
+    [report],
+  );
 
   const loadPending = useCallback(async () => {
     setLoadingPending(true);
@@ -83,8 +80,9 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
     }
     setOpen(true);
     bridgeEvents.emit('inbox.open', { open: true });
+    showReceived();
     void loadPending();
-  }, [open, loadPending]);
+  }, [open, loadPending, showReceived]);
 
   const handleClose = useCallback(() => {
     setOpen(false);
@@ -126,18 +124,17 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
                 <div role="alert" style={{ ...mono, fontSize: 11, color: '#e53e3e', padding: '4px 6px', border: '1px solid #e53e3e' }}>{error}</div>
               )}
 
-              {/* ---- Applied transfer notices (auto-expire) ---- */}
-              {records.length > 0 && (
+              {/* ---- Received since the b0x was last opened, as Rust lists them ---- */}
+              {shown.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div style={{ ...mono, fontSize: 10, opacity: 0.6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    Recently applied
+                    Received
                   </div>
-                  {records.map((rec) => (
-                    <div key={rec.id} style={{ border: '1px solid var(--border)', padding: '8px 10px', background: 'rgba(var(--text-dark-rgb),0.06)', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <div style={{ ...mono, fontSize: 12 }}>
-                        {rec.count === 1 ? '1 transfer received and applied' : `${rec.count} transfers received and applied`}
-                      </div>
-                      <span style={{ ...mono, fontSize: 10, opacity: 0.55 }}>{formatTime(rec.unix_ts)}</span>
+                  {shown.map((tx) => (
+                    <div key={tx.txId} style={{ border: '1px solid var(--border)', padding: '8px 10px', background: 'rgba(var(--text-dark-rgb),0.06)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div style={{ ...mono, fontSize: 12 }}>{tx.displayAmount} {tx.tokenId}</div>
+                      <div style={{ ...mono, fontSize: 10, opacity: 0.7, wordBreak: 'break-all', overflowWrap: 'break-word' }}>from {tx.recipient}</div>
+                      {tx.memo && <div style={{ ...mono, fontSize: 10, opacity: 0.7 }}>{tx.memo}</div>}
                     </div>
                   ))}
                 </div>
@@ -162,7 +159,7 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
                 </div>
               )}
 
-              {records.length === 0 && pending.length === 0 && !loadingPending && (
+              {shown.length === 0 && pending.length === 0 && !loadingPending && (
                 <div style={{ ...mono, fontSize: 12, opacity: 0.6 }}>No new notifications.</div>
               )}
 

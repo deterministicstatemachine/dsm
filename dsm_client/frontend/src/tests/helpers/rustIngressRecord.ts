@@ -41,6 +41,7 @@ function carriedBy(method: string, payload: Uint8Array): string {
   }
   if (method === 'nativeHostRequest') return pb.NativeHostRequestKind[pb.NativeHostRequest.fromBinary(payload).kind];
   if (method === 'setPreference' || method === 'getPreference') return pb.PreferencePayload.fromBinary(payload).key;
+  if (method === 'setScreenGuards') return `setScreenGuards ${payload.length === 1 ? payload[0] : 'of no byte'}`;
   return method;
 }
 
@@ -60,6 +61,11 @@ export function answerFromRustRecord(path: string): Arrival[] {
       const call = pb.BridgeRpcRequest.fromBinary(bytes);
       const payload = call.payload.case === 'bytes' ? call.payload.value.data : new Uint8Array(0);
       arrivals.push({ method: call.method, carried: carriedBy(call.method, payload) });
+      // The window's guards are Kotlin's to take (MainActivity.setScreenGuards):
+      // nothing reaches Rust, and Kotlin answers no bytes.
+      if (call.method === 'setScreenGuards') {
+        return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: new Uint8Array(0) } } }).toBinary();
+      }
       const asked = call.method === 'nativeBoundaryIngress'
         ? record.flatMap((recorded, at) => (sameBytes(recorded.request, payload) ? [at] : []))
         : [];

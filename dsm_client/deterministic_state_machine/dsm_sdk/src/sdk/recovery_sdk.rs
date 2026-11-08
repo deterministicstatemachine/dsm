@@ -2,22 +2,19 @@
 
 //! DSM Recovery SDK
 //!
-//! SDK wrapper for the offline-first, post-quantum recovery system.
-//! Provides application-level APIs for creating recovery capsules, managing
-//! tombstone/succession receipts, and performing device recovery operations.
+//! SDK wrapper for the offline-first, post-quantum recovery system: the wallet
+//! seed and the recovery authority of the unlocked session, tombstone and
+//! succession receipts, and the device recovery operations.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use dsm::recovery::{
-    create_recovery_capsule, decrypt_recovery_capsule, create_tombstone_receipt,
-    create_succession_receipt, verify_tombstone_receipt, verify_succession_receipt, update_rollup,
-    verify_rollup, init_recovery, EncryptedCapsule, RecoveryCapsule, ReceiptRollup,
-    TombstoneReceipt, SuccessionReceipt,
-};
-use dsm::recovery::capsule::{
-    decrypt_capsule_with_key, derive_recovery_key, derive_recovery_authority_seed,
+    create_tombstone_receipt, create_succession_receipt, derive_recovery_authority_seed,
+    init_recovery, update_rollup, verify_rollup, verify_tombstone_receipt,
+    verify_succession_receipt, ReceiptRollup, SuccessionReceipt, TombstoneReceipt,
 };
 use dsm::types::error::DsmError;
+use zeroize::Zeroizing;
 
 /// The number of words of a DSM wallet mnemonic: 24, i.e. 256 bits of entropy.
 pub const WALLET_MNEMONIC_WORDS: usize = 24;
@@ -43,45 +40,38 @@ pub fn wallet_seed_from_mnemonic(phrase: &str) -> Result<[u8; 64], DsmError> {
     Ok(parse_wallet_mnemonic(phrase)?.to_seed(""))
 }
 
-/// In-memory cached recovery key (key schedule KS1: an Expand of the wallet-root Extract).
-/// Also persisted to SQLite encrypted by a device-bound key so it survives app restarts.
-static RECOVERY_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
-
 /// In-memory cached recovery authority SPHINCS+ keypair (public, secret).
 /// Derived from the wallet root via a separate KS1 Expand label (`DSM/recovery-authority/v2`).
 /// Used to sign tombstone and succession receipts during device recovery.
-/// Never persisted to disk — cleared alongside the encryption key.
-static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
+/// Never persisted to disk — cleared alongside the encryption key. The secret key is zeroized
+/// when replaced or cleared.
+static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Zeroizing<Vec<u8>>)>> = Mutex::new(None);
 
 /// In-memory cached BIP39 wallet seed (`mnemonic.to_seed("")`). The canonical Genesis v2
 /// root-secret input — `wallet_seed -> s0 -> Smaster -> {device signing key, per-step EK,
 /// ML-KEM coins}` are re-derived from it on demand via the wallet/recovery unlock path.
-/// NEVER persisted; populated at unlock alongside the recovery key, cleared with it.
-static WALLET_SEED_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+/// NEVER persisted; populated at unlock alongside the recovery key, cleared with it, and
+/// zeroized when replaced or cleared.
+static WALLET_SEED_CACHE: Mutex<Option<Zeroizing<Vec<u8>>>> = Mutex::new(None);
 
 /// Digest of the last mnemonic [`RecoverySDK::generate_mnemonic`] produced in this process.
 /// A NEW identity may be created only from that phrase: a 24-word phrase typed in proves
 /// nothing about its entropy, while one drawn here from the OS CSPRNG has 256 bits.
 static GENERATED_MNEMONIC: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
+/// `DSM/generated-mnemonic/v1`: the domain of [`GENERATED_MNEMONIC`]'s digest.
+const TAG_GENERATED_MNEMONIC: dsm::crypto::domain::TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/generated-mnemonic/v1");
+
+/// The digest a generated mnemonic is remembered by: its words, single-spaced, under
+/// [`TAG_GENERATED_MNEMONIC`]. The joined phrase is zeroized once hashed.
 fn mnemonic_digest(phrase: &str) -> [u8; 32] {
-    let words: Vec<&str> = phrase.split_whitespace().collect();
-    *blake3::hash(words.join(" ").as_bytes()).as_bytes()
+    let words = Zeroizing::new(phrase.split_whitespace().collect::<Vec<&str>>().join(" "));
+    dsm::crypto::blake3::domain_hash_bytes(TAG_GENERATED_MNEMONIC, words.as_bytes())
 }
 
 /// SDK for DSM recovery operations
 pub struct RecoverySDK;
-
-struct RecoveryCapsuleState {
-    smt_root: Vec<u8>,
-    counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
-    rollup: ReceiptRollup,
-    next_index: u64,
-    /// Device ID of this device (for capsule source binding).
-    source_device_id: Vec<u8>,
-    /// Genesis hash of this device (for capsule genesis binding).
-    genesis_hash: Vec<u8>,
-}
 
 /// Session inputs for [`RecoverySDK::build_and_activate_recovery`] — the decrypted capsule's
 /// floor/frontier plus the recovery intent and the recovered device's final state. The route
@@ -111,48 +101,6 @@ impl RecoverySDK {
     /// Initialize the recovery subsystem
     pub fn init() {
         init_recovery();
-    }
-
-    /// Create an encrypted recovery capsule for NFC ring storage
-    ///
-    /// # Arguments
-    /// * `smt_root` - Current SMT root hash
-    /// * `counterparty_tips` - Map of counterparty_id -> (height, head_hash) for bilateral chains
-    /// * `rollup` - Current receipt rollup accumulator
-    /// * `mnemonic` - 24-word BIP39 mnemonic for key derivation
-    /// * `counter` - Recovery capsule counter/version
-    ///
-    /// # Returns
-    /// Encrypted capsule ready for NFC storage
-    pub fn create_recovery_capsule(
-        smt_root: &[u8],
-        counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
-        rollup: &ReceiptRollup,
-        mnemonic: &str,
-        counter: u64,
-    ) -> Result<EncryptedCapsule, DsmError> {
-        let mut seed = wallet_seed_from_mnemonic(mnemonic)?;
-        let out = create_recovery_capsule(smt_root, counterparty_tips, rollup, &seed, counter);
-        zeroize::Zeroize::zeroize(&mut seed);
-        out
-    }
-
-    /// Decrypt and verify a recovery capsule from NFC ring
-    ///
-    /// # Arguments
-    /// * `encrypted_capsule` - Encrypted capsule from NFC ring
-    /// * `mnemonic` - 24-word BIP39 mnemonic for key derivation
-    ///
-    /// # Returns
-    /// Decrypted recovery capsule with SMT root and peer tips
-    pub fn decrypt_recovery_capsule(
-        encrypted_capsule: &EncryptedCapsule,
-        mnemonic: &str,
-    ) -> Result<RecoveryCapsule, DsmError> {
-        let mut seed = wallet_seed_from_mnemonic(mnemonic)?;
-        let out = decrypt_recovery_capsule(encrypted_capsule, &seed);
-        zeroize::Zeroize::zeroize(&mut seed);
-        out
     }
 
     /// Create tombstone receipt to invalidate old device binding
@@ -274,61 +222,6 @@ impl RecoverySDK {
         verify_rollup(rollup, expected)
     }
 
-    /// Create an encrypted recovery capsule from the current device state.
-    ///
-    /// Gathers current SMT root, all bilateral counterparty chain tips,
-    /// the receipt rollup accumulator, and the next capsule index from SQLite,
-    /// then encrypts everything into a capsule ready for NFC ring storage.
-    ///
-    /// # Arguments
-    /// * `mnemonic` - 24-word BIP39 mnemonic for key derivation
-    ///
-    /// # Returns
-    /// Tuple of (capsule_index, encrypted capsule bytes serialized for NFC)
-    pub fn create_capsule_from_current_state(mnemonic: &str) -> Result<(u64, Vec<u8>), DsmError> {
-        let mut seed = wallet_seed_from_mnemonic(mnemonic)?;
-        let key = derive_recovery_key(&seed);
-        zeroize::Zeroize::zeroize(&mut seed);
-        let key = key?;
-        Self::create_capsule_from_current_state_with_key(&key)
-    }
-
-    /// Get the latest pending recovery capsule bytes for NFC write.
-    /// Returns None if no capsule is pending.
-    pub fn get_pending_capsule() -> Option<(u64, Vec<u8>)> {
-        crate::storage::client_db::recovery::get_pending_recovery_capsule()
-            .ok()
-            .flatten()
-    }
-
-    /// Check if NFC backup is currently enabled.
-    pub fn is_nfc_backup_enabled() -> bool {
-        crate::storage::client_db::recovery::is_nfc_backup_enabled()
-    }
-
-    /// Check if NFC backup was ever configured (mnemonic set up).
-    pub fn is_nfc_backup_configured() -> bool {
-        crate::storage::client_db::recovery::is_nfc_backup_configured()
-    }
-
-    /// Enable NFC backup. Marks the backup as both configured and enabled.
-    pub fn enable_nfc_backup() -> Result<(), DsmError> {
-        crate::storage::client_db::recovery::set_nfc_backup_configured(true)
-            .map_err(|e| DsmError::InvalidState(format!("Failed to set configured: {e}")))?;
-        crate::storage::client_db::recovery::set_nfc_backup_enabled(true)
-            .map_err(|e| DsmError::InvalidState(format!("Failed to set enabled: {e}")))?;
-        Ok(())
-    }
-
-    /// Disable NFC backup. Keeps configured=true so the user can re-enable.
-    pub fn disable_nfc_backup() -> Result<(), DsmError> {
-        crate::storage::client_db::recovery::set_nfc_backup_enabled(false)
-            .map_err(|e| DsmError::InvalidState(format!("Failed to set disabled: {e}")))?;
-        crate::storage::client_db::recovery::clear_pending_recovery_capsule()
-            .map_err(|e| DsmError::InvalidState(format!("Failed to clear pending capsule: {e}")))?;
-        Ok(())
-    }
-
     /// Generate a cryptographically secure 24-word BIP-39 mnemonic.
     /// Uses 256 bits of CSPRNG entropy via OsRng. Crypto stays in Rust.
     pub fn generate_mnemonic() -> Result<String, DsmError> {
@@ -370,62 +263,56 @@ impl RecoverySDK {
     /// The cached BIP39 wallet seed (the Genesis v2 root-secret input), if the mnemonic
     /// has been unlocked this session via [`Self::derive_and_cache_key`]. `None` otherwise —
     /// callers that need it (device-key re-derivation, per-step EK/ML-KEM) MUST fail closed.
-    pub fn get_cached_wallet_seed() -> Option<Vec<u8>> {
+    /// The copy returned is zeroized when the caller drops it.
+    pub fn get_cached_wallet_seed() -> Option<Zeroizing<Vec<u8>>> {
         WALLET_SEED_CACHE.lock().ok().and_then(|g| g.clone())
     }
 
-    /// Derive recovery key from mnemonic and cache it in memory.
+    /// Derive the recovery authority from the mnemonic and cache it in memory.
     ///
     /// Key derivation (key schedule KS1), from a 24-word mnemonic only:
     ///                 wallet_seed = BIP39 seed of the mnemonic
     ///                 PRK_w = Extract("DSM/kdf/wallet-root/v1", wallet_seed)
-    ///                 K_R  = Expand(PRK_w, "DSM/recovery-aead/v2")
     ///                 K_A  = Expand(PRK_w, "DSM/recovery-authority/v2")
     ///                 (pk, sk) = SPHINCS+.generate_from_seed(K_A)
     ///
-    /// Both the encryption key and the authority keypair are cached in memory.
+    /// The authority keypair is cached in memory, and the
+    /// wallet seed is cached, and on a device sealed at rest: this is the wallet's unlock,
+    /// used where the phrase is the wallet's own (genesis, restore, the session unlock).
+    /// Every intermediate secret is zeroized when it goes out of scope.
     pub fn derive_and_cache_key(mnemonic: &str) -> Result<(), DsmError> {
-        let mut wallet_seed = wallet_seed_from_mnemonic(mnemonic)?;
-        let key = derive_recovery_key(&wallet_seed);
-        let authority_seed = derive_recovery_authority_seed(&wallet_seed);
-        zeroize::Zeroize::zeroize(&mut wallet_seed);
-        let key = key?;
-        let authority_seed = authority_seed?;
-        {
-            let mut guard = RECOVERY_KEY
-                .lock()
-                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-            *guard = Some(key);
-        }
+        let wallet_seed = Zeroizing::new(wallet_seed_from_mnemonic(mnemonic)?);
+        Self::install_recovery_authority(wallet_seed.as_slice())?;
 
         // Cache the BIP39 wallet seed — the canonical Genesis v2 root-secret input
         // (mnemonic -> wallet_seed -> s0 -> Smaster). Lives for the unlocked session so
-        // device-key + per-step EK/ML-KEM derivations can re-derive it, and is ALSO sealed
-        // at rest (hardware Keystore on Android) so the signer rebuilds on cold start
-        // without the mnemonic. The seed is a one-way BIP39 derivation — NOT the mnemonic,
-        // never reversible to it; the mnemonic itself is never persisted.
+        // device-key + per-step EK/ML-KEM derivations can re-derive it. On a device it is
+        // ALSO sealed at rest under the platform's key so the signer rebuilds on cold start
+        // without the mnemonic; anywhere else no platform key holds it, so nothing is
+        // written and the next start unlocks from the mnemonic. The seed is a one-way BIP39
+        // derivation — NOT the mnemonic, never reversible to it; the mnemonic itself is
+        // never persisted.
         {
-            let seed = wallet_seed_from_mnemonic(mnemonic)?;
-            {
-                let mut guard = WALLET_SEED_CACHE
-                    .lock()
-                    .map_err(|_| DsmError::InvalidState("Wallet seed mutex poisoned".into()))?;
-                *guard = Some(seed.to_vec());
-            }
-            // Seal the seed at rest (non-fatal: the session is already usable; failure only
-            // means the next cold start will require the mnemonic again).
-            if let Err(e) = Self::persist_wallet_seed(&seed) {
-                log::warn!("[RECOVERY_SDK] Failed to seal wallet seed (non-fatal): {e}");
-            }
+            let mut guard = WALLET_SEED_CACHE
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Wallet seed mutex poisoned".into()))?;
+            *guard = Some(Zeroizing::new(wallet_seed.to_vec()));
         }
-
-        // Persist the key encrypted by a device-bound wrapping key so it
-        // survives app restarts without requiring the mnemonic again.
-        if let Err(e) = Self::persist_recovery_key(&key) {
-            log::warn!("[RECOVERY_SDK] Failed to persist recovery key (non-fatal): {e}");
+        // Seal the seed at rest (non-fatal: the session is already usable; failure only
+        // means the next cold start will require the mnemonic again).
+        #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
+        if let Err(e) = Self::persist_wallet_seed(wallet_seed.as_slice()) {
+            log::warn!("[RECOVERY_SDK] Failed to seal wallet seed (non-fatal): {e}");
         }
+        Ok(())
+    }
 
-        // Derive and cache the recovery authority SPHINCS+ keypair.
+    /// Derive the recovery authority keypair from `wallet_seed` (KS1) and cache it,
+    /// zeroized when replaced or cleared.
+    fn install_recovery_authority(wallet_seed: &[u8]) -> Result<(), DsmError> {
+        let authority_seed = Zeroizing::new(derive_recovery_authority_seed(wallet_seed)?);
+        // The key pair zeroizes itself on drop; the cache keeps its own zeroizing copy
+        // of the secret key.
         let keypair = dsm::crypto::sphincs::generate_keypair_from_seed(
             dsm::crypto::sphincs::SphincsVariant::SPX256f,
             &authority_seed,
@@ -435,43 +322,19 @@ impl RecoverySDK {
             let mut guard = RECOVERY_AUTHORITY_KEYPAIR.lock().map_err(|_| {
                 DsmError::InvalidState("Recovery authority keypair mutex poisoned".into())
             })?;
-            *guard = Some((keypair.public_key.clone(), keypair.secret_key.clone()));
+            *guard = Some((
+                keypair.public_key.clone(),
+                Zeroizing::new(keypair.secret_key.clone()),
+            ));
         }
-        log::info!("[RECOVERY_SDK] Cached recovery encryption key and authority keypair");
+        log::info!("[RECOVERY_SDK] Cached recovery authority keypair");
         Ok(())
     }
 
-    /// Clear the cached recovery key and authority keypair from memory and storage.
-    pub fn clear_cached_key() {
-        if let Ok(mut guard) = RECOVERY_KEY.lock() {
-            if let Some(ref mut k) = *guard {
-                k.iter_mut().for_each(|b| *b = 0);
-            }
-            *guard = None;
-        }
-        if let Ok(mut guard) = RECOVERY_AUTHORITY_KEYPAIR.lock() {
-            if let Some((ref mut pk, ref mut sk)) = *guard {
-                pk.iter_mut().for_each(|b| *b = 0);
-                sk.iter_mut().for_each(|b| *b = 0);
-            }
-            *guard = None;
-        }
-        // Also wipe the persisted encrypted blob.
-        let _ = crate::storage::client_db::recovery::delete_encrypted_recovery_key();
-        // Full wipe (logout / mnemonic change): drop the in-memory seed and the sealed
-        // bundle. (Temporary lock uses `clear_wallet_seed_cache`, which keeps the blob.)
-        Self::clear_wallet_seed_cache();
-        let _ = crate::storage::client_db::recovery::delete_encrypted_wallet_seed();
-    }
-
-    /// Check if a recovery key is currently cached in memory.
-    pub fn has_cached_key() -> bool {
-        RECOVERY_KEY.lock().map(|g| g.is_some()).unwrap_or(false)
-    }
-
-    /// Get the cached recovery authority keypair (public_key, secret_key).
-    /// Returns `None` if no mnemonic has been cached yet.
-    pub fn get_cached_authority_keypair() -> Option<(Vec<u8>, Vec<u8>)> {
+    /// Get the cached recovery authority keypair (public_key, secret_key); the secret key's
+    /// copy is zeroized when the caller drops it. Returns `None` if no mnemonic has been
+    /// cached yet.
+    pub fn get_cached_authority_keypair() -> Option<(Vec<u8>, Zeroizing<Vec<u8>>)> {
         RECOVERY_AUTHORITY_KEYPAIR
             .lock()
             .ok()
@@ -484,9 +347,9 @@ impl RecoverySDK {
     /// is the SOLE canonical derivation), uses the cached mnemonic-derived authority
     /// keypair, and produces the doubly-signed declaration committing `H(K_A_pub)`.
     ///
-    /// Fail-closed: requires AppState identity (device_id + genesis_hash), K_DBRW, and a
+    /// Fail-closed: requires AppState identity (device_id + genesis_hash) and a
     /// cached authority keypair — i.e. the mnemonic must already be cached (call
-    /// `derive_and_cache_key` first, as `recovery.enable` does).
+    /// `derive_and_cache_key` first).
     pub fn build_authority_anchor() -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
         let device_id = Self::require_self_id32(
             crate::sdk::app_state::AppState::get_device_id(),
@@ -505,7 +368,7 @@ impl RecoverySDK {
         })?;
 
         // Re-derive the device signing keypair — byte-identical to the one create_genesis_v2
-        // registered (the AK keypair rooted in the BIP39 wallet seed; Genesis v2). No DBRW.
+        // registered (the AK keypair rooted in the BIP39 wallet seed; Genesis v2).
         let device_kp = crate::init::derive_device_signing_keypair(&wallet_seed, &genesis_id)?;
 
         let (authority_pk, authority_sk) =
@@ -1238,21 +1101,10 @@ impl RecoverySDK {
         Ok(receipt.content_id())
     }
 
-    /// Derive a device-bound wrapping key from device_id + genesis_hash.
-    /// Used to encrypt the recovery key before persisting to SQLite.
-    fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
-        let device_id = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| DsmError::InvalidState("Device ID not available".into()))?;
-        let genesis_hash = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
-        let mut hasher = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist\0");
-        hasher.update(&device_id);
-        hasher.update(&genesis_hash);
-        Ok(*hasher.finalize().as_bytes())
-    }
-
     /// Seal the BIP39 wallet seed at rest via the hardware-backed seed vault so the
     /// signer can be rebuilt on cold start without the mnemonic. The seed is a one-way
     /// derivation from the paper mnemonic (never the mnemonic, never reversible to it).
+    #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
     pub fn persist_wallet_seed(seed: &[u8]) -> Result<(), DsmError> {
         let blob = crate::sdk::seed_vault::seal(seed)?;
         crate::storage::client_db::recovery::store_encrypted_wallet_seed(&blob)
@@ -1268,6 +1120,7 @@ impl RecoverySDK {
     /// bundle and re-cache it (rebuilding the signer without the mnemonic). Returns
     /// `Ok(true)` if the seed is now cached, `Ok(false)` if no sealed bundle exists.
     /// A vault that cannot be opened surfaces as `Err`.
+    #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
     pub fn load_and_cache_wallet_seed() -> Result<bool, DsmError> {
         if Self::get_cached_wallet_seed().is_some() {
             return Ok(true);
@@ -1281,7 +1134,7 @@ impl RecoverySDK {
                 )))
             }
         };
-        let seed = crate::sdk::seed_vault::open(&blob)?;
+        let seed = Zeroizing::new(crate::sdk::seed_vault::open(&blob)?);
         {
             let mut guard = WALLET_SEED_CACHE
                 .lock()
@@ -1297,119 +1150,8 @@ impl RecoverySDK {
     /// next auth-gated unlock).
     pub fn clear_wallet_seed_cache() {
         if let Ok(mut guard) = WALLET_SEED_CACHE.lock() {
-            if let Some(ref mut s) = *guard {
-                s.iter_mut().for_each(|b| *b = 0);
-            }
             *guard = None;
         }
-    }
-
-    /// Encrypt the recovery key with a device-bound wrapping key and store in SQLite.
-    /// Format: nonce (24 bytes) || ciphertext+tag.
-    fn persist_recovery_key(key: &[u8; 32]) -> Result<(), DsmError> {
-        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-        use chacha20poly1305::aead::Aead;
-
-        let wrapping_key = Self::device_wrapping_key()?;
-        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
-            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
-
-        // Nonce derived from wrapping key AND plaintext — safe even if the
-        // mnemonic (and therefore key) changes between persist calls.
-        let nonce_hash = {
-            let mut h = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist-nonce\0");
-            h.update(&wrapping_key);
-            h.update(key);
-            h.finalize()
-        };
-        let nonce = XNonce::from_slice(&nonce_hash.as_bytes()[..24]);
-
-        let ciphertext = cipher
-            .encrypt(nonce, key.as_ref())
-            .map_err(|e| DsmError::InvalidState(format!("recovery key encryption: {e}")))?;
-
-        // Store nonce || ciphertext so decrypt doesn't need to re-derive from plaintext.
-        let mut blob = Vec::with_capacity(24 + ciphertext.len());
-        blob.extend_from_slice(nonce.as_slice());
-        blob.extend_from_slice(&ciphertext);
-
-        crate::storage::client_db::recovery::store_encrypted_recovery_key(&blob)
-            .map_err(|e| DsmError::InvalidState(format!("persist encrypted key: {e}")))?;
-
-        log::info!(
-            "[RECOVERY_SDK] Recovery key persisted (encrypted, {} bytes)",
-            blob.len()
-        );
-        Ok(())
-    }
-
-    /// Load the persisted encrypted recovery key, decrypt it, and cache in memory.
-    /// Returns Ok(true) if loaded, Ok(false) if no persisted key exists.
-    fn load_persisted_recovery_key() -> Result<bool, DsmError> {
-        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-        use chacha20poly1305::aead::Aead;
-
-        let blob = match crate::storage::client_db::recovery::load_encrypted_recovery_key() {
-            Ok(Some(b)) => b,
-            Ok(None) => return Ok(false),
-            Err(e) => {
-                return Err(DsmError::InvalidState(format!(
-                    "load encrypted recovery key: {e}"
-                )))
-            }
-        };
-
-        if blob.len() < 24 {
-            return Err(DsmError::InvalidState(format!(
-                "persisted key blob too short: {} bytes",
-                blob.len()
-            )));
-        }
-
-        let nonce = XNonce::from_slice(&blob[..24]);
-        let ciphertext = &blob[24..];
-
-        let wrapping_key = Self::device_wrapping_key()?;
-        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
-            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
-
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| DsmError::InvalidState(format!("recovery key decryption: {e}")))?;
-
-        if plaintext.len() != 32 {
-            return Err(DsmError::InvalidState(format!(
-                "decrypted key wrong length: {} (expected 32)",
-                plaintext.len()
-            )));
-        }
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&plaintext);
-        {
-            let mut guard = RECOVERY_KEY
-                .lock()
-                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-            *guard = Some(key);
-        }
-        Ok(true)
-    }
-
-    /// Decrypt an encrypted capsule using the in-memory cached recovery key.
-    ///
-    /// Used by the ring-import flow so mnemonic handling stays in Rust.
-    pub fn decrypt_capsule_with_cached_key_bytes(
-        capsule_bytes: &[u8],
-    ) -> Result<RecoveryCapsule, DsmError> {
-        let key = {
-            let guard = RECOVERY_KEY
-                .lock()
-                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-            guard.ok_or_else(|| DsmError::InvalidState("No cached recovery key".into()))?
-        };
-
-        let encrypted = EncryptedCapsule::from_bytes(capsule_bytes)?;
-        decrypt_capsule_with_key(&encrypted, &key)
     }
 
     /// Decode this device's persisted recovery state into a [`RecoveryActivationContext`]
@@ -1595,37 +1337,88 @@ impl RecoverySDK {
         Ok(())
     }
 
-    /// A_new's posted recovery succession proof under `authority_pubkey`: the one
-    /// distinct proof that names that authority. The CALLER runs the
-    /// accept-guard over its receipts before trusting it.
-    pub async fn fetch_recovery_succession_proof(
-        genesis_id: &[u8; 32],
+    /// The device `proof` tombstones, once its authority is the one that
+    /// device anchored. The device is a contact of this one, and its anchor is
+    /// read under the genesis this device pinned for it. A recovery acts under
+    /// the predecessor's authority, anchored by the predecessor: an authority
+    /// the successor bound under a genesis of its own is any device's, and let
+    /// any device claim to succeed any contact (SA-121); a tombstone is signed
+    /// under that authority, never under the tombstoned device's AK (SA-117).
+    pub async fn predecessor_anchoring(
+        proof: &dsm::recovery::RecoverySuccessionProof,
+    ) -> Result<[u8; 32], DsmError> {
+        let named = crate::util::text_id::decode_base32_crockford(&proof.tombstone.device_id)
+            .ok_or_else(|| {
+                DsmError::verification(
+                    "recovery: the tombstone's device id is not Base32 Crockford",
+                )
+            })?;
+        let a_old = <[u8; 32]>::try_from(named.as_slice()).map_err(|e| {
+            DsmError::verification(format!("recovery: the tombstone's device id: {e}"))
+        })?;
+        let contact = crate::storage::client_db::get_contact_by_device_id(&a_old)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("the tombstoned device's contact: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?
+            .ok_or_else(|| {
+                DsmError::verification("recovery: the tombstoned device is not a contact")
+            })?;
+        let genesis = <[u8; 32]>::try_from(contact.genesis_hash.as_slice()).map_err(|e| {
+            DsmError::verification(format!(
+                "recovery: the tombstoned device's pinned genesis: {e}"
+            ))
+        })?;
+        Self::fetch_and_verify_authority_anchor(&genesis, &a_old, &proof.authority_pubkey).await?;
+        Ok(a_old)
+    }
+
+    /// The succession proof `a_new` posted under `a_new_genesis` whose
+    /// authority its tombstoned predecessor anchored
+    /// ([`Self::predecessor_anchoring`]), with that predecessor. The CALLER runs
+    /// the accept-guard over its receipts before trusting it.
+    pub async fn succession_proof_anchored_by_predecessor(
+        a_new_genesis: &[u8; 32],
         a_new: &[u8; 32],
-        authority_pubkey: &[u8],
-    ) -> Result<dsm::recovery::RecoverySuccessionProof, DsmError> {
+    ) -> Result<(dsm::recovery::RecoverySuccessionProof, [u8; 32]), DsmError> {
         let cell = dsm::recovery::RecoveryCell::SuccessionProof {
-            genesis: *genesis_id,
+            genesis: *a_new_genesis,
             a_new: *a_new,
         };
-        let mut named: Vec<dsm::recovery::RecoverySuccessionProof> = Vec::new();
+        let mut anchored: Vec<(dsm::recovery::RecoverySuccessionProof, [u8; 32])> = Vec::new();
+        // Why each proof that was not anchored by its predecessor was passed
+        // over: the refusal names them.
+        let mut passed_over: Vec<String> = Vec::new();
         for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            // Anyone can write a cell: bytes that are not a proof are nothing.
             let Ok(proof) = dsm::recovery::RecoverySuccessionProof::from_bytes(&bytes) else {
                 continue;
             };
-            if proof.authority_pubkey == authority_pubkey
-                && !named.iter().any(|held| held.to_bytes() == proof.to_bytes())
-            {
-                named.push(proof);
+            match Self::predecessor_anchoring(&proof).await {
+                Ok(a_old) => {
+                    if !anchored
+                        .iter()
+                        .any(|(held, _)| held.to_bytes() == proof.to_bytes())
+                    {
+                        anchored.push((proof, a_old));
+                    }
+                }
+                Err(e) => passed_over.push(e.to_string()),
             }
         }
-        match named.len() {
-            0 | 1 => named.pop().ok_or_else(|| {
-                DsmError::verification(
-                    "recovery succession proof: none posted names the anchored authority",
-                )
+        match anchored.len() {
+            0 | 1 => anchored.pop().ok_or_else(|| {
+                DsmError::verification(format!(
+                    "recovery succession proof: none posted names an authority its predecessor \
+                     anchored ({})",
+                    passed_over.join("; ")
+                ))
             }),
             n => Err(DsmError::verification(format!(
-                "recovery succession proof: {n} distinct proofs name the anchored authority"
+                "recovery succession proof: {n} distinct proofs name an authority their \
+                 predecessor anchored"
             ))),
         }
     }
@@ -1701,14 +1494,16 @@ impl RecoverySDK {
     /// owner from a mnemonic thief (gate 2 / P5 handles double-spend safety). See
     /// [`dsm::recovery::verify_recovery_reestablish_request`] for the exact security property.
     ///
-    /// Gathers everything from authenticated sources: A_new's genesis + recovery authority from
-    /// its posted, genesis-anchored PDSMT head; the [`dsm::recovery::RecoverySuccessionProof`]
-    /// (bound to that same anchored authority); A_old from the tombstone; and C's own
-    /// `(A_old,C)` frontier (ordered post-floor segment from its BCR archive). Then runs the
+    /// Gathers everything from authenticated sources: `a_new_genesis` is the genesis this
+    /// device pinned for the sender; the [`dsm::recovery::RecoverySuccessionProof`] is the one
+    /// whose authority A_old anchored under the genesis this device pinned for A_old
+    /// ([`Self::succession_proof_anchored_by_predecessor`]); A_old from the tombstone; and C's
+    /// own `(A_old,C)` frontier (ordered post-floor segment from its BCR archive). Then runs the
     /// pure [`dsm::recovery::verify_recovery_reestablish_request`].
     pub async fn verify_incoming_recovery_reestablish(
         op: &dsm::types::operations::Operation,
         a_new: &[u8; 32],
+        a_new_genesis: &[u8; 32],
     ) -> Result<(), DsmError> {
         let h_cap = dsm::recovery::recovery_establishment_floor(op).ok_or_else(|| {
             DsmError::verification(
@@ -1720,29 +1515,10 @@ impl RecoverySDK {
             "device_id",
         )?;
 
-        // A_new's genesis + recovery authority, from A_new's posted head under
-        // its genesis-anchored authority.
-        let a_new_head = Self::anchored_pdsmt_head(None, a_new).await?;
-        let a_new_genesis = a_new_head.genesis_id;
-
-        // The pre-co-sign succession proof, under the SAME anchored authority.
-        let proof = Self::fetch_recovery_succession_proof(
-            &a_new_genesis,
-            a_new,
-            &a_new_head.authority_pubkey,
-        )
-        .await?;
-
-        // A_old is the tombstoned predecessor (authenticated by the receipts under K_A).
-        let a_old_v = crate::util::text_id::decode_base32_crockford(&proof.tombstone.device_id)
-            .ok_or_else(|| {
-                DsmError::verification(
-                    "recovery reestablish: tombstone device_id is not Base32 Crockford",
-                )
-            })?;
-        let a_old = <[u8; 32]>::try_from(a_old_v.as_slice()).map_err(|_| {
-            DsmError::verification("recovery reestablish: tombstone device_id is not 32 bytes")
-        })?;
+        // The pre-co-sign succession proof, under the authority A_old anchored;
+        // A_old is the predecessor its tombstone names.
+        let (proof, a_old) =
+            Self::succession_proof_anchored_by_predecessor(a_new_genesis, a_new).await?;
         let old_rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&a_old, &c_self);
 
@@ -2008,317 +1784,6 @@ impl RecoverySDK {
                 .into(),
         ))
     }
-
-    /// Refresh the pending NFC capsule if backup is enabled and a key is available.
-    ///
-    /// Called by the transport layer (Kotlin) after every state-mutating operation.
-    /// If the in-memory key was lost (app restart), this auto-loads the persisted
-    /// encrypted key from SQLite before creating the capsule.
-    pub fn maybe_refresh_nfc_capsule() {
-        if !Self::is_nfc_backup_enabled() {
-            return;
-        }
-
-        // Auto-load persisted key if the in-memory cache was lost (app restart).
-        if !Self::has_cached_key() {
-            log::info!("[NFC_BACKUP] No cached key — attempting to load persisted key");
-            match Self::load_persisted_recovery_key() {
-                Ok(true) => {
-                    log::info!("[NFC_BACKUP] Persisted key loaded successfully");
-                }
-                Ok(false) => {
-                    log::warn!(
-                        "[NFC_BACKUP] No persisted key found — capsule refresh skipped. \
-                         User must re-enter mnemonic via Settings."
-                    );
-                    return;
-                }
-                Err(e) => {
-                    log::warn!("[NFC_BACKUP] Failed to load persisted key: {e}");
-                    return;
-                }
-            }
-        }
-
-        match Self::create_capsule_from_current_state_with_cached_key() {
-            Ok((idx, capsule_bytes)) => {
-                log::info!(
-                    "[NFC_BACKUP] Auto-refreshed capsule index={} size={}",
-                    idx,
-                    capsule_bytes.len(),
-                );
-            }
-            Err(e) => {
-                log::warn!("[NFC_BACKUP] Auto-refresh failed (non-fatal): {}", e);
-            }
-        }
-    }
-
-    /// Create a capsule using the cached recovery key (no mnemonic needed).
-    /// Used by `maybe_refresh_nfc_capsule` for automatic post-transition capsule creation.
-    fn create_capsule_from_current_state_with_cached_key() -> Result<(u64, Vec<u8>), DsmError> {
-        let key = {
-            let guard = RECOVERY_KEY
-                .lock()
-                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-            guard.ok_or_else(|| DsmError::InvalidState("No cached recovery key".into()))?
-        };
-        Self::create_capsule_from_current_state_with_key(&key)
-    }
-
-    /// Get recovery status for frontend display.
-    pub fn get_recovery_status() -> RecoveryStatus {
-        let enabled = crate::storage::client_db::recovery::is_nfc_backup_enabled();
-        let configured = crate::storage::client_db::recovery::is_nfc_backup_configured();
-        let pending_capsule = crate::storage::client_db::recovery::get_pending_recovery_capsule()
-            .ok()
-            .flatten()
-            .is_some();
-        let capsule_count = crate::storage::client_db::recovery::get_capsule_count().unwrap_or(0);
-        let last_capsule_index =
-            crate::storage::client_db::recovery::get_max_capsule_index().unwrap_or(0);
-        let accepted_state_index = crate::storage::client_db::recovery::accepted_state_index();
-        let capsule_state_index = crate::storage::client_db::recovery::capsule_state_index();
-        let capsule_dirty = crate::storage::client_db::recovery::is_capsule_dirty();
-
-        RecoveryStatus {
-            enabled,
-            configured,
-            pending_capsule,
-            capsule_count,
-            last_capsule_index,
-            capsule_dirty,
-            accepted_state_index,
-            capsule_state_index,
-        }
-    }
-
-    fn create_capsule_from_current_state_with_key(
-        key: &[u8; 32],
-    ) -> Result<(u64, Vec<u8>), DsmError> {
-        // Capsule currency (spec §5.2): capture the accepted-state index this
-        // seal represents *before* gathering state, so a transition that races
-        // the seal leaves the capsule observably dirty (fail-safe) rather than
-        // falsely current.
-        let captured_index = crate::storage::client_db::recovery::accepted_state_index();
-        let RecoveryCapsuleState {
-            smt_root,
-            counterparty_tips,
-            rollup,
-            next_index,
-            source_device_id,
-            genesis_hash,
-        } = Self::build_capsule_state()?;
-        let tip_count = counterparty_tips.len();
-        let encrypted = dsm::recovery::create_recovery_capsule_with_binding(
-            &smt_root,
-            counterparty_tips,
-            &rollup,
-            key,
-            next_index,
-            &source_device_id,
-            &genesis_hash,
-        )?;
-        let capsule_bytes = encrypted.to_bytes();
-        Self::persist_capsule(next_index, &smt_root, &capsule_bytes, tip_count)?;
-        // Capsule currency (spec §5.2): record the accepted-state index this seal
-        // captured so `is_capsule_dirty()` clears.
-        if let Err(e) = crate::storage::client_db::recovery::set_capsule_state_index(captured_index)
-        {
-            log::warn!("[RECOVERY_SDK] failed to record capsule_state_index: {e}");
-        }
-        log::info!(
-            "[RECOVERY_SDK] Created recovery capsule index={} size={} counterparties={} captured_state_index={}",
-            next_index,
-            capsule_bytes.len(),
-            tip_count,
-            captured_index,
-        );
-        Ok((next_index, capsule_bytes))
-    }
-
-    fn build_capsule_state() -> Result<RecoveryCapsuleState, DsmError> {
-        let smt_root = crate::sdk::app_state::AppState::get_smt_root().ok_or_else(|| {
-            DsmError::InvalidState(
-                "SMT root not available — run genesis before creating recovery capsule".to_string(),
-            )
-        })?;
-
-        let device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| DsmError::InvalidState("Device ID not available".to_string()))?;
-        let local_device_id = crate::util::text_id::encode_base32_crockford(&device_id_bytes);
-        let rollup = Self::derive_recovery_rollup(&local_device_id)?;
-
-        let mut counterparty_tips = HashMap::new();
-        if let Ok(contacts) = crate::storage::client_db::get_all_contacts() {
-            for contact in contacts {
-                if let Some(ref tip) = contact.current_chain_tip {
-                    if tip.len() == 32 && contact.device_id.len() == 32 {
-                        let counterparty_id =
-                            crate::util::text_id::encode_base32_crockford(&contact.device_id);
-                        // The SMT-backed relationship tip is authoritative. Height is hardcoded
-                        // to 0 as it is not used for conflict resolution in this context.
-                        counterparty_tips.insert(counterparty_id, (0, tip.clone()));
-                    }
-                }
-            }
-        }
-
-        // If there's already a pending (unconsumed) capsule, reuse its index —
-        // we only care about the newest state. The pending capsule is continuously
-        // overwritten with the latest SMT root until the ring consumes it.
-        //
-        // When there's NO pending capsule (ring consumed it via clearPending),
-        // always advance to max_index + 1. We cannot compare SMT roots here
-        // because the consumed capsule was already overwritten with the current
-        // state before being written to the ring — the roots would match and
-        // the index would never advance.
-        let next_index = match crate::storage::client_db::recovery::get_pending_recovery_capsule() {
-            Ok(Some((idx, _))) => idx,
-            _ => {
-                let max_idx = crate::storage::client_db::recovery::get_max_capsule_index()
-                    .map_err(|e| {
-                        DsmError::InvalidState(format!("Failed to read capsule index: {e}"))
-                    })?;
-                if max_idx == 0 {
-                    // No capsules exist yet — start at 1.
-                    1
-                } else {
-                    // Ring consumed the previous capsule — always advance.
-                    max_idx.saturating_add(1)
-                }
-            }
-        };
-
-        let genesis_hash_bytes =
-            crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
-
-        Ok(RecoveryCapsuleState {
-            smt_root,
-            counterparty_tips,
-            rollup,
-            next_index,
-            source_device_id: device_id_bytes,
-            genesis_hash: genesis_hash_bytes,
-        })
-    }
-
-    fn derive_recovery_rollup(local_device_id: &str) -> Result<ReceiptRollup, DsmError> {
-        let binding = crate::storage::client_db::get_connection().map_err(|e| {
-            DsmError::InvalidState(format!("Failed to open transaction history: {e}"))
-        })?;
-        let conn = binding
-            .lock()
-            .map_err(|_| DsmError::InvalidState("Database lock poisoned".into()))?;
-        let mut stmt = conn
-            .prepare(
-                // The rollup folds receipts in the order this device accepted
-                // them: history insertion order.
-                "SELECT tx_id, from_device, to_device, proof_data
-                 FROM transactions
-                 ORDER BY rowid ASC",
-            )
-            .map_err(|e| {
-                DsmError::InvalidState(format!("Failed to query transaction history: {e}"))
-            })?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<Vec<u8>>>(3)?,
-                ))
-            })
-            .map_err(|e| {
-                DsmError::InvalidState(format!("Failed to iterate transaction history: {e}"))
-            })?;
-
-        let mut rollup = ReceiptRollup::new();
-        // ht'_i, the relationship's height after a receipt: the number of that
-        // peer's receipts this device accepted, up to and including it. DSM
-        // keeps no height counter, so the rollup derives it from the history.
-        let mut heights: HashMap<String, u64> = HashMap::new();
-
-        for row in rows {
-            let (tx_id, from_device, to_device, proof_data) = row.map_err(|e| {
-                DsmError::InvalidState(format!("Failed to decode transaction row: {e}"))
-            })?;
-
-            let counterparty_id = if from_device == local_device_id && to_device != local_device_id
-            {
-                to_device
-            } else if to_device == local_device_id && from_device != local_device_id {
-                from_device
-            } else {
-                continue;
-            };
-
-            let Some(receipt_bytes) = proof_data.filter(|bytes| !bytes.is_empty()) else {
-                continue;
-            };
-
-            let mut receipt_hasher =
-                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_RECEIPT);
-            receipt_hasher.update(&receipt_bytes);
-            let receipt_hash = *receipt_hasher.finalize().as_bytes();
-            let height = heights.entry(counterparty_id.clone()).or_insert(0);
-            *height += 1;
-            update_rollup(
-                &mut rollup,
-                tx_id.as_bytes(),
-                &receipt_hash,
-                &counterparty_id,
-                *height,
-            )?;
-        }
-
-        Ok(rollup)
-    }
-
-    fn persist_capsule(
-        capsule_index: u64,
-        smt_root: &[u8],
-        capsule_bytes: &[u8],
-        tip_count: usize,
-    ) -> Result<(), DsmError> {
-        let smt_root_32: [u8; 32] = smt_root
-            .try_into()
-            .map_err(|_| DsmError::InvalidState("Recovery SMT root must be 32 bytes".into()))?;
-
-        crate::storage::client_db::recovery::store_recovery_capsule(
-            capsule_index,
-            capsule_bytes,
-            &smt_root_32,
-        )
-        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule: {e}")))?;
-        crate::storage::client_db::recovery::mark_pending_recovery_capsule(capsule_index)
-            .map_err(|e| DsmError::InvalidState(format!("Failed to mark capsule pending: {e}")))?;
-        crate::storage::client_db::recovery::set_latest_capsule_counterparty_count(
-            tip_count as u64,
-        )
-        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule preview: {e}")))?;
-        let _ = crate::storage::client_db::recovery::prune_old_capsules(5);
-        Ok(())
-    }
-}
-
-/// Recovery status for frontend display.
-#[derive(Debug, Clone)]
-pub struct RecoveryStatus {
-    pub enabled: bool,
-    pub configured: bool,
-    pub pending_capsule: bool,
-    pub capsule_count: u64,
-    pub last_capsule_index: u64,
-    /// Capsule currency (spec §5.2): true when the latest sealed capsule does
-    /// not capture the latest accepted state.
-    pub capsule_dirty: bool,
-    /// Device-level monotone count of accepted frontier-changing transitions.
-    pub accepted_state_index: u64,
-    /// Accepted-state index captured by the latest successful capsule seal.
-    pub capsule_state_index: u64,
 }
 
 impl Default for RecoverySDK {
@@ -2388,7 +1853,7 @@ mod tests {
         assert_eq!(created_tree.s0, restored_tree.s0);
 
         let authority_seed =
-            dsm::recovery::capsule::derive_recovery_authority_seed(&seed).expect("authority seed");
+            dsm::recovery::derive_recovery_authority_seed(&seed).expect("authority seed");
         let authority = dsm::crypto::sphincs::generate_keypair_from_seed(
             dsm::crypto::sphincs::SphincsVariant::SPX256f,
             &authority_seed,
@@ -2398,6 +1863,23 @@ mod tests {
             RecoverySDK::get_cached_authority_keypair().expect("the cached recovery authority");
         assert_eq!(cached_pk, authority.public_key);
         RecoverySDK::clear_wallet_seed_cache();
+    }
+
+    /// The digest a generated phrase is remembered by is BLAKE3 under its own registered
+    /// domain, `DSM/generated-mnemonic/v1` (SA-50), and spacing does not change it.
+    #[test]
+    fn a_generated_phrase_is_remembered_under_its_own_domain() {
+        let phrase = crate::economic_fixtures::test_mnemonic(0x5B);
+        let spaced = format!("  {}  ", phrase.replace(' ', "   "));
+        assert_eq!(
+            TAG_GENERATED_MNEMONIC.source_bytes(),
+            b"DSM/generated-mnemonic/v1"
+        );
+        assert_eq!(
+            mnemonic_digest(&phrase),
+            dsm::crypto::blake3::domain_hash_bytes(TAG_GENERATED_MNEMONIC, phrase.as_bytes())
+        );
+        assert_eq!(mnemonic_digest(&spaced), mnemonic_digest(&phrase));
     }
 
     /// A valid 24-word phrase the wallet did not generate cannot create a wallet: the
@@ -2425,6 +1907,35 @@ mod tests {
         }
     }
 
+    /// Owner, 2026-10-04: "No seal off Android". A build with no platform key holds the
+    /// wallet seed in memory for the session and writes nothing at rest: a seal under a
+    /// key every build carries is readable by anyone holding the store.
+    ///
+    /// MUTATION CONTROL: writing the seed at rest off a device, as the constant-key seal
+    /// did, fills the row: red.
+    #[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
+    #[test]
+    #[serial_test::serial]
+    fn off_a_device_an_unlock_leaves_no_secret_at_rest() {
+        use crate::storage::client_db::recovery::{get_recovery_pref, SEALED_WALLET_SEED};
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let phrase = crate::economic_fixtures::test_mnemonic(0x5e);
+        let seed = wallet_seed_from_mnemonic(&phrase).expect("the wallet seed");
+        RecoverySDK::clear_wallet_seed_cache();
+
+        RecoverySDK::derive_and_cache_key(&phrase).expect("unlock from the mnemonic");
+
+        let held = RecoverySDK::get_cached_wallet_seed().expect("the session holds the seed");
+        assert_eq!(held.as_slice(), seed.as_slice());
+        assert_eq!(
+            get_recovery_pref(SEALED_WALLET_SEED).expect("read the store"),
+            None,
+            "no wallet seed is written at rest off a device"
+        );
+    }
+
     #[test]
     fn test_rollup_operations_via_sdk() -> Result<(), DsmError> {
         let mut rollup = ReceiptRollup::new();
@@ -2440,53 +1951,5 @@ mod tests {
         assert!(RecoverySDK::verify_rollup(&rollup, &rollup.current_hash()));
 
         Ok(())
-    }
-
-    /// ht'_i is the peer's receipt count in acceptance order: two receipts
-    /// with A then one with B give A heights 1 and 2 and B height 1, and a
-    /// history row without a receipt counts for nobody.
-    #[test]
-    #[serial_test::serial]
-    fn the_rollup_derives_each_peers_height_from_the_history() {
-        crate::economic_fixtures::use_test_storage_dir();
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
-        let me = "LOCAL";
-        let row = |id: &str, from: &str, to: &str, receipt: Option<Vec<u8>>| {
-            crate::storage::client_db::store_transaction(
-                &crate::storage::client_db::TransactionRecord {
-                    tx_id: id.to_string(),
-                    tx_hash: format!("h-{id}"),
-                    from_device: from.to_string(),
-                    to_device: to.to_string(),
-                    amount: 1,
-                    tx_type: "online".to_string(),
-                    status: "confirmed".to_string(),
-                    commitment_hash: None,
-                    proof_data: receipt,
-                    metadata: std::collections::HashMap::new(),
-                },
-            )
-            .expect("store");
-        };
-        row("a1", me, "PEER-A", Some(vec![0x01]));
-        row("n1", me, "PEER-A", None);
-        row("b1", "PEER-B", me, Some(vec![0x02]));
-        row("a2", "PEER-A", me, Some(vec![0x03]));
-
-        let rollup = RecoverySDK::derive_recovery_rollup(me).expect("rollup");
-        let heights: Vec<(Vec<u8>, u64)> = rollup
-            .entries()
-            .iter()
-            .map(|e| (e.receipt_id.clone(), e.new_height))
-            .collect();
-        assert_eq!(
-            heights,
-            vec![
-                (b"a1".to_vec(), 1),
-                (b"b1".to_vec(), 1),
-                (b"a2".to_vec(), 2)
-            ]
-        );
     }
 }

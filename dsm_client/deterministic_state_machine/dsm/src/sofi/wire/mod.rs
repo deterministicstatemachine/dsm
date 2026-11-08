@@ -67,9 +67,6 @@
 //! duplicate is malformed). A `RefContentAddr` may not name a class that
 //! depends on the current E or that has its own reference variant.
 //!
-//! `0x0042 PolicyFulfillmentAuxRef`: 1 `policy_fulfillment_id` digest32 ·
-//! 2 `evidence_class` u16 · 3 `addr` digest32.
-//!
 //!
 //!
 //! `0x004A RouteLegSet` (`Γ`): 1 `legs` `seq<(vault_id, parent_root,
@@ -219,9 +216,8 @@ pub mod objects;
 
 pub use objects::*;
 
-/// The fixed storage profile: exactly five committed members.
-pub const STORAGE_MEMBER_COUNT: usize = 5;
-/// Storage finality: three matching write-once cells. `3 + 3 > 5`.
+/// Storage finality: three matching write-once cells of the five committed
+/// members. `3 + 3 > 5`.
 pub const STORAGE_FINALITY_COUNT: usize = 3;
 /// Beta route cardinality: two hops across two distinct vaults.
 ///
@@ -311,6 +307,9 @@ pub enum SofiWireError {
     UnknownVaultStatus { status: u16 },
     /// A frontier witness's relationship kind is neither Absent nor Present.
     UnknownFrontierRelationship { kind: u16 },
+    /// A baseline contradiction of a kind this version does not define, or a
+    /// step contradiction at generation 0, which has no step.
+    UnknownBaselineContradiction { kind: u16 },
     /// An object exceeds the frozen byte bound for its class, so it has no
     /// canonical representation.
     ObjectTooLarge {
@@ -399,6 +398,11 @@ impl core::fmt::Display for SofiWireError {
             Self::UnknownVaultStatus { status } => write!(
                 f,
                 "vault status {status:#06x} is neither Active nor Retired"
+            ),
+            Self::UnknownBaselineContradiction { kind } => write!(
+                f,
+                "baseline contradiction kind {kind:#06x} is not Genesis, Top or a Step past \
+                 generation 0"
             ),
             Self::UnknownFrontierRelationship { kind } => write!(
                 f,

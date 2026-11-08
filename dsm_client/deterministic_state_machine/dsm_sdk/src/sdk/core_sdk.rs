@@ -10,9 +10,7 @@
 //!
 //! All ambiguous features fail-closed with `DsmError`.
 
-use blake3::Hasher;
 use parking_lot::Mutex;
-use prost::Message;
 use std::collections::HashMap;
 
 use dsm::core::state_machine::StateMachine;
@@ -20,10 +18,8 @@ use dsm::core::token::policy::TokenPolicySystem;
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation as DsmOperation;
 use dsm::types::state_types::{DeviceInfo, State};
-use dsm::types::token_types::TokenMetadata;
 
 use crate::storage::client_db;
-use crate::generated::TokenMetadataProto;
 
 use log;
 
@@ -54,43 +50,83 @@ pub struct CoreSDK {
     device_info: DeviceInfo,
     policy_system: TokenPolicySystem,
     /// Device-level fused-anchor appliance (Software-Authority / Hardware-Identity; the
-    /// silicon). Lazily birthed on the first offline-bearer transfer; persists across transfers so
-    /// its down-counter + fused-anchor lineage advance. Its `commit_0` is bootstrapped into the
-    /// DeviceState anchor-state leaf on birth; each bearer transfer drives PREPARE→COMMIT→EMIT→
-    /// FINALIZE and advances the leaf in the same `DeviceState::advance`.
-    anchor_appliance: Mutex<Option<Box<dyn crate::anchor::AnchorAppliance + Send>>>,
+    /// silicon), attached on first use and kept: its down-counter + fused-anchor lineage advance
+    /// across transfers. It is attached only once it is provisioned for this device
+    /// ([`CoreSDK::anchor_for_this_device`]). The device's offline account is opened at the chip's
+    /// enrolled origin; each bearer transfer steps the account's software counter and frontier in
+    /// `DeviceState::advance` and drives PREPARE→COMMIT→EMIT→FINALIZE to match.
+    anchor_appliance: Mutex<Option<AttachedAnchor>>,
 }
 
-/// The pending economic admission each device's head carried when THIS PROCESS
-/// built its first `CoreSDK` for that device, as `(economic_position,
-/// operation_digest)`, or `None` if there was no head or nothing pending.
-/// Recorded once per device per process and never replaced. The SDK can be initialized more than once in a process (a bridge
-/// re-init, an Android activity recreated while the process lives); a router
-/// built then must not adopt an admission a live handler of this process
-/// created. Ownership ruled 2026-09-15: recovery owns only what predates
-/// process startup.
-static PROCESS_STARTUP_ADMISSIONS: once_cell::sync::Lazy<
-    std::sync::Mutex<std::collections::HashMap<[u8; 32], Option<(u64, [u8; 32])>>>,
+/// An anchor appliance attached to this device, with the pin it was checked to be provisioned
+/// for this device under.
+struct AttachedAnchor {
+    appliance: Box<dyn crate::anchor::AnchorAppliance + Send>,
+    pin: crate::anchor::AnchorPin,
+}
+
+/// How many handlers that create an economic admission are running in this
+/// process, per device. A pending admission no running handler holds is the
+/// sync's to finish: its handler has returned, and the admission is held for
+/// resume (owner ruling, 2026-10-30, amending the 2026-09-15 ruling that left
+/// one created by the running process to its handler alone). An admission a
+/// restored head carries has no running handler either.
+static RUNNING_ADMISSION_HANDLERS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<[u8; 32], usize>>,
 > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/* ------------------------------- Helpers -------------------------------- */
-
-fn blake3_cat(parts: &[&[u8]]) -> [u8; 32] {
-    let mut h = Hasher::new();
-    for p in parts {
-        h.update(p);
+fn running_admission_handlers(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<[u8; 32], usize>> {
+    match RUNNING_ADMISSION_HANDLERS.lock() {
+        Ok(running) => running,
+        Err(poisoned) => poisoned.into_inner(),
     }
-    *h.finalize().as_bytes()
 }
+
+/// A running handler that creates an economic admission for one device, held
+/// from before it creates the admission until it returns
+/// ([`CoreSDK::admission_handler`]).
+pub(crate) struct AdmissionHandler {
+    device_id: [u8; 32],
+}
+
+impl Drop for AdmissionHandler {
+    fn drop(&mut self) {
+        let mut running = running_admission_handlers();
+        if let Some(count) = running.get_mut(&self.device_id) {
+            *count -= 1;
+            if *count == 0 {
+                running.remove(&self.device_id);
+            }
+        }
+    }
+}
+
+/* ------------------------------- Helpers -------------------------------- */
 
 fn u64_le(n: u64) -> [u8; 8] {
     n.to_le_bytes()
 }
 
-#[derive(Clone, PartialEq, ::prost::Message)]
-struct TokenRegistryUpdateList {
-    #[prost(message, repeated, tag = "1")]
-    items: ::prost::alloc::vec::Vec<TokenMetadataProto>,
+/// Why `operation` may not move value out of this device now, if it may not:
+/// identity recovery is in progress (spec R3), or the operation's egress
+/// asset is held `LockedRecovery` until its own verified frontier reconciles
+/// (spec §0.4 P5). Fail-closed: an unreadable state refuses. An operation
+/// that moves no value out is never refused here.
+///
+/// The canonical advance checks this under the state-machine lock, atomic
+/// with its commit. A flow with an irreversible step before that commit — a
+/// BLE prepare, an anchor's COMMIT — checks it before that step too, so a
+/// refusal comes before anything is spent.
+pub(crate) fn value_egress_refusal(
+    operation: &dsm::types::operations::Operation,
+) -> Option<String> {
+    if !operation.is_value_egress() {
+        return None;
+    }
+    crate::storage::client_db::recovery::value_egress_block_reason()
+        .map(str::to_string)
+        .or_else(|| crate::storage::client_db::recovery::asset_egress_block_reason(operation))
 }
 
 /* ------------------------------- Impl ----------------------------------- */
@@ -271,7 +307,6 @@ impl CoreSDK {
             operation,
             deltas,
             None,
-            None,
             in_tx_extra,
             None,
             Some(plan),
@@ -352,21 +387,20 @@ impl CoreSDK {
     }
 
     /// The terminal admission of a SoFi position `advance_resolved` resolved:
-    /// the position is admitted at the root the resolution selected, the vault
-    /// heads it selected are recorded, and the unfenced head takes the trader
-    /// balances that root holds — all in the one admission transaction, so the
-    /// head and the admitted root cannot disagree about what this device holds.
+    /// the position is admitted at the root the resolution selected with the
+    /// leaves Core bound to that root, the vault heads it selected are
+    /// recorded, and the unfenced head takes the trader balances that root
+    /// holds — all in the one admission transaction, so the head and the
+    /// admitted root cannot disagree about what this device holds. The vault
+    /// heads are the advance's own (spec §44.4), so a head and the position
+    /// that chose it cannot disagree either.
     pub(crate) fn admit_resolved_sofi_position(
         &self,
         advanced: &dsm::sofi::lineage::ResolvedAdvance,
         fulfillment_id: [u8; 32],
         operation_digest: &[u8; 32],
-        leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
+        leaves: &dsm::sofi::lineage::InstalledLeaves,
         storage_set_id: &[u8; 32],
-        // The vault heads this position selected (spec §44.4), recorded in
-        // THIS transaction so a head and the position that chose it cannot
-        // disagree.
-        vault_heads: &[dsm::sofi::validation::VaultPostState],
     ) -> Result<(), DsmError> {
         let admitted = dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi {
             economic_position: advanced.root.economic_position(),
@@ -378,10 +412,10 @@ impl CoreSDK {
             &admitted,
             advanced.root.economic_root(),
             operation_digest,
-            leaves,
+            leaves.rows(),
             storage_set_id,
             &[],
-            vault_heads,
+            advanced.vault_generations(),
             Some(&advanced.balances),
         )
     }
@@ -439,11 +473,20 @@ impl CoreSDK {
                 &tx, admitted, leaves,
             )
             .map_err(|e| DsmError::storage(format!("admit record: {e}"), None::<std::io::Error>))?;
+            // The record follows what Core's advance selected (MR-DSM-0331):
+            // a contradicting record is replaced, and named.
             for post in vault_heads {
-                crate::storage::client_db::sofi_vault_head::record_resolved_with_conn(&tx, post)
-                    .map_err(|e| {
-                        DsmError::storage(format!("admit vault head: {e}"), None::<std::io::Error>)
-                    })?;
+                if let Some(replaced) =
+                    crate::storage::client_db::sofi_vault_head::record_resolved_with_conn(&tx, post)
+                        .map_err(|e| {
+                            DsmError::storage(
+                                format!("admit vault head: {e}"),
+                                None::<std::io::Error>,
+                            )
+                        })?
+                {
+                    log::warn!("[sofi admit] {replaced}");
+                }
             }
             crate::storage::client_db::economic_admission::clear_pending_admission_with_conn(
                 &tx, &devid,
@@ -504,7 +547,6 @@ impl CoreSDK {
     /// Recovery re-signs NOTHING and asks the user for nothing.
     pub(crate) fn commit_advance_with_pending_admission_and_artifacts(
         outcome: &dsm::types::device_state::AdvanceOutcome,
-        bump_capsule: bool,
         pending: &dsm::economic::admission::PendingEconomicAdmission,
         artifacts: &[(String, Vec<u8>, &'static str)],
         storage_set_id: &[u8; 32],
@@ -535,73 +577,16 @@ impl CoreSDK {
         let artifacts: Vec<(String, Vec<u8>, &'static str)> = artifacts.to_vec();
         Self::dual_write_advance_outcome_with_extra(
             outcome,
-            bump_capsule,
             Some(&move |tx: &rusqlite::Transaction<'_>,
                         o: &dsm::types::device_state::AdvanceOutcome| {
-                // CAS re-assert of the admitted predecessor INSIDE the
-                // transaction that makes local acceptance durable: the
-                // pre-lock check can go stale only through this same
-                // serialized path, but the invariant is cheap to restate and
-                // a violated restatement is corruption, not a race.
-                let admitted =
-                    crate::storage::client_db::economic_lineage::get_admitted_with_conn(tx)
-                        .map_err(|e| {
-                            DsmError::storage(
-                                format!("admission predecessor CAS: {e}"),
-                                None::<std::io::Error>,
-                            )
-                        })?;
-                let (expect_pos, expect_root) = match admitted {
-                    Some(a) => {
-                        // THE FENCE, on the commit that makes acceptance
-                        // durable. It decides more than the equality below:
-                        // for a resolved conditional predecessor it requires
-                        // this descendant to be built on the root the route
-                        // actually selected, and for an unresolved one it
-                        // refuses outright.
-                        dsm::sofi::lineage::descendant_fence(
-                            a.predecessor_claim(),
-                            &pending.pre_economic_root,
-                        )
-                        .map_err(|e| {
-                            DsmError::invalid_operation(format!("admission commit: {e}"))
-                        })?;
-                        let v = dsm::economic::lineage::ValidatedEconomicRoot::
-                            rehydrate_from_admitted_store(a)
-                            .map_err(|e| {
-                                DsmError::invalid_operation(format!("admission commit: {e}"))
-                            })?;
-                        (v.economic_position() + 1, v.economic_root())
-                    }
-                    None => (1, dsm::economic::tree::empty_economic_root()),
-                };
-                if pending.economic_position != expect_pos
-                    || pending.pre_economic_root != expect_root
-                {
-                    return Err(DsmError::invalid_operation(
-                        "admission commit: the admitted predecessor changed under the \
-                         admission — refusing to make a stale acceptance durable",
-                    ));
-                }
-                crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
-                    tx, &devid, &pending,
-                )
-                .map_err(|e| {
-                    DsmError::storage(
-                        format!("commit pending economic admission: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-                for (key, payload, purpose) in &artifacts {
-                    crate::storage::client_db::frozen_publication_artifact::
-                        freeze_artifact_with_conn(tx, &set_id, key, payload, &bound_root, purpose)
-                    .map_err(|e| {
-                        DsmError::storage(
-                            format!("freeze admission evidence {key}: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    })?;
-                }
+                Self::make_admission_durable_in_tx(
+                    tx,
+                    &devid,
+                    &pending,
+                    &artifacts,
+                    &set_id,
+                    &bound_root,
+                )?;
                 if let Some(also) = also {
                     also(tx, o)?;
                 }
@@ -610,9 +595,276 @@ impl CoreSDK {
         )
     }
 
+    /// Inside the transaction that makes a local acceptance durable: re-assert
+    /// the admitted predecessor the admission extends, write the pending row,
+    /// and freeze the admission's evidence bound to `bound_root`. One
+    /// implementation for every substrate.
+    fn make_admission_durable_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        devid: &[u8; 32],
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+        artifacts: &[(String, Vec<u8>, &'static str)],
+        set_id: &[u8; 32],
+        bound_root: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        // CAS re-assert of the admitted predecessor INSIDE the transaction
+        // that makes local acceptance durable: the pre-lock check can go
+        // stale only through this same serialized path, but the invariant is
+        // cheap to restate and a violated restatement is corruption, not a
+        // race.
+        let admitted = crate::storage::client_db::economic_lineage::get_admitted_with_conn(tx)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("admission predecessor CAS: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        let (expect_pos, expect_root) =
+            match admitted {
+                Some(a) => {
+                    // THE FENCE, on the commit that makes acceptance durable. It
+                    // decides more than the equality below: for a resolved
+                    // conditional predecessor it requires this descendant to be
+                    // built on the root the route actually selected, and for an
+                    // unresolved one it refuses outright.
+                    dsm::sofi::lineage::descendant_fence(
+                        a.predecessor_claim(),
+                        &pending.pre_economic_root,
+                    )
+                    .map_err(|e| DsmError::invalid_operation(format!("admission commit: {e}")))?;
+                    let v = dsm::economic::lineage::ValidatedEconomicRoot::
+                    rehydrate_from_admitted_store(a)
+                    .map_err(|e| DsmError::invalid_operation(format!("admission commit: {e}")))?;
+                    (v.economic_position() + 1, v.economic_root())
+                }
+                None => (1, dsm::economic::tree::empty_economic_root()),
+            };
+        if pending.economic_position != expect_pos || pending.pre_economic_root != expect_root {
+            return Err(DsmError::invalid_operation(
+                "admission commit: the admitted predecessor changed under the admission — \
+                 refusing to make a stale acceptance durable",
+            ));
+        }
+        crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
+            tx, devid, pending,
+        )
+        .map_err(|e| {
+            DsmError::storage(
+                format!("commit pending economic admission: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        for (key, payload, purpose) in artifacts {
+            crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
+                tx, set_id, key, payload, bound_root, purpose,
+            )
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("freeze admission evidence {key}: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// One offline boundary — a load or an unload of the offline account of
+    /// `bundle` — taken by Core and made a durable local acceptance of its
+    /// economic admission, all under the head lock.
+    ///
+    /// Core takes the boundary from the head (`cross_offline_boundary`);
+    /// `prepare` builds the admission from exactly that boundary — its
+    /// prepared admission, acceptance coordinates and evidence — and the head
+    /// that carries the admission, the pending row and the frozen evidence
+    /// commit in ONE transaction. Either the boundary never happened, or it
+    /// and everything needed to finish its admission exist durably. A head
+    /// already fenced by another admission takes no boundary.
+    pub(crate) fn admitted_boundary(
+        &self,
+        bundle: &[u8; 32],
+        kind: dsm::types::device_state::OfflineBoundaryKind,
+        asset: &[u8; 32],
+        amount: u64,
+        prepare: impl FnOnce(
+            &dsm::types::device_state::OfflineBoundaryOutcome,
+        ) -> Result<
+            (
+                dsm::economic::admission::PendingEconomicAdmission,
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
+        storage_set_id: &[u8; 32],
+    ) -> Result<
+        (
+            dsm::types::device_state::OfflineBoundaryOutcome,
+            dsm::economic::admission::PendingEconomicAdmission,
+        ),
+        DsmError,
+    > {
+        let mut sm = self.state_machine.lock();
+        let head = sm.device_head().ok_or_else(|| {
+            DsmError::state_machine("offline boundary: DeviceState not initialized (genesis first)")
+        })?;
+        if let Some(pending) = head.pending_economic_admission() {
+            return Err(DsmError::invalid_operation(format!(
+                "offline boundary: the admission at position {} is still pending — finish it \
+                 before moving value across the offline boundary",
+                pending.economic_position
+            )));
+        }
+        let outcome = head.cross_offline_boundary(bundle, kind, asset, amount)?;
+        let (prepared, coords, artifacts) = prepare(&outcome)?;
+        let pending = prepared
+            .into_locally_accepted(coords)
+            .map_err(DsmError::invalid_operation)?;
+        let new_head = outcome
+            .new_device_state
+            .clone()
+            .with_pending_economic_admission(Some(pending.clone()));
+        let devid = new_head.devid();
+        let bound_root = new_head.root();
+        {
+            let binding = crate::storage::client_db::get_connection().map_err(|e| {
+                DsmError::storage(format!("offline boundary: {e}"), None::<std::io::Error>)
+            })?;
+            let mut conn = binding.lock().map_err(|e| {
+                DsmError::storage(
+                    format!("offline boundary: the database lock is poisoned: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+            let tx = conn.transaction().map_err(|e| {
+                DsmError::storage(format!("offline boundary tx: {e}"), None::<std::io::Error>)
+            })?;
+            Self::make_admission_durable_in_tx(
+                &tx,
+                &devid,
+                &pending,
+                &artifacts,
+                storage_set_id,
+                &bound_root,
+            )?;
+            crate::storage::client_db::update_bcr_device_head_with_conn(&tx, &new_head).map_err(
+                |e| {
+                    DsmError::storage(
+                        format!("offline boundary: persist device head: {e}"),
+                        None::<std::io::Error>,
+                    )
+                },
+            )?;
+            // The boundary's body carries every spend since the last boundary: they are
+            // exposed with it, and the next chain starts from the account it leaves.
+            crate::storage::client_db::offline_spends::expose_own_offline_spends_in_tx(&tx, bundle)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("offline boundary: expose the spends it carries: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+            // What this device's contacts are told of once the boundary is admitted: durable
+            // with the boundary, so a process that stops here owes the notices still.
+            crate::storage::client_db::offline_boundary_notices::record_own_boundary_in_tx(
+                &tx,
+                pending.economic_position,
+            )
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("offline boundary: record it for its contacts: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+            tx.commit().map_err(|e| {
+                DsmError::storage(
+                    format!("offline boundary: commit: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        }
+        sm.set_device_head(new_head.clone());
+        drop(sm);
+        Self::reproject_committed_head(&new_head);
+        Ok((outcome, pending))
+    }
+
+    /// Take a settlement of value received offline (SA-91) as Core takes it:
+    /// the head credited by the payment `receipt` records
+    /// (`RealizedHead::settle_offline_receipt`), with its prepared admission, and
+    /// that head, the pending row, the frozen evidence and the receipt's settled
+    /// mark commit in ONE transaction. A head already fenced by another admission
+    /// takes no settlement.
+    pub(crate) fn admitted_settlement(
+        &self,
+        receipt: &crate::storage::client_db::offline_receipts::PendingOfflineReceipt,
+        prepare: impl FnOnce() -> Result<
+            (
+                dsm::economic::admission::PendingEconomicAdmission,
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
+        storage_set_id: &[u8; 32],
+    ) -> Result<dsm::economic::admission::PendingEconomicAdmission, DsmError> {
+        let mut sm = self.state_machine.lock();
+        let head = sm.device_head().ok_or_else(|| {
+            DsmError::state_machine("offline settlement: DeviceState not initialized")
+        })?;
+        if let Some(pending) = head.pending_economic_admission() {
+            return Err(DsmError::invalid_operation(format!(
+                "offline settlement: the admission at position {} is still pending — finish it \
+                 first",
+                pending.economic_position
+            )));
+        }
+        let settled = head.settle_offline_receipt(&receipt.asset, receipt.amount)?;
+        let (prepared, coords, artifacts) = prepare()?;
+        let pending = prepared
+            .into_locally_accepted(coords)
+            .map_err(DsmError::invalid_operation)?;
+        let new_head = settled.with_pending_economic_admission(Some(pending.clone()));
+        let devid = new_head.devid();
+        let bound_root = new_head.root();
+        {
+            let storage = |what: &str, e: &dyn std::fmt::Display| {
+                DsmError::storage(
+                    format!("offline settlement: {what}: {e}"),
+                    None::<std::io::Error>,
+                )
+            };
+            let binding = crate::storage::client_db::get_connection()
+                .map_err(|e| storage("the store", &e))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|e| storage("the database lock is poisoned", &e))?;
+            let tx = conn.transaction().map_err(|e| storage("tx", &e))?;
+            Self::make_admission_durable_in_tx(
+                &tx,
+                &devid,
+                &pending,
+                &artifacts,
+                storage_set_id,
+                &bound_root,
+            )?;
+            crate::storage::client_db::update_bcr_device_head_with_conn(&tx, &new_head)
+                .map_err(|e| storage("persist device head", &e))?;
+            crate::storage::client_db::offline_receipts::settle_offline_receipt_in_tx(
+                &tx,
+                &receipt.release_message,
+                pending.economic_position,
+            )
+            .map_err(|e| storage("the receipt settled", &e))?;
+            tx.commit().map_err(|e| storage("commit", &e))?;
+        }
+        sm.set_device_head(new_head.clone());
+        drop(sm);
+        Self::reproject_committed_head(&new_head);
+        Ok(pending)
+    }
+
     fn dual_write_advance_outcome_with_extra(
         outcome: &dsm::types::device_state::AdvanceOutcome,
-        bump_capsule: bool,
         in_tx_extra: Option<
             &dyn Fn(
                 &rusqlite::Transaction<'_>,
@@ -657,21 +909,9 @@ impl CoreSDK {
                 None::<std::io::Error>,
             )
         })?;
-        // Capsule currency (spec §5.1): advance the accepted-state index ATOMICALLY
-        // with the state commit so a frontier-changing transition can never be
-        // persisted without the recovery capsule being marked dirty. Closes the
-        // post-commit fail-OPEN (a missed bump on already-committed state). Uses
-        // the transaction's own connection — never opens a new one (deadlock).
-        if bump_capsule {
-            crate::storage::client_db::recovery::bump_accepted_state_index_with_conn(&tx).map_err(
-                |e| {
-                    DsmError::storage(
-                        format!("dual-write: bump accepted_state_index failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                },
-            )?;
-        }
+        // A connected application's request this task is carrying out is
+        // bound to the advance in this same transaction (SA-60).
+        crate::sdk::connect::operations::bind_in_tx(&tx, outcome)?;
         // §16.6: caller-injected full-state-consumption work (nonce consumption +
         // canonical apply record for the incoming-transfer apply). Same tx — an
         // Err here rolls back the state persistence too.
@@ -708,17 +948,23 @@ impl CoreSDK {
     /// downstream is taught to tolerate a zero root.
     fn write_genesis_device_head(&self, genesis_hash: [u8; 32]) -> Result<(), DsmError> {
         use crate::storage::client_db::update_bcr_device_head;
-        let mut head = self.device_head().unwrap_or_else(|| {
-            dsm::types::device_state::DeviceState::new(
-                genesis_hash,
-                self.device_info.device_id,
-                self.device_info.public_key.clone(),
-            )
-        });
-        head.set_genesis_digest(genesis_hash);
-        if head.legacy_anchor().is_none() {
-            head.bootstrap_legacy_root(genesis_hash);
+        // A head already installed is this device's lineage: genesis under the
+        // same `G` has nothing to write, and under another `G` it would rewrite
+        // the device's identity, which no transition does (MR-DSM-0243).
+        if let Some(existing) = self.device_head() {
+            if existing.genesis_digest() == genesis_hash {
+                return Ok(());
+            }
+            return Err(DsmError::invalid_operation(format!(
+                "genesis install: this device already holds a head under genesis {}",
+                crate::util::text_id::encode_base32_crockford(&existing.genesis_digest())
+            )));
         }
+        let head = dsm::types::device_state::DeviceState::genesis_head(
+            genesis_hash,
+            self.device_info.device_id,
+            self.device_info.public_key.clone(),
+        );
         update_bcr_device_head(&head).map_err(|e| {
             DsmError::storage(
                 format!("genesis head-cache write failed: {e}"),
@@ -753,7 +999,6 @@ impl CoreSDK {
         let state_machine = Mutex::new(StateMachine::new());
 
         Self::restore_latest_archived_state(&state_machine, &device_info.device_id)?;
-        Self::record_process_startup_admission(&state_machine, &device_info.device_id);
 
         Ok(Self {
             state_machine,
@@ -763,48 +1008,23 @@ impl CoreSDK {
         })
     }
 
-    /// Record, at the FIRST `CoreSDK` built for this device in this process, the
-    /// pending admission its restored head carries (`None` when there is no head
-    /// or nothing is pending). Never replaced: a later construction in the same
-    /// process (a bridge re-init, an activity recreated while the process lives)
-    /// records nothing, so no head created or loaded later in this process can
-    /// have its admission adopted.
-    fn record_process_startup_admission(state_machine: &Mutex<StateMachine>, device_id: &[u8; 32]) {
-        let coords = state_machine.lock().device_head().and_then(|h| {
-            h.pending_economic_admission()
-                .map(|p| (p.economic_position, p.operation_digest))
-        });
-        PROCESS_STARTUP_ADMISSIONS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .entry(*device_id)
-            .or_insert(coords);
+    /// Hold this device's admission handler: a handler that creates an
+    /// economic admission holds it from before it creates the admission until
+    /// it returns, and the sync leaves the device's pending admission to it
+    /// meanwhile.
+    pub(crate) fn admission_handler(&self) -> AdmissionHandler {
+        *running_admission_handlers()
+            .entry(self.device_info.device_id)
+            .or_insert(0) += 1;
+        AdmissionHandler {
+            device_id: self.device_info.device_id,
+        }
     }
 
-    /// Whether `pending` is the admission this device's head already carried when
-    /// THIS PROCESS built its first `CoreSDK` for the device: an admission the
-    /// running process did not create.
-    pub(crate) fn admission_predates_startup(
-        &self,
-        pending: &dsm::economic::admission::PendingEconomicAdmission,
-    ) -> bool {
-        PROCESS_STARTUP_ADMISSIONS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&self.device_info.device_id)
-            .copied()
-            .flatten()
-            == Some((pending.economic_position, pending.operation_digest))
-    }
-
-    /// Forget every process-startup record. TEST ONLY: it models a process
-    /// restart for tests that build a fresh router over the same database.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn forget_process_startup_admissions_for_testing() {
-        PROCESS_STARTUP_ADMISSIONS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
+    /// Whether a handler that creates an economic admission is running for
+    /// this device: while one is, the device's pending admission is its own.
+    pub(crate) fn admission_handler_running(&self) -> bool {
+        running_admission_handlers().contains_key(&self.device_info.device_id)
     }
 
     pub fn get_device_identity(&self) -> DeviceInfo {
@@ -1027,68 +1247,35 @@ impl CoreSDK {
         }
     }
 
-    /// Circulating supply of an asset, DERIVED from this device's canonical
-    /// chain history — never a cached counter, which a restored snapshot could
-    /// misreport. A token's whole supply is released at creation (SoFi §51),
-    /// so:
-    ///
-    ///   circulating = Σ CreateToken.initial_supply − Σ Burn
-    ///                 (for operations naming this policy_commit)
-    ///
-    /// Returns `None` when the history could not be read in full. That is not
-    /// the same as zero: a figure from partial history is a figure about
-    /// another chain.
-    ///
-    /// `None` propagates as an ABSENT witness, and the enforcer already fails
-    /// closed on an absent circulating supply rather than guessing.
-    fn derive_circulating_supply(&self, policy_commit: &[u8; 32]) -> Option<u64> {
-        use dsm::types::operations::Operation as O;
-        let device_id = self.device_info.device_id;
-        let Ok(states) = crate::storage::client_db::get_bcr_chain_states(&device_id, false) else {
-            log::warn!("[supply] chain history unreadable — refusing to derive a supply figure");
-            return None;
-        };
-        let mut circulating: u128 = 0;
-        for state in states {
-            match &state.operation {
-                O::CreateToken {
-                    initial_supply,
-                    policy_commit: pc,
-                    ..
-                } if pc == policy_commit => {
-                    circulating = circulating.saturating_add(initial_supply.value() as u128);
-                }
-                O::Burn {
-                    amount,
-                    policy_commit: pc,
-                    ..
-                } if pc == policy_commit => {
-                    circulating = circulating.saturating_sub(amount.value() as u128);
-                }
-                _ => {}
-            }
-        }
-        Some(u64::try_from(circulating).unwrap_or(u64::MAX))
-    }
-
     /// Whether the policy committed at the commitment `operation` names
     /// permits it. A creation's supply cap is evaluated against the
-    /// circulating supply derived HERE, where the chain is reachable, never
-    /// in the pure context builder.
+    /// circulating supply Core folds over the chain history loaded HERE,
+    /// where the chain is reachable, never in the pure context builder.
     pub(crate) fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
     ) -> Result<(), DsmError> {
-        use dsm::core::token::policy::policy_enforcement::witness_keys;
+        use dsm::core::token::policy::policy_enforcement::{circulating_supply, witness_keys};
         let Some((policy_commit, op_type, mut context)) =
             Self::build_token_policy_context(operation)?
         else {
             return Ok(());
         };
         if context.contains_key(witness_keys::AMOUNT) {
-            // Absent, not zero, when the history is incomplete — the
+            // Core folds the supply over this device's canonical chain
+            // history. Absent, not zero, when the history is incomplete — the
             // enforcer refuses a capped creation it cannot evaluate.
-            if let Some(circulating) = self.derive_circulating_supply(&policy_commit) {
+            let states =
+                crate::storage::client_db::get_bcr_chain_states(&self.device_info.device_id);
+            if let Err(e) = &states {
+                log::warn!("[supply] chain history unreadable, so no supply figure: {e}");
+            }
+            if let Some(circulating) = circulating_supply(
+                &policy_commit,
+                states
+                    .as_ref()
+                    .map(|states| states.iter().map(|state| &state.operation)),
+            ) {
                 context.insert(
                     witness_keys::CIRCULATING.to_string(),
                     circulating.to_le_bytes().to_vec(),
@@ -1162,7 +1349,7 @@ impl CoreSDK {
     /// view derived from the AdvanceOutcome's DeviceState + chain state. The
     /// `State` will be removed once all downstream readers migrate to
     /// `DeviceState`.
-    /// Ordinary advance (no fused-anchor-state leaf, no allocation draw).
+    /// Ordinary advance (no offline-account spend).
     pub fn execute_on_relationship(
         &self,
         rel_key: [u8; 32],
@@ -1175,7 +1362,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            None,
             None,
             None,
             None,
@@ -1196,7 +1382,6 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
         before_commit: Option<
             &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
@@ -1211,7 +1396,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf,
             offline_spend,
             Some(settle),
             before_commit,
@@ -1300,7 +1484,6 @@ impl CoreSDK {
             operation,
             deltas,
             None,
-            None,
             Some(&write),
             Some(&pre),
             admission,
@@ -1340,7 +1523,6 @@ impl CoreSDK {
             operation,
             deltas,
             None,
-            None,
             in_tx_extra,
             None,
             admission,
@@ -1378,7 +1560,6 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
         in_tx_extra: Option<
             &dyn Fn(
@@ -1406,40 +1587,15 @@ impl CoreSDK {
         // and any new Operation variant must be consciously classified. This is
         // the canonical state-advance chokepoint, so it covers bilateral
         // transfers, token ops, and DLV ops in one place.
-        // Recovery egress gate (spec R3) + capsule currency (spec §5.1). Classify
-        // before `operation` is moved into the advance.
-        let is_egress = operation.is_value_egress();
-        let frontier_changed = !matches!(
-            operation,
-            dsm::types::operations::Operation::Noop | dsm::types::operations::Operation::Genesis
-        );
-
-        // R2′ optimistic self-heal (BEFORE the lock, only when the capsule is
-        // stale): re-seal so a current device is not needlessly blocked, while
-        // keeping the heavy capsule rebuild off the hot path when already current.
-        if is_egress && crate::storage::client_db::recovery::is_capsule_dirty() {
-            crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule();
-        }
-
+        // Recovery egress gate (spec R3).
         let mut sm = self.state_machine.lock();
 
         // Authoritative fail-closed egress gate UNDER the state-machine lock, so
-        // the decision is atomic with the commit + capsule-currency bump below.
-        // This closes the check-before-lock TOCTOU where two concurrent egress
-        // ops could both pass before either marked the capsule dirty.
-        if is_egress {
-            if let Some(reason) = crate::storage::client_db::recovery::value_egress_block_reason() {
-                return Err(DsmError::invalid_operation(reason));
-            }
-            // P5 per-asset bearer gate (spec §0.4): in ADDITION to the identity-level gate
-            // above, a recovered bearer asset stays LockedRecovery until its OWN verified
-            // frontier reconciles — this persists AFTER recovery activation and is keyed by
-            // the operation's egress asset. Fail-closed (unreadable/locked → refuse).
-            if let Some(reason) =
-                crate::storage::client_db::recovery::asset_egress_block_reason(&operation)
-            {
-                return Err(DsmError::invalid_operation(reason));
-            }
+        // the decision is atomic with the commit below. This closes the
+        // check-before-lock TOCTOU where two concurrent egress ops could both
+        // pass before either committed.
+        if let Some(reason) = value_egress_refusal(&operation) {
+            return Err(DsmError::invalid_operation(reason));
         }
 
         // Enforce the token's committed policy on the operation that will
@@ -1506,6 +1662,13 @@ impl CoreSDK {
         if let Some(plan) = &admission {
             sm.attach_pending_economic_admission(Some(plan.prepared.clone()));
         }
+        // Whether this advance attached an admission of its own: only that is
+        // rolled off on an error. An advance with no plan can run while the
+        // head carries another one's admission (a SoFi fulfillment, an online
+        // step awaiting finality: the fence lets a bearer step through), and
+        // clearing it on that advance's failure let the next admission take the
+        // same position (SA-90).
+        let attached_here = admission.is_some();
         // From here to commit, every error path must roll the attach off —
         // one restore point via the closure below, not scattered clears.
         // The admission, when there is one, travels with the storage set it
@@ -1532,7 +1695,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
             offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
         )?;
         // The sender's signed A-side pair is deliberately NOT compared against
@@ -1569,9 +1731,11 @@ impl CoreSDK {
         let (outcome, accepted, artifacts) = match admission_result {
             Ok(v) => v,
             Err(e) => {
-                // Restore the exact prior in-memory admission (None — the
-                // pre-attach check proved nothing was pending).
-                sm.attach_pending_economic_admission(None);
+                // Roll off this advance's own attach (None — the pre-attach
+                // check proved nothing was pending). One it did not make stays.
+                if attached_here {
+                    sm.attach_pending_economic_admission(None);
+                }
                 return Err(e);
             }
         };
@@ -1580,15 +1744,12 @@ impl CoreSDK {
             // canonical apply) COMPOSES with the admission commit via `also`.
             Some((accepted, set_id)) => Self::commit_advance_with_pending_admission_and_artifacts(
                 &outcome,
-                frontier_changed,
                 accepted,
                 &artifacts,
                 set_id,
                 in_tx_extra,
             ),
-            None => {
-                Self::dual_write_advance_outcome_with_extra(&outcome, frontier_changed, in_tx_extra)
-            }
+            None => Self::dual_write_advance_outcome_with_extra(&outcome, in_tx_extra),
         };
         if let Err(e) = commit_result {
             if accepted.is_some() {
@@ -1668,111 +1829,41 @@ impl CoreSDK {
         Ok(())
     }
 
-    /// **Load** `amount` of `asset` from the online balance into this device's offline-cash allocation,
-    /// bound to the enrolled anchor bundle `B`. An online, conserved regime shift: online
-    /// `available` drops and the device-bound allocation rises by the same amount (device root advances).
-    /// Fail-closed persistence: the new device head is durably written BEFORE it is installed, so a
-    /// persist failure leaves the in-memory head on the prior state (the load is never-happened).
-    pub fn load_offline_cash(
-        &self,
-        anchor_bundle_b: [u8; 32],
-        asset: [u8; 32],
-        amount: u64,
-    ) -> Result<dsm::types::device_state::OfflineAllocationOutcome, DsmError> {
-        let mut sm = self.state_machine.lock();
-        let outcome = {
-            let ds = sm.device_head().ok_or_else(|| {
-                DsmError::state_machine(
-                    "load_offline_cash: DeviceState not initialized (genesis first)",
-                )
-            })?;
-            ds.load_offline_cash(&anchor_bundle_b, &asset, amount)?
-        };
-        crate::storage::client_db::update_bcr_device_head(&outcome.new_device_state).map_err(
-            |e| {
-                DsmError::storage(
-                    format!("load_offline_cash: persist device head failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            },
-        )?;
-        sm.set_device_head(outcome.new_device_state.clone());
-        Self::reproject_committed_head(&outcome.new_device_state);
-        Ok(outcome)
-    }
-
-    /// **Unload** `amount` from this device's offline-cash allocation back to the online balance
-    /// (reconcile): the allocation drops and online `available` rises by the same amount. Same
-    /// fail-closed persist-before-install discipline as [`Self::load_offline_cash`].
-    pub fn unload_offline_cash(
-        &self,
-        anchor_bundle_b: [u8; 32],
-        asset: [u8; 32],
-        amount: u64,
-    ) -> Result<dsm::types::device_state::OfflineAllocationOutcome, DsmError> {
-        let mut sm = self.state_machine.lock();
-        let outcome = {
-            let ds = sm.device_head().ok_or_else(|| {
-                DsmError::state_machine(
-                    "unload_offline_cash: DeviceState not initialized (genesis first)",
-                )
-            })?;
-            ds.unload_offline_cash(&anchor_bundle_b, &asset, amount)?
-        };
-        crate::storage::client_db::update_bcr_device_head(&outcome.new_device_state).map_err(
-            |e| {
-                DsmError::storage(
-                    format!("unload_offline_cash: persist device head failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            },
-        )?;
-        sm.set_device_head(outcome.new_device_state.clone());
-        Self::reproject_committed_head(&outcome.new_device_state);
-        Ok(outcome)
-    }
-
-    /// Current offline-cash allocation balance for `asset` under the enrolled anchor bundle `B`.
-    pub fn offline_cash_balance(&self, anchor_bundle_b: [u8; 32], asset: [u8; 32]) -> u64 {
+    /// The allocation of `asset` in the offline account of the enrolled anchor bundle `B`, if the
+    /// account is open and holds one.
+    pub fn offline_cash_balance(&self, anchor_bundle_b: [u8; 32], asset: [u8; 32]) -> Option<u64> {
         let sm = self.state_machine.lock();
-        match sm.device_head() {
-            Some(ds) => {
-                let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
-                    &ds.genesis_digest(),
-                    &ds.devid(),
-                    &anchor_bundle_b,
-                    &asset,
-                );
-                ds.offline_allocation(&key)
-            }
-            None => 0,
-        }
+        sm.device_head()?
+            .offline_allocation(&anchor_bundle_b, &asset)
     }
 
     /// The offline allocation of `asset` under the bundle of the appliance
-    /// attached in this process, or `None` while none has been attached or
-    /// before genesis. The allocation leaf is keyed by the appliance's bundle,
-    /// which only the appliance states, so a device that has not attached one
-    /// cannot say what it holds offline: that is unknown, not zero.
+    /// attached in this process, or `None` while none has been attached,
+    /// before genesis, or while its account holds none of `asset`. The account
+    /// is keyed by the appliance's bundle, which only the appliance states, so
+    /// a device that has not attached one cannot say what it holds offline:
+    /// that is unknown, not zero.
+    /// The pin of the anchor attached in this process, checked to be
+    /// provisioned for this device; `None` while none is attached.
+    pub(crate) fn attached_anchor_pin(&self) -> Option<crate::anchor::AnchorPin> {
+        self.anchor_appliance
+            .lock()
+            .as_ref()
+            .map(|attached| attached.pin.clone())
+    }
+
     pub fn offline_allocation_of(&self, asset: &[u8; 32]) -> Option<u64> {
         let bundle = self
             .anchor_appliance
             .lock()
             .as_ref()
-            .map(|appliance| appliance.pin().bundle)?;
+            .map(|attached| attached.pin.bundle)?;
         let sm = self.state_machine.lock();
-        let ds = sm.device_head()?;
-        let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
-            &ds.genesis_digest(),
-            &ds.devid(),
-            &bundle,
-            asset,
-        );
-        Some(ds.offline_allocation(&key))
+        sm.device_head()?.offline_allocation(&bundle, asset)
     }
 
     /// Get the canonical DeviceState head (§2.2 SMT root).
-    pub fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+    pub fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead> {
         self.state_machine.lock().device_head().cloned()
     }
 
@@ -1782,7 +1873,7 @@ impl CoreSDK {
     /// Used by the BLE sender in `send_bilateral_confirm` to build the
     /// stitched receipt (§4.2) with the real post-advance SMT roots + proofs
     /// *before* the sender advances canonical state — the canonical commit
-    /// happens later in `finalize_sender_step` via
+    /// happens when the anchor commits, in `commit_released_bearer_step`, via
     /// `execute_on_relationship_for_bilateral`, which re-runs prepare and
     /// then commits. Identical inputs → identical outcome, so the simulated
     /// receipt is byte-exact with the eventual canonical advance.
@@ -1793,7 +1884,6 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
         let sm = self.state_machine.lock();
@@ -1802,7 +1892,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf,
             offline_spend,
         )
     }
@@ -1835,49 +1924,51 @@ impl CoreSDK {
         &self,
         genesis_state: &dsm::core::identity::genesis::GenesisState,
     ) -> Result<[u8; 32], DsmError> {
-        let genesis_state_hash = {
-            let mut sm = self.state_machine.lock();
-            let mut s = State::new_genesis(genesis_state.genesis_nonce, self.device_info.clone());
-            s.hash = genesis_state.hash;
-            let snapshot = s.clone();
-            sm.set_state(s);
-            snapshot.hash
-        };
-        self.write_genesis_device_head(genesis_state_hash)?;
+        self.write_genesis_device_head(genesis_state.hash)?;
         Ok(genesis_state.hash)
     }
 }
 
-/// Producer-side offline-bearer artifacts from driving the device fused-anchor appliance for one
-/// transfer: the wire release + the anchor-state leaf update the DSM advance must apply + the
-/// appliance frontier lineage the receiver pins/adopts + the pin material to admit the anchor.
+/// The release the device fused-anchor appliance committed and emitted for one bearer transfer,
+/// and the pin material the receiver admits the anchor by. The release's offline-state proof
+/// fields are empty: the proofs come from the step's committed advance and are attached with
+/// [`attach_offline_state_proofs`].
 #[derive(Clone, Debug)]
 pub struct OfflineBearerArtifacts {
-    /// prost-encoded `dsm.anchor.OfflineRelease` (goes on `BilateralConfirmRequest.offline_release`).
+    /// prost-encoded `dsm.anchor.OfflineRelease`, as the appliance emitted it.
     pub offline_release: Vec<u8>,
-    /// The anchor-state leaf update the DSM advance applied (`Some(...)` on the canonical commit).
-    pub anchor_leaf: dsm::types::device_state::AnchorLeafUpdate,
-    /// The appliance frontier `h_i` this transfer consumes (the receiver's accepted frontier).
-    pub appliance_prev_root: [u8; 32],
-    /// The successor frontier `h_{i+1}` the receiver adopts after acceptance.
-    pub appliance_next_root: [u8; 32],
     /// The pin material (B, anchor_id, H0, pk_host, pk_chip) the receiver admits for this anchor.
     pub pin: crate::anchor::AnchorPin,
 }
 
+/// `release` with the offline-state proofs `Π_i`/`Π_{i+1}` attached. They sit OUTSIDE all three
+/// signatures (the receiver verifies them independently against `R_i`/`R_{i+1}`), so attaching
+/// them mutates no signed bytes.
+pub fn attach_offline_state_proofs(
+    release: &[u8],
+    offline_state_proof_before: Vec<u8>,
+    offline_state_proof_after: Vec<u8>,
+) -> Result<Vec<u8>, DsmError> {
+    use prost::Message;
+    let mut rel = anchor_core::proto::pb::OfflineRelease::decode(release).map_err(|e| {
+        DsmError::serialization_error("OfflineRelease", "protobuf", Some(e.to_string()), Some(e))
+    })?;
+    rel.offline_state_proof_before = offline_state_proof_before;
+    rel.offline_state_proof_after = offline_state_proof_after;
+    Ok(rel.encode_to_vec())
+}
+
 /// A STAGED offline-bearer transition (v2 producer phase 1): the transition `Δ` and its successor
-/// anchor-state leaf are fully determined from the appliance's active state, but NOTHING has been
-/// signed or committed — the appliance is untouched. The DSM layer runs its advance simulation over
-/// `anchor_leaf` to materialize the real device SMT roots `R_i`/`R_{i+1}` and the inclusion proofs
+/// frontier are fully determined from the offline account's frontier and counter, which the
+/// appliance's active state matches, but NOTHING has been signed or committed — the appliance is
+/// untouched. The DSM layer runs its advance simulation with the spend's next frontier to
+/// materialize the real device SMT roots `R_i`/`R_{i+1}` and the offline-state proofs
 /// `Π_i`/`Π_{i+1}`, then feeds those into [`CoreSDK::release_offline_bearer`] so the release is
-/// born with the real roots in its signed transcript (no placeholder stamping, no re-stamp).
+/// born with the real roots in its signed transcript.
 #[derive(Clone)]
 pub struct StagedBearerTransition {
     /// The fully-formed transition `Δ` (owned; `as_transition()` for the appliance call).
     pub transition: anchor_core::root_advance::OwnedTransition,
-    /// The successor anchor-state leaf `L_{i+1} = H("DSM/anchor-state/v2" ‖ B ‖ h_{i+1} ‖ u_{i+1})`
-    /// at the stable per-device key — what the DSM advance commits atomically with the transfer.
-    pub anchor_leaf: dsm::types::device_state::AnchorLeafUpdate,
     /// The appliance frontier `h_i` this transfer consumes.
     pub appliance_prev_root: [u8; 32],
     /// The successor frontier `h_{i+1} = H(h_i ‖ D)`.
@@ -1904,48 +1995,147 @@ pub struct AnchorStatusSnapshot {
 }
 
 impl CoreSDK {
+    /// The anchor appliance attached to this device: attached through the installed factory on
+    /// first use and kept. An anchor is attached only once it is provisioned for this device: one
+    /// never provisioned is provisioned here, once, with this device's id, online key, the
+    /// offline-bearer policy and its genesis; one provisioned for any other device, key or policy
+    /// is refused. Its pin is kept with it.
+    fn anchor_for_this_device<'a>(
+        &self,
+        slot: &'a mut Option<AttachedAnchor>,
+    ) -> Result<&'a mut AttachedAnchor, DsmError> {
+        if let Some(attached) = slot {
+            return Ok(attached);
+        }
+        let mut appliance = match crate::bridge::anchor_appliance_factory() {
+            Some(factory) => factory()?,
+            None => hardware_appliance_or_fail()?,
+        };
+        let pin = match appliance.provisioned_pin()? {
+            Some(pin) => pin,
+            None => appliance.provision(&self.anchor_provisioning()?)?,
+        };
+        self.require_anchor_for_this_device(&pin)?;
+        Ok(slot.insert(AttachedAnchor { appliance, pin }))
+    }
+
+    /// What this device provisions an anchor with: its device id, its online key, the
+    /// offline-bearer policy and its genesis.
+    fn anchor_provisioning(&self) -> Result<anchor_core::enrollment::Provisioning, DsmError> {
+        let genesis = self
+            .state_machine
+            .lock()
+            .device_head()
+            .ok_or_else(|| {
+                DsmError::state_machine("anchor provisioning: DeviceState not initialized")
+            })?
+            .genesis();
+        Ok(anchor_core::enrollment::Provisioning {
+            device_id: self.device_info.device_id,
+            online_id_pk: self.device_info.public_key.clone(),
+            policy_hash: dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+            genesis_root: genesis,
+        })
+    }
+
+    /// The anchor `pin` describes is provisioned for this device: its bundle `B` recomputes from
+    /// its pin keys, its birth commitment, this device's online key and id and the offline-bearer
+    /// policy. An anchor provisioned for another device is never attached.
+    fn require_anchor_for_this_device(
+        &self,
+        pin: &crate::anchor::AnchorPin,
+    ) -> Result<(), DsmError> {
+        dsm::crypto::anchor_enrollment::require_bundle_of(
+            dsm::crypto::anchor_enrollment::PinKeys {
+                bundle: &pin.bundle,
+                anchor_id: &pin.anchor_id,
+                pk_chip: &pin.pk_chip,
+                partition_pk: &pin.partition_pk,
+                enrolled_counter: pin.enrolled_counter,
+            },
+            dsm::crypto::anchor_enrollment::BundleOwner {
+                online_key: &self.device_info.public_key,
+                device_id: &self.device_info.device_id,
+                policy: &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+                birth_commitment: &pin.birth_commitment,
+            },
+        )
+        .map_err(|e| {
+            DsmError::invalid_operation(format!(
+                "the anchor is not provisioned for this device: {e}"
+            ))
+        })
+    }
+
+    /// The offline account of `bundle` standing exactly where the anchor stands, at `frontier`
+    /// and `counter`. The account is the authority and the chip its mirror, so nothing is ever
+    /// rewritten to follow the chip: an account not yet open is opened here only at the chip's
+    /// enrolled origin — a chip that has never released (`u = 0`) — and any other disagreement
+    /// fails closed. A counter that moved with no account recording it, or an account standing
+    /// anywhere the chip does not, is inconsistent with the software state.
+    pub fn require_offline_account_at(
+        &self,
+        bundle: &[u8; 32],
+        frontier: &[u8; 32],
+        counter: u64,
+    ) -> Result<(), DsmError> {
+        let mut sm = self.state_machine.lock();
+        let ds = sm.device_head().ok_or_else(|| {
+            DsmError::state_machine("offline account: DeviceState not initialized (genesis first)")
+        })?;
+        match ds.offline_account(bundle) {
+            Some(account) => {
+                if account.counter() != counter || account.frontier() != *frontier {
+                    return Err(DsmError::invalid_operation(format!(
+                        "offline account: the anchor stands at counter {counter} but the offline \
+                         account at {} (or at another frontier) — the software counter is the \
+                         authority; recover the appliance first (fail closed)",
+                        account.counter()
+                    )));
+                }
+                Ok(())
+            }
+            None => {
+                if counter != 0 {
+                    return Err(DsmError::invalid_operation(format!(
+                        "offline account: none is open, and the anchor's counter has moved to \
+                         {counter} — a counter with no software record (fail closed)"
+                    )));
+                }
+                let opened = ds.open_offline_account(bundle, *frontier, counter)?;
+                crate::storage::client_db::update_bcr_device_head(&opened).map_err(|e| {
+                    DsmError::storage(
+                        format!("offline account: persist the opened account: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+                sm.set_device_head(opened);
+                Ok(())
+            }
+        }
+    }
+
     /// Read-only anchor appliance snapshot for the `anchor.status` diagnostics route (signal (c)).
     /// Attaches (and caches) the appliance via the installed factory if not already attached, then
     /// reads `pin()`/`status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
-    /// this performs NO anchor-state leaf reconciliation and NO mutation. When no appliance can
+    /// this performs NO offline-account check and NO mutation. When no appliance can
     /// attach (no device / fail-closed) it returns a disconnected snapshot rather than an error, so
     /// the diagnostics panel can render "no anchor connected" instead of failing.
     #[must_use]
     pub fn anchor_appliance_status(&self) -> AnchorStatusSnapshot {
-        let dev = self.device_info.device_id;
-        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
-
         let mut guard = self.anchor_appliance.lock();
-        if guard.is_none() {
-            let attached: Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> =
-                match crate::bridge::anchor_appliance_factory() {
-                    Some(factory) => factory(),
-                    None => hardware_appliance_or_fail(&seed, dev),
-                };
-            match attached {
-                Ok(a) => *guard = Some(a),
-                Err(e) => {
-                    log::info!("[anchor.status] no anchor appliance attached: {e}");
-                    return AnchorStatusSnapshot {
-                        status: "no anchor appliance connected".into(),
-                        ..Default::default()
-                    };
-                }
-            }
-        }
-
-        let app = match guard.as_mut() {
-            Some(a) => a,
-            None => {
+        let attached = match self.anchor_for_this_device(&mut guard) {
+            Ok(a) => a,
+            Err(e) => {
+                log::info!("[anchor.status] no anchor appliance attached: {e}");
                 return AnchorStatusSnapshot {
-                    status: "no anchor appliance connected".into(),
+                    status: format!("no anchor appliance connected: {e}"),
                     ..Default::default()
-                }
+                };
             }
         };
-
-        let pin = app.pin();
-        match app.status() {
+        let pin = attached.pin.clone();
+        match attached.appliance.status() {
             Ok(s) => AnchorStatusSnapshot {
                 connected: true,
                 anchor_id: pin.anchor_id,
@@ -1973,12 +2163,12 @@ impl CoreSDK {
         }
     }
 
-    /// v2 producer phase 1 (Software-Authority / Hardware-Identity): lazily attach the appliance
-    /// (reconciling the DeviceState anchor-state leaf to the chip's CURRENT active state), then
-    /// deterministically stage the next transition — compute `D`, the successor frontier
-    /// `h_{i+1} = H(h_i ‖ D)`, and the successor anchor-state leaf. NO appliance mutation, NO
-    /// signatures, NO counter move: the caller first simulates the DSM advance over `anchor_leaf`
-    /// to obtain the real device roots `R_i`/`R_{i+1}`, then calls
+    /// v2 producer phase 1 (Software-Authority / Hardware-Identity): lazily attach the appliance,
+    /// check it against the offline account — the account's software counter and frontier are the
+    /// authority, and the chip must stand exactly where they do — then deterministically stage the
+    /// next transition: compute `D` and the successor frontier `h_{i+1} = H(h_i ‖ D)`. NO
+    /// appliance mutation, NO signatures, NO counter move: the caller first simulates the DSM
+    /// advance with that frontier to obtain the real device roots `R_i`/`R_{i+1}`, then calls
     /// [`release_offline_bearer`](Self::release_offline_bearer).
     #[allow(clippy::too_many_arguments)]
     pub fn stage_offline_bearer_transition(
@@ -1992,37 +2182,23 @@ impl CoreSDK {
         action_fields: Vec<u8>,
         receiver_challenge: [u8; 32],
     ) -> Result<StagedBearerTransition, DsmError> {
-        use anchor_core::root_advance::{anchor_root_advance, anchor_state_leaf, transition_digest};
-        use dsm::core::bilateral_transaction_manager::anchor_state_leaf_key;
+        use anchor_core::root_advance::{anchor_root_advance, transition_digest};
 
         let dev = self.device_info.device_id;
-        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
-
         let mut guard = self.anchor_appliance.lock();
-        if guard.is_none() {
-            // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory. On device
-            // an absent factory FAILS CLOSED ("offline = chips"); the in-process mock is the test-only
-            // producer. The factory is called once and cached (stateful appliance). Construction only —
-            // the anchor-state-leaf reconcile is done PER stage call below (see the comment there), not
-            // once at birth: the chip can advance between attach and a later transfer.
-            let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
-                match crate::bridge::anchor_appliance_factory() {
-                    Some(factory) => factory()?,
-                    None => hardware_appliance_or_fail(&seed, dev)?,
-                };
-            *guard = Some(a);
-        }
-
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
-        let pin = app.pin();
+        // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory, attached
+        // once and kept (stateful appliance), and only once it is provisioned for this device. The
+        // check against the offline account is made PER stage call below.
+        let attached = self.anchor_for_this_device(&mut guard)?;
+        let pin = attached.pin.clone();
+        let app = &mut attached.appliance;
 
         // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
         // apply the existing host policy (`recovery_action`); anything other than Ready fails closed to
-        // online recovery. This does NOT cancel or erase here — an orphaned/committed record is left for
-        // the dedicated `resolve_prepared_on_reattach` seam (a Committed release must be re-emitted,
-        // never erased, §26). Conservative `prepared_owned_by_session = true`: never auto-cancel in stage.
+        // online recovery. This does NOT cancel or erase here — an unfinished release is settled by
+        // the bilateral handler before a new step is staged (a Committed release is re-emitted as the
+        // same payment, never erased, §26). A prepared record is treated as owned by a session here,
+        // so stage never cancels one.
         let action = crate::anchor::recovery_action(app.recover()?, true);
         if action != crate::anchor::RecoveryAction::Ready {
             return Err(DsmError::invalid_operation(format!(
@@ -2035,39 +2211,8 @@ impl CoreSDK {
         let before = app.status()?;
         let appliance_prev_root = before.root;
 
-        // PER-CALL reconcile (the fix for receiver `PrevStateUncommitted`): keep the device-head
-        // anchor-state leaf byte-equal to the value the certificate will claim —
-        // `anchor_state_leaf(B, before.root, before.anchor_counter)` at `anchor_state_leaf_key(B)`.
-        // `before` is a LIVE chip status read that drives cert.prev_frontier/anchor_counter, so the
-        // leaf the sim's Π_i proves must be reconciled to the SAME live state. This previously ran only
-        // once at first attach (`if guard.is_none()`), so any chip move afterward that was not mirrored
-        // into a persisted device head — a committed-but-failed attempt (COMMIT burns the counter +
-        // FINALIZE advances the frontier), a reflash-birth, or an online-only advance that rebuilt the
-        // head — left the stored leaf stale, Π_i proved a stale value, and the receiver rejected.
-        // `with_anchor_state_leaf` touches only `anchor_state_leaf_key(B)`; balances / relationship tips
-        // / offline_allocations are untouched (allocation conservation is unaffected).
-        {
-            let value = anchor_state_leaf(&pin.bundle, &before.root, before.anchor_counter);
-            let key = anchor_state_leaf_key(&pin.bundle);
-            let mut sm = self.state_machine.lock();
-            let ds = sm.device_head().ok_or_else(|| {
-                DsmError::state_machine(
-                    "offline-bearer: DeviceState not initialized (genesis first)",
-                )
-            })?;
-            let stored = ds.extra_leaves_snapshot().get(&key).copied();
-            // No-op guard: an idempotent same-value write preserves the SMT root, but the explicit
-            // skip makes the determinism guarantee obvious and avoids a needless head replacement.
-            if stored != Some(value) {
-                log::info!(
-                    "[offline-bearer] anchor-state leaf reconciled to live chip: u(anchor_counter)={} (stored={}, chip is source of truth)",
-                    before.anchor_counter,
-                    stored.map(|v| crate::util::text_id::encode_base32_crockford(&v[..6])).unwrap_or_else(|| "absent".into()),
-                );
-                let bootstrapped = ds.with_anchor_state_leaf(&key, &value)?;
-                sm.set_device_head(bootstrapped);
-            }
-        }
+        // The account is the authority and the chip its mirror.
+        self.require_offline_account_at(&pin.bundle, &before.root, before.anchor_counter)?;
 
         // Stage Δ°: the digest excludes `next_root`, so D is computable first and the successor
         // frontier is derived, never invented.
@@ -2091,49 +2236,38 @@ impl CoreSDK {
         let appliance_next_root = anchor_root_advance(&appliance_prev_root, &d);
         owned.next_root = appliance_next_root;
 
-        // Successor anchor-state leaf: what the device SMT holds AFTER this transfer commits.
-        let anchor_leaf = dsm::types::device_state::AnchorLeafUpdate {
-            key: anchor_state_leaf_key(&pin.bundle),
-            new_value: anchor_state_leaf(
-                &pin.bundle,
-                &appliance_next_root,
-                before.anchor_counter + 1,
-            ),
-        };
-
         Ok(StagedBearerTransition {
             transition: owned,
-            anchor_leaf,
             appliance_prev_root,
             appliance_next_root,
             pin,
         })
     }
 
-    /// v2 producer phase 2: drive the appliance PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT →
-    /// FINALIZE for a staged transition, with the REAL device SMT roots the caller's advance
-    /// simulation produced. The release is emitted with those roots inside the signed transcript
-    /// (σ^DSM binding is the caller's; σ^chip + σ^host are produced here) — there is no placeholder
-    /// stamping and no post-hoc re-stamp. The anchor-state inclusion proofs `Π_i`/`Π_{i+1}` (from
-    /// the same simulation) are attached to the release package here — they sit OUTSIDE all three
-    /// signatures (the receiver verifies them independently against `R_i`/`R_{i+1}`), so attaching
-    /// them mutates no signed bytes. Fails closed if the appliance's post-finalize frontier
-    /// diverges from the staged successor.
+    /// v2 producer phase 2, the hardware half of the one motion: drive the appliance
+    /// PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT for a staged transition, with the REAL device
+    /// SMT roots the caller's advance simulation produced. The caller has already recorded the
+    /// software step durably as releasing; the step commits next, and only then is the appliance's
+    /// frontier advanced ([`finalize_offline_bearer`](Self::finalize_offline_bearer)), so a crash
+    /// anywhere between leaves a state the recovery table names.
+    ///
+    /// The release is emitted with those roots inside the signed transcript (σ^DSM binding is the
+    /// caller's; σ^chip + σ^host are produced here), signed once over the real roots and never
+    /// re-stamped.
     pub fn release_offline_bearer(
         &self,
         staged: &StagedBearerTransition,
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        anchor_smt_proof_before: Vec<u8>,
-        anchor_smt_proof_after: Vec<u8>,
     ) -> Result<OfflineBearerArtifacts, DsmError> {
-        use prost::Message;
-
         let mut guard = self.anchor_appliance.lock();
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
+        let app = &mut guard
+            .as_mut()
+            .ok_or_else(|| {
+                DsmError::state_machine("offline-bearer: anchor appliance not attached")
+            })?
+            .appliance;
 
         app.prepare(
             &staged.transition.as_transition(),
@@ -2142,34 +2276,55 @@ impl CoreSDK {
             &sender_device_root_after,
         )?;
         app.commit()?;
-        let emitted = app.emit()?;
-        let new_frontier = app.finalize()?;
-        if new_frontier != staged.appliance_next_root {
-            return Err(DsmError::state_machine(
-                "offline-bearer: post-finalize frontier diverged from the staged successor (fail closed)",
-            ));
-        }
-
-        // Attach Π_i/Π_{i+1} to the package (unsigned carrier fields; see method doc).
-        let mut rel =
-            anchor_core::proto::pb::OfflineRelease::decode(&emitted[..]).map_err(|e| {
-                DsmError::serialization_error(
-                    "OfflineRelease",
-                    "protobuf",
-                    Some(e.to_string()),
-                    Some(e),
-                )
-            })?;
-        rel.anchor_smt_proof_before = anchor_smt_proof_before;
-        rel.anchor_smt_proof_after = anchor_smt_proof_after;
-
         Ok(OfflineBearerArtifacts {
-            offline_release: rel.encode_to_vec(),
-            anchor_leaf: staged.anchor_leaf.clone(),
-            appliance_prev_root: staged.appliance_prev_root,
-            appliance_next_root: staged.appliance_next_root,
+            offline_release: app.emit()?,
             pin: staged.pin.clone(),
         })
+    }
+
+    /// The committed release the appliance holds, emitted again: the same signed release, never a
+    /// new one, and the counter does not move (§26). For a step recorded as releasing whose
+    /// counter moved before its software side committed.
+    pub fn reemit_offline_bearer(&self) -> Result<OfflineBearerArtifacts, DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        let attached = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline-bearer: anchor appliance not attached")
+        })?;
+        Ok(OfflineBearerArtifacts {
+            offline_release: attached.appliance.emit()?,
+            pin: attached.pin.clone(),
+        })
+    }
+
+    /// The appliance's recovery state (§26), observed: what it holds and whether its counter moved.
+    /// Attaches the appliance first when none is attached. Observes only — the caller settles the
+    /// outcome against the step it recorded, by the recovery table.
+    pub fn observe_offline_bearer_recovery(
+        &self,
+    ) -> Result<anchor_core::appliance::RecoverOutcome, DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        self.anchor_for_this_device(&mut guard)?.appliance.recover()
+    }
+
+    /// Advance the appliance's frontier to the committed successor, once the step that spends it
+    /// is committed in software. Fails closed if the appliance's frontier is not the successor the
+    /// step names.
+    pub fn finalize_offline_bearer(&self, appliance_next_root: [u8; 32]) -> Result<(), DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        let app = &mut guard
+            .as_mut()
+            .ok_or_else(|| {
+                DsmError::state_machine("offline-bearer: anchor appliance not attached")
+            })?
+            .appliance;
+        let new_frontier = app.finalize()?;
+        if new_frontier != appliance_next_root {
+            return Err(DsmError::state_machine(
+                "offline-bearer: post-finalize frontier diverged from the committed successor \
+                 (fail closed)",
+            ));
+        }
+        Ok(())
     }
 
     /// Cleanup: drive an ABANDONED prepared release back to `Ready` (e.g. the confirm build failed
@@ -2178,8 +2333,8 @@ impl CoreSDK {
     /// it is not `Prepared`.
     pub fn cancel_offline_bearer_release(&self) -> Result<(), DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        if let Some(app) = guard.as_mut() {
-            match app.cancel() {
+        if let Some(attached) = guard.as_mut() {
+            match attached.appliance.cancel() {
                 Ok(()) => log::info!(
                     "[offline-bearer] cancelled an abandoned prepared bearer (appliance → Ready)"
                 ),
@@ -2190,39 +2345,6 @@ impl CoreSDK {
             }
         }
         Ok(())
-    }
-
-    /// §27/§28 host recovery seam. OBSERVE the sender appliance's recovery state at a re-attach
-    /// (process restart / power loss) via [`AnchorAppliance::recover`], then apply the host cancel
-    /// policy ([`crate::anchor::recovery_action`]): cancel ONLY an orphaned uncommitted `Prepared` —
-    /// one with no in-flight/durable session owning it and whose counter has not moved. A committed
-    /// release is NEVER cancelled or erased here (it is re-emitted or resolved online); a mismatch
-    /// downgrades online. `recover()` observes; this method decides and executes ONLY the
-    /// orphaned-`Prepared` cancel.
-    ///
-    /// `prepared_owned_by_session` is supplied by the caller — the bilateral handler knows whether an
-    /// in-flight session still holds the matching prepared bearer. Pass `false` at a cold re-attach
-    /// where the in-memory sessions are gone. Returns the decided [`crate::anchor::RecoveryAction`].
-    pub fn resolve_prepared_on_reattach(
-        &self,
-        prepared_owned_by_session: bool,
-    ) -> Result<crate::anchor::RecoveryAction, DsmError> {
-        let mut guard = self.anchor_appliance.lock();
-        let Some(app) = guard.as_mut() else {
-            // No appliance attached yet -> nothing is prepared -> Ready.
-            return Ok(crate::anchor::RecoveryAction::Ready);
-        };
-        let outcome = app.recover()?;
-        let action = crate::anchor::recovery_action(outcome, prepared_owned_by_session);
-        if action == crate::anchor::RecoveryAction::CancelOrphanedPrepared {
-            // Host policy executes the cancel — `recover()` did not. Only an orphaned uncommitted
-            // Prepared reaches here (no owning session, counter not moved), so nothing is lost.
-            app.cancel()?;
-            log::info!(
-                "[offline-bearer] re-attach cancelled an orphaned prepared bearer (appliance → Ready)"
-            );
-        }
-        Ok(action)
     }
 }
 
@@ -2237,193 +2359,12 @@ pub(crate) const OFFLINE_BEARER_NO_APPLIANCE_MSG: &str =
 
 /// The sender-side appliance when no hardware factory is installed: none.
 /// Offline-bearer requires the physical anchor device ("offline = chips").
-fn hardware_appliance_or_fail(
-    _seed: &impl Fn(&str) -> [u8; 32],
-    _dev: [u8; 32],
-) -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
+fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError>
+{
     Err(DsmError::invalid_operation(OFFLINE_BEARER_NO_APPLIANCE_MSG))
 }
 
 impl CoreSDK {
-    fn token_metadata_from_proto(proto: &TokenMetadataProto) -> TokenMetadata {
-        TokenMetadata {
-            token_id: proto.token_id.clone(),
-            name: proto.name.clone(),
-            symbol: proto.symbol.clone(),
-            description: proto.description.clone().filter(|s| !s.is_empty()),
-            icon_url: proto.icon_url.clone().filter(|s| !s.is_empty()),
-            decimals: (proto.decimals as u8).min(18),
-            token_type: match proto.token_type.to_uppercase().as_str() {
-                "NATIVE" => dsm::types::token_types::TokenType::Native,
-                "CREATED" => dsm::types::token_types::TokenType::Created,
-                "RESTRICTED" => dsm::types::token_types::TokenType::Restricted,
-                "WRAPPED" => dsm::types::token_types::TokenType::Wrapped,
-                _ => dsm::types::token_types::TokenType::Created,
-            },
-            owner_id: {
-                let bytes = crate::util::text_id::decode_base32_crockford(&proto.owner_id)
-                    .unwrap_or_default();
-                let mut arr = [0u8; 32];
-                if bytes.len() == 32 {
-                    arr.copy_from_slice(&bytes);
-                }
-                arr
-            },
-            metadata_uri: proto.metadata_uri.clone().filter(|s| !s.is_empty()),
-            policy_anchor: proto.policy_anchor.clone().filter(|s| !s.is_empty()),
-            fields: proto
-                .fields
-                .iter()
-                .map(|field| (field.key.clone(), field.value.clone()))
-                .collect(),
-        }
-    }
-
-    fn token_metadata_for_operation(
-        &self,
-        op: &dsm::types::operations::Operation,
-        token_id: &str,
-    ) -> Option<TokenMetadata> {
-        match op {
-            // The canonical creation operation. Recognising it here is what
-            // lets a token be recovered from the chain alone after a restart.
-            dsm::types::operations::Operation::CreateToken {
-                token_id: op_token_id,
-                symbol,
-                name,
-                decimals,
-                policy_commit,
-                metadata_uri,
-                ..
-            } => {
-                let op_token_id_str = String::from_utf8(op_token_id.clone()).ok()?;
-                if op_token_id_str != token_id && symbol != token_id {
-                    return None;
-                }
-                let anchor_b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
-                Some(TokenMetadata {
-                    token_id: op_token_id_str,
-                    name: name.clone(),
-                    symbol: symbol.clone(),
-                    description: None,
-                    icon_url: None,
-                    decimals: *decimals,
-                    token_type: dsm::types::token_types::TokenType::Created,
-                    owner_id: self.device_info.device_id,
-                    metadata_uri: metadata_uri.clone(),
-                    policy_anchor: Some(format!("dsm:policy:{anchor_b32}")),
-                    fields: std::collections::HashMap::new(),
-                })
-            }
-            dsm::types::operations::Operation::Create { metadata, .. } => {
-                let proto = TokenMetadataProto::decode(metadata.as_slice()).ok()?;
-                let token_metadata = Self::token_metadata_from_proto(&proto);
-                if token_metadata.token_id == token_id || token_metadata.symbol == token_id {
-                    Some(token_metadata)
-                } else {
-                    None
-                }
-            }
-            dsm::types::operations::Operation::Generic {
-                operation_type,
-                data,
-                ..
-            } => {
-                if operation_type.as_slice() == b"token_create"
-                    || operation_type.as_slice() == b"token_registry_update"
-                {
-                    if let Ok(registry_update) = TokenRegistryUpdateList::decode(data.as_slice()) {
-                        if let Some(proto) = registry_update
-                            .items
-                            .into_iter()
-                            .find(|proto| proto.token_id == token_id || proto.symbol == token_id)
-                        {
-                            return Some(Self::token_metadata_from_proto(&proto));
-                        }
-                    }
-                    if let Ok(proto) = TokenMetadataProto::decode(data.as_slice()) {
-                        let token_metadata = Self::token_metadata_from_proto(&proto);
-                        if token_metadata.token_id == token_id || token_metadata.symbol == token_id
-                        {
-                            return Some(token_metadata);
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    pub fn resolve_policy_commit_strict(&self, token_id: &[u8]) -> Result<[u8; 32], DsmError> {
-        let token_id = std::str::from_utf8(token_id)
-            .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
-
-        if let Some(commit) = crate::policy::builtin_policy_commit(token_id) {
-            return Ok(commit);
-        }
-
-        // The registry is authoritative for the persisted token IDENTITY
-        // mapping — ticker, token id, policy commitment, metadata — while
-        // canonical DeviceState stays authoritative for balances and
-        // transitions. Ask it before walking the archive.
-        //
-        // A device that ADOPTED a token by its CPTA anchor holds a registry
-        // row and the anchored policy bytes, and has no CreateToken of its own
-        // to find: adoption registers an identity, it is not a transition on
-        // this device's chain. So an archive-only lookup resolved on the
-        // CREATING device and could never resolve on the RECEIVING one, and
-        // every incoming transfer of an adopted token fail-closed with
-        // "Missing canonical policy anchor" after the sender had already
-        // debited.
-        //
-        // This is not trusting a mutable cache. `load_policy_verified`
-        // re-derives BLAKE3(TAG_DSM_POLICY, policy_bytes) and refuses bytes
-        // that do not hash to the commitment they are stored under, so a row
-        // that does not carry the real policy cannot resolve through here.
-        let registry = |e: anyhow::Error| {
-            DsmError::storage(format!("token registry: {e}"), None::<std::io::Error>)
-        };
-        let by_id =
-            crate::storage::client_db::token_registry::get_token(token_id).map_err(registry)?;
-        let by_ticker = crate::storage::client_db::token_registry::get_token_by_ticker(token_id)
-            .map_err(registry)?;
-        for row in [by_id, by_ticker].into_iter().flatten() {
-            if crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
-                .map_err(registry)?
-                .is_some()
-            {
-                return Ok(row.policy_commit);
-            }
-        }
-
-        // Per §4.3 there is no `state_number`. Walk the per-relationship
-        // chain-state archive newest-first looking for an op that registered
-        // metadata for `token_id`. Chains are keyed by chain tip and ordered
-        // by insertion time — no counter, no derived sparse index.
-        let device_id = self.device_info.device_id;
-        let states =
-            crate::storage::client_db::get_bcr_chain_states(&device_id, false).map_err(|e| {
-                DsmError::state(format!(
-                    "Failed to load BCR chain states for policy commit lookup: {e}"
-                ))
-            })?;
-        for state in states.into_iter().rev() {
-            if let Some(token_metadata) =
-                self.token_metadata_for_operation(&state.operation, token_id)
-            {
-                return crate::policy::strict_policy_commit_for_token(
-                    token_id,
-                    token_metadata.policy_anchor.as_deref(),
-                );
-            }
-        }
-
-        Err(DsmError::state(format!(
-            "Missing canonical policy anchor for token {token_id}"
-        )))
-    }
-
     pub async fn local_genesis_hash(&self) -> Result<Vec<u8>, DsmError> {
         // Return the genesis hash `G` from the genesis_records table.
         // This MUST match the genesis hash that contacts store during pairing,
@@ -2447,21 +2388,28 @@ impl CoreSDK {
         }
     }
 
+    /// Sync the balance projection of the token a transfer moved: the policy
+    /// its operation commits to, under that policy's own ticker. The ticker in
+    /// the transfer's terms is the sender's word and names no row (SoFi §47).
     fn sync_token_projection_best_effort(
         &self,
         local_b32: &str,
-        token_id: &[u8],
+        policy_commit: &[u8; 32],
         new_state: &State,
         context: &str,
     ) {
-        let token_id_str = String::from_utf8_lossy(token_id);
-        let canonical_token_id = token_id_str.trim();
-        if canonical_token_id.is_empty() {
-            log::error!(
-                "[{context}] CRITICAL: the operation names no token; no projection to sync"
-            );
-            return;
-        }
+        let canonical_token_id =
+            match crate::handlers::wallet_routes::token_of_commit(policy_commit) {
+                Ok((ticker, _)) => ticker,
+                Err(error) => {
+                    log::error!(
+                        "[{context}] CRITICAL: the token the transfer moved is not named here \
+                         ({error}); the projection is left for the repair sweep"
+                    );
+                    return;
+                }
+            };
+        let canonical_token_id = canonical_token_id.as_str();
 
         let existing_locked = match client_db::get_locked_balance(local_b32, canonical_token_id) {
             Ok(value) => value,
@@ -2474,20 +2422,10 @@ impl CoreSDK {
             }
         };
 
-        let policy_commit = match self.resolve_policy_commit_strict(token_id) {
-            Ok(commit) => commit,
-            Err(error) => {
-                log::error!(
-                    "[{context}] CRITICAL: failed to resolve policy commit for {canonical_token_id}: {error}"
-                );
-                return;
-            }
-        };
-
         if let Err(error) = client_db::sync_token_projection_from_state(
             local_b32,
             canonical_token_id,
-            &policy_commit,
+            policy_commit,
             new_state,
             existing_locked,
         ) {
@@ -2565,13 +2503,13 @@ impl CoreSDK {
                 ))
             }
         };
-        // The nonce and the token are read from terms that open the signed
-        // commitment, and from nothing else (pre-audit item 4).
+        // The nonce is read from terms that open the signed commitment, and
+        // from nothing else (pre-audit item 4); the token is the policy the
+        // operation commits to.
         terms.open(&op).map_err(|e| {
             DsmError::invalid_operation(format!("apply_incoming_transfer_full_state: {e}"))
         })?;
         let nonce = terms.nonce.clone();
-        let token_id = terms.token_id.clone();
         if nonce.is_empty() {
             return Err(DsmError::invalid_operation(
                 "apply_incoming_transfer_full_state: empty transfer nonce",
@@ -2631,18 +2569,8 @@ impl CoreSDK {
             &parent_tip,
             canonical_operation_bytes,
             &sender_transition_entropy,
-        );
-        let operation_digest = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-                dsm::crypto::domain::TaggedHashDomain::from_static(
-                    b"DSM/canonical-apply-op-digest/v1",
-                ),
-            );
-            h.update(canonical_operation_bytes);
-            let mut out = [0u8; 32];
-            out.copy_from_slice(&h.finalize().as_bytes()[..32]);
-            out
-        };
+        )?;
+        let operation_digest = cdb::canonical_apply_operation_digest(canonical_operation_bytes);
         // The nonce is spent in this relationship only (security pre-audit item
         // 5): another contact's transfer cannot spend it first.
         let nonce_hash = cdb::relationship_nonce_hash(&rel_key, &nonce);
@@ -2882,16 +2810,14 @@ impl CoreSDK {
                 let local_b32 = crate::util::text_id::encode_base32_crockford(&local_arr);
                 self.sync_token_projection_best_effort(
                     &local_b32,
-                    &token_id,
+                    &signed_policy_commit,
                     &staged.state,
                     "apply_full_state",
                 );
                 let record = record_for(&staged.outcome);
                 log::info!(
-                    "[apply_full_state] ✅ applied transfer tx={} amount={} from={} (single full-state tx)",
+                    "[apply_full_state] ✅ applied transfer tx={} (single full-state tx)",
                     tx_id_str,
-                    amount_val,
-                    sender_device_id,
                 );
                 Ok(ApplyOutcome::Applied {
                     record,
@@ -3094,14 +3020,9 @@ mod tests {
         );
     }
 
-    /// AWYPCNK8: the apply consults only the SIGNED canonical pair. The
-    /// symmetric projection (`contacts.chain_tip`) is a different formula
-    /// space. B's poll stages A's next transfer; B's projection of the
-    /// relationship then diverges from its canonical lineage — as the live
-    /// rig's did — and B's next sync still applies the staged pair.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial]
-    async fn an_apply_consults_the_signed_pair_never_the_projection() {
+    /// A settled first transfer A→B, then A's next transfer of 5 and its
+    /// receipt staged at B by B's poll, not yet applied.
+    async fn a_pair_staged_at_b() -> Pair {
         use crate::handlers::recipient_dispatch::{
             ingest_evidence_half, ingest_transfer_half, IngestOutcome, Ingested,
         };
@@ -3143,18 +3064,34 @@ mod tests {
             .expect("ingest the evidence"),
             staged
         );
+        p
+    }
 
-        {
-            let binding = client_db::get_connection().expect("conn");
-            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-            let changed = conn
-                .execute(
-                    "UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?2",
-                    rusqlite::params![p.b.genesis.as_slice(), p.a.device_id.as_slice()],
-                )
-                .expect("diverge the projection");
-            assert_eq!(changed, 1, "B holds A as a contact");
-        }
+    /// B's projection of the relationship diverges from its canonical lineage,
+    /// as the live rig's did: its tip toward A becomes B's genesis.
+    fn diverge_b_projection(p: &Pair) {
+        p.b.enter();
+        let binding = client_db::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        let changed = conn
+            .execute(
+                "UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?2",
+                rusqlite::params![p.b.genesis.as_slice(), p.a.device_id.as_slice()],
+            )
+            .expect("diverge the projection");
+        assert_eq!(changed, 1, "B holds A as a contact");
+    }
+
+    /// AWYPCNK8: the apply consults only the SIGNED canonical pair. The
+    /// symmetric projection (`contacts.chain_tip`) is a different formula
+    /// space. B's poll stages A's next transfer; B's projection of the
+    /// relationship then diverges from its canonical lineage — as the live
+    /// rig's did — and B's next sync still applies the staged pair.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn an_apply_consults_the_signed_pair_never_the_projection() {
+        let p = a_pair_staged_at_b().await;
+        diverge_b_projection(&p);
 
         let applied = p.b.sync().await;
         assert!(applied.success, "{:?}", applied.errors);
@@ -3162,6 +3099,45 @@ mod tests {
             p.b.era_balance(),
             15,
             "a valid signed pair applies whatever the projection holds"
+        );
+    }
+
+    /// The send barrier consults only the signed pair, as the apply does. A's
+    /// staged receipt names a step B has not taken, so B holds its sends toward
+    /// A. With B's projection diverged (AWYPCNK8) it still holds them, and B
+    /// says why; B's next sync applies the pair, and the step it took holds
+    /// nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn the_send_barrier_consults_the_signed_pair_never_the_projection() {
+        use crate::handlers::relationship_status::derive_local_send_status_for_device_id;
+        use client_db::recipient_staging::has_undecided_staged_receipt_from;
+        let p = a_pair_staged_at_b().await;
+        p.b.enter();
+        assert!(
+            has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "A's staged step holds B's sends toward A"
+        );
+
+        diverge_b_projection(&p);
+        assert!(
+            has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "and still holds them with B's projection diverged"
+        );
+        let status = derive_local_send_status_for_device_id(&p.a.device_id);
+        assert!(!status.send_ready, "B is not send-ready toward A");
+        assert_eq!(
+            status.send_block_message, "Waiting for a transfer from this peer to finish applying",
+            "B says its send waits on A's transfer"
+        );
+
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        assert_eq!(p.b.era_balance(), 15, "the staged pair applied");
+        p.b.enter();
+        assert!(
+            !has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "the step B took holds nothing"
         );
     }
 

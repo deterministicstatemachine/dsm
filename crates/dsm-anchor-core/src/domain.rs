@@ -30,7 +30,10 @@ pub const ANCHOR_FRONTIER_GENESIS_V2: &str = "DSM/anchor-frontier-genesis/v2";
 pub const TRANSITION_DIGEST_V2: &str = "DSM/transition-digest/v2";
 /// Forward-only offline frontier advance `h_{i+1} = H(tag ‖ h_i ‖ D_{i+1})`.
 pub const ANCHOR_ROOT_ADVANCE_V2: &str = "DSM/anchor-root-advance/v2";
-/// Anchor-state leaf `L_i = H(tag ‖ B ‖ h_i ‖ le64(u_i))`, committed inside device SMT root `R_i`.
-pub const ANCHOR_STATE_V2: &str = "DSM/anchor-state/v2";
 /// Root-advance message `M_{i+1}` — the single message all three signatures cover.
 pub const ROOT_ADVANCE_MESSAGE_V2: &str = "DSM/root-advance/v2";
+
+/// The digest of the appliance's record as R-memory holds it.
+pub const RMEM_RECORD_V1: &str = "DSM/anchor/rmem-record/v1";
+/// The seal of an R-memory header naming a record.
+pub const RMEM_HEADER_V1: &str = "DSM/anchor/rmem-header/v1";

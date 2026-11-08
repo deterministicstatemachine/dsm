@@ -81,6 +81,18 @@ pub fn preview(offer_digest: &[u8; 32]) -> Result<Option<PreviewRow>> {
         .optional()?)
 }
 
+/// The secret a wallet's accept commits, which it alone presents to read its
+/// session's requests (SA-128). Its `Debug` never shows it, so no log of a
+/// session carries it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReadSecret(pub [u8; 32]);
+
+impl core::fmt::Debug for ReadSecret {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ReadSecret(..)")
+    }
+}
+
 /// A connected (or once connected) application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalletSession {
@@ -96,6 +108,8 @@ pub struct WalletSession {
     pub accept_body: Vec<u8>,
     pub last_seq: u64,
     pub connected: SessionStatus,
+    /// The secret its accept commits: what reads its requests.
+    pub read_secret: ReadSecret,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +149,7 @@ fn i64_of(v: u64) -> Result<i64> {
 }
 
 const SESSION_COLUMNS: &str = "session_id, app_device_id, app_genesis, app_ak, display_name, \
-     endpoint, cert_pin, offer_digest, accept_body, last_seq, status";
+     endpoint, cert_pin, offer_digest, accept_body, last_seq, status, read_secret";
 
 fn session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WalletSession> {
     let status: String = r.get(10)?;
@@ -151,6 +165,7 @@ fn session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WalletSession> {
         accept_body: r.get(8)?,
         last_seq: u64_of(r, 9)?,
         connected: status_of(&status)?,
+        read_secret: ReadSecret(column_32(r, 11)?),
     })
 }
 
@@ -162,20 +177,30 @@ pub fn insert_session(s: &WalletSession) -> Result<()> {
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
     let tx = conn.transaction()?;
-    let existing: Option<String> = tx
+    let existing: Option<(String, i64)> = tx
         .query_row(
-            "SELECT status FROM connect_sessions WHERE session_id = ?1",
+            "SELECT status, last_seq FROM connect_sessions WHERE session_id = ?1",
             params![s.session_id.as_slice()],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if existing.as_deref() == Some(CONNECTED) {
+    if existing
+        .as_ref()
+        .is_some_and(|(status, _)| status == CONNECTED)
+    {
         return Err(anyhow!("this application is already connected"));
     }
+    // The same code approved again is the same session: the requests it
+    // already took stay taken. Starting it over at 0 had the relay's earlier
+    // signed requests carried out again (SA-125).
+    let last_seq = match existing {
+        Some((_, taken)) => i64_of(s.last_seq)?.max(taken),
+        None => i64_of(s.last_seq)?,
+    };
     tx.execute(
         &format!(
             "INSERT OR REPLACE INTO connect_sessions({SESSION_COLUMNS}) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
         ),
         params![
             s.session_id.as_slice(),
@@ -187,8 +212,9 @@ pub fn insert_session(s: &WalletSession) -> Result<()> {
             s.cert_pin.as_slice(),
             s.offer_digest.as_slice(),
             s.accept_body,
-            i64_of(s.last_seq)?,
+            last_seq,
             status_text(s.connected),
+            s.read_secret.0.as_slice(),
         ],
     )?;
     tx.execute(
@@ -429,16 +455,159 @@ pub struct LogRow {
 const UNSENT: &str = "unsent";
 const SENT: &str = "sent";
 
+/// Add `amount` to what the grant of `session_id` has spent of `policy_commit`.
+fn add_spend(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &[u8; 32],
+    policy_commit: &[u8; 32],
+    amount: u64,
+) -> Result<()> {
+    let before: Option<i64> = tx
+        .query_row(
+            "SELECT spent FROM connect_spent WHERE session_id = ?1 AND policy_commit = ?2",
+            params![session_id.as_slice(), policy_commit.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let before = match before {
+        Some(v) => u64::try_from(v).map_err(|e| anyhow!("a negative spend is stored: {e}"))?,
+        None => 0,
+    };
+    let after = before
+        .checked_add(amount)
+        .ok_or_else(|| anyhow!("the grant's spend overflows"))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO connect_spent(session_id, policy_commit, spent) \
+         VALUES (?1, ?2, ?3)",
+        params![
+            session_id.as_slice(),
+            policy_commit.as_slice(),
+            i64_of(after)?
+        ],
+    )?;
+    Ok(())
+}
+
+/// How many operations request `seq` of `session_id` committed.
+fn operations_bound(tx: &rusqlite::Connection, session_id: &[u8; 32], seq: i64) -> Result<i64> {
+    Ok(tx.query_row(
+        "SELECT COUNT(*) FROM connect_operations WHERE session_id = ?1 AND seq = ?2",
+        params![session_id.as_slice(), seq],
+        |r| r.get(0),
+    )?)
+}
+
+/// Bind the advance being committed in `tx`, whose chain tip is
+/// `chain_tip`, to request `seq` of `session_id` (SA-60): the request's next
+/// operation and, with its first, the spend its grant counts for it. Written
+/// in the advance's own transaction, so a debit is never durable without the
+/// request it answers, nor the request's spend without its debit.
+pub fn bind_operation_with_conn(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &[u8; 32],
+    seq: u64,
+    chain_tip: &[u8; 32],
+    spend: Option<([u8; 32], u64)>,
+) -> Result<()> {
+    let seq = i64_of(seq)?;
+    let ordinal = operations_bound(tx, session_id, seq)?;
+    tx.execute(
+        "INSERT INTO connect_operations(session_id, seq, ordinal, chain_tip) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![session_id.as_slice(), seq, ordinal, chain_tip.as_slice()],
+    )?;
+    if let (0, Some((policy_commit, amount))) = (ordinal, spend) {
+        add_spend(tx, session_id, &policy_commit, amount)?;
+    }
+    Ok(())
+}
+
+/// The chain tips of the operations request `seq` of `session_id`
+/// committed, in the order it committed them.
+pub fn bound_operations(session_id: &[u8; 32], seq: u64) -> Result<Vec<[u8; 32]>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let mut stmt = conn.prepare(
+        "SELECT chain_tip FROM connect_operations WHERE session_id = ?1 AND seq = ?2 \
+         ORDER BY ordinal",
+    )?;
+    let rows = stmt
+        .query_map(params![session_id.as_slice(), i64_of(seq)?], |r| {
+            column_32(r, 0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Whose a computed match nonce is (SA-59).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceHolder {
+    /// The session asking: newly bound to it, or bound to it before.
+    This,
+    /// Another application's session.
+    Another,
+}
+
+/// Bind `match_nonce` to `session_id` unless it is bound already, and say
+/// whose it is.
+pub fn claim_duel_nonce(session_id: &[u8; 32], match_nonce: &[u8; 32]) -> Result<NonceHolder> {
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let tx = conn.transaction()?;
+    let held: Option<[u8; 32]> = tx
+        .query_row(
+            "SELECT session_id FROM connect_duel_nonces WHERE match_nonce = ?1",
+            params![match_nonce.as_slice()],
+            |r| column_32(r, 0),
+        )
+        .optional()?;
+    let holder = match held {
+        Some(holder) if &holder == session_id => NonceHolder::This,
+        Some(..) => NonceHolder::Another,
+        None => {
+            tx.execute(
+                "INSERT INTO connect_duel_nonces(match_nonce, session_id) VALUES (?1, ?2)",
+                params![match_nonce.as_slice(), session_id.as_slice()],
+            )?;
+            NonceHolder::This
+        }
+    };
+    tx.commit()?;
+    Ok(holder)
+}
+
+/// The session `match_nonce` is bound to, if any.
+pub fn duel_nonce_session(match_nonce: &[u8; 32]) -> Result<Option<[u8; 32]>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT session_id FROM connect_duel_nonces WHERE match_nonce = ?1",
+            params![match_nonce.as_slice()],
+            |r| column_32(r, 0),
+        )
+        .optional()?)
+}
+
 /// Record that `seq` of `session_id` was processed: it becomes the replay
-/// guard, its spend (if it was carried out under the grant) is counted, it
-/// leaves the pending list, and its log row is written, all at once. A `seq`
-/// that is not the next one after the guard is refused: nothing is processed
-/// twice and nothing is skipped.
+/// guard, it leaves the pending list, and its log row is written, all at
+/// once. Its `spend` (if it was carried out under the grant) is counted here
+/// only when it committed no operation: one that did was counted with its
+/// first operation ([`bind_operation_with_conn`]). A `seq` that is not the
+/// next one after the guard is refused: nothing is processed twice and
+/// nothing is skipped.
 pub fn record_processed(
     session_id: &[u8; 32],
     spend: Option<([u8; 32], u64)>,
     log: &LogRow,
     response: &[u8],
+    grant_use: GrantUse,
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding
@@ -464,38 +633,16 @@ pub fn record_processed(
         "UPDATE connect_sessions SET last_seq = ?2 WHERE session_id = ?1",
         params![session_id.as_slice(), seq],
     )?;
-    if let Some((policy_commit, amount)) = spend {
-        let before: Option<i64> = tx
-            .query_row(
-                "SELECT spent FROM connect_spent WHERE session_id = ?1 AND policy_commit = ?2",
-                params![session_id.as_slice(), policy_commit.as_slice()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let before = match before {
-            Some(v) => u64::try_from(v).map_err(|e| anyhow!("a negative spend is stored: {e}"))?,
-            None => 0,
-        };
-        let after = before
-            .checked_add(amount)
-            .ok_or_else(|| anyhow!("the grant's spend overflows"))?;
-        tx.execute(
-            "INSERT OR REPLACE INTO connect_spent(session_id, policy_commit, spent) \
-             VALUES (?1, ?2, ?3)",
-            params![
-                session_id.as_slice(),
-                policy_commit.as_slice(),
-                i64_of(after)?
-            ],
-        )?;
+    if let (0, Some((policy_commit, amount))) = (operations_bound(&tx, session_id, seq)?, spend) {
+        add_spend(&tx, session_id, &policy_commit, amount)?;
     }
     tx.execute(
         "DELETE FROM connect_pending WHERE session_id = ?1 AND seq = ?2",
         params![session_id.as_slice(), seq],
     )?;
     tx.execute(
-        "INSERT INTO connect_log(session_id, seq, summary, outcome, detail, response, delivery) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO connect_log(session_id, seq, summary, outcome, detail, response, \
+         response_digest, delivery, grant_use) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             session_id.as_slice(),
             seq,
@@ -503,11 +650,51 @@ pub fn record_processed(
             log.outcome,
             log.detail,
             response,
-            UNSENT
+            dsm::connect::response_digest(response).as_slice(),
+            UNSENT,
+            grant_use.text(),
         ],
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// What a processed request was to its grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantUse {
+    /// Run under the grant, and it moved nothing: counted against the
+    /// grant's `free_requests` (SA-78).
+    Free,
+    /// Run under the grant, and it spent, or committed operations whose
+    /// spend was counted with them.
+    Counted,
+    /// Decided by the player.
+    Player,
+}
+
+impl GrantUse {
+    fn text(self) -> &'static str {
+        match self {
+            GrantUse::Free => "free",
+            GrantUse::Counted => "counted",
+            GrantUse::Player => "player",
+        }
+    }
+}
+
+/// How many requests that moved nothing the grant of `session_id` has run:
+/// read from its own log, which keeps a row of each for the session's life.
+pub fn free_requests_used(session_id: &[u8; 32]) -> Result<u64> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let used: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM connect_log WHERE session_id = ?1 AND grant_use = 'free'",
+        params![session_id.as_slice()],
+        |r| r.get(0),
+    )?;
+    u64::try_from(used).map_err(|e| anyhow!("a negative count: {e}"))
 }
 
 pub fn log(session_id: &[u8; 32]) -> Result<Vec<LogRow>> {
@@ -541,13 +728,14 @@ pub fn keep_disconnect_notice(session_id: &[u8; 32], notice: &[u8]) -> Result<()
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
     conn.execute(
-        "INSERT OR REPLACE INTO connect_log(session_id, seq, summary, outcome, detail, response, delivery) \
-         VALUES (?1, 0, ?2, 0, ?3, ?4, ?5)",
+        "INSERT OR REPLACE INTO connect_log(session_id, seq, summary, outcome, detail, response, \
+         response_digest, delivery, grant_use) VALUES (?1, 0, ?2, 0, ?3, ?4, ?5, ?6, 'notice')",
         params![
             session_id.as_slice(),
             "Disconnected",
             "the player disconnected this application; it is told at the next sync",
             notice,
+            dsm::connect::response_digest(notice).as_slice(),
             UNSENT
         ],
     )?;
@@ -576,8 +764,12 @@ pub fn mark_delivered(session_id: &[u8; 32], seq: u64) -> Result<()> {
     let conn = binding
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    // A free request's answer is dropped once the application holds it: the
+    // row keeps its digest, its summary and its outcome (SA-78).
     conn.execute(
-        "UPDATE connect_log SET delivery = ?3 WHERE session_id = ?1 AND seq = ?2",
+        "UPDATE connect_log SET delivery = ?3, \
+         response = CASE WHEN grant_use = 'free' THEN NULL ELSE response END \
+         WHERE session_id = ?1 AND seq = ?2",
         params![session_id.as_slice(), i64_of(seq)?, SENT],
     )?;
     Ok(())
@@ -594,6 +786,27 @@ pub fn app_put_offer(offer_digest: &[u8; 32], code: &str, offer: &[u8]) -> Resul
         "INSERT OR IGNORE INTO connect_app_offers(offer_digest, code, offer) VALUES (?1, ?2, ?3)",
         params![offer_digest.as_slice(), code, offer],
     )?;
+    Ok(())
+}
+
+/// Claim the offer `offer_digest` for `session_id`, its first verified accept:
+/// an offer connects one wallet (SA-79). The same session claiming it again is
+/// that accept retried; any other session is refused.
+pub fn app_claim_offer(offer_digest: &[u8; 32], session_id: &[u8; 32]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let claimed = conn.execute(
+        "UPDATE connect_app_offers SET accepted_session = ?2 WHERE offer_digest = ?1 \
+         AND (accepted_session IS NULL OR accepted_session = ?2)",
+        params![offer_digest.as_slice(), session_id.as_slice()],
+    )?;
+    if claimed != 1 {
+        return Err(anyhow!(
+            "this offer connected another wallet already: an offer connects one wallet"
+        ));
+    }
     Ok(())
 }
 
@@ -626,10 +839,12 @@ pub struct AppSession {
     /// Connected until the wallet's signed disconnect arrives (DSM Amendment
     /// A11: a grant ends when the player disconnects the application).
     pub connected: SessionStatus,
+    /// What the wallet's accept committed for its read secret (SA-128).
+    pub read_commitment: [u8; 32],
 }
 
-const APP_SESSION_COLUMNS: &str =
-    "session_id, offer_digest, wallet_device_id, wallet_genesis, wallet_ak, accept, next_seq, status";
+const APP_SESSION_COLUMNS: &str = "session_id, offer_digest, wallet_device_id, wallet_genesis, \
+     wallet_ak, accept, next_seq, status, read_commitment";
 
 fn app_session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppSession> {
     Ok(AppSession {
@@ -641,6 +856,7 @@ fn app_session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppSession> {
         accept: r.get(5)?,
         next_seq: u64_of(r, 6)?,
         connected: status_of(&r.get::<_, String>(7)?)?,
+        read_commitment: column_32(r, 8)?,
     })
 }
 
@@ -667,7 +883,7 @@ pub fn app_insert_session(s: &AppSession) -> Result<()> {
     tx.execute(
         &format!(
             "INSERT INTO connect_app_sessions({APP_SESSION_COLUMNS}) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
         ),
         params![
             s.session_id.as_slice(),
@@ -678,6 +894,7 @@ pub fn app_insert_session(s: &AppSession) -> Result<()> {
             s.accept,
             i64_of(s.next_seq)?,
             status_text(s.connected),
+            s.read_commitment.as_slice(),
         ],
     )?;
     tx.commit()?;
@@ -903,4 +1120,47 @@ pub fn app_record_fact(fact_id: &[u8], session_id: &[u8; 32], seq: u64) -> Resul
     )
     .map_err(|e| anyhow!("the fact is already granted on: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(last_seq: u64, connected: SessionStatus) -> WalletSession {
+        WalletSession {
+            session_id: [0x51; 32],
+            app_device_id: [0x52; 32],
+            app_genesis: [0x53; 32],
+            app_ak: vec![0x54; 64],
+            display_name: "Arena".to_string(),
+            endpoint: "https://arena.example".to_string(),
+            cert_pin: [0x55; 32],
+            offer_digest: [0x56; 32],
+            accept_body: vec![0x57; 16],
+            last_seq,
+            connected,
+            read_secret: ReadSecret([0x58; 32]),
+        }
+    }
+
+    /// SA-125. Approving the same connect code again, after a disconnect,
+    /// keeps the highest request the session took: the relay's earlier signed
+    /// requests are not carried out a second time.
+    /// MUTATION CONTROL: writing the new approval's `last_seq` of 0 over the
+    /// stored one, as the approval did, turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn approving_a_code_again_keeps_the_requests_its_session_took() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        insert_session(&session(7, SessionStatus::Disconnected)).expect("the first session");
+        insert_session(&session(0, SessionStatus::Connected)).expect("approved again");
+        let stored = super::session(&[0x51; 32])
+            .expect("read the session")
+            .expect("the session");
+        assert_eq!(stored.last_seq, 7);
+        assert_eq!(stored.connected, SessionStatus::Connected);
+    }
 }

@@ -44,7 +44,7 @@ class BleScanner(private val context: Context) {
             Log.d("BleScanner", "Scan result: ${device.address}, services: ${scanRecord.serviceUuids}")
 
             // Primary: check for DSM service UUID in advertised services
-            val hasServiceUuid = scanRecord.serviceUuids?.any { it.uuid == BleConstants.DSM_SERVICE_UUID_V2 } == true
+            val hasServiceUuid = scanRecord.serviceUuids.orEmpty().any { it.uuid == BleConstants.DSM_SERVICE_UUID }
 
             // Secondary check: if serviceUuids is null/empty (truncated advertisement on some
             // Samsung/Qualcomm devices), check manufacturer-specific data for DSM magic.
@@ -100,7 +100,7 @@ class BleScanner(private val context: Context) {
 
         // Primary filter: DSM service UUID
         val uuidFilter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(BleConstants.DSM_SERVICE_UUID_V2))
+            .setServiceUuid(ParcelUuid(BleConstants.DSM_SERVICE_UUID))
             .build()
 
         // Secondary filter: manufacturer data magic bytes (for truncated advertisements)

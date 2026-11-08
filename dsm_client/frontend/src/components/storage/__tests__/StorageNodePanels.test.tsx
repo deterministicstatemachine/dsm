@@ -7,11 +7,11 @@ import type { StorageStatus } from '../../../dsm/types';
 
 const status: StorageStatus = {
   networkId: 'dsm-testnet',
-  storageSetIdB32: '7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0',
+  storageSetIdB32: 'YTSBGCJFS144MK92CN6FNK4ZAQ60JGYW05N89XXKT25ZRKSA03GG',
   members: [
     {
       memberId: 'dsm-node-1',
-      registerIncarnationB32: 'B6DZ4TFJ2Y1GSJ8X57CE8BWX0QM5JRVAJP08JRQTV65DEQ53DYKG',
+      registerIncarnationB32: '0Y3VWSHQXT8C5K9PGQWRT5DS7492HKNT6J2P69DSHR53XSVD26M0',
       endpoint: 'https://node-1:8080',
       answer: {
         kind: 'latest',
@@ -25,14 +25,14 @@ const status: StorageStatus = {
     },
     {
       memberId: 'dsm-node-2',
-      registerIncarnationB32: 'QYR6K65CD8SZ40G4PZV4PMS2R0VK02N14TECZ0GP00ZR9VCSYC20',
+      registerIncarnationB32: 'J7CX24XQG55SNZHS578HZJJMCFZNTQSNQX5ZAZ1VQPHKN0MFGAX0',
       endpoint: 'https://node-2:8080',
       answer: { kind: 'noCycle' },
       answeredAs: 'dsm-node-3',
     },
     {
       memberId: 'dsm-node-3',
-      registerIncarnationB32: '2AJ8GZ4QM7YH7D5G552EAHSPTSTWG9KXE04RTBKYN8ES17Y9BTWG',
+      registerIncarnationB32: 'PJRKQ7C2PF53TAA1SXAWNWXANHWNZ2H983MZ413KB9GTV2FYR5EG',
       endpoint: 'https://node-3:8080',
       answer: { kind: 'unanswered', why: 'transport: connection refused' },
     },

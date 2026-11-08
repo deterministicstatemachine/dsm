@@ -5,6 +5,28 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 pub const TAG_DSM_B0X: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/b0x");
+/// An inbox address's genesis axis (`crypto::spool_address`).
+pub const TAG_DSM_B0X_G: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-G");
+/// An inbox address's device axis.
+pub const TAG_DSM_B0X_D: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-D");
+/// An inbox address's relationship-tip axis.
+pub const TAG_DSM_B0X_T: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-T");
+/// An acceptance reply's spool message id.
+pub const TAG_DSM_B0X_REPLY_MESSAGE_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-reply-message-id");
+/// A certificate resync message's spool message id.
+pub const TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-certresync-message-id");
+/// The content digest a reader keeps one copy of a spool message by.
+pub const TAG_DSM_B0X_ENVELOPE_CONTENT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-envelope-content");
+/// The spool message id a transfer goes under, from its receipt commitment.
+pub const TAG_DSM_B0X_SUBMISSION_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-submission-id/v1");
+/// The spool message id an artifact of a transfer goes under, from its
+/// content digest (ADR 0003).
+pub const TAG_DSM_B0X_ARTIFACT_SUBMISSION_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-artifact-submission-id/v1");
 pub const TAG_DSM_B0X_UNILATERAL: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/B0X/UNILATERAL");
 pub const TAG_DSM_BILATERAL_COMMIT: TaggedHashDomain<'static> =
@@ -18,8 +40,14 @@ pub const TAG_DSM_BILATERAL_STATE: TaggedHashDomain<'static> =
 pub const TAG_DSM_BLE_FRAME: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/ble-frame");
 pub const TAG_DSM_BLE_FRAME_CHECKSUM: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/ble-frame-checksum");
-pub const TAG_DSM_BLE_SESSION_KEY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/ble-session-key");
+/// `H(tag ‖ label ‖ transcript ‖ secret)` — each key of a BLE link session's
+/// handshake and of its two directions (DSM Amendment A27).
+pub const TAG_DSM_BLE_LINK_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/ble-link/key/v1");
+/// `H(tag ‖ label ‖ parts…)` — a BLE link handshake's transcript at each of
+/// its three messages (DSM Amendment A27).
+pub const TAG_DSM_BLE_LINK_TRANSCRIPT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/ble-link/transcript/v1");
 pub const TAG_DSM_CHAIN_TIP: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/CHAIN_TIP");
 pub const TAG_DSM_CHAIN_TIP_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/chain-tip-id");
@@ -43,6 +71,14 @@ pub const TAG_DSM_SDK_BILATERAL_ENTRY_V1: TaggedHashDomain<'static> =
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_B0X,
+    TAG_DSM_B0X_G,
+    TAG_DSM_B0X_D,
+    TAG_DSM_B0X_T,
+    TAG_DSM_B0X_REPLY_MESSAGE_ID,
+    TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID,
+    TAG_DSM_B0X_ENVELOPE_CONTENT,
+    TAG_DSM_B0X_SUBMISSION_ID,
+    TAG_DSM_B0X_ARTIFACT_SUBMISSION_ID,
     TAG_DSM_B0X_UNILATERAL,
     TAG_DSM_BILATERAL_COMMIT,
     TAG_DSM_BILATERAL_OP_COMMIT,
@@ -50,7 +86,8 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_BILATERAL_STATE,
     TAG_DSM_BLE_FRAME,
     TAG_DSM_BLE_FRAME_CHECKSUM,
-    TAG_DSM_BLE_SESSION_KEY,
+    TAG_DSM_BLE_LINK_KEY,
+    TAG_DSM_BLE_LINK_TRANSCRIPT,
     TAG_DSM_CHAIN_TIP,
     TAG_DSM_CHAIN_TIP_ID,
     TAG_DSM_ENVELOPE_ID,

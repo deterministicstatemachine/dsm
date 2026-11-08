@@ -89,16 +89,114 @@ fn with_database(url: &str, database: &str) -> String {
     }
 }
 
-/// A client pinned to a freshly generated storage set CA.
+/// The storage set CA every test node is served under, made once per test
+/// binary: its certificate, and one certificate it issued for the loopback
+/// address with that certificate's key, as the fleet's CA issues each node a
+/// certificate naming its IP (`deploy/generate_node_configs.sh`).
+struct TestCa {
+    ca_pem: String,
+    node_cert_pem: String,
+    node_key_pem: String,
+}
+
+fn test_ca() -> &'static TestCa {
+    static CA: std::sync::OnceLock<TestCa> = std::sync::OnceLock::new();
+    CA.get_or_init(|| {
+        let ca_key = ok_or_panic(rcgen::KeyPair::generate(), "the CA's key");
+        let mut ca_params = ok_or_panic(
+            rcgen::CertificateParams::new(Vec::<String>::new()),
+            "the CA's parameters",
+        );
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "DSM-Storage-CA (node tests)");
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let ca_pem = ok_or_panic(ca_params.self_signed(&ca_key), "the CA's certificate").pem();
+        let issuer = rcgen::Issuer::new(ca_params, ca_key);
+        let node_key = ok_or_panic(rcgen::KeyPair::generate(), "the node's key");
+        let node_params = ok_or_panic(
+            rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]),
+            "the node's parameters",
+        );
+        let node_cert = ok_or_panic(
+            node_params.signed_by(&node_key, &issuer),
+            "the node's certificate",
+        );
+        TestCa {
+            ca_pem,
+            node_cert_pem: node_cert.pem(),
+            node_key_pem: node_key.serialize_pem(),
+        }
+    })
+}
+
+/// A client pinned to the test storage set's CA, as a node's set client is
+/// pinned to its set's.
 pub fn set_client() -> reqwest::Client {
-    let ca = ok_or_panic(
-        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]),
-        "generate a test CA",
-    );
     ok_or_panic(
-        dsm_storage_node::set_client::pinned_set_client(ca.cert.pem().as_bytes()),
+        dsm_storage_node::set_client::pinned_set_client(test_ca().ca_pem.as_bytes()),
         "pinned client",
     )
+}
+
+/// The process's TLS provider, as the node binary installs it before it
+/// serves (`main.rs`): the TLS server takes the process default.
+fn install_tls_provider() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        match rustls::crypto::ring::default_provider().install_default() {
+            Ok(()) => {}
+            // Refused only because a provider is installed already, which is
+            // all a server here needs.
+            Err(installed_first) => assert!(
+                rustls::crypto::CryptoProvider::get_default().is_some(),
+                "no TLS provider installed: {installed_first:?}"
+            ),
+        }
+    });
+}
+
+/// The TLS a test node serves: the certificate the test CA issued for the
+/// loopback address.
+pub async fn node_tls() -> axum_server::tls_rustls::RustlsConfig {
+    install_tls_provider();
+    let ca = test_ca();
+    ok_or_panic(
+        axum_server::tls_rustls::RustlsConfig::from_pem(
+            ca.node_cert_pem.clone().into_bytes(),
+            ca.node_key_pem.clone().into_bytes(),
+        )
+        .await,
+        "the node's TLS",
+    )
+}
+
+/// A loopback listener and the `https://` endpoint a set-mate's
+/// configuration names for it.
+pub async fn tls_listener() -> (tokio::net::TcpListener, String) {
+    let listener = ok_or_panic(
+        tokio::net::TcpListener::bind("127.0.0.1:0").await,
+        "bind a listener",
+    );
+    let address = ok_or_panic(listener.local_addr(), "the listener's address");
+    (listener, format!("https://{address}"))
+}
+
+/// Serve `app` on `listener` over the test node TLS, as a node serves its
+/// set-mates, until the test ends.
+pub async fn serve_tls(listener: tokio::net::TcpListener, app: axum::Router) {
+    let tls = node_tls().await;
+    let listener = ok_or_panic(listener.into_std(), "the listener");
+    let server = ok_or_panic(axum_server::from_tcp_rustls(listener, tls), "a TLS server");
+    tokio::spawn(async move {
+        if let Err(e) = server.serve(app.into_make_service()).await {
+            panic!("serve over TLS: {e}");
+        }
+    });
 }
 
 /// A Tokio runtime for a test that drives the served app. `#[tokio::test]`

@@ -232,11 +232,14 @@ over. `LeaderHeld` is the first value to reach the leader, `Preserved` adds one
 further valid link, `Final` adds two. Only a value with a valid leader link can
 have valid further links. Nodes append and never remove.
 
-This module replaces the copy rule ("LeaderHeld and two other members hold x")
-that `DSM_SofiSuccessorCells`, `DSM_SofiFulfillment` and
-`DSM_NativeReserveRelease` still encode; those take their finality from here
-when they are rewritten (G15). The loss rule, handover and retirement are
-outside beta.
+This module replaces the copy rule ("LeaderHeld and two other members hold x").
+`DSM_SofiSuccessorCells` and `DSM_NativeReserveRelease` take their finality
+from here (G15): a further link is a copy carrying the value's leader record,
+copies written before the value held the leader count for nothing, and each
+has a `_CopyRule` falsification that counts them and must fail
+`FinalRequiresChainLinks`. `DSM_SofiFulfillment` reads a key only as the facts
+Core derives (empty, or one final value), which the cells module proves. The
+loss rule, handover and retirement are outside beta.
 
 | Invariant | Requirement |
 |---|---|
@@ -275,9 +278,12 @@ final release names. The Rust twins are `dsm/src/economic/native_reserve.rs`
 `dsm_sdk/src/sdk/native_reserve.rs` (the leader-first write, the memoised
 walk, the background carry); the algebra is `lean4/DSMNativeReserve.lean`.
 
-Two properties, kept apart (owner ruling, 2026-09-20): finality is the
-deterministic leader plus two other members holding the same recognized
-object — `ThreeHoldersIsFinal`, `UnavailableNonLeaderNeverBlocks` — and
+Two properties, kept apart (owner ruling, 2026-09-20): finality is the route
+chain's (`DSM_RouteChain`, G15) — the deterministic leader's link plus two
+further links, copies at other members that carry the release's leader
+record, so a copy written before the release held the leader counts for
+nothing — `LeaderAndTwoLinksIsFinal`, `FinalRequiresChainLinks`,
+`UnavailableNonLeaderNeverBlocks` — and
 replication is all-member, in the background, never a condition of finality
 (`_AllMembersHoldReachable` witnesses every member holding the winner). The
 reserve's accounting is `Conservation` (`Supply = remaining + Σ balances`),
@@ -290,7 +296,8 @@ reserve's accounting is `Conservation` (`Supply = remaining + Σ balances`),
 |---|---|---|
 | `_CountWithoutLeader` | finality counted over any three holders | `FinalRequiresLeader` |
 | `_AvailabilityLeader` | the leader is whoever is reachable | `LeaderFromCommittedSet` |
-| `_AllMemberFinality` | finality waits for every member (five copies) | `ThreeHoldersIsFinal` |
+| `_CopyRule` | finality counted over copies however they were written — the copy rule G15 replaced | `FinalRequiresChainLinks` |
+| `_AllMemberFinality` | finality waits for every member (five copies) | `LeaderAndTwoLinksIsFinal` |
 | `_UnavailableNonLeaderBlocks` | the same fault, seen from a member that is down | `UnavailableNonLeaderNeverBlocks` |
 | `_OverdraftRecognized` | recognition accepts a release of more than remains — the one arm that would mint | `NoValidReserveTransitionMints` |
 | `_MintArm` | a transition that raises `remaining` | `Conservation` |
@@ -350,7 +357,7 @@ modules check it at two levels, and each leaves the other level alone:
 ```text
 lean4/DSMSofiSuccessorCells.lean  the ALGEBRA of leader-first cells: members keep every
                                   value; Final(K,x) iff x is the leader's first object and
-                                  two other members hold it; one final value ever;
+                                  two further links carry its leader record; one final value ever;
                                   LeaderHeld settles loss; no key is dead; Unknown never
                                   counts; the attempt walk
 lean4/DSMSofiAtomicity.lean       identities, the hash order, the two Core predicates
@@ -444,6 +451,7 @@ carry the full invariant set and must pass.
 | cells | `_AvailabilityLeaderTwoFinals` | the leader is whoever is reachable | `AtMostOneFinalPerCoordinate` |
 | cells | `_ConsumptionReachable` | *claim:* nothing is consumed | `NeverConsumed` |
 | cells | `_CountWithoutLeader` | finality counted over any three holders | `FinalRequiresLeader` |
+| cells | `_CopyRule` | copies of an exercise written before it held the leader count toward finality — the copy rule G15 replaced | `FinalRequiresChainLinks` |
 | cells | `_CountWithoutLeaderTwoFinals` | finality counted over any three holders | `AtMostOneFinalPerCoordinate` |
 | cells | `_EarlyOccupancyReachable` | *claim:* a key is never occupied early | `NeverEarlyOccupied` |
 | cells | `_ExerciseCountsAnywhere` | an exercise consuming at a key it does not name | `ExerciseNamesItsKey` |

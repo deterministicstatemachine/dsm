@@ -4,7 +4,9 @@
 //! storage set's CA: every set-mate presents a certificate chaining to that
 //! one anchor. A node reaches a set-mate only to mirror its ByteCommits
 //! (storage spec §14, mirror sync), at the endpoint its own configuration
-//! names for it.
+//! names for it, and nowhere else: a redirect is an answer, never followed,
+//! so a set-mate's endpoint cannot send the node to fetch from another
+//! address (storage spec §14, mirror provenance 1).
 
 use reqwest::Client;
 use rustls::pki_types::pem::PemObject;
@@ -40,6 +42,7 @@ pub fn pinned_set_client(set_ca_pem: &[u8]) -> anyhow::Result<Client> {
 
     Ok(Client::builder()
         .use_preconfigured_tls(config)
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(SET_MATE_CONNECT_TIMEOUT)
         .timeout(SET_MATE_REQUEST_TIMEOUT)
         .build()?)

@@ -69,7 +69,6 @@ bool-literal	crates/dsm-anchor-secure-monitor/src/main.rs	6ebfbaa8c8c5229c
 bool-literal	crates/dsm-anchor-secure-monitor/src/main.rs	763b0fdef3967e02
 bool-literal	crates/dsm-anchor-secure-monitor/src/main.rs	ae7eab11c9e52b7f
 bool-literal	crates/dsm-anchor-secure-monitor/src/main.rs	dabbdf16b8204c2b
-bool-literal	crates/dsm-anchor-secure-monitor/src/tropic.rs	59b1c8f31b140ca4
 bool-literal	crates/dsm-android-anchor/src/install.rs	b8fa17c73a1f8cb7
 bool-literal	crates/dsm-android-anchor/src/usb_appliance.rs	100d4b7dfeef03cb
 bool-literal	crates/dsm-android-anchor/src/usb_appliance.rs	a6a10c61cab52549
@@ -479,7 +478,6 @@ bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/debug/PicoSelfT
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/debug/PicoSelfTestActivity.kt	7e4fe8351c22e218
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/debug/PicoSelfTestActivity.kt	b307dd5603e01bd1
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/diagnostics/ArchitectureChecker.kt	af93d36e997009ad
-bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/security/KeystoreVault.kt	2ed48dfb60407cdd
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/security/KeystoreVault.kt	47e349283029a40a
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/service/BleBackgroundService.kt	11a0073e4dd2caf6
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/service/BleBackgroundService.kt	2dcdabc1c35e81f5
@@ -3847,7 +3845,6 @@ rust-default-on-error	crates/dsm-anchor-secure-monitor/build.rs	56b2f2450c0cf737
 rust-default-on-error	crates/dsm-anchor-secure-monitor/build.rs	b7ec9e8809b3fd9b
 rust-default-on-error	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	2fb50c4b47e272bc
 rust-default-on-error	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	77049c0222e37088
-rust-default-on-error	crates/dsm-anchor-secure-monitor/src/tropic.rs	59b1c8f31b140ca4
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/build.rs	8fe0d92695576bc7
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	4c8fc76989c760ac
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	9d1779cc398dd57b
@@ -3865,7 +3862,6 @@ rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/core/state_
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/core/state_machine/mod.rs	5539e4652c7dde96
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/core/state_machine/mod.rs	6bff2c15ad7b0bb8
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/core/state_machine/random_walk.rs	e2a4c239e9c7da6f
-rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/crypto/canonical_lp.rs	2875a8c05726ee4c
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/economic/mutation.rs	c98833eb7f2dfa2e
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/economic/provenance.rs	3521cd84d1c2ccda
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/economic/provenance.rs	3521cd84d1c2ccda
@@ -4924,12 +4920,6 @@ rust-error-discarded	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	a5cb00e
 rust-error-discarded	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	ab98016b5d9c2709
 rust-error-discarded	crates/dsm-anchor-secure-monitor/src/main.rs	2a39dd1b53d52128
 rust-error-discarded	crates/dsm-anchor-secure-monitor/src/main.rs	c69327708ee2dab2
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	00d77ca01631c0ef
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	00d77ca01631c0ef
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	98d02996bf5c6cda
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	e7a59e437d94ebd5
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	f4ec43c3f6b8efbe
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	f63e8720e60b625b
 rust-error-discarded	crates/dsm-android-anchor/src/usb_appliance.rs	0669f6b20abdf9a5
 rust-error-discarded	crates/dsm-android-anchor/src/usb_appliance.rs	6d0fec92ee37350d
 rust-error-discarded	crates/dsm-android-anchor/src/usb_appliance.rs	9fccaed7b0c1e83f
@@ -5843,8 +5833,6 @@ rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/runt
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/seed_vault.rs	1a906b07c78760e1
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/seed_vault.rs	cd254efaeb6b7908
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs	1fc4e2a74515e873
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_reads.rs	0bf42ef1cf8d619b
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_sdk.rs	c45b9af992c369a8
@@ -6462,7 +6450,6 @@ rust-zero-id	crates/dsm-anchor-pico/src/main.rs	7e3db05b1847caab
 rust-zero-id	crates/dsm-anchor-pico/src/secure_boot.rs	b41c2477f4e535f8
 rust-zero-id	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	7bc361d809a5a1e6
 rust-zero-id	crates/dsm-anchor-secure-monitor/src/main.rs	b41c2477f4e535f8
-rust-zero-id	crates/dsm-anchor-secure-monitor/src/tropic.rs	7bc361d809a5a1e6
 rust-zero-id	crates/dsm-sphincs/src/lib.rs	46d25b954f03715e
 rust-zero-id	crates/dsm-sphincs/src/lib.rs	b41c2477f4e535f8
 rust-zero-id	crates/dsm-sphincs/src/lib.rs	b41c2477f4e535f8
@@ -6488,7 +6475,6 @@ rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/common/device_tree.r
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/common/device_tree.rs	b41c2477f4e535f8
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/common/device_tree.rs	b41c2477f4e535f8
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/common/device_tree.rs	ed43c65838af0c51
-rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/core/bilateral_transaction_manager.rs	1e71b461050d7d49
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/core/bilateral_transaction_manager.rs	7932d388fe3e0826
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/core/bilateral_transaction_manager.rs	81c928f1f71fb3c2
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/core/bilateral_transaction_manager.rs	ed43c65838af0c51

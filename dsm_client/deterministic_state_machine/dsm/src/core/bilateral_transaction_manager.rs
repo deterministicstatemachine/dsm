@@ -24,7 +24,7 @@ use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
 use crate::core::utility::labeling;
 use crate::common::domain_tags::{
-    TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY, TAG_TIP,
+    TAG_BILATERAL_PRECOMMIT, TAG_BILATERAL_SESSION, TAG_RELATIONSHIP_JOIN, TAG_SMT_KEY, TAG_TIP,
 };
 
 // -------------------- Relationship Anchor (bytes-only, single shared tip) --------------------
@@ -116,7 +116,11 @@ pub fn compute_smt_key(dev_id_a: &[u8; 32], dev_id_b: &[u8; 32]) -> [u8; 32] {
 /// Canonical bilateral pre-commit digest.
 ///
 /// `C_pre = H("DSM/precommit/commitment-hash/v2\0" || h_n || payload_i || e_i)`.
-pub fn compute_precommit(h_n: &[u8; 32], op_bytes: &[u8], entropy: &[u8]) -> [u8; 32] {
+pub fn compute_precommit(
+    h_n: &[u8; 32],
+    op_bytes: &[u8],
+    entropy: &[u8],
+) -> Result<[u8; 32], DsmError> {
     crate::commitments::precommit::branch_commitment_hash(h_n, op_bytes, entropy)
 }
 
@@ -138,64 +142,46 @@ pub fn compute_successor_tip(
     bytes32(h.finalize().as_bytes())
 }
 
-/// SMT key of the single per-device anchor-state leaf: `H("DSM/fused-anchor-state-leaf/v1" ‖ B)`.
-///
-/// One stable key per device (the fused anchor is device-level — one appliance, one counter),
-/// bound to the immutable anchor bundle `B`. Its VALUE is the current v2 anchor-state leaf
-/// `anchor_state_leaf(B, h_i, u_i)` (computed by the anchor-core-holding caller), bootstrapped
-/// when the anchor is attached and replaced old→successor on every bearer transfer's device-SMT
-/// advance. So `R_i` proves `key → L_i` and `R_{i+1}` proves the same `key → L_{i+1}`. Never
-/// keyed by relationship id, root, frontier, or counter.
-pub fn anchor_state_leaf_key(bundle: &[u8; 32]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher(TAG_FUSED_ANCHOR_STATE_LEAF);
-    h.update(bundle);
-    bytes32(h.finalize().as_bytes())
-}
-
-/// Receiver-side (v2 Software-Authority): verify that `device_root` (`R_i`/`R_{i+1}`) commits the
-/// given anchor-state leaf VALUE `leaf` — the anchor-core v2 leaf `anchor_state_leaf(B, h_i, u_i)`
-/// the acceptance predicate already computed — at the stable per-device key `anchor_state_leaf_key(B)`,
-/// via the release's carried SMT inclusion `proof`. Value-agnostic (dsm never recomputes the v2 leaf,
-/// so it needs no anchor-core dep). Fail-closed on any mismatch (wrong key/value/root) or an empty
-/// proof — so a release with no attached `Π` routes to online recovery.
-pub fn verify_anchor_state_leaf(
-    device_root: &[u8; 32],
-    bundle: &[u8; 32],
-    leaf: &[u8; 32],
-    proof_bytes: &[u8],
-) -> bool {
-    use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
-    let key = anchor_state_leaf_key(bundle);
-    let Some(proof) = SmtInclusionProof::from_bytes(proof_bytes) else {
-        return false;
+/// The relationship tip two concurrent accepted steps leave (owner ruling,
+/// 2026-10-29: "both settle"). Two online transfers that cross — each from
+/// its own sender, each consuming that sender's own parent — are each a step
+/// from the one relationship tip `h_n` both devices held, to `one` and to
+/// `other` (each [`compute_successor_tip`] of its own signed step). Neither
+/// is rewritten onto the other's successor: both keep their own parent and
+/// their own successor, and the relationship continues from
+/// `H("DSM/relationship-join/v1" ‖ h_n ‖ lo ‖ hi)`, `lo` and `hi` the two
+/// successors in byte order, so either device, taking the two steps in either
+/// order, derives the same tip. Two equal successors are one step, not two:
+/// refused.
+pub fn join_concurrent_tips(
+    h_n: &[u8; 32],
+    one: &[u8; 32],
+    other: &[u8; 32],
+) -> Result<[u8; 32], DsmError> {
+    if one == other {
+        return Err(DsmError::invalid_operation(
+            "join_concurrent_tips: one step is not two concurrent steps",
+        ));
+    }
+    if one == h_n || other == h_n {
+        return Err(DsmError::invalid_operation(
+            "join_concurrent_tips: a successor is the tip it steps from",
+        ));
+    }
+    let (lo, hi) = if one < other {
+        (one, other)
+    } else {
+        (other, one)
     };
-    proof.key == key
-        && proof.value == Some(*leaf)
-        && SparseMerkleTree::verify_proof_against_root(&proof, device_root)
+    let mut h = dsm_domain_hasher(TAG_RELATIONSHIP_JOIN);
+    h.update(h_n);
+    h.update(lo);
+    h.update(hi);
+    Ok(bytes32(h.finalize().as_bytes()))
 }
 
-/// Producer-side (v2): set the per-device anchor-state leaf to the given VALUE `leaf` (the anchor-core
-/// v2 leaf `anchor_state_leaf(B, h_i, u_i)`, computed by the caller — the SDK has anchor-core) at the
-/// stable per-device key, and return its inclusion proof against the resulting device root. So the
-/// returned proof binds the same root the transfer commits; the receiver checks it with
-/// [`verify_anchor_state_leaf`].
-pub fn set_anchor_state_leaf_value(
-    smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
-    bundle: &[u8; 32],
-    leaf: &[u8; 32],
-) -> Result<Vec<u8>, DsmError> {
-    let key = anchor_state_leaf_key(bundle);
-    smt.update_leaf(&key, leaf);
-    let proof = smt
-        .get_inclusion_proof(&key, 256)
-        .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
-    Ok(proof.to_bytes())
-}
-
-/// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
-/// trigger). Only these transitions run the anchor gate; all others finalize unchanged.
-/// The bytes a party's signature over the step `commitment_hash` covers: the
-/// proposer's σ_A and the receiver's acceptance σ_B alike.
+/// The bytes the proposer's signature σ_A over the step `commitment_hash`
+/// covers.
 pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
     let mut msg = Vec::with_capacity(19 + 32);
     msg.extend_from_slice(b"DSM/bilateral-sign\0");
@@ -203,6 +189,32 @@ pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
     msg
 }
 
+/// The bytes the receiver's acceptance σ_B covers: the step `commitment_hash`
+/// and the challenge `r_R` the step's release must answer. The challenge is
+/// under σ_B so that a relay cannot substitute it: the proposer takes only
+/// the challenge its receiver signed, and so stages and commits its anchor
+/// transition only toward a challenge the receiver will accept.
+pub fn bilateral_accept_sign_message(
+    commitment_hash: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(21 + 32 + 32);
+    msg.extend_from_slice(b"DSM/bilateral-accept\0");
+    msg.extend_from_slice(commitment_hash);
+    msg.extend_from_slice(receiver_challenge);
+    msg
+}
+
+/// The receiver's acceptance of a step, as the proposer holds it: σ_B and
+/// the challenge σ_B binds ([`bilateral_accept_sign_message`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiverAcceptance<'a> {
+    pub signature: &'a [u8],
+    pub receiver_challenge: &'a [u8; 32],
+}
+
+/// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
+/// trigger). Only these transitions run the anchor gate; all others finalize unchanged.
 pub fn operation_requires_offline_bearer(op: &crate::types::operations::Operation) -> bool {
     use crate::types::operations::{AuthorityMode, Operation};
     matches!(
@@ -215,7 +227,7 @@ pub fn operation_requires_offline_bearer(op: &crate::types::operations::Operatio
 // -------------------- Bilateral Pre-Commitment (bytes-only) --------------------
 #[derive(Clone, Debug)]
 pub struct BilateralPreCommitment {
-    /// `H(DSM/bilateral-session; lp(h_n) ‖ lp(op))`: the step this
+    /// `H(DSM/bilateral-precommit/v1; lp(h_n) ‖ lp(op))`: the step this
     /// precommitment proposes, bound to the relationship tip it extends.
     pub bilateral_commitment_hash: [u8; 32],
     pub operation: Operation,
@@ -225,17 +237,17 @@ pub struct BilateralPreCommitment {
     pub parent_tip: [u8; 32],
 }
 impl BilateralPreCommitment {
-    pub fn new(parent_tip: [u8; 32], operation: Operation) -> Self {
-        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
-        canonical_lp::write_lp(&mut h, &parent_tip);
-        canonical_lp::write_lp(&mut h, &operation.to_bytes());
-        let mut bilateral_commitment_hash = [0u8; 32];
-        bilateral_commitment_hash.copy_from_slice(h.finalize().as_bytes());
-        Self {
-            bilateral_commitment_hash,
+    /// The precommitment of `operation` on `parent_tip`, refused when the
+    /// operation's bytes are longer than the length prefix can frame.
+    pub fn new(parent_tip: [u8; 32], operation: Operation) -> Result<Self, DsmError> {
+        let mut h = dsm_domain_hasher(TAG_BILATERAL_PRECOMMIT);
+        canonical_lp::write_lp(&mut h, &parent_tip)?;
+        canonical_lp::write_lp(&mut h, &operation.to_bytes())?;
+        Ok(Self {
+            bilateral_commitment_hash: *h.finalize().as_bytes(),
             operation,
             parent_tip,
-        }
+        })
     }
 }
 
@@ -268,20 +280,15 @@ pub struct PreparedBilateralAdvance {
     /// Bilateral precommitment hash, for post-commit cleanup via
     /// [`BilateralTransactionManager::consume_pre_commitment`].
     pub pre_commitment_hash: [u8; 32],
-    /// Offline-bearer fused-anchor-state leaf update to commit atomically with the relationship
-    /// leaf (Software-Authority / Hardware-Identity). `Some` iff this is a bearer transfer whose sender drove the
-    /// appliance; the SAME value the sender's `simulate_advance_for_confirm` used to build the wire
-    /// proofs, so the canonical committed root matches (both-or-neither). `None` for ordinary transfers.
-    pub anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
-    /// Offline-cash allocation debit for an offline-bearer transfer: the value is drawn from the
-    /// device-bound allocation instead of the online balance, so `deltas` is empty and this is `Some`.
-    /// Carried forward from the confirm-build seam (stashed on the session) — NEVER reconstructed
-    /// from `anchor_leaf`, whose key is `H(B)` and cannot recover the bundle. Threaded identically
-    /// into the determinism-guard sim and the canonical commit so all three sender roots byte-match.
+    /// The offline-account spend of an offline-bearer transfer: the value is drawn from the
+    /// account's allocation instead of the online balance, so `deltas` is empty and this is
+    /// `Some`; the counter and frontier move with it. Carried forward from the confirm-build seam
+    /// (stashed on the session), with the frontier the sender's appliance staged. Threaded
+    /// identically into the determinism-guard sim and the canonical commit so all three sender
+    /// roots byte-match.
     pub offline_spend: Option<crate::types::device_state::OfflineSpend>,
 }
 
-#[derive(Debug)]
 pub struct BilateralTransactionManager {
     contact_manager: DsmContactManager,
     relationships: HashMap<[u8; 32], BilateralRelationshipAnchor>, // key = remote_device_id
@@ -290,6 +297,21 @@ pub struct BilateralTransactionManager {
     local_device_id: [u8; 32],
     local_genesis_hash: [u8; 32],
     chain_tip_store: std::sync::Arc<dyn ChainTipStore>,
+}
+
+/// Names the manager's identity and how much it holds. The signing key pair
+/// appears as its public key only: the secret key is never formatted.
+impl std::fmt::Debug for BilateralTransactionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BilateralTransactionManager")
+            .field("local_device_id", &self.local_device_id)
+            .field("local_genesis_hash", &self.local_genesis_hash)
+            .field("signing_public_key", &self.signature_keypair.public_key())
+            .field("contacts", &self.contact_manager.contacts.len())
+            .field("relationships", &self.relationships.len())
+            .field("pending_commitments", &self.pending_commitments.len())
+            .finish()
+    }
 }
 
 impl BilateralTransactionManager {
@@ -450,36 +472,65 @@ impl BilateralTransactionManager {
         Ok(sig)
     }
 
+    /// The receiver's acceptance σ_B of the step `commitment_hash`, binding
+    /// the challenge `receiver_challenge` its release must answer
+    /// ([`bilateral_accept_sign_message`]).
+    pub fn sign_acceptance(
+        &self,
+        commitment_hash: &[u8; 32],
+        receiver_challenge: &[u8; 32],
+    ) -> Result<Vec<u8>, DsmError> {
+        self.signature_keypair
+            .sign(&bilateral_accept_sign_message(
+                commitment_hash,
+                receiver_challenge,
+            ))
+            .map_err(|e| {
+                error!("[BTM] sign_acceptance: failed to sign: {}", e);
+                e
+            })
+    }
+
     /// The bytes a refusal of the proposal `commitment_hash` signs: the
     /// proposal, the device refusing it and its reason.
     fn rejection_message(
         commitment_hash: &[u8; 32],
         rejector_device_id: &[u8; 32],
+        addressed_to: &[u8; 32],
         reason: &str,
     ) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(21 + 64 + reason.len());
+        let mut msg = Vec::with_capacity(21 + 96 + reason.len());
         msg.extend_from_slice(b"DSM/bilateral-reject\0");
         msg.extend_from_slice(commitment_hash);
         msg.extend_from_slice(rejector_device_id);
+        msg.extend_from_slice(addressed_to);
         msg.extend_from_slice(reason.as_bytes());
         msg
     }
 
-    /// This device's signature refusing the proposal `commitment_hash`.
+    /// This device's signature refusing the step `commitment_hash`, addressed
+    /// to `addressed_to`: the device whose proposal it refuses, or the
+    /// receiver of this device's own proposal it cancels. A rejection names
+    /// the device it answers, so it ends only that device's step: one signed
+    /// for a contact that sent another contact's commitment once ended the
+    /// other contact's proposal (SA-110).
     pub fn sign_rejection(
         &self,
         commitment_hash: &[u8; 32],
+        addressed_to: &[u8; 32],
         reason: &str,
     ) -> Result<Vec<u8>, DsmError> {
         self.signature_keypair.sign(&Self::rejection_message(
             commitment_hash,
             &self.local_device_id,
+            addressed_to,
             reason,
         ))
     }
 
     /// A refusal of a proposal holds only when the device it was sent to
-    /// signed it, under the key that device's contact pins.
+    /// signed it, under the key that device's contact pins, addressed to this
+    /// device.
     pub fn verify_rejection(
         &self,
         rejector_device_id: &[u8; 32],
@@ -498,7 +549,12 @@ impl BilateralTransactionManager {
             .ok_or_else(|| DsmError::InvalidOperation("the rejector is not a contact".into()))?
             .public_key;
         let valid = SignatureKeyPair::verify_raw(
-            &Self::rejection_message(commitment_hash, rejector_device_id, reason),
+            &Self::rejection_message(
+                commitment_hash,
+                rejector_device_id,
+                &self.local_device_id,
+                reason,
+            ),
             signature,
             pinned_key,
         )
@@ -538,15 +594,11 @@ impl BilateralTransactionManager {
             .get_contact(remote_device_id)
             .ok_or_else(|| DsmError::ContactNotFound("remote device".into()))?;
         info!(
-            "[BTM] establish_relationship: contact.alias={}, public_key.len()={}, genesis_verified={}, chain_tip={:?}",
-            contact.alias, contact.public_key.len(), contact.genesis_verified_online,
+            "[BTM] establish_relationship: contact.alias={}, public_key.len()={}, chain_tip={:?}",
+            contact.alias,
+            contact.public_key.len(),
             contact.chain_tip.map(|ct| labeling::hash_to_short_id(&ct))
         );
-        if !contact.can_perform_bilateral_transaction() {
-            return Err(DsmError::InvalidContact(
-                "Contact Genesis not verified online".into(),
-            ));
-        }
         let contact_genesis_hash = contact.genesis_hash;
         // Strict: a relationship established for bilateral transfer needs the
         // counterparty's signing key, which verifies its acceptance proofs.
@@ -595,7 +647,7 @@ impl BilateralTransactionManager {
         // acceptance proof this step finalizes on. Contact exchange / online
         // verification comes before an offline prepare.
         self.require_contact_signing_key(remote_device_id)?;
-        let bilateral = BilateralPreCommitment::new(parent_tip, operation);
+        let bilateral = BilateralPreCommitment::new(parent_tip, operation)?;
         self.pending_commitments
             .insert(bilateral.bilateral_commitment_hash, bilateral.clone());
         Ok(bilateral)
@@ -622,9 +674,9 @@ impl BilateralTransactionManager {
         &self,
         remote_device_id: &[u8; 32],
         pre_commitment_hash: &[u8; 32],
-        receiver_acceptance_proof: &[u8],
+        acceptance: ReceiverAcceptance<'_>,
     ) -> Result<(), DsmError> {
-        if receiver_acceptance_proof.is_empty() {
+        if acceptance.signature.is_empty() {
             return Err(DsmError::InvalidOperation(
                 "receiver acceptance proof required".into(),
             ));
@@ -638,8 +690,8 @@ impl BilateralTransactionManager {
             .clone();
 
         let valid = SignatureKeyPair::verify_raw(
-            &bilateral_sign_message(pre_commitment_hash),
-            receiver_acceptance_proof,
+            &bilateral_accept_sign_message(pre_commitment_hash, acceptance.receiver_challenge),
+            acceptance.signature,
             &counterparty_pubkey,
         )
         .map_err(|e| {
@@ -691,9 +743,8 @@ impl BilateralTransactionManager {
         &mut self,
         remote_device_id: &[u8; 32],
         pre_commitment_hash: &[u8; 32],
-        receiver_acceptance_proof: &[u8],
+        acceptance: ReceiverAcceptance<'_>,
         sender_deltas: Vec<BalanceDelta>,
-        anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
     ) -> Result<PreparedBilateralAdvance, DsmError> {
         info!("prepare_bilateral_advance: tripwire (no SMT/anchor mutation)");
@@ -705,11 +756,7 @@ impl BilateralTransactionManager {
                 DsmError::InvalidOperation("pre-commitment not found or expired".into())
             })?
             .clone();
-        self.verify_receiver_acceptance_proof(
-            remote_device_id,
-            pre_commitment_hash,
-            receiver_acceptance_proof,
-        )?;
+        self.verify_receiver_acceptance_proof(remote_device_id, pre_commitment_hash, acceptance)?;
         let mut anchor = self
             .relationships
             .get(remote_device_id)
@@ -790,7 +837,6 @@ impl BilateralTransactionManager {
             deltas: sender_deltas,
             parent_tip: anchor.chain_tip,
             pre_commitment_hash: *pre_commitment_hash,
-            anchor_leaf,
             offline_spend,
         })
     }
@@ -810,7 +856,7 @@ impl BilateralTransactionManager {
         if !self.relationships.contains_key(remote_device_id) {
             return Err(DsmError::RelationshipNotFound("remote device".into()));
         }
-        let pre = BilateralPreCommitment::new(parent_tip, operation);
+        let pre = BilateralPreCommitment::new(parent_tip, operation)?;
         if &pre.bilateral_commitment_hash != commitment_hash {
             return Err(DsmError::invalid_operation(
                 "the persisted step does not hash to the session's commitment",
@@ -867,76 +913,85 @@ mod tests {
         assert_eq!(base, explicit);
     }
 
+    /// Two concurrent steps from one tip join into one tip both devices
+    /// derive (owner ruling, 2026-10-29: "both settle"): the same in either
+    /// order, `H("DSM/relationship-join/v1" ‖ h_n ‖ lo ‖ hi)` exactly, none of
+    /// the tips it joins, different for any other pair, and refused for one
+    /// step taken twice or a successor that is its own parent.
+    /// MUTATION CONTROL: joining the two successors in the order given, not in
+    /// byte order, turns this red, and the crossing test with it.
     #[test]
-    fn anchor_state_leaf_inclusion_round_trips_and_rejects_tamper() {
-        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
-        let b = [0xB1u8; 32];
-        // Opaque v2 anchor-state leaf VALUES (anchor-core computes the real ones).
-        let leaf0 = [0xC0u8; 32];
-        let leaf1 = [0xC1u8; 32];
-
-        let mut smt = SparseMerkleTree::new();
-        // Bootstrap leaf_0, then the "parent" proof against prev_root.
-        let parent_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf0).expect("set0");
-        let prev_root = *smt.root();
-        assert!(verify_anchor_state_leaf(
-            &prev_root,
-            &b,
-            &leaf0,
-            &parent_proof
-        ));
-
-        // Advance the leaf to the successor leaf_1; "child" proof vs next_root.
-        let child_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf1).expect("set1");
-        let next_root = *smt.root();
-        assert!(verify_anchor_state_leaf(
-            &next_root,
-            &b,
-            &leaf1,
-            &child_proof
-        ));
-
-        // Fail-closed rejections:
-        // wrong leaf value under next_root.
-        assert!(!verify_anchor_state_leaf(
-            &next_root,
-            &b,
-            &leaf0,
-            &child_proof
-        ));
-        // right value but wrong root (child proof does not verify under prev_root).
-        assert!(!verify_anchor_state_leaf(
-            &prev_root,
-            &b,
-            &leaf1,
-            &child_proof
-        ));
-        // parent (old) state is NOT committed by next_root.
-        assert!(!verify_anchor_state_leaf(
-            &next_root,
-            &b,
-            &leaf0,
-            &parent_proof
-        ));
-        // wrong bundle (wrong leaf KEY) rejects even with the right value + root.
-        assert!(!verify_anchor_state_leaf(
-            &next_root,
-            &[9u8; 32],
-            &leaf1,
-            &child_proof
-        ));
-        // an empty proof rejects (a release with no attached proof routes online).
-        assert!(!verify_anchor_state_leaf(&next_root, &b, &leaf1, &[]));
+    fn two_concurrent_steps_join_into_one_tip_whichever_comes_first() {
+        let h_n = [0x10u8; 32];
+        let (one, other, third) = ([0x20u8; 32], [0x30u8; 32], [0x40u8; 32]);
+        let joined = join_concurrent_tips(&h_n, &one, &other).expect("two steps join");
+        assert_eq!(
+            joined,
+            join_concurrent_tips(&h_n, &other, &one).expect("in the other order"),
+            "either device, taking the two in either order, derives one tip"
+        );
+        let explicit = {
+            let mut h = dsm_domain_hasher(TAG_RELATIONSHIP_JOIN);
+            h.update(&h_n);
+            h.update(&one);
+            h.update(&other);
+            bytes32(h.finalize().as_bytes())
+        };
+        assert_eq!(joined, explicit);
+        for tip in [h_n, one, other] {
+            assert_ne!(joined, tip, "the join is a tip of its own");
+        }
+        assert_ne!(
+            joined,
+            join_concurrent_tips(&h_n, &one, &third).expect("another pair"),
+            "another pair of steps leaves another tip"
+        );
+        assert_ne!(
+            joined,
+            join_concurrent_tips(&third, &one, &other).expect("another parent"),
+            "the same steps from another tip leave another tip"
+        );
+        join_concurrent_tips(&h_n, &one, &one).expect_err("one step is not two");
+        join_concurrent_tips(&h_n, &h_n, &other).expect_err("a successor is not its parent");
     }
 
+    /// `h_0` and a step precommitment are hashed under different registered
+    /// tags. Both used `DSM/bilateral-session`, so the two meanings shared one
+    /// domain and were told apart only by how their fields happened to be
+    /// framed.
+    ///
+    /// MUTATION CONTROL: hash the precommitment under `TAG_BILATERAL_SESSION`
+    /// again and this goes red.
     #[test]
-    fn anchor_state_leaf_key_is_stable_per_bundle() {
-        let b = [1u8; 32];
-        let k = anchor_state_leaf_key(&b);
-        // One stable key per device bundle (value changes, key does not).
-        assert_eq!(k, anchor_state_leaf_key(&b));
-        // Different bundle -> different key.
-        assert_ne!(k, anchor_state_leaf_key(&[2u8; 32]));
+    fn a_precommitment_is_hashed_under_its_own_tag_not_h0s() -> Result<(), DsmError> {
+        let parent_tip = [0x5Eu8; 32];
+        let pre = BilateralPreCommitment::new(parent_tip, Operation::Noop)?;
+        let under = |tag| -> Result<[u8; 32], DsmError> {
+            let mut h = dsm_domain_hasher(tag);
+            canonical_lp::write_lp(&mut h, &parent_tip)?;
+            canonical_lp::write_lp(&mut h, &Operation::Noop.to_bytes())?;
+            Ok(bytes32(h.finalize().as_bytes()))
+        };
+        assert_eq!(
+            pre.bilateral_commitment_hash,
+            under(TAG_BILATERAL_PRECOMMIT)?
+        );
+        assert_ne!(pre.bilateral_commitment_hash, under(TAG_BILATERAL_SESSION)?);
+        assert_ne!(
+            TAG_BILATERAL_PRECOMMIT.source_bytes(),
+            TAG_BILATERAL_SESSION.source_bytes()
+        );
+        Ok(())
+    }
+
+    /// Formatting the manager names its identity and its signing public key,
+    /// and never the signing secret key.
+    #[test]
+    fn the_manager_formats_without_its_signing_secret_key() {
+        let (manager, kp) = make_manager();
+        let shown = format!("{manager:?}");
+        assert!(!shown.contains(&format!("{:?}", kp.secret_key)), "{shown}");
+        assert!(shown.contains(&format!("{:?}", kp.public_key)));
     }
 
     fn make_manager_ids() -> ([u8; 32], [u8; 32]) {
@@ -1026,6 +1081,7 @@ mod tests {
     fn signed_transfer_op(kp: &SignatureKeyPair, message: &str, nonce: u8) -> Operation {
         let mut op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![nonce; 8],
@@ -1035,6 +1091,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: vec![9u8; 32],
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(1),
             signature: Vec::new(),
             authority_policy: None,
@@ -1062,16 +1119,6 @@ mod tests {
         let remote = make_remote_ids().0;
         let res = manager.establish_relationship(&remote).await;
         assert!(res.is_err());
-    }
-
-    #[tokio::test]
-    async fn establish_relationship_requires_genesis_verified() {
-        let (mut manager, _kp) = make_manager();
-        let contact = make_verified_contact("Alice", true, false);
-        // Add contact (pre-verified API allows any, but BTM enforces on use)
-        manager.add_verified_contact(contact.clone()).expect("add");
-        let res = manager.establish_relationship(&contact.device_id).await;
-        assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 
     /// A relationship its store does not hold is not established, and
@@ -1215,11 +1262,20 @@ mod tests {
             .await
             .expect("establish");
 
-        // The cached contact is replaced by one without its signing key: the
-        // relationship stands, and no precommitment is made without the key.
-        manager
+        // A re-add cannot take the contact's signing key away: it is refused
+        // and the key is kept.
+        let refused = manager
             .add_verified_contact(make_verified_contact("Grace", false, true))
-            .expect("re-add");
+            .expect_err("a re-add that drops the signing key");
+        assert!(matches!(refused, DsmError::InvalidContact(_)), "{refused}");
+        // The held record without its key: the relationship stands, and no
+        // precommitment is made without the key.
+        manager
+            .contact_manager
+            .get_contact_mut(&remote_id)
+            .expect("held contact")
+            .public_key
+            .clear();
         let op = signed_transfer_op(&manager.signature_keypair, "m", 5);
         let res = manager.create_bilateral_precommitment(&remote_id, op).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
@@ -1236,12 +1292,11 @@ mod tests {
         )
         .expect("receiver keys");
         let commitment = [0x31u8; 32];
-        let signature = receiver
-            .sign_rejection(&commitment, "no")
-            .expect("sign the rejection");
-
         // The proposer, holding the receiver as a contact under its pinned key.
         let (proposer_id, proposer_genesis) = make_remote_ids();
+        let signature = receiver
+            .sign_rejection(&commitment, &proposer_id, "no")
+            .expect("sign the rejection");
         let proposer_kp = SignatureKeyPair::generate_from_entropy(b"rejection-proposer").unwrap();
         let mut proposer = BilateralTransactionManager::new(
             DsmContactManager::new(proposer_id),
@@ -1275,10 +1330,19 @@ mod tests {
         assert!(proposer
             .verify_rejection(&receiver_id, &[0x32u8; 32], "no", &signature)
             .is_err());
+        // SA-110: a rejection the receiver addressed to another device ends
+        // nothing here, however it reached this device.
+        let addressed_elsewhere = receiver
+            .sign_rejection(&commitment, &[0x33u8; 32], "no")
+            .expect("sign a rejection for another device");
+        proposer
+            .verify_rejection(&receiver_id, &commitment, "no", &addressed_elsewhere)
+            .expect_err("a rejection addressed to another device verified here");
         let forged = proposer_kp
             .sign(&BilateralTransactionManager::rejection_message(
                 &commitment,
                 &receiver_id,
+                &proposer_id,
                 "no",
             ))
             .unwrap();

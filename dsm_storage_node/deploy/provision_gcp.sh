@@ -4,21 +4,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="${SCRIPT_DIR}/../terraform/gcp"
 
-SSH_KEY="" SSH_PUB_KEY="" GCP_PROJECT="" SKIP_TF=false SKIP_BUILD=false
+SSH_KEY="" SSH_PUB_KEY="" SSH_CIDR="" GCP_PROJECT="" SKIP_TF=false SKIP_BUILD=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ssh-key) SSH_KEY="$2"; shift 2 ;;
         --ssh-pub-key) SSH_PUB_KEY="$2"; shift 2 ;;
         --gcp-project) GCP_PROJECT="$2"; shift 2 ;;
+        --ssh-cidr) SSH_CIDR="$2"; shift 2 ;;
         --skip-terraform) SKIP_TF=true; shift ;;
         --skip-build) SKIP_BUILD=true; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-if [ -z "${SSH_KEY}" ] || [ -z "${GCP_PROJECT}" ]; then
-    echo "Usage: $0 --ssh-key ~/.ssh/id_ed25519 --gcp-project PROJECT_ID [options]"
+if [ -z "${SSH_KEY}" ] || [ -z "${GCP_PROJECT}" ] || { [ "${SKIP_TF}" = false ] && [ -z "${SSH_CIDR}" ]; }; then
+    echo "Usage: $0 --ssh-key ~/.ssh/id_ed25519 --gcp-project PROJECT_ID --ssh-cidr 1.2.3.4/32 [options]"
+    echo "  --ssh-cidr CIDR: the one CIDR block allowed SSH (required unless --skip-terraform)"
     exit 1
 fi
 
@@ -27,11 +29,11 @@ fi
 PUB_KEY_CONTENT="$(cat "${SSH_PUB_KEY}")"
 
 echo "=============================================="
-echo " DSM Storage Node Multi-Region Deployment (GCP)"
+echo " DSM Storage Node Deployment (GCP)"
 echo "=============================================="
 echo "  Project:    ${GCP_PROJECT}"
-echo "  Regions:    us-east1, europe-west1, asia-southeast1"
-echo "  Nodes:      6 total (2 per region)"
+echo "  Region:     us-central1 (terraform/gcp/main.tf)"
+echo "  Nodes:      5 (quorum 3 of 5)"
 echo "  SSH key:    ${SSH_KEY}"
 echo ""
 
@@ -39,9 +41,12 @@ if [ "${SKIP_TF}" = false ]; then
     echo "==> [1/5] Provisioning VMs via Terraform..."
     cd "${TERRAFORM_DIR}"
     terraform init -input=false
-    terraform apply -input=false -auto-approve \
+    # Terraform shows its plan and asks before it applies anything: the
+    # nodes' databases live on their instances, so no apply goes through unread.
+    terraform apply \
         -var="gcp_project=${GCP_PROJECT}" \
-        -var="ssh_public_key=${PUB_KEY_CONTENT}"
+        -var="ssh_public_key=${PUB_KEY_CONTENT}" \
+        -var="allowed_ssh_cidr=${SSH_CIDR}"
     cd "${SCRIPT_DIR}"
 else
     echo "==> [1/5] Skipping Terraform (--skip-terraform)"

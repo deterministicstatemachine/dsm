@@ -78,6 +78,24 @@ async fn append(app: &Router, locator: &str, addr: &[u8]) -> StatusCode {
     app.clone().oneshot(req).await.expect("oneshot").status()
 }
 
+/// Put `bytes` in the member's immutable store: the address it computes.
+async fn held(app: &Router, bytes: &[u8]) -> [u8; 32] {
+    let (status, addr) = common::call(
+        app,
+        "POST",
+        "/api/v2/immutable/put",
+        &[("x-namespace", NS)],
+        bytes.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "the member takes the object");
+    let addr = common::some_or_panic(
+        text_id::decode_base32_crockford(&String::from_utf8_lossy(&addr)),
+        "a Base32 address",
+    );
+    common::ok_or_panic(addr.as_slice().try_into(), "a 32-byte address")
+}
+
 async fn page(app: &Router, locator: &str, query: &str) -> Vec<(i64, Vec<u8>)> {
     let req = Request::builder()
         .method("GET")
@@ -229,7 +247,11 @@ async fn a_namespace_scopes_the_key() {
 async fn an_index_pages_in_append_order_from_the_last_seq() {
     let app = member("cells_an_index_pages_in_append_order_from_the_last").await;
     let loc = key(0x10);
-    let addrs = [[0xA1u8; 32], [0xA2u8; 32], [0xA3u8; 32]];
+    let addrs = [
+        held(&app, b"first").await,
+        held(&app, b"second").await,
+        held(&app, b"third").await,
+    ];
     for a in &addrs {
         assert_eq!(append(&app, &loc, a).await, StatusCode::NO_CONTENT);
     }
@@ -248,6 +270,42 @@ async fn an_index_pages_in_append_order_from_the_last_seq() {
     assert!(
         none.is_empty(),
         "past the end is an empty page, not an error"
+    );
+}
+
+/// Storage spec §7: anyone may append the address of an object the member
+/// already holds. An address it holds no object at is not appended, and the
+/// index reads as it did; once the member holds the object, the same address
+/// is appended. Taking every address, a member's index carried appends of
+/// objects nobody held, and a reader had to decide each one.
+/// MUTATION CONTROL: dropping the holds check turns this red.
+#[tokio::test]
+async fn an_address_the_member_holds_no_object_at_is_not_appended() {
+    let app = member("cells_an_address_the_member_holds_no_object_at").await;
+    let loc = key(0x12);
+    let addrs = |entries: Vec<(i64, Vec<u8>)>| -> Vec<Vec<u8>> {
+        entries.into_iter().map(|(_, a)| a).collect()
+    };
+    let first = held(&app, b"held").await;
+    assert_eq!(append(&app, &loc, &first).await, StatusCode::NO_CONTENT);
+    // The address of an object another member holds, and this one does not.
+    let elsewhere = member("cells_an_address_the_member_holds_no_object_else").await;
+    let unheld = held(&elsewhere, b"not yet held").await;
+    assert_eq!(
+        append(&app, &loc, &unheld).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no object is held at the address"
+    );
+    assert_eq!(
+        addrs(page(&app, &loc, "").await),
+        vec![first.to_vec()],
+        "the index reads as it did"
+    );
+    assert_eq!(held(&app, b"not yet held").await, unheld);
+    assert_eq!(append(&app, &loc, &unheld).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        addrs(page(&app, &loc, "").await),
+        vec![first.to_vec(), unheld.to_vec()]
     );
 }
 
@@ -370,4 +428,103 @@ async fn a_cell_takes_the_largest_route_entry_and_refuses_a_byte_more() {
         "a batched value at the limit was refused: {taken}"
     );
     assert_eq!(get(&app, &key(0xC2)).await.1, vec![at_cap]);
+}
+
+/// One page of a cell read from arrival index `from`: the status, the values,
+/// their records' arrival indexes and where the next page starts.
+async fn get_page(
+    app: &Router,
+    key: &str,
+    query: &str,
+) -> (StatusCode, Vec<Vec<u8>>, Vec<u64>, u64) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v2/cell/{key}{query}"))
+        .header("x-namespace", NS)
+        .body(Body::empty())
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    if status != StatusCode::OK {
+        return (status, Vec::new(), Vec::new(), 0);
+    }
+    let page = dsm::types::proto::CellValuesV1::decode(body.as_ref()).expect("CellValuesV1");
+    let indexes = page.records.iter().map(|r| r.index).collect();
+    (status, page.values, indexes, page.next)
+}
+
+/// A cell is read a page at a time (storage spec §6): from the arrival index
+/// the read names, at most the cell-value cap of value bytes and
+/// MAX_CELL_PAGE_ENTRIES entries, each page naming where the next starts and
+/// the last naming none. Reading every page returns everything held, in
+/// arrival order, and a read past the last entry is an empty page.
+#[tokio::test]
+async fn a_cell_is_read_a_page_at_a_time() {
+    use dsm::storage_cell::{CELL_PAGE_VALUE_BYTES, MAX_CELL_PAGE_ENTRIES};
+    let app = member("cells_paged").await;
+
+    // Three values, any two of which pass the cap: one to a page.
+    let large = key(0x71);
+    let big: Vec<Vec<u8>> = (0..3u8)
+        .map(|i| vec![i; CELL_PAGE_VALUE_BYTES * 2 / 3])
+        .collect();
+    for value in &big {
+        assert_eq!(put(&app, Some(NS), &large, value).await, StatusCode::OK);
+    }
+    for (from, next) in [(1u64, 2u64), (2, 3), (3, 0)] {
+        let (status, values, indexes, at) = get_page(&app, &large, &format!("?from={from}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            values,
+            vec![big[usize::try_from(from - 1).expect("index")].clone()]
+        );
+        assert_eq!(indexes, vec![from]);
+        assert_eq!(at, next, "the page from {from} names where the next starts");
+    }
+
+    // More small values than a page holds: a full page, then the rest.
+    let many = key(0x72);
+    let count = MAX_CELL_PAGE_ENTRIES + 10;
+    let small: Vec<Vec<u8>> = (0..count)
+        .map(|i| format!("entry {i}").into_bytes())
+        .collect();
+    let ns = NS.as_bytes().to_vec();
+    let raw_key = [0x72u8; 32];
+    for chunk in small.chunks(16) {
+        let batch = chunk
+            .iter()
+            .map(|v| (ns.clone(), raw_key, v.clone()))
+            .collect();
+        assert_eq!(put_batch(&app, batch).await, StatusCode::OK);
+    }
+    let (status, first, first_indexes, next) = get_page(&app, &many, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first, small[..MAX_CELL_PAGE_ENTRIES].to_vec());
+    let expected: Vec<u64> = (1..=u64::try_from(MAX_CELL_PAGE_ENTRIES).expect("entries")).collect();
+    assert_eq!(first_indexes, expected);
+    assert_eq!(
+        next,
+        u64::try_from(MAX_CELL_PAGE_ENTRIES + 1).expect("index")
+    );
+    let (_, rest, _, after) = get_page(&app, &many, &format!("?from={next}")).await;
+    assert_eq!(rest, small[MAX_CELL_PAGE_ENTRIES..].to_vec());
+    assert_eq!(after, 0, "the last page names no next page");
+
+    // Past the last entry: an empty page that names none.
+    let (status, none, _, past) = get_page(&app, &many, "?from=10000").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(none.is_empty());
+    assert_eq!(past, 0);
+
+    // An arrival index starts at 1, and a read names nothing else.
+    for query in ["?from=0", "?from=first", "?after=3", "?from=2&limit=9"] {
+        assert_eq!(
+            get_page(&app, &many, query).await.0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
 }

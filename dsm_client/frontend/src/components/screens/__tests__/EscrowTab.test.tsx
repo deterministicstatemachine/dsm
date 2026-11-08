@@ -41,10 +41,16 @@ describe('EscrowTab', () => {
     fireEvent.click(within(list).getByRole('option', { name: /ERA/ }));
     fireEvent.change(screen.getByLabelText('Agreement, exactly as every party has it'), { target: { value: AGREEMENT } });
     fireEvent.change(screen.getByLabelText('Outcome 1'), { target: { value: OUTCOME } });
-    fireEvent.click(await screen.findByLabelText('Outcome 1 decided by This device'));
-    fireEvent.change(screen.getByLabelText('Pays'), { target: { value: screen.getByRole('option', { name: 'This device' }).getAttribute('value') } });
+    fireEvent.click(await screen.findByLabelText(/^Outcome 1 decided by This device, device /));
+    const self = screen.getByRole('option', { name: /^This device, device / });
+    fireEvent.change(screen.getByLabelText('Pays'), { target: { value: self.getAttribute('value') } });
 
+    // The stake is locked from the review, which names the party by its device.
     fireEvent.click(screen.getByRole('button', { name: 'Lock stake' }));
+    expect(screen.getByText(/^Lock 5 ERA in an escrow vault\?/)).toHaveTextContent(
+      `Lock 5 ERA in an escrow vault? Outcome 1, "${OUTCOME}": decided by ${self.textContent}; pays ${self.textContent}.`,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     expect(await screen.findByText('Escrow vault locked')).toBeInTheDocument();
     // Rust renders the stake: 5 ERA at ERA's decimals.
     const vault = await screen.findByRole('region', { name: /^Escrow vault / });
@@ -62,7 +68,8 @@ describe('EscrowTab', () => {
     expect(moved).toEqual(['refresh', 'refresh']);
 
     // Every step reached Rust, in the order the record holds; nothing was decided here.
-    expect(carried(arrivals)).toEqual([
+    // The review's confirm guard went to Kotlin (setScreenGuards), not to Rust.
+    expect(carried(arrivals.filter((a) => a.method !== 'setScreenGuards'))).toEqual([
       'escrow.party',
       'escrow.vaults',
       'escrow.lock',

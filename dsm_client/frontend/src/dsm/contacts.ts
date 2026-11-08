@@ -10,6 +10,7 @@ import {
 } from './WebViewBridge';
 import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ContactCard } from './types';
 import type { ContactPairing, PersonProfile } from '../domain/types';
+import { deviceFingerprint, visibleText } from '../domain/displayName';
 
 const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
   [pb.ContactPairingPhase.PAIRED]: 'paired',
@@ -18,6 +19,12 @@ const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
   [pb.ContactPairingPhase.CONNECTED]: 'connected',
   [pb.ContactPairingPhase.RETRYING]: 'retrying',
 };
+
+/** A contact's alias as names are shown; one that is nothing but invisible characters is shown as the device's fingerprint. */
+function shownAlias(alias: string, deviceId: Uint8Array): string {
+  const visible = visibleText(alias);
+  return visible.length > 0 ? visible : deviceFingerprint(deviceId);
+}
 
 /** A contact as contacts.list states it; a contact missing what Rust always writes is refused. */
 function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
@@ -45,7 +52,7 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
   return {
     deviceId: c.deviceId,
     publicKey: c.signingPublicKey,
-    alias: c.alias,
+    alias: shownAlias(c.alias, c.deviceId),
     genesisHash,
     chainTip,
     // The wire's empty string is "no address".
@@ -59,11 +66,22 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
 
 /** A person's details as the wire carries them. */
 export function profileOf(p: pb.ContactProfileV1): PersonProfile {
-  return { name: p.displayName, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey };
+  return { name: visibleText(p.displayName), email: visibleText(p.email), phone: visibleText(p.phone), phoneLookupKey: p.phoneLookupKey };
 }
 
 function profileToWire(p: PersonProfile): pb.ContactProfileV1 {
-  return new pb.ContactProfileV1({ displayName: p.name, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey });
+  return new pb.ContactProfileV1({
+    displayName: visibleText(p.name),
+    email: visibleText(p.email),
+    phone: visibleText(p.phone),
+    phoneLookupKey: p.phoneLookupKey,
+  });
+}
+
+/** What a card says in a field, without its invisible characters; nothing when that leaves nothing. */
+function cardText(text: string): string | undefined {
+  const visible = visibleText(text);
+  return visible.length > 0 ? visible : undefined;
 }
 
 import { decodeFramedEnvelopeV3 } from './decoding';
@@ -141,9 +159,9 @@ export async function readContactCode(text: string): Promise<ContactCard> {
     genesisHash: card.genesisHash,
     signingPublicKey: card.signingPublicKey,
     network: card.network,
-    preferredAlias: card.preferredAlias || undefined,
-    email: card.email || undefined,
-    phone: card.phone || undefined,
+    preferredAlias: cardText(card.preferredAlias),
+    email: cardText(card.email),
+    phone: cardText(card.phone),
   };
 }
 
@@ -154,7 +172,7 @@ export async function readContactCode(text: string): Promise<ContactCard> {
 export async function addContact(args: AddContactArgs): Promise<AddContactResult> {
   try {
     const req = new pb.ContactManualAddRequest({
-      alias: args.alias,
+      alias: visibleText(args.alias),
       deviceId: args.deviceId as any,
       genesisHash: args.genesisHash as any,
       signingPublicKey: args.signingPublicKey as any,
@@ -170,6 +188,8 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
       throw new Error(`STRICT: contacts.addManual answered ${env.payload.case}`);
     }
     const added = env.payload.value;
+    // The alias Rust stored, shown as every name is (SA-159).
+    added.alias = shownAlias(added.alias, added.deviceId);
     return { accepted: true, contactId: encodeBase32Crockford(added.deviceId), alias: added.alias };
   } catch (e) {
     return {

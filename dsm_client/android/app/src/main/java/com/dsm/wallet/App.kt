@@ -11,6 +11,8 @@ class App : Application() {
         Log.d("DSM-App", "App.onCreate()")
         // BLE events arrive with no context of their own; the relay persists through this one.
         com.dsm.wallet.bridge.BleEventRelay.attach(this)
+        // Rust hands over the icon count with no context of its own.
+        com.dsm.wallet.service.MoneyReceivedNotice.attach(this)
         // The debug report's app log is kept on disk from process start: logcat's
         // own buffer holds only minutes of it.
         com.dsm.wallet.bridge.DiagnosticsReport.startRollingLog(this)

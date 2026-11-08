@@ -14,7 +14,7 @@ class BleConstantsTest {
 
     // ── UUID validity ──────────────────────────────────────────────────────
     //
-    // The `serviceUuid_isNotNull` test was deleted — `DSM_SERVICE_UUID_V2`
+    // The `serviceUuid_isNotNull` test was deleted — `DSM_SERVICE_UUID`
     // is statically typed `UUID` (non-nullable), so `is UUID` was always
     // true. The structural validation lives in `allUuids_shareBaseSuffix`
     // below, which asserts both presence AND well-formedness.
@@ -24,9 +24,6 @@ class BleConstantsTest {
         val uuids = listOf(
             BleConstants.TX_REQUEST_UUID,
             BleConstants.TX_RESPONSE_UUID,
-            BleConstants.IDENTITY_UUID,
-            BleConstants.PAIRING_UUID,
-            BleConstants.PAIRING_ACK_UUID,
         )
         assertEquals(uuids.size, uuids.toSet().size)
     }
@@ -36,12 +33,9 @@ class BleConstantsTest {
         val chars = listOf(
             BleConstants.TX_REQUEST_UUID,
             BleConstants.TX_RESPONSE_UUID,
-            BleConstants.IDENTITY_UUID,
-            BleConstants.PAIRING_UUID,
-            BleConstants.PAIRING_ACK_UUID,
         )
         for (c in chars) {
-            assertNotEquals(BleConstants.DSM_SERVICE_UUID_V2, c)
+            assertNotEquals(BleConstants.DSM_SERVICE_UUID, c)
         }
     }
 
@@ -57,12 +51,9 @@ class BleConstantsTest {
     fun allUuids_shareBaseSuffix() {
         val suffix = "7c07-4f3f-9b32-7bf3ba6c2a01"
         val uuids = listOf(
-            BleConstants.DSM_SERVICE_UUID_V2,
+            BleConstants.DSM_SERVICE_UUID,
             BleConstants.TX_REQUEST_UUID,
             BleConstants.TX_RESPONSE_UUID,
-            BleConstants.IDENTITY_UUID,
-            BleConstants.PAIRING_UUID,
-            BleConstants.PAIRING_ACK_UUID,
         )
         for (uuid in uuids) {
             assertTrue(
@@ -107,20 +98,21 @@ class BleConstantsTest {
         assertEquals(517, BleConstants.MTU_SIZE)
     }
 
+    /**
+     * A link asks for an MTU whose notification carries one sealed record of
+     * 500 bytes behind its one-byte tag (DSM Amendment A27): 509 bytes at 512.
+     */
     @Test
-    fun identityMtuRequest_is512() {
-        assertEquals(512, BleConstants.IDENTITY_MTU_REQUEST)
+    fun linkMtuRequest_carriesOneSealedRecordPerNotification() {
+        assertEquals(512, BleConstants.LINK_MTU_REQUEST)
+        assertTrue(BleConstants.LINK_MTU_REQUEST - 3 >= 1 + 500)
+        assertTrue(BleConstants.LINK_MTU_REQUEST <= BleConstants.MTU_SIZE)
     }
 
     @Test
-    fun minIdentityMtu_is67() {
-        assertEquals(67, BleConstants.MIN_IDENTITY_MTU)
-    }
-
-    @Test
-    fun mtuOrdering_minLessThanIdentityLessThanMax() {
-        assertTrue(BleConstants.MIN_IDENTITY_MTU < BleConstants.IDENTITY_MTU_REQUEST)
-        assertTrue(BleConstants.IDENTITY_MTU_REQUEST <= BleConstants.MTU_SIZE)
+    fun linkRoles_matchRust() {
+        assertEquals(1, BleConstants.LINK_ROLE_CLIENT)
+        assertEquals(2, BleConstants.LINK_ROLE_SERVER)
     }
 
     // ── Reconnection backoff ───────────────────────────────────────────────
@@ -181,8 +173,7 @@ class BleConstantsTest {
     @Test
     fun allNumericConstants_arePositive() {
         assertTrue(BleConstants.MTU_SIZE > 0)
-        assertTrue(BleConstants.IDENTITY_MTU_REQUEST > 0)
-        assertTrue(BleConstants.MIN_IDENTITY_MTU > 0)
+        assertTrue(BleConstants.LINK_MTU_REQUEST > 0)
         assertTrue(BleConstants.RECONNECT_INITIAL_DELAY_MS > 0)
         assertTrue(BleConstants.RECONNECT_MAX_DELAY_MS > 0)
         assertTrue(BleConstants.RECONNECT_MAX_ATTEMPTS > 0)

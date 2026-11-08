@@ -1,21 +1,30 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! BLE chunk reassembly persistence — durable chunk buffer for cross-session resume.
 //!
-//! Persists individual BLE chunks to SQLite as they arrive. On reconnect,
-//! chunks are hydrated from the `ble_reassembly_state` table so reassembly
-//! resumes from where it left off — fully automatic, no user action.
+//! Persists individual BLE chunks to SQLite as the frame coordinator takes
+//! them. When a chunk of the same frame arrives on the same link again, the
+//! chunks kept for it are hydrated from the `ble_reassembly_chunks` table, so
+//! reassembly resumes from where it left off — fully automatic, no user action.
 //!
-//! Keys are content-addressed 32-byte BLAKE3 frame commitments, not strings.
+//! A chunk is kept under the link it arrived on and its frame's 32-byte
+//! BLAKE3 commitment: chunks one peer writes never join a frame another peer
+//! is sending. Rows live as long as their frame's reassembly: the coordinator
+//! deletes them when the frame completes or fails its check, and when its
+//! buffer expires or is evicted; [`cleanup_orphan_chunk_buffers`] bounds what
+//! a previous process left behind.
 
 use anyhow::{anyhow, Result};
 use log::{debug, warn};
 use rusqlite::params;
 
 use super::get_connection;
-use super::types::{PersistedChunk, ChunkPersistenceParams};
+use super::types::{ChunkPersistenceParams, PersistedChunk};
 
-/// Persist a single BLE chunk to SQLite. Idempotent — duplicates are silently ignored
-/// via `INSERT OR IGNORE` on the (frame_commitment, chunk_index) primary key.
+/// The most frames whose chunks a startup keeps from a previous process.
+pub const MAX_PERSISTED_FRAMES: i64 = 16;
+
+/// Persist a single BLE chunk to SQLite. Idempotent — a chunk already kept
+/// for its `(peer_link, frame_commitment, chunk_index)` is left as it is.
 pub fn persist_ble_chunk(params: ChunkPersistenceParams) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding
@@ -23,19 +32,19 @@ pub fn persist_ble_chunk(params: ChunkPersistenceParams) -> Result<()> {
         .map_err(|_| anyhow!("Database lock poisoned"))?;
 
     conn.execute(
-        "INSERT OR IGNORE INTO ble_reassembly_state
-         (frame_commitment, chunk_index, frame_type, total_chunks,
-          payload_len, chunk_data, checksum, counterparty_id)
+        "INSERT OR IGNORE INTO ble_reassembly_chunks
+         (peer_link, frame_commitment, chunk_index, frame_type, total_chunks,
+          payload_len, chunk_data, checksum)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
+            params.peer_link,
             &params.frame_commitment[..],
-            params.chunk_index as i64,
+            i64::from(params.chunk_index),
             params.frame_type,
-            params.total_chunks as i64,
-            params.payload_len as i64,
+            i64::from(params.total_chunks),
+            i64::from(params.payload_len),
             params.chunk_data,
-            params.checksum as i64,
-            params.counterparty_id.map(|id| &id[..]),
+            i64::from(params.checksum),
         ],
     )?;
 
@@ -46,8 +55,29 @@ pub fn persist_ble_chunk(params: ChunkPersistenceParams) -> Result<()> {
     Ok(())
 }
 
-/// Load all persisted chunks for a given frame commitment, ordered by chunk_index.
-pub fn load_persisted_chunks(frame_commitment: &[u8; 32]) -> Result<Vec<PersistedChunk>> {
+/// A stored integer column, as the type it was written from. A value out of
+/// that type's range is a corrupt row and an error, never truncated.
+fn column_int<T>(row: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<T>
+where
+    T: TryFrom<i64>,
+    T::Error: std::fmt::Display,
+{
+    let v: i64 = row.get(i)?;
+    T::try_from(v).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            i,
+            rusqlite::types::Type::Integer,
+            format!("column {i} holds {v}, out of range: {e}").into(),
+        )
+    })
+}
+
+/// Every chunk kept for the frame `frame_commitment` arriving on `peer_link`,
+/// ordered by chunk_index.
+pub fn load_persisted_chunks(
+    peer_link: &str,
+    frame_commitment: &[u8; 32],
+) -> Result<Vec<PersistedChunk>> {
     let binding = get_connection()?;
     let conn = binding
         .lock()
@@ -55,19 +85,19 @@ pub fn load_persisted_chunks(frame_commitment: &[u8; 32]) -> Result<Vec<Persiste
 
     let mut stmt = conn.prepare(
         "SELECT chunk_index, chunk_data, checksum, frame_type, total_chunks, payload_len
-         FROM ble_reassembly_state
-         WHERE frame_commitment = ?1
+         FROM ble_reassembly_chunks
+         WHERE peer_link = ?1 AND frame_commitment = ?2
          ORDER BY chunk_index",
     )?;
 
-    let rows = stmt.query_map(params![&frame_commitment[..]], |row| {
+    let rows = stmt.query_map(params![peer_link, &frame_commitment[..]], |row| {
         Ok(PersistedChunk {
-            chunk_index: row.get::<_, i64>(0)? as u16,
+            chunk_index: column_int(row, 0)?,
             chunk_data: row.get(1)?,
-            checksum: row.get::<_, i64>(2)? as u32,
+            checksum: column_int(row, 2)?,
             frame_type: row.get(3)?,
-            total_chunks: row.get::<_, i64>(4)? as u16,
-            payload_len: row.get::<_, i64>(5)? as u32,
+            total_chunks: column_int(row, 4)?,
+            payload_len: column_int(row, 5)?,
         })
     })?;
 
@@ -78,104 +108,74 @@ pub fn load_persisted_chunks(frame_commitment: &[u8; 32]) -> Result<Vec<Persiste
     Ok(result)
 }
 
-/// Count persisted chunks for a given frame commitment.
-pub fn count_persisted_chunks(frame_commitment: &[u8; 32]) -> Result<u16> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM ble_reassembly_state WHERE frame_commitment = ?1",
-        params![&frame_commitment[..]],
-        |row| row.get(0),
-    )?;
-
-    Ok(count as u16)
-}
-
-/// Delete all chunks for a given frame commitment (cleanup after successful reassembly).
-pub fn delete_frame_chunks(frame_commitment: &[u8; 32]) -> Result<()> {
+/// Delete every chunk kept for the frame `frame_commitment` arriving on
+/// `peer_link`: its reassembly completed, failed, expired or was evicted.
+pub fn delete_frame_chunks(peer_link: &str, frame_commitment: &[u8; 32]) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned"))?;
 
     let deleted = conn.execute(
-        "DELETE FROM ble_reassembly_state WHERE frame_commitment = ?1",
-        params![&frame_commitment[..]],
+        "DELETE FROM ble_reassembly_chunks WHERE peer_link = ?1 AND frame_commitment = ?2",
+        params![peer_link, &frame_commitment[..]],
     )?;
 
     if deleted > 0 {
-        debug!("Deleted {} persisted chunks after reassembly", deleted);
+        debug!("Deleted {} persisted chunks of a frame", deleted);
     }
     Ok(())
 }
 
-/// Delete a single chunk by frame_commitment + chunk_index.
-/// Used to remove corrupt chunks detected during hydration revalidation.
-pub fn delete_single_chunk(frame_commitment: &[u8; 32], chunk_index: u16) -> Result<()> {
+/// Delete one kept chunk: a chunk that no longer passes the checks a fresh
+/// chunk passes.
+pub fn delete_single_chunk(
+    peer_link: &str,
+    frame_commitment: &[u8; 32],
+    chunk_index: u16,
+) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned"))?;
 
     conn.execute(
-        "DELETE FROM ble_reassembly_state WHERE frame_commitment = ?1 AND chunk_index = ?2",
-        params![&frame_commitment[..], chunk_index],
+        "DELETE FROM ble_reassembly_chunks
+         WHERE peer_link = ?1 AND frame_commitment = ?2 AND chunk_index = ?3",
+        params![peer_link, &frame_commitment[..], i64::from(chunk_index)],
     )?;
     Ok(())
 }
 
-/// Delete all chunks associated with a counterparty device_id.
-/// Used when a bilateral session reaches a terminal state (Committed/Rejected/Failed).
-pub fn delete_chunks_by_counterparty(counterparty_id: &[u8; 32]) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let deleted = conn.execute(
-        "DELETE FROM ble_reassembly_state WHERE counterparty_id = ?1",
-        params![&counterparty_id[..]],
-    )?;
-
-    if deleted > 0 {
-        debug!(
-            "Swept {} orphaned reassembly chunks for counterparty",
-            deleted
-        );
-    }
-    Ok(())
-}
-
-/// Cleanup orphaned chunk buffers. If more than 50 distinct frame_commitments
-/// exist, delete the ones whose newest chunk was persisted longest ago (insertion
-/// order, the rowid) to prevent unbounded growth.
+/// Bound what a previous process left behind. If more than
+/// [`MAX_PERSISTED_FRAMES`] frames (by link and commitment) hold chunks, delete
+/// the ones whose newest chunk was persisted longest ago (insertion order, the
+/// rowid).
 pub fn cleanup_orphan_chunk_buffers() -> Result<()> {
     let binding = get_connection()?;
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned"))?;
 
-    let distinct_count: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT frame_commitment) FROM ble_reassembly_state",
+    let frames: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (
+             SELECT 1 FROM ble_reassembly_chunks GROUP BY peer_link, frame_commitment
+         )",
         [],
         |row| row.get(0),
     )?;
 
-    if distinct_count <= 50 {
+    if frames <= MAX_PERSISTED_FRAMES {
         return Ok(());
     }
 
-    // Keep the 50 frames with the most recently persisted chunk.
-    let to_delete = distinct_count - 50;
+    let to_delete = frames - MAX_PERSISTED_FRAMES;
     let deleted = conn.execute(
-        "DELETE FROM ble_reassembly_state
-         WHERE frame_commitment IN (
-             SELECT frame_commitment
-             FROM ble_reassembly_state
-             GROUP BY frame_commitment
+        "DELETE FROM ble_reassembly_chunks
+         WHERE (peer_link, frame_commitment) IN (
+             SELECT peer_link, frame_commitment
+             FROM ble_reassembly_chunks
+             GROUP BY peer_link, frame_commitment
              ORDER BY MAX(rowid) ASC
              LIMIT ?1
          )",
@@ -193,9 +193,11 @@ pub fn cleanup_orphan_chunk_buffers() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::ChunkPersistenceParams;
+    use super::*;
     use serial_test::serial;
+
+    const LINK: &str = "AA:BB:CC:DD:EE:01";
 
     fn init_test_db() {
         crate::economic_fixtures::use_test_storage_dir();
@@ -204,11 +206,13 @@ mod tests {
     }
 
     fn make_chunk_params<'a>(
+        link: &'a str,
         fc: &'a [u8; 32],
         index: u16,
         data: &'a [u8],
     ) -> ChunkPersistenceParams<'a> {
         ChunkPersistenceParams {
+            peer_link: link,
             frame_commitment: fc,
             chunk_index: index,
             frame_type: 1,
@@ -216,8 +220,11 @@ mod tests {
             payload_len: 1024,
             chunk_data: data,
             checksum: 0xDEAD,
-            counterparty_id: None,
         }
+    }
+
+    fn count(link: &str, fc: &[u8; 32]) -> usize {
+        load_persisted_chunks(link, fc).unwrap().len()
     }
 
     #[test]
@@ -228,10 +235,10 @@ mod tests {
         let data0 = b"chunk-data-0";
         let data1 = b"chunk-data-1";
 
-        persist_ble_chunk(make_chunk_params(&fc, 0, data0)).unwrap();
-        persist_ble_chunk(make_chunk_params(&fc, 1, data1)).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 0, data0)).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 1, data1)).unwrap();
 
-        let loaded = load_persisted_chunks(&fc).unwrap();
+        let loaded = load_persisted_chunks(LINK, &fc).unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].chunk_index, 0);
         assert_eq!(loaded[0].chunk_data, data0);
@@ -248,23 +255,35 @@ mod tests {
         let fc = [0xBB; 32];
         let data = b"dupe-data";
 
-        persist_ble_chunk(make_chunk_params(&fc, 0, data)).unwrap();
-        persist_ble_chunk(make_chunk_params(&fc, 0, data)).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 0, data)).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 0, data)).unwrap();
 
-        let count = count_persisted_chunks(&fc).unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count(LINK, &fc), 1);
     }
 
+    /// SA-13. The same frame commitment on two links is two frames: what one
+    /// peer writes is never read into, or deleted with, another peer's frame.
     #[test]
     #[serial]
-    fn count_persisted_chunks_counts_correctly() {
+    fn a_frame_on_one_link_is_not_the_same_frame_on_another() {
         init_test_db();
-        let fc = [0xCC; 32];
-        persist_ble_chunk(make_chunk_params(&fc, 0, b"a")).unwrap();
-        persist_ble_chunk(make_chunk_params(&fc, 1, b"b")).unwrap();
-        persist_ble_chunk(make_chunk_params(&fc, 2, b"c")).unwrap();
+        let fc = [0xBC; 32];
+        let other = "AA:BB:CC:DD:EE:02";
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 0, b"honest")).unwrap();
+        persist_ble_chunk(make_chunk_params(other, &fc, 0, b"poison")).unwrap();
 
-        assert_eq!(count_persisted_chunks(&fc).unwrap(), 3);
+        assert_eq!(
+            load_persisted_chunks(LINK, &fc).unwrap()[0].chunk_data,
+            b"honest"
+        );
+        assert_eq!(
+            load_persisted_chunks(other, &fc).unwrap()[0].chunk_data,
+            b"poison"
+        );
+
+        delete_frame_chunks(other, &fc).unwrap();
+        assert_eq!(count(other, &fc), 0);
+        assert_eq!(count(LINK, &fc), 1);
     }
 
     #[test]
@@ -272,11 +291,11 @@ mod tests {
     fn delete_frame_chunks_removes_all_for_commitment() {
         init_test_db();
         let fc = [0xDD; 32];
-        persist_ble_chunk(make_chunk_params(&fc, 0, b"a")).unwrap();
-        persist_ble_chunk(make_chunk_params(&fc, 1, b"b")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 0, b"a")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 1, b"b")).unwrap();
 
-        delete_frame_chunks(&fc).unwrap();
-        assert_eq!(count_persisted_chunks(&fc).unwrap(), 0);
+        delete_frame_chunks(LINK, &fc).unwrap();
+        assert_eq!(count(LINK, &fc), 0);
     }
 
     #[test]
@@ -284,35 +303,13 @@ mod tests {
     fn delete_single_chunk_removes_only_one() {
         init_test_db();
         let fc = [0xEE; 32];
-        persist_ble_chunk(make_chunk_params(&fc, 0, b"a")).unwrap();
-        persist_ble_chunk(make_chunk_params(&fc, 1, b"b")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 0, b"a")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 1, b"b")).unwrap();
 
-        delete_single_chunk(&fc, 0).unwrap();
-        let remaining = load_persisted_chunks(&fc).unwrap();
+        delete_single_chunk(LINK, &fc, 0).unwrap();
+        let remaining = load_persisted_chunks(LINK, &fc).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].chunk_index, 1);
-    }
-
-    #[test]
-    #[serial]
-    fn delete_chunks_by_counterparty_sweeps_related() {
-        init_test_db();
-        let fc = [0xFF; 32];
-        let cp = [0x11; 32];
-        let params = ChunkPersistenceParams {
-            frame_commitment: &fc,
-            chunk_index: 0,
-            frame_type: 1,
-            total_chunks: 2,
-            payload_len: 100,
-            chunk_data: b"data",
-            checksum: 42,
-            counterparty_id: Some(&cp),
-        };
-        persist_ble_chunk(params).unwrap();
-
-        delete_chunks_by_counterparty(&cp).unwrap();
-        assert_eq!(count_persisted_chunks(&fc).unwrap(), 0);
     }
 
     #[test]
@@ -322,16 +319,37 @@ mod tests {
         let fc1 = [0x01; 32];
         let fc2 = [0x02; 32];
 
-        persist_ble_chunk(make_chunk_params(&fc1, 0, b"data-fc1")).unwrap();
-        persist_ble_chunk(make_chunk_params(&fc2, 0, b"data-fc2")).unwrap();
-        persist_ble_chunk(make_chunk_params(&fc2, 1, b"data-fc2-b")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc1, 0, b"data-fc1")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc2, 0, b"data-fc2")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc2, 1, b"data-fc2-b")).unwrap();
 
-        assert_eq!(count_persisted_chunks(&fc1).unwrap(), 1);
-        assert_eq!(count_persisted_chunks(&fc2).unwrap(), 2);
+        assert_eq!(count(LINK, &fc1), 1);
+        assert_eq!(count(LINK, &fc2), 2);
 
-        delete_frame_chunks(&fc1).unwrap();
-        assert_eq!(count_persisted_chunks(&fc1).unwrap(), 0);
-        assert_eq!(count_persisted_chunks(&fc2).unwrap(), 2);
+        delete_frame_chunks(LINK, &fc1).unwrap();
+        assert_eq!(count(LINK, &fc1), 0);
+        assert_eq!(count(LINK, &fc2), 2);
+    }
+
+    /// A stored chunk index out of a chunk index's range is a corrupt row: an
+    /// error, never truncated into another chunk's index.
+    #[test]
+    #[serial]
+    fn a_stored_index_out_of_range_is_an_error() {
+        init_test_db();
+        let fc = [0x06; 32];
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 0, b"data")).unwrap();
+        {
+            let binding = get_connection().unwrap();
+            let conn = binding.lock().unwrap();
+            conn.execute(
+                "UPDATE ble_reassembly_chunks SET chunk_index = ?1",
+                params![i64::from(u16::MAX) + 1],
+            )
+            .unwrap();
+        }
+        let err = load_persisted_chunks(LINK, &fc).expect_err("refused");
+        assert!(err.to_string().contains("out of range"), "{err}");
     }
 
     #[test]
@@ -339,10 +357,10 @@ mod tests {
     fn cleanup_orphan_chunk_buffers_noop_under_threshold() {
         init_test_db();
         let fc = [0x03; 32];
-        persist_ble_chunk(make_chunk_params(&fc, 0, b"data")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &fc, 0, b"data")).unwrap();
 
         cleanup_orphan_chunk_buffers().unwrap();
-        assert_eq!(count_persisted_chunks(&fc).unwrap(), 1);
+        assert_eq!(count(LINK, &fc), 1);
     }
 
     /// Over the threshold, the frames whose newest chunk is oldest go; a frame
@@ -352,19 +370,20 @@ mod tests {
     fn cleanup_orphan_chunk_buffers_evicts_the_least_recently_persisted_frames() {
         init_test_db();
         let frame = |i: u8| [i; 32];
-        for i in 0..52u8 {
-            persist_ble_chunk(make_chunk_params(&frame(i), 0, b"data")).unwrap();
+        let frames = u8::try_from(MAX_PERSISTED_FRAMES).unwrap() + 2;
+        for i in 0..frames {
+            persist_ble_chunk(make_chunk_params(LINK, &frame(i), 0, b"data")).unwrap();
         }
         // Frame 0 was first, but it is the most recent to receive a chunk.
-        persist_ble_chunk(make_chunk_params(&frame(0), 1, b"late")).unwrap();
+        persist_ble_chunk(make_chunk_params(LINK, &frame(0), 1, b"late")).unwrap();
 
         cleanup_orphan_chunk_buffers().unwrap();
 
-        assert_eq!(count_persisted_chunks(&frame(0)).unwrap(), 2);
-        assert_eq!(count_persisted_chunks(&frame(1)).unwrap(), 0);
-        assert_eq!(count_persisted_chunks(&frame(2)).unwrap(), 0);
-        for i in 3..52u8 {
-            assert_eq!(count_persisted_chunks(&frame(i)).unwrap(), 1, "frame {i}");
+        assert_eq!(count(LINK, &frame(0)), 2);
+        assert_eq!(count(LINK, &frame(1)), 0);
+        assert_eq!(count(LINK, &frame(2)), 0);
+        for i in 3..frames {
+            assert_eq!(count(LINK, &frame(i)), 1, "frame {i}");
         }
     }
 
@@ -373,8 +392,7 @@ mod tests {
     fn load_empty_frame_returns_empty_vec() {
         init_test_db();
         let fc = [0x04; 32];
-        let chunks = load_persisted_chunks(&fc).unwrap();
-        assert!(chunks.is_empty());
+        assert!(load_persisted_chunks(LINK, &fc).unwrap().is_empty());
     }
 
     #[test]
@@ -382,6 +400,6 @@ mod tests {
     fn delete_single_chunk_nonexistent_is_noop() {
         init_test_db();
         let fc = [0x05; 32];
-        delete_single_chunk(&fc, 99).unwrap();
+        delete_single_chunk(LINK, &fc, 99).unwrap();
     }
 }

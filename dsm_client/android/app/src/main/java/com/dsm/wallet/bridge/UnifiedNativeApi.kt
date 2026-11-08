@@ -20,8 +20,7 @@ import androidx.annotation.Keep
 //
 // VERIFICATION:
 //   nm -gU libdsm_sdk.so | grep -c Java_   -> must match `external fun` count
-//   nm -gU libdsm_sdk.so | grep -c cdbrw    -> must be 0 (router-only now)
-//   If either check fails after a Rust rebuild, a symbol was accidentally
+//   If the check fails after a Rust rebuild, a symbol was accidentally
 //   added or removed without updating the Kotlin side.
 //
 // ALL METHODS:
@@ -58,41 +57,25 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
-    // C-DBRW JNI surface removed: Kotlin is transport-only. All C-DBRW state —
-    // enrollment (Algorithm 6.1), challenge/response (Algorithm 3), entropy
-    // health, signing, verifier key mgmt — is now reached exclusively through
-    // `NativeBoundaryBridge.routerQuery("cdbrw.*", ...)`. Do not re-add any
-    // `external fun cdbrw*` declarations here; they break the single-path rule.
-    /** A link to the appliance deviceId, identity-anchored at address, came up or ended. */
-    @Keep @JvmStatic external fun bleNotifyLink(deviceId: ByteArray, address: String, up: Boolean)
     @Keep @JvmStatic external fun hasContactForDeviceId(deviceId: ByteArray): Boolean
     @Keep @JvmStatic external fun isBleAddressPaired(address: String): Boolean
     @Keep @JvmStatic external fun isCommitEnvelope(envelope: ByteArray): Boolean
-    @Keep @JvmStatic external fun notifyBleIdentityObserved(address: String, genesisHash: ByteArray, deviceId: ByteArray)
     @Keep @JvmStatic external fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray?
     @Keep @JvmStatic external fun isBleCoordinatorReady(): Boolean
     @Keep @JvmStatic external fun detectEnvelopeFrameType(envelopeBytes: ByteArray): Int
-    /** Returns true if payload is a framed Envelope v3 that expects a BLE protocol ACK. */
-    @Keep @JvmStatic external fun requiresBleAck(payloadBytes: ByteArray): Boolean
-    /** Unified BLE incoming data router. Returns serialized BleIncomingDataResponse. */
-    @Keep @JvmStatic external fun processIncomingBleData(deviceAddress: String, data: ByteArray): ByteArray
+    /** The radio's entry: bytes a peer wrote over BLE. Returns serialized BleIncomingDataResponse. */
+    @Keep @JvmStatic external fun processIncomingBleData(deviceAddress: String, role: Int, data: ByteArray): ByteArray
+    /** A GATT link came up; returns the radio bytes to write on it (DSM Amendment A27), or null when Rust panicked. */
+    @Keep @JvmStatic external fun bleLinkOpened(address: String, role: Int, target: ByteArray): Array<ByteArray>?
+    /** A GATT link closed. */
+    @Keep @JvmStatic external fun bleLinkClosed(address: String, role: Int)
     /** Extract response_chunks from a BleIncomingDataResponse proto. */
     @Keep @JvmStatic external fun bleDataResponseExtractChunks(responseProto: ByteArray): Array<ByteArray>
     /** Extract use_reliable_write from a BleIncomingDataResponse proto. */
     @Keep @JvmStatic external fun bleDataResponseUsesReliableWrite(responseProto: ByteArray): Boolean
-    /** Extract success flag from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic external fun identityReadResultGetSuccess(responseProto: ByteArray): Boolean
-    /** Extract write_back_envelope bytes from a BleGattIdentityReadResult proto: empty when none, null when the result does not decode. */
-    @Keep @JvmStatic external fun identityReadResultExtractWriteBack(responseProto: ByteArray): ByteArray?
-    /** Extract peer_device_id (32 bytes) from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic external fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray?
-    /** Extract peer_genesis_hash (32 bytes) from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic external fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray?
     @Keep @JvmStatic external fun acceptBilateralByCommitment(commitmentHashBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray
     @Keep @JvmStatic external fun cancelBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray
-    @Keep @JvmStatic external fun chunkEnvelopeForBle(envelopeBytes: ByteArray, frameType: Int): Array<ByteArray>
-    @Keep @JvmStatic external fun chunkEnvelopeForBleWithCounterparty(envelopeBytes: ByteArray, frameType: Int, counterpartyDeviceId: ByteArray): Array<ByteArray>
     @Keep @JvmStatic external fun getDeviceIdBin(): ByteArray
 
     /**
@@ -104,24 +87,7 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun isErrorEnvelope(envelopeBytes: ByteArray): Int
 
-    // BLE identity envelope processor (decodes protobuf envelope + uses GATT sender address)
-    @Keep @JvmStatic external fun processBleIdentityEnvelope(envelopeBytes: ByteArray, senderBleAddress: String): ByteArray
 
-    // Atomic pairing Phase 3b (scanner side): finalize after BlePairingConfirm GATT write ACK.
-    // Called from BleCoordinator.PairingConfirmWritten (onCharacteristicWrite callback).
-    // Returns true on success, false if no matching ConfirmSent session (benign — already finalized).
-    @Keep @JvmStatic external fun finalizeScannerPairing(bleAddress: String): Boolean
-
-    // Encode genesis_hash + device_id as protobuf BleIdentityCharValue for GATT characteristic.
-    // Kotlin MUST NOT concatenate raw bytes — this is the canonical encoder.
-    @Keep @JvmStatic external fun encodeIdentityCharValue(genesisHash: ByteArray, deviceId: ByteArray): ByteArray
-
-    // Process raw protobuf bytes read from GATT identity characteristic.
-    // Decodes BleIdentityCharValue, dispatches identity events, returns BleGattIdentityReadResult.
-    // expectedDeviceId: the appliance a reach is connecting for (empty when not a reach);
-    // a peer that is not it is reported not established, and nothing about it is recorded.
-    // Kotlin MUST NOT split or interpret the raw bytes.
-    @Keep @JvmStatic external fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray, expectedDeviceId: ByteArray): ByteArray
 
     // BLE event envelope builders (JNI symbols in ble_events.rs)
     @Keep @JvmStatic external fun createBleDeviceFoundEnvelope(address: String, name: String, rssi: Int): ByteArray
@@ -132,8 +98,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun createBleConnectionEstablishedEnvelope(address: String, name: String): ByteArray
     @Keep @JvmStatic external fun createBleConnectionLostEnvelope(address: String): ByteArray
     @Keep @JvmStatic external fun createBlePermissionDeniedEnvelope(operation: String): ByteArray
-    @Keep @JvmStatic external fun createNfcRecoveryCapsuleEnvelope(payload: ByteArray): ByteArray
-    @Keep @JvmStatic external fun createNfcBackupWrittenEnvelope(): ByteArray
 
     // BLE pairing orchestration (Rust-driven loop)
 
@@ -142,11 +106,4 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun updateSessionHardwareFacts(factsBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun setSessionFatalError(message: ByteArray): ByteArray
     @Keep @JvmStatic external fun clearSessionFatalError(): ByteArray
-
-    // NFC Ring Backup — Rust owns all capsule creation/content; Kotlin writes raw bytes to NFC tag
-    @Keep @JvmStatic external fun getPendingRecoveryCapsule(): ByteArray
-    @Keep @JvmStatic external fun prepareNfcWritePayload(capsuleBytes: ByteArray): ByteArray
-    @Keep @JvmStatic external fun clearPendingRecoveryCapsule()
-    /** Silently refresh pending NFC capsule after state mutations. No-op if backup disabled. */
-    @Keep @JvmStatic external fun maybeRefreshNfcCapsule()
 }

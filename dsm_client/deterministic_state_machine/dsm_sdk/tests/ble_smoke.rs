@@ -16,9 +16,41 @@ use sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, F
 use sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 
+/// The link these frames arrive on, as the radio names a peer.
+const SMOKE_LINK: &str = "ble-smoke-link";
+
+/// An offline-bearer transfer of 7 base units of ERA to `to`, with the terms it
+/// commits to: the one operation the offline door carries (MR-DSM-0219), built
+/// as the wallet builds it.
+fn bearer_transfer(
+    to: [u8; 32],
+) -> (
+    dsm::types::operations::Operation,
+    dsm::types::operations::TransferTerms,
+) {
+    let terms = dsm::types::operations::TransferTerms::new(
+        b"ERA".to_vec(),
+        Vec::new(),
+        dsm::types::operations::TransactionMode::Bilateral,
+        String::new(),
+    );
+    let operation = dsm::types::operations::Operation::Transfer {
+        to_device_id: to.to_vec(),
+        to_genesis: [0x6E; 32],
+        amount: dsm::types::token_types::Balance::amount(7),
+        policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+        terms_commitment: terms.commitment(),
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+        signature: Vec::new(),
+        authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
+    };
+    (operation, terms)
+}
+
 #[tokio::test]
 async fn ble_smoke_basic_chunk_roundtrip() {
     // Build a simple single-chunk BLE frame and verify reassembly returns original payload
+    dsm_sdk::economic_fixtures::use_test_storage_dir();
     let payload = vec![0xAB; 64];
 
     // Minimal BLE handler + coordinator
@@ -30,7 +62,7 @@ async fn ble_smoke_basic_chunk_roundtrip() {
     assert_eq!(chunks.len(), 1);
 
     let ingress = coord
-        .ingest_chunk(&chunks[0])
+        .ingest_chunk(SMOKE_LINK, &chunks[0])
         .await
         .unwrap_or_else(|e| panic!("ingest_chunk failed: {e}"));
     match ingress {
@@ -89,8 +121,9 @@ async fn ble_smoke_prepare_roundtrip() {
     let adapter = BilateralTransportAdapter::new(handler);
     let coord = BleFrameCoordinator::new(device_id);
 
-    let prepare_payload = adapter
-        .create_prepare_message(recipient_id, dsm::types::operations::Operation::Noop)
+    let (operation, terms) = bearer_transfer(recipient_id);
+    let (prepare_payload, _commitment) = adapter
+        .create_transfer_prepare_with_commitment(recipient_id, operation, terms)
         .await
         .unwrap_or_else(|e| panic!("prepare payload failed: {e}"));
     let chunks = coord
@@ -101,7 +134,7 @@ async fn ble_smoke_prepare_roundtrip() {
     let mut assembled = None;
     for ch in &chunks {
         let maybe = coord
-            .ingest_chunk(ch)
+            .ingest_chunk(SMOKE_LINK, ch)
             .await
             .unwrap_or_else(|e| panic!("ingest chunk failed: {e}"));
         if let FrameIngressResult::MessageComplete { message } = maybe {
@@ -136,6 +169,7 @@ async fn ble_smoke_prepare_roundtrip() {
 async fn ble_smoke_multi_chunk_roundtrip() {
     // Exercise multi-chunk framing (> MAX_BLE_CHUNK_SIZE = 180) and verify
     // reassembly + fallback path returns original payload.
+    dsm_sdk::economic_fixtures::use_test_storage_dir();
     let device_id = [0x55; 32];
 
     // Large payload (pseudo-random pattern) > 3 chunks (e.g., 560 bytes)
@@ -157,7 +191,7 @@ async fn ble_smoke_multi_chunk_roundtrip() {
     let mut assembled = None;
     for (idx, ch) in chunks.iter().enumerate() {
         let maybe = coord
-            .ingest_chunk(ch)
+            .ingest_chunk(SMOKE_LINK, ch)
             .await
             .unwrap_or_else(|e| panic!("ingest chunk failed: {e}"));
         if idx < chunks.len() - 1 {
@@ -185,6 +219,7 @@ async fn ble_checksum_mismatch_fails() {
     use sdk::bluetooth::ble_frame_coordinator::BleFrameCoordinator;
     use sdk::generated::{BleChunk, BleFrameType};
 
+    dsm_sdk::economic_fixtures::use_test_storage_dir();
     let device_id = [0xAA; 32];
     let coord = BleFrameCoordinator::new(device_id);
 
@@ -210,7 +245,7 @@ async fn ble_checksum_mismatch_fails() {
         .unwrap_or_else(|e| panic!("encode corrupted chunk failed: {e}"));
 
     // Feeding corrupted chunk should yield checksum mismatch error
-    let err = match coord.ingest_chunk(&corrupted_buf).await {
+    let err = match coord.ingest_chunk(SMOKE_LINK, &corrupted_buf).await {
         Ok(_) => panic!("expected checksum error"),
         Err(e) => e,
     };

@@ -17,8 +17,8 @@ fn get_db_connection() -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Conne
 const SESSION_COLUMNS: &str = "commitment_hash, counterparty_device_id, operation_bytes, phase,
     counterparty_genesis_hash, local_signature, counterparty_signature, sender_ble_address,
     stitched_receipt_bytes, counter_signed_receipt, parent_tip, receiver_challenge,
-    sent_child_root, anchor_leaf_key, anchor_leaf_value, spend_anchor_bundle, spend_asset,
-    spend_amount, owed_frame, terms_bytes";
+    sent_child_root, spend_anchor_bundle, spend_asset, spend_amount, spend_next_frontier,
+    owed_frame, terms_bytes";
 
 fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BilateralSessionRecord> {
     Ok(BilateralSessionRecord {
@@ -35,13 +35,12 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BilateralSessio
         parent_tip: row.get(10)?,
         receiver_challenge: row.get(11)?,
         sent_child_root: row.get(12)?,
-        anchor_leaf_key: row.get(13)?,
-        anchor_leaf_value: row.get(14)?,
-        spend_anchor_bundle: row.get(15)?,
-        spend_asset: row.get(16)?,
-        spend_amount: row.get(17)?,
-        owed_frame: row.get(18)?,
-        terms_bytes: row.get(19)?,
+        spend_anchor_bundle: row.get(13)?,
+        spend_asset: row.get(14)?,
+        spend_amount: row.get(15)?,
+        spend_next_frontier: row.get(16)?,
+        owed_frame: row.get(17)?,
+        terms_bytes: row.get(18)?,
     })
 }
 
@@ -60,6 +59,76 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
         encode_base32_crockford(&session.commitment_hash[..8.min(session.commitment_hash.len())])
     );
     Ok(())
+}
+
+/// Store `session` only while its step's stored phase is one of `from`, in
+/// one transaction: the read of the phase and the write are one
+/// compare-and-set. A write decided on a phase that another path has since
+/// moved — a cancellation racing a confirm, a rejection racing a commit — is
+/// refused, and the phase stored stays as that path left it.
+pub fn store_bilateral_session_from(session: &BilateralSessionRecord, from: &[&str]) -> Result<()> {
+    let binding = get_db_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("Database lock poisoned: {e}"))?;
+    let tx = conn.transaction()?;
+    store_bilateral_session_from_with_conn(&tx, session, from)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`store_bilateral_session_from`] inside `conn`, the transaction the
+/// session's step state commits in.
+pub fn store_bilateral_session_from_with_conn(
+    conn: &rusqlite::Connection,
+    session: &BilateralSessionRecord,
+    from: &[&str],
+) -> Result<()> {
+    require_stored_phase(conn, &session.commitment_hash, from)?;
+    store_bilateral_session_with_conn(conn, session)
+}
+
+/// End the step `commitment_hash`'s session inside `conn` only while its
+/// stored phase is one of `from`.
+pub fn delete_bilateral_session_from_with_conn(
+    conn: &rusqlite::Connection,
+    commitment_hash: &[u8],
+    from: &[&str],
+) -> Result<()> {
+    require_stored_phase(conn, commitment_hash, from)?;
+    delete_bilateral_session_with_conn(conn, commitment_hash)
+}
+
+/// Whether the step `commitment_hash`'s stored phase is still one of `from`:
+/// an error names the phase it moved to, or that no session is stored.
+pub fn require_bilateral_session_phase(commitment_hash: &[u8], from: &[&str]) -> Result<()> {
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("Database lock poisoned: {e}"))?;
+    require_stored_phase(&conn, commitment_hash, from)
+}
+
+fn require_stored_phase(
+    conn: &rusqlite::Connection,
+    commitment_hash: &[u8],
+    from: &[&str],
+) -> Result<()> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT phase FROM bilateral_sessions WHERE commitment_hash = ?1",
+            params![commitment_hash],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(phase) if from.contains(&phase.as_str()) => Ok(()),
+        Some(phase) => Err(anyhow!(
+            "the step's session moved to {phase} (this write expected one of {from:?}); it is \
+             not overwritten"
+        )),
+        None => Err(anyhow!("the step's session is not stored")),
+    }
 }
 
 /// Store or update a bilateral session inside `conn`, the transaction the
@@ -92,28 +161,18 @@ pub fn store_bilateral_session_with_conn(
             ));
         }
     }
-    if ![
-        "preparing",
-        "prepared",
-        "pending_user_action",
-        "accepted",
-        "rejected",
-        "confirm_pending",
-        "committed",
-        "failed",
-    ]
-    .contains(&session.phase.as_str())
-    {
-        return Err(anyhow!("Invalid phase: '{}'", session.phase));
-    }
+    // The phases a row holds are exactly the session's: the tag parses as
+    // the session parses it on restore.
+    crate::bluetooth::bilateral_session::phase_from_str(&session.phase)
+        .map_err(|e| anyhow!("Invalid phase: '{}': {e}", session.phase))?;
     conn.execute(
         "INSERT INTO bilateral_sessions(
             commitment_hash, counterparty_device_id, operation_bytes, phase,
             counterparty_genesis_hash, local_signature, counterparty_signature, sender_ble_address,
             stitched_receipt_bytes, counter_signed_receipt, parent_tip, receiver_challenge,
-            sent_child_root, anchor_leaf_key, anchor_leaf_value, spend_anchor_bundle, spend_asset,
-            spend_amount, owed_frame, terms_bytes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            sent_child_root, spend_anchor_bundle, spend_asset, spend_amount, spend_next_frontier,
+            owed_frame, terms_bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
          ON CONFLICT(commitment_hash) DO UPDATE SET
             phase = excluded.phase,
             local_signature = excluded.local_signature,
@@ -125,11 +184,10 @@ pub fn store_bilateral_session_with_conn(
             parent_tip = COALESCE(excluded.parent_tip, bilateral_sessions.parent_tip),
             receiver_challenge = COALESCE(excluded.receiver_challenge, bilateral_sessions.receiver_challenge),
             sent_child_root = COALESCE(excluded.sent_child_root, bilateral_sessions.sent_child_root),
-            anchor_leaf_key = COALESCE(excluded.anchor_leaf_key, bilateral_sessions.anchor_leaf_key),
-            anchor_leaf_value = COALESCE(excluded.anchor_leaf_value, bilateral_sessions.anchor_leaf_value),
             spend_anchor_bundle = COALESCE(excluded.spend_anchor_bundle, bilateral_sessions.spend_anchor_bundle),
             spend_asset = COALESCE(excluded.spend_asset, bilateral_sessions.spend_asset),
             spend_amount = COALESCE(excluded.spend_amount, bilateral_sessions.spend_amount),
+            spend_next_frontier = COALESCE(excluded.spend_next_frontier, bilateral_sessions.spend_next_frontier),
             owed_frame = COALESCE(excluded.owed_frame, bilateral_sessions.owed_frame),
             terms_bytes = COALESCE(excluded.terms_bytes, bilateral_sessions.terms_bytes)",
         params![
@@ -146,11 +204,10 @@ pub fn store_bilateral_session_with_conn(
             &session.parent_tip,
             &session.receiver_challenge,
             &session.sent_child_root,
-            &session.anchor_leaf_key,
-            &session.anchor_leaf_value,
             &session.spend_anchor_bundle,
             &session.spend_asset,
             &session.spend_amount,
+            &session.spend_next_frontier,
             &session.owed_frame,
             &session.terms_bytes,
         ],
@@ -188,11 +245,12 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
 
 /// The phase tags of a step in flight: the steps a relationship's one-step-
 /// at-a-time rule counts.
-pub const IN_FLIGHT_PHASE_TAGS: [&str; 5] = [
+pub const IN_FLIGHT_PHASE_TAGS: [&str; 6] = [
     "preparing",
     "prepared",
     "pending_user_action",
     "accepted",
+    "releasing",
     "confirm_pending",
 ];
 
@@ -226,6 +284,47 @@ pub fn bilateral_step_in_flight_with(
     )
     .optional()
     .map_err(Into::into)
+}
+
+/// The offline payment this device is making, in flight with any counterparty,
+/// as its commitment hash and phase tag: a step in an in-flight phase whose
+/// transfer is addressed to another device. Every offline step is an
+/// offline-bearer transfer (the offline door admits nothing else), and every
+/// one this device makes spends its one offline account, so the account holds
+/// one such step at a time (SA-10). A stored operation that does not decode is
+/// an error, never passed over.
+pub fn offline_spend_in_flight(own_device_id: &[u8]) -> Result<Option<(Vec<u8>, String)>> {
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the offline payment in flight: db lock poisoned: {e}"))?;
+    let phases = IN_FLIGHT_PHASE_TAGS
+        .iter()
+        .map(|tag| format!("'{tag}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT commitment_hash, operation_bytes, phase FROM bilateral_sessions
+         WHERE phase IN ({phases})
+         ORDER BY rowid"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (commitment_hash, operation_bytes, phase) = row?;
+        let operation = super::deserialize_operation(&operation_bytes)?;
+        if let dsm::types::operations::Operation::Transfer { to_device_id, .. } = &operation {
+            if to_device_id.as_slice() != own_device_id {
+                return Ok(Some((commitment_hash, phase)));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Delete a bilateral session by commitment hash
@@ -313,8 +412,7 @@ mod tests {
             parent_tip: None,
             receiver_challenge: None,
             sent_child_root: None,
-            anchor_leaf_key: None,
-            anchor_leaf_value: None,
+            spend_next_frontier: None,
             spend_anchor_bundle: None,
             spend_asset: None,
             spend_amount: None,
@@ -399,6 +497,7 @@ mod tests {
             "pending_user_action",
             "accepted",
             "rejected",
+            "releasing",
             "confirm_pending",
             "committed",
             "failed",
@@ -500,7 +599,7 @@ mod tests {
 
     /// Regression test: the sender-cached signed stitched receipt (with §11.1
     /// per-step EK signing artifacts already stamped) must round-trip through
-    /// SQLite so post-crash recovery in `finalize_sender_step`
+    /// SQLite so post-crash recovery (`commit_released_bearer_step`)
     /// can reuse it verbatim instead of attempting an unsigned rebuild.
     #[test]
     #[serial]

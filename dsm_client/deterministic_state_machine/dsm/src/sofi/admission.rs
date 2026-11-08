@@ -14,7 +14,7 @@
 //! encodes and decodes so the DSM succession track can activate it without a
 //! byte change, and until then nothing may execute it or build it (R18-1).
 
-use super::wire::{OwnerAuthority, SettlementBody, SettlementPreimage, ROUTE_MAX_LEGS};
+use super::wire::{SettlementBody, SettlementPreimage, ROUTE_MAX_LEGS};
 
 /// Why beta will not execute an otherwise well-formed operation.
 ///
@@ -51,10 +51,10 @@ impl std::error::Error for NotAdmissible {}
 
 /// Whether beta will execute this operation.
 ///
-/// Called on the way in, by a producer before it builds and by admission
-/// before it runs. It reads the settlement body only — a canonical object is
-/// never rewritten to fit, because that would map two logical operations onto
-/// one.
+/// Run inside `validation::validate`, so a producer's stage 3 and every
+/// verifier's stage 9 (§31) refuse what this release does not run. It reads
+/// the settlement body only — a canonical object is never rewritten to fit,
+/// because that would map two logical operations onto one.
 pub fn admissible(settlement: &SettlementBody) -> Result<(), NotAdmissible> {
     let legs = settlement.leg_count();
     if legs > ROUTE_MAX_LEGS {
@@ -67,7 +67,7 @@ pub fn admissible(settlement: &SettlementBody) -> Result<(), NotAdmissible> {
         owner_authority, ..
     } = settlement
     {
-        if !matches!(owner_authority, OwnerAuthority::Origin) {
+        if !owner_authority.is_activated() {
             return Err(NotAdmissible::OwnerAuthorityNotActivated);
         }
     }
@@ -83,7 +83,7 @@ pub fn preimage_admissible(preimage: &SettlementPreimage) -> Result<(), NotAdmis
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
     use super::*;
-    use crate::sofi::wire::{PreEClosureIndex, SwapHop};
+    use crate::sofi::wire::{OwnerAuthority, PreEClosureIndex, SwapHop};
 
     fn hop(vault: u8) -> SwapHop {
         SwapHop {

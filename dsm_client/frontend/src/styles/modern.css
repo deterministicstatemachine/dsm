@@ -260,7 +260,8 @@ html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; 
 .s-step { flex: 1; text-align: center; padding: 10px 6px; border-radius: 10px; font-weight: 700; font-size: 14px; color: var(--s-muted); }
 .s-step[aria-current="step"] { background: var(--s-gold); color: #0f0f0f; }
 .s-seg[role="list"] { display: flex; }
-.s-words { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* The words cannot be selected, so the page offers no Copy for them. */
+.s-words { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; -webkit-user-select: none; user-select: none; }
 .s-words li { background: var(--s-surface-2); border-radius: 14px; padding: 12px 14px; font-size: 19px; font-weight: 800; display: flex; gap: 10px; align-items: baseline; }
 .s-words li span { color: var(--s-muted); font-size: 14px; font-weight: 700; min-width: 20px; }
 .s-word-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

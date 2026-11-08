@@ -7,6 +7,7 @@ import { ContactProfileV1 } from "../../proto/dsm_app_pb";
 import { once } from "../EventBridge";
 import { callBin } from "./transportCore";
 import type { PersonProfile } from "../../domain/types";
+import { visibleText } from "../../domain/displayName";
 
 export const PHONE_CONTACT_PICKED = "phone_contact_picked";
 
@@ -22,7 +23,8 @@ export async function pickPhoneContact(): Promise<PersonProfile | null> {
   const bytes = await picked;
   if (bytes.length === 0) return null;
   const p = ContactProfileV1.fromBinary(bytes);
-  return { name: p.displayName, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey };
+  // Shown as every name is, without what renders as nothing (SA-159).
+  return { name: visibleText(p.displayName), email: visibleText(p.email), phone: visibleText(p.phone), phoneLookupKey: p.phoneLookupKey };
 }
 
 /** A linked phone contact's photo as a data URL, or `null` when there is none to show. */

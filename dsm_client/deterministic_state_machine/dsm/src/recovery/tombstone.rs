@@ -10,6 +10,7 @@
 //! time: a succession is bound to its tombstone by the tombstone's hash.
 
 use crate::crypto::blake3::dsm_domain_hasher;
+use crate::crypto::canonical_lp::write_lp;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::types::error::DsmError;
 use crate::types::proto::{
@@ -67,14 +68,17 @@ pub enum RecoveryReceipt {
 }
 
 impl TombstoneReceipt {
-    /// Compute tombstone hash: H(device_id || old_smt_root || old_counter || old_rollup_hash)
-    pub fn compute_hash(&self) -> [u8; 32] {
+    /// Compute tombstone hash: `H(lp(device_id) ‖ lp(old_smt_root) ‖
+    /// u64le(old_counter) ‖ lp(old_rollup_hash))`, each variable-length field
+    /// length-prefixed so no two receipts share a preimage. A field the
+    /// prefix cannot frame is refused.
+    pub fn compute_hash(&self) -> Result<[u8; 32], DsmError> {
         let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TOMBSTONE);
-        hasher.update(self.device_id.as_bytes());
-        hasher.update(&self.old_smt_root);
+        write_lp(&mut hasher, self.device_id.as_bytes())?;
+        write_lp(&mut hasher, &self.old_smt_root)?;
         hasher.update(&self.old_counter.to_le_bytes());
-        hasher.update(&self.old_rollup_hash);
-        *hasher.finalize().as_bytes()
+        write_lp(&mut hasher, &self.old_rollup_hash)?;
+        Ok(*hasher.finalize().as_bytes())
     }
 
     /// Verify tombstone signature
@@ -124,14 +128,16 @@ impl TombstoneReceipt {
 }
 
 impl SuccessionReceipt {
-    /// Compute succession hash: H(device_id || tombstone_hash || new_device_commitment)
-    pub fn compute_hash(&self) -> [u8; 32] {
+    /// Compute succession hash: `H(lp(device_id) ‖ lp(tombstone_hash) ‖
+    /// lp(new_device_commitment))`, each field length-prefixed. A field the
+    /// prefix cannot frame is refused.
+    pub fn compute_hash(&self) -> Result<[u8; 32], DsmError> {
         let mut hasher =
             dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TOMBSTONE_SUCCESSION);
-        hasher.update(self.device_id.as_bytes());
-        hasher.update(&self.tombstone_hash);
-        hasher.update(&self.new_device_commitment);
-        *hasher.finalize().as_bytes()
+        write_lp(&mut hasher, self.device_id.as_bytes())?;
+        write_lp(&mut hasher, &self.tombstone_hash)?;
+        write_lp(&mut hasher, &self.new_device_commitment)?;
+        Ok(*hasher.finalize().as_bytes())
     }
     /// Verify succession signature
     pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool, DsmError> {
@@ -186,14 +192,14 @@ pub fn create_tombstone(
         signature: Vec::new(),
         tombstone_hash: Vec::new(),
     };
-    tombstone.tombstone_hash = tombstone.compute_hash().to_vec();
+    tombstone.tombstone_hash = tombstone.compute_hash()?.to_vec();
     tombstone.signature = sphincs_sign(private_key, &tombstone.tombstone_hash)?;
     Ok(tombstone)
 }
 
 /// Verify tombstone receipt
 pub fn verify_tombstone(tombstone: &TombstoneReceipt, public_key: &[u8]) -> Result<bool, DsmError> {
-    if tombstone.tombstone_hash != tombstone.compute_hash().to_vec() {
+    if tombstone.tombstone_hash != tombstone.compute_hash()?.to_vec() {
         return Ok(false);
     }
     tombstone.verify_signature(public_key)
@@ -213,7 +219,7 @@ pub fn create_succession(
         signature: Vec::new(),
         succession_hash: Vec::new(),
     };
-    succession.succession_hash = succession.compute_hash().to_vec();
+    succession.succession_hash = succession.compute_hash()?.to_vec();
     succession.signature = sphincs_sign(private_key, &succession.succession_hash)?;
     Ok(succession)
 }
@@ -227,7 +233,7 @@ pub fn verify_succession(
     if succession.tombstone_hash != tombstone_hash {
         return Ok(false);
     }
-    if succession.succession_hash != succession.compute_hash().to_vec() {
+    if succession.succession_hash != succession.compute_hash()?.to_vec() {
         return Ok(false);
     }
     succession.verify_signature(public_key)
@@ -340,6 +346,68 @@ impl ContactTombstoneAck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit SA-47: every variable-length field of a receipt is
+    /// length-prefixed in its hash, so receipts whose fields differ only in
+    /// where one ends and the next begins hash differently. Unframed, each
+    /// pair below was one preimage.
+    #[test]
+    fn receipt_hashes_frame_every_variable_length_field() -> Result<(), DsmError> {
+        let tombstone = |device_id: &str, root: Vec<u8>, counter: u64, roll: Vec<u8>| {
+            TombstoneReceipt {
+                device_id: device_id.to_string(),
+                old_smt_root: root,
+                old_counter: counter,
+                old_rollup_hash: roll,
+                signature: Vec::new(),
+                tombstone_hash: Vec::new(),
+            }
+            .compute_hash()
+        };
+        // The device id's last byte moved into the root.
+        assert_ne!(
+            tombstone("AB", vec![0x11; 32], 7, vec![0x22; 32])?,
+            tombstone(
+                "A",
+                [b"B".as_slice(), &[0x11; 32]].concat(),
+                7,
+                vec![0x22; 32]
+            )?
+        );
+        // The counter's bytes moved into the root, and the roll's first eight
+        // bytes into the counter.
+        let roll: Vec<u8> = (0u8..32).collect();
+        let shifted_root = [[0x11; 32].as_slice(), &7u64.to_le_bytes()].concat();
+        let shifted_counter = u64::from_le_bytes(roll[..8].try_into().expect("eight bytes"));
+        assert_ne!(
+            tombstone("A", vec![0x11; 32], 7, roll.clone())?,
+            tombstone("A", shifted_root, shifted_counter, roll[8..].to_vec())?
+        );
+
+        let succession = |device_id: &str, tombstone_hash: Vec<u8>, commitment: Vec<u8>| {
+            SuccessionReceipt {
+                device_id: device_id.to_string(),
+                tombstone_hash,
+                new_device_commitment: commitment,
+                signature: Vec::new(),
+                succession_hash: Vec::new(),
+            }
+            .compute_hash()
+        };
+        assert_ne!(
+            succession("AB", vec![0x33; 32], vec![0x44; 32])?,
+            succession("A", [b"B".as_slice(), &[0x33; 32]].concat(), vec![0x44; 32])?
+        );
+        assert_ne!(
+            succession("A", vec![0x33; 32], vec![0x44; 32])?,
+            succession(
+                "A",
+                vec![0x33; 31],
+                [[0x33].as_slice(), &[0x44; 32]].concat()
+            )?
+        );
+        Ok(())
+    }
 
     /// An acknowledgement counts only under the acknowledging contact's own
     /// AK, for exactly the tombstone and device it names; its codec is exact.

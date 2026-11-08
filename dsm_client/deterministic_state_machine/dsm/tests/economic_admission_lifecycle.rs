@@ -21,6 +21,10 @@ use dsm::economic::lineage::{
     EconomicValidationError,
 };
 use dsm::economic::mutation::EconomicLeafMutation;
+use dsm::economic::successor_evidence::{
+    sign_dsm_successor_evidence, successor_evidence_addr, verify_dsm_successor_evidence,
+};
+use dsm::types::device_state::relationship_chain_tip_v2;
 use dsm::economic::register::RegisteredEconomicRoot;
 use dsm::economic::provenance::{
     PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
@@ -31,7 +35,7 @@ use dsm::economic::witness::EconomicTransitionWitness;
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 
-const G: [u8; 32] = [0x11; 32];
+mod identity;
 const ERA: [u8; 32] = [0xAA; 32];
 
 const SOFI: [u8; 32] = [0xBB; 32];
@@ -41,15 +45,34 @@ const SOFI: [u8; 32] = [0xBB; 32];
 /// cell recognizes a release only when its signer is the device it credits.
 fn trader() -> &'static (Vec<u8>, Vec<u8>) {
     static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    KEYS.get_or_init(|| dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair"))
+    KEYS.get_or_init(|| {
+        (
+            holder().ak_public_key.clone(),
+            holder().ak_secret_key.clone(),
+        )
+    })
 }
 
-const ATTA: [u8; 32] = [0x4A; 32];
+/// The trader: a real identity, with its own signed directory entry (SA-63).
+fn holder() -> &'static identity::Identity {
+    static HOLDER: std::sync::OnceLock<identity::Identity> = std::sync::OnceLock::new();
+    HOLDER.get_or_init(|| identity::identity(0x72))
+}
+
+/// The trader's genesis.
+fn g() -> [u8; 32] {
+    holder().genesis
+}
+
+/// The trader's `AttA`.
+fn atta() -> [u8; 32] {
+    holder().att_a
+}
 
 /// The trader's device id, derived from its key and `AttA`.
 fn dev() -> &'static [u8; 32] {
     static DEVID: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    DEVID.get_or_init(|| dsm::core::identity::genesis_v2::derive_devid(&trader().0, &ATTA))
+    DEVID.get_or_init(|| holder().devid)
 }
 
 fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> PendingEconomicAdmission {
@@ -62,8 +85,16 @@ fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> Pending
             post_economic_root: [2; 32],
             accepted_substrate_addr: [4; 32],
             admission_manifest_addr: [5; 32],
-            embedded_parent: [0x5E; 32],
-            c_dsm_plus: [6; 32],
+            substrate: match kind {
+                PendingAdmissionKind::OfflineLoad { .. }
+                | PendingAdmissionKind::OfflineUnload { .. } => {
+                    dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary
+                }
+                _ => dsm::economic::admission::AcceptedSubstrateCoords::Successor {
+                    embedded_parent: [0x5E; 32],
+                    c_dsm_plus: [6; 32],
+                },
+            },
         })
         .expect("prepared -> accepted")
         .advanced_to(state)
@@ -73,8 +104,10 @@ fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> Pending
 fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
     Operation::Transfer {
         to_device_id: vec![1; 32],
+        to_genesis: [0x6E; 32],
         amount: Balance::amount(5),
         policy_commit,
+        token_policy: Vec::new(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"ERA".to_vec(),
             nonce: vec![0; 8],
@@ -90,16 +123,25 @@ fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
 
 // ── The fence predicate ────────────────────────────────────────────────────
 
+/// Activity that touches no economic leaf: a token adoption commits a policy
+/// leaf and moves no value.
+fn ordinary_activity() -> Operation {
+    Operation::AdoptToken {
+        policy_commit: ERA,
+        signature: Vec::new(),
+    }
+}
+
 #[test]
 fn the_fence_blocks_economic_writes_and_allows_ordinary_activity() {
     let p = pending(
         PendingAdmissionKind::DsmBacked,
         EconomicAdmissionState::LocalAcceptedPendingEcon,
     );
-    let op = Operation::Noop;
+    let op = ordinary_activity();
 
-    // A publication delay must not look like a device fault: relationship
-    // activity that touches no economic leaf continues throughout.
+    // A publication delay must not look like a device fault: activity that
+    // touches no economic leaf continues throughout.
     assert!(fence_allows(&p, EconomicEffect::None, &op).is_ok());
 
     assert!(matches!(
@@ -114,7 +156,7 @@ fn the_fence_blocks_economic_writes_and_allows_ordinary_activity() {
 
 #[test]
 fn the_fence_engages_only_while_actually_pending() {
-    let op = Operation::Noop;
+    let op = ordinary_activity();
     // Before local acceptance nothing durable changed, and after admission the
     // protection has served its purpose. Fencing in either state would stall
     // the device for no benefit.
@@ -206,7 +248,11 @@ fn an_unidentifiable_bearer_operation_fails_closed_during_a_boundary_fence() {
         EconomicAdmissionState::LocalAcceptedPendingEcon,
     );
     assert!(matches!(
-        fence_allows(&load, EconomicEffect::OfflineAccountOnly, &Operation::Noop),
+        fence_allows(
+            &load,
+            EconomicEffect::OfflineAccountOnly,
+            &ordinary_activity()
+        ),
         Err(FenceBlock::BearerUseOfPendingAllocation { .. })
     ));
 }
@@ -227,6 +273,37 @@ fn bal(pc: [u8; 32], amount: u64) -> EconomicLeafState {
 const C_DSM_PLUS: [u8; 32] = [0xCD; 32];
 const EMBEDDED_PARENT: [u8; 32] = [0xCE; 32];
 const SUBSTRATE_ADDR: [u8; 32] = [0xA4; 32];
+const REL_KEY: [u8; 32] = [0xC1; 32];
+const COUNTERPARTY: [u8; 32] = [0xC2; 32];
+const ENTROPY: [u8; 32] = [0xC3; 32];
+
+/// The successor evidence the trader signs for `op`, as an admission freezes it.
+fn successor_evidence(op: &Operation, entropy: &[u8]) -> Vec<u8> {
+    sign_dsm_successor_evidence(
+        &REL_KEY,
+        &EMBEDDED_PARENT,
+        &COUNTERPARTY,
+        &op.to_bytes(),
+        entropy,
+        None,
+        &g(),
+        dev(),
+        &holder().ak_secret_key,
+    )
+    .expect("the trader signs its successor")
+}
+
+/// The `C_dsm+` that evidence commits.
+fn c_dsm_plus(op: &Operation) -> [u8; 32] {
+    relationship_chain_tip_v2(
+        &REL_KEY,
+        &EMBEDDED_PARENT,
+        &COUNTERPARTY,
+        &op.to_bytes(),
+        &ENTROPY,
+        None,
+    )
+}
 
 fn canonical_set_id() -> [u8; 32] {
     dsm::economic::register::resolve_root_register_profile(b"dsm-testnet")
@@ -245,6 +322,7 @@ struct FaucetFixture {
 /// The reserve state the fixture's release succeeds: `R_0`.
 fn reserve_genesis() -> dsm::economic::native_reserve::NativeReserveState {
     dsm::economic::native_reserve::NativeReserveState::genesis(b"dsm-testnet", canonical_set_id())
+        .expect("R_0")
 }
 
 fn faucet_fixture(position: u64) -> FaucetFixture {
@@ -256,7 +334,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     };
     let (pk, sk) = trader().clone();
     let parent = reserve_genesis();
-    let reserve_id = parent.reserve_id;
+    let reserve_id = *parent.reserve_id();
     let generation = 1u64;
     let op = Operation::FaucetClaim {
         reserve_id,
@@ -269,14 +347,15 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
             parent_root: parent.root(),
             generation,
             amount: ERA_FAUCET_PAYOUT,
-            recipient_genesis: G,
+            recipient_genesis: g(),
             recipient_devid: *dev(),
             recipient_economic_position: position,
             recipient_operation_digest: op_digest,
             storage_set_id: canonical_set_id(),
             source: ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk.clone(),
-                claimant_att_a: ATTA,
+                claimant_att_a: atta(),
+                claimant_directory_entry: holder().directory_entry.clone(),
             },
         },
         &sk,
@@ -287,7 +366,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     let mut tree = EconomicSmt::new();
     let pre_root = tree.root();
     let credit = bal(era, ERA_FAUCET_PAYOUT);
-    let key = credit.leaf_key(&G, dev());
+    let key = credit.leaf_key(&g(), dev());
     let siblings = tree.siblings(&key).to_vec();
     let mutation =
         EconomicLeafMutation::new(None, Some(credit.clone()), siblings).expect("well-formed");
@@ -297,7 +376,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     let witness = EconomicTransitionWitness::new(
         pre_root,
         post_root,
-        dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
+        dsm_economic_operation_id(&g(), dev(), &c_dsm_plus(&op)),
         op_digest,
         vec![mutation],
         vec![CreditSource::NativeReserveRelease(
@@ -353,14 +432,24 @@ impl ProvenanceResolver for OneTicket {
         generation: u64,
     ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
         let parent = reserve_genesis();
-        if *reserve_id != parent.reserve_id || generation != 1 {
+        if reserve_id != parent.reserve_id() || generation != 1 {
             return Err(PeerLineageFailure::Incomplete(format!(
                 "this fixture's walk reached generation 1 only, not {generation} of {reserve_id:?}"
             )));
         }
+        // The reader's heads around the release: the genesis, and this
+        // release established on it by Core as generation 1.
+        let mut lineage = dsm::economic::native_reserve::ReserveLineage::from_genesis(&parent)
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
+        let before = lineage.chain().head();
+        lineage
+            .establish(&self.envelope)
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
         Ok(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
-            parent,
+            parent: before,
+            parent_step: *parent.predecessor(),
+            child: lineage.chain().head(),
         })
     }
 
@@ -446,23 +535,35 @@ impl ProvenanceResolver for NoRegisterSet {
     }
 }
 
-fn accepted_for(op: &Operation) -> AcceptedSubstrate {
+/// What the verifier establishes over `evidence`, the one way to an
+/// [`AcceptedSubstrate`].
+fn accepted_over(evidence: &[u8]) -> AcceptedSubstrate {
     AcceptedSubstrate::from_verified_dsm_successor(
-        op.clone(),
-        C_DSM_PLUS,
-        EMBEDDED_PARENT,
-        SUBSTRATE_ADDR,
+        verify_dsm_successor_evidence(evidence, &g(), dev(), &holder().ak_public_key)
+            .expect("the trader's evidence verifies"),
     )
 }
 
-fn manifest_for(witness: &EconomicTransitionWitness) -> EconomicAdmissionManifest {
+fn accepted_for(op: &Operation) -> AcceptedSubstrate {
+    accepted_over(&successor_evidence(op, &ENTROPY))
+}
+
+fn manifest_for(op: &Operation, witness: &EconomicTransitionWitness) -> EconomicAdmissionManifest {
+    manifest_naming(
+        witness,
+        successor_evidence_addr(&successor_evidence(op, &ENTROPY)),
+    )
+}
+
+fn manifest_naming(
+    witness: &EconomicTransitionWitness,
+    evidence_addr: [u8; 32],
+) -> EconomicAdmissionManifest {
     EconomicAdmissionManifest::new(
         [0xA1; 32],
         [0xA2; 32],
         [0xA3; 32],
-        AdmissionSubstrate::DsmSuccessor {
-            evidence_addr: SUBSTRATE_ADDR,
-        },
+        AdmissionSubstrate::DsmSuccessor { evidence_addr },
         witness.derived_provenance_index(),
     )
     .expect("valid manifest")
@@ -487,7 +588,7 @@ fn registered_naming(
     post_root: [u8; 32],
     manifest_addr: [u8; 32],
 ) -> RegisteredEconomicRoot {
-    registered_for_trader(G, trader(), ATTA, position, post_root, manifest_addr)
+    registered_for_trader(g(), trader(), atta(), position, post_root, manifest_addr)
 }
 
 /// A registered root of the trader `(genesis, derive_devid(pk, att_a))`,
@@ -541,7 +642,7 @@ fn run(
         &OneTicket {
             envelope: fx.envelope.clone(),
         },
-        &G,
+        &g(),
         dev(),
         b"dsm-testnet",
         &fx.pk,
@@ -551,7 +652,7 @@ fn run(
 #[test]
 fn a_faucet_claim_transition_advances_the_validated_lineage() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let accepted = accepted_for(&fx.op);
     let advanced = run(&fx, &registered, &manifest, &fx.witness, &accepted).expect("validates");
@@ -566,7 +667,7 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
             advanced.claim.economic_position(),
             advanced.claim.claim_ref()
         ),
-        (G, *dev(), 1, registered.claim_ref())
+        (g(), *dev(), 1, registered.claim_ref())
     );
 }
 
@@ -577,7 +678,7 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
 #[test]
 fn a_register_set_not_established_is_not_a_verdict_about_the_claimant() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let accepted = accepted_for(&fx.op);
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
@@ -590,7 +691,7 @@ fn a_register_set_not_established_is_not_a_verdict_about_the_claimant() {
         &NoRegisterSet(OneTicket {
             envelope: fx.envelope.clone(),
         }),
-        &G,
+        &g(),
         dev(),
         b"dsm-testnet",
         &fx.pk,
@@ -614,14 +715,14 @@ fn a_register_set_not_established_is_not_a_verdict_about_the_claimant() {
 #[test]
 fn a_registered_claim_of_another_trader_is_refused() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let accepted = accepted_for(&fx.op);
     let addr = manifest.addr().expect("addressable");
     static OTHER: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
     let other = OTHER.get_or_init(|| {
         dsm::crypto::sphincs::generate_sphincs_keypair().expect("another trader's keypair")
     });
-    for (genesis, signer, att_a) in [([0x99; 32], trader(), ATTA), (G, other, [0x98; 32])] {
+    for (genesis, signer, att_a) in [([0x99; 32], trader(), atta()), (g(), other, [0x98; 32])] {
         let foreign = registered_for_trader(genesis, signer, att_a, 1, fx.post_root, addr);
         assert!(matches!(
             run(&fx, &foreign, &manifest, &fx.witness, &accepted),
@@ -645,7 +746,7 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
         source_id: [0x5C; 32],
         consumer_economic_operation_id: [0x0E; 32],
     });
-    let key = record.leaf_key(&G, dev());
+    let key = record.leaf_key(&g(), dev());
     let siblings = tree.siblings(&key).to_vec();
     let mutation =
         EconomicLeafMutation::new(None, Some(record.clone()), siblings).expect("well-formed");
@@ -653,13 +754,13 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
     let forged = EconomicTransitionWitness::new(
         pre_root,
         tree.root(),
-        dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
+        dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &c_dsm_plus(&fx.op)),
         fx.witness.operation_digest,
         vec![mutation],
         Vec::new(),
     )
     .expect("internally valid");
-    let manifest = manifest_for(&forged);
+    let manifest = manifest_for(&fx.op, &forged);
     let registered = registered_for(&manifest, 1, tree.root());
     let accepted = accepted_for(&fx.op);
     match run(&fx, &registered, &manifest, &forged, &accepted) {
@@ -674,7 +775,7 @@ fn a_successor_paired_with_a_different_operation_is_refused() {
     // objects are individually valid; together they describe two different
     // operations.
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let other_op = Operation::FaucetClaim {
         reserve_id: dsm::economic::native_reserve::era_reserve_id(b"dsm-testnet"),
@@ -693,14 +794,12 @@ fn a_witness_naming_a_different_successor_is_refused() {
     // not merely this operation. Same operation bytes, different successor
     // commitment ⇒ refused.
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    // Other entropy: a different accepted successor of the same operation, and
+    // the manifest names that evidence, so only the identity conjunct is left.
+    let other = successor_evidence(&fx.op, &[0xDD; 32]);
+    let manifest = manifest_naming(&fx.witness, successor_evidence_addr(&other));
     let registered = registered_for(&manifest, 1, fx.post_root);
-    let accepted = AcceptedSubstrate::from_verified_dsm_successor(
-        fx.op.clone(),
-        [0xDD; 32], // a different accepted successor
-        EMBEDDED_PARENT,
-        SUBSTRATE_ADDR,
-    );
+    let accepted = accepted_over(&other);
     match run(&fx, &registered, &manifest, &fx.witness, &accepted) {
         Err(EconomicValidationError::EconomicOperationIdMismatch { .. }) => {}
         other => panic!("a witness naming another successor must be refused, got {other:?}"),
@@ -749,7 +848,7 @@ fn the_manifest_must_name_the_substrate_evidence_actually_used() {
 #[test]
 fn a_registration_at_the_wrong_position_is_refused() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 5, fx.post_root); // not 0 + 1
     let accepted = accepted_for(&fx.op);
     assert!(matches!(
@@ -764,7 +863,7 @@ fn a_registration_at_the_wrong_position_is_refused() {
 #[test]
 fn a_registration_naming_another_manifest_is_refused() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_naming(1, fx.post_root, [0xFF; 32]);
     let accepted = accepted_for(&fx.op);
     assert!(matches!(
@@ -776,7 +875,7 @@ fn a_registration_naming_another_manifest_is_refused() {
 #[test]
 fn a_registered_root_disagreeing_with_the_witness_is_refused() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 1, [0xEE; 32]); // invented root
     let accepted = accepted_for(&fx.op);
     assert!(matches!(
@@ -811,7 +910,7 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
 /// THE TWO SETUP CONJUNCTS ARE REACHABLE, and they refuse.
 ///
 /// `R_T^setup` had zero readers before this: a correctly signed first setup
-/// could put ANY 32 bytes there, and the `(G, DevID, v)` index would then pin
+/// could put ANY 32 bytes there, and the `(g(), DevID, v)` index would then pin
 /// a `ρ` committing them forever — the uniqueness rule holding over a field
 /// nothing had checked. `p` was equally unbound.
 ///
@@ -819,32 +918,39 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
 /// E2: `advance_validated` already holds the predecessor and the root derived
 /// from the verified mutation sequence, which is exactly the normative
 /// relation. (`ClaimRef_p` still needs the parent envelope, so it stays E2's.)
+///
+/// The body that passes both is Core's own producer's
+/// (`sofi::lineage::setup_body`, SoFi §2.1): the root it derives on the
+/// predecessor's tree is the root the verifier derives from the transition.
+/// MUTATION CONTROL: the setup-root check removed turns this red.
 #[test]
 fn a_setup_transition_binds_its_position_and_its_derived_root() {
-    use dsm::economic::state::EconomicLeafState;
     use dsm::economic::tree::EconomicSmt;
 
-    let vault_id = dsm::sofi::derive::vault_id(&G, dev(), 7);
+    let vault_id = dsm::sofi::derive::vault_id(&g(), dev(), 7);
     // The predecessor is the activation root at position 0, so `p` is 0.
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
-    let sigma = dsm::sofi::derive::setup_id(&G, dev(), zero.economic_position(), &vault_id);
-    let state = EconomicLeafState::Relationship(dsm::sofi::wire::TraderRelationshipLeaf {
-        vault_id,
-        leaf: dsm::sofi::derive::relationship_leaf_genesis(&sigma),
-    });
-    let mut tree = EconomicSmt::new();
-    let pre_root = tree.root();
-    tree.insert(
-        state.leaf_key(&G, dev()),
-        state.leaf_value().expect("a leaf value"),
-    );
-    let derived_root = tree.root();
+    let pre_tree = EconomicSmt::new();
+    let pre_root = pre_tree.root();
+    let produced = dsm::sofi::lineage::setup_body(
+        &zero,
+        &pre_tree,
+        &dsm::sofi::lineage::SetupNames {
+            genesis: g(),
+            device_id: *dev(),
+            vault_id,
+            claim_ref: [0x66; 32],
+            signature_alg: dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            claimant_public_key: &[0x01; 64],
+        },
+    )
+    .expect("Core builds the setup body on the activation root");
+    let derived_root = *produced.setup_root();
 
-    // A body whose `p` and `R_T^setup` are the derived ones, and three that
-    // are wrong in exactly one way each.
+    // The producer's body, and two that are wrong in exactly one way each.
     let body = |position: u64, setup_root: [u8; 32]| {
         dsm::sofi::wire::SofiSetupBody::new(
-            G,
+            g(),
             *dev(),
             position,
             vault_id,
@@ -870,9 +976,9 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         let mut build_tree = EconomicSmt::new();
         let built = dsm::economic::write_set::build_write_set(
             &op,
-            &G,
+            &g(),
             dev(),
-            &dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
+            &dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &c_dsm_plus(&op)),
             &dsm::economic::write_set::EconomicPreState::new(&std::collections::BTreeMap::new(), 0),
             &mut build_tree,
             &dsm::economic::write_set::CreditSourceFacts::None,
@@ -886,13 +992,13 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         let witness = EconomicTransitionWitness::new(
             pre_root,
             built.post_root,
-            dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
+            dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &c_dsm_plus(&op)),
             dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
             built.mutations,
             built.credit_sources,
         )
         .expect("a witness");
-        let manifest = manifest_for(&witness);
+        let manifest = manifest_for(&op, &witness);
         let registered = registered_for(&manifest, 1, witness.post_economic_root);
         advance_validated(
             &zero,
@@ -903,7 +1009,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
             &OneTicket {
                 envelope: fx.envelope.clone(),
             },
-            &G,
+            &g(),
             dev(),
             b"dsm-testnet",
             &fx.pk,
@@ -930,11 +1036,12 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         "R_T^setup is derived, never asserted"
     );
 
-    // And the correct body reaches the conjuncts and passes them. It may be
-    // refused further down for faucet-fixture reasons; what this asserts is
-    // that it is NOT refused by either setup conjunct, which is what makes
+    // And the producer's body reaches the conjuncts and passes them. It may
+    // be refused further down for faucet-fixture reasons; what this asserts
+    // is that it is NOT refused by either setup conjunct, which is what makes
     // the two refusals above meaningful rather than unreachable.
-    let outcome = go(&body(zero.economic_position(), derived_root));
+    assert_eq!(produced.position(), zero.economic_position());
+    let outcome = go(&produced);
     assert!(
         !matches!(
             outcome,
@@ -970,22 +1077,67 @@ fn held_first_claim(
     .into_locally_accepted(dsm::economic::admission::AcceptedAdmissionCoords {
         post_economic_root: fx.post_root,
         accepted_substrate_addr: SUBSTRATE_ADDR,
-        admission_manifest_addr: manifest_for(&fx.witness).addr().expect("addressable"),
-        c_dsm_plus: C_DSM_PLUS,
-        embedded_parent: EMBEDDED_PARENT,
+        admission_manifest_addr: manifest_for(&fx.op, &fx.witness)
+            .addr()
+            .expect("addressable"),
+        substrate: match kind {
+            PendingAdmissionKind::OfflineLoad { .. }
+            | PendingAdmissionKind::OfflineUnload { .. } => {
+                dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary
+            }
+            _ => dsm::economic::admission::AcceptedSubstrateCoords::Successor {
+                c_dsm_plus: C_DSM_PLUS,
+                embedded_parent: EMBEDDED_PARENT,
+            },
+        },
     })
     .expect("prepared -> accepted")
 }
 
 /// The trader's head as it reloads: `balances`, `allocations`, and the
-/// admission in flight.
+/// admission in flight. `restore` takes the root the device persisted with the
+/// fields; it is computed here, independently, over the leaves those fields
+/// hold: the device's own relationship at `h_0` and, with allocations, the
+/// one offline account a load leaves.
 fn head_of(
     genesis: [u8; 32],
     fx: &FaucetFixture,
     balances: &[([u8; 32], u64)],
     allocations: &[([u8; 32], u64)],
     pending: Option<PendingEconomicAdmission>,
-) -> dsm::types::device_state::DeviceState {
+) -> dsm::types::device_state::RealizedHead {
+    use dsm::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
+    let accounts: std::collections::BTreeMap<
+        [u8; 32],
+        dsm::types::offline_account::OfflineAccount,
+    > = Some(allocations)
+        .filter(|held| !held.is_empty())
+        .map(|held| {
+            (
+                [0xB0; 32],
+                dsm::types::offline_account::OfflineAccount::restore(
+                    held.iter().copied().collect(),
+                    0,
+                    [0x01; 32],
+                    Some([0x0F; 32]),
+                ),
+            )
+        })
+        .into_iter()
+        .collect();
+    let stored_root = *dsm::merkle::sparse_merkle_tree::SparseMerkleTree::from_leaves(
+        std::iter::once((
+            compute_smt_key(dev(), dev()),
+            initial_chain_tip_from_device_ids(dev(), dev()),
+        ))
+        .chain(accounts.iter().map(|(bundle, account)| {
+            (
+                dsm::types::offline_account::offline_account_leaf_key(bundle),
+                account.root(),
+            )
+        })),
+    )
+    .root();
     dsm::types::device_state::DeviceState::restore(
         genesis,
         *dev(),
@@ -994,19 +1146,9 @@ fn head_of(
         balances.iter().copied().collect(),
         Vec::new(),
         std::collections::BTreeMap::new(),
-        allocations
-            .iter()
-            .map(|(key, amount)| {
-                (
-                    *key,
-                    dsm::types::device_state::OfflineAllocation {
-                        amount: *amount,
-                        sequence: 1,
-                    },
-                )
-            })
-            .collect(),
+        accounts,
         pending,
+        stored_root,
     )
     .expect("the head reloads")
 }
@@ -1027,11 +1169,11 @@ fn era_payout() -> ([u8; 32], u64) {
 fn a_held_first_admission_resumes_on_the_activation_root() {
     let fx = faucet_fixture(1);
     let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
-    let head = head_of(G, &fx, &[era_payout()], &[], Some(pending));
+    let head = head_of(g(), &fx, &[era_payout()], &[], Some(pending));
 
     let as_it_stands = EconomicActivationSnapshot {
         online_balances_empty: head.balances_snapshot().is_empty(),
-        outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+        outstanding_offline_allocation: head.holds_offline_value(),
     };
     activate(as_it_stands).expect_err("the head as it stands carries the held credit");
 
@@ -1074,7 +1216,7 @@ fn value_the_first_admission_did_not_credit_still_blocks_activation() {
     ];
     for (name, balances, allocations) in cases {
         let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
-        let head = head_of(G, &fx, &balances, &allocations, Some(pending));
+        let head = head_of(g(), &fx, &balances, &allocations, Some(pending));
         let snapshot = match EconomicActivationSnapshot::before_first_admission(&head, &fx.witness)
         {
             Ok(snapshot) => snapshot,
@@ -1104,7 +1246,7 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
 
     // Nothing pending: the head is its own activation point.
     assert_eq!(
-        read(&head_of(G, &fx, &[era_payout()], &[], None)),
+        read(&head_of(g(), &fx, &[era_payout()], &[], None)),
         Err(ActivationPointUnreadable::NothingPending)
     );
 
@@ -1120,7 +1262,7 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
     ] {
         let pending = held_first_claim(&fx, kind, position, &fx.op);
         assert_eq!(
-            read(&head_of(G, &fx, &[era_payout()], &[], Some(pending))),
+            read(&head_of(g(), &fx, &[era_payout()], &[], Some(pending))),
             Err(ActivationPointUnreadable::NotAFirstAdmission {
                 economic_position: position
             })
@@ -1129,12 +1271,12 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
 
     // The witness of another operation than the one pending.
     let other = Operation::FaucetClaim {
-        reserve_id: reserve_genesis().reserve_id,
+        reserve_id: *reserve_genesis().reserve_id(),
         generation: 2,
     };
     let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &other);
     assert_eq!(
-        read(&head_of(G, &fx, &[era_payout()], &[], Some(pending))),
+        read(&head_of(g(), &fx, &[era_payout()], &[], Some(pending))),
         Err(ActivationPointUnreadable::WitnessOfAnotherTransition)
     );
 
@@ -1155,7 +1297,420 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
     // A head that does not hold the credit its pending admission made.
     let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
     assert_eq!(
-        read(&head_of(G, &fx, &[], &[], Some(pending))),
+        read(&head_of(g(), &fx, &[], &[], Some(pending))),
         Err(ActivationPointUnreadable::CreditNotOnHead { policy_commit: era })
     );
+}
+
+// ── Offline boundaries: a load and an unload, admitted ────────────────────
+
+/// One boundary taken by the device head and admitted after `previous`: its
+/// body, its write set against the economic tree, and the registration that
+/// names them.
+struct AdmittedBoundary {
+    outcome: dsm::types::device_state::OfflineBoundaryOutcome,
+    verified: dsm::economic::offline_boundary::VerifiedOfflineBoundary,
+    evidence_addr: [u8; 32],
+    witness: EconomicTransitionWitness,
+}
+
+/// The anchor of the trader's offline account: pin material whose bundle
+/// recomputes for the trader's online key and device id.
+fn boundary_anchor() -> dsm::economic::offline_boundary::BoundaryAnchor {
+    dsm::economic::offline_boundary::BoundaryAnchor {
+        anchor_id: [0xB1; 32],
+        pk_chip: vec![0xB2; 32],
+        pk_host: vec![0xB3; 64],
+        enrolled_counter: 16,
+        birth_commitment: [0xB4; 32],
+    }
+}
+
+/// The bundle `B` of [`boundary_anchor`] provisioned for the trader.
+fn bundle() -> [u8; 32] {
+    let a = boundary_anchor();
+    anchor_core::enrollment::anchor_bundle(
+        &trader().0,
+        &a.anchor_id,
+        &a.pk_chip,
+        &a.pk_host,
+        16,
+        dev(),
+        &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+        &a.birth_commitment,
+    )
+}
+
+fn boundary(
+    head: &dsm::types::device_state::RealizedHead,
+    kind: dsm::types::device_state::OfflineBoundaryKind,
+    amount: u64,
+    pre_root: [u8; 32],
+    tree: &mut EconomicSmt,
+    balances: &std::collections::BTreeMap<[u8; 32], u64>,
+    position: u64,
+) -> AdmittedBoundary {
+    use dsm::economic::offline_boundary::{offline_boundary_evidence_addr, OfflineBoundaryBody};
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let outcome = head
+        .cross_offline_boundary(&bundle(), kind, &era, amount)
+        .expect("the head takes the boundary");
+    // No spends here: the boundary starts from the account as it stands,
+    // which is the account its previous boundary left, or the one opened.
+    let account = head
+        .offline_account(&bundle())
+        .expect("the account is open");
+    let since = match account.funding_chain() {
+        None => dsm::economic::offline_boundary::BoundarySince::Opened {
+            frontier: account.frontier(),
+        },
+        Some(_) => dsm::economic::offline_boundary::BoundarySince::Previous {
+            account_root: account.root(),
+        },
+    };
+    let bytes = OfflineBoundaryBody::of(
+        &outcome,
+        kind,
+        bundle(),
+        era,
+        amount,
+        dsm::economic::offline_boundary::BoundaryAncestry {
+            anchor: boundary_anchor(),
+            since,
+            chain: Vec::new(),
+        },
+    )
+    .expect("body")
+    .encode()
+    .expect("encode");
+    let (verified, exposed) =
+        OfflineBoundaryBody::verify(&bytes, &g(), dev(), &trader().0).expect("the body verifies");
+    assert!(exposed.is_empty(), "no spends, no exposure");
+    let built = dsm::economic::write_set::build_boundary_write_set(
+        &dsm::economic::write_set::BoundaryEffect {
+            kind,
+            asset: era,
+            amount,
+            boundary_id: outcome.operation_id,
+        },
+        &g(),
+        dev(),
+        &dsm::economic::write_set::EconomicPreState::new(balances, position),
+        tree,
+    )
+    .expect("the boundary's write set");
+    let witness = EconomicTransitionWitness::new(
+        pre_root,
+        built.post_root,
+        verified.operation_id(),
+        verified.operation_digest(),
+        built.mutations,
+        built.credit_sources,
+    )
+    .expect("a witness");
+    AdmittedBoundary {
+        outcome,
+        verified,
+        evidence_addr: offline_boundary_evidence_addr(&bytes),
+        witness,
+    }
+}
+
+fn validate_boundary(
+    fx: &FaucetFixture,
+    previous: &dsm::economic::lineage::ValidatedEconomicRoot,
+    position: u64,
+    b: &AdmittedBoundary,
+    witness: &EconomicTransitionWitness,
+) -> Result<dsm::economic::lineage::ValidatedAdvance, EconomicValidationError> {
+    let manifest = EconomicAdmissionManifest::new(
+        [0xA1; 32],
+        [0xA2; 32],
+        [0xA3; 32],
+        AdmissionSubstrate::OfflineBoundary {
+            evidence_addr: b.evidence_addr,
+        },
+        witness.derived_provenance_index(),
+    )
+    .expect("valid manifest");
+    let registered = registered_for(&manifest, position, witness.post_economic_root);
+    advance_validated(
+        previous,
+        &registered,
+        &manifest,
+        witness,
+        &AcceptedSubstrate::from_verified_offline_boundary(b.verified, b.evidence_addr),
+        &OneTicket {
+            envelope: fx.envelope.clone(),
+        },
+        &g(),
+        dev(),
+        b"dsm-testnet",
+        &fx.pk,
+    )
+}
+
+/// A load debits the online balance it moves into the offline account; an
+/// unload credits it back, funded by exactly the account debit its body
+/// proves, and consumes that debit: the same unload cannot fund a second
+/// credit, and no other amount, asset or boundary validates.
+#[test]
+fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
+    use dsm::types::device_state::OfflineBoundaryKind::{Load, Unload};
+    use dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let fx = faucet_fixture(1);
+    let manifest = manifest_for(&fx.op, &fx.witness);
+    let at_one = run(
+        &fx,
+        &registered_for(&manifest, 1, fx.post_root),
+        &manifest,
+        &fx.witness,
+        &accepted_for(&fx.op),
+    )
+    .expect("the faucet claim validates")
+    .root;
+
+    let mut tree = EconomicSmt::new();
+    let credit = bal(era, ERA_FAUCET_PAYOUT);
+    tree.insert(
+        credit.leaf_key(&g(), dev()),
+        credit.leaf_value().expect("encodable"),
+    );
+    assert_eq!(tree.root(), at_one.economic_root());
+    let head = head_of(g(), &fx, &[(era, ERA_FAUCET_PAYOUT)], &[], None)
+        .open_offline_account(&bundle(), [0x01; 32], 0)
+        .expect("the account opens");
+
+    // ── position 2: load 300 ──
+    let online = std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT)]);
+    let load = boundary(
+        &head,
+        Load,
+        300,
+        at_one.economic_root(),
+        &mut tree,
+        &online,
+        2,
+    );
+    let at_two = validate_boundary(&fx, &at_one, 2, &load, &load.witness)
+        .expect("the load validates")
+        .root;
+    assert_eq!(
+        load.outcome
+            .new_device_state
+            .offline_allocation(&bundle(), &era),
+        Some(300)
+    );
+
+    // ── position 3: unload 100 ──
+    let online = std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT - 300)]);
+    let after_load = tree.clone();
+    let unload = boundary(
+        &load.outcome.new_device_state,
+        Unload,
+        100,
+        at_two.economic_root(),
+        &mut tree,
+        &online,
+        3,
+    );
+    let at_three =
+        validate_boundary(&fx, &at_two, 3, &unload, &unload.witness).expect("the unload validates");
+    assert_eq!(at_three.funded.len(), 1, "the unload's credit is funded");
+    assert_eq!(at_three.funded[0].amount(), 100);
+
+    // The same unload cannot fund a second credit: its source is consumed.
+    let again = dsm::economic::write_set::build_boundary_write_set(
+        &dsm::economic::write_set::BoundaryEffect {
+            kind: Unload,
+            asset: era,
+            amount: 100,
+            boundary_id: unload.outcome.operation_id,
+        },
+        &g(),
+        dev(),
+        &dsm::economic::write_set::EconomicPreState::new(
+            &std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT - 200)]),
+            4,
+        ),
+        &mut tree,
+    )
+    .expect_err("a consumed offline debit funds nothing more");
+    assert_eq!(
+        again,
+        dsm::economic::write_set::WriteSetError::SourceAlreadyConsumed
+    );
+
+    // A credit larger than the account debit the body proves is refused.
+    let inflated = dsm::economic::write_set::build_boundary_write_set(
+        &dsm::economic::write_set::BoundaryEffect {
+            kind: Unload,
+            asset: era,
+            amount: 101,
+            boundary_id: unload.outcome.operation_id,
+        },
+        &g(),
+        dev(),
+        &dsm::economic::write_set::EconomicPreState::new(&online, 3),
+        &mut after_load.clone(),
+    )
+    .expect("a write set for 101");
+    let witness = EconomicTransitionWitness::new(
+        at_two.economic_root(),
+        inflated.post_root,
+        unload.verified.operation_id(),
+        unload.verified.operation_digest(),
+        inflated.mutations,
+        inflated.credit_sources,
+    )
+    .expect("a witness");
+    let refused = validate_boundary(&fx, &at_two, 3, &unload, &witness)
+        .expect_err("a credit the offline debit does not fund");
+    assert!(
+        refused
+            .to_string()
+            .contains("not exactly the amount it unloads"),
+        "{refused}"
+    );
+
+    // An unload's write set presented on a load's body is refused.
+    let refused = validate_boundary(
+        &fx,
+        &at_two,
+        3,
+        &AdmittedBoundary {
+            outcome: unload.outcome.clone(),
+            verified: load.verified,
+            evidence_addr: load.evidence_addr,
+            witness: unload.witness.clone(),
+        },
+        &unload.witness,
+    )
+    .expect_err("another boundary's body");
+    assert!(
+        matches!(
+            refused,
+            EconomicValidationError::OperationDigestMismatch { .. }
+        ),
+        "{refused}"
+    );
+
+    // A witness that names another boundary's identity is refused.
+    let renamed = EconomicTransitionWitness::new(
+        unload.witness.pre_economic_root,
+        unload.witness.post_economic_root,
+        load.verified.operation_id(),
+        unload.witness.operation_digest,
+        unload.witness.mutations.clone(),
+        unload.witness.credit_sources.clone(),
+    )
+    .expect("a witness");
+    let refused = validate_boundary(&fx, &at_two, 3, &unload, &renamed)
+        .expect_err("another boundary's identity");
+    assert!(
+        matches!(
+            refused,
+            EconomicValidationError::OfflineBoundaryIdMismatch { .. }
+        ),
+        "{refused}"
+    );
+}
+
+/// The `0x0075` arm on its own, beside the write-set check that stands in
+/// front of it: it funds a credit only on an unload's admission, and only
+/// with its source recorded as consumed in the same witness.
+#[test]
+fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
+    use dsm::economic::provenance::{verify_transition_provenance, ProvenanceContext, ProvenanceError};
+    use dsm::types::device_state::OfflineBoundaryKind::{Load, Unload};
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let fx = faucet_fixture(1);
+    let online = std::collections::BTreeMap::from([(era, 500)]);
+    let head = head_of(g(), &fx, &[(era, 500)], &[], None)
+        .open_offline_account(&bundle(), [0x01; 32], 0)
+        .expect("the account opens");
+    let mut tree = EconomicSmt::new();
+    let held = bal(era, 500);
+    tree.insert(
+        held.leaf_key(&g(), dev()),
+        held.leaf_value().expect("encodable"),
+    );
+    let pre_root = tree.root();
+    let load = boundary(&head, Load, 300, pre_root, &mut tree.clone(), &online, 2);
+    let after_load = std::collections::BTreeMap::from([(era, 200)]);
+    let mut loaded_tree = tree.clone();
+    let built = dsm::economic::write_set::build_boundary_write_set(
+        &dsm::economic::write_set::BoundaryEffect {
+            kind: Load,
+            asset: era,
+            amount: 300,
+            boundary_id: load.outcome.operation_id,
+        },
+        &g(),
+        dev(),
+        &dsm::economic::write_set::EconomicPreState::new(&online, 2),
+        &mut loaded_tree,
+    )
+    .expect("the load's write set");
+    assert_eq!(built.post_root, load.witness.post_economic_root);
+    let unload = boundary(
+        &load.outcome.new_device_state,
+        Unload,
+        100,
+        loaded_tree.root(),
+        &mut loaded_tree.clone(),
+        &after_load,
+        3,
+    );
+    let ctx = |offline_boundary| ProvenanceContext {
+        genesis: &holder().genesis,
+        device_id: dev(),
+        economic_position: 3,
+        network_id: b"dsm-testnet",
+        proven_ak: &fx.pk,
+        canonical_storage_set_id: canonical_set_id(),
+        substrate_b_pair: None,
+        verified_operation: None,
+        offline_boundary,
+    };
+    let resolver = OneTicket {
+        envelope: fx.envelope.clone(),
+    };
+    verify_transition_provenance(&unload.witness, &resolver, &ctx(Some(&unload.verified)))
+        .expect("the unload's own debit funds its credit");
+    // On a load's substrate the same credit has no offline debit to fund it.
+    assert_eq!(
+        verify_transition_provenance(&unload.witness, &resolver, &ctx(Some(&load.verified))),
+        Err(ProvenanceError::NotAnOfflineUnload)
+    );
+    assert_eq!(
+        verify_transition_provenance(&unload.witness, &resolver, &ctx(None)),
+        Err(ProvenanceError::NotAnOfflineUnload)
+    );
+    // The credit without the consumption of its source is not funded once.
+    let credit_only: Vec<EconomicLeafMutation> = unload
+        .witness
+        .mutations
+        .iter()
+        .filter(|m| matches!(m.post_state, Some(EconomicLeafState::Balance(_))))
+        .cloned()
+        .collect();
+    let witness = EconomicTransitionWitness::new(
+        unload.witness.pre_economic_root,
+        unload.witness.post_economic_root,
+        unload.witness.economic_operation_id,
+        unload.witness.operation_digest,
+        credit_only,
+        vec![CreditSource::OfflineBoundaryDebit(
+            dsm::economic::credit::CreditSourceOfflineBoundaryDebit {
+                credit_mutation_index: 0,
+            },
+        )],
+    )
+    .expect("a witness");
+    assert!(matches!(
+        verify_transition_provenance(&witness, &resolver, &ctx(Some(&unload.verified))),
+        Err(ProvenanceError::SourceNotRecordedAsConsumed { .. })
+    ));
 }

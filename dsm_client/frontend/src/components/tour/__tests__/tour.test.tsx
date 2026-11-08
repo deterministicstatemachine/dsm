@@ -240,6 +240,38 @@ describe('the ring', () => {
   });
 });
 
+describe('a hands-on step can tuck its guide away', () => {
+  beforeEach(() => {
+    resetTour();
+    act(() => tourStore.start());
+  });
+  afterEach(() => act(() => tourStore.end()));
+
+  // On a phone the guide covered the token wizard's Continue: a hands-on step
+  // whose target is a whole panel leaves the guide over that panel's buttons.
+  it('Hide tucks the guide above the screen with its prompt, and Show brings it back', async () => {
+    const index = TOUR_STEPS.findIndex((s) => s.id === 'go-send');
+    const step = TOUR_STEPS[index];
+    act(() => {
+      while (tourStore.getSnapshot().index < index) tourStore.next();
+    });
+    render(<GuidedTour appState="wallet_ready" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Hide' }));
+    expect(document.querySelector('.gt-dialog--tucked')).not.toBeNull();
+    expect(screen.getByRole('status')).toHaveTextContent(step.prompt ?? 'Your turn');
+    expect(screen.queryByRole('button', { name: 'Skip' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show' }));
+    expect(document.querySelector('.gt-dialog--tucked')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeInTheDocument();
+  });
+
+  it('offers no Hide on a step the user only reads', async () => {
+    render(<GuidedTour appState="wallet_ready" />);
+    await screen.findByRole('button', { name: 'Next' });
+    expect(screen.queryByRole('button', { name: 'Hide' })).toBeNull();
+  });
+});
+
 describe('placeDialog', () => {
   const screenBox = { top: 0, left: 0, width: 300, height: 400 };
 
@@ -301,7 +333,6 @@ describe('tour anchors', () => {
       'liquidity-create',
       'liquidity-vaults',
       'recent-activity',
-      'swap-get',
       'swap-pay',
       'tokens-tabs',
       'tutorial-button',
@@ -333,11 +364,22 @@ describe('tour anchors', () => {
     for (const name of [...classes, ...ids]) expect(rendered).toMatch(written(name));
   });
 
-  // Offline sending and Bitcoin stay out of the tour (owner, 2026-10-01).
-  it('no step teaches offline sending or Bitcoin', () => {
+  // Bitcoin stays out of the tour (owner, 2026-10-01).
+  it('no step teaches Bitcoin', () => {
     for (const step of TOUR_STEPS) {
-      expect(`${step.title} ${step.body}`).not.toMatch(/bluetooth|appliance|bitcoin|dbtc|offline (send|allocation|funding|mode)/i);
-      expect(JSON.stringify(step)).not.toMatch(/offline-funding|appliance-setup|Transaction mode/);
+      expect(`${step.title} ${step.body}`).not.toMatch(/bitcoin|dbtc/i);
+      expect(JSON.stringify(step)).not.toMatch(/offline-funding|appliance-setup/);
     }
+  });
+
+  // Offline is taught as a mechanism, with no offline send (owner, 2026-10-31:
+  // "You shouldn't need to actually do any of the transfers for it to show you
+  // how to do them all. By the way, that includes how to do offline
+  // transactions. It should show the mechanisms."). Offline sending is not open
+  // in this build, so its steps point at the send form and wait for nothing.
+  it('the offline steps show the mechanism and send nothing offline', () => {
+    const offline = TOUR_STEPS.filter((step) => step.id.startsWith('offline-'));
+    expect(offline.map((step) => step.id)).toEqual(['offline-mode', 'offline-how', 'offline-rules']);
+    for (const step of offline) expect(step.wait).toBeUndefined();
   });
 });

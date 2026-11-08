@@ -23,10 +23,12 @@
 //! NOT mutate `DeviceState.balances` itself.
 
 use crate::bluetooth::bilateral_ble_handler::BilateralSettlementDelegate;
-use crate::sdk::token_state::{canonicalize_token_id, TransferFields};
+use crate::handlers::wallet_routes::canonicalize_token_id;
+use crate::sdk::token_state::TransferFields;
 use crate::sdk::transfer_hooks::TransferMeta;
 use crate::util::text_id::encode_base32_crockford;
 use dsm::types::error::DsmError;
+use dsm::verification::receipt_verification::BilateralSide;
 use dsm::types::operations::{Operation, TransferTerms};
 
 /// `(amount, token_id)` of a step for display: a transfer's amount from its
@@ -77,11 +79,6 @@ fn parse_transfer(
     }))
 }
 
-fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
-    crate::policy::strict_policy_commit_for_token(token_id, None)
-        .map_err(|e| format!("resolve policy commit failed for {token_id}: {e}"))
-}
-
 /// A transfer's settlement inputs, resolved before the step's advance.
 #[derive(Debug, Clone)]
 struct SettledTransfer {
@@ -105,7 +102,8 @@ pub(crate) struct StepSettlement {
     operation_bytes: Vec<u8>,
     /// A transfer's terms, kept in its history row beside the operation.
     terms_bytes: Option<Vec<u8>>,
-    is_sender: bool,
+    /// This device's side of the step: its sender (A) or its receiver (B).
+    side: BilateralSide,
     transfer: Option<SettledTransfer>,
 }
 
@@ -121,7 +119,7 @@ impl StepSettlement {
         parent_tip: [u8; 32],
         operation_bytes: Vec<u8>,
         terms: Option<&TransferTerms>,
-        is_sender: bool,
+        side: BilateralSide,
     ) -> Result<Self, String> {
         let operation = Operation::from_bytes(&operation_bytes)
             .map_err(|e| format!("bilateral settle: the step's operation does not decode: {e}"))?;
@@ -130,7 +128,10 @@ impl StepSettlement {
                 if t.token_id.is_empty() {
                     return Err("bilateral settle: the transfer names no token".to_string());
                 }
-                let policy_commit = resolve_policy_commit(&t.token_id)?;
+                let policy_commit = crate::policy::resolve_policy_commit_strict(
+                    t.token_id.as_bytes(),
+                )
+                .map_err(|e| format!("resolve policy commit failed for {}: {e}", t.token_id))?;
                 let locked = crate::storage::client_db::get_locked_balance(
                     &encode_base32_crockford(&local_device_id),
                     &t.token_id,
@@ -152,7 +153,7 @@ impl StepSettlement {
             parent_tip,
             operation_bytes,
             terms_bytes: terms.map(TransferTerms::to_bytes),
-            is_sender,
+            side,
             transfer,
         })
     }
@@ -171,13 +172,16 @@ impl StepSettlement {
     /// Write the step's relationship tip (`parent_tip` → `child_tip`, bound to
     /// the step's commitment), its balance projection from `outcome`'s head,
     /// and its history row with the step's signed `receipt`, in `tx` — the
-    /// transaction the advance commits in.
+    /// transaction the advance commits in. An offline-bearer sender commits its
+    /// step when its anchor commits, before the receiver's counter-signed
+    /// receipt exists: its row is written with no proof, and the receipt is
+    /// written into it when the acknowledgment verifies.
     pub(crate) fn write_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
         outcome: &dsm::types::device_state::AdvanceOutcome,
         child_tip: [u8; 32],
-        receipt: &[u8],
+        receipt: Option<&[u8]>,
     ) -> Result<(), DsmError> {
         let local_txt = encode_base32_crockford(&self.local_device_id);
         let head = &outcome.new_device_state;
@@ -210,10 +214,9 @@ impl StepSettlement {
             None => None,
         };
         let counterparty_txt = encode_base32_crockford(&self.counterparty_device_id);
-        let (from_device, to_device) = if self.is_sender {
-            (local_txt, counterparty_txt)
-        } else {
-            (counterparty_txt, local_txt)
+        let (from_device, to_device) = match self.side {
+            BilateralSide::A => (local_txt, counterparty_txt),
+            BilateralSide::B => (counterparty_txt, local_txt),
         };
         let record = crate::storage::client_db::TransactionRecord {
             tx_id: encode_base32_crockford(&self.commitment_hash),
@@ -224,7 +227,7 @@ impl StepSettlement {
             tx_type: "bilateral_offline".to_string(),
             status: "completed".to_string(),
             commitment_hash: Some(encode_base32_crockford(&self.commitment_hash).into_bytes()),
-            proof_data: Some(receipt.to_vec()),
+            proof_data: receipt.map(<[u8]>::to_vec),
             metadata: {
                 let mut m = std::collections::HashMap::new();
                 if let Some(t) = &self.transfer {
@@ -258,11 +261,6 @@ impl StepSettlement {
         )
         .map_err(|e| DsmError::storage(format!("bilateral settle: {e}"), None::<std::io::Error>))
     }
-
-    /// The operation bytes the step settles.
-    pub(crate) fn operation_bytes(&self) -> &[u8] {
-        &self.operation_bytes
-    }
 }
 
 /// Display metadata for the offline protocol's events; the application
@@ -286,7 +284,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 #[cfg(test)]
 mod tests {
     use super::parse_transfer_fields;
-    use crate::sdk::token_state::canonicalize_token_id;
+    use crate::handlers::wallet_routes::canonicalize_token_id;
     use dsm::types::operations::{Operation, TransactionMode};
     use dsm::types::token_types::Balance;
 
@@ -308,8 +306,10 @@ mod tests {
         };
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: terms.commitment(),
             to_device_id: vec![0x11; 32],
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(5),
             signature: vec![],
             authority_policy: None,
@@ -334,8 +334,10 @@ mod tests {
         };
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: terms.commitment(),
             to_device_id: vec![0x11; 32],
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(7),
             signature: vec![],
             authority_policy: None,
@@ -355,6 +357,23 @@ mod tests {
         assert!(refused.contains("carries no terms"), "{refused}");
     }
 
+    /// Stores `counterparty` as a contact whose genesis was verified online,
+    /// with `held` as the relationship tip this device holds toward it.
+    fn store_peer(counterparty: [u8; 32], genesis: [u8; 32], public_key: Vec<u8>, held: [u8; 32]) {
+        crate::storage::client_db::store_contact_for_tests(
+            &dsm::types::contact_types::DsmVerifiedContact {
+                alias: "peer".to_string(),
+                device_id: counterparty,
+                genesis_hash: genesis,
+                public_key,
+                chain_tip: Some(held),
+                genesis_verified_online: true,
+                verifying_storage_nodes: vec![],
+                ble_address: None,
+            },
+        );
+    }
+
     /// A step's settlement commits in its advance's transaction: when the
     /// settlement refuses — here the relationship tip is not the step's parent
     /// — the head does not advance either, and nothing of the step is kept.
@@ -366,30 +385,30 @@ mod tests {
         let (identity, core) = crate::economic_fixtures::local_device(0x31);
         let counterparty = [0x32u8; 32];
         let held = [0x70u8; 32];
-        crate::storage::client_db::store_contact_for_tests(
-            &dsm::types::contact_types::DsmVerifiedContact {
-                alias: "peer".to_string(),
-                device_id: counterparty,
-                genesis_hash: [0x33u8; 32],
-                public_key: vec![0x41; 64],
-                chain_tip: Some(held),
-                genesis_verified_online: true,
-                verifying_storage_nodes: vec![],
-                ble_address: None,
-            },
-        );
+        store_peer(counterparty, [0x33u8; 32], vec![0x41; 64], held);
         core.establish_relationship(counterparty)
             .expect("establish the relationship");
         let before = core.device_head().expect("head").root();
 
+        // A step that moves no value and changes state: a vault's creation.
+        // Core refuses a step that changes nothing (MR-DSM-0201).
+        let step = Operation::DlvCreate {
+            vault_id: b"settled-step".to_vec(),
+            creator_public_key: Vec::new(),
+            parameters_hash: Vec::new(),
+            fulfillment_condition: Vec::new(),
+            intended_recipient: None,
+            signature: Vec::new(),
+            mode: dsm::types::operations::TransactionMode::Bilateral,
+        };
         let settlement = super::StepSettlement::resolve(
             identity.device_id,
             counterparty,
             [0x34u8; 32],
             [0x71u8; 32],
-            Operation::Noop.to_bytes(),
+            step.to_bytes(),
             None,
-            false,
+            dsm::verification::receipt_verification::BilateralSide::B,
         )
         .expect("resolve");
         let err = core
@@ -399,13 +418,12 @@ mod tests {
                     &counterparty,
                 ),
                 counterparty,
-                Operation::Noop,
+                step,
                 &[],
                 None,
                 None,
-                None,
                 // The settlement refuses at the tip, before a receipt is kept.
-                &|tx, o| settlement.write_in_tx(tx, o, [0x72u8; 32], &[]),
+                &|tx, o| settlement.write_in_tx(tx, o, [0x72u8; 32], None),
             )
             .expect_err("a step whose settlement refuses does not commit");
         assert!(err.to_string().contains("conflict"), "{err}");
@@ -420,6 +438,67 @@ mod tests {
         );
         assert!(!crate::storage::client_db::transaction_exists(
             &crate::util::text_id::encode_base32_crockford(&[0x34u8; 32])
+        )
+        .expect("read the history"));
+    }
+
+    /// MR-DSM-0201: a zero-effect transition is not a transition. A `Noop`
+    /// presented to Core's advance is refused with the typed error, and
+    /// nothing moves: the head stays where it was, the relationship tip is
+    /// the one held, and no step is recorded. The settlement here would take
+    /// the step (its parent is the held tip), so only Core's refusal stops it.
+    /// MUTATION CONTROL: dropping the refusal lets the `Noop` advance and
+    /// commit with its settlement, and turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn a_noop_presented_to_core_is_refused_and_moves_nothing() {
+        let (identity, core) = crate::economic_fixtures::local_device(0x35);
+        let counterparty = [0x36u8; 32];
+        let held = [0x73u8; 32];
+        store_peer(counterparty, [0x37u8; 32], vec![0x42; 64], held);
+        core.establish_relationship(counterparty)
+            .expect("establish the relationship");
+        let before = core.device_head().expect("head").root();
+
+        let settlement = super::StepSettlement::resolve(
+            identity.device_id,
+            counterparty,
+            [0x38u8; 32],
+            held,
+            Operation::Noop.to_bytes(),
+            None,
+            dsm::verification::receipt_verification::BilateralSide::B,
+        )
+        .expect("resolve");
+        let refused = core
+            .execute_offline_step(
+                dsm::core::bilateral_transaction_manager::compute_smt_key(
+                    &identity.device_id,
+                    &counterparty,
+                ),
+                counterparty,
+                Operation::Noop,
+                &[],
+                None,
+                None,
+                &|tx, o| settlement.write_in_tx(tx, o, [0x74u8; 32], None),
+            )
+            .expect_err("a Noop is no transition");
+        assert!(
+            matches!(refused, dsm::types::error::DsmError::ZeroEffectTransition),
+            "{refused}"
+        );
+        assert_eq!(
+            core.device_head().expect("head").root(),
+            before,
+            "the head advanced by a Noop"
+        );
+        assert_eq!(
+            crate::storage::client_db::get_contact_chain_tip(&counterparty).expect("read"),
+            Some(held)
+        );
+        assert!(!crate::storage::client_db::transaction_exists(
+            &crate::util::text_id::encode_base32_crockford(&[0x38u8; 32])
         )
         .expect("read the history"));
     }

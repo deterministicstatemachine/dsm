@@ -86,12 +86,20 @@ pub const TAG_DSM_CHAIN_HEAD_AT_REST_V3: TaggedHashDomain<'static> =
 /// SDK context entropy: `Expand(PRK_w, "DSM/sdk-entropy/v3" ‖ 0x00 ‖ DevID ‖ G)`.
 pub const TAG_DSM_SDK_ENTROPY_V3: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sdk-entropy/v3");
-/// The recovery ring's AEAD key: `Expand(PRK_w, "DSM/recovery-aead/v2" ‖ 0x00)`.
+/// The recovery AEAD key KS1 defines: `Expand(PRK_w, "DSM/recovery-aead/v2" ‖ 0x00)`.
 pub const TAG_DSM_RECOVERY_AEAD_V2: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery-aead/v2");
 /// The recovery-authority SPHINCS+ seed: `Expand(PRK_w, "DSM/recovery-authority/v2" ‖ 0x00)`.
 pub const TAG_DSM_RECOVERY_AUTHORITY_V2: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery-authority/v2");
+/// A match session key's seed (SoFi §19.10, Amendment S27):
+/// `Expand(PRK_w, "DSM/escrow/session-key/v2" ‖ 0x00 ‖ G ‖ match_nonce)`.
+pub const TAG_DSM_ESCROW_SESSION_KEY_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/escrow/session-key/v2");
+/// A side's start entropy for a match (SoFi §19.10, Amendment S33):
+/// `Expand(PRK_w, "DSM/escrow/start-entropy/v1" ‖ 0x00 ‖ G ‖ match_nonce)`.
+pub const TAG_DSM_ESCROW_START_ENTROPY_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/escrow/start-entropy/v1");
 /// The ML-KEM identity seed, keyed by Smaster like the per-step EK seeds:
 /// `keyed-BLAKE3(Smaster, "DSM/ml-kem-identity/v1" ‖ 0x00 ‖ "ML-KEM-768")`.
 pub const TAG_DSM_ML_KEM_IDENTITY_V1: TaggedHashDomain<'static> =

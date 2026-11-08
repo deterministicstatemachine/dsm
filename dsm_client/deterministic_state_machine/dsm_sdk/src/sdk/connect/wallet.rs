@@ -8,7 +8,8 @@
 //! The listener only asks the installed app router for `connect.sync`, the
 //! same route a screen may call: every request is decided against its grant
 //! and carried out by the router's own production routes, exactly as if the
-//! player had started it by hand.
+//! player had started it by hand. While the wallet is locked nothing is
+//! carried out; requests wait for it to open.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -18,7 +19,8 @@ use prost::Message;
 
 use super::d32;
 use super::grant::{scopes_from_wire, Request, Scope, ScopeKind};
-use super::signed::{canonical, card_identity, offer_digest, own_network, verify, CardIdentity, Signed};
+use super::signed::own_network;
+use dsm::connect::{canonical, card_identity, offer_digest, verify, CardIdentity, Signed};
 use crate::util::text_id::encode_base32_crockford;
 
 /// The longest display name an offer may carry.
@@ -85,6 +87,13 @@ pub fn verify_offer(
 pub fn granted_scopes(accept_body: &[u8]) -> Result<Vec<Scope>, String> {
     let body: generated::AppConnectAcceptBodyV1 = canonical(accept_body, "the stored accept")?;
     scopes_from_wire(&body.granted)
+}
+
+/// How many requests that move nothing the signed grant allows over the
+/// session's life (SA-78).
+pub fn granted_free_requests(accept_body: &[u8]) -> Result<u32, String> {
+    let body: generated::AppConnectAcceptBodyV1 = canonical(accept_body, "the stored accept")?;
+    Ok(body.free_requests)
 }
 
 /// A token as the player reads it: its symbol and an amount in its decimals,
@@ -313,6 +322,7 @@ pub fn describe_request(request: &Request) -> String {
             1 => "Collect a battle result".to_string(),
             n => format!("Collect a battle result ({n} stakes)"),
         },
+        Request::Sign { statement } => format!("Sign this: \"{statement}\""),
         Request::Contacts => "Share your contacts' DSM IDs".to_string(),
     }
 }
@@ -356,6 +366,13 @@ static LISTENER: once_cell::sync::Lazy<std::sync::Mutex<Option<tokio::task::Join
 /// How long to wait after a cycle that could not run before the next one.
 const RETRY_AFTER: Duration = Duration::from_secs(3);
 
+/// The least time from the start of one sync cycle to the start of the next.
+/// The relay's long poll paces a cycle that waits on it; one that does not —
+/// a request held for the player, which asks the relay nothing, or a relay
+/// that answers at once — would otherwise run back to back (SA-82). A
+/// transport pace, never a verdict.
+const MIN_CYCLE: Duration = Duration::from_secs(1);
+
 /// Start the listener unless one is running. It ends by itself once no
 /// application is connected; approving one starts it again.
 pub fn start_listener() -> Result<(), String> {
@@ -394,46 +411,87 @@ pub fn resume_listener() -> Result<(), String> {
     Ok(())
 }
 
+/// What one sync cycle came to.
+enum Cycle {
+    /// The cycle ran and answered every connected application's session.
+    Sessions(Vec<generated::ConnectSessionV1>),
+    /// No cycle ran: why.
+    NotRun(String),
+}
+
+/// Whether no session's sync completed in a cycle that answered `sessions`:
+/// every relay down or refusing. The listener then waits [`RETRY_AFTER`].
+fn none_completed(sessions: &[generated::ConnectSessionV1]) -> bool {
+    sessions
+        .iter()
+        .all(|session| !session.last_error.is_empty())
+}
+
 async fn listen() {
     log::info!("[connect] listener started");
+    listen_with(sync_cycle).await;
+    log::info!("[connect] listener stopped: no application is connected");
+}
+
+/// Run `cycle` over and over until one answers that no application is
+/// connected. Each cycle runs beside a [`MIN_CYCLE`] pause and the next
+/// starts once both have ended, so no two cycles start closer together; a
+/// cycle in which no session's sync completed waits [`RETRY_AFTER`] more.
+async fn listen_with<F, C>(cycle: F)
+where
+    F: Fn() -> C,
+    C: core::future::Future<Output = Cycle>,
+{
     loop {
-        let Some(router) = crate::bridge::app_router() else {
-            tokio::time::sleep(RETRY_AFTER).await;
-            continue;
-        };
-        let result = router
-            .invoke(crate::bridge::AppInvoke {
-                method: "connect.sync".into(),
-                args: Vec::new(),
-            })
-            .await;
-        if !result.success {
-            log::warn!(
-                "[connect] a sync cycle did not run: {:?}",
-                result.error_message
-            );
-            tokio::time::sleep(RETRY_AFTER).await;
-            continue;
-        }
-        match crate::handlers::response_helpers::decode_local_envelope(&result.data) {
-            Ok(generated::Envelope {
-                payload:
-                    Some(generated::envelope::Payload::ConnectReply(generated::ConnectReplyV1 {
-                        reply: Some(generated::connect_reply_v1::Reply::Sessions(s)),
-                    })),
-                ..
-            }) => {
-                if s.sessions.is_empty() {
-                    break;
-                }
+        let (answered, ()) = tokio::join!(cycle(), tokio::time::sleep(MIN_CYCLE));
+        match answered {
+            Cycle::Sessions(sessions) if sessions.is_empty() => break,
+            Cycle::Sessions(sessions) if none_completed(&sessions) => {
+                tokio::time::sleep(RETRY_AFTER).await;
             }
-            other => {
-                log::warn!("[connect] a sync cycle answered {other:?}, not the sessions");
+            Cycle::Sessions(_) => {}
+            Cycle::NotRun(why) => {
+                log::warn!("[connect] a sync cycle did not run: {why}");
                 tokio::time::sleep(RETRY_AFTER).await;
             }
         }
     }
-    log::info!("[connect] listener stopped: no application is connected");
+}
+
+/// One sync cycle: `connect.sync` through the router, unless the wallet is
+/// locked.
+async fn sync_cycle() -> Cycle {
+    // The router is invoked here, not through the ingress, so the lock is
+    // read here: while the wallet is locked no request is fetched or run
+    // (SA-18). `connect.sync` holds every request back while it is locked
+    // too; this keeps the listener from cycling the relay meanwhile.
+    match crate::sdk::session_manager::lock_holds() {
+        Ok(None) => {}
+        Ok(Some(..)) => return Cycle::NotRun("the wallet is locked".into()),
+        Err(e) => return Cycle::NotRun(format!("the session lock could not be read: {e}")),
+    }
+    let Some(router) = crate::bridge::app_router() else {
+        return Cycle::NotRun("no router yet".into());
+    };
+    let result = router
+        .invoke(crate::bridge::AppInvoke {
+            method: "connect.sync".into(),
+            args: Vec::new(),
+        })
+        .await;
+    if !result.success {
+        return Cycle::NotRun(format!("{:?}", result.error_message));
+    }
+    match crate::handlers::response_helpers::decode_local_envelope(&result.data) {
+        Ok(generated::Envelope {
+            payload:
+                Some(generated::envelope::Payload::ConnectReply(generated::ConnectReplyV1 {
+                    reply: Some(generated::connect_reply_v1::Reply::Sessions(s)),
+                })),
+            ..
+        }) => Cycle::Sessions(s.sessions),
+        other => Cycle::NotRun(format!("it answered {other:?}, not the sessions")),
+    }
 }
 
 /// Encode an `AppResponseV1` the wallet signed over `body`.
@@ -459,6 +517,42 @@ mod tests {
         assert!(memo.ends_with("1 capsule"));
         assert_ne!(payment_ref(&session, 7), payment_ref(&session, 8));
         assert_eq!(payment_memo(&session, 7, "  "), payment_ref(&session, 7));
+    }
+
+    /// SA-82. The listener never starts cycles faster than one a
+    /// `MIN_CYCLE`: cycles that answer at once — a request held for the
+    /// player asks the relay nothing — are paced, not run back to back, and
+    /// cycles in which every session failed wait `RETRY_AFTER` more. Two and
+    /// a half intervals of cycles that each answer at once run three, where
+    /// unpaced they ran without end.
+    /// MUTATION CONTROL: dropping the pause beside each cycle turns this red.
+    #[tokio::test]
+    async fn the_listener_never_cycles_faster_than_its_minimum_interval() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let healthy = generated::ConnectSessionV1::default();
+        let failing = generated::ConnectSessionV1 {
+            last_error: "the relay did not answer".into(),
+            ..Default::default()
+        };
+        assert!(none_completed(std::slice::from_ref(&failing)));
+        assert!(!none_completed(std::slice::from_ref(&healthy)));
+        assert!(!none_completed(&[failing, healthy.clone()]));
+
+        let cycles = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = cycles.clone();
+        let listener = tokio::spawn(async move {
+            listen_with(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let sessions = vec![healthy.clone()];
+                async move { Cycle::Sessions(sessions) }
+            })
+            .await
+        });
+        tokio::time::sleep(MIN_CYCLE * 5 / 2).await;
+        listener.abort();
+        let ran = cycles.load(Ordering::SeqCst);
+        assert!(ran <= 3, "{ran} cycles ran in two and a half intervals");
+        assert!(ran >= 1, "the listener ran no cycle");
     }
 
     /// DSM Amendment A16: a contacts answer is each contact's device id,

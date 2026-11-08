@@ -5,7 +5,7 @@
 
 This guide covers building the hardware anchor that DSM uses for offline bearer transfer. The appliance has two parts: an RP2350 microcontroller (on a Raspberry Pi Pico 2 W) and a TROPIC01 secure element (on a MIKROE Secure Tropic Click). They are joined by six wires and fit together in a 3D-printed case about the size of a key fob. The appliance plugs into a phone over USB-OTG.
 
-The appliance proves **device identity only**. Transfer uniqueness is a software property of the DSM state machine, and the firmware is not the transfer authority. See `crates/dsm-anchor-pico/src/main.rs` for the authority model, and see [`docs/bench-proofs/`](../../bench-proofs/) for the silicon proof logs.
+The appliance proves **device identity only**. Transfer uniqueness is a software property of the DSM state machine, and the firmware is not the transfer authority. See `crates/dsm-anchor-core` (the appliance and the anchor's states) for the authority model, and see [`docs/bench-proofs/`](../../bench-proofs/) for the silicon proof logs.
 
 | Sheet | Contents |
 |---|---|
@@ -38,7 +38,7 @@ Datasheets: [Secure Tropic Click (MIKROE-6559)](https://www.mouser.com/datasheet
 
 ## 2. Wiring
 
-The firmware fixes the pin map (`crates/dsm-anchor-pico/src/main.rs` and `crates/dsm-anchor-secure-monitor/src/tropic.rs`), so the wiring below is the only one that works.
+The firmware fixes the pin map (`crates/dsm-anchor-secure-monitor/src/anchor_glue.rs`), so the wiring below is the only one that works.
 
 | Wire | Signal | Pico 2 W | Pico pin | Click pad (left header) | Direction | Suggested colour |
 |---|---|---|---|---|---|---|
@@ -92,26 +92,26 @@ Inside the case the Click lies **under** the Pico. Sheet 1 draws the two boards 
 
 ## 5. Firmware bring-up and self-test
 
-The firmware lives in [`crates/dsm-anchor-pico`](../../../crates/dsm-anchor-pico). That crate is excluded from the host workspace (it builds for thumbv8m only), and its README has the full build and flash steps. In short:
+The firmware is two TrustZone images: the Secure monitor ([`crates/dsm-anchor-secure-monitor`](../../../crates/dsm-anchor-secure-monitor)), which holds the TROPIC01 session, the anchor and its R-memory record, and the Non-secure USB transport ([`crates/dsm-anchor-nonsecure-app`](../../../crates/dsm-anchor-nonsecure-app)), which the monitor's build embeds. Both are excluded from the host workspace (they build for thumbv8m only). In short:
 
 ```sh
-# libtropic-rs must be checked out where crates/dsm-anchor-pico/Cargo.toml expects it:
-#   crates/dsm-anchor-pico/../../../../libtropic-rs/tropic01
-cd crates/dsm-anchor-pico
-cargo build --release                       # thumbv8m.main-none-eabihf (default target)
+# libtropic-rs must be checked out where crates/dsm-anchor-secure-monitor/Cargo.toml expects it:
+#   crates/dsm-anchor-secure-monitor/../../../../libtropic-rs/tropic01
+cd crates/dsm-anchor-secure-monitor
+cargo build --release                       # thumbv8m.main-none-eabihf; embeds the Non-secure image
 
 # Hold BOOTSEL (paperclip through the lid pinhole once closed) while plugging in USB, then:
-picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/dsm-anchor-pico
-
-python3 tools/anchor_host_test.py          # STATUS → PREPARE → COMMIT → EMIT → FINALIZE → STATUS
+picotool load -v -x -t elf target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor
 ```
+
+The monitor refuses to start until the board's sealed secret is in OTP (the secure-boot runbook below). A started appliance is unprovisioned until the DSM app provisions it for its owner's device.
 
 When it's working, the appliance enumerates over USB-CDC as **"DSM Anchor"** (VID `0x1209`, PID `0xD5A1`). The DSM Android app's USB filter (`dsm_client/android/app/src/main/res/xml/pico_device_filter.xml`) matches that ID when the appliance is plugged into a phone over USB-OTG.
 
 > [!CAUTION]
 > **Assembly and self-test change nothing permanent. The two runbooks below do,** and neither is part of building the appliance. Read each one in full and dry-run it on a sacrificial board first.
-> - [`crates/dsm-anchor-pico/scripts/anchor-secure-boot/RUNBOOK.md`](../../../crates/dsm-anchor-pico/scripts/anchor-secure-boot/RUNBOOK.md) burns RP2350 secure-boot and host-secret OTP fuses. A wrong value bricks the board.
-> - [`crates/dsm-anchor-hw-verifier/BENCH_BURN_RUNBOOK.md`](../../../crates/dsm-anchor-hw-verifier/BENCH_BURN_RUNBOOK.md) does the TROPIC01 verifier-slot and counter set-up, which consumes a pairing slot permanently.
+> - [`crates/dsm-anchor-secure-monitor/scripts/anchor-secure-boot/RUNBOOK.md`](../../../crates/dsm-anchor-secure-monitor/scripts/anchor-secure-boot/RUNBOOK.md) burns RP2350 secure-boot and sealed-secret OTP fuses. A wrong value bricks the board.
+> - The first provisioning from the DSM app closes the TROPIC01 to a second birth: it writes the board's own pairing key, invalidates the factory key and revokes the commands a second birth would use. It cannot be undone, and the chip then serves only that owner's device.
 
 ## 6. Troubleshooting
 

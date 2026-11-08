@@ -564,8 +564,8 @@ pub fn mark_contact_needs_online_reconcile(device_id: &[u8]) -> Result<()> {
 
     if updated > 0 {
         info!(
-            "Marked contact for online reconciliation: device_id={:02x}{:02x}...",
-            device_id[0], device_id[1]
+            "Marked contact for online reconciliation: device_id={}",
+            crate::util::text_id::encode_base32_crockford(device_id)
         );
     }
 
@@ -950,7 +950,7 @@ mod tests {
     }
 
     /// After a paired peer's BLE address rotates, the re-persist on a later
-    /// identity read (`update_contact_ble_status(device_id, None, Some(new))`)
+    /// paired link (`update_contact_ble_status(device_id, None, Some(new))`)
     /// re-points the contact: it holds the fresh address, not the stale one.
     #[test]
     #[serial]
