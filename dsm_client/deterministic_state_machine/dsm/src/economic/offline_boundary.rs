@@ -1212,7 +1212,6 @@ mod tests {
     #[test]
     fn a_boundary_carries_every_spend_since_the_last() {
         use crate::types::offline_chain::fixture::Payer;
-        use prost::Message;
         let mut payer = Payer::loaded(0x61, 40);
         let after_load = payer.account_root();
         let (first, _, _) = payer.spend([0xB0; 32], 10);
