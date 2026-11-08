@@ -17,7 +17,9 @@ Every extraction in this round is taken against exactly these bytes:
 | `specs/DSM_High_Level_Explainer.md` | `2778bb9dab75145755463bbe2fe37bd20ddb5f10` | 4527 |
 | `specs/SoFi_Settlement_Specification.md` | `2f4aeca7089c85a9388ace3658b9cf4b23e572c0` | 3131 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `3b067f88e50f91b7bdc483220cd2c22ad5cf920a` | 645 |
+| `specs/DSM_Storage_Node_Specification.md` | `118d8afac5beff4e404fb0eaaf0e6ede3f764f8e` | 647 |
+
+Storage node pin updated 2026-11-08 for the owner's decision of 2026-11-05 (each operator's own certificate), quoted in the specification: a storage set has no shared CA, and each member is pinned to its own operator's CA. No requirement row names a storage CA, so every row reads as written.
 
 Explainer pin updated 2026-11-04 after A28's first-spend exception came out (direction pasted into the session, 2026-11-04): MR-DSM-0348 removed, and every other row reads as written. The edit replaced one line in place.
 
