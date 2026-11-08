@@ -532,6 +532,9 @@ pub(crate) mod fixture {
         pub(crate) token_policy: Vec<u8>,
         pub(crate) genesis: [u8; 32],
         related: Vec<[u8; 32]>,
+        /// The secret half of `head`'s device key: the owner the anchor was
+        /// provisioned for, who signs each prepare's authorization.
+        owner_sk: Vec<u8>,
     }
 
     impl Payer {
@@ -549,6 +552,7 @@ pub(crate) mod fixture {
         pub(crate) fn loaded_with(seed: u8, loaded: u64, flags: u8) -> Self {
             Self::loaded_on(
                 crate::types::device_state::tests::fresh_device(seed),
+                crate::types::device_state::tests::test_keypair().secret_key(),
                 derive(seed, "genesis"),
                 seed,
                 loaded,
@@ -557,9 +561,10 @@ pub(crate) mod fixture {
         }
 
         /// [`Self::loaded_with`] on `device`, a head whose genesis is
-        /// `genesis`.
+        /// `genesis` and whose device key's secret half is `owner_sk`.
         pub(crate) fn loaded_on(
             device: DeviceState,
+            owner_sk: &[u8],
             genesis: [u8; 32],
             seed: u8,
             loaded: u64,
@@ -626,6 +631,7 @@ pub(crate) mod fixture {
                 token_policy,
                 genesis,
                 related: Vec::new(),
+                owner_sk: owner_sk.to_vec(),
             }
         }
 
@@ -739,7 +745,7 @@ pub(crate) mod fixture {
             );
             let signature = crate::crypto::sphincs::sign(
                 crate::crypto::sphincs::SphincsVariant::SPX256f,
-                crate::types::device_state::tests::test_keypair().secret_key(),
+                &self.owner_sk,
                 &authorization,
             )
             .expect("the owner signs");

@@ -1868,6 +1868,7 @@ mod tests {
         let receiver = Peer::new(0x62);
         let mut payer = Payer::loaded_on(
             sender.party.head(),
+            sender.party.signing_secret_key(),
             sender.genesis,
             0x61,
             40,
