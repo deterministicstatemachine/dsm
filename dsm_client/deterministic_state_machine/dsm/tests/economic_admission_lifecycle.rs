@@ -1117,6 +1117,7 @@ fn head_of(
                 [0xB0; 32],
                 dsm::types::offline_account::OfflineAccount::restore(
                     held.iter().copied().collect(),
+                    std::collections::BTreeMap::new(),
                     0,
                     [0x01; 32],
                     Some([0x0F; 32]),
