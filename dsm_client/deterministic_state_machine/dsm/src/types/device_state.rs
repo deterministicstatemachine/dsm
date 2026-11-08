@@ -141,6 +141,9 @@ fn hex_short(b: &[u8; 32]) -> String {
 #[derive(Clone)]
 pub struct RealizedHead(DeviceState);
 
+/// What each closed offline account held, by bundle: token id to amount.
+pub type ClosedOfflineHoldings = BTreeMap<[u8; 32], BTreeMap<[u8; 32], u64>>;
+
 impl RealizedHead {
     /// A head one of Core's own transitions produced.
     pub(crate) fn of(state: DeviceState) -> Self {
@@ -218,7 +221,7 @@ impl RealizedHead {
     pub fn close_offline_accounts_except(
         &self,
         keep: &[u8; 32],
-    ) -> (RealizedHead, BTreeMap<[u8; 32], BTreeMap<[u8; 32], u64>>) {
+    ) -> (RealizedHead, ClosedOfflineHoldings) {
         let (state, lost) = self.0.close_offline_accounts_except(keep);
         (Self(state), lost)
     }
@@ -1768,7 +1771,7 @@ impl DeviceState {
     pub(crate) fn close_offline_accounts_except(
         &self,
         keep: &[u8; 32],
-    ) -> (Self, BTreeMap<[u8; 32], BTreeMap<[u8; 32], u64>>) {
+    ) -> (Self, ClosedOfflineHoldings) {
         let mut offline_accounts = self.offline_accounts.clone();
         let mut lost = BTreeMap::new();
         for (bundle, account) in &self.offline_accounts {
