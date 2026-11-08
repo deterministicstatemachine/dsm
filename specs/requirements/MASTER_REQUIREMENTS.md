@@ -14,10 +14,12 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `e4ea0fcf8f573ff1afd81aa943998fae2f9f0689` | 4527 |
+| `specs/DSM_High_Level_Explainer.md` | `2778bb9dab75145755463bbe2fe37bd20ddb5f10` | 4527 |
 | `specs/SoFi_Settlement_Specification.md` | `2f4aeca7089c85a9388ace3658b9cf4b23e572c0` | 3131 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
 | `specs/DSM_Storage_Node_Specification.md` | `3b067f88e50f91b7bdc483220cd2c22ad5cf920a` | 645 |
+
+Explainer pin updated 2026-11-04 after A28's first-spend exception came out (direction pasted into the session, 2026-11-04): MR-DSM-0348 removed, and every other row reads as written. The edit replaced one line in place.
 
 Explainer pin updated 2026-11-04 after DSM Amendment A30 (the owner's word of 2026-11-04 on the design of 2026-10-22: a payer's offline boundaries reach its contacts by a notice each contact's sync validates): MR-DSM-0349..0351 added. The edit added lines in place, so older line citations into the explainer past it are off by those lines.
 
@@ -546,7 +548,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0345 | invariant | explicit | A statement to sign is one line of at most 512 bytes, with no control character and nothing a screen would hide or reorder; the application's account and the wallet each refuse any other. | amendment: DSM Amendment A29 (2026-11-03) | owner | none |
 | MR-DSM-0346 | invariant | explicit | Only a carried-out signed answer holding exactly the words asked establishes `CONNECT_FACT_SIGNED`; the status gives the answer's body and signature so that they can be checked again under the wallet's key. | amendment: DSM Amendment A29 (2026-11-03) | owner | none |
 | MR-DSM-0347 | obligation | explicit | A receiver holding a payment received offline scans that payer's positions by register key, from the position after the latest boundary it recorded and within a named bound, and validates one hop only the steps whose manifest substrate is an offline boundary. | amendment: DSM Amendment A28 (2026-11-03) | owner | ambiguous: a default the owner was told of and did not object to, not a ruling |
-| MR-DSM-0348 | obligation | explicit | A receiver checking a peer's step at position 2 validates the step at position 1 from the peer's activation root, its credit's source debit, finality, exact state change and policy included, and requires the offered step's parent root to equal the root that step installed. This holds for position 2 alone. | amendment: DSM Amendment A28 (2026-11-03) | owner | none |
+| MR-DSM-0348 | obligation | explicit | A receiver checking a peer's step at position 2 validates the step at position 1 from the peer's activation root, its credit's source debit, finality, exact state change and policy included, and requires the offered step's parent root to equal the root that step installed. This holds for position 2 alone. | amendment: DSM Amendment A28 (2026-11-03) | owner | removed 2026-11-04; A14 as written (CONFORMANCE §6.148) |
 | MR-DSM-0349 | obligation | explicit | A payer tells each of its contacts of each offline load and unload it admits, sealed to that contact on the relationship's route, naming the economic position it is admitted at. What is owed is durable from the transaction that commits the boundary, is delivered only once the boundary is admitted, is delivered again at a later sync if delivery failed, and a holder whose contacts could not all be told is told so. | amendment: DSM Amendment A30 (2026-11-04) | owner | none |
 | MR-DSM-0350 | obligation | explicit | A contact told of some of a payer's boundaries is told of every one since, in order; a contact told of none, one added after the boundary among them, is told of the latest alone at the payer's next sync. | amendment: DSM Amendment A30 (2026-11-04) | owner | none |
 | MR-DSM-0351 | invariant | explicit | A boundary notice is discovery and no authority: a contact's sync validates the step it names, one hop, at a cost that does not grow with the payer's history, and only that check records an offline account. A notice naming a step that is no boundary records nothing; a position not established is left and read again, never read as its negation; one that verifies as wrong, or whose bytes name no position, is refused and not read again. | amendment: DSM Amendment A30 (2026-11-04) | owner | none |

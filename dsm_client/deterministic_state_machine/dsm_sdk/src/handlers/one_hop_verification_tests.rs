@@ -6,9 +6,8 @@
 //! position, takes each to the cell routed from the parent its own witness
 //! names, accepts the one final there, and validates the step from that
 //! parent. A credit's source is the source's one step. Nothing behind the
-//! parent is read, so acceptance costs the same at first contact as later. A
-//! payer's first spend, at position 2, reads position 1 as well (DSM Amendment
-//! A28).
+//! parent is read, so acceptance costs the same at first contact as later, at
+//! any position.
 
 use serial_test::serial;
 
@@ -329,8 +328,8 @@ fn admitted_position(device: &TestDevice) -> u64 {
 /// (DSM Amendment A14). A pays B three times; B takes each in as a process
 /// that remembers nothing. Every acceptance asks for A's register key at
 /// A's paying position, the same number of times, and for none of A's earlier
-/// positions, however far A has gone, but for A's first spend, at position 2,
-/// which reads position 1 as well (DSM Amendment A28).
+/// positions, however far A has gone. A's first spend is position 2, and reads
+/// position 2 alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn every_acceptance_reads_only_the_senders_paying_position() {
@@ -346,16 +345,11 @@ async fn every_acceptance_reads_only_the_senders_paying_position() {
         let asked = accept(&p.b).await;
         assert_eq!(p.b.era_balance(), 5 * round);
         let read = positions_asked(&asked, &p.a, paid_at + 1);
-        let expected = if paid_at == 2 {
-            vec![1, 2]
-        } else {
-            vec![paid_at]
-        };
         assert_eq!(
             read.iter()
                 .map(|(position, _)| *position)
                 .collect::<Vec<_>>(),
-            expected,
+            vec![paid_at],
             "acceptance {round} read A at its paying position {paid_at}: {read:?}"
         );
         let cost = read.last().expect("the paying position").1;
@@ -415,8 +409,8 @@ async fn a_credits_source_is_one_step() {
             .iter()
             .map(|(position, _)| *position)
             .collect::<Vec<_>>(),
-        vec![1, a_credited_at],
-        "A's credit step, a first spend's position, and the step before it"
+        vec![a_credited_at],
+        "A's credit step alone"
     );
     assert_eq!(
         positions_asked(&asked, &c, c_paid_at + 1)
@@ -448,8 +442,8 @@ async fn a_contact_with_a_history_pays_in_one_step_after_the_add() {
     assert_eq!(p.b.era_balance(), 10);
     assert_eq!(
         read_of(&asked, &c, paid_at + 1),
-        vec![1, paid_at],
-        "B read C at its first spend and the step before it, nothing else"
+        vec![paid_at],
+        "B read C at its paying position, nothing else"
     );
 }
 
@@ -822,8 +816,8 @@ async fn a_read_checks_only_the_step_it_asks_about() {
     );
     assert_eq!(
         first,
-        vec![1, paid_at],
-        "the read validates A's first spend and the step before it"
+        vec![paid_at],
+        "the read validates A's paying step alone"
     );
 
     // C takes in A's first payment, which A's relationship with C waits for
@@ -879,8 +873,8 @@ async fn a_payment_after_the_payers_dealings_with_others_is_accepted() {
 /// The same payment is accepted, with the same committed effect, whichever
 /// receiver takes it (plan R06). D adds A after A's funding; B added A before.
 /// A pays D, then pays B the same amount. Both accept, both admit their credit
-/// as their first position. D reads A's first spend with the step before it,
-/// and B reads A's next step alone.
+/// as their first position. D reads A's first spend alone, and B reads A's
+/// next step alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn the_same_payment_costs_every_receiver_the_same() {
@@ -909,11 +903,7 @@ async fn the_same_payment_costs_every_receiver_the_same() {
         admitted_position(&p.b),
         "both admit the credit as the same position of their own"
     );
-    assert_eq!(
-        d_read,
-        vec![1, to_d_at],
-        "D validates A's first spend and the step before it"
-    );
+    assert_eq!(d_read, vec![to_d_at], "D validates A's first spend alone");
     assert_eq!(b_read, vec![to_b_at], "B validates A's step to B alone");
 }
 

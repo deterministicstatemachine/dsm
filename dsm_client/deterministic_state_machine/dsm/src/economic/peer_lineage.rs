@@ -24,13 +24,6 @@
 //!
 //! The cost is a constant number of lookup stages, whatever the position.
 //!
-//! ## A first spend
-//!
-//! An offered step at position 2 is held to the first step: position 1 is
-//! validated from the activation root, its credits' sources included, and the
-//! offered step's witness must start from the root it installed (DSM Amendment
-//! A28). This rule is for that position alone.
-//!
 //! ## Sources
 //!
 //! A credit's source is the source's own step, validated the same way, one
@@ -406,17 +399,10 @@ impl<T> Checked<T> {
     }
 }
 
-/// The one position whose step is held to the step before it: a peer's second
-/// economic step, the first that can spend what its first step credited (DSM
-/// Amendment A28).
-const FIRST_SPEND_POSITION: u64 = 2;
-
 /// A peer's step at `target_position`, validated from its own parent (DSM
 /// Amendment A14). The step's credits' sources are each validated the same
 /// way, one hop. A conditional claim at the target is `Unresolved`: the peer
-/// is mid-route, and no single transition can be validated there yet. At
-/// [`FIRST_SPEND_POSITION`] the step at position 1 is validated too, and the
-/// target must start from the root it installed.
+/// is mid-route, and no single transition can be validated there yet.
 pub fn validate_peer_step(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
@@ -432,20 +418,7 @@ pub fn validate_peer_step(
         ));
     }
     let verifier = Verifier::new(fetcher, expected_network_id, records, conditional)?;
-    let first = if target_position == FIRST_SPEND_POSITION {
-        Some(verifier.step_at(peer_genesis, peer_devid, 1, StepRole::Offered)?)
-    } else {
-        None
-    };
     let answer = verifier.step_at(peer_genesis, peer_devid, target_position, StepRole::Offered)?;
-    if let Some(first) = first {
-        if answer.witness().pre_economic_root != first.validated_root().economic_root() {
-            return Err(invalid(format!(
-                "position {target_position}: the step does not start from the root the step \
-                 validated at position 1 installed"
-            )));
-        }
-    }
     Ok(verifier.checked(answer))
 }
 
