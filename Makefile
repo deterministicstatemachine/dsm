@@ -99,6 +99,9 @@ doctor: ## Check local prerequisites and repo state without changing files
 	elif [ -n "$$ANDROID_NDK_ROOT" ]; then \
 		NDK="$$ANDROID_NDK_ROOT"; \
 		NDK_SOURCE="ANDROID_NDK_ROOT"; \
+	elif [ -f "$(CARGO_CONFIG)" ]; then \
+		NDK="$$(sed -n 's/^ANDROID_NDK_ROOT = { value = \"\([^\"]*\)\",.*/\1/p' "$(CARGO_CONFIG)" | head -1)"; \
+		NDK_SOURCE="make setup ($(notdir $(CARGO_CONFIG)))"; \
 	fi; \
 	if [ -n "$$NDK" ]; then \
 		if [ -d "$$NDK" ]; then \

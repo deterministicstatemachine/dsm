@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::time::{Duration, Instant};
 
 use dsm_sdk::generated as pb;
 use prost::Message;
@@ -15,6 +16,40 @@ use crate::Args;
 #[derive(Clone)]
 pub struct Account {
     pub device_id: [u8; 32],
+}
+
+/// How long the host holds its ingress for the account's directory entry to
+/// be on the network before it serves regardless.
+const PUBLICATION_WAIT: Duration = Duration::from_secs(120);
+
+/// The account's directory entry on the network's pinned set. The SDK
+/// publishes it right after genesis without holding genesis up, as a phone
+/// shows its wallet while the entry goes out. This account is a server, and
+/// nothing reaches it until the network can find it (the first call an
+/// application makes, the faucet's claim, is refused until then), so the host
+/// holds its ingress until the entry is read back from enough members. When
+/// the network is slow it serves anyway and says so: the SDK's startup keeps
+/// retrying the publication.
+pub fn wait_published(account: &Account) -> Result<(), String> {
+    let device = dsm_sdk::util::text_id::encode_base32_crockford(&account.device_id);
+    let started = Instant::now();
+    loop {
+        let published = dsm_sdk::sdk::identity_publication::is_identity_ready(&device)
+            .map_err(|e| format!("this account's publication state: {e}"))?;
+        if published {
+            log::info!("[host] this account's directory entry is on the network");
+            return Ok(());
+        }
+        if started.elapsed() >= PUBLICATION_WAIT {
+            log::warn!(
+                "[host] this account's directory entry is not on the network after {}s; serving \
+                 anyway, and the SDK keeps trying to publish it",
+                PUBLICATION_WAIT.as_secs()
+            );
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn startup(operation: pb::startup_request::Operation) -> Result<(), String> {

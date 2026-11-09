@@ -14,7 +14,7 @@ The developer walkthrough ("Plug your app into DSM") is a short series of videos
 ```bash
 brew install vhs                                  # renders .tape files to video
 make dev-down && make nodes-reset                 # a clean start, as a new developer has
-vhs tools/walkthrough/tapes/ep2-setup.tape        # writes ep2-setup.mp4, and so on in episode order
+vhs tools/walkthrough/tapes/ep2-setup.tape        # writes docs/walkthrough/clips/ep2-setup.mp4, and so on in episode order
 ```
 
 Every `make` target a tape types must be a documented target, and CI's developer-path job runs every command the tapes type, in order (`tools/walkthrough/check_tapes.py --run`). A step that breaks fails CI before a video shows it.
