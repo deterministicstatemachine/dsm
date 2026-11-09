@@ -47,49 +47,46 @@ For offline development or testing against local nodes (not required for normal 
 
 ### Setup and Run
 
-```bash
-cd dsm_storage_node
+From the repository root:
 
-# Start 5 local dev nodes: the production binary, serving TLS under a local
-# dev CA. The first run generates dev-pki/ and creates the databases
-# dsm_storage_node1..5.
-./scripts/dev/start_dev_nodes.sh
+```bash
+# Your own storage set: the network's pinned members (dsm-node-1..5) as five
+# local nodes, each the production binary on its own database
+# (dsm_dev_node_1..5), serving TLS from a CA of the set's own. The first run
+# prepares the set with crates/dsm-dev-net, as the SDK's test harness does:
+# each database already holds its member's pinned register incarnation.
+make nodes-up
 
 # Health over verified TLS
-./scripts/dev/start_dev_nodes.sh status
+make nodes-status
 ```
 
-PIDs saved in `dev-node*.pid`, logs in `logs/`. Clients trust `dev-pki/ca.crt`.
+Everything lives in `.dsm-dev/net/`: each node's config, certificate, log and
+pid, and the client config wallets and app hosts use
+(`dsm_env_config.toml`, trusting `dev-ca.pem`). Postgres is reached at
+`DSM_DEV_PG_URL` (default `postgresql://$USER@localhost:5432/postgres?sslmode=disable`).
 
 ### Stop
 
 ```bash
-./scripts/dev/stop_dev_nodes.sh
+make nodes-down
 ```
 
-### Connect Phone to Local Nodes
-
-Push a localhost config override so the app talks to local nodes instead of AWS:
+### Connect Phones to Local Nodes
 
 ```bash
-scripts/push_env_override.sh --local
+make phones-local   # every adb device (via adb reverse) and every booted iOS Simulator
 ```
 
-Forward ports via adb:
+It pushes the local set's client config and CA as a developer override (debug
+builds only). To go back to the bundled beta set:
 
 ```bash
-adb reverse tcp:8080 tcp:8080
-adb reverse tcp:8081 tcp:8081
-adb reverse tcp:8082 tcp:8082
-adb reverse tcp:8083 tcp:8083
-adb reverse tcp:8084 tcp:8084
+adb shell run-as com.dsm.wallet rm files/dsm_env_config.override.toml   # Android
 ```
 
-To switch back to AWS nodes:
-
-```bash
-adb shell run-as com.dsm.wallet rm files/dsm_env_config.override.toml
-```
+On the iOS Simulator, delete `Documents/dsm_env_config.toml` from the wallet's
+data container (`xcrun simctl get_app_container booted com.dsm.wallet data`).
 
 ## API Endpoints
 
@@ -134,8 +131,8 @@ without `node.id`, `network.listen_addr`, `network.port`, `database.url`, and
 mirror sync pins set-mates to). `network.max_connections` and
 `http.body_limit_bytes` default when absent and are refused when of the wrong
 type. The database connection requires TLS unless its URL says
-`sslmode=disable`. It serves TLS only. See `config/production.toml` and
-`config/dev/`.
+`sslmode=disable`. It serves TLS only. See `config/production.toml`, and the
+configs `make nodes-up` writes to `.dsm-dev/net/`.
 
 The database carries an explicit schema version: an empty database is created
 at the version this build serves, a database at that version must hold exactly
@@ -172,23 +169,22 @@ Storage nodes themselves never sign anything. The crypto stack is used for TLS t
 brew services list | grep postgresql   # macOS
 sudo systemctl status postgresql       # Linux
 
-# Re-run the launcher; it creates missing dev databases
-./scripts/dev/start_dev_nodes.sh
+# Re-run it; a set that was never prepared is prepared now
+make nodes-up
 ```
 
 **"Port already in use"**
 
 ```bash
-./scripts/dev/stop_dev_nodes.sh
-rm -f dev-node*.pid
+make nodes-down
 ```
 
 **"the storage database is at schema version …" / "holds tables but no schema version"**
 
 ```bash
 # The dev databases predate this build's schema: drop them and start fresh
-./scripts/dev/start_dev_nodes.sh reset
-./scripts/dev/start_dev_nodes.sh
+make nodes-reset
+make nodes-up
 ```
 
 ## AWS Cloud Deployment

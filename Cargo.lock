@@ -1184,6 +1184,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsm-dev-net"
+version = "0.1.0-beta.4"
+dependencies = [
+ "dsm",
+ "dsm_storage_node",
+ "rcgen",
+ "tokio",
+]
+
+[[package]]
 name = "dsm-receipt-service"
 version = "0.1.0"
 dependencies = [

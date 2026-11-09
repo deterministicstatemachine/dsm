@@ -25,7 +25,7 @@ dsm_client/deterministic_state_machine/target/
 **/*.aab
 dsm_storage_node/deploy/nodes/
 dsm_storage_node/deploy/*.tar
-dsm_storage_node/dev-pki/
+/.dsm-dev/
 dsm_storage_node/logs/
 **/data-dev-node*/
 **/pgdata-dev*/

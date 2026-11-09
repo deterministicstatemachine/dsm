@@ -14,7 +14,7 @@
 //!
 //! Only the application reaches it. The ingress listens on a loopback
 //! address alone, and every request must carry the secret this launch wrote
-//! to `<data-dir>/ingress-token` (readable by the operator alone) as
+//! to `<ingress-secret-dir>/ingress-token` (readable by the operator alone) as
 //! `Authorization: Bearer <secret>`, name this ingress as its `Host`, and
 //! come from no other web origin. A web page in a browser on the same host
 //! can neither read the secret nor send it, and a page whose name was
