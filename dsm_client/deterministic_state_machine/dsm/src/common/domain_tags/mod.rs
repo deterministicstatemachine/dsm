@@ -210,7 +210,9 @@ mod tests {
     // restart (DSM Amendment A20).
     // +1 with the join of two online transfers that cross (owner ruling,
     // 2026-10-29: "both settle"): `DSM/relationship-join/v1`.
-    const EXPECTED_TAG_COUNT: usize = 432;
+    // +2 with what an offline account holds received (owner, 2026-11-07: an
+    // offline payment needs a board on both sides): its key and its value.
+    const EXPECTED_TAG_COUNT: usize = 434;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

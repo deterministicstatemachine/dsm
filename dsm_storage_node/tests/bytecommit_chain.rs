@@ -350,9 +350,7 @@ async fn a_rewritten_cycle_is_kept_beside_the_first() {
 #[tokio::test]
 async fn a_node_in_no_set_refuses_a_mirror_sync() {
     let pool = common::fresh_store("bc_no_set").await;
-    let state = Arc::new(
-        AppState::new("dsm-node-z".to_string(), pool).expect("app state"),
-    );
+    let state = Arc::new(AppState::new("dsm-node-z".to_string(), pool).expect("app state"));
     assert_eq!(sync(&app(state)).await, StatusCode::CONFLICT);
 }
 

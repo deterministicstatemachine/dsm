@@ -546,6 +546,12 @@ pub mod schema {
         // carries both, and the spends since the last boundary.
         (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 1),
         (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 1),
+        // Schema 2's ancestry was a chain of spends only. Schema 3 (owner,
+        // 2026-11-07: an offline payment needs a board on both sides) types
+        // each step, so an account also moves by its board's receive commits
+        // and by the unload of what it received.
+        (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 2),
+        (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 2),
         // Schema 1 of the offline settlement did not carry the transfer its
         // payment was, so it named its recipient by device id alone. Schema 2
         // carries it, re-hashed to the payload the anchor signed (SA-133).
