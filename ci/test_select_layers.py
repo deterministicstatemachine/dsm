@@ -28,7 +28,10 @@ def sel(files, event="pull_request", preset=None):
 
 
 def groups(layers):
-    return {g["group"] for g in sl.rust_matrix(CFG, layers)}
+    matrix = {g["group"] for g in sl.rust_matrix(CFG, layers)}
+    # dsm_sdk is never a matrix entry: it runs sharded in its own job.
+    assert "dsm_sdk" not in matrix
+    return sl.active_groups(CFG, layers)
 
 
 class Selector(unittest.TestCase):

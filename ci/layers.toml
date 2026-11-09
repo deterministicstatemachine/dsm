@@ -82,9 +82,14 @@ lib_filters = [
 when = ["CORE"]
 run = "cargo test --locked -p dsm --release -- --nocapture --test-threads=1"
 
+# Not a matrix entry: the `sdk-test` job runs it, its library tests chosen by
+# test impact and split across shards by ci/sdk_tests.py, its integration
+# tests on the first shard. Together exactly what
+#   cargo test --locked -p dsm_sdk --release -- --nocapture --test-threads=1
+# runs, when every test is chosen.
 [groups.dsm_sdk]
 when = ["SDK"]
-run = "cargo test --locked -p dsm_sdk --release -- --nocapture --test-threads=1"
+sharded = true
 
 # Only when STORAGE escalated here without SDK itself being selected.
 [groups.sdk-node-protocol]

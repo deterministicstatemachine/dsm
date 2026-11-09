@@ -8,6 +8,7 @@ explicit file list, and prints GitHub Actions outputs:
     core|sdk|jni_android|storage|frontend|formal|sdk_node_protocol=true|false
     rust=true|false            any Rust layer selected (gates job)
     rust_matrix=<json>         the include-list for the Rust test matrix
+    sdk_sharded=true|false     the dsm_sdk suite runs (job sdk-test, sharded)
     summary=<text>             one line for the job log
 
 Precedence (ci/layers.toml documents the same order):
@@ -123,9 +124,20 @@ def rust_matrix(cfg: dict, layers: set[str]) -> list[dict]:
             continue
         if any(u in layers for u in spec.get("unless", [])):
             continue
+        if spec.get("sharded"):
+            continue  # its own job (sdk-test), not a matrix entry
         run = spec["run"].replace("{lib_filters}", lib_filters)
         include.append({"group": group, "run": run})
     return include
+
+
+def active_groups(cfg: dict, layers: set[str]) -> set[str]:
+    """Every group the layers select, matrix entries and sharded ones alike."""
+    out = set()
+    for group, spec in cfg["groups"].items():
+        if any(w in layers for w in spec["when"]) and not any(u in layers for u in spec.get("unless", [])):
+            out.add(group)
+    return out
 
 
 def changed_files(base: str, head: str) -> list[str]:
@@ -144,6 +156,7 @@ def outputs(cfg: dict, layers: set[str], full: bool, reason: str) -> list[str]:
         lines.append(f"{layer.lower()}={'true' if layer in layers else 'false'}")
     lines.append(f"rust={'true' if layers & RUST_LAYERS else 'false'}")
     lines.append(f"rust_matrix={json.dumps(rust_matrix(cfg, layers))}")
+    lines.append(f"sdk_sharded={'true' if 'dsm_sdk' in active_groups(cfg, layers) else 'false'}")
     lines.append(f"summary={reason}")
     return lines
 
