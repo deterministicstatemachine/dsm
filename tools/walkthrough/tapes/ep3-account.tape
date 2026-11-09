@@ -8,7 +8,7 @@ Sleep 30s
 Type "make app ARGS=id"
 Enter
 Sleep 3s
-Type "make app ARGS=balances"
+Type "make app ARGS=owned"
 Enter
 Sleep 3s
 Type "make app ARGS=activity"

@@ -889,6 +889,14 @@ jobs:
           ./scripts/check-secure-no-xip.sh
           python3 scripts/stack-bound.py target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor --limit 60416
 
+      # The model's wheel and configuration, pinned by digest in the script: kept
+      # between runs, so an outage of the hosts they come from fails nothing.
+      - name: Cache the TROPIC01 model's downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/tropic01-model/downloads
+          key: tropic01-model-${{ hashFiles('ci/tropic01_model.sh') }}
+
       - name: Install the TROPIC01 model
         run: bash ci/tropic01_model.sh "$RUNNER_TEMP/tropic01-model" >> "$GITHUB_ENV"
 

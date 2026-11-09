@@ -6,7 +6,7 @@ Source tools/walkthrough/tapes/_settings.tape
 Type "make dev-wallet"
 Enter
 Sleep 30s
-Type `CODE=$(make -s app ARGS="offer 'My Game' ERA 10 100")`
+Type `CODE=$(make -s app ARGS="offer 'My Game' ERA 0.10 1.00")`
 Enter
 Sleep 3s
 Type "echo $CODE"
@@ -19,6 +19,6 @@ Hide
 Type "sleep 3"
 Enter
 Show
-Type "make app ARGS=sessions"
+Type "make app ARGS=connections"
 Enter
 Sleep 4s

@@ -19,7 +19,7 @@ Use `.\scripts\dev.ps1` on Windows instead of `make`.
 | Android APK build/install | Yes | Yes | WSL2 |
 | iOS app (Simulator or device) | Yes | No | No |
 | Local storage nodes (optional) | Yes | Yes | Yes (`scripts/dev.ps1`) |
-| Building an app on DSM (`make app-dev`) | Yes | Yes | WSL2 |
+| Plugging an app into DSM (`make app-dev`) | Yes | Yes | WSL2 |
 | Bash/Zsh helper scripts | Yes | Yes | WSL2 |
 
 Windows contributors can do normal development natively. Use WSL2 when you need Android builds or Unix-only helper scripts.
@@ -31,7 +31,7 @@ Windows contributors can do normal development natively. Use WSL2 when you need 
 - The wallet configured for the beta storage set (no local setup required)
 - Base Rust/frontend toolchain validated with the supported onboarding commands
 - Optional Android APK build and device install, and the iOS app in the Simulator or on a device
-- Optionally, your own storage set on this machine, and everything you need to build an app on DSM ([BUILDING_APPS.md](BUILDING_APPS.md))
+- Optionally, your own storage set on this machine, and everything you need to plug an app into DSM ([BUILDING_APPS.md](BUILDING_APPS.md))
 
 ## Storage Nodes
 
@@ -62,7 +62,7 @@ All platforms:
 - `cargo-ndk` if you want Android native builds
 - Set `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`) before `make android`, `make android-libs`, or `make install`
 - Xcode (macOS) and `cbindgen` (`cargo install cbindgen`) if you want the iOS app
-- PostgreSQL if you want local storage nodes (`make nodes-up`) or to build an app on DSM (`make app-dev`)
+- PostgreSQL if you want local storage nodes (`make nodes-up`) or to plug an app into DSM (`make app-dev`)
 
 Windows:
 
@@ -191,9 +191,9 @@ make phones-local  # every adb device (via adb reverse) and every booted iOS Sim
 
 A wallet that already made its identity on another storage set keeps it there: clear the app's data first (Android: `adb shell pm clear com.dsm.wallet`, then grant its Bluetooth permissions again; iOS: delete the app and run `make ios-simulator-run`). The same holds after `make nodes-reset`: it makes a new set with a new CA, so clear the wallets and run `make phones-local` again, or they refuse every node (`invalid peer certificate`).
 
-## Build an App on DSM
+## Plug an App Into DSM
 
-Your app gets its own DSM account, and players connect their wallets to it. Start here:
+Your app stays what it is and gets its own DSM account; players connect their wallets to it. Sign-in, payments, items, trades and matches, with no Kotlin, Swift or Rust. Start here:
 
 ```bash
 make app-dev       # your app's account on your local set (starts the set too)

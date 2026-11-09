@@ -6,10 +6,12 @@
 #
 #   make app-dev        your app's account (and the local set), funded
 #   make dev-wallet     a player's wallet in the terminal, funded
+#   make dev-wallet2    a second player's, for the match
 #   make starter        the Connect starter app, here in the background
-#   examples/connect-starter check: connect, pay inside and over the grant,
-#     prove holdings, disconnect (the starter's own HTTP API on one side, the
-#     terminal wallet on the other)
+#   examples/connect-starter check: every helper once, through the starter's
+#     own HTTP API on one side and the terminal wallets on the other: connect,
+#     send inside and over the grant, prove what is owned, sign in, issue and
+#     give an item, open a vault and trade, referee a match, disconnect
 #   the Python client's example, against the same account
 #
 # CI runs this (the developer-path job); so can you. Everything it starts it
@@ -31,7 +33,7 @@ stop_all() {
     fi
     if [ "$code" != 0 ]; then
         echo "[developer-path] logs:" >&2
-        for log in "$STARTER_LOG" .dsm-dev/app/host.log .dsm-dev/wallet/host.log; do
+        for log in "$STARTER_LOG" .dsm-dev/app/host.log .dsm-dev/wallet/host.log .dsm-dev/wallet2/host.log; do
             if [ -f "$log" ]; then
                 echo "--- $log" >&2
                 tail -40 "$log" >&2
@@ -44,6 +46,7 @@ trap stop_all EXIT
 
 make --no-print-directory app-dev
 make --no-print-directory dev-wallet
+make --no-print-directory dev-wallet2
 
 (cd examples/connect-starter && npm ci --no-audit --no-fund && npm run build)
 mkdir -p .dsm-dev

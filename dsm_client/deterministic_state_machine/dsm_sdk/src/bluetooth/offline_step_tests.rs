@@ -3952,6 +3952,28 @@ async fn a_release_cut_off_after_its_prepare_goes_back_to_waiting_with_the_count
     let (_pair, a, b, appliance, operation) = bearer_pair().await;
     let before = chip(&appliance);
     let staged = stage_release(&a, &b, &operation);
+    // A authorizes exactly this prepare under its own key, as
+    // `release_offline_bearer` does: the anchor signs nothing for anyone else.
+    let digest = anchor_core::appliance::owner_authorization_digest(
+        &staged.spend.staged.pin.bundle,
+        &staged.spend.staged.appliance_prev_root,
+        staged.spend.staged.transition.anchor_counter,
+        &anchor_core::root_advance::transition_digest(
+            &staged.spend.staged.transition.as_transition(),
+            &staged.challenge,
+        ),
+        &staged.root_before,
+        &staged.root_after,
+    );
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &crate::sdk::signing_authority::current_secret_key().expect("A's key"),
+        &digest,
+    )
+    .expect("A signs its authorization");
+    (*appliance)
+        .clone()
+        .authorize(&digest, &signature)
+        .expect("A's anchor takes its owner's authorization");
     (*appliance)
         .clone()
         .prepare(

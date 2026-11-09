@@ -1,13 +1,13 @@
 # Walkthrough videos
 
-The developer walkthrough ("Building apps on DSM") is a short series of videos. Everything in them is scripted, so any shot can be rendered again when the code changes.
+The developer walkthrough ("Plug your app into DSM") is a short series of videos. Everything in them is scripted, so any shot can be rendered again when the code changes.
 
 | Episode | Terminal shots (VHS) | Phone shots |
 |---|---|---|
 | 2. Set up your machine | [ep2-setup.tape](tapes/ep2-setup.tape) | the wallet's first run on Android and in the iOS Simulator |
 | 3. Your app's own DSM account | [ep3-account.tape](tapes/ep3-account.tape) | none |
 | 4. Make an offer, connect a wallet | [ep4-connect.tape](tapes/ep4-connect.tape) | scanning the starter's code and approving, on both |
-| 5. Ask the wallet for things | [ep5-requests.tape](tapes/ep5-requests.tape) | approving a payment over the cap, on both |
+| 5. Ask the wallet for things | [ep5-requests.tape](tapes/ep5-requests.tape) | approving a send over the cap and a sign-in, on both |
 
 ## Terminal shots
 

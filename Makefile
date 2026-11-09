@@ -573,7 +573,7 @@ nodes-reset: ## Stop the local nodes, drop their databases, forget the set and t
 	@bash scripts/dev_net.sh reset
 
 # ---------------------------------------------------------------------------
-# BUILD AN APP ON DSM (BUILDING_APPS.md)
+# PLUG AN APP INTO DSM (BUILDING_APPS.md)
 # ---------------------------------------------------------------------------
 
 TS_CLIENT_DIR := $(REPO_ROOT)/clients/typescript
@@ -605,6 +605,15 @@ dev-wallet: clients ## Start a player's wallet in the terminal (a second account
 dev-wallet-down: ## Stop the terminal wallet
 	@bash scripts/app_dev.sh down wallet
 
+.PHONY: dev-wallet2
+dev-wallet2: clients ## Start a second player's wallet in the terminal (for matches) and fund it
+	@bash scripts/app_dev.sh up wallet2
+	@DSM_WALLET_NAME=wallet2 $(DSM_WALLET) fund
+
+.PHONY: wallet2
+wallet2: ## Any command on the second terminal wallet: ARGS="connect <code>"
+	@DSM_WALLET_NAME=wallet2 $(DSM_WALLET) $(ARGS)
+
 .PHONY: dev-wallet-connect
 dev-wallet-connect: ## Connect the terminal wallet to an app: CODE=dsm:connect/v1:...
 	@test -n "$(CODE)" || (echo "usage: make dev-wallet-connect CODE=dsm:connect/v1:..." && exit 2)
@@ -619,7 +628,7 @@ wallet: ## Any terminal-wallet command: ARGS="approve <session> <seq>" (ARGS=hel
 	@$(DSM_WALLET) $(ARGS)
 
 .PHONY: app
-app: ## Any command on your app's account: ARGS="sessions" (ARGS=help lists them)
+app: ## Any command on your app's account: ARGS="connections" (ARGS=help lists them)
 	@$(DSM_APP) $(ARGS)
 
 .PHONY: starter
@@ -639,7 +648,8 @@ developer-path: ## The whole developer path end to end, as CI runs it (scripts/d
 	@bash scripts/developer_path_check.sh
 
 .PHONY: dev-down
-dev-down: ## Stop the terminal wallet, your app's account and the local nodes
+dev-down: ## Stop the terminal wallets, your app's account and the local nodes
+	@bash scripts/app_dev.sh down wallet2
 	@bash scripts/app_dev.sh down wallet
 	@bash scripts/app_dev.sh down app
 	@bash scripts/dev_net.sh down

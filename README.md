@@ -208,7 +208,7 @@ Release APKs are signed by the maintainer; CI does not sign or upload them. Code
 A storage node is index-only persistence: it stores and serves bytes, keeps write-once registers, and never signs, validates, or interprets protocol rules. The beta fleet is five nodes in GCP `us-central1` with a quorum of three. The client pins the five members and the quorum in `dsm/src/economic/register.rs` under the `dsm-testnet` network id; the same register profile drives the delivery fan-out, so a message is delivered to exactly the quorum's worth of members. The app ships configured for this fleet.
 
 - Local development nodes: `make nodes-up`, `make nodes-down`, `make nodes-status`, `make nodes-reset` (PostgreSQL required): the pinned members as five local nodes, prepared by [crates/dsm-dev-net/](crates/dsm-dev-net/). Code: [dsm_storage_node/](dsm_storage_node/).
-- Building an app on DSM: your app's own account (`make app-dev`), the TypeScript and Python clients, a starter app and a terminal wallet. Guide: [BUILDING_APPS.md](BUILDING_APPS.md).
+- Plugging an app into DSM: your app's own account (`make app-dev`), the TypeScript and Python clients, a starter app and terminal wallets. Guide: [BUILDING_APPS.md](BUILDING_APPS.md).
 - Operators: Terraform and deployment scripts under `dsm_storage_node/`; the release workflow ships a Linux x86_64 binary with its SHA-256.
 - Beta admission: the fleet meters device writes, and a beta device needs an operator-side allowance before its first publication succeeds.
 
@@ -257,7 +257,7 @@ It runs in `--release` because the shipped profile is what is gated and the cryp
 
 - Where the code lives — core [dsm/src/](dsm_client/deterministic_state_machine/dsm/src/) (`core`, `bilateral`, `dlv`, `economic`, `ccb`, `vault`, `bitcoin`, `emissions`, `crypto`), SDK routes [dsm_sdk/src/handlers/](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/), storage node [dsm_storage_node/](dsm_storage_node/), appliance [crates/](crates/), Android [dsm_client/android/](dsm_client/android/), frontend [dsm_client/frontend/](dsm_client/frontend/)
 - [Bench proofs](docs/bench-proofs/) — the silicon proof log
-- [Quickstart](QUICKSTART.md), [Building apps on DSM](BUILDING_APPS.md), [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md), [Support](SUPPORT.md), [Changelog](CHANGELOG.md)
+- [Quickstart](QUICKSTART.md), [Plug your app into DSM](BUILDING_APPS.md), [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md), [Support](SUPPORT.md), [Changelog](CHANGELOG.md)
 - [Proto schema](proto/dsm_app.proto) — the wire format
 
 ## License

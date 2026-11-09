@@ -15,18 +15,29 @@ CFG_URL="https://raw.githubusercontent.com/tropicsquare/libtropic/${LIBTROPIC_CO
 CFG_SHA256="e6b0c32e2b851ef1c6ff3853fb0021e311358c3d96630dc59432c586007187b9"
 
 dir="${1:?usage: ci/tropic01_model.sh <directory>}"
-mkdir -p "$dir"
+# The downloads live apart from the venv, so CI can keep them between runs.
+downloads="$dir/downloads"
+mkdir -p "$downloads"
 
 fetch() { # URL FILE SHA256
-  curl -fsSL "$1" -o "$2"
+  # A file kept from an earlier run is used only if it still matches its digest.
+  if [ -f "$2" ] && echo "$3  $2" | sha256sum -c - >&2; then
+    return
+  fi
+  # The hosts answer 504 at times (the Embedded job on #1186): retry for up
+  # to five minutes before failing.
+  if ! curl -fsSL --retry 10 --retry-all-errors --retry-delay 10 --retry-max-time 300 "$1" -o "$2"; then
+    echo "could not fetch $1" >&2
+    return 1
+  fi
   echo "$3  $2" | sha256sum -c - >&2
 }
 
-fetch "$WHEEL_URL" "$dir/tvl-2.4-py3-none-any.whl" "$WHEEL_SHA256"
-fetch "$CFG_URL" "$dir/model_cfg.yml" "$CFG_SHA256"
+fetch "$WHEEL_URL" "$downloads/tvl-2.4-py3-none-any.whl" "$WHEEL_SHA256"
+fetch "$CFG_URL" "$downloads/model_cfg.yml" "$CFG_SHA256"
 
 python3 -m venv "$dir/venv" >&2
-"$dir/venv/bin/pip" -q install "$dir/tvl-2.4-py3-none-any.whl" >&2
+"$dir/venv/bin/pip" -q install "$downloads/tvl-2.4-py3-none-any.whl" >&2
 
 echo "DSM_TROPIC01_MODEL_SERVER=$dir/venv/bin/model_server"
-echo "DSM_TROPIC01_MODEL_CFG=$dir/model_cfg.yml"
+echo "DSM_TROPIC01_MODEL_CFG=$downloads/model_cfg.yml"

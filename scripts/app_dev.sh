@@ -3,7 +3,7 @@
 #
 # A DSM account on this machine, run by dsm-app-host against the developer's
 # own storage set (scripts/dev_net.sh): your application's account ("app"),
-# or the terminal dev wallet ("wallet"). Each is one real DSM identity on the
+# or a terminal dev wallet ("wallet", and "wallet2" for a second player). Each is one real DSM identity on the
 # same SDK path a phone runs.
 #
 # Under .dsm-dev/<name>/ (never in git):
@@ -14,9 +14,9 @@
 #   host.log, host.pid
 #
 # Usage:
-#   scripts/app_dev.sh up <app|wallet>
-#   scripts/app_dev.sh down <app|wallet>
-#   scripts/app_dev.sh status <app|wallet>
+#   scripts/app_dev.sh up <app|wallet|wallet2>
+#   scripts/app_dev.sh down <app|wallet|wallet2>
+#   scripts/app_dev.sh status <app|wallet|wallet2>
 #
 # The relay listens on 127.0.0.1 only. A phone reaches it
 # through `adb reverse` (Android, make phones-local) or directly (the
@@ -33,7 +33,8 @@ ports_of() {
     case "$1" in
         app) echo "8787 8443" ;;
         wallet) echo "8788 8444" ;;
-        *) echo "usage: $0 up|down|status app|wallet" >&2; exit 2 ;;
+        wallet2) echo "8789 8445" ;;
+        *) echo "usage: $0 up|down|status app|wallet|wallet2" >&2; exit 2 ;;
     esac
 }
 
@@ -125,5 +126,5 @@ case "${1:-}" in
     up) up ;;
     down) down ;;
     status) status ;;
-    *) echo "usage: $0 up|down|status app|wallet" >&2; exit 2 ;;
+    *) echo "usage: $0 up|down|status app|wallet|wallet2" >&2; exit 2 ;;
 esac
