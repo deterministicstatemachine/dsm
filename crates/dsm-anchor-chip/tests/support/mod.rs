@@ -434,11 +434,6 @@ impl Served {
         }
     }
 
-    /// The owner's authorization over the wire: its message, the signature after it.
-    pub fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> pb::ApplianceResponse {
-        self.frame(authorize_frame(digest, signature), Measurement::Matches)
-    }
-
     /// Answer a request under a measurement of the Non-secure image.
     pub fn measured(
         &mut self,

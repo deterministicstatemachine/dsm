@@ -129,10 +129,6 @@ fn hex_short(b: &[u8; 32]) -> String {
     s
 }
 
-/// What the accounts closed at an install held, per closed bundle: per asset, what was loaded and
-/// what was received offline ([`crate::types::offline_account::OfflineAccount::held`]).
-pub type ClosedAccounts = BTreeMap<[u8; 32], BTreeMap<[u8; 32], u64>>;
-
 /// A device head Core produced: the genesis head, a head restored from this
 /// device's own persisted encoding, or a head one of Core's transitions made
 /// from a realized head. The realization predicate is the only way a state
@@ -144,6 +140,10 @@ pub type ClosedAccounts = BTreeMap<[u8; 32], BTreeMap<[u8; 32], u64>>;
 /// and returning one.
 #[derive(Clone)]
 pub struct RealizedHead(DeviceState);
+
+/// What each closed offline account held, by bundle: token id to amount, what was loaded and what
+/// was received offline alike ([`crate::types::offline_account::OfflineAccount::held`]).
+pub type ClosedOfflineHoldings = BTreeMap<[u8; 32], BTreeMap<[u8; 32], u64>>;
 
 impl RealizedHead {
     /// A head one of Core's own transitions produced.
@@ -217,7 +217,7 @@ impl RealizedHead {
     pub fn close_offline_accounts_except(
         &self,
         keep: &[u8; 32],
-    ) -> Result<(RealizedHead, ClosedAccounts), DsmError> {
+    ) -> Result<(RealizedHead, ClosedOfflineHoldings), DsmError> {
         let (state, lost) = self.0.close_offline_accounts_except(keep)?;
         Ok((Self(state), lost))
     }
@@ -1836,7 +1836,7 @@ impl DeviceState {
     pub(crate) fn close_offline_accounts_except(
         &self,
         keep: &[u8; 32],
-    ) -> Result<(Self, ClosedAccounts), DsmError> {
+    ) -> Result<(Self, ClosedOfflineHoldings), DsmError> {
         let mut offline_accounts = self.offline_accounts.clone();
         let mut lost = BTreeMap::new();
         for (bundle, account) in &self.offline_accounts {
