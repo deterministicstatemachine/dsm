@@ -31,9 +31,11 @@ fn main() {
     // veneer/dsm_ns_payload.S `.incbin`s into .ns_app. A separate --target-dir avoids workspace lock
     // contention with this monitor build. This is the cross-crate NS packaging (replaces the stub).
     let ns_crate = manifest.join("../dsm-anchor-nonsecure-app");
-    println!("cargo:rerun-if-changed={}/src/main.rs", ns_crate.display());
+    println!("cargo:rerun-if-changed={}/src", ns_crate.display());
+    println!("cargo:rerun-if-changed={}/radio", ns_crate.display());
+    println!("cargo:rerun-if-changed={}/Cargo.toml", ns_crate.display());
     println!(
-        "cargo:rerun-if-changed={}/dsm-ns-sram.x",
+        "cargo:rerun-if-changed={}/dsm-ns-flash.x",
         ns_crate.display()
     );
     println!("cargo:rerun-if-changed={}/memory.x", ns_crate.display());
@@ -52,7 +54,7 @@ fn main() {
             .args(["build", "--release", "--target-dir"])
             .arg(&ns_target)
             // Do not inherit this monitor build's RUSTFLAGS/target; the NS crate's .cargo/config sets
-            // its own (dsm-ns-sram.x). Clear the vars cargo would otherwise propagate.
+            // its own (dsm-ns-flash.x). Clear the vars cargo would otherwise propagate.
             .env_remove("RUSTFLAGS")
             .env_remove("CARGO_ENCODED_RUSTFLAGS")
             .env_remove("CARGO_BUILD_TARGET")

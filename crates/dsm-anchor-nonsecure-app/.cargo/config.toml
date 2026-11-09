@@ -10,10 +10,10 @@ target = "thumbv8m.main-none-eabihf"
 [target.thumbv8m.main-none-eabihf]
 rustflags = [
   "-C", "link-arg=--nmagic",
-  # SRAM-resident Non-secure image at the NS SRAM VMA (0x20065000). Replaces cortex-m-rt's link.x
-  # (which forces .text into FLASH): this app is embedded in the monitor image and copied into NS
-  # SRAM by the monitor's LOAD_MAP, so it links at its runtime NS VMA, no boot block, no self-copy.
-  "-C", "link-arg=-Tdsm-ns-sram.x",
+  # The Non-secure image runs in place from its flash region (0x10100000) with its writable memory
+  # in NS SRAM. Replaces cortex-m-rt's link.x: this app is embedded in the monitor image, has no
+  # boot block, and fills the measured window exactly (dsm-ns-flash.x).
+  "-C", "link-arg=-Tdsm-ns-flash.x",
   "-C", "target-cpu=cortex-m33",
 ]
 

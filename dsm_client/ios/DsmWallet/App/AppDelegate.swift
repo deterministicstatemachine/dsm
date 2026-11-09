@@ -24,6 +24,11 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         if let hostRefusal {
             DsmLog.error(tag, "the host was not installed: \(hostRefusal)")
         }
+        // The board this device pays offline with is reached over Bluetooth;
+        // installing the link gives the SDK its appliance.
+        if let why = AnchorLink.install() {
+            DsmLog.error(tag, "the board link was not installed: \(why)")
+        }
         var dir = AppDelegate.storageBaseDir
         do {
             // The support directory itself may not exist on a fresh install:

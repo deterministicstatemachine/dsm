@@ -123,6 +123,20 @@ const TRNG_HEALTH_FAILED: u32 = 0xE;
 
 /// One 192-bit block from the RP2350's TRNG, passed by the block's own health tests (autocorrelation,
 /// continuous, von Neumann). `None` when it never passes: there is no lesser source behind it.
+/// 32 bytes for the Non-secure side's radio: its Bluetooth address and the tokens it advertises.
+/// Derived from the TRNG's blocks under a key of its own, apart from the chip session's entropy,
+/// so nothing the radio shows on the air is related to what a session is keyed with. `None` when
+/// the TRNG fails its own health test.
+pub fn link_entropy() -> Option<[u8; 32]> {
+    let mut hasher = blake3::Hasher::new_derive_key("DSM/anchor/link-entropy/v1");
+    for _block in 0..TRNG_BLOCKS {
+        let mut block = trng_block()?;
+        hasher.update(&block);
+        crate::zeroize(&mut block);
+    }
+    Some(*hasher.finalize().as_bytes())
+}
+
 fn trng_block() -> Option<[u8; 24]> {
     let trng = unsafe { &*hal::pac::TRNG::ptr() };
     for _try in 0..TRNG_TRIES {

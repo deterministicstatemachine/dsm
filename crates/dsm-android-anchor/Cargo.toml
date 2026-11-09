@@ -4,7 +4,7 @@ name = "dsm-android-anchor"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "On-device glue for the DSM Software-Authority / Hardware-Identity anchor: installs the sender USB anchor appliance (UsbAnchorAppliance over the opaque Kotlin picoUsbTransceive) into the dsm_sdk bridge seam. The appliance provisions itself over OP_PROVISION; no raw SPI reaches the chip from the phone. Depends on dsm_sdk in ONE direction (no dependency cycle); built in the Android cargo-ndk pipeline."
+description = "On-device glue for the DSM Software-Authority / Hardware-Identity anchor: installs the SDK's FramedAnchorAppliance over the opaque Kotlin picoUsbTransceive (the phone's USB link to its board) into the dsm_sdk bridge seam. The appliance provisions itself over OP_PROVISION; no raw SPI reaches the chip from the phone. Depends on dsm_sdk in ONE direction (no dependency cycle); built in the Android cargo-ndk pipeline."
 
 # Its own workspace root. The repository workspace excludes this crate, and cargo keeps
 # climbing past an excluding root: from a checkout nested under another checkout (a git
@@ -25,11 +25,6 @@ on_device_installs = []
 [dependencies]
 # The SDK whose bridge install seams we fill. One-directional: dsm_sdk never depends back on us.
 dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk" }
-# The ApplianceRequest/Response codec — the Phone->Pico USB bridge frames requests and decodes
-# responses in Rust so Kotlin stays an opaque byte transport.
-dsm-anchor-core = { path = "../dsm-anchor-core" }
-# DsmError (the fail-closed error type at every op boundary).
-dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
 log = "0.4"
 
 # On Android, the USB bridge does a JNI up-call to Kotlin's opaque picoUsbTransceive (mirrors

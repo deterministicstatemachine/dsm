@@ -7,9 +7,9 @@
 //! - `σ^host` — BLAKE3-SPHINCS+ SPX128f, the RP2350 partition (`dsm::crypto::sphincs`, the same
 //!   scheme + variant `bluetooth::anchor_accept` verifies with).
 //!
-//! Implemented by the USB client of the physical appliance (`crates/dsm-android-anchor`,
-//! `UsbAnchorAppliance`, installed by the Android build) and, for tests, by the real anchor-core
-//! appliance on a software TROPIC01 (`test_support::appliance`).
+//! Implemented by the client of the physical appliance over any byte link
+//! ([`super::FramedAnchorAppliance`]: Android's USB round-trip, iOS's Bluetooth link) and, for
+//! tests, by the real anchor-core appliance on a software TROPIC01 (`test_support::appliance`).
 
 use anchor_core::appliance::RecoverOutcome;
 use anchor_core::root_advance::Transition;

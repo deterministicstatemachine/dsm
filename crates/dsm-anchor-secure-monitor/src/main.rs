@@ -66,6 +66,8 @@ const OP_KEEPALIVE: u32 = 1;
 const OP_REQUEST_PART: u32 = 2;
 /// One part of the response frame, from `offset`.
 const OP_RESPONSE_PART: u32 = 3;
+/// Bytes from the Secure entropy source for the Non-secure radio's addresses and tokens.
+const OP_ENTROPY: u32 = 4;
 const SG_OK: u32 = 0;
 const SG_ERR_SLOT: u32 = 1;
 const SG_ERR_SEQ: u32 = 2;
@@ -289,6 +291,7 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
             let offset = unsafe { core::ptr::read_volatile(&mb.offset) } as usize;
             response_part(mb, offset)
         }
+        OP_ENTROPY => entropy(mb),
         _ => SG_ERR_OPCODE,
     };
     finish(mb, seq, status)
@@ -368,6 +371,25 @@ fn response_part(mb: &mut Mailbox, offset: usize) -> u32 {
     }
     if offset + n == frame.len() {
         *response = None;
+    }
+    SG_OK
+}
+
+/// Fill the slot with bytes from the Secure entropy source, for the Non-secure radio's own
+/// Bluetooth address and tokens. Keyed apart from the chip session's entropy. A source that fails
+/// its health test answers nothing, and the radio does without rather than with bytes made up.
+fn entropy(mb: &mut Mailbox) -> u32 {
+    let Some(bytes) = anchor_glue::link_entropy() else {
+        unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
+        return SG_ERR_STATE;
+    };
+    for (i, byte) in bytes.iter().enumerate() {
+        unsafe { core::ptr::write_volatile(&mut mb.body[i], *byte) };
+    }
+    unsafe {
+        core::ptr::write_volatile(&mut mb.resp_len, bytes.len() as u32);
+        core::ptr::write_volatile(&mut mb.offset, 0);
+        core::ptr::write_volatile(&mut mb.total, bytes.len() as u32);
     }
     SG_OK
 }
@@ -513,9 +535,11 @@ fn main() -> ! {
     // drives (OTP, SPI0/TROPIC, DMA stay NSP=0 = denied). Before lock_accessctrl + the NS launch. All
     // but USB go again at its first crossing (`revoke_ns_init_grants`).
     boundary::grant_ns_peripherals();
+    // Its clock's alarm and the radio's event interrupt vector through its own table.
+    boundary::target_ns_interrupts();
 
-    // The Non-secure app's own view of its memory: the measured window read-only, everything it
-    // writes never executed. Fail-closed like the SAU.
+    // The Non-secure app's own view of its memory: the measured window (its flash image) read-only,
+    // everything it writes never executed. Fail-closed like the SAU.
     let window_start = core::ptr::addr_of!(__ns_rx_start) as u32;
     let window_end = core::ptr::addr_of!(__ns_rx_end) as u32;
     match boundary::protect_ns_window(window_start, window_end) {
@@ -552,8 +576,9 @@ fn main() -> ! {
     // bootloader.
     boundary::arm_watchdog();
 
-    // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
-    // and SAU marks that region Non-secure; this sets MSP_NS + VTOR_NS from the NS vector table and
+    // Step 5b: launch the Non-secure app. Its image is in its flash region, hashed by the bootrom in
+    // place (LOAD_MAP entry 3, copied nowhere) and measured fresh before every authority op; SAU marks
+    // that region Non-secure. This sets MSP_NS + VTOR_NS from the NS vector table and
     // BXNS into the NS reset vector. Control leaves Secure and only re-enters through the `sg`
     // veneer. (Step 7 replaces the bring-up stub with the measured real NS app; step 5 still owes
     // ACCESSCTRL/DMA/NVIC/lock.) If the launch ever returns, halt fail-closed.
@@ -602,8 +627,8 @@ unsafe fn HardFault(_ef: &cortex_m_rt::ExceptionFrame) -> ! {
 }
 
 extern "C" {
-    /// The Non-secure app's 2-word vector table (`[initial NS MSP, NS reset]`), at the NS SRAM base
-    /// (dsm-secure-sram.x `.ns_app`). Copied there by LOAD_MAP entry 3.
+    /// The Non-secure app's vector table (`[initial NS MSP, NS reset, ...]`), at the start of its
+    /// flash region (dsm-secure-sram.x `.ns_app`), where it is stored and runs.
     static __ns_app_vector_table: u32;
 }
 

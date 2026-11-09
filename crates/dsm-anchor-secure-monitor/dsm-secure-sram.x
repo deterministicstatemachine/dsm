@@ -101,7 +101,7 @@ SECTIONS
     LONG(LOADADDR(.gnu.sgstubs) - __dsm_load_map);
     LONG(ADDR(.gnu.sgstubs));
     LONG(SIZEOF(.gnu.sgstubs));
-    /* entry 3 — Non-secure app image FLASH -> NS SRAM 0x20065000 */
+    /* entry 3 — Non-secure app image, in place at its flash region (hashed, not copied) */
     LONG(LOADADDR(.ns_app) - __dsm_load_map);
     LONG(ADDR(.ns_app));
     LONG(SIZEOF(.ns_app));
@@ -211,16 +211,17 @@ SECTIONS
   . = ALIGN(32);
   __veneer_limit = .;
 
-  /* ### .ns_app — the dsm-anchor-nonsecure-app image (build.rs), VMA at the NS SRAM base
-   * (0x20065000), FLASH LMA. A LOAD_MAP entry copies it to NS SRAM; the monitor launches it
-   * Non-secure after SAU. */
-  .ns_app ORIGIN(NS) : ALIGN(8)
+  /* ### .ns_app — the dsm-anchor-nonsecure-app image (build.rs), in place at its flash region
+   * (NSF, 0x10100000): its LMA is its VMA, so the bootrom's LOAD_MAP entry 3 hashes it and copies
+   * nothing (varm_blocks.c copies an entry only when its runtime address differs from its storage
+   * address). The monitor launches it Non-secure after SAU. */
+  .ns_app ORIGIN(NSF) : ALIGN(8)
   {
     __ns_app_start = .;
     KEEP(*(.ns_app .ns_app.*))
     . = ALIGN(4);
     __ns_app_end = .;
-  } > NS AT> FLASH
+  } > NSF AT> NSF
 
   /* ### .bss */
   .bss (NOLOAD) : ALIGN(4)
@@ -338,4 +339,6 @@ ASSERT((__etext - _stext) <= 224K, "Secure monitor code+rodata exceeds the 224 K
  * window and runs past its end (the NS script fills the window with code, rodata and a fixed fill,
  * and starts writable data at its end), so no byte measured is left from an earlier boot. */
 ASSERT(__ns_app_start == __ns_rx_start, "ERROR: the Non-secure image does not start at the measured window");
-ASSERT(__ns_app_end >= __ns_rx_end, "ERROR: the Non-secure image does not fill the measured window");
+ASSERT(__ns_app_end == __ns_rx_end, "ERROR: the Non-secure image does not fill the measured window exactly");
+ASSERT(LOADADDR(.ns_app) == ADDR(.ns_app), "ERROR: the Non-secure image must be stored where it runs (LOAD_MAP entry 3 copies nothing)");
+ASSERT(__flash_binary_end <= ORIGIN(NSF), "ERROR: the Secure image's flash storage overruns the Non-secure flash image");

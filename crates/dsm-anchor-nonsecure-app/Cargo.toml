@@ -3,7 +3,7 @@ name = "dsm-anchor-nonsecure-app"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "DSM anchor RP2350 Non-secure application (TrustZone-M Non-secure world): USB-CDC + protobuf + host transport + candidate transition/SMT-proof construction. Calls the Secure monitor ONLY through the single NSC Secure Gateway entry dsm_secure_dispatch(slot, seq); a fixed Non-secure SRAM mailbox slot carries bulk request/response bytes. Has NO access to OTP, the host key, TROPIC01, the counter, or Secure state. Not a workspace member — thumbv8m-only."
+description = "DSM anchor RP2350 Non-secure application (TrustZone-M Non-secure world): the two host transports, USB-CDC and Bluetooth Low Energy over the Pico 2 W radio, carrying LE32-length-prefixed request and response frames to and from the Secure monitor through the single NSC Secure Gateway entry dsm_secure_dispatch(slot, seq); a fixed Non-secure SRAM mailbox slot carries the frames in parts. Runs in place from its own flash region. Has NO access to OTP, the host key, TROPIC01, the counter, DMA or Secure state. Not a workspace member — thumbv8m-only."
 
 [[bin]]
 name = "dsm-anchor-nonsecure-app"
@@ -11,19 +11,45 @@ test = false
 bench = false
 
 [dependencies]
-# The app builds candidate transitions + SMT inclusion proofs (BLAKE3 only — NO SPHINCS+, NO
-# libtropic; those are Secure-only).
-blake3 = { version = "1", default-features = false }
 # No `binary-info`: this app is embedded in the monitor image (not flashed standalone), so it needs
 # no PICOBIN metadata / .bi_entries — the monitor carries the boot block + binary info.
 rp235x-hal = { version = "0.3", features = ["critical-section-impl", "rt"] }
 panic-halt = "1.0"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
-embedded-alloc = "0.6"
-# USB-CDC host transport (the Non-secure data path).
+critical-section = "1"
+embedded-hal = "1"
+# USB-CDC host transport.
 usb-device = "0.3"
 usbd-serial = "0.2"
+# The tasks: one per transport, the radio's runner, the Bluetooth host, the watchdog keepalive.
+embassy-executor = { version = "0.10", default-features = false, features = ["platform-cortex-m", "executor-thread"] }
+embassy-time = { version = "0.5.1", default-features = false, features = ["tick-hz-1_000_000"] }
+embassy-time-driver = "0.2"
+embassy-time-queue-utils = "0.3"
+embassy-futures = "0.1.2"
+embassy-sync = "0.7"
+heapless = "0.9"
+static_cell = "2"
+# The Pico 2 W radio (CYW43439) over its gSPI bus, driven by PIO0 without DMA, and its Bluetooth
+# controller; the Bluetooth host serving the anchor's GATT service.
+cyw43 = { version = "0.7", default-features = false, features = ["bluetooth"] }
+bt-hci = "0.8"
+trouble-host = { version = "0.6", default-features = false, features = ["derive", "gatt", "peripheral", "default-packet-pool-mtu-512", "default-packet-pool-size-8", "connection-event-queue-size-2"] }
+pio = "0.2"
+pio-proc = "0.2"
+
+[features]
+default = ["radio"]
+# The Bluetooth link over the Pico 2 W radio. Without it the image serves over USB alone; a bench
+# image for telling a fault in the radio's bring-up from one in the layout.
+radio = []
 
 # Its own workspace: excluded from the root manifest.
 [workspace]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+debug = 0

@@ -19,6 +19,7 @@
 #define DSM_SG_OP_KEEPALIVE      1u        // feed the watchdog; touches no frame
 #define DSM_SG_OP_REQUEST_PART   2u        // one part of a request frame
 #define DSM_SG_OP_RESPONSE_PART  3u        // one part of the response frame, from `offset`
+#define DSM_SG_OP_ENTROPY        4u        // 32 bytes from the Secure entropy source, for the radio
 
 // dsm_secure_dispatch return status. Statuses 5, 7 and 8 are retired: an undecodable frame, a
 // failed measurement and an anchor that did not come up are answered with a refusal frame.

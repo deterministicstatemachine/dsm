@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The ONE v2 device-flow install: the SENDER's anchor appliance factory. Wires
-//! [`crate::usb_appliance::UsbAnchorAppliance`] (the phone's USB link to its own RP2350/TROPIC01)
+//! The ONE v2 device-flow install: the SENDER's anchor appliance factory. Wires the SDK's
+//! `FramedAnchorAppliance` over the phone's USB link to its own RP2350/TROPIC01 ([`crate::usb_pico`])
 //! into `dsm_sdk::bridge::install_anchor_appliance_factory`, so
 //! `CoreSDK::stage_offline_bearer_transition` / `release_offline_bearer` drive REAL silicon:
 //! `σ^chip` from the resident non-exportable Ed25519 key, `σ^host` from the RP2350 partition, and
@@ -20,7 +20,7 @@
 pub fn install_anchor_transport() {
     use std::sync::Arc;
     dsm_sdk::bridge::install_anchor_appliance_factory(Arc::new(|| {
-        let app = crate::usb_appliance::UsbAnchorAppliance::connect(Arc::new(
+        let app = dsm_sdk::anchor::FramedAnchorAppliance::connect(Arc::new(
             crate::usb_pico::jni_usb_transceive,
         ))?;
         Ok(Box::new(app) as Box<dyn dsm_sdk::anchor::AnchorAppliance + Send>)

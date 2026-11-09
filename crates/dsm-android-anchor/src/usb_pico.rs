@@ -6,25 +6,19 @@
 //! crosses the boundary. Every failure (USB down, timeout, an op the chip refused, a malformed
 //! response) is fail-closed to a `DsmError`.
 //!
-//! Consumer: [`crate::usb_appliance::UsbAnchorAppliance`] (the sender's release producer).
-
-use std::sync::Arc;
-
-use dsm_sdk::types::error::DsmError;
-
-/// The opaque USB round-trip Kotlin performs: write the length-prefixed request frame to the Pico's
-/// USB-CDC endpoint, read the `LE32` length + that many bytes, return the `ApplianceResponse` body.
-/// Any transport failure is an `Err` (fail-closed). Blocking is fine — it runs on the SDK's blocking
-/// relay task, not the BLE/GATT thread.
-pub type UsbTransceive = Arc<dyn Fn(Vec<u8>) -> Result<Vec<u8>, DsmError> + Send + Sync>;
+//! Consumer: the SDK's `FramedAnchorAppliance` (the sender's release producer), which takes this
+//! round-trip as its `dsm_sdk::anchor::Transceive`.
 
 /// The raw opaque USB round-trip: up-call Kotlin's `Unified.picoUsbTransceive([B)[B`, which does the
 /// actual USB-OTG round-trip to A's own Pico. Mirrors `queue_follow_up_chunks`' `with_env` +
 /// re-derive-mutable-JNIEnv pattern. Any JNI/USB failure -> `Err` (fail-closed); a null return from
-/// Kotlin (no device / permission / timeout) is a USB failure. The transport of
-/// [`crate::usb_appliance::UsbAnchorAppliance`].
+/// Kotlin (no device / permission / timeout) is a USB failure. The transport the SDK's
+/// `FramedAnchorAppliance` runs over on Android.
 #[cfg(target_os = "android")]
-pub(crate) fn jni_usb_transceive(frame: Vec<u8>) -> Result<Vec<u8>, DsmError> {
+pub(crate) fn jni_usb_transceive(
+    frame: Vec<u8>,
+) -> Result<Vec<u8>, dsm_sdk::types::error::DsmError> {
+    use dsm_sdk::types::error::DsmError;
     use jni::objects::{JByteArray, JObject, JValue};
     dsm_sdk::jni::jni_common::with_env(|env| -> Result<Vec<u8>, String> {
         // Re-derive a mutable JNIEnv from the raw handle (same as queue_follow_up_chunks).

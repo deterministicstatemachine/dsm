@@ -510,6 +510,15 @@ typedef struct DsmBytes {
 } DsmBytes;
 
 /**
+ * One round-trip to the board: `request` is the LE32-length-prefixed request frame, whole; the
+ * host writes it to the board and reads the answer frame, and fills `out` with the answer's body
+ * (the bytes after its LE32 length) in a buffer from `dsm_bytes_alloc`, which Rust then owns.
+ * Answers 0 when it did; any other code is a failure to reach the board or to get an answer, and
+ * `out` may then carry the reason as UTF-8. The call may take as long as the board does.
+ */
+typedef int32_t (*DsmAnchorTransceive)(const uint8_t *request, size_t len, struct DsmBytes *out);
+
+/**
  * What a radio event came to: records to write back on the link (each
  * behind its big-endian u32 length, back to back), or why the bytes were
  * refused, in which case the host closes the link. Exactly one of the two
@@ -600,6 +609,13 @@ void dsm_bytes_free(struct DsmBytes bytes);
  * through a callback's out-parameter (`host_bridge`): Rust owns them.
  */
 struct DsmBytes dsm_bytes_alloc(size_t len);
+
+/**
+ * Install the host's board link as this process's anchor appliance. From here, every offline
+ * release is produced by the board the link reaches; a link that cannot reach one fails every
+ * such send closed. Answers nothing.
+ */
+struct DsmBytes dsm_ffi_install_anchor_link(DsmAnchorTransceive transceive);
 
 /**
  * `bleLinkOpened`: a GATT link came up at `address`, this device on it as
