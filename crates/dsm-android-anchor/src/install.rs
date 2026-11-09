@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The ONE v2 device-flow install: the SENDER's anchor appliance factory. Wires
-//! [`crate::usb_appliance::UsbAnchorAppliance`] (the phone's USB link to its own RP2350/TROPIC01)
-//! into `dsm_sdk::bridge::install_anchor_appliance_factory`, so
-//! `CoreSDK::stage_offline_bearer_transition` / `release_offline_bearer` drive REAL silicon:
-//! `σ^chip` from the resident non-exportable Ed25519 key, `σ^host` from the RP2350 partition, and
-//! a real monotonic-counter step at COMMIT.
+//! The ONE v2 device-flow install: the phone's anchor appliance factory, for both sides of an offline
+//! payment. Wires [`crate::usb_appliance::UsbAnchorAppliance`] (the phone's USB link to its own
+//! RP2350/TROPIC01) into `dsm_sdk::bridge::install_anchor_appliance_factory`, so the payer's
+//! `CoreSDK::stage_offline_bearer_transition` / `release_offline_bearer` and the receiver's
+//! `draw_receive_challenge` / `receive_offline_bearer` drive REAL silicon: `σ^chip` from the resident
+//! non-exportable Ed25519 key, `σ^host` from the RP2350 partition, the receiver's challenge from the
+//! board's TRNG and the chip's, and a real monotonic-counter step at each COMMIT.
 //!
-//! v2 needs NOTHING receiver-side (no relay, no counter reader, no verifier slot) — the receiver
-//! accepts from the release alone. So this is the ENTIRE device-layer install story.
+//! An offline payment needs a board on both sides (owner, 2026-11-07: "you have to have the board,
+//! man, for it to work offline. You can't receive either."): the payer's releases the payment, and
+//! the receiver's draws the challenge, checks the payer's release itself and commits the receive,
+//! its certificate the acknowledgement. The same factory serves both, so this is the ENTIRE
+//! device-layer install story.
 //!
 //! Registered once at app start by the Kotlin `DsmInitProvider`, in every .so that carries it
 //! (feature `on_device_installs`; the production flip of that feature is the owner's call).
-//! Registering opens nothing. The factory is called once per send-session and fails CLOSED if
-//! the Pico/chip is absent — an
-//! uninstalled factory or an unreachable chip means every offline-bearer send errors
-//! ("offline = chips"); nothing falls back to a mock.
+//! Registering opens nothing. The factory is called once per session and fails CLOSED if the
+//! Pico/chip is absent — an uninstalled factory or an unreachable chip means every offline-bearer
+//! send and every offline receive errors ("offline = chips"); nothing takes the chip's place.
 
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
 pub fn install_anchor_transport() {
@@ -26,7 +29,7 @@ pub fn install_anchor_transport() {
         Ok(Box::new(app) as Box<dyn dsm_sdk::anchor::AnchorAppliance + Send>)
     }));
     log::info!(
-        "[anchor-install] USB anchor appliance factory installed (sender release = physical chip)"
+        "[anchor-install] USB anchor appliance factory installed (offline release and receive = physical chip)"
     );
 }
 

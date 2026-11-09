@@ -26,6 +26,8 @@ pub enum TropicError {
     Refused,
     /// After closing its birth the chip still accepts a command the closed birth denies.
     CageOpen,
+    /// The board's random generator failed its own health tests: nothing random is drawn from it.
+    NoEntropy,
 }
 
 /// TROPIC01 primitives used over an authenticated L3 session, mediated by the RP2350
@@ -65,6 +67,23 @@ pub trait Tropic {
     /// step ([`crate::try_run`]). Leaves the chip as it found it: what is written is undone, and what
     /// cannot be undone is not written but checked to be what the chip would take.
     fn rehearse_birth(&mut self) -> Vec<crate::try_run::TryStep>;
+
+    /// Fresh randomness for a receive challenge, from both hardware sources: 32 bytes from the
+    /// board's own generator, passed by its health tests, and 32 from the chip's (`Random_Value_Get`).
+    fn challenge_entropy(&mut self) -> Result<ChallengeEntropy, TropicError>;
+}
+
+/// Randomness for one receive challenge, from each hardware source.
+pub struct ChallengeEntropy {
+    pub board: [u8; 32],
+    pub chip: [u8; 32],
+}
+
+impl Drop for ChallengeEntropy {
+    fn drop(&mut self) {
+        crate::util::zeroize(&mut self.board);
+        crate::util::zeroize(&mut self.chip);
+    }
 }
 
 /// A chip lent for a while, as a try-run borrows it.
@@ -89,6 +108,9 @@ impl<T: Tropic + ?Sized> Tropic for &mut T {
     }
     fn rehearse_birth(&mut self) -> Vec<crate::try_run::TryStep> {
         (**self).rehearse_birth()
+    }
+    fn challenge_entropy(&mut self) -> Result<ChallengeEntropy, TropicError> {
+        (**self).challenge_entropy()
     }
 }
 
@@ -118,6 +140,9 @@ impl<T: Tropic + ?Sized> Tropic for alloc::boxed::Box<T> {
     }
     fn rehearse_birth(&mut self) -> Vec<crate::try_run::TryStep> {
         (**self).rehearse_birth()
+    }
+    fn challenge_entropy(&mut self) -> Result<ChallengeEntropy, TropicError> {
+        (**self).challenge_entropy()
     }
 }
 

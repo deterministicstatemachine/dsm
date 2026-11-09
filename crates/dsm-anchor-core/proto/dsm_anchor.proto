@@ -95,6 +95,21 @@ enum Op {
                        // substituted; nothing is bound. See try_run.rs.
   OP_IDENTIFY    = 12; // what the chip says it is and what it holds, read with nothing written to
                        // it or to the board's OTP. Only the identify image serves it. See identify.rs.
+  // The receiver's side of an offline payment (owner, 2026-11-07). See receive.rs.
+  OP_CHALLENGE     = 14; // draw a receive challenge from both hardware sources and hold it open
+  OP_CHECK_PAYMENT = 15; // check the payer's release against the open challenge, before the receive
+}
+
+// What a payer discloses of its enrollment, for its bundle B to recompute (every field B binds).
+message PayerDisclosure {
+  bytes  online_id_pk     = 1;
+  bytes  anchor_id        = 2;  // 32
+  bytes  chip_pk          = 3;
+  bytes  partition_pk     = 4;
+  uint32 enrolled_counter = 5;
+  bytes  device_id        = 6;  // 32
+  bytes  policy_hash      = 7;  // 32
+  bytes  birth_commitment = 8;  // 32
 }
 
 // What an install of this anchor makes.
@@ -138,6 +153,8 @@ message ApplianceRequest {
   // OP_TRY_RUN, OP_PROVISION: the wallet's rehearsal owner key (SPX256f), derived apart from its
   // device key: the try-run's payment is authorized under it, through the same check a real one is.
   bytes rehearsal_pk                = 9;
+  OfflineRelease payment            = 10;  // OP_CHECK_PAYMENT: the payer's transition and certificate
+  PayerDisclosure payer             = 11;  // OP_CHECK_PAYMENT: the payer's enrollment
 }
 
 // One thing a try-run went through.
@@ -195,6 +212,8 @@ message ApplianceResponse {
   // (32). An OP_AUTHORIZE carrying the rehearsal key's signature of it continues the run; any other
   // request ends it, and the anchor is left as it was found.
   bytes awaiting_authorization       = 23;
+  bytes receiver_challenge           = 24; // OP_CHALLENGE: the challenge drawn (32)
+  bytes open_challenge               = 25; // OP_STATUS: the challenge held open (32), if any
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the
@@ -221,6 +240,7 @@ message DurableActive {
     DurablePrepared prepared       = 3;
     DurableCommitted committed     = 4;
   }
+  bytes open_challenge             = 5;  // 32  the receive challenge held open, or empty
 }
 
 // What the host supplies when it provisions an anchor for its device, once: the identity the

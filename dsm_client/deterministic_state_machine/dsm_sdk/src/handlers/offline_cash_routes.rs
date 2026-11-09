@@ -176,6 +176,65 @@ impl AppRouterImpl {
         };
         pack_envelope_ok(generated::envelope::Payload::OfflineCashResponse(resp))
     }
+
+    /// `wallet.unloadReceived` (owner, 2026-11-07: "One tap, all ready"): every payment this device
+    /// received offline whose payer has been back online moves out of its offline account's
+    /// received amount into its online balance, each as its own checked step — its settlement, which
+    /// a contact takes only once the payer's own online history shows the spend. The rest stay in
+    /// the offline balance, waiting. Nothing moves without being asked: the sync settles nothing.
+    pub(crate) async fn handle_unload_received_invoke(&self, _i: AppInvoke) -> AppResult {
+        let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
+        match crate::storage::client_db::offline_spend_in_flight(&self.device_id_bytes) {
+            Ok(None) => {}
+            Ok(Some((_, phase))) => {
+                return err(format!(
+                    "wallet.unloadReceived: an offline payment of this device's is in progress \
+                     (phase={phase}); it completes or is resolved before received money moves"
+                ))
+            }
+            Err(e) => {
+                return err(format!(
+                    "wallet.unloadReceived: the offline payment in flight: {e}"
+                ))
+            }
+        }
+        let (moved, failures) =
+            crate::sdk::economic_admission_flow::settle_received_offline(&self.core_sdk).await;
+        drop(door);
+        let waiting = match crate::storage::client_db::offline_receipts::pending_offline_receipts()
+            .map_err(|e| e.to_string())
+            .and_then(|receipts| u32::try_from(receipts.len()).map_err(|e| e.to_string()))
+        {
+            Ok(waiting) => waiting,
+            Err(e) => {
+                return err(format!(
+                    "wallet.unloadReceived: the payments still waiting: {e}"
+                ))
+            }
+        };
+        let mut message = match (moved, waiting) {
+            (0, 0) => "No money received offline is waiting.".to_string(),
+            (0, w) => format!(
+                "{w} payment(s) received offline are still waiting: each moves online once its \
+                 payer has been back online"
+            ),
+            (m, 0) => format!("{m} payment(s) received offline moved online"),
+            (m, w) => format!(
+                "{m} payment(s) received offline moved online; {w} still waiting for their payers \
+                 to be back online"
+            ),
+        };
+        if !failures.is_empty() {
+            message.push_str(&format!(" ({})", failures.join("; ")));
+        }
+        pack_envelope_ok(generated::envelope::Payload::UnloadReceivedResponse(
+            generated::UnloadReceivedResponse {
+                moved,
+                waiting,
+                message,
+            },
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -310,6 +369,16 @@ mod tests {
         }
         fn provisioned_pin(&mut self) -> Result<Option<crate::anchor::AnchorPin>, DsmError> {
             self.anchor.provisioned_pin()
+        }
+        fn draw_challenge(&mut self) -> Result<[u8; 32], DsmError> {
+            self.anchor.draw_challenge()
+        }
+        fn check_payment(
+            &mut self,
+            payment: &anchor_core::root_advance::OfflineRelease,
+            payer: &anchor_core::receive::PayerDisclosure,
+        ) -> Result<(), DsmError> {
+            self.anchor.check_payment(payment, payer)
         }
         fn try_run(
             &mut self,

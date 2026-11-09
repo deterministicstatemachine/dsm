@@ -7482,6 +7482,78 @@ Measured on the chip model (`dsm-anchor-chip` `secure_heap`, budget 122,880 of a
 
 **What this means under the owner's rule.** Every image but the trial image refuses this chip before writing to it (`check_fit`, `RandomnessUntested`). Tropic Square's correction is the `prepare_chip` image's one I-config write, which is irreversible, so it waits for the last step. Until then the trial image alone keys this chip, and installs it only for a trial. The board's stepping refuses nothing. Its OTP secret page is written, and the trial image runs under a secret of each boot instead.
 
+### 6.153 An offline payment needs a board on both sides: Refinement R5 on today's offline code (`fix/offline-receive-on-the-board`, 2026-11-07)
+
+The owner, 2026-11-07, of the receive as it stood, with no board on the receiving phone: "Supposed to not the right design. They have to have boards. I decided that a while ago." and "you have to have the board, man, for it to work offline. You can't receive either." Refinement R5 (`7be135625` on `feat/phrase-recovery`, never merged) had built this some 2,400 commits earlier. It is rebuilt here on the offline code as it is now, not cherry-picked.
+
+Later the same day the owner said, in words the session that started this work relayed with their date: "it should always, no matter what you're doing, be offline. It's actually more secure, I'm pretty sure." and "You can't move it to the online while you're offline. I think it's actually better. I think this makes it more secure because that means both sides have to do it the same way." That is what is built. Value received offline stays in the receiver's offline account. It reaches the online balance only through its unload, which is an online step. The payer's allocation leaves the offline account the same way. `wallet.unloadReceived` is the only caller of `settle_received_offline`, and the sync calls neither.
+
+**The owner's answers, 2026-11-07, to the questions the port raised.**
+
+| Question | The owner's answer |
+|---|---|
+| Where received money goes, against the 2026-10-28 ruling that it is a pending online credit | "Yes, offline balance", and asked again, "Yes, confirmed": into the receiver's own offline account. The pending online credit is gone. |
+| What stops a payment being received twice | "Yes, challenge": the challenge the receiver's board drew, used up by the receive. |
+| Who checks the payer's signatures | "Board checks": the receiver's board, before it commits anything. |
+| What the payer does with the acknowledgement | "Phone checks it": the payer's phone verifies it under the receiver's board and keeps it. |
+| Paying on what was received, before going online | "Not until unloaded". |
+| Where received money is held | "Its own place": a leaf of its own in the offline account, apart from the allocation loaded for paying. |
+| How received money reaches the online balance | "One tap, all ready": one action moves every received payment whose payer has been back online. Nothing moves at sync. |
+| The firmware's Secure stack, which the board's check did not fit beside | "Stack 64→60 KiB (Recommended)". |
+
+**The receiver's board.**
+- At acceptance it draws the challenge r_R from both its sources, the RP2350's TRNG and the TROPIC01's `Random_Value_Get` (`Appliance::draw_challenge`, `OP_CHALLENGE`). It holds one challenge open at a time, and the challenge survives a power cut (`DurableActive.open_challenge`).
+- At the confirm it checks the payer's release itself (`receive::check_payment`, `OP_CHECK_PAYMENT`). The bundle recomputes from the disclosure. The policy, h and M recompute. σ^chip (Ed25519) and σ^host (SPHINCS+) verify. The release answers the open challenge and names this board's device as recipient.
+- It then commits a receive transition (action 4) bound to that one checked payment by a single digest (`receive_binding`), and its certificate is the acknowledgement.
+- Finalizing the receive uses the challenge up.
+- A frame larger than 4 KiB is taken only as a payment check, of at most 56 KiB, on a board holding no record (`service::handle`).
+
+**Core.**
+- The offline account holds what it received per asset in a leaf of its own (`received_key`). Its steps are Load, Unload, Spend, Receive and Settle.
+- A bearer transfer moves nothing online on either side: the payer spends, the receiver receives (`OfflineMove`, `validate_conservation`).
+- The receiver's receipt writes its relationship leaf and its own account's receive, held to the leaves of its board's certificate.
+- The payer takes the acknowledgement only as the receiver's board's receive of the payer's own release, under the board it pinned from the receiver's response (`decide_commit_ack`, `receive::verify_acknowledgement`). The receipt must prove the move of the receiver's device root that the board signed.
+- σ_B now signs the receiver's board's bundle beside the commitment and r_R.
+- A chain of spends refuses any hop that is not a spend (`verify_spend_chain`).
+- A boundary carries every kind of step since the last one, as typed hops (`AccountHop`, boundary body schema 3).
+- The unload of a received payment debits the received leaf and credits online. It is admitted through the existing exposure check: `peer_lineage.rs` is unchanged.
+
+**The SDK.**
+- The receiver signs its receipt, records the step as `receiving` with its per-step key, then drives its board, all inside its advance. The step's writes then commit in one transaction before any ack, and only then does the board finalize.
+- A confirm delivered again settles a receiving step by what the board reports: driven again when nothing committed, the same receive emitted again when it did (`settle_receive_on_board`).
+- A board left holding a receive its phone committed is finalized at its next use (`finalize_committed_receive`).
+- A phone with no board refuses the acceptance with `OFFLINE_RECEIVE_NO_BOARD_MSG`. A phone already receiving refuses a second acceptance.
+- A phone that received since its last boundary is refused at its own door when it proposes. Its contacts refuse its chain as well.
+- `wallet.unloadReceived` moves the ready payments, and `storage.sync` no longer settles any. The client schema is 44.
+- The wallet's card for received money is now "Received offline", with "Move to balance".
+
+**The acceptance architecture is unchanged.** A receiver takes the payer's step from that step's own parent, as DSM Amendment A14 says. R5's per-payer record of receives is not ported: the receive-once guard is the board's own challenge (the owner's second answer). `peer_lineage.rs`, `economic_registers.rs` and the one-hop and counterfeit tests are untouched.
+
+**The firmware.** The board's check did not fit: the Secure image's .bss and heap ran into the reserved stack by 2.8–3.0 KB, after the code was slimmed, and the owner moved the stack from 64 to 60 KiB ("Stack 64→60 KiB"). Merged with the owner's authorization of every prepare (6.152), the two together ran 708 bytes over on the production image. The owner, 2026-11-08: "I'd go with 59 KiB for the stack ... I wouldn't cut the heap yet." With the stack at 59 KiB all four images link, with 628 bytes to spare on the trial image and 316 on production. `scripts/stack-bound.py` bounds the deepest path at 55,104 B on the trial image and 55,176 B on production, and CI holds it to 60,416 B (`--limit 60416`). The no-XIP check passes. A receive's prepare is authorized as a release's is: the receiving phone signs the owner-authorization digest of that very receive with the key its board was provisioned for (`receive_offline_bearer`), after the board's check of the payment and before its prepare.
+
+**The model.**
+- `tla/DSM_OfflineFinality.tla` gains a `cut` ghost variable, a `Boundary(d)` action and the invariant `NothingReceivedIsPaidOn`, with `PaysOnlyLoaded = TRUE` in every config. The main config holds every invariant over 41,912 distinct states.
+- `DSM_OfflineFinality_PaysReceived.cfg` turns the switch off, and TLC shows the invariant violated (registered as `OfflineFinality/pays-received`). Every existing falsification and reachability config still shows its violation.
+
+**Tests run, each in its own targeted run, all passing:**
+- anchor-core's durable and integration tests (`a_receive_commits_only_the_payment_checked_under_its_own_challenge`, `the_receivers_anchor_refuses_a_release_that_does_not_check`, `an_open_challenge_and_a_committed_receive_survive_a_power_cut`, `a_challenge_is_drawn_only_when_ready`, `a_large_frame_is_served_only_as_a_payment_check_on_a_ready_appliance`);
+- Core's offline account, chain, boundary, receipt, conservation and acknowledgement modules;
+- the SDK's two-board run and end-to-end run;
+- the receiver's board under a power cut at each record write of a receive, with and without a restart (`receiver_board::*`);
+- a lost acknowledgement, and four forged ones;
+- paying on after a receive, and a second receive while one waits;
+- `wallet.unloadReceived` through the ingress, recorded for the wallet's tests, which replay Rust's own answer to the overview's button (`unload_received_answers_through_the_ingress_as_the_wallet_records_it`, `OverviewTab.unloadReceived.test.tsx`);
+- the frontend's overview tests.
+
+The dsm-anchor-chip model tests (`a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up`, and the receive added to `every_operation_fits_the_secure_heap`) compile; they run only in CI, on the TROPIC01 model.
+
+**Not run.** No mutation of the new checks has been run: each test names its control. Nothing has run on hardware: the two-phone device run, each phone with a board on the trial image, waits for the owner's go before any load.
+
+**What this changes elsewhere.**
+- **iOS.** An iPhone or iPad cannot receive offline until iOS talks to its own board, which is out of scope here. The iPad payment of 6.152 used the receive this section removes.
+- **A trial's account closed at a reinstall (6.152) takes what it received with it.** The owner ruled on 2026-11-08 that the account of an ended trial is lost with it. Received money waits in that same account, so it is lost too, and the install now says so. `OfflineAccount::held` counts it beside the allocation. In the same transaction as the head, `close_offline_accounts` drops the payments that waited in the account and the account's own steps, which no boundary of it will ever carry. Without that, a receive left behind would refuse the phone's every later offline payment.
+- **One receive at a time.** A phone that accepted a payment holds its board's one challenge until the payer's confirm arrives, or the payer's cancellation does. Until then it accepts no other offline payment, from anyone. A payer that never comes back keeps it waiting. Whether that wait should end is the owner's call.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

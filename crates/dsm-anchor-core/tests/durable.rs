@@ -25,6 +25,8 @@ use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use ed25519_dalek::{Signer, SigningKey};
 
 const H0: u32 = 64;
+/// The policy every anchor here is enrolled under.
+const POLICY: [u8; 32] = [0x0C; 32];
 const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX128f;
 
 /// The board's one supply.
@@ -187,6 +189,14 @@ impl Tropic for Chip {
             "this software chip's counter reads",
             self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
         )]
+    }
+
+    fn challenge_entropy(&mut self) -> Result<anchor_core::tropic::ChallengeEntropy, TropicError> {
+        self.board.powered()?;
+        Ok(anchor_core::tropic::ChallengeEntropy {
+            board: software_entropy(),
+            chip: software_entropy(),
+        })
     }
 
     fn close_birth(&mut self) -> Result<(), TropicError> {
@@ -437,7 +447,8 @@ impl Anchor {
         Provisioning {
             device_id: derive(&self.seed, "device id"),
             online_id_pk: owner_key().1.clone(),
-            policy_hash: derive(&self.seed, "policy"),
+            // Every anchor here is enrolled under one policy, as every wallet's is.
+            policy_hash: POLICY,
             genesis_root: derive(&self.seed, "genesis root"),
         }
     }
@@ -809,7 +820,7 @@ fn the_status_discloses_what_the_bundle_recomputes_from() {
         &status.pin_partition_pk,
         ok(u32::try_from(status.pin_enrolled_counter), "H0"),
         &derive(&anchor.seed, "device id"),
-        &derive(&anchor.seed, "policy"),
+        &POLICY,
         &ok(
             <[u8; 32]>::try_from(status.pin_birth_commitment.as_slice()),
             "32",
@@ -1320,4 +1331,522 @@ fn recovery_over_the_wire_names_the_committed_releases_successor_frontier() {
     assert_eq!(answer.recovery, pb::Recovery::ReemitCommitted as i32);
     assert_eq!(answer.active_root, t.next_root.to_vec());
     assert_ne!(answer.active_root, a.active.root.to_vec());
+}
+
+/// 32 bytes from the process's own randomness: this software chip's generator.
+fn software_entropy() -> [u8; 32] {
+    use std::hash::{BuildHasher, Hasher};
+    let drawn: Vec<u8> = (0..4u8)
+        .flat_map(|lane| {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u8(lane);
+            hasher.finish().to_le_bytes()
+        })
+        .collect();
+    match drawn.try_into() {
+        Ok(bytes) => bytes,
+        Err(short) => panic!("four lanes of eight bytes, not {}", short.len()),
+    }
+}
+
+// --- The receiver's side of an offline payment (owner, 2026-11-07) ---------------------------
+
+use anchor_core::appliance::ApplianceError;
+use anchor_core::receive::{
+    receive_action_fields, verify_acknowledgement, AckRefusal, PayerDisclosure, PaymentRefusal,
+    ReceiverPin, ACTION_RECEIVE,
+};
+use anchor_core::root_advance::OfflineRelease;
+
+/// What `anchor` discloses of its enrollment to a receiver.
+fn disclosure(anchor: &Anchor) -> PayerDisclosure {
+    let birth = ok(
+        anchor.chip_birth().birth::<Partition>(&anchor.owner()),
+        "the anchor is born",
+    );
+    let owner = anchor.owner();
+    PayerDisclosure {
+        online_id_pk: owner.online_id_pk,
+        anchor_id: derive(&anchor.seed, "anchor id"),
+        chip_pk: anchor.resident().verifying_key().to_bytes().to_vec(),
+        partition_pk: birth.partition_pk.clone(),
+        enrolled_counter: H0,
+        device_id: owner.device_id,
+        policy_hash: owner.policy_hash,
+        birth_commitment: birth.birth_commitment,
+    }
+}
+
+/// The payer's transfer of its frontier `prev` at counter `u`, to `recipient` under `challenge`.
+fn payment(
+    payer: &Anchor,
+    prev: [u8; 32],
+    u: u64,
+    recipient: [u8; 32],
+    challenge: &[u8; 32],
+) -> OwnedTransition {
+    let device = payer.owner().device_id;
+    let core = Transition {
+        relationship_id: &[0x01; 32],
+        object_id: &[0x02; 32],
+        sender_device_id: &device,
+        recipient_device_id: &recipient,
+        prev_root: &prev,
+        next_root: &prev,
+        anchor_counter: u,
+        next_anchor_counter: u + 1,
+        action_type: 0,
+        action_fields: &[],
+        payload_hash: &[0x06; 32],
+        old_leaf_proof: &[],
+        new_leaf_proof: &[],
+        authority_policy_hash: &[0x07; 32],
+    };
+    let next = anchor_root_advance(&prev, &transition_digest(&core, challenge));
+    OwnedTransition {
+        next_root: next,
+        ..OwnedTransition::from(&core)
+    }
+}
+
+/// The owner authorizes preparing `t` on `d`, which then prepares it.
+fn authorized_prepare(
+    d: &mut Durable,
+    t: &OwnedTransition,
+    rc: &[u8; 32],
+    before: &[u8; 32],
+    after: &[u8; 32],
+) -> Result<(), DurableError> {
+    let (digest, signature) = owner_authorization(d.appliance(), t, rc, before, after);
+    d.authorize(&digest, &signature)?;
+    d.prepare(&t.as_transition(), rc, before, after)
+}
+
+/// The payer's anchor releases a payment to `recipient` under `challenge`: prepare, commit, emit and
+/// finalize. Answers the release.
+fn pay(
+    payer: &Anchor,
+    d: &mut Durable,
+    recipient: [u8; 32],
+    challenge: &[u8; 32],
+) -> OfflineRelease {
+    let a = d.appliance();
+    let t = payment(
+        payer,
+        a.active.root,
+        a.active.anchor_counter,
+        recipient,
+        challenge,
+    );
+    ok(
+        authorized_prepare(d, &t, challenge, &ROOT_BEFORE, &ROOT_AFTER),
+        "the payer's anchor prepares",
+    );
+    ok(d.commit(), "the payer's anchor commits");
+    let release = ok(d.emit(), "the payer's release").clone();
+    ok(d.finalize(), "the payer's anchor finalizes");
+    release
+}
+
+/// Check `release` on the receiver's anchor, as the wire carries it.
+fn check(
+    d: &mut Durable,
+    release: &OfflineRelease,
+    payer: &PayerDisclosure,
+) -> Result<(), ApplianceError> {
+    let cert = release.cert.to_pb();
+    let view = ok(cert.as_payment(), "the certificate reads");
+    d.check_payment(&release.transition.as_transition(), &view, payer)
+}
+
+/// The receive of `release` the receiver's anchor would prepare: its own advance, under `challenge`.
+fn receive_of(
+    receiver: &Anchor,
+    d: &Durable,
+    release: &OfflineRelease,
+    challenge: &[u8; 32],
+) -> OwnedTransition {
+    let a = d.appliance();
+    let fields = receive_action_fields(
+        &release.cert.anchor_bundle,
+        &release.cert.root_advance_message,
+        release.cert.next_anchor_counter,
+    );
+    let sent = &release.transition;
+    let me = receiver.owner().device_id;
+    let core = Transition {
+        relationship_id: &sent.relationship_id,
+        object_id: &sent.object_id,
+        sender_device_id: &me,
+        recipient_device_id: &sent.sender_device_id,
+        prev_root: &a.active.root,
+        next_root: &a.active.root,
+        anchor_counter: a.active.anchor_counter,
+        next_anchor_counter: a.active.anchor_counter + 1,
+        action_type: ACTION_RECEIVE,
+        action_fields: &fields,
+        payload_hash: &sent.payload_hash,
+        old_leaf_proof: &[],
+        new_leaf_proof: &[],
+        authority_policy_hash: &sent.authority_policy_hash,
+    };
+    let next = anchor_root_advance(&a.active.root, &transition_digest(&core, challenge));
+    OwnedTransition {
+        next_root: next,
+        ..OwnedTransition::from(&core)
+    }
+}
+
+const RECEIVER_ROOT_BEFORE: [u8; 32] = [0x71; 32];
+const RECEIVER_ROOT_AFTER: [u8; 32] = [0x72; 32];
+
+fn pin_of(anchor: &Anchor) -> (PayerDisclosure, [u8; 32]) {
+    let shown = disclosure(anchor);
+    let bundle = shown.bundle();
+    (shown, bundle)
+}
+
+struct Ed25519;
+impl anchor_core::tropic::ChipSig for Ed25519 {
+    fn verify(pk_chip: &[u8], message: &[u8; 32], sig: &[u8]) -> bool {
+        matches!(
+            (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(sig)),
+            (Ok(key), Ok(signature)) if matches!(
+                ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                    .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                Ok(())
+            )
+        )
+    }
+}
+
+/// The whole receive: the receiver's anchor draws the challenge, the payer's anchor releases against
+/// it, the receiver's anchor checks the release itself and commits a receive of exactly it, the
+/// receive uses the challenge up, and the payer verifies the receive's certificate as its
+/// acknowledgement.
+#[test]
+fn a_receive_commits_only_the_payment_checked_under_its_own_challenge() {
+    let payer = Anchor::new(0x51);
+    let receiver = Anchor::new(0x52);
+    let mut a = payer.born();
+    let mut b = receiver.born();
+    let me = receiver.owner().device_id;
+
+    let challenge = ok(
+        b.draw_challenge(),
+        "the receiver's anchor draws a challenge",
+    );
+    assert_eq!(
+        receiver.stored().open_challenge,
+        Some(challenge),
+        "the open challenge is durable"
+    );
+    let release = pay(&payer, &mut a, me, &challenge);
+    let (shown, _) = pin_of(&payer);
+
+    // Nothing is received before the payment is checked.
+    let t = receive_of(&receiver, &b, &release, &challenge);
+    assert!(matches!(
+        b.prepare(
+            &t.as_transition(),
+            &challenge,
+            &RECEIVER_ROOT_BEFORE,
+            &RECEIVER_ROOT_AFTER
+        ),
+        Err(DurableError::Appliance(ApplianceError::PaymentUnchecked))
+    ));
+    ok(
+        check(&mut b, &release, &shown),
+        "the receiver's anchor checks the release",
+    );
+    // A receive naming another payment than the one checked is refused.
+    let mut other = t.clone();
+    other.action_fields = receive_action_fields(&[0x99; 32], &release.cert.root_advance_message, 1);
+    let other_next = anchor_root_advance(
+        &other.prev_root,
+        &transition_digest(&other.as_transition(), &challenge),
+    );
+    other.next_root = other_next;
+    assert!(matches!(
+        b.prepare(
+            &other.as_transition(),
+            &challenge,
+            &RECEIVER_ROOT_BEFORE,
+            &RECEIVER_ROOT_AFTER
+        ),
+        Err(DurableError::Appliance(ApplianceError::PaymentUnchecked))
+    ));
+    ok(
+        authorized_prepare(
+            &mut b,
+            &t,
+            &challenge,
+            &RECEIVER_ROOT_BEFORE,
+            &RECEIVER_ROOT_AFTER,
+        ),
+        "the receive of the checked payment prepares",
+    );
+    ok(b.commit(), "the receive commits");
+    let ack = ok(b.emit(), "the receive's certificate").clone();
+    let next = ok(b.finalize(), "the receive finalizes");
+    assert_eq!(next, t.next_root);
+    assert_eq!(
+        receiver.stored().open_challenge,
+        None,
+        "the receive used the challenge up"
+    );
+    assert_eq!(
+        receiver.chip_counter(),
+        H0 - 1,
+        "the receiver's counter moved once"
+    );
+
+    // The payer's phone verifies the acknowledgement under the receiver's pinned anchor.
+    let (receiver_shown, receiver_bundle) = pin_of(&receiver);
+    let pin = ReceiverPin {
+        bundle: &receiver_bundle,
+        anchor_id: &receiver_shown.anchor_id,
+        pk_chip: &receiver_shown.chip_pk,
+        pk_host: &receiver_shown.partition_pk,
+    };
+    let acked = ok(
+        verify_acknowledgement::<Ed25519, Partition>(&ack, &pin, &me, &release),
+        "the payer verifies the acknowledgement",
+    );
+    assert_eq!(acked.receiver_device_root_before, RECEIVER_ROOT_BEFORE);
+    assert_eq!(acked.receiver_device_root_after, RECEIVER_ROOT_AFTER);
+    assert_eq!(acked.counter, 0);
+    assert_eq!(acked.next_frontier, next);
+
+    // The same release is never received twice: its challenge is used up, and a fresh one is not
+    // the one it answers.
+    assert!(matches!(
+        check(&mut b, &release, &shown),
+        Err(ApplianceError::NoOpenChallenge)
+    ));
+    ok(b.draw_challenge(), "another challenge");
+    assert!(matches!(
+        check(&mut b, &release, &shown),
+        Err(ApplianceError::PaymentRefused(PaymentRefusal::Challenge))
+    ));
+
+    // An acknowledgement is refused for another release, under another anchor, or when it is a
+    // payment rather than a receive.
+    let later = pay(&payer, &mut a, me, &[0x31; 32]);
+    assert!(matches!(
+        verify_acknowledgement::<Ed25519, Partition>(&ack, &pin, &me, &later),
+        Err(AckRefusal::NotThisRelease) | Err(AckRefusal::Binding)
+    ));
+    let (_, payer_bundle) = pin_of(&payer);
+    let wrong = ReceiverPin {
+        bundle: &payer_bundle,
+        anchor_id: &receiver_shown.anchor_id,
+        pk_chip: &receiver_shown.chip_pk,
+        pk_host: &receiver_shown.partition_pk,
+    };
+    assert!(matches!(
+        verify_acknowledgement::<Ed25519, Partition>(&ack, &wrong, &me, &release),
+        Err(AckRefusal::Anchor)
+    ));
+    let payer_pin = ReceiverPin {
+        bundle: &payer_bundle,
+        anchor_id: &shown.anchor_id,
+        pk_chip: &shown.chip_pk,
+        pk_host: &shown.partition_pk,
+    };
+    assert!(matches!(
+        verify_acknowledgement::<Ed25519, Partition>(&release, &payer_pin, &me, &release),
+        Err(AckRefusal::Action)
+    ));
+}
+
+/// The receiver's anchor checks the payer's release itself: a release for another device, one whose
+/// partition signature does not hold, a disclosure of another anchor, and a payer under another
+/// policy are each refused, and nothing is held for a receive.
+#[test]
+fn the_receivers_anchor_refuses_a_release_that_does_not_check() {
+    let payer = Anchor::new(0x53);
+    let receiver = Anchor::new(0x54);
+    let mut a = payer.born();
+    let mut b = receiver.born();
+    let me = receiver.owner().device_id;
+    let challenge = ok(b.draw_challenge(), "a challenge");
+    let (shown, _) = pin_of(&payer);
+
+    let elsewhere = pay(&payer, &mut a, [0x45; 32], &challenge);
+    assert!(matches!(
+        check(&mut b, &elsewhere, &shown),
+        Err(ApplianceError::PaymentRefused(PaymentRefusal::Recipient))
+    ));
+
+    let release = pay(&payer, &mut a, me, &challenge);
+    let mut forged = release.clone();
+    forged.cert.sigma_host[0] ^= 1;
+    assert!(matches!(
+        check(&mut b, &forged, &shown),
+        Err(ApplianceError::PaymentRefused(
+            PaymentRefusal::HostSignature
+        ))
+    ));
+    let mut forged = release.clone();
+    forged.cert.sigma_chip[0] ^= 1;
+    assert!(matches!(
+        check(&mut b, &forged, &shown),
+        Err(ApplianceError::PaymentRefused(
+            PaymentRefusal::ChipSignature
+        ))
+    ));
+    let (stranger, _) = pin_of(&Anchor::new(0x55));
+    assert!(matches!(
+        check(&mut b, &release, &stranger),
+        Err(ApplianceError::PaymentRefused(PaymentRefusal::Bundle))
+    ));
+    let mut other_policy = shown.clone();
+    other_policy.policy_hash = [0x08; 32];
+    assert!(matches!(
+        check(&mut b, &release, &other_policy),
+        Err(ApplianceError::PaymentRefused(PaymentRefusal::Policy))
+    ));
+    let t = receive_of(&receiver, &b, &release, &challenge);
+    assert!(matches!(
+        b.prepare(
+            &t.as_transition(),
+            &challenge,
+            &RECEIVER_ROOT_BEFORE,
+            &RECEIVER_ROOT_AFTER
+        ),
+        Err(DurableError::Appliance(ApplianceError::PaymentUnchecked))
+    ));
+    assert_eq!(receiver.chip_counter(), H0, "nothing moved");
+}
+
+/// The open challenge outlives a power cut and a cancel, and a receive cut after its counter moved
+/// completes at boot as the same receive; its finalize then uses the challenge up.
+#[test]
+fn an_open_challenge_and_a_committed_receive_survive_a_power_cut() {
+    let payer = Anchor::new(0x56);
+    let receiver = Anchor::new(0x57);
+    let mut a = payer.born();
+    let mut b = receiver.born();
+    let me = receiver.owner().device_id;
+    let challenge = ok(b.draw_challenge(), "a challenge");
+    let release = pay(&payer, &mut a, me, &challenge);
+    let (shown, _) = pin_of(&payer);
+
+    drop(b);
+    let mut b = ok(receiver.reboot(), "the receiver's anchor boots again");
+    assert_eq!(
+        b.appliance().active.open_challenge,
+        Some(challenge),
+        "the challenge is open still"
+    );
+    // The check is not durable: after the cut the payment is checked again.
+    let t = receive_of(&receiver, &b, &release, &challenge);
+    assert!(matches!(
+        b.prepare(
+            &t.as_transition(),
+            &challenge,
+            &RECEIVER_ROOT_BEFORE,
+            &RECEIVER_ROOT_AFTER
+        ),
+        Err(DurableError::Appliance(ApplianceError::PaymentUnchecked))
+    ));
+    ok(check(&mut b, &release, &shown), "checked again");
+    ok(
+        authorized_prepare(
+            &mut b,
+            &t,
+            &challenge,
+            &RECEIVER_ROOT_BEFORE,
+            &RECEIVER_ROOT_AFTER,
+        ),
+        "prepared",
+    );
+    ok(b.cancel(), "cancelled");
+    assert_eq!(
+        b.appliance().active.open_challenge,
+        Some(challenge),
+        "a cancel keeps it"
+    );
+    ok(
+        authorized_prepare(
+            &mut b,
+            &t,
+            &challenge,
+            &RECEIVER_ROOT_BEFORE,
+            &RECEIVER_ROOT_AFTER,
+        ),
+        "prepared again",
+    );
+    // Writes since the cut was set: 1 the candidate, 2 the counter-committed record.
+    receiver.board.cut(Cut::AtWrite(2));
+    let cut = b.commit();
+    assert!(
+        matches!(cut, Err(DurableError::Store(StoreError::Unavailable))),
+        "the counter-committed record does not land: {cut:?}"
+    );
+    drop(b);
+    let mut b = ok(receiver.reboot(), "boot completes the receive");
+    assert_eq!(receiver.chip_counter(), H0 - 1, "the counter moved once");
+    let ack = ok(b.emit(), "the same receive").clone();
+    assert_eq!(ack.transition.action_type, ACTION_RECEIVE);
+    assert_eq!(ack.transition.next_root, t.next_root);
+    ok(b.finalize(), "finalized");
+    assert_eq!(b.appliance().active.open_challenge, None);
+    assert_eq!(receiver.stored().open_challenge, None);
+}
+
+/// A challenge is drawn only by an appliance holding no record: a release in progress keeps its own.
+#[test]
+fn a_challenge_is_drawn_only_when_ready() {
+    let anchor_ = Anchor::new(0x58);
+    let mut d = anchor_.born();
+    ok(prepare(&mut d), "prepared");
+    assert!(matches!(
+        d.draw_challenge(),
+        Err(DurableError::Appliance(ApplianceError::WrongState))
+    ));
+}
+
+/// The wire takes a frame larger than a prepare only for a payment check, and only from an
+/// appliance holding no record.
+#[test]
+fn a_large_frame_is_served_only_as_a_payment_check_on_a_ready_appliance() {
+    use anchor_core::service::{handle, REQUEST_HEAD_MAX};
+    let receiver = Anchor::new(0x59);
+    let mut b = receiver.born();
+    let big = pb::ApplianceRequest {
+        op: pb::Op::Prepare as i32,
+        sender_device_root_before: vec![0x51; REQUEST_HEAD_MAX],
+        ..Default::default()
+    };
+    let answer = ok(
+        decode_response(&handle(&mut b, &encode_request(&big))),
+        "an answer",
+    );
+    assert_eq!(answer.error, anchor_core::service::err::FRAME_TOO_LARGE);
+    let challenge = ok(b.draw_challenge(), "a challenge");
+    let payer = Anchor::new(0x5A);
+    let mut a = payer.born();
+    let release = pay(&payer, &mut a, receiver.owner().device_id, &challenge);
+    let request = pb::ApplianceRequest {
+        op: pb::Op::CheckPayment as i32,
+        payment: Some(Box::new(release.to_pb())),
+        payer: Some(Box::new(disclosure(&payer).to_pb())),
+        ..Default::default()
+    };
+    let frame = encode_request(&request);
+    assert!(
+        frame.len() > REQUEST_HEAD_MAX,
+        "a payment check is a large frame"
+    );
+    let answer = ok(decode_response(&handle(&mut b, &frame)), "an answer");
+    assert!(
+        answer.ok,
+        "the check is served: {} {}",
+        answer.error, answer.detail
+    );
+    ok(prepare(&mut b), "a release in progress");
+    let answer = ok(decode_response(&handle(&mut b, &frame)), "an answer");
+    assert_eq!(answer.error, anchor_core::service::err::FRAME_TOO_LARGE);
 }

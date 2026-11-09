@@ -16,7 +16,7 @@ use crate::merkle::batch_fold::{batch_fold, FoldEntry};
 use crate::merkle::smt_path;
 use crate::merkle::sparse_merkle_tree::{DeviceSmtHashes, SparseMerkleTree};
 use crate::types::error::DsmError;
-use crate::types::offline_account::SpendWitness;
+use crate::types::offline_account::AccountWitness;
 use crate::types::receipt_types::{ReceiptLeaf, ReceiptWrite};
 
 /// Every leaf one step wrote, with its path against the step's pre-root, and
@@ -28,7 +28,7 @@ pub struct StepTransition {
     pre_root: [u8; 32],
     post_root: [u8; 32],
     writes: Vec<FoldEntry>,
-    offline_account: Option<([u8; 32], SpendWitness)>,
+    offline_account: Option<([u8; 32], AccountWitness)>,
 }
 
 impl StepTransition {
@@ -39,7 +39,7 @@ impl StepTransition {
     pub(crate) fn apply(
         tree: &mut SparseMerkleTree,
         writes: &[([u8; 32], [u8; 32])],
-        offline_account: Option<([u8; 32], SpendWitness)>,
+        offline_account: Option<([u8; 32], AccountWitness)>,
     ) -> Result<Self, DsmError> {
         let pre_root = *tree.root();
         let entries = tree.apply_writes(writes)?;
@@ -54,7 +54,7 @@ impl StepTransition {
         if let Some((key, witness)) = &offline_account {
             if !entries
                 .iter()
-                .any(|e| &e.key == key && e.pre == Some(witness.pre_account_root))
+                .any(|e| &e.key == key && e.pre == Some(witness.pre_account_root()))
             {
                 return Err(DsmError::invalid_operation(
                     "a step names the offline account it spent from but does not write it",
@@ -90,9 +90,8 @@ impl StepTransition {
         self.writes.iter().find(|e| &e.key == key)
     }
 
-    /// The offline account a bearer spend drew from: its device-SMT key and
-    /// the spend's witness.
-    pub fn offline_account(&self) -> Option<&([u8; 32], SpendWitness)> {
+    /// The offline account a bearer step moved: its device-SMT key and the move's witness.
+    pub fn offline_account(&self) -> Option<&([u8; 32], AccountWitness)> {
         self.offline_account.as_ref()
     }
 
@@ -116,7 +115,7 @@ impl StepTransition {
                     .as_ref()
                     .filter(|(key, _)| key == &entry.key)
                 {
-                    ReceiptLeaf::OfflineAccount(Box::new(witness.clone()))
+                    witness.receipt_leaf()
                 } else {
                     return Err(DsmError::invalid_operation(
                         "the step writes a leaf no receipt names; it has no receipt",
@@ -137,6 +136,7 @@ mod tests {
     use super::*;
     use crate::core::bilateral_transaction_manager::compute_smt_key;
     use crate::merkle::batch_fold::verify_batch;
+    use crate::types::offline_account::SpendWitness;
     use crate::types::step_fixture::{transfer_step, Party};
 
     /// A real step's transition folds from its pre-root to its post-root,
@@ -180,14 +180,14 @@ mod tests {
         let rel_key = compute_smt_key(&sender.device_id(), &receiver.device_id());
         let written = [(rel_key, step.receipt.child_tip)];
         let account = crate::types::offline_account::OfflineAccount::open([0x01; 32], 0);
-        let witness = SpendWitness {
+        let witness = crate::types::offline_account::AccountWitness::Spend(SpendWitness {
             pre_account_root: account.root(),
             pre_allocation: 5,
             pre_counter: 0,
             pre_frontier: [0x01; 32],
             next_frontier: [0x02; 32],
             account_paths: Vec::new(),
-        };
+        });
         let unwritten = crate::types::offline_account::offline_account_leaf_key(&[0x0B; 32]);
         let mut tree = SparseMerkleTree::new();
         let refused = StepTransition::apply(&mut tree, &written, Some((unwritten, witness)))

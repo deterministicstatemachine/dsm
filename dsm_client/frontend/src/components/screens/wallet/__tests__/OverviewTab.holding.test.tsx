@@ -33,11 +33,13 @@ const creature = row('MOS0001', '1', 1n, pb.BalanceHolding.STATE_OBJECT);
 
 function renderTab(balances: TokenBalanceView[]) {
   const stay = (): void => undefined;
+  const read = async (): Promise<void> => undefined;
   return render(
     <OverviewTab
       balances={balances}
       balancesLoading={balances.length < 0}
       pendingOffline={{ receipts: [], error: null }}
+      onReceivedMoved={read}
       transactions={[]}
       genesisB32=""
       deviceB32=""

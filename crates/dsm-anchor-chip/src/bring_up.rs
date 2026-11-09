@@ -149,7 +149,9 @@ fn op_requires_measurement(op: i32) -> bool {
             | pb::Op::Commit
             | pb::Op::Emit
             | pb::Op::Finalize
-            | pb::Op::Recover)
+            | pb::Op::Recover
+            | pb::Op::Challenge
+            | pb::Op::CheckPayment)
     )
 }
 
@@ -160,14 +162,20 @@ pub fn serve_measured(
     frame: Vec<u8>,
     measurement: Measurement,
 ) -> (BoardAnchor, Vec<u8>) {
-    let (req, _signature) = match decode_frame(&frame) {
-        Ok(decoded) => decoded,
-        Err(_undecodable) => return (anchor, refusal(0, err::BAD_PROTO, "")),
+    let op = match anchor_core::proto::peek_op(&frame) {
+        // A payment check is one message larger than any head. Its op is read without decoding a
+        // copy of it, which would be as large as its frame; the anchor decodes it for itself. Any
+        // other frame is a head and, for an authorization, its signature after it.
+        Ok(op) if op == pb::Op::CheckPayment as i32 => op,
+        _ => match decode_frame(&frame) {
+            Ok((req, _signature)) => req.op,
+            Err(_undecodable) => return (anchor, refusal(0, err::BAD_PROTO, "")),
+        },
     };
-    if measurement == Measurement::Differs && op_requires_measurement(req.op) {
+    if measurement == Measurement::Differs && op_requires_measurement(op) {
         // §7.12 measurement failure => no counter movement, no TROPIC/host signature.
         let refused = refusal(
-            req.op,
+            op,
             err::MEASUREMENT,
             "the Non-secure image does not match the enrolled digest",
         );

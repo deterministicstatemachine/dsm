@@ -160,6 +160,19 @@ impl Tropic for SoftwareTropic {
         *held(&self.closed_births) += 1;
         Ok(())
     }
+
+    /// The process's own randomness, for each of the two sources a board draws from.
+    fn challenge_entropy(&mut self) -> Result<anchor_core::tropic::ChallengeEntropy, TropicError> {
+        self.board.powered()?;
+        let draw = || {
+            <[u8; 32]>::try_from(dsm::crypto::rng::random_bytes(32).as_slice())
+                .map_err(|_short| TropicError::NoEntropy)
+        };
+        Ok(anchor_core::tropic::ChallengeEntropy {
+            board: draw()?,
+            chip: draw()?,
+        })
+    }
 }
 
 /// The R-memory slot the appliance keeps its durable record in, on the board's supply.
@@ -533,6 +546,43 @@ impl HostAppliance {
     }
 }
 
+/// A payer's board and a receiver's, each the board of the device it was born for, installed together
+/// through the production seam (owner, 2026-11-07: an offline payment needs a board on both sides).
+/// Derefs to the payer's, the board most steps drive. Dropping it uninstalls both.
+pub struct InstalledPair {
+    pub payer: HostAppliance,
+    pub receiver: HostAppliance,
+    _installed: InstalledAppliances,
+}
+
+impl HostAppliance {
+    /// Install `payer`'s board for `payer_device` and `receiver`'s for `receiver_device`.
+    #[must_use = "the boards stay installed only while the handle lives"]
+    pub fn install_pair(
+        payer_device: &TestDevice,
+        payer: HostAppliance,
+        receiver_device: &TestDevice,
+        receiver: HostAppliance,
+    ) -> InstalledPair {
+        let installed = Self::install_each(vec![
+            (payer_device.device_id, payer.clone()),
+            (receiver_device.device_id, receiver.clone()),
+        ]);
+        InstalledPair {
+            payer,
+            receiver,
+            _installed: installed,
+        }
+    }
+}
+
+impl std::ops::Deref for InstalledPair {
+    type Target = HostAppliance;
+    fn deref(&self) -> &HostAppliance {
+        &self.payer
+    }
+}
+
 impl Drop for InstalledAppliances {
     fn drop(&mut self) {
         crate::bridge::uninstall_anchor_appliance_factory();
@@ -568,6 +618,7 @@ impl AnchorAppliance for HostAppliance {
                 root: a.active.root,
                 anchor_counter: a.active.anchor_counter,
                 install: a.install,
+                open_challenge: a.active.open_challenge,
             })
         })
     }
@@ -615,6 +666,47 @@ impl AnchorAppliance for HostAppliance {
 
     fn cancel(&mut self) -> Result<(), DsmError> {
         self.with(|d| d.cancel().map_err(|e| appliance_error("cancel", e)))
+    }
+
+    fn draw_challenge(&mut self) -> Result<[u8; 32], DsmError> {
+        self.with(|d| {
+            d.draw_challenge()
+                .map_err(|e| appliance_error("challenge", e))
+        })
+    }
+
+    /// Over the wire, as the board serves it: the frame the USB client sends, through the board's own
+    /// entry point and its rule for a frame this large.
+    fn check_payment(
+        &mut self,
+        payment: &anchor_core::root_advance::OfflineRelease,
+        payer: &anchor_core::receive::PayerDisclosure,
+    ) -> Result<(), DsmError> {
+        use anchor_core::proto::pb;
+        let request = pb::ApplianceRequest {
+            op: pb::Op::CheckPayment as i32,
+            payment: Some(Box::new(pb::OfflineRelease {
+                transition: Some(payment.transition.to_pb()),
+                cert: Some(payment.cert.to_pb()),
+                ..Default::default()
+            })),
+            payer: Some(Box::new(payer.to_pb())),
+            ..Default::default()
+        };
+        let frame = anchor_core::proto::encode_request(&request);
+        self.with(|d| {
+            let answer =
+                anchor_core::proto::decode_response(&anchor_core::service::handle(d, &frame))
+                    .map_err(|e| appliance_error("check-payment answer", e))?;
+            if answer.ok {
+                Ok(())
+            } else {
+                Err(DsmError::invalid_operation(format!(
+                    "anchor appliance: the payment check failed on-chip (error code {}) {}",
+                    answer.error, answer.detail
+                )))
+            }
+        })
     }
 
     fn provisioned_pin(&mut self) -> Result<Option<AnchorPin>, DsmError> {

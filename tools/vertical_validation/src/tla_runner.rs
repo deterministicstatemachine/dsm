@@ -39,7 +39,7 @@ use crate::tla_trace_replay::{
 /// 96 with the successor cells' `SofiSuccessorCells/copy-rule`. 95 since the
 /// offline door carries only the offline-bearer transfer (MR-DSM-0219): no step
 /// of the code commits on its ack, and `OfflineFinality/commit-on-ack` is gone.
-pub const EXPECTED_STANDARD_SPECS: usize = 101;
+pub const EXPECTED_STANDARD_SPECS: usize = 102;
 
 /// The TLC simulation trace a spec replays in Rust. No trace is replayed into
 /// the code: a model's code-level checks are its linked implementation traces
@@ -476,6 +476,15 @@ impl TlaRunner {
                 "DSM_OfflineFinality.tla",
                 "DSM_OfflineFinality_CommitWithoutOwedConfirm.cfg",
                 "NoHalfCommit",
+            ),
+            // Money received offline paid on before a boundary carries it online (owner,
+            // 2026-11-07): without the rule, a device commits a payment of its own after one it
+            // received, with no boundary between.
+            expect_violation(
+                "OfflineFinality/pays-received",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_PaysReceived.cfg",
+                "NothingReceivedIsPaidOn",
             ),
             // Non-vacuity: both steps commit on both devices, and proposals
             // cross, in states the model config checks.

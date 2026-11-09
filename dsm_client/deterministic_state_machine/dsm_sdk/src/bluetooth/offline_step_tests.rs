@@ -621,7 +621,11 @@ async fn a_sender_restarted_holding_its_ack_files_it_on_restart() {
     a.device.enter();
     assert!(a
         .handler
-        .record_commit_ack(commitment, &response.counter_signed_receipt)
+        .record_commit_ack(
+            commitment,
+            &response.counter_signed_receipt,
+            &response.receive_acknowledgement,
+        )
         .await
         .expect("the sender records the verified ack"));
     assert_eq!(
@@ -803,7 +807,7 @@ async fn bearer_pair() -> (
     Pair,
     OfflineDevice,
     OfflineDevice,
-    crate::test_support::appliance::InstalledAppliance,
+    crate::test_support::appliance::InstalledPair,
     Proposal,
 ) {
     loaded_pair(100, 0).await
@@ -822,14 +826,19 @@ async fn loaded_pair(
     Pair,
     OfflineDevice,
     OfflineDevice,
-    crate::test_support::appliance::InstalledAppliance,
+    crate::test_support::appliance::InstalledPair,
     Proposal,
 ) {
     let pair = Pair::boot(a_funding, b_funding).await;
     let a = OfflineDevice::new(&pair.a);
     let b = OfflineDevice::new(&pair.b);
-    let appliance =
-        crate::test_support::appliance::HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
+    // Both phones hold a board (owner, 2026-11-07): A's pays, B's receives.
+    let appliance = crate::test_support::appliance::HostAppliance::install_pair(
+        &pair.a,
+        crate::test_support::appliance::HostAppliance::birth(&pair.a, [0xC4; 32], 16),
+        &pair.b,
+        crate::test_support::appliance::HostAppliance::birth(&pair.b, [0xB4; 32], 16),
+    );
     a.device.enter();
     let loaded = a
         .device
@@ -1320,8 +1329,15 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     let a = OfflineDevice::new(&pair.a);
     let b = OfflineDevice::new(&pair.b);
     let appliance =
-        crate::test_support::appliance::HostAppliance::unprovisioned_trial([0xC5; 32], 16)
-            .install();
+        crate::test_support::appliance::HostAppliance::unprovisioned_trial([0xC5; 32], 16);
+    // B receives, so it holds a board of its own (owner, 2026-11-07).
+    let _boards = crate::test_support::appliance::HostAppliance::install_each(vec![
+        (pair.a.device_id, appliance.clone()),
+        (
+            pair.b.device_id,
+            crate::test_support::appliance::HostAppliance::birth(&pair.b, [0xB5; 32], 16),
+        ),
+    ]);
     a.device.enter();
     let core = a.device.router().core_sdk.clone();
     let installed = core.anchor_install().expect("the trial installs");
@@ -1391,6 +1407,12 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     assert!(
         head.offline_account(&bundle).is_none(),
         "the ended trial's account is closed"
+    );
+    assert!(
+        crate::storage::client_db::offline_spends::own_offline_hops(&bundle)
+            .expect("A's steps")
+            .is_empty(),
+        "the closed account's steps went with it: no boundary of it will ever carry them"
     );
     let fresh = head
         .offline_account(&again.bundle)
@@ -1575,38 +1597,84 @@ fn alias_of(device: &OfflineDevice, peer: &OfflineDevice) -> String {
 /// exposed yet.
 fn unexposed_spends(
     a: &OfflineDevice,
-    appliance: &crate::test_support::appliance::InstalledAppliance,
+    appliance: &crate::test_support::appliance::InstalledPair,
 ) -> usize {
     a.device.enter();
-    crate::storage::client_db::offline_spends::own_offline_spends(&appliance.pin().bundle)
-        .expect("A's spends")
+    crate::storage::client_db::offline_spends::own_offline_hops(&appliance.pin().bundle)
+        .expect("A's steps")
         .len()
 }
 
-/// Phases 2–4, SA-61 opened: A's bearer payment of 7 to B, every frame over
-/// BLE, commits on both devices. B credits nothing online — its ERA balance is
-/// what it was, and an online send of what it received is refused — and holds
-/// the payment pending until it is settled online (SA-91). A's anchor moved its
-/// counter once, B pinned A's anchor from the payment's disclosure, and A
-/// records the spend, unexposed, for its next boundary to carry (SA-116).
+/// An offline payment needs a board on both sides (owner, 2026-11-07: "you have to have the board,
+/// man, for it to work offline. You can't receive either."). A's payment of 7 to B, every frame over
+/// BLE: B's board draws the challenge A's release answers, checks A's release itself and commits the
+/// receive, and its certificate is the acknowledgement A checks and keeps. Both boards move their
+/// counters once. The payment lands in B's own offline account, in what it holds received — never
+/// its online balance and never its loaded allocation — and waits there for its unload; B's
+/// challenge is used up; each side pins the other's anchor; A records its spend and B its receive
+/// for their next boundaries to carry.
 /// MUTATION CONTROL: the receiver not recording the payment it commits
-/// (`receipt_unrecorded`) leaves nothing pending and turns this red.
+/// (`receipt_unrecorded`) leaves nothing waiting and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn an_offline_payment_over_ble_is_held_pending_and_credits_nothing_online() {
+async fn an_offline_payment_needs_a_board_on_both_sides_and_lands_in_the_receivers_offline_balance()
+{
+    use crate::anchor::AnchorAppliance;
     let (pair, a, b, appliance, operation) = bearer_pair().await;
     let before = chip(&appliance);
+    let receiver_before = appliance.receiver.clone().status().expect("B's board");
     let commitment = bearer_payment_over_ble(&a, &b, &operation).await;
     assert_committed_on_both(&a, &b, &commitment);
 
     b.device.enter();
     assert_eq!(pair.b.era_balance(), 0, "B is credited nothing online");
-    b.device.enter();
-    assert_eq!(pending_era(), 7, "B holds the payment pending");
+    assert_eq!(
+        pending_era(),
+        7,
+        "B holds the payment, waiting for its unload"
+    );
+    let receiver_after = appliance.receiver.clone().status().expect("B's board");
+    assert_eq!(
+        receiver_after.anchor_counter,
+        receiver_before.anchor_counter + 1,
+        "B's board committed the receive, moving its counter once"
+    );
+    assert_eq!(
+        receiver_after.open_challenge, None,
+        "the receive used B's challenge up"
+    );
+    let b_bundle = appliance.receiver.pin().bundle;
+    let era = crate::policy::resolve_policy_commit_strict(b"ERA").expect("ERA");
+    let head = b.device.router().core_sdk.device_head().expect("B's head");
+    let account = head
+        .offline_account(&b_bundle)
+        .expect("B's offline account");
+    assert_eq!(
+        account.received(&era),
+        Some(7),
+        "the payment is in what B holds received"
+    );
+    assert_eq!(
+        account.allocation(&era),
+        None,
+        "B's loaded allocation is untouched"
+    );
+    assert_eq!(
+        (account.counter(), account.frontier()),
+        (receiver_after.anchor_counter, receiver_after.root),
+        "B's account stands where its board does"
+    );
+    let b_steps =
+        crate::storage::client_db::offline_spends::own_offline_hops(&b_bundle).expect("B's steps");
+    assert_eq!(
+        b_steps.len(),
+        1,
+        "B records its receive for its next boundary"
+    );
     let refused = pair.b.send(&pair.a, 7).await;
     assert!(
         !refused.success,
-        "B spent online what it received offline before it was settled"
+        "B spent online what it received offline before it was unloaded"
     );
     assert!(
         crate::bridge::anchor_enrollment_store()
@@ -1615,6 +1683,18 @@ async fn an_offline_payment_over_ble_is_held_pending_and_credits_nothing_online(
             .is_some(),
         "B pinned A's anchor from the payment"
     );
+    a.device.enter();
+    assert!(
+        crate::bridge::anchor_enrollment_store()
+            .expect("the enrollment store")
+            .get(&b.device.device_id)
+            .is_some_and(|pinned| pinned.pin.bundle == b_bundle),
+        "A pinned B's board from its response"
+    );
+    let kept = crate::storage::client_db::offline_spends::acknowledgement(&commitment)
+        .expect("the acknowledgements")
+        .expect("A keeps B's board's receive commit");
+    assert!(!kept.is_empty());
     assert_eq!(
         chip(&appliance).anchor_counter,
         before.anchor_counter + 1,
@@ -2054,25 +2134,23 @@ async fn a_rejected_bearer_transfer_spends_no_counter_step_and_frees_the_relatio
     assert_committed_on_both(&a, &b, &next);
 }
 
-/// Phases 2–4 end to end (§5A "Offline, end to end"), every offline frame
-/// over BLE between the two devices on the node harness: A loads 20 ERA into
-/// its offline account; B validates A's online history through the load. A
-/// pays B 7, then 3 more before A goes online again — the second payment
-/// carries A's chain of spends from the account B recorded (SA-116). B holds
-/// 10 pending and spends none of it online. A unloads what is left; that
-/// boundary carries both spends and exposes them online. B's sync walks A's
-/// history and settles each payment by an admitted transition of its own,
-/// once (SA-91); a second sync settles nothing more. B then spends the result
-/// online, and A takes it. While B holds them, B's wallet shows each payment
-/// held pending, with its asset, amount and payer, and its ERA row and offline
-/// allocation are what they were before it was paid (owner ruling,
-/// 2026-10-28); once settled, nothing is shown pending.
+/// End to end (owner, 2026-11-07: an offline payment needs a board on both sides, the money
+/// received lands in the receiver's own offline balance, and it moves online only by the receiver's
+/// own unload). A loads 20 ERA into its offline account; B validates A's online history through the
+/// load. A pays B 7, then 3 more before A goes online again — the second payment carries A's chain
+/// of spends from the account B recorded (SA-116). B's board commits each receive, and B holds the
+/// 10 in its offline account's received amount, shown as waiting, in neither its online balance nor
+/// its loaded allocation. B's unload moves nothing while A has not been back online. A unloads what
+/// is left; that boundary carries both spends and exposes them online. B's sync moves nothing on its
+/// own. B's one unload action then moves each payment online by an admitted transition of its own,
+/// once — each checked against A's own history — and a second moves nothing more. B then spends the
+/// result online, and A takes it.
 /// MUTATION CONTROL: `wallet.pendingOffline` answering from the settled rows
-/// too, or `balance.list` adding the value held pending to `available`, turns
+/// too, or `balance.list` adding the value held received to `available`, turns
 /// this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and_spend_online() {
+async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_and_spend_online() {
     use crate::economic_fixtures::whole_era;
 
     let (pair, a, b, appliance, _) = bearer_pair().await;
@@ -2087,7 +2165,25 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and
     assert_eq!(
         pending_era(),
         whole_era(10),
-        "B holds both payments pending"
+        "B holds both payments, waiting for their unload"
+    );
+    let era = crate::policy::resolve_policy_commit_strict(b"ERA").expect("ERA");
+    let b_bundle = appliance.receiver.pin().bundle;
+    let received_held = |what: &str| {
+        b.device.enter();
+        b.device
+            .router()
+            .core_sdk
+            .device_head()
+            .expect("B's head")
+            .offline_account(&b_bundle)
+            .map(|account| account.received(&era))
+            .expect(what)
+    };
+    assert_eq!(
+        received_held("received"),
+        Some(whole_era(10)),
+        "both payments are in what B's offline account holds received"
     );
     let payer = alias_of(&b, &a);
     let shown = pending_offline_shown(&b).await;
@@ -2105,7 +2201,7 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and
             ("ERA", whole_era(7), "7.00", payer.as_str()),
             ("ERA", whole_era(3), "3.00", payer.as_str()),
         ],
-        "B's wallet shows each payment held pending"
+        "B's wallet shows each payment waiting"
     );
     assert!(
         shown
@@ -2115,15 +2211,29 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and
     );
     let era_held = era_row_shown(&b).await;
     assert_eq!(
-        (era_held.available, era_held.offline_allocation),
-        (era_before.available, era_before.offline_allocation),
-        "the value held pending is in neither the balance nor the offline allocation"
+        era_held.available, era_before.available,
+        "the value received is not in the balance"
+    );
+    assert_eq!(
+        era_held
+            .offline_allocation
+            .map(|allocation| allocation.base_units),
+        Some(0),
+        "nor in the loaded allocation: B's board, which stated its bundle at the receive, holds \
+         nothing loaded"
     );
     assert_eq!(pair.b.era_balance(), 0, "B is credited nothing online");
     let refused = pair.b.send(&pair.a, whole_era(1)).await;
     assert!(
         !refused.success,
-        "B spent online what it received offline before it was settled"
+        "B spent online what it received offline before it was unloaded"
+    );
+    let early = unload_received(&b).await;
+    assert_eq!(
+        (early.moved, early.waiting),
+        (0, 2),
+        "nothing moves while the payer has not been back online: {}",
+        early.message
     );
 
     a.device.enter();
@@ -2151,22 +2261,41 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and
 
     pair.b.sync().await;
     b.device.enter();
-    assert_eq!(pending_era(), 0, "B settled both payments");
+    assert_eq!(
+        (pending_era(), pair.b.era_balance()),
+        (whole_era(10), 0),
+        "B's sync moves nothing on its own"
+    );
+    let moved = unload_received(&b).await;
+    assert_eq!(
+        (moved.moved, moved.waiting),
+        (2, 0),
+        "B's unload moved both payments online: {}",
+        moved.message
+    );
+    b.device.enter();
+    assert_eq!(pending_era(), 0, "nothing received is waiting");
     assert_eq!(
         pending_offline_shown(&b).await,
         Vec::new(),
-        "a settled payment is shown pending no more"
+        "a payment unloaded is shown waiting no more"
+    );
+    assert_eq!(
+        received_held("unloaded"),
+        Some(0),
+        "the unload took both payments out of what B's account holds received"
     );
     assert_eq!(
         pair.b.era_balance(),
         whole_era(10),
         "B's online balance holds what it was paid offline"
     );
-    pair.b.sync().await;
+    let again = unload_received(&b).await;
+    assert_eq!((again.moved, again.waiting), (0, 0), "{}", again.message);
     assert_eq!(
         pair.b.era_balance(),
         whole_era(10),
-        "a second sync settles nothing again"
+        "a second unload moves nothing again"
     );
 
     let sent = pair.b.send(&pair.a, whole_era(10)).await;
@@ -2178,6 +2307,29 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and
         whole_era(100),
         "A received B's online payment: {synced:?}"
     );
+}
+
+/// `wallet.unloadReceived` on `device`: Rust's answer.
+async fn unload_received(device: &OfflineDevice) -> dsm::types::proto::UnloadReceivedResponse {
+    let res = device
+        .device
+        .invoke(
+            "wallet.unloadReceived",
+            &crate::generated::ArgPack::default(),
+        )
+        .await;
+    assert!(
+        res.success,
+        "wallet.unloadReceived: {:?}",
+        res.error_message
+    );
+    match crate::handlers::response_helpers::decode_local_envelope(&res.data)
+        .expect("wallet.unloadReceived answers locally")
+        .payload
+    {
+        Some(dsm::types::proto::envelope::Payload::UnloadReceivedResponse(r)) => r,
+        other => panic!("expected UnloadReceivedResponse, got {other:?}"),
+    }
 }
 
 /// `method` (`wallet.loadOffline` or `wallet.unloadOffline`) of `amount` ERA on
@@ -2206,7 +2358,7 @@ async fn account_held(
     stage: &str,
     a: &OfflineDevice,
     c: &OfflineDevice,
-    appliance: &crate::test_support::appliance::InstalledAppliance,
+    appliance: &crate::test_support::appliance::InstalledPair,
 ) {
     let before = chip(appliance);
     a.device.enter();
@@ -2262,6 +2414,15 @@ async fn an_offline_payment_in_flight_holds_the_account_until_it_is_acknowledged
     c_device.boot(&pair.fleet).await;
     c_device.add_contact(&pair.a).await;
     pair.a.add_contact(&c_device).await;
+    // C receives too, so it holds a board of its own (owner, 2026-11-07).
+    let _boards = crate::test_support::appliance::HostAppliance::install_each(vec![
+        (pair.a.device_id, appliance.payer.clone()),
+        (pair.b.device_id, appliance.receiver.clone()),
+        (
+            c_device.device_id,
+            crate::test_support::appliance::HostAppliance::birth(&c_device, [0xCC; 32], 16),
+        ),
+    ]);
     // A's next sync tells the contact it added since the load, and C's takes it.
     pair.a.sync().await;
     c_device.sync().await;
@@ -3506,7 +3667,7 @@ fn stage_release(a: &OfflineDevice, b: &OfflineDevice, operation: &Proposal) -> 
             b.device.device_id,
             operation.operation.clone(),
             &[],
-            Some(spend.spend),
+            Some(dsm::types::device_state::OfflineMove::Spend(spend.spend)),
         )
         .expect("A simulates the step's advance");
     StagedRelease {
@@ -3519,7 +3680,7 @@ fn stage_release(a: &OfflineDevice, b: &OfflineDevice, operation: &Proposal) -> 
 }
 
 fn chip(
-    appliance: &crate::test_support::appliance::InstalledAppliance,
+    appliance: &crate::test_support::appliance::InstalledPair,
 ) -> crate::anchor::ApplianceStatus {
     use crate::anchor::AnchorAppliance;
     (**appliance).clone().status().expect("the chip's status")
@@ -4513,7 +4674,8 @@ async fn a_signed_receipt_whose_roots_its_writes_do_not_produce_is_refused() {
         .iter_mut()
         .find_map(|write| match &mut write.leaf {
             dsm::types::receipt_types::ReceiptLeaf::OfflineAccount(witness) => Some(witness),
-            dsm::types::receipt_types::ReceiptLeaf::Relationship => None,
+            dsm::types::receipt_types::ReceiptLeaf::Relationship
+            | dsm::types::receipt_types::ReceiptLeaf::OfflineReceive(_) => None,
         })
         .expect("a bearer step writes its offline account");
     witness.next_frontier[0] ^= 0x01;
@@ -4884,7 +5046,7 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
             b.device.device_id,
             payment.operation.clone(),
             &[],
-            Some(spend.spend),
+            Some(dsm::types::device_state::OfflineMove::Spend(spend.spend)),
         )
         .expect("A simulates the step's advance");
     let leaves = dsm::verification::receipt_verification::BearerLeaves {
@@ -4940,6 +5102,7 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
                     path,
                 });
             }
+            ReceiptLeaf::OfflineReceive(_) => panic!("a payer's receipt names no receive"),
         }
     }
     forged.child_root = verify_batch::<DeviceSmtHashes>(&forged.parent_root, &entries)
@@ -4977,10 +5140,13 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
     let sigma =
         dsm::core::bilateral_transaction_manager::compute_precommit(&held, &op_bytes, &entropy)
             .expect("the step's precommit");
-    let chain = crate::storage::client_db::offline_spends::own_offline_spends(&leaves.bundle)
+    let chain = crate::storage::client_db::offline_spends::own_offline_spend_chain(&leaves.bundle)
         .expect("A's unexposed spends")
         .iter()
-        .map(|hop| crate::generated::OfflineSpendHop::decode(hop.as_slice()).expect("a hop"))
+        .map(|hop| {
+            crate::generated::OfflineSpendHop::decode(hop.to_proto().encode_to_vec().as_slice())
+                .expect("a hop")
+        })
         .collect();
     let confirm = crate::bluetooth::bilateral_ble_handler::confirm_envelope(
         &a.device.device_id,
@@ -5031,6 +5197,9 @@ mod boundary_notices;
 
 /// The bilateral models, refined by this protocol run between real devices.
 mod model_correspondence;
+
+/// The receiver's board: no board, a cut at each of its writes, and a forged acknowledgement.
+mod receiver_board;
 
 /// DSM Amendment A27 (SA-35; the owner's requirement of 2026-11-01: "a
 /// passive BLE observer must not learn permanent identifiers, transfer

@@ -20,6 +20,7 @@ use crate::test_support::two_device::TestDevice;
 /// counterparties having validated its online history through the load.
 struct World {
     devices: Vec<OfflineDevice>,
+    relationships: Vec<(usize, usize)>,
     _appliances: InstalledAppliances,
     _fleet: economic_fixtures::FleetGuard,
     _nodes: NodeSet,
@@ -88,6 +89,7 @@ impl World {
         }
         Self {
             devices: offline,
+            relationships: relationships.to_vec(),
             _appliances: appliances,
             _fleet: fleet,
             _nodes: nodes,
@@ -97,6 +99,41 @@ impl World {
 
     fn id(&self, d: usize) -> [u8; 32] {
         self.devices[d].device.device_id
+    }
+
+    /// Before device `d` proposes: if its offline account received offline since its last boundary,
+    /// it crosses one online — a load of 1 ERA — and its counterparties take the boundary by their
+    /// syncs, as a payer must before it pays offline again (owner, 2026-11-07: money received
+    /// offline is paid on only once it has been unloaded). The models hold no boundary: it moves no
+    /// relationship, and is `Boundary` before `Propose` in DSM_OfflineFinality.tla.
+    async fn boundary_if_received(&self, d: usize) {
+        let device = &self.devices[d];
+        device.device.enter();
+        let received = crate::storage::client_db::offline_spends::account_received_since_boundary()
+            .expect("the device's offline steps");
+        if received.is_none() {
+            return;
+        }
+        let load = device
+            .device
+            .invoke(
+                "wallet.loadOffline",
+                &crate::generated::OfflineCashRequest {
+                    token_id: "ERA".to_string(),
+                    amount: "1.00".to_string(),
+                },
+            )
+            .await;
+        assert!(load.success, "the boundary: {:?}", load.error_message);
+        let counterparties = self.relationships.iter().filter_map(|&(a, b)| match d {
+            _ if a == d => Some(b),
+            _ if b == d => Some(a),
+            _ => None,
+        });
+        for counterparty in counterparties.collect::<Vec<_>>() {
+            self.devices[counterparty].device.sync().await;
+        }
+        device.device.enter();
     }
 }
 
@@ -545,6 +582,7 @@ impl FinCode<'_> {
         match act {
             Act::Propose(s) => {
                 let (p, r) = (proposer(s), receiver(s));
+                self.world.boundary_if_received(p).await;
                 self.dev(p).device.enter();
                 let proposal = bearer_transfer(self.dev(r), self.amount);
                 let (prepare, commitment) = self
@@ -1186,6 +1224,7 @@ async fn the_offline_steps_refine_the_tripwire_model() {
                 Successor::Honest => amount,
                 Successor::Fork => amount + 1,
             };
+            world.boundary_if_received(a).await;
             let (sender, receiver) = (&world.devices[a], &world.devices[b]);
             sender.device.enter();
             let (other_prepare, other_commitment) = sender
@@ -1446,7 +1485,9 @@ fn ni_value(device: &OfflineDevice) -> u64 {
     };
     let pending = crate::storage::client_db::offline_receipts::pending_offline_value(&era)
         .expect("the payments received offline");
-    allocation + pending
+    // The online balance too: a boundary the harness takes before a proposal (a load) moves value
+    // from it into the allocation, and moves no value off the device.
+    allocation + pending + device.device.era_balance()
 }
 
 /// MR-DSM-0267 (G3 ruling B9): the offline protocol refines
@@ -1461,7 +1502,7 @@ fn ni_value(device: &OfflineDevice) -> u64 {
 /// in flight in either direction, a proposal its receiver takes while its own
 /// step is in flight — the code's transition is the model's stutter or
 /// `SessionFail`, which the test asserts is enabled. After every step each
-/// device's tip and its value (allocation and payments held pending) are the
+/// device's tip and its value (allocation, payments received and online balance) are the
 /// model's, each session's two stored phases are the model's phase, a
 /// relationship with nothing committed holds every device of it where it
 /// started (`NonInterference`, `ZeroRefreshForInactive`), and each pair's
@@ -1582,6 +1623,7 @@ async fn the_offline_steps_refine_the_non_interference_model() {
                     sid,
                     amount: _,
                 } => {
+                    world.boundary_if_received(sender).await;
                     let (s, r) = (&world.devices[sender], &world.devices[ni_peer(sender)]);
                     s.device.enter();
                     match s.propose(r, bearer_transfer(r, next_amount)).await {

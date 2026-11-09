@@ -25,6 +25,8 @@ pub struct ApplianceStatus {
     pub anchor_counter: u64,
     /// For good, or a trial that the anchor's next boot ends ([`anchor_core::enrollment::Install`]).
     pub install: anchor_core::enrollment::Install,
+    /// The receive challenge the anchor holds open, if any ([`anchor_core::receive`]).
+    pub open_challenge: Option<[u8; 32]>,
 }
 
 /// The pin material a receiver must hold to recognize + verify this anchor's releases
@@ -153,6 +155,20 @@ pub trait AnchorAppliance {
     /// loss / host re-attach. This NEVER cancels, commits, moves the counter, or erases a release;
     /// the host decides from the returned [`RecoverOutcome`] (see [`recovery_action`]).
     fn recover(&mut self) -> Result<RecoverOutcome, DsmError>;
+
+    /// `OP_CHALLENGE`: the receiver's side of an offline payment. The anchor draws a receive challenge
+    /// from both hardware sources and holds it open, in place of any open one; refused unless it holds
+    /// no record.
+    fn draw_challenge(&mut self) -> Result<[u8; 32], DsmError>;
+
+    /// `OP_CHECK_PAYMENT`: the anchor checks the payer's release (its transition and certificate) and
+    /// the payer's disclosed enrollment against its open challenge, itself, and holds what it checked
+    /// for the receive that names it ([`anchor_core::receive::check_payment`]).
+    fn check_payment(
+        &mut self,
+        payment: &anchor_core::root_advance::OfflineRelease,
+        payer: &anchor_core::receive::PayerDisclosure,
+    ) -> Result<(), DsmError>;
 }
 
 /// The host's policy decision after OBSERVING a [`RecoverOutcome`]. `recover()` observes; this

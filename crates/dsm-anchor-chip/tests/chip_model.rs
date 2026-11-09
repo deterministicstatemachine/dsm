@@ -1334,3 +1334,97 @@ fn a_chip_with_a_used_counter_is_set_to_the_start_of_a_birth() {
     );
     assert!(prepared.ok, "prepare: error {}", prepared.error);
 }
+
+/// A receive on the chip: it draws a challenge from both its generators, checks a release made for
+/// that challenge itself, commits a receive of exactly it whose certificate verifies under the keys it
+/// discloses, and the finalize uses the challenge up, so the same release is not taken again. The
+/// model is one chip, so its anchor pays itself, its own release standing in for a payer's.
+#[test]
+fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
+    use support::{
+        check_of, disclosure_of, prepare_of, receive_of, self_payment, served, thirty_two,
+    };
+    let model = ModelServer::start();
+    let mut anchor = provisioned(&model);
+    let status = served(anchor.bare(pb::Op::Status), "status");
+    let challenge = thirty_two(
+        &served(anchor.bare(pb::Op::Challenge), "a challenge").receiver_challenge,
+        "the challenge",
+    );
+    let again = served(anchor.bare(pb::Op::Status), "status");
+    assert_eq!(
+        again.open_challenge,
+        challenge.to_vec(),
+        "the challenge is held open"
+    );
+
+    let paid = self_payment(arr32(&status.active_root), 0, &challenge);
+    served(
+        prepare(
+            &mut anchor,
+            &prepare_of(&paid, &challenge, ROOT_BEFORE, ROOT_AFTER),
+            &status.anchor_bundle,
+        ),
+        "pay",
+    );
+    served(anchor.bare(pb::Op::Commit), "commit");
+    let release = match served(anchor.bare(pb::Op::Emit), "emit").release {
+        Some(release) => match release.to_release() {
+            Ok(release) => release,
+            Err(e) => panic!("the release decodes: {e:?}"),
+        },
+        None => panic!("the emit carried no release"),
+    };
+    let after_payment = thirty_two(
+        &served(anchor.bare(pb::Op::Finalize), "finalize").active_root,
+        "h",
+    );
+
+    // A receive the chip did not check is refused.
+    let t = receive_of(&release, after_payment, 1, &challenge);
+    let unchecked = anchor.request(&prepare_of(&t, &challenge, [0x71; 32], [0x72; 32]));
+    assert_eq!(unchecked.error, err::PAYMENT_UNCHECKED);
+    served(
+        anchor.request(&check_of(&release, &disclosure_of(&status))),
+        "the check",
+    );
+    served(
+        prepare(
+            &mut anchor,
+            &prepare_of(&t, &challenge, [0x71; 32], [0x72; 32]),
+            &status.anchor_bundle,
+        ),
+        "the receive",
+    );
+    served(anchor.bare(pb::Op::Commit), "the receive commits");
+    let ack = match served(anchor.bare(pb::Op::Emit), "the receive's certificate").release {
+        Some(ack) => match ack.to_release() {
+            Ok(ack) => ack,
+            Err(e) => panic!("the certificate decodes: {e:?}"),
+        },
+        None => panic!("the emit carried no certificate"),
+    };
+    served(anchor.bare(pb::Op::Finalize), "the receive finalizes");
+    if let Err(e) = verify_cert_frontier_and_sigs::<Ed25519Chip, SphincsHost>(
+        &ack.cert,
+        &status.pin_chip_pk,
+        &status.pin_partition_pk,
+    ) {
+        panic!("the receive's certificate does not verify: {e:?}");
+    }
+    let done = served(anchor.bare(pb::Op::Status), "status");
+    assert!(
+        done.open_challenge.is_empty(),
+        "the receive used the challenge up"
+    );
+    assert_eq!(
+        done.active_anchor_counter, 2,
+        "a payment and a receive, one counter step each"
+    );
+    let twice = anchor.request(&check_of(&release, &disclosure_of(&status)));
+    assert_eq!(
+        twice.error,
+        err::NO_OPEN_CHALLENGE,
+        "the same release is not taken again"
+    );
+}

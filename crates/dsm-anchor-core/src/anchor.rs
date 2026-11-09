@@ -78,6 +78,16 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Anchor<T, P, S> {
         }
     }
 
+    /// Whether the anchor would serve a payment check now: it is provisioned and holds no record. A
+    /// payment check's frame is as large as a record, so a firmware asks before it allocates one.
+    pub fn takes_a_payment_check(&self) -> bool {
+        matches!(
+            self,
+            Self::Serving(d) | Self::Unclosed(d)
+                if d.appliance().active.status == crate::appliance::Status::Ready
+        )
+    }
+
     /// Answer one request frame, and the anchor as the request leaves it. The frame is the anchor's
     /// own copy: it is held no longer than its request needs it, and wiped when let go.
     pub fn serve(self, frame: &[u8]) -> (Self, Vec<u8>) {

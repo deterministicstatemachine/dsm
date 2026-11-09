@@ -754,15 +754,15 @@ impl CoreSDK {
                     )
                 },
             )?;
-            // The boundary's body carries every spend since the last boundary: they are
+            // The boundary's body carries every step since the last boundary: they are
             // exposed with it, and the next chain starts from the account it leaves.
-            crate::storage::client_db::offline_spends::expose_own_offline_spends_in_tx(&tx, bundle)
+            crate::storage::client_db::offline_spends::expose_own_offline_hops_in_tx(&tx, bundle)
                 .map_err(|e| {
-                    DsmError::storage(
-                        format!("offline boundary: expose the spends it carries: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
+                DsmError::storage(
+                    format!("offline boundary: expose the steps it carries: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
             // What this device's contacts are told of once the boundary is admitted: durable
             // with the boundary, so a process that stops here owes the notices still.
             crate::storage::client_db::offline_boundary_notices::record_own_boundary_in_tx(
@@ -818,7 +818,24 @@ impl CoreSDK {
                 pending.economic_position
             )));
         }
-        let settled = head.settle_offline_receipt(&receipt.asset, receipt.amount)?;
+        // The unload of the payment received (owner, 2026-11-07): out of what this device's own
+        // offline account holds received, into its online balance.
+        let (settled, witness) =
+            head.settle_offline_receipt(&receipt.receiver_bundle, &receipt.asset, receipt.amount)?;
+        let settle_hop = dsm::types::offline_chain::AccountHop::Settle(
+            dsm::types::offline_chain::SettleHop::new(
+                witness,
+                receipt.asset,
+                receipt.amount,
+                dsm::economic::offline_boundary::settlement_id(
+                    &head.genesis_digest(),
+                    &head.devid(),
+                    &receipt.payer_genesis,
+                    &receipt.payer_device,
+                    &receipt.release_message,
+                ),
+            ),
+        );
         let (prepared, coords, artifacts) = prepare()?;
         let pending = prepared
             .into_locally_accepted(coords)
@@ -855,6 +872,13 @@ impl CoreSDK {
                 pending.economic_position,
             )
             .map_err(|e| storage("the receipt settled", &e))?;
+            // The account's next boundary carries this unload in its ancestry.
+            crate::storage::client_db::offline_spends::record_own_offline_hop_in_tx(
+                &tx,
+                &receipt.receiver_bundle,
+                &settle_hop,
+            )
+            .map_err(|e| storage("the unload, for the account's next boundary", &e))?;
             tx.commit().map_err(|e| storage("commit", &e))?;
         }
         sm.set_device_head(new_head.clone());
@@ -1382,7 +1406,7 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
         before_commit: Option<
             &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
         >,
@@ -1396,7 +1420,7 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            offline_spend,
+            offline,
             Some(settle),
             before_commit,
             None,
@@ -1560,7 +1584,7 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
         in_tx_extra: Option<
             &dyn Fn(
                 &rusqlite::Transaction<'_>,
@@ -1695,7 +1719,7 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
+            offline, // Some(..) moves the value through an offline account instead of the online balance
         )?;
         // The sender's signed A-side pair is deliberately NOT compared against
         // this device's own lineage here — see the doc comment on
@@ -1861,11 +1885,8 @@ impl CoreSDK {
         let sm = self.state_machine.lock();
         let account = sm.device_head()?.offline_account(&bundle)?;
         // An open account keeps an entry only for an asset it holds some of: no entry is none of
-        // it, which is known, not unknown.
-        Some(match account.allocation(asset) {
-            Some(held) => held,
-            None => 0,
-        })
+        // it, which is known, not unknown. What it holds is the sum of its entries for the asset.
+        Some(account.allocations().get(asset).into_iter().sum())
     }
 
     /// Get the canonical DeviceState head (§2.2 SMT root).
@@ -1890,16 +1911,10 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
         let sm = self.state_machine.lock();
-        sm.prepare_advance_relationship(
-            rel_key,
-            counterparty_devid,
-            operation,
-            deltas,
-            offline_spend,
-        )
+        sm.prepare_advance_relationship(rel_key, counterparty_devid, operation, deltas, offline)
     }
 
     /// Read device-level balance for a token by its 32-byte CPTA policy_commit.
@@ -2102,16 +2117,26 @@ impl CoreSDK {
         let Some(ds) = sm.device_head() else {
             return Ok(BTreeMap::new());
         };
-        let (closed, lost) = ds.close_offline_accounts_except(bundle);
+        let (closed, lost) = ds.close_offline_accounts_except(bundle)?;
         if lost.is_empty() {
             return Ok(BTreeMap::new());
         }
-        crate::storage::client_db::update_bcr_device_head(&closed).map_err(|e| {
+        let bundles: Vec<[u8; 32]> = lost.keys().copied().collect();
+        let payments = crate::storage::client_db::offline_spends::close_offline_accounts(
+            &closed, &bundles,
+        )
+        .map_err(|e| {
             DsmError::storage(
                 format!("offline account: persist the accounts closed at an install: {e}"),
                 None::<std::io::Error>,
             )
         })?;
+        if payments > 0 {
+            log::warn!(
+                "[anchor.install] {payments} payment(s) received offline into a closed account went \
+                 with it"
+            );
+        }
         sm.set_device_head(closed);
         let mut held = BTreeMap::new();
         for (ended, allocations) in &lost {
@@ -2299,30 +2324,37 @@ impl CoreSDK {
         use anchor_core::root_advance::{anchor_root_advance, transition_digest};
 
         let dev = self.device_info.device_id;
-        let mut guard = self.anchor_appliance.lock();
-        // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory, attached
-        // once and kept (stateful appliance), and only once it is provisioned for this device. The
-        // check against the offline account is made PER stage call below.
-        let attached = self.anchor_for_this_device(&mut guard)?;
-        let pin = attached.pin.clone();
-        let app = &mut attached.appliance;
+        // A receive the phone committed before its board finalized is finished first: the board
+        // then stands where the account does.
+        self.finalize_committed_receive()?;
+        // The anchor's lock is let go before the account is checked under the state machine's:
+        // a receive takes the two in the other order, inside its advance.
+        let (pin, before) = {
+            let mut guard = self.anchor_appliance.lock();
+            // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory, attached
+            // once and kept (stateful appliance), and only once it is provisioned for this device. The
+            // check against the offline account is made PER stage call below.
+            let attached = self.anchor_for_this_device(&mut guard)?;
+            let pin = attached.pin.clone();
+            let app = &mut attached.appliance;
 
-        // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
-        // apply the existing host policy (`recovery_action`); anything other than Ready fails closed to
-        // online recovery. This does NOT cancel or erase here — an unfinished release is settled by
-        // the bilateral handler before a new step is staged (a Committed release is re-emitted as the
-        // same payment, never erased, §26). A prepared record is treated as owned by a session here,
-        // so stage never cancels one.
-        let action = crate::anchor::recovery_action(app.recover()?, true);
-        if action != crate::anchor::RecoveryAction::Ready {
-            return Err(DsmError::invalid_operation(format!(
+            // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
+            // apply the existing host policy (`recovery_action`); anything other than Ready fails closed to
+            // online recovery. This does NOT cancel or erase here — an unfinished release is settled by
+            // the bilateral handler before a new step is staged (a Committed release is re-emitted as the
+            // same payment, never erased, §26). A prepared record is treated as owned by a session here,
+            // so stage never cancels one.
+            let action = crate::anchor::recovery_action(app.recover()?, true);
+            if action != crate::anchor::RecoveryAction::Ready {
+                return Err(DsmError::invalid_operation(format!(
                 "offline-bearer stage: appliance not Ready ({action:?}) — resolve/re-emit via recovery \
                  before staging a new transfer (fail closed to online)"
             )));
-        }
+            }
 
-        // Active state: the frontier this transfer consumes + the current counter floor.
-        let before = app.status()?;
+            // Active state: the frontier this transfer consumes + the current counter floor.
+            (pin, app.status()?)
+        };
         let appliance_prev_root = before.root;
 
         // The account is the authority and the chip its mirror.
@@ -2476,7 +2508,188 @@ impl CoreSDK {
         }
         Ok(())
     }
+
+    /// This device's board, attached, and where it stands, for the receiver's side of an offline
+    /// payment (owner, 2026-11-07): a phone with no board of its own does not receive offline. The
+    /// board must hold no record (§26): a release or a receive in the middle of its motion keeps it.
+    fn board_to_receive(
+        &self,
+    ) -> Result<(crate::anchor::AnchorPin, crate::anchor::ApplianceStatus), DsmError> {
+        // A receive the phone committed before its board finalized is finished first.
+        self.finalize_committed_receive()?;
+        let mut guard = self.anchor_appliance.lock();
+        let attached = self.anchor_for_this_device(&mut guard).map_err(|e| {
+            DsmError::invalid_operation(format!("{OFFLINE_RECEIVE_NO_BOARD_MSG} ({e})"))
+        })?;
+        match attached.appliance.recover()? {
+            anchor_core::appliance::RecoverOutcome::Accept(_) => {}
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "this phone's DSM Anchor is in the middle of another offline payment \
+                     ({other:?}); it receives once that one is finished"
+                )))
+            }
+        }
+        Ok((attached.pin.clone(), attached.appliance.status()?))
+    }
+
+    /// The receiver's side, first: this device's board draws the challenge the payer's release must
+    /// answer, from both its hardware sources, and holds it open. The device's offline account is
+    /// opened at the board's origin if it is not yet open. Answers the challenge and the board's pin.
+    pub fn draw_receive_challenge(&self) -> Result<([u8; 32], crate::anchor::AnchorPin), DsmError> {
+        let (pin, status) = self.board_to_receive()?;
+        self.require_offline_account_at(&pin.bundle, &status.root, status.anchor_counter)?;
+        let mut guard = self.anchor_appliance.lock();
+        let attached = guard
+            .as_mut()
+            .ok_or_else(|| DsmError::state_machine("offline receive: the anchor was detached"))?;
+        let challenge = attached.appliance.draw_challenge()?;
+        Ok((challenge, pin))
+    }
+
+    /// Stage the receive of `paid` on this device's board, as the board will bind it: its own advance
+    /// from where it stands, a receive of exactly the payer's release, under the challenge the release
+    /// answered, which the board must still hold open. Nothing on the board changes. The device's
+    /// offline account must stand where the board does.
+    pub fn stage_offline_receive(
+        &self,
+        paid: &anchor_core::root_advance::OfflineRelease,
+        receiver_challenge: [u8; 32],
+    ) -> Result<StagedBearerTransition, DsmError> {
+        use anchor_core::root_advance::{anchor_root_advance, transition_digest};
+        let (pin, status) = self.board_to_receive()?;
+        if status.open_challenge != Some(receiver_challenge) {
+            return Err(DsmError::invalid_operation(
+                "this phone's DSM Anchor no longer holds the challenge this payment answers: it \
+                 drew another, or it received this payment already (fail closed)",
+            ));
+        }
+        self.require_offline_account_at(&pin.bundle, &status.root, status.anchor_counter)?;
+        let sent = &paid.transition;
+        let mut owned = anchor_core::root_advance::OwnedTransition {
+            relationship_id: sent.relationship_id,
+            object_id: sent.object_id,
+            sender_device_id: self.device_info.device_id,
+            recipient_device_id: sent.sender_device_id,
+            prev_root: status.root,
+            next_root: status.root,
+            anchor_counter: status.anchor_counter,
+            next_anchor_counter: status.anchor_counter + 1,
+            action_type: anchor_core::receive::ACTION_RECEIVE,
+            action_fields: anchor_core::receive::receive_action_fields(
+                &paid.cert.anchor_bundle,
+                &paid.cert.root_advance_message,
+                paid.cert.next_anchor_counter,
+            ),
+            payload_hash: sent.payload_hash,
+            old_leaf_proof: Vec::new(),
+            new_leaf_proof: Vec::new(),
+            authority_policy_hash: sent.authority_policy_hash,
+        };
+        let d = transition_digest(&owned.as_transition(), &receiver_challenge);
+        owned.next_root = anchor_root_advance(&status.root, &d);
+        Ok(StagedBearerTransition {
+            appliance_prev_root: status.root,
+            appliance_next_root: owned.next_root,
+            transition: owned,
+            pin,
+        })
+    }
+
+    /// The receiver's board's receive commit, the hardware half of the receive (owner, 2026-11-07):
+    /// the board checks the payer's release itself, this device authorizes the receive, then
+    /// PREPARE → COMMIT → EMIT of the staged receive over the device roots the receiver's advance
+    /// moves between. Answers the receive's release, its certificate the acknowledgement. Takes only
+    /// the anchor's lock: it runs inside the receiver's advance, under the state machine's.
+    pub fn receive_offline_bearer(
+        &self,
+        staged: &StagedBearerTransition,
+        paid: &anchor_core::root_advance::OfflineRelease,
+        payer: &anchor_core::receive::PayerDisclosure,
+        receiver_challenge: [u8; 32],
+        device_root_before: [u8; 32],
+        device_root_after: [u8; 32],
+    ) -> Result<Vec<u8>, DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        let app = &mut guard
+            .as_mut()
+            .ok_or_else(|| DsmError::state_machine("offline receive: the anchor is not attached"))?
+            .appliance;
+        app.check_payment(paid, payer)?;
+        // This device authorizes exactly this receive, under the key its board was provisioned for,
+        // as it authorizes a release: the board signs for its owner, not for whoever holds the link.
+        let digest = anchor_core::appliance::owner_authorization_digest(
+            &staged.pin.bundle,
+            &staged.appliance_prev_root,
+            staged.transition.anchor_counter,
+            &anchor_core::root_advance::transition_digest(
+                &staged.transition.as_transition(),
+                &receiver_challenge,
+            ),
+            &device_root_before,
+            &device_root_after,
+        );
+        let secret = crate::sdk::signing_authority::current_secret_key()?;
+        let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &digest)?;
+        app.authorize(&digest, &signature)?;
+        app.prepare(
+            &staged.transition.as_transition(),
+            &receiver_challenge,
+            &device_root_before,
+            &device_root_after,
+        )?;
+        app.commit()?;
+        app.emit()
+    }
+
+    /// After a restart, finish a receive whose phone side committed before its board finalized: the
+    /// board holds a committed receive whose successor frontier the device's offline account already
+    /// stands at. Anything else is left as it is: a committed release is its sender session's to
+    /// finish, and a receive the phone has not committed is its receiving session's. Answers the
+    /// frontier the board was advanced to, when it was.
+    pub fn finalize_committed_receive(&self) -> Result<Option<[u8; 32]>, DsmError> {
+        use prost::Message;
+        let committed = {
+            let mut guard = self.anchor_appliance.lock();
+            match self.anchor_for_this_device(&mut guard) {
+                Ok(attached) => match attached.appliance.recover()? {
+                    anchor_core::appliance::RecoverOutcome::ReemitCommitted(next) => {
+                        Some((next, attached.appliance.emit()?, attached.pin.bundle))
+                    }
+                    _ => None,
+                },
+                // No board of this device's is connected: there is no receive on one to finish.
+                Err(_no_board) => None,
+            }
+        };
+        let Some((next, emitted, bundle)) = committed else {
+            return Ok(None);
+        };
+        let release = anchor_core::proto::pb::OfflineRelease::decode(emitted.as_slice())
+            .map_err(|e| DsmError::invalid_operation(format!("the committed record: {e}")))?;
+        let is_receive = release
+            .transition
+            .as_ref()
+            .is_some_and(|t| t.action_type == anchor_core::receive::ACTION_RECEIVE);
+        let account_at = self.device_head().and_then(|head| {
+            head.offline_account(&bundle)
+                .map(|account| account.frontier())
+        });
+        match account_at {
+            Some(at) if is_receive && at == next => {
+                self.finalize_offline_bearer(next)?;
+                Ok(Some(next))
+            }
+            _ => Ok(None),
+        }
+    }
 }
+
+/// Why a phone with no board of its own receives nothing offline (owner, 2026-11-07: "you have to
+/// have the board, man, for it to work offline. You can't receive either.").
+pub(crate) const OFFLINE_RECEIVE_NO_BOARD_MSG: &str =
+    "this phone has no DSM Anchor connected, so it cannot receive offline: connect its anchor and \
+     try again (fail closed)";
 
 /* ------------------------------ Private helpers ------------------------- */
 

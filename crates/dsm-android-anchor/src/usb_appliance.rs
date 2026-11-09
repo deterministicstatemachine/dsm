@@ -196,6 +196,10 @@ impl AnchorAppliance for UsbAnchorAppliance {
             install: install_of(&r).ok_or_else(|| {
                 DsmError::invalid_operation("anchor appliance: STATUS named no install")
             })?,
+            open_challenge: match r.open_challenge.as_slice() {
+                [] => None,
+                held => Some(arr32(held)?),
+            },
         })
     }
 
@@ -353,6 +357,31 @@ impl AnchorAppliance for UsbAnchorAppliance {
             permanent: resp.permanent.clone(),
             refused,
         })
+    }
+
+    fn draw_challenge(&mut self) -> Result<[u8; 32], DsmError> {
+        let r = self.roundtrip(bare(pb::Op::Challenge))?;
+        arr32(&r.receiver_challenge)
+    }
+
+    fn check_payment(
+        &mut self,
+        payment: &anchor_core::root_advance::OfflineRelease,
+        payer: &anchor_core::receive::PayerDisclosure,
+    ) -> Result<(), DsmError> {
+        // Only what the anchor checks goes over the cable: the transition and the certificate. The
+        // offline-state proofs and any spend chain are the phone's to verify.
+        let req = pb::ApplianceRequest {
+            op: pb::Op::CheckPayment as i32,
+            payment: Some(Box::new(pb::OfflineRelease {
+                transition: Some(payment.transition.to_pb()),
+                cert: Some(payment.cert.to_pb()),
+                ..Default::default()
+            })),
+            payer: Some(Box::new(payer.to_pb())),
+            ..Default::default()
+        };
+        self.roundtrip(req).map(|_| ())
     }
 
     fn provision(

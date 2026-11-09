@@ -57,6 +57,12 @@ pub enum ApplianceError {
     /// the one taken was for another anchor, frontier or payment ([`owner_authorization_digest`]),
     /// or a signature did not verify. Nothing is signed, nothing is prepared.
     OwnerUnauthorized,
+    /// A receive was asked for with no challenge open, or under another challenge than the open one.
+    NoOpenChallenge,
+    /// A receive names no payment this appliance checked, or another than the one it checked.
+    PaymentUnchecked,
+    /// The payer's release did not pass this appliance's own check.
+    PaymentRefused(crate::receive::PaymentRefusal),
 }
 
 /// Prepared record (§12.2): the certificate carrying the appliance's two on-device identity
@@ -92,6 +98,8 @@ pub struct Active {
     pub anchor_counter: u64,
     pub status: Status,
     pub record: Record,
+    /// The receive challenge this appliance drew and has not used up (see [`crate::receive`]).
+    pub open_challenge: Option<[u8; 32]>,
 }
 
 impl Active {
@@ -102,6 +110,7 @@ impl Active {
             anchor_counter: 0,
             status: Status::Ready,
             record: Record::Empty,
+            open_challenge: None,
         }
     }
 }
@@ -181,6 +190,14 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     /// ([`Self::authorize`]), consumed by the prepare that claims it. Held in memory only: a reboot
     /// drops it, and the owner authorizes again.
     authorized: Option<[u8; 32]>,
+    /// The owner's DSM device id its bundle binds: a payment it receives must name it.
+    pub owner_device_id: [u8; 32],
+    /// The policy its bundle binds: a payer's anchor must be enrolled under it too.
+    pub policy_hash: [u8; 32],
+    /// What the receive of the payer's release this appliance last checked must bind
+    /// ([`crate::receive::receive_binding`]), held until that receive is finalized. Not durable:
+    /// after a power cut the payment is checked again.
+    pub checked: Option<[u8; 32]>,
     /// SECRET partition signing key (non-exportable on device).
     partition_sk: Vec<u8>,
     tropic: T,
@@ -211,6 +228,9 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             install,
             owner_pk,
             authorized: None,
+            owner_device_id: birth.device_id,
+            policy_hash: birth.policy_hash,
+            checked: None,
             partition_sk: birth.partition_sk,
             tropic,
             _p: PhantomData,
@@ -282,6 +302,22 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         }
         if t.next_anchor_counter != t.anchor_counter + 1 {
             return Err(ApplianceError::IndexMismatch);
+        }
+        // A receive is prepared only against the open challenge, for exactly the payment checked
+        // under it.
+        if t.action_type == crate::receive::ACTION_RECEIVE {
+            match &self.active.open_challenge {
+                Some(open) if ct_eq_32(open, receiver_challenge) => {}
+                _ => return Err(ApplianceError::NoOpenChallenge),
+            }
+            match &self.checked {
+                Some(binding)
+                    if ct_eq_32(
+                        binding,
+                        &crate::receive::receive_binding(t, receiver_challenge),
+                    ) => {}
+                _ => return Err(ApplianceError::PaymentUnchecked),
+            }
         }
         // Read H once and reject an exhausted down-counter before signing. commit() guards
         // this too; prepare must not build a release that can never commit.
@@ -462,21 +498,85 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// §12.6 Finalize: advance the active frontier to `(h_{i+1}, u_i+1)`, guarded by
     /// `active.u = H₀ − H`.
     pub fn finalize(&mut self) -> Result<[u8; 32], ApplianceError> {
-        let (next_frontier, next_anchor_counter) = match &self.active.record {
-            Record::Committed(c) if c.committed => (c.next_frontier, c.next_anchor_counter),
+        let (next_frontier, next_anchor_counter, action) = match &self.active.record {
+            Record::Committed(c) if c.committed => (
+                c.next_frontier,
+                c.next_anchor_counter,
+                c.release.transition.action_type,
+            ),
             _ => return Err(ApplianceError::NotCommitted),
         };
         let live_u = self.live_index()?;
         if self.active.anchor_counter != live_u {
             return Err(ApplianceError::CounterMismatch);
         }
+        // A receive's finalize uses its challenge up: the release it received answers no other.
+        let open_challenge = if action == crate::receive::ACTION_RECEIVE {
+            self.checked = None;
+            None
+        } else {
+            self.active.open_challenge
+        };
         self.active = Active {
             root: next_frontier,
             anchor_counter: next_anchor_counter,
             status: Status::Ready,
             record: Record::Empty,
+            open_challenge,
         };
         Ok(next_frontier)
+    }
+
+    /// Draw a receive challenge from both hardware sources and hold it open, in place of any open
+    /// one (see [`crate::receive`]). Refused unless Ready: a receive or a release in progress keeps
+    /// the challenge it has.
+    pub fn draw_challenge(&mut self) -> Result<[u8; 32], ApplianceError> {
+        if self.active.status != Status::Ready {
+            return Err(ApplianceError::WrongState);
+        }
+        let entropy = self
+            .tropic
+            .challenge_entropy()
+            .map_err(ApplianceError::Tropic)?;
+        let challenge = crate::hash::h(
+            crate::domain::RECEIVE_CHALLENGE_V1,
+            &[&entropy.board, &entropy.chip],
+        );
+        self.checked = None;
+        self.active.open_challenge = Some(challenge);
+        Ok(challenge)
+    }
+
+    /// Check the payer's release against the open challenge ([`crate::receive::check_payment`]) and
+    /// hold what was checked for the receive that names it. Refused unless Ready with a challenge
+    /// open. Nothing is signed and nothing durable changes.
+    pub fn check_payment(
+        &mut self,
+        transition: &Transition,
+        cert: &crate::receive::PaymentCert,
+        payer: &crate::receive::PayerDisclosure,
+    ) -> Result<(), ApplianceError> {
+        if self.active.status != Status::Ready {
+            return Err(ApplianceError::WrongState);
+        }
+        let open = self
+            .active
+            .open_challenge
+            .ok_or(ApplianceError::NoOpenChallenge)?;
+        let checked = crate::receive::check_payment::<T, P>(
+            &self.tropic,
+            transition,
+            cert,
+            payer,
+            &crate::receive::Receiver {
+                device_id: &self.owner_device_id,
+                policy_hash: &self.policy_hash,
+                open_challenge: &open,
+            },
+        )
+        .map_err(ApplianceError::PaymentRefused)?;
+        self.checked = Some(checked);
+        Ok(())
     }
 
     /// Cancel a prepared (not yet committed) record.

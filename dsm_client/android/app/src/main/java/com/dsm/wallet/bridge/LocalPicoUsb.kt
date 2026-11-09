@@ -13,7 +13,8 @@ import android.hardware.usb.UsbManager
 import android.util.Log
 
 /**
- * H2 — the Phone->Pico USB-OTG transport (the sender phone A talking to its own Pico A).
+ * H2 — the Phone->Pico USB-OTG transport: each phone talking to its own Pico, the payer's to release
+ * an offline payment and the receiver's to receive it (owner, 2026-11-07: both sides hold a board).
  *
  * OPAQUE BYTE TRANSPORT ONLY. This class understands nothing about TROPIC /
  * protobuf — Rust builds the request frame and decodes the response. All this does is: open the

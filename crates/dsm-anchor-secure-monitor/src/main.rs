@@ -304,7 +304,8 @@ fn request_part(mb: &mut Mailbox) -> u32 {
     let len = unsafe { core::ptr::read_volatile(&mb.req_len) } as usize;
     unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
     let request = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
-    if total > anchor_chip::MAX_REQUEST_BYTES || len > SG_SLOT_MAX_LEN || offset + len > total {
+    if !unsafe { anchor_glue::takes_frame(total) } || len > SG_SLOT_MAX_LEN || offset + len > total
+    {
         discard(request);
         return SG_ERR_SIZE;
     }

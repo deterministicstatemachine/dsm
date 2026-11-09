@@ -2579,7 +2579,7 @@ impl AppRouter for AppRouterImpl {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
         before_commit: Option<
             &dyn Fn(
                 &dsm::types::device_state::AdvanceOutcome,
@@ -2595,7 +2595,7 @@ impl AppRouter for AppRouterImpl {
             counterparty_devid,
             operation,
             deltas,
-            offline_spend,
+            offline,
             before_commit,
             settle,
         )
@@ -2607,14 +2607,14 @@ impl AppRouter for AppRouterImpl {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk.simulate_advance_for_confirm(
             rel_key,
             counterparty_devid,
             operation,
             deltas,
-            offline_spend,
+            offline,
         )
     }
 
@@ -2677,6 +2677,44 @@ impl AppRouter for AppRouterImpl {
         appliance_next_root: [u8; 32],
     ) -> Result<(), dsm::types::error::DsmError> {
         self.core_sdk.finalize_offline_bearer(appliance_next_root)
+    }
+
+    fn draw_receive_challenge(
+        &self,
+    ) -> Result<([u8; 32], crate::anchor::AnchorPin), dsm::types::error::DsmError> {
+        self.core_sdk.draw_receive_challenge()
+    }
+
+    fn stage_offline_receive(
+        &self,
+        paid: &anchor_core::root_advance::OfflineRelease,
+        receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError> {
+        self.core_sdk
+            .stage_offline_receive(paid, receiver_challenge)
+    }
+
+    fn receive_offline_bearer(
+        &self,
+        staged: &crate::sdk::core_sdk::StagedBearerTransition,
+        paid: &anchor_core::root_advance::OfflineRelease,
+        payer: &anchor_core::receive::PayerDisclosure,
+        receiver_challenge: [u8; 32],
+        device_root_before: [u8; 32],
+        device_root_after: [u8; 32],
+    ) -> Result<Vec<u8>, dsm::types::error::DsmError> {
+        self.core_sdk.receive_offline_bearer(
+            staged,
+            paid,
+            payer,
+            receiver_challenge,
+            device_root_before,
+            device_root_after,
+        )
+    }
+
+    fn finalize_committed_receive(&self) -> Result<Option<[u8; 32]>, dsm::types::error::DsmError> {
+        self.core_sdk.finalize_committed_receive()
     }
 
     // ====================== QUERY ======================
@@ -2768,6 +2806,9 @@ impl AppRouter for AppRouterImpl {
             "wallet.loadOffline" | "wallet.unloadOffline" => {
                 Box::pin(self.handle_offline_cash_invoke(i)).await
             }
+            // Money received offline, moved online by the receiver's own unload (owner,
+            // 2026-11-07).
+            "wallet.unloadReceived" => Box::pin(self.handle_unload_received_invoke(i)).await,
             // Contacts invoke routes
             "contacts.addManual"
             | "contacts.setProfile"

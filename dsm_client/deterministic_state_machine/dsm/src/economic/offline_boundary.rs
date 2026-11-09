@@ -34,6 +34,16 @@
 //! account between its boundaries, and the boundary exposes each payment
 //! online. A walker that recorded the previous boundary holds the account it
 //! left, and takes this boundary only from there.
+//!
+//! Schema 3 (owner, 2026-11-07: an offline payment needs a board on both sides,
+//! and the money received lands in the receiver's own offline balance): the
+//! ancestry's steps are typed (`OfflineAccountHop`). Besides spends, an account
+//! moves between its boundaries by its own board's receive commits, into what it
+//! holds received, and by the unload of a received payment, out of it
+//! ([`crate::types::offline_chain::verify_account_hops`]). A receive brings no
+//! money a contact takes on its word: the money leaves only by its unload, which
+//! is checked against the payer's own history. An account's first boundary may
+//! come after receives, and still after no spend.
 
 use crate::ccb::decode::{Cursor, DecodeError};
 use crate::ccb::{
@@ -58,14 +68,14 @@ use crate::types::offline_account::{
 struct LoadBody;
 impl CcbObject for LoadBody {
     const CLASS: u16 = class::OFFLINE_LOAD_BOUNDARY_BODY;
-    const SCHEMA: u16 = 2;
+    const SCHEMA: u16 = 3;
 }
 
 /// Envelope of an unload body.
 struct UnloadBody;
 impl CcbObject for UnloadBody {
     const CLASS: u16 = class::OFFLINE_UNLOAD_BOUNDARY_BODY;
-    const SCHEMA: u16 = 2;
+    const SCHEMA: u16 = 3;
 }
 
 /// The anchor an offline account belongs to, as its bundle `B` commits it:
@@ -675,13 +685,13 @@ impl OfflineSettlementBody {
 
     /// The settlement's identity: the receiver's one settlement of this spend.
     pub fn operation_id(&self, genesis: &[u8; 32], device_id: &[u8; 32]) -> [u8; 32] {
-        let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_SETTLEMENT);
-        h.update(genesis);
-        h.update(device_id);
-        h.update(&self.payer_genesis);
-        h.update(&self.payer_device);
-        h.update(&self.release_message);
-        *h.finalize().as_bytes()
+        settlement_id(
+            genesis,
+            device_id,
+            &self.payer_genesis,
+            &self.payer_device,
+            &self.release_message,
+        )
     }
 
     /// Verify the body at `body_bytes` as a settlement of the device
@@ -755,6 +765,25 @@ impl OfflineSettlementBody {
     }
 }
 
+/// The identity of the receiver `(genesis, device_id)`'s one settlement — the unload of the payment it
+/// received offline — of the spend the payer's anchor signed as `release_message`:
+/// `H(G ‖ DevID ‖ G_payer ‖ DevID_payer ‖ M)`.
+pub fn settlement_id(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    payer_genesis: &[u8; 32],
+    payer_device: &[u8; 32],
+    release_message: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_SETTLEMENT);
+    h.update(genesis);
+    h.update(device_id);
+    h.update(payer_genesis);
+    h.update(payer_device);
+    h.update(release_message);
+    *h.finalize().as_bytes()
+}
+
 /// Which body an offline substrate's bytes hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfflineBodyKind {
@@ -797,7 +826,7 @@ fn verify_ancestry(
     device_id: &[u8; 32],
     owner_key: &[u8],
 ) -> Result<Vec<crate::types::offline_chain::ChainPayment>, DsmError> {
-    use crate::types::offline_chain::{chain_end, verify_spend_chain, ChainAnchor, SpendHop};
+    use crate::types::offline_chain::{verify_account_hops, ChainAnchor};
     let anchor = &body.ancestry.anchor;
     crate::crypto::anchor_enrollment::require_bundle_of(
         crate::crypto::anchor_enrollment::PinKeys {
@@ -818,45 +847,35 @@ fn verify_ancestry(
         .ancestry
         .chain
         .iter()
-        .map(|hop| {
-            use prost::Message;
-            SpendHop::from_proto(
-                crate::types::proto::OfflineSpendHop::decode(hop.as_slice()).map_err(|e| {
-                    DsmError::invalid_operation(format!("an offline boundary's spend: {e}"))
-                })?,
-            )
-        })
+        .map(|hop| crate::types::offline_chain::AccountHop::from_bytes(hop))
         .collect::<Result<Vec<_>, DsmError>>()?;
-    let start =
-        match (
-            &body.ancestry.since,
-            body.pre_funding_chain,
-            hops.as_slice(),
-        ) {
-            (BoundarySince::Opened { frontier }, None, []) => {
-                crate::types::offline_account::OfflineAccount::open(*frontier, 0).root()
-            }
-            (BoundarySince::Previous { account_root }, Some(_), _) => *account_root,
-            (BoundarySince::Opened { .. }, ..) => return Err(DsmError::invalid_operation(
-                "an offline account's first boundary starts from the account opened empty, with \
-                 no spends before it",
-            )),
-            (BoundarySince::Previous { .. }, None, _) => {
-                return Err(DsmError::invalid_operation(
-                    "a boundary after an account's first names the boundary before it",
-                ))
-            }
-        };
+    // An account's first boundary starts from the account opened empty. Nothing can be spent before
+    // a load funds it, but its board may have received offline since it opened (owner, 2026-11-07).
+    let start = match (&body.ancestry.since, body.pre_funding_chain) {
+        (BoundarySince::Opened { frontier }, None) => {
+            crate::types::offline_account::OfflineAccount::open(*frontier, 0).root()
+        }
+        (BoundarySince::Previous { account_root }, Some(_)) => *account_root,
+        (BoundarySince::Opened { .. }, Some(_)) => return Err(DsmError::invalid_operation(
+            "an offline account's first boundary starts from the account opened empty, and names \
+                 no boundary before it",
+        )),
+        (BoundarySince::Previous { .. }, None) => {
+            return Err(DsmError::invalid_operation(
+                "a boundary after an account's first names the boundary before it",
+            ))
+        }
+    };
     let chain_anchor = ChainAnchor {
         bundle: body.bundle,
         anchor_id: anchor.anchor_id,
         pk_chip: anchor.pk_chip.clone(),
         pk_host: anchor.pk_host.clone(),
     };
-    let payments = verify_spend_chain(&start, &chain_anchor, &hops)?;
-    if chain_end(&start, &payments) != body.pre_account_root {
+    let (payments, end) = verify_account_hops(&start, &chain_anchor, device_id, &hops)?;
+    if end != body.pre_account_root {
         return Err(DsmError::invalid_operation(
-            "the boundary's account is not the one its chain of spends leaves",
+            "the boundary's account is not the one its steps since the last boundary leave",
         ));
     }
     Ok(payments)
@@ -1113,7 +1132,7 @@ mod tests {
         );
         refused(
             verify(&dev, &misplaced),
-            "is not the one its chain of spends leaves",
+            "is not the one its steps since the last boundary leave",
         );
         let (_, unnamed) = body_of(
             &dev,
@@ -1193,7 +1212,6 @@ mod tests {
     #[test]
     fn a_boundary_carries_every_spend_since_the_last() {
         use crate::types::offline_chain::fixture::Payer;
-        use prost::Message;
         let mut payer = Payer::loaded(0x61, 40);
         let after_load = payer.account_root();
         let (first, _, _) = payer.spend([0xB0; 32], 10);
@@ -1233,7 +1251,9 @@ mod tests {
             .encode()
             .expect("encode")
         };
-        let hop = |h: &crate::types::offline_chain::SpendHop| h.to_proto().encode_to_vec();
+        let hop = |h: &crate::types::offline_chain::SpendHop| {
+            crate::types::offline_chain::AccountHop::Spend(h.clone()).to_bytes()
+        };
         let (verified, exposed) = OfflineBoundaryBody::verify(
             &body(vec![hop(&first), hop(&second)]),
             &payer.genesis,
@@ -1256,7 +1276,7 @@ mod tests {
                 &payer.head.devid(),
                 payer.head.public_key(),
             ),
-            "is not the one its chain of spends leaves",
+            "is not the one its steps since the last boundary leave",
         );
     }
 

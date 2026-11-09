@@ -42,3 +42,10 @@ pub const OWNER_AUTHORIZATION_V1: &str = "DSM/anchor/owner-authorization/v1";
 pub const RMEM_RECORD_V1: &str = "DSM/anchor/rmem-record/v1";
 /// The seal of an R-memory header naming a record.
 pub const RMEM_HEADER_V1: &str = "DSM/anchor/rmem-header/v1";
+
+// --- The receiver's side of an offline payment (owner, 2026-11-07) ---
+/// The receive challenge `r_R = H(tag ‖ board TRNG ‖ chip RNG)` the receiver's appliance draws, from
+/// both hardware sources.
+pub const RECEIVE_CHALLENGE_V1: &str = "DSM/anchor/receive-challenge/v1";
+/// What a receive of a checked payment binds, as one digest (`receive::receive_binding`).
+pub const RECEIVE_BINDING_V1: &str = "DSM/anchor/receive-binding/v1";

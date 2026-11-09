@@ -171,6 +171,12 @@ pub struct BilateralSessionRecord {
     pub spend_asset: Option<Vec<u8>>,
     pub spend_amount: Option<i64>,
     pub spend_next_frontier: Option<Vec<u8>>,
+    /// Receiver, bearer steps: the receive its board commits into its own offline account (owner,
+    /// 2026-11-07), all four or none.
+    pub receive_anchor_bundle: Option<Vec<u8>>,
+    pub receive_asset: Option<Vec<u8>>,
+    pub receive_amount: Option<i64>,
+    pub receive_next_frontier: Option<Vec<u8>>,
     /// The frame the session owes its counterparty, delivered again when the
     /// link returns.
     pub owed_frame: Option<Vec<u8>>,

@@ -26,7 +26,7 @@ use anchor_chip::Board;
 use anchor_core::appliance::owner_authorization_digest;
 use anchor_core::enrollment::{Install, Provisioning};
 use anchor_core::proto::{decode_response, encode_request, pb};
-use anchor_core::root_advance::{transition_digest, OwnedTransition};
+use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
 use anchor_core::tropic::PartitionSig;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::{Error, ErrorKind, ErrorType, Operation, SpiDevice};
@@ -562,5 +562,129 @@ pub fn provision_request() -> pb::ApplianceRequest {
         }),
         rehearsal_pk: rehearsal_key().1.clone(),
         ..Default::default()
+    }
+}
+
+// --- The receiver's side of an offline payment, on one chip ---------------------------------------
+//
+// The model is one chip, so its anchor pays itself and then receives that payment: every operation
+// of a receive runs on the chip, its own release standing in for a payer's.
+
+/// What the anchor discloses of its enrollment, from its STATUS and the provisioning.
+pub fn disclosure_of(status: &pb::ApplianceResponse) -> pb::PayerDisclosure {
+    let provisioning = provisioning();
+    pb::PayerDisclosure {
+        online_id_pk: provisioning.online_id_pk,
+        anchor_id: status.pin_anchor_id.clone(),
+        chip_pk: status.pin_chip_pk.clone(),
+        partition_pk: status.pin_partition_pk.clone(),
+        enrolled_counter: match u32::try_from(status.pin_enrolled_counter) {
+            Ok(h0) => h0,
+            Err(e) => panic!("the enrolled counter fits: {e}"),
+        },
+        device_id: provisioning.device_id.to_vec(),
+        policy_hash: provisioning.policy_hash.to_vec(),
+        birth_commitment: status.pin_birth_commitment.clone(),
+    }
+}
+
+/// A payment from the provisioned device to itself, from the frontier `prev` at counter `u`.
+pub fn self_payment(prev: [u8; 32], u: u64, challenge: &[u8; 32]) -> OwnedTransition {
+    let device = provisioning().device_id;
+    let mut t = OwnedTransition {
+        relationship_id: [1; 32],
+        object_id: [2; 32],
+        sender_device_id: device,
+        recipient_device_id: device,
+        prev_root: prev,
+        next_root: prev,
+        anchor_counter: u,
+        next_anchor_counter: u + 1,
+        action_type: anchor_core::receive::ACTION_TRANSFER,
+        action_fields: Vec::new(),
+        payload_hash: [6; 32],
+        old_leaf_proof: Vec::new(),
+        new_leaf_proof: Vec::new(),
+        authority_policy_hash: provisioning().policy_hash,
+    };
+    t.next_root = anchor_root_advance(&prev, &transition_digest(&t.as_transition(), challenge));
+    t
+}
+
+/// The receive of `paid` from the frontier `prev` at counter `u`, under `challenge`.
+pub fn receive_of(
+    paid: &anchor_core::root_advance::OfflineRelease,
+    prev: [u8; 32],
+    u: u64,
+    challenge: &[u8; 32],
+) -> OwnedTransition {
+    let mut t = OwnedTransition {
+        sender_device_id: provisioning().device_id,
+        recipient_device_id: paid.transition.sender_device_id,
+        prev_root: prev,
+        next_root: prev,
+        anchor_counter: u,
+        next_anchor_counter: u + 1,
+        action_type: anchor_core::receive::ACTION_RECEIVE,
+        action_fields: anchor_core::receive::receive_action_fields(
+            &paid.cert.anchor_bundle,
+            &paid.cert.root_advance_message,
+            paid.cert.next_anchor_counter,
+        ),
+        old_leaf_proof: Vec::new(),
+        new_leaf_proof: Vec::new(),
+        ..paid.transition.clone()
+    };
+    t.next_root = anchor_root_advance(&prev, &transition_digest(&t.as_transition(), challenge));
+    t
+}
+
+pub fn prepare_of(
+    t: &OwnedTransition,
+    challenge: &[u8; 32],
+    before: [u8; 32],
+    after: [u8; 32],
+) -> pb::ApplianceRequest {
+    pb::ApplianceRequest {
+        op: pb::Op::Prepare as i32,
+        transition: Some(t.to_pb()),
+        receiver_challenge: challenge.to_vec(),
+        sender_device_root_before: before.to_vec(),
+        sender_device_root_after: after.to_vec(),
+        ..Default::default()
+    }
+}
+
+/// A payment check of `paid`, as the wallet sends it: the transition and the certificate only.
+pub fn check_of(
+    paid: &anchor_core::root_advance::OfflineRelease,
+    payer: &pb::PayerDisclosure,
+) -> pb::ApplianceRequest {
+    pb::ApplianceRequest {
+        op: pb::Op::CheckPayment as i32,
+        payment: Some(Box::new(pb::OfflineRelease {
+            transition: Some(paid.transition.to_pb()),
+            cert: Some(paid.cert.to_pb()),
+            ..Default::default()
+        })),
+        payer: Some(Box::new(payer.clone())),
+        ..Default::default()
+    }
+}
+
+/// The value of a step that must succeed, or the test fails naming it.
+pub fn served(answer: pb::ApplianceResponse, what: &str) -> pb::ApplianceResponse {
+    assert!(
+        answer.ok,
+        "{what}: error {} {}",
+        answer.error, answer.detail
+    );
+    answer
+}
+
+pub fn thirty_two(bytes: &[u8], what: &str) -> [u8; 32] {
+    match bytes.try_into() {
+        Ok(array) => array,
+        Err(e) => panic!("{what} is 32 bytes: {e}"),
     }
 }
