@@ -35,20 +35,20 @@
   .qr svg { display: block; width: 100%; height: auto; }
   a { color: var(--accent); }
   .code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; word-break: break-all; color: var(--muted); }
-  .balance { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--line); }
-  .balance:last-child { border-bottom: 0; }
+  .owned { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--line); }
+  .owned:last-child { border-bottom: 0; }
   .amount { font-variant-numeric: tabular-nums; font-weight: 600; }
-  .session { border-top: 1px solid var(--line); padding: 12px 0; }
-  .session:first-of-type { border-top: 0; padding-top: 0; }
+  .connection { border-top: 1px solid var(--line); padding: 12px 0; }
+  .connection:first-of-type { border-top: 0; padding-top: 0; }
   .grants { margin: 6px 0 10px; padding-left: 18px; color: var(--muted); font-size: 13px; }
-  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  input { width: 90px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px;
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  input { width: 110px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px;
           background: var(--bg); color: var(--ink); font: inherit; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--muted); font-weight: 500; }
-  .fact-PAID, .fact-HOLDINGS { color: var(--good); font-weight: 600; }
-  .fact-NONE { color: var(--wait); }
+  .fact { color: var(--good); font-weight: 600; }
+  .fact-none { color: var(--wait); font-weight: 400; }
   .err { color: var(--bad); }
   .muted { color: var(--muted); }
   .scroll { overflow-x: auto; }
@@ -60,8 +60,9 @@
     <h1 id="name">Connect Starter</h1>
     <span class="id" id="account"></span>
   </header>
-  <p class="muted">This page never touches the account's secret: it asks this app's server, and the server asks its DSM account.
-    A payment counts when the account itself accepted the transfer (the <b>fact</b>), not when a wallet says it paid.</p>
+  <p class="muted">An ordinary web app, plugged into DSM. This page never touches the app's account: it asks this app's server,
+    and the server asks the account. What counts is the <b>fact</b> the account established itself (a transfer it accepted,
+    a proof it verified, a signature it checked), never what a wallet says.</p>
 
   <div class="grid">
     <section>
@@ -74,12 +75,18 @@
       </div>
     </section>
     <section>
-      <h2>This app's balances</h2>
-      <div id="balances" class="muted">…</div>
+      <h2>This app owns</h2>
+      <div id="owned" class="muted">…</div>
+      <div class="row">
+        <input id="issue-symbol" value="SWORD" aria-label="Symbol">
+        <input id="issue-supply" value="1" aria-label="Supply">
+        <button class="quiet" onclick="act('/api/issue', {symbol: el('issue-symbol').value, name: el('issue-symbol').value.toLowerCase(), supply: el('issue-supply').value})">Issue</button>
+      </div>
+      <div id="vaults" class="muted"></div>
     </section>
     <section class="wide">
       <h2>Connected wallets</h2>
-      <div id="sessions" class="muted">No wallet has connected yet.</div>
+      <div id="connections" class="muted">No wallet has connected yet.</div>
     </section>
     <section class="wide">
       <h2>Requests made</h2>
@@ -120,7 +127,7 @@
     } catch (e) { alert(e.message); }
   };
 
-  async function ask(path, payload) {
+  async function act(path, payload) {
     try { await api(path, payload); await refresh(); } catch (e) { alert(e.message); }
   }
 
@@ -128,31 +135,39 @@
     el("name").textContent = s.name;
     document.title = s.name;
     el("account").textContent = "account " + s.account;
-    el("balances").innerHTML = s.balances.map((b) =>
-      `<div class="balance"><span>${text(b.symbol)}</span><span class="amount">${text(b.amount)}</span></div>`).join("");
-    el("sessions").innerHTML = s.sessions.length === 0 ? "No wallet has connected yet." : s.sessions.map((w) => `
-      <div class="session">
-        <div><b>${w.connected ? "Connected" : "Disconnected"}</b> <span class="id">wallet ${text(w.wallet)}</span></div>
-        <ul class="grants">${w.grants.map((g) => `<li>${text(g)}</li>`).join("")}</ul>
-        ${w.connected ? `<div class="row">
-          <input id="amt-${w.id}" value="5" inputmode="numeric" aria-label="Amount in base units">
-          <button onclick="ask('/api/pay', {session: '${w.id}', amount: el('amt-${w.id}').value})">Request payment</button>
-          <button class="quiet" onclick="ask('/api/holdings', {session: '${w.id}'})">Ask for holdings</button>
+    el("owned").innerHTML = s.owned.map((o) =>
+      `<div class="owned"><span>${text(o.symbol)} <span class="muted">${text(o.kind)}</span></span><span class="amount">${text(o.amount)}</span></div>`).join("");
+    el("vaults").innerHTML = s.vaults.map((v) => `<div>vault ${text(v.pair)}: ${text(v.reserves)}${v.active ? "" : " (closed)"}</div>`).join("");
+    el("connections").innerHTML = s.connections.length === 0 ? "No wallet has connected yet." : s.connections.map((c) => `
+      <div class="connection">
+        <div><b>${c.connected ? "Connected" : "Disconnected"}</b> <span class="id">wallet ${text(c.wallet)}</span></div>
+        <ul class="grants">${c.grants.map((g) => `<li>${text(g)}</li>`).join("")}</ul>
+        ${c.connected ? `<div class="row">
+          <input id="amt-${c.id}" value="0.05" aria-label="Amount in ERA">
+          <button onclick="act('/api/send', {connection: '${c.id}', amount: el('amt-${c.id}').value})">Ask it to send ERA</button>
+          <button class="quiet" onclick="act('/api/owns', {connection: '${c.id}'})">Ask what it owns</button>
+          <button class="quiet" onclick="act('/api/login', {connection: '${c.id}'})">Sign in</button>
+        </div><div class="row">
+          <input id="obj-${c.id}" value="SWORD" aria-label="Object to give">
+          <button class="quiet" onclick="act('/api/give', {connection: '${c.id}', object: el('obj-${c.id}').value, amount: '1'})">Give it one</button>
+          <input id="era-${c.id}" value="0.50" aria-label="ERA to trade">
+          <button class="quiet" onclick="act('/api/trade', {connection: '${c.id}', era: el('era-${c.id}').value})">Sell it the coin</button>
         </div>` : ""}
       </div>`).join("");
     el("requests").innerHTML = s.requests.length === 0
       ? `<tr><td colspan="4" class="muted">Nothing asked yet.</td></tr>`
       : s.requests.slice().reverse().map((r) => `<tr>
           <td>${text(r.seq)}</td><td>${text(r.what)}</td>
-          <td>${r.error ? `<span class="err">${text(r.error)}</span>` : text(r.outcome || "waiting") + (r.reason ? `<div class="muted">${text(r.reason)}</div>` : "")}</td>
-          <td><span class="fact-${text(r.fact)}">${text(r.fact || "…")}</span><div class="muted">${text(r.detail)}</div></td>
+          <td>${r.error ? `<span class="err">${text(r.error)}</span>` : text(r.outcome || "unanswered") + (r.reason ? `<div class="muted">${text(r.reason)}</div>` : "")}</td>
+          <td><span class="${r.fact && r.fact !== "none" ? "fact" : "fact-none"}">${text(r.fact || "…")}</span>
+            <div class="muted">${text(r.detail)}${r.owns.map((o) => `<br>owns ${text(o.amount)} of ${text(o.object).slice(0, 12)}…`).join("")}${r.signedAsAsked === undefined ? "" : r.signedAsAsked ? "<br>signed the words asked for" : "<br>signed other words"}</div></td>
         </tr>`).join("");
     el("activity").innerHTML = s.activity.slice().reverse().map((a) =>
       `<tr><td>${text(a.seq)}</td><td>${text(a.name)}</td><td>${text(a.summary)}</td><td>${text(a.result)}</td></tr>`).join("");
   }
 
   async function refresh() {
-    try { render(await api("/api/state")); } catch (e) { el("balances").textContent = e.message; }
+    try { render(await api("/api/state")); } catch (e) { el("owned").textContent = e.message; }
   }
   refresh();
   setInterval(refresh, 2000);

@@ -121,7 +121,7 @@ reset() {
     # Accounts made on this set (scripts/app_dev.sh) exist only on it: they go
     # with it.
     local name
-    for name in app wallet; do
+    for name in app wallet wallet2; do
         if [ -d "$REPO/.dsm-dev/$name" ]; then
             "$REPO/scripts/app_dev.sh" down "$name"
             rm -rf "${REPO:?}/.dsm-dev/$name"

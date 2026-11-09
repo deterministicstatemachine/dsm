@@ -14,7 +14,8 @@ import { dirname, join, resolve } from "node:path";
 import { AppAccount, WalletAccount } from "./account.js";
 import { Ingress } from "./ingress.js";
 
-export type LocalAccountName = "app" | "wallet";
+/** "app" is your application's account; "wallet" and "wallet2" are players' wallets in the terminal. */
+export type LocalAccountName = "app" | "wallet" | "wallet2";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -61,9 +62,9 @@ async function localIngress(name: LocalAccountName): Promise<Ingress> {
   return Ingress.fromSecretFile(recorded, join(dir, "ingress", "ingress-token"));
 }
 
-/** The account `make app-dev` (app) or `make dev-wallet` (wallet) runs. */
+/** The account `make app-dev` (app) or `make dev-wallet` (wallet, wallet2) runs. */
 export async function localAccount(name: "app"): Promise<AppAccount>;
-export async function localAccount(name: "wallet"): Promise<WalletAccount>;
+export async function localAccount(name: "wallet" | "wallet2"): Promise<WalletAccount>;
 export async function localAccount(name: LocalAccountName): Promise<AppAccount | WalletAccount> {
   const ingress = await localIngress(name);
   return name === "app" ? new AppAccount(ingress) : new WalletAccount(ingress);
