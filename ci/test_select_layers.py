@@ -6,8 +6,12 @@ never select core alone; the SDK's jni module is SDK *and* JNI_ANDROID with
 their escalations; STORAGE reaches its node-protocol SDK coverage; a
 frontend-only change compiles no Rust; Cargo.lock, workflow files, shared
 fixtures, build.rs and unknown paths yield FULL; two surfaces produce the
-union; workflow_dispatch FULL turns everything on; push and schedule ignore
+union; workflow_dispatch FULL turns everything on; schedule ignores
 narrowing.
+
+A push to main narrows by its own diff and is never FULL (owner, 2026-11-09,
+superseding the 2026-09-13 "push ignores narrowing": "Should be only when you
+manually do it on main that it runs the full thing").
 """
 import sys
 import unittest
@@ -144,11 +148,38 @@ class Selector(unittest.TestCase):
         layers, full = sel([], event="workflow_dispatch", preset="bogus")
         self.assertTrue(full)
 
-    def test_push_and_schedule_ignore_narrowing(self):
-        for ev in ("push", "schedule"):
-            layers, full = sel(["dsm_client/frontend/src/a.tsx"], event=ev)
-            self.assertTrue(full, ev)
-            self.assertEqual(layers, ALL, ev)
+    def test_schedule_ignores_narrowing(self):
+        layers, full = sel(["dsm_client/frontend/src/a.tsx"], event="schedule")
+        self.assertTrue(full)
+        self.assertEqual(layers, ALL)
+
+    def test_a_push_runs_only_what_its_diff_touches(self):
+        layers, full = sel(["dsm_client/frontend/src/a.tsx"], event="push")
+        self.assertFalse(full)
+        self.assertEqual(layers, {"FRONTEND"})
+        layers, full = sel([SDK + "handlers/x.rs"], event="push")
+        self.assertFalse(full)
+        self.assertEqual(layers, {"SDK", "JNI_ANDROID", "FORMAL"})
+
+    def test_a_push_is_never_full(self):
+        # FULL triggers and unmapped paths add nothing on a push: the pull
+        # request ran its own selection; the full run is started by hand.
+        for files in (
+            ["Cargo.lock"],
+            [".github/workflows/ci.yml", "ci/layers.toml"],
+            ["some/unmapped/file.txt"],
+            ["README.md"],
+            [],
+        ):
+            layers, full = sel(files, event="push")
+            self.assertFalse(full, files)
+            self.assertEqual(layers, set(), files)
+        layers, full = sel(["Cargo.lock", "dsm_client/frontend/src/a.tsx"], event="push")
+        self.assertEqual((layers, full), ({"FRONTEND"}, False))
+        # A FULL-trigger path inside a surface still selects that surface.
+        layers, full = sel(["dsm_client/deterministic_state_machine/dsm_sdk/build.rs"], event="push")
+        self.assertFalse(full)
+        self.assertIn("SDK", layers)
 
     def test_globs(self):
         self.assertTrue(sl.matches_any("a/b/Cargo.toml", ["**/Cargo.toml"]))

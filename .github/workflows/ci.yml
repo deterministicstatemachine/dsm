@@ -23,11 +23,13 @@ on:
       - '**/*.md'
   # Run on every PR regardless of base branch, so stacked PRs (whose base is
   # another feature branch, not main) are validated too — not only the one at
-  # the bottom of a stack that targets main. Push/schedule stay main-only.
+  # the bottom of a stack that targets main. Push stays main-only, and a push
+  # runs only the layers its own diff touches (owner, 2026-11-09).
   # Manual runs pick a validation preset. A preset means "pretend this
   # surface changed" and goes through the same escalation graph as an
   # automatic PR selection — it can never be weaker than automatic CI.
-  # FULL runs everything regardless of what git thinks changed.
+  # FULL (the default) runs everything regardless of what git thinks changed:
+  # the only run that does, along with the conformance evidence job.
   workflow_dispatch:
     inputs:
       preset:
@@ -74,17 +76,14 @@ jobs:
   # --------------------------------------------------------------------------
   # Layer selection. ci/layers.toml is the dependency map; ci/select_layers.py
   # applies it: FULL trigger → multi-surface mapping → escalation closure,
-  # unknown path = FULL. Pushes to main and nightly always run FULL. The
-  # selector's own tests run first — it proves itself before it may narrow
-  # anything — and ci/** is itself a FULL trigger.
+  # unknown path = FULL. A push to main runs only the layers its own diff
+  # maps to and is never FULL; FULL runs when CI is started by hand (owner,
+  # 2026-11-09). The selector's own tests run first — it proves itself before
+  # it may narrow anything — and ci/** is itself a FULL trigger on a PR.
   # --------------------------------------------------------------------------
   select:
     name: Select layers
     runs-on: ubuntu-latest
-    # actions: read — the latest test map is an artifact of a main run.
-    permissions:
-      contents: read
-      actions: read
     outputs:
       full: ${{ steps.sel.outputs.full }}
       core: ${{ steps.sel.outputs.core }}
@@ -113,53 +112,18 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           PRESET: ${{ github.event.inputs.preset }}
-          BASE: ${{ github.event.pull_request.base.sha }}
+          # A pull request compares with its base; a push with the commit
+          # main was at before it.
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.sha }}
         run: |
           python3 ci/select_layers.py --event "$EVENT" --preset "$PRESET" --base "$BASE" --head "$HEAD" | tee -a "$GITHUB_OUTPUT"
 
-      # Which dsm_sdk library tests run, and on how many shards (ci/sdk_tests.py).
-      # A FULL run takes every test. Otherwise only the test modules that
-      # execute a file this change touches, per the test map main's last
-      # successful test-map.yml run built; no map means every test. The
-      # selection is handed to the shards as an artifact, so every shard plans
-      # from the same map even if a newer one lands mid-run.
-      - name: Select SDK tests
+      # How many shards the dsm_sdk library suite splits into (ci/sdk_tests.py).
+      - name: SDK shards
         id: sdk
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHARDED: ${{ steps.sel.outputs.sdk_sharded }}
-          FULL: ${{ steps.sel.outputs.full }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.sha }}
-        run: |
-          if [ "$SHARDED" != "true" ]; then
-            echo "sdk_shards=[]" | tee -a "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          map=none
-          if [ "$FULL" != "true" ]; then
-            id="$(gh run list --repo "$REPO" --workflow test-map.yml --branch main --status success \
-                    --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)"
-            if [ -n "$id" ] && gh run download "$id" --repo "$REPO" -n test-map -D "$RUNNER_TEMP/map"; then
-              map="$RUNNER_TEMP/map/test-map.json"
-              echo "test map from run $id"
-            else
-              echo "no test map from main: every SDK test runs"
-            fi
-          fi
-          python3 ci/sdk_tests.py select --map "$map" --full "$FULL" --base "$BASE" --head "$HEAD" \
-            --out sdk-selection.json | tee -a "$GITHUB_OUTPUT"
-
-      - name: Keep the SDK selection for the shards
         if: steps.sel.outputs.sdk_sharded == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: sdk-selection
-          path: sdk-selection.json
-          if-no-files-found: error
-          retention-days: 7
+        run: python3 ci/sdk_tests.py shards | tee -a "$GITHUB_OUTPUT"
 
   # --------------------------------------------------------------------------
   # Rust gates: purity checks, safety lints, fmt/clippy, the --all-features
@@ -352,21 +316,31 @@ jobs:
         # Merge before the runner captures them so evidence keeps their order.
         run: |
           exec 2>&1
-          ${{ matrix.run }}
+          set -o pipefail
+          { ${{ matrix.run }}
+          } | tee rust-test.log
+
+      # The conformance evidence job reads every test job's log.
+      - name: Keep the test log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: test-log-${{ matrix.group }}
+          path: rust-test.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   # --------------------------------------------------------------------------
   # dsm_sdk's suite, split across parallel runners (ci/sdk_tests.py).
   #
-  # Its library tests were one job of 1,459 tests run one at a time: 141
-  # minutes measured on 2026-11-09, nearly all of a three-hour run. Each shard
-  # builds the suite, lists the binary's tests, takes the tests the `select`
-  # job chose (every test, or on a pull request only the modules that execute
-  # a changed file), and runs its time-balanced share by exact name, still
-  # --test-threads=1. It then checks the log shows exactly its share run: a
-  # name that matched nothing, or a filter that matched more, fails the shard.
-  # Every shard plans from the same list, selection and timing table, so the
-  # shards together run each chosen test exactly once. Shard 1 also runs the
-  # integration tests (seconds).
+  # Its library tests were one job of ~1,460 tests run one at a time: about
+  # 150 minutes measured on 2026-11-09, nearly all of a three-hour run. Each
+  # shard builds the suite, lists the binary's tests, and runs its
+  # time-balanced share by exact name, still --test-threads=1. It then checks
+  # the log shows exactly its share run: a name that matched nothing, or a
+  # filter that matched more, fails the shard. Every shard plans from the same
+  # list and timing table, so the shards together run each test exactly once.
+  # Shard 1 also runs the integration tests and the doc tests (minutes).
   # --------------------------------------------------------------------------
   sdk-test:
     name: Rust tests (dsm_sdk ${{ matrix.shard }}/${{ matrix.of }})
@@ -421,11 +395,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler ripgrep
 
-      - name: Fetch the SDK selection
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: sdk-selection
-
       - name: Build and list the library tests
         run: |
           set -o pipefail
@@ -438,8 +407,7 @@ jobs:
           SHARD: ${{ matrix.shard }}
           OF: ${{ matrix.of }}
         run: |
-          python3 ci/sdk_tests.py plan --list sdk-list.txt --selection sdk-selection.json \
-            --shard "$SHARD" --of "$OF" > sdk-shard.txt
+          python3 ci/sdk_tests.py plan --list sdk-list.txt --shard "$SHARD" --of "$OF" > sdk-shard.txt
 
       # --test-threads=1 and --release: see the `rust-test` job's Test step.
       # With no names at all, `cargo test` would run EVERY test, so an empty
@@ -460,101 +428,63 @@ jobs:
       - name: The shard ran exactly the tests it was given
         run: python3 ci/sdk_tests.py check --log sdk-shard.log --expect "$(wc -l < sdk-shard.txt)"
 
-      - name: Test (integration tests)
+      - name: Test (integration and doc tests)
         if: matrix.shard == 1
         run: |
           exec 2>&1
-          cargo test --locked -p dsm_sdk --release --test '*' -- --nocapture --test-threads=1
-
-  # --------------------------------------------------------------------------
-  # The exhaustive board, unsplit, on every push to main: the exact command
-  # CLAUDE.md names as "the board". PRs run the same tests through the
-  # per-crate matrix above; this job is the safety net that proves the union
-  # was the whole, on the commit that actually lands.
-  # --------------------------------------------------------------------------
-  rust-board:
-    name: Rust board (main)
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: dsm_node_test
-        ports:
-          - 5432:5432
-        # Without a health check the job races the container's first accept().
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    # The storage node's store is Postgres, and the SDK suites run their nodes
-    # on it: every node-backed test needs this server.
-    env:
-      DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
-                      /usr/local/share/boost /usr/share/swift
-          sudo docker image prune --all --force >/dev/null 2>&1 || true
-          df -h /
-
-      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
-        with:
-          # The G1 negative control (dsm_sdk source_rules) indexes a scratch
-          # workspace with rust-analyzer, which needs the standard library source.
-          components: rust-analyzer, rust-src
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: board
-
-      - name: Install CI system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler ripgrep
-
-      - name: Test (whole workspace)
-        run: |
           set -o pipefail
-          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee board.log
-          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board.log
+          { cargo test --locked -p dsm_sdk --release --test '*' -- --nocapture --test-threads=1
+            cargo test --locked -p dsm_sdk --release --doc -- --nocapture --test-threads=1
+          } | tee sdk-integration.log
 
-      # Jest tests are evidence for the frontend's own behaviour (owner ruling,
-      # 2026-10-27): the board runs them too, and keeps Jest's own results.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: dsm_client/frontend/package-lock.json
-
-      - name: Test (frontend)
-        working-directory: dsm_client/frontend
-        run: |
-          npm ci
-          npm test -- --ci --json --outputFile="$GITHUB_WORKSPACE/jest.json"
-
-      # A requirement is Met only on tests that ran and passed on this board:
-      # the same gate the PR jobs run statically, given the logs. A test a row
-      # names that was not in these logs, crashed, or failed fails the board.
-      - name: Conformance evidence, executed
-        run: python3 ci/conformance_evidence.py --board-log board.log --jest-log jest.json
-
-      - name: Keep the board log
+      # The conformance evidence job reads every test job's log.
+      - name: Keep the test logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: board-log
+          name: test-log-dsm_sdk-${{ matrix.shard }}
           path: |
-            board.log
-            jest.json
+            sdk-shard.log
+            sdk-integration.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Conformance evidence, executed: a requirement is Met only on tests that
+  # ran and passed. It reads the logs of every test job of a FULL run (CI
+  # started by hand): the Rust groups, every dsm_sdk shard, and Jest's own
+  # results (Jest tests are evidence for the frontend's own behaviour, owner
+  # ruling 2026-10-27). A test a row names that is in none of these logs,
+  # crashed, or failed fails this job. It replaces the unsplit board that
+  # re-ran the whole workspace serially on every push to main (~3h20m).
+  # --------------------------------------------------------------------------
+  evidence:
+    name: Conformance evidence (FULL)
+    needs: [select, rust-test, sdk-test, frontend]
+    if: always() && github.event_name == 'workflow_dispatch' && needs.select.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Fetch every test job's log
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: test-log-*
+          path: logs
+
+      - name: Fetch Jest's results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: jest-results
+          path: jest
+
+      - name: Conformance evidence, executed
+        run: |
+          mapfile -t logs < <(find logs -name '*.log' | sort)
+          args=()
+          for f in "${logs[@]}"; do args+=(--board-log "$f"); done
+          echo "${#logs[@]} test logs"
+          python3 ci/conformance_evidence.py "${args[@]}" --jest-log jest/jest.json
 
   # --------------------------------------------------------------------------
   # Storage node on Postgres — its only store, the one the fleet deploys.
@@ -806,7 +736,16 @@ jobs:
         run: npm run type-check
 
       - name: Test
-        run: npm test -- --passWithNoTests --ci
+        run: npm test -- --passWithNoTests --ci --json --outputFile="$GITHUB_WORKSPACE/jest.json"
+
+      - name: Keep Jest's results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: jest-results
+          path: jest.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Build
         run: npm run build
