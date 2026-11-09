@@ -166,6 +166,8 @@ Any other language: generate types from [`proto/dsm_app.proto`](proto/dsm_app.pr
 
 Everything an account can hold is an **object**: ERA, a sword, a ticket, a coin you issued. A currency is an object counted in units; an item is an object of which exactly one exists. You name an object by its symbol (`"ERA"`, `"SWORD"`) or by its id, and amounts in its own units (`"0.10"`, `"1"`); Rust converts them, in both directions, so no client carries the unit rule. `issue` makes a new object; your account then holds its whole supply, and `give` hands some to a wallet that has accepted it.
 
+Richer objects are the next beta's work: uniquely identifiable items with their own ownership, transfer and destruction rules, verifiable collections of objects, developer-defined units under signed schemas, and durable signed records. [ROADMAP.md](ROADMAP.md) lists them.
+
 ## Grants
 
 What an offer asks the player to let your app do without asking again:
