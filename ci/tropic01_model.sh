@@ -18,7 +18,8 @@ dir="${1:?usage: ci/tropic01_model.sh <directory>}"
 mkdir -p "$dir"
 
 fetch() { # URL FILE SHA256
-  curl -fsSL "$1" -o "$2"
+  # A 504 from GitHub's release host failed the Embedded job once (#1186): retry before failing.
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "$1" -o "$2"
   echo "$3  $2" | sha256sum -c - >&2
 }
 
