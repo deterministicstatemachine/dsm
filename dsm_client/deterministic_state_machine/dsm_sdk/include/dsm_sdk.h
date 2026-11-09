@@ -430,8 +430,19 @@
  * own parent (DSM Amendment A14 restored, A19 removed by the owner's ruling
  * of 2026-11-03), so no frontier is kept. A database made at 42 is refused at
  * open.
+ *
+ * v44: an offline payment needs a board on both sides (owner, 2026-11-07). A
+ * payment received offline names the receiving account's own bundle
+ * (`pending_offline_receipt.receiver_bundle`): it sits in that account's
+ * received amount until its unload. `own_offline_hop` replaces
+ * `own_offline_spend`: an account moves between its boundaries by spends,
+ * receives and the unloads of received payments, in order (`seq`).
+ * `bilateral_sessions` keeps a receive's account move (`receive_*`) while the
+ * receiver's board commits it, and `offline_acknowledgement` keeps each step's
+ * acknowledgement, the receiver board's receive commit. A database made at 43
+ * is refused at open.
  */
-#define CLIENT_DB_SCHEMA_VERSION 43
+#define CLIENT_DB_SCHEMA_VERSION 44
 
 /**
  * The most frames whose chunks a startup keeps from a previous process.
