@@ -21,16 +21,31 @@
 #   scripts/dev_net.sh reset    stop, drop every node's database, forget the set and
 #                               the accounts made on it (.dsm-dev/app, .dsm-dev/wallet)
 #
-# DSM_DEV_PG_URL names the Postgres server's administrative database
-# (default postgresql://$USER@localhost:5432/postgres?sslmode=disable). The server
-# must run with fsync=on and full_page_writes=on: a node refuses one that
-# cannot keep an acknowledgement.
+# DSM_DEV_PG_URL names the Postgres server's administrative database. The
+# default is this login's role on the server at localhost: over Debian/Ubuntu's
+# socket where there is one, else TCP port 5432 (Homebrew's). The server must
+# run with fsync=on and full_page_writes=on: a node refuses one that cannot
+# keep an acknowledgement.
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NET="$REPO/.dsm-dev/net"
-PG_URL="${DSM_DEV_PG_URL:-postgresql://${USER}@localhost:5432/postgres?sslmode=disable}"
+# The default server: this login's role on the server at localhost. Where
+# Debian/Ubuntu's PostgreSQL has its socket, that is the way in: it takes the
+# login name there (peer authentication) and wants a password over TCP. The
+# login name is `id -un`, not $USER, which a container, sudo or cron shell may
+# not set.
+pg_default() {
+    local login
+    login="$(id -un)"
+    if [ -S /var/run/postgresql/.s.PGSQL.5432 ]; then
+        echo "postgresql://$login@/postgres?host=/var/run/postgresql&sslmode=disable"
+    else
+        echo "postgresql://$login@localhost:5432/postgres?sslmode=disable"
+    fi
+}
+PG_URL="${DSM_DEV_PG_URL:-$(pg_default)}"
 FIRST_PORT=8080
 NODE_BIN="$REPO/target/release/storage_node"
 DEV_NET_BIN="$REPO/target/release/dsm-dev-net"

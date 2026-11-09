@@ -57,18 +57,26 @@ What this replaces, in cost: a hardware key per user and its replacements; SMS c
 - **A wallet connects** by scanning a `dsm:connect/v1:` code your app shows. The player approves a **grant**: what your app may ask for without asking them again, with caps.
 - **Your app then asks**, and reads the **fact** your own account established.
 
-Your app needs a server side, even a small one, because the account's secret must never reach a browser page. The [starter](examples/connect-starter/) is one file.
+Your app needs a server side, even a small one, because the account's secret must never reach a browser page. The [starter](examples/connect-starter/) is one file, and its page is where you build your app from pieces.
 
 ## Start in five minutes
 
-You need what [QUICKSTART.md](QUICKSTART.md) lists for local storage nodes (Rust, Node.js 20+, protoc, PostgreSQL).
+You need what [QUICKSTART.md](QUICKSTART.md)'s prerequisites list (Rust, Node.js 20+, protoc, and PostgreSQL for the local storage set).
 
 ```bash
 make app-dev       # your own storage set on this machine, and your app's account on it, funded
 make starter       # the starter app: open http://127.0.0.1:3000
 ```
 
-In the starter, press **Show a connect code**. Then connect a wallet. With no phone:
+The starter's page is a builder. It has three kinds of pieces, in the order an app uses them:
+
+1. **Objects your app issues**: a coin, points, an item (supply 1 is a one-of-a-kind), a ticket; and a shop, a vault that sells one object for another.
+2. **What the wallet lets your app do**: the offer. Tick the grants (send, owns, accept, contacts, match, trade), set each cap, and press **Show the connect code**.
+3. **Ask a connected wallet**: send, prove what it owns, sign in, sign a statement, accept or receive an object, price or make a trade through your shop, stake on a match, decide it, collect.
+
+Under every piece is the exact code it is, in TypeScript or Python, with a Copy button. The page never makes up that code: it asks the starter's server, which runs one mapping from piece to client call ([src/pieces.ts](examples/connect-starter/src/pieces.ts)) both to show the code and to make the call. Set the pieces up the way your app needs them, press the button to see it happen, then paste the code into your own app.
+
+Press **Show the connect code**. Then connect a wallet. With no phone:
 
 ```bash
 make dev-wallet                                  # a player's wallet in the terminal, funded
@@ -84,7 +92,7 @@ make phones-connect CODE=dsm:connect/v1:...      # open the code in each wallet
 
 After `make nodes-reset` (a new set, with new CAs), clear the phones' wallets and run `make phones-local` again.
 
-Back in the starter, the wallet appears under **Connected wallets**. Ask it to send 0.05 ERA and watch the fact become `received`. Ask for 0.20, over the per-request cap, and it waits for the player: `make dev-wallet-pending`, then `make wallet ARGS="approve <connection> <seq>"` (or approve it on the phone). Press **Sign in** and approve that the same way: the fact is `signed`.
+Back in the starter, the wallet appears under **Connected wallets**. Under **Ask a connected wallet**, ask it to send 0.05 ERA and watch the fact become `received`. Ask for 0.20, over the per-request cap, and it waits for the player: `make dev-wallet-pending`, then `make wallet ARGS="approve <connection> <seq>"` (or approve it on the phone). Ask it to **sign in** and approve that the same way: the fact is `signed`.
 
 `make dev-down` stops everything. `make developer-path` runs the whole path, every helper once, as CI does.
 
@@ -122,7 +130,12 @@ if (login.fact === "signed") console.log(`${player.peer} signed in`);
 
 ### Python (3.10+)
 
-[clients/python/](clients/python/). `make clients` generates its protobuf types; install it with `pip install -e clients/python`.
+[clients/python/](clients/python/). `make clients` generates its protobuf types; install it into a virtual environment:
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e clients/python
+```
 
 ```python
 from dsm_app_client import local_app, grant, ask
@@ -139,11 +152,21 @@ if paid.fact == "received":
     app.give(player, sword, "1")
 ```
 
+[clients/python/examples/first_payment.py](clients/python/examples/first_payment.py) is this, as a program: it prints the connect code, waits for a wallet to connect to it, asks for 0.05 ERA and prints the fact.
+
+```bash
+python3 clients/python/examples/first_payment.py              # then: make dev-wallet-connect CODE=<the code it prints>
+```
+
+A wallet connects to an app once. If the terminal wallet is already connected to your account (through the starter, say), it disconnects first (`make wallet ARGS="disconnect <connection>"`), or a second wallet connects: `make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`.
+
 Any other language: generate types from [`proto/dsm_app.proto`](proto/dsm_app.proto) and send an `IngressRequest` (a `RouterInvokeOp` or `RouterQueryOp`: the route's name and an `ArgPack` holding its request message) to `POST /ingress`. An `IngressResponse` comes back: either an error, or `0x03` followed by an `Envelope`. [clients/typescript/src/ingress.ts](clients/typescript/src/ingress.ts) is the whole exchange, in one short file.
 
 ### Objects, not tokens
 
 Everything an account can hold is an **object**: ERA, a sword, a ticket, a coin you issued. A currency is an object counted in units; an item is an object of which exactly one exists. You name an object by its symbol (`"ERA"`, `"SWORD"`) or by its id, and amounts in its own units (`"0.10"`, `"1"`); Rust converts them, in both directions, so no client carries the unit rule. `issue` makes a new object; your account then holds its whole supply, and `give` hands some to a wallet that has accepted it.
+
+Richer objects are the next beta's work: uniquely identifiable items with their own ownership, transfer and destruction rules, verifiable collections of objects, developer-defined units under signed schemas, and durable signed records. [BETA_ROADMAP.md](BETA_ROADMAP.md) lists them.
 
 ## Grants
 
@@ -207,7 +230,8 @@ The first lines it logs name the relay and its certificate pin, the ingress, and
 
 - `make dev-wallet` runs a second account as a player's wallet, and `make dev-wallet2` a third for matches. `make wallet ARGS=...` (and `make wallet2 ARGS=...`) drives them: `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`.
 - `make app ARGS=...` drives your app's account from the terminal: `offer`, `connections`, `send`, `owns`, `accept`, `login`, `result`, `issue`, `give`, `owned`, `activity`.
-- `make developer-path` runs every helper once against your local set: connect, send inside and over the grant, prove what is owned, sign in, issue and give an item, open a vault and trade, referee a match between two wallets, disconnect; then the Python client. CI runs it on every change.
+- `make developer-path` first proves that the code the starter's page shows under each piece is the code the starter runs: every shown call, in TypeScript and in Python, is evaluated with the real client and compared with what the server hands it, and every shown program is checked against the client (`npm test` in `examples/connect-starter`). Then it runs every helper once against your local set: connect, send inside and over the grant, prove what is owned, sign in, issue and give an item, open a vault and trade, referee a match between two wallets, disconnect; then the Python client. CI runs it on every change.
+- `make first-run` is a newcomer's first run, proven: a clean Ubuntu (in Docker) with nothing on it but what QUICKSTART.md's prerequisites say to install, a fresh clone, and this page's commands alone, in TypeScript (the starter's page, its buttons pressed in a real browser and its table read) and in Python (`first_payment.py`), each to a wallet connected and its own request's payment received. The prerequisites are read out of QUICKSTART.md, and every command it types is one this page shows, so the docs cannot drift from what works. A release runs it.
 
 ## Reference
 

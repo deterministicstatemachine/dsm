@@ -3,9 +3,11 @@
 Plug your app into DSM: a client for a `dsm-app-host`'s local ingress, which is your app's own DSM account. Python 3.10+, standard library plus `protobuf`.
 
 ```bash
-make clients                      # from the repo root: generates dsm_app_client/generated/dsm_app_pb2.py
-pip install -e clients/python     # installs protobuf too
-python clients/python/examples/account_status.py
+make clients                                  # from the repo root: generates dsm_app_client/generated/dsm_app_pb2.py
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e clients/python                 # installs protobuf too
+python3 clients/python/examples/account_status.py    # your account at a glance
+python3 clients/python/examples/first_payment.py     # a connect code, a wallet, 0.05 ERA received
 ```
 
 - `AppAccount`: `offer`, `connections`, `request`, `result`, `wait`; `issue`, `give`; `open_vault`, `vaults`, `close_vault`; `decide`; `owned`, `owns`, `identity`, `fund`; and `ingress.activity`.

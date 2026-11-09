@@ -144,6 +144,32 @@ jobs:
           bash ci/audit_every_lockfile.sh
 
   # --------------------------------------------------------------------------
+  # A newcomer's first run (owner, 2026-11-09: a release gate). A clean Ubuntu
+  # in Docker with nothing on it but what QUICKSTART.md's prerequisites say to
+  # install, a fresh clone of the tagged commit, and BUILDING_APPS.md's
+  # commands alone, in TypeScript and in Python, each to a wallet connected
+  # and a payment received. scripts/first_run_check.sh; `make first-run`.
+  # --------------------------------------------------------------------------
+  first-run:
+    name: First run (clean machine, the docs alone)
+    runs-on: ubuntu-latest
+    needs: [validate-tag]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: The newcomer's first run
+        run: make first-run
+
+      - name: Upload the newcomer's log
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: first-run-log
+          path: .dsm-dev/first-run/newcomer.log
+          if-no-files-found: warn
+
+  # --------------------------------------------------------------------------
   # Build the storage node binary for Linux x86_64 — the primary deployment
   # target for the public 6-node beta cluster.
   # --------------------------------------------------------------------------
@@ -363,6 +389,7 @@ jobs:
       contents: write   # required to create GitHub Releases
     needs:
       - validate-tag
+      - first-run
       - build-storage-node
       - build-frontend
       - build-sbom

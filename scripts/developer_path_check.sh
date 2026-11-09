@@ -8,6 +8,9 @@
 #   make dev-wallet     a player's wallet in the terminal, funded
 #   make dev-wallet2    a second player's, for the match
 #   make starter        the Connect starter app, here in the background
+#   examples/connect-starter test: the code the starter's page shows is the
+#     code it runs, every piece, in TypeScript and in Python, against the real
+#     clients (src/shown-code.test.ts)
 #   examples/connect-starter check: every helper once, through the starter's
 #     own HTTP API on one side and the terminal wallets on the other: connect,
 #     send inside and over the grant, prove what is owned, sign in, issue and
@@ -49,6 +52,8 @@ make --no-print-directory dev-wallet
 make --no-print-directory dev-wallet2
 
 (cd examples/connect-starter && npm ci --no-audit --no-fund && npm run build)
+echo "[developer-path] the code the starter's page shows is the code it runs:"
+(cd examples/connect-starter && DEVELOPER_PATH_PYTHON="$PYTHON" npm test)
 mkdir -p .dsm-dev
 node examples/connect-starter/dist/server.js >"$STARTER_LOG" 2>&1 &
 starter_pid=$!

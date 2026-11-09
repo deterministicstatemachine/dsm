@@ -257,7 +257,7 @@ It runs in `--release` because the shipped profile is what is gated and the cryp
 
 - Where the code lives — core [dsm/src/](dsm_client/deterministic_state_machine/dsm/src/) (`core`, `bilateral`, `dlv`, `economic`, `ccb`, `vault`, `bitcoin`, `emissions`, `crypto`), SDK routes [dsm_sdk/src/handlers/](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/), storage node [dsm_storage_node/](dsm_storage_node/), appliance [crates/](crates/), Android [dsm_client/android/](dsm_client/android/), frontend [dsm_client/frontend/](dsm_client/frontend/)
 - [Bench proofs](docs/bench-proofs/) — the silicon proof log
-- [Quickstart](QUICKSTART.md), [Plug your app into DSM](BUILDING_APPS.md), [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md), [Support](SUPPORT.md), [Changelog](CHANGELOG.md)
+- [Quickstart](QUICKSTART.md), [Plug your app into DSM](BUILDING_APPS.md), [Beta roadmap](BETA_ROADMAP.md), [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md), [Support](SUPPORT.md), [Changelog](CHANGELOG.md)
 - [Proto schema](proto/dsm_app.proto) — the wire format
 
 ## License

@@ -647,6 +647,10 @@ phones-connect: ## Open a connect code in the wallet on every phone: CODE=dsm:co
 developer-path: ## The whole developer path end to end, as CI runs it (scripts/developer_path_check.sh)
 	@bash scripts/developer_path_check.sh
 
+.PHONY: first-run
+first-run: ## A newcomer's first run, proven: clean Ubuntu in Docker, the docs' commands alone, TypeScript and Python each to a payment received (scripts/first_run_check.sh)
+	@bash scripts/first_run_check.sh
+
 .PHONY: dev-down
 dev-down: ## Stop the terminal wallets, your app's account and the local nodes
 	@bash scripts/app_dev.sh down wallet2

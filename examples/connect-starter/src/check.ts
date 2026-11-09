@@ -2,7 +2,8 @@
 
 // Every helper once, end to end: what a developer does after `make app-dev`,
 // `make dev-wallet`, `make dev-wallet2` and `make starter`, driven through the
-// starter's own HTTP API on one side and the terminal wallets on the other.
+// starter's own HTTP API (the same pieces its page composes) on one side and
+// the terminal wallets on the other.
 // CI runs this (`make developer-path`), so the guide and the videos fail CI
 // before they go stale.
 //
@@ -41,7 +42,7 @@ interface State {
   requests: Row[];
 }
 
-async function api<T>(path: string, payload?: Record<string, string>): Promise<T> {
+async function api<T>(path: string, payload?: Record<string, unknown>): Promise<T> {
   const res = await fetch(STARTER + path, payload === undefined ? {} : {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -57,15 +58,20 @@ async function until<T>(what: string, probe: () => Promise<T | undefined>): Prom
   for (;;) {
     const found = await probe();
     if (found !== undefined) return found;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}${lastError ? ` (last failure: ${lastError})` : ""}`);
     await new Promise((r) => setTimeout(r, 500));
   }
 }
 
+/** The last failure reading a request's result, named when a wait times out. */
+let lastError = "";
+
 async function row(connection: string, seq: string): Promise<Row | undefined> {
   const s = await api<State>("/api/state");
   const r = s.requests.find((x) => x.connection === connection && x.seq === seq);
-  if (r?.error) throw new Error(`request ${seq}: ${r.error}`);
+  // A read can fail and succeed on the next poll (the starter reads it again);
+  // only a wait that runs out reports it.
+  if (r?.error) lastError = `request ${seq}: ${r.error}`;
   return r;
 }
 
@@ -116,27 +122,27 @@ async function main(): Promise<void> {
   const other = await localAccount("wallet2");
 
   const coin = await api<{ symbol: string }>("/api/issue", { symbol: "GOLD", name: "Starter gold", supply: "1000000", decimals: "2" });
-  const vault = await api<{ id: string }>("/api/vault", { object: "GOLD", reserve: "1000", era: "10" });
+  const vault = await api<{ id: string }>("/api/vault", { a: "GOLD", reserveA: "1000", b: "ERA", reserveB: "10" });
   step(1, `the app issued ${coin.symbol} and opened vault ${vault.id.slice(0, 12)}… selling it for ERA`);
 
   const cid = await connect(wallet);
   step(2, `the wallet approved the offer: connection ${cid}`);
   step(3, `the starter sees the wallet connected`);
 
-  const within = await api<{ seq: string }>("/api/send", { connection: cid, amount: "0.05" });
+  const within = await api<{ seq: string }>("/api/ask", { connection: cid, ask: { kind: "send", object: "ERA", amount: "0.05" } });
   const received = await settled("the send inside the grant", cid, within.seq, "received");
   step(4, `a send inside the grant: ${received.outcome}, ${received.fact}`);
 
-  const over = await api<{ seq: string }>("/api/send", { connection: cid, amount: "0.20" });
+  const over = await api<{ seq: string }>("/api/ask", { connection: cid, ask: { kind: "send", object: "ERA", amount: "0.20" } });
   const held = await settled("the send over the cap to wait", cid, over.seq, "received", "awaiting_approval");
   const approvedSend = await approved(wallet, cid, over.seq, "the send over the cap", "received");
   step(5, `a send over the cap: ${held.reason}; approved; ${approvedSend.fact}`);
 
-  const owns = await api<{ seq: string }>("/api/owns", { connection: cid });
+  const owns = await api<{ seq: string }>("/api/ask", { connection: cid, ask: { kind: "owns", objects: ["ERA", "GOLD"] } });
   const proven = await settled("the proof of what the wallet owns", cid, owns.seq, "owns");
   step(6, `a proof of what the wallet owns: ${proven.fact} (${proven.owns.length} object(s))`);
 
-  const login = await api<{ seq: string }>("/api/login", { connection: cid });
+  const login = await api<{ seq: string }>("/api/ask", { connection: cid, ask: { kind: "login" } });
   await settled("the sign-in to wait for the player", cid, login.seq, "signed", "awaiting_approval");
   const signed = await approved(wallet, cid, login.seq, "the sign-in", "signed");
   if (signed.signedAsAsked !== true) throw new Error("the wallet signed other words than the sign-in asked for");
@@ -150,7 +156,7 @@ async function main(): Promise<void> {
   });
   step(8, `the app issued ${sword.object.symbol} (${sword.object.kind}), the wallet accepted it, the app gave it: the wallet owns ${sword.display}`);
 
-  const trade = await api<{ seq: string; priced: string }>("/api/trade", { connection: cid, era: "0.50" });
+  const trade = await api<{ seq: string; priced: string }>("/api/ask", { connection: cid, ask: { kind: "trade", from: "ERA", to: "GOLD", amount: "0.50", atLeastPercent: 95 } });
   await until("the trade to be carried out", async () => {
     const r = await row(cid, trade.seq);
     if (r?.outcome === "failed" || r?.outcome === "declined") throw new Error(`the trade: ${r.outcome}: ${r.reason}`);
@@ -163,12 +169,12 @@ async function main(): Promise<void> {
   step(9, `priced at ${trade.priced} smallest units of GOLD; traded 0.50 ERA: the wallet owns ${gold.display} GOLD`);
 
   const cid2 = await connect(other);
-  const stakeA = await api<{ seq: string }>("/api/match/stake", { connection: cid, side: "A" });
+  const stakeA = await api<{ seq: string }>("/api/ask", { connection: cid, ask: { kind: "stake", match: "match 1", object: "ERA", amount: "1.00", side: "A" } });
   const stakedA = await settled("side A's stake", cid, stakeA.seq, "staked");
-  const stakeB = await api<{ seq: string }>("/api/match/stake", { connection: cid2, side: "B", against: stakedA.stakes[0] ?? "" });
+  const stakeB = await api<{ seq: string }>("/api/ask", { connection: cid2, ask: { kind: "stake", match: "match 1", object: "ERA", amount: "1.00", side: "B", against: stakedA.stakes[0] ?? "" } });
   const stakedB = await settled("side B's stake", cid2, stakeB.seq, "staked");
-  const verdict = await api<{ outcome: string }>("/api/match/decide", { stake: stakedA.stakes[0] ?? "", decision: "A" });
-  const collect = await api<{ seq: string }>("/api/match/collect", { connection: cid, stakes: `${stakedA.stakes[0]},${stakedB.stakes[0]}` });
+  const verdict = await api<{ outcome: string }>("/api/decide", { stake: stakedA.stakes[0] ?? "", decision: "A" });
+  const collect = await api<{ seq: string }>("/api/ask", { connection: cid, ask: { kind: "collect", stakes: [stakedA.stakes[0] ?? "", stakedB.stakes[0] ?? ""] } });
   const collected = await settled("side A's collect", cid, collect.seq, "collected");
   step(10, `a match: both wallets staked; the app decided ${verdict.outcome}; the winner collected ${collected.stakes.length} stake(s)`);
 
@@ -178,7 +184,7 @@ async function main(): Promise<void> {
     return s.connections.find((x) => x.id === cid && !x.connected);
   });
   try {
-    await api("/api/send", { connection: cid, amount: "0.05" });
+    await api("/api/ask", { connection: cid, ask: { kind: "send", object: "ERA", amount: "0.05" } });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (!message.includes("disconnected")) throw e;
