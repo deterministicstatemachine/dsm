@@ -429,11 +429,8 @@ mod tests {
     async fn spool() -> Router {
         let pool = Arc::new(crate::db::test_store::fresh_pool().await);
         let app_state = Arc::new(
-            AppState::new(
-                "test-node".to_string(),
-                pool,
-            )
-            .unwrap_or_else(|e| panic!("app state: {e}")),
+            AppState::new("test-node".to_string(), pool)
+                .unwrap_or_else(|e| panic!("app state: {e}")),
         );
         super::router(app_state)
     }
@@ -828,13 +825,8 @@ mod tests {
     /// The wait router on `pool`, holding a wait for at most `bound`, and the
     /// node state behind it.
     fn waits_on(pool: crate::db::DBPool, bound: std::time::Duration) -> (Arc<AppState>, Router) {
-        let app_state = Arc::new(
-            AppState::new(
-                "test-node".to_string(),
-                Arc::new(pool),
-            )
-            .expect("app state"),
-        );
+        let app_state =
+            Arc::new(AppState::new("test-node".to_string(), Arc::new(pool)).expect("app state"));
         let router = super::wait_router(app_state.clone(), bound);
         (app_state, router)
     }

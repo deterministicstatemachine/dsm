@@ -2122,15 +2122,14 @@ impl CoreSDK {
             return Ok(BTreeMap::new());
         }
         let bundles: Vec<[u8; 32]> = lost.keys().copied().collect();
-        let payments = crate::storage::client_db::offline_spends::close_offline_accounts(
-            &closed, &bundles,
-        )
-        .map_err(|e| {
-            DsmError::storage(
-                format!("offline account: persist the accounts closed at an install: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let payments =
+            crate::storage::client_db::offline_spends::close_offline_accounts(&closed, &bundles)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("offline account: persist the accounts closed at an install: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
         if payments > 0 {
             log::warn!(
                 "[anchor.install] {payments} payment(s) received offline into a closed account went \

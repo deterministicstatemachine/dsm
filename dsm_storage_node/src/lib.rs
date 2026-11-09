@@ -333,10 +333,7 @@ mod storage_set_tests {
             )
         };
         let err = set()
-            .with_set_mates(
-                "n1",
-                vec![entry("n2", None), entry("n3", Some(a_ca()))],
-            )
+            .with_set_mates("n1", vec![entry("n2", None), entry("n3", Some(a_ca()))])
             .expect_err("a set-mate with no CA");
         assert!(err.to_string().contains("no `ca_cert`"), "{err}");
 

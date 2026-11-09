@@ -134,10 +134,7 @@ fn proofs_past_the_queued_tree_builds_are_answered_busy_at_once() {
         let pool = one_committed_cell("pt_queued", key).await;
         // A node that keeps no tree for cycle 1, as after a restart.
         let state = Arc::new(common::ok_or_panic(
-            dsm_storage_node::AppState::new(
-                String::from_utf8_lossy(MEMBER).into_owned(),
-                pool,
-            ),
+            dsm_storage_node::AppState::new(String::from_utf8_lossy(MEMBER).into_owned(), pool),
             "app state",
         ));
         let app = common::served(state.clone());

@@ -236,8 +236,8 @@ fn build_member_client(
     };
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls::pki_types::CertificateDer::pem_slice_iter(bytes) {
-        let cert = cert
-            .map_err(|e| ca_error(format!("storage client: {member_id}'s ca_cert: {e}")))?;
+        let cert =
+            cert.map_err(|e| ca_error(format!("storage client: {member_id}'s ca_cert: {e}")))?;
         roots
             .add(cert)
             .map_err(|e| ca_error(format!("storage client: {member_id}'s ca_cert: {e}")))?;
