@@ -543,9 +543,15 @@ pub mod schema {
         // Schema 1 of the offline boundary bodies carried no ancestry: nothing
         // tied the account a boundary started from to the one the boundary
         // before it left, nor named the anchor its bundle commits. Schema 2
-        // carries both, and the spends since the last boundary.
+        // carries both, and the spends since the last boundary. Schema 2 said
+        // nothing of money the account received offline: under Refinement R5
+        // (owner, 2026-11-07) a payment needs a board on both sides and lands
+        // in the receiver's own offline balance, so schema 3 accounts for what
+        // the board received, and for the unload of a received payment.
         (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 1),
+        (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 2),
         (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 1),
+        (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 2),
         // Schema 1 of the offline settlement did not carry the transfer its
         // payment was, so it named its recipient by device id alone. Schema 2
         // carries it, re-hashed to the payload the anchor signed (SA-133).
