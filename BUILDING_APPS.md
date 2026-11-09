@@ -158,6 +158,8 @@ if paid.fact == "received":
 python3 clients/python/examples/first_payment.py              # then: make dev-wallet-connect CODE=<the code it prints>
 ```
 
+A wallet connects to an app once. If the terminal wallet is already connected to your account (through the starter, say), it disconnects first (`make wallet ARGS="disconnect <connection>"`), or a second wallet connects: `make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`.
+
 Any other language: generate types from [`proto/dsm_app.proto`](proto/dsm_app.proto) and send an `IngressRequest` (a `RouterInvokeOp` or `RouterQueryOp`: the route's name and an `ArgPack` holding its request message) to `POST /ingress`. An `IngressResponse` comes back: either an error, or `0x03` followed by an `Envelope`. [clients/typescript/src/ingress.ts](clients/typescript/src/ingress.ts) is the whole exchange, in one short file.
 
 ### Objects, not tokens

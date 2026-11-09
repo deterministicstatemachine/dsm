@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Your first payment, in Python: a connect code, a wallet that connects to
 it, 0.05 ERA asked for, and the fact your own account established. Runs
-against `make app-dev`; connect a wallet with
-`make dev-wallet-connect CODE=<the code printed>`, or scan it with a phone."""
+against `make app-dev`; connect a wallet to the code it prints:
+`make dev-wallet-connect CODE=<the code>`, or scan it with a phone. A wallet
+connects to an app once: one already connected to this account (say, through
+the starter) must disconnect first, or a second one connects
+(`make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`)."""
 
 import sys
 import time
@@ -22,7 +25,12 @@ def main() -> int:
     player = None
     while player is None:
         if time.monotonic() > deadline:
-            print("no wallet connected within four minutes", file=sys.stderr)
+            already = sum(1 for c in app.connections() if c.connected)
+            print(
+                f"no wallet connected to this code within four minutes ({already} already connected to this "
+                "account; a wallet connects to an app once, and disconnects to connect again)",
+                file=sys.stderr,
+            )
             return 1
         new = [c for c in app.connections() if c.connected and c.id not in before]
         if new:

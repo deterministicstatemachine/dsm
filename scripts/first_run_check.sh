@@ -20,8 +20,9 @@
 #   make dev-wallet-connect CODE=...; ask the wallet to send 0.05 ERA (the
 #   page's button: POST /api/ask) and watch the fact become `received`.
 #   Then Python: the virtual environment and pip install the guide shows,
-#   clients/python/examples/first_payment.py, the wallet connected to the
-#   code it prints, and its fact `received`.
+#   clients/python/examples/first_payment.py, a second wallet (a wallet
+#   connects to an app once, and the first is still connected to the
+#   starter) connected to the code it prints, and its fact `received`.
 #
 # Needs Docker. Logs under .dsm-dev/first-run/. FIRST_RUN_IMAGE_ONLY=1 builds
 # the clean machine and stops.
@@ -43,6 +44,8 @@ TYPED=(
     "python3 -m venv .venv && . .venv/bin/activate"
     "pip install -e clients/python"
     "python3 clients/python/examples/first_payment.py"
+    "make dev-wallet2"
+    "make wallet2 ARGS="
     "make dev-down"
 )
 for cmd in "${TYPED[@]}"; do
@@ -168,7 +171,12 @@ for _ in $(seq 1 120); do
 done
 PYCODE=$(sed -n 's/^connect code: //p' ~/first_payment.log | head -1)
 [ -n "$PYCODE" ] || { echo "first_payment.py printed no connect code:"; cat ~/first_payment.log; exit 1; }
-make dev-wallet-connect CODE="$PYCODE"
+
+step "make dev-wallet2   (a second player's wallet: a wallet connects to an app once, and the first is connected to the starter)"
+make dev-wallet2
+
+step "make wallet2 ARGS=\"connect ...\""
+make wallet2 ARGS="connect $PYCODE"
 if wait "$PY"; then
     cat ~/first_payment.log
     echo "PYTHON: a wallet connected, 0.05 ERA received"
