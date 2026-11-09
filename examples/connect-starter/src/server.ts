@@ -51,6 +51,40 @@ const made: Made[] = [];
 /** The coin this app sells through its vault, once it has issued one. */
 let coin: string | undefined;
 
+/** The vaults as the page shows them. */
+interface VaultRow {
+  id: string;
+  pair: string;
+  reserves: string;
+  active: boolean;
+}
+/**
+ * The account's vaults, as last read. Reading them walks each vault's history,
+ * and the account refuses that while one of its own steps is pending (taking in
+ * a send, say): so they are read again only after something here changed them,
+ * not on every poll of the page, and a read the account refuses for now keeps
+ * the last list and is tried on the next poll.
+ */
+let vaults: VaultRow[] = [];
+let vaultsChanged = false;
+
+async function vaultRows(app: AppAccount): Promise<VaultRow[]> {
+  if (!vaultsChanged) return vaults;
+  try {
+    vaults = (await app.vaults()).map((v) => ({
+      id: hex(v.id),
+      pair: `${v.a.symbol}/${v.b.symbol}`,
+      reserves: `${v.a.display} ${v.a.symbol}, ${v.b.display} ${v.b.symbol}`,
+      active: v.active,
+    }));
+    vaultsChanged = false;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (!message.includes("is pending")) throw e;
+  }
+  return vaults;
+}
+
 /** A request whose result can no longer change, so it is not asked about again. */
 function settled(m: Made): boolean {
   if (m.error.length > 0) return true;
@@ -70,6 +104,8 @@ async function state(app: AppAccount): Promise<unknown> {
     if (settled(m)) continue;
     try {
       m.result = await app.result(m.ref);
+      // A trade moves the vault's reserves once it is carried out.
+      if (m.what.startsWith("trade") && settled(m)) vaultsChanged = true;
     } catch (e) {
       m.error = e instanceof Error ? e.message : String(e);
     }
@@ -79,12 +115,7 @@ async function state(app: AppAccount): Promise<unknown> {
     name: NAME,
     account: identity.id,
     owned: (await app.owned()).map((o) => ({ symbol: o.object.symbol, amount: o.display, kind: o.object.kind, id: o.object.id })),
-    vaults: (await app.vaults()).map((v) => ({
-      id: hex(v.id),
-      pair: `${v.a.symbol}/${v.b.symbol}`,
-      reserves: `${v.a.display} ${v.a.symbol}, ${v.b.display} ${v.b.symbol}`,
-      active: v.active,
-    })),
+    vaults: await vaultRows(app),
     connections: (await app.connections()).map((c) => ({ id: c.id, wallet: c.peer, connected: c.connected, grants: c.grants })),
     requests: made.map((m) => ({
       connection: m.ref.connection,
@@ -205,6 +236,7 @@ async function route(app: AppAccount, page: string, req: IncomingMessage, res: S
       const object = field(fields, "object");
       const vault = await app.openVault({ a: object, reserveA: field(fields, "reserve"), b: "ERA", reserveB: field(fields, "era"), label: `${NAME} shop` });
       coin = (await app.object(object)).id;
+      vaultsChanged = true;
       send(res, 200, { id: hex(vault.id) });
       return;
     }
@@ -212,10 +244,15 @@ async function route(app: AppAccount, page: string, req: IncomingMessage, res: S
       if (coin === undefined) throw new Error("issue a coin and open a vault first");
       const c = await connected(app, field(fields, "connection"));
       const era = field(fields, "era");
+      // A wallet receives only what it has added itself: the coin the trade pays
+      // out is accepted first, as an item is before it is given.
+      const accepted = await app.wait(await app.request(c, ask.accept(coin)), { until: "answered" });
+      if (accepted.outcome !== "carried_out") throw new Error(`the wallet did not accept the coin: ${accepted.reason}`);
       const priced = await app.wait(await app.request(c, ask.price("ERA", coin, era)));
       if (priced.price === undefined) throw new Error(`no price: ${priced.reason}`);
       const atLeast = (priced.price.amountOut * 95n) / 100n;
       const ref = await app.request(c, ask.trade("ERA", coin, era, atLeast));
+      vaultsChanged = true;
       send(res, 200, { ...remember(ref, `trade ${era} ERA for the coin`), priced: priced.price.amountOut.toString() });
       return;
     }

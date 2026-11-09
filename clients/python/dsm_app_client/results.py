@@ -70,7 +70,7 @@ FACTS: Dict[int, str] = {
 class RequestRef:
     """A request this application made, by connection and sequence number."""
 
-    connection: bytes
+    connection: str  # the connection's id (Base32 Crockford), as Connection.id and Pending.connection name it
     seq: int
 
 

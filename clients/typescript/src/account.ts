@@ -443,7 +443,7 @@ export class AppAccount extends Account {
     const sessionId = rawOf(connection, "the connection id");
     const request = new ConnectAppRequestIntentV1({ sessionId, kind: await this.intent(what) });
     const ref = connectReply(route, await this.ingress.call("invoke", route, request), "request");
-    return { connection: ref.sessionId, seq: ref.seq };
+    return { connection: encodeB32(ref.sessionId), seq: ref.seq };
   }
 
   /**
@@ -452,7 +452,7 @@ export class AppAccount extends Account {
    */
   async result(ref: RequestRef): Promise<Result> {
     const route = "connect.app.status";
-    const request = new ConnectRequestRefV1({ sessionId: ref.connection, seq: ref.seq });
+    const request = new ConnectRequestRefV1({ sessionId: rawOf(ref.connection, "the connection id"), seq: ref.seq });
     return resultOf(ref, connectReply(route, await this.ingress.call("invoke", route, request, { quiet: true }), "status"));
   }
 

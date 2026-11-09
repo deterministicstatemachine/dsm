@@ -338,12 +338,12 @@ class AppAccount(Account):
         request = self.intent(what)
         request.session_id = _raw_of(connection, "the connection id")
         ref = connect_reply(route, self.ingress.call("invoke", route, request), "request")
-        return RequestRef(connection=ref.session_id, seq=ref.seq)
+        return RequestRef(connection=encode_b32(ref.session_id), seq=ref.seq)
 
     def result(self, ref: RequestRef) -> Result:
         """The wallet's answer (a notification) and the fact this account established (the evidence)."""
         route = "connect.app.status"
-        request = pb.ConnectRequestRefV1(session_id=ref.connection, seq=ref.seq)
+        request = pb.ConnectRequestRefV1(session_id=_raw_of(ref.connection, "the connection id"), seq=ref.seq)
         return result_of(ref, connect_reply(route, self.ingress.call("invoke", route, request, quiet=True), "status"))
 
     def wait(self, ref: RequestRef, until: Literal["fact", "answered"] = "fact", timeout: float = 240.0) -> Result:

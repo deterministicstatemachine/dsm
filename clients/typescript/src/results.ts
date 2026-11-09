@@ -91,7 +91,8 @@ const FACTS: Record<ConnectFact, Fact> = {
 
 /** A request this application made, by connection and sequence number. */
 export interface RequestRef {
-  connection: Uint8Array;
+  /** The connection's id (Base32 Crockford), as `Connection.id` and `Pending.connection` name it. */
+  connection: string;
   seq: bigint;
 }
 

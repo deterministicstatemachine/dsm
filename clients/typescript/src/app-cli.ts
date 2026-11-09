@@ -129,7 +129,7 @@ async function main(args: string[]): Promise<void> {
       return;
     }
     case "result":
-      show(await app.result({ connection: (await app.connection(arg(args, 1))).rawId, seq: BigInt(arg(args, 2)) }));
+      show(await app.result({ connection: (await app.connection(arg(args, 1))).id, seq: BigInt(arg(args, 2)) }));
       return;
     case "activity": {
       const after = args[1] === undefined ? 0n : BigInt(args[1]);

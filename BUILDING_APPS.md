@@ -155,7 +155,7 @@ What an offer asks the player to let your app do without asking again:
 | `owns(objects)` | be shown a proof of what the wallet owns of these objects, and of any you issued | `ask.owns` |
 | `accept()` | hand the player objects your account issued | `ask.accept`, then `give` |
 | `contacts()` | read the DSM identities of the wallet's contacts, and nothing more | `ask.contacts` |
-| `trade(a, b, caps)` | trade between two objects through your vaults, within caps | `ask.price`, `ask.trade` |
+| `trade(a, b, caps)` | trade between two objects through your vaults, within caps | `ask.price`, `ask.trade`; a wallet receives only an object it added, so `ask.accept` your coin first |
 | `match(caps)` | take stakes in matches your app referees, within caps | `ask.match.stake`, `decide`, `ask.match.collect` |
 | `duel(programs, caps)` | take stakes in matches a pinned program decides | `ask.duel.*` |
 
