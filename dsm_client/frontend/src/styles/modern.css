@@ -209,6 +209,10 @@ html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
 .s-sheet p { font-size: 16px; line-height: 1.45; color: var(--s-muted); }
 .s-sheet ul { padding-left: 20px; font-size: 15px; line-height: 1.5; }
 .s-stack { display: grid; gap: 10px; }
+.s-kv { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--s-line); font-size: 15px; }
+.s-kv-k { color: var(--s-muted); }
+.s-kv-v { color: var(--s-text); font-weight: 700; text-align: right; }
+.s-mono { font-family: ui-monospace, monospace; font-size: 14px; }
 .s-empty { text-align: center; color: var(--s-muted); padding: 30px 10px; font-size: 16px; }
 
 /* ---- The rest of DSM, on the Wallet tab ---- */

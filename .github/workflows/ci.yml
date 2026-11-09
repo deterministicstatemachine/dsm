@@ -174,7 +174,7 @@ jobs:
           # rust-analyzer's index of the workspace (ci/sofi_reachability.py).
           components: rustfmt, clippy, rust-analyzer, rust-src
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install CI system deps
         run: |
@@ -274,7 +274,7 @@ jobs:
           # workspace with rust-analyzer, which needs the standard library source.
           components: rust-analyzer, rust-src
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.group }}
 
@@ -349,7 +349,7 @@ jobs:
           # workspace with rust-analyzer, which needs the standard library source.
           components: rust-analyzer, rust-src
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: board
 
@@ -428,7 +428,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install CI system deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
@@ -471,6 +471,75 @@ jobs:
           test "${passed:-0}" -ge 10
 
   # --------------------------------------------------------------------------
+  # The developer path (BUILDING_APPS.md), end to end on real storage nodes:
+  # the local storage set (dsm-dev-net + the node binary on Postgres), an
+  # app's own account and a player's terminal wallet (dsm-app-host), the
+  # TypeScript and Python clients, the Connect starter app and its check
+  # (connect, pay inside and over the grant, holdings, disconnect). Then every
+  # command the walkthrough videos type (tools/walkthrough/tapes), in order:
+  # a step that breaks fails here before a video shows it.
+  # --------------------------------------------------------------------------
+  developer-path:
+    name: Developer path (app on DSM, end to end)
+    needs: [select]
+    if: >-
+      needs.select.outputs.full == 'true' || needs.select.outputs.core == 'true' ||
+      needs.select.outputs.sdk == 'true' || needs.select.outputs.storage == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # The server dsm-dev-net prepares the five node databases on.
+      DSM_DEV_PG_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "20"
+
+      - name: Install CI system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
+
+      - name: The Python client's runtime
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install --quiet "protobuf~=5.29"
+
+      - name: Every make target the walkthrough types is documented
+        run: python3 tools/walkthrough/check_tapes.py
+
+      - name: The developer path, end to end
+        env:
+          DEVELOPER_PATH_PYTHON: ${{ runner.temp }}/py/bin/python
+          DEVELOPER_PATH_KEEP: "1"
+        run: make developer-path
+
+      - name: Every command the walkthrough videos type
+        run: python3 tools/walkthrough/check_tapes.py --run
+
+      - name: Stop the developer environment
+        if: always()
+        run: make dev-down
+
+  # --------------------------------------------------------------------------
   # Formal validation: TLA+ model checking + real-code bridge harness
   #
   # Manual runs only (owner, 2026-10-02): it no longer runs on pull requests
@@ -492,7 +561,7 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install formal validation deps
         run: |
@@ -666,7 +735,7 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: dsm_client/deterministic_state_machine
           key: android-all-abis
@@ -746,18 +815,10 @@ jobs:
   # --------------------------------------------------------------------------
   # --------------------------------------------------------------------------
   # Embedded: the no_std / bare-metal compile paths that `cargo test` never
-  # exercises, plus the two excluded anchor crates that need no external
-  # checkout. No untrusted GitHub event inputs are used.
-  #
-  # WHAT THIS DOES NOT COVER, and why. The anchor crate
-  # dsm-anchor-secure-monitor reaches `tropic01 = { path =
-  # "../../../../libtropic-rs/tropic01" }`. That resolves ABOVE
-  # $GITHUB_WORKSPACE, which actions/checkout cannot write to, and no commit is
-  # pinned anywhere in this repo (tropic01 is `publish = false`, so there is no
-  # registry version either). Cloning an unpinned third-party repo at CI time
-  # would also make the dependency invisible to the spdx and sbom jobs. That
-  # crate stays uncovered until libtropic-rs is vendored into the workspace
-  # or pinned by SHA. Do not add it to this job without doing that first.
+  # exercises, the excluded anchor crates, the production firmware, and the
+  # rehearsal of its chip code on Tropic Square's TROPIC01 model. The driver is
+  # pinned by commit in dsm-anchor-chip and dsm-anchor-secure-monitor. No
+  # untrusted GitHub event inputs are used.
   # --------------------------------------------------------------------------
   embedded:
     name: Embedded (no_std + excluded anchor crates)
@@ -773,7 +834,7 @@ jobs:
           targets: thumbv8m.main-none-eabihf
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       # dsm-sphincs IS a workspace member, so the `rust` job already builds and
       # tests it — on the host, where `cfg(test)` makes it std. `src/lib.rs` is
@@ -811,6 +872,35 @@ jobs:
           cargo build --release --locked
           cargo clippy --release --locked -- -D warnings
           cargo test --release --locked
+
+      # The firmware as a burn takes it: the production profile, its memory map's
+      # assertions at the link, and no Secure symbol in mutable flash. It runs
+      # nowhere here; what it runs on the chip is the rehearsal below.
+      - name: Install the firmware's tools
+        run: sudo apt-get install -y binutils-arm-none-eabi clang
+
+      - name: dsm-anchor-secure-monitor builds its four images (thumbv8m)
+        working-directory: crates/dsm-anchor-secure-monitor
+        run: |
+          cargo build --release --locked --features bench_self_enroll,prepare_chip
+          cargo build --release --locked --features bench_self_enroll,identify_chip
+          cargo build --release --locked --features bench_self_enroll
+          cargo build --release --locked --features production
+          ./scripts/check-secure-no-xip.sh
+          python3 scripts/stack-bound.py target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor --limit 60416
+
+      - name: Install the TROPIC01 model
+        run: bash ci/tropic01_model.sh "$RUNNER_TEMP/tropic01-model" >> "$GITHUB_ENV"
+
+      # The chip code the monitor runs, on the vendor's model: birth, cage, spend
+      # and a power cut at every point of them, against the Secure heap's budget.
+      - name: dsm-anchor-chip rehearsal on the model
+        working-directory: crates/dsm-anchor-chip
+        run: |
+          cargo test --release --locked --test chip_model -- --test-threads=2
+          cargo test --release --locked --test secure_heap
+          cargo clippy --release --locked --all-targets -- -D warnings
+          cargo fmt --check
 
   # --------------------------------------------------------------------------
   # Lean 4: kernel-check the proof tree. No untrusted GitHub event inputs are
@@ -954,7 +1044,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install SBOM tooling
         run: |

@@ -87,8 +87,8 @@ final class GattClientSession: NSObject, CBPeripheralDelegate {
             payload = data.dropFirst(BleConstants.transferHeader)
         }
         peer.notificationCount += 1
-        if peer.notificationCount % BleConstants.notificationWindow == 0 {
-            coordinator.writeChunkAck(peer, count: peer.notificationCount)
+        if peer.notificationCount % BleConstants.notificationWindow == 0, let nonce = peer.currentTransferNonce {
+            coordinator.writeChunkAck(peer, nonce: nonce, count: peer.notificationCount)
         }
         coordinator.inbound(peer, role: BleConstants.linkRoleClient, bytes: Data(payload))
     }

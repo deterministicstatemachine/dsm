@@ -128,6 +128,9 @@ pub enum ReceiptLeaf {
     /// The offline account of the pinned bundle, as it stood before the
     /// spend.
     OfflineAccount(Box<crate::types::offline_account::SpendWitness>),
+    /// The receiver's offline account under its own bundle, as it stood before its board's receive
+    /// commit (owner, 2026-11-07).
+    OfflineReceive(Box<crate::types::offline_account::ReceiveWitness>),
 }
 
 /// One leaf a receipt's step writes: which leaf, and its path against the
@@ -145,6 +148,7 @@ impl ReceiptWrite {
             leaf: Some(match &self.leaf {
                 ReceiptLeaf::Relationship => Leaf::Relationship(StepWriteRelationship {}),
                 ReceiptLeaf::OfflineAccount(w) => Leaf::OfflineAccount(w.to_proto()),
+                ReceiptLeaf::OfflineReceive(w) => Leaf::OfflineReceive(w.to_proto()),
             }),
             path_heights: self.path.explicit_heights.to_vec(),
             path_siblings: self.path.siblings.clone(),
@@ -160,6 +164,9 @@ impl ReceiptWrite {
             Some(Leaf::Relationship(_)) => ReceiptLeaf::Relationship,
             Some(Leaf::OfflineAccount(a)) => ReceiptLeaf::OfflineAccount(Box::new(
                 crate::types::offline_account::SpendWitness::from_proto(a)?,
+            )),
+            Some(Leaf::OfflineReceive(a)) => ReceiptLeaf::OfflineReceive(Box::new(
+                crate::types::offline_account::ReceiveWitness::from_proto(a)?,
             )),
         };
         // Only the one canonical encoding of a device-tree path is a path.

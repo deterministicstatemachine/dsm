@@ -32,8 +32,20 @@ pub const TRANSITION_DIGEST_V2: &str = "DSM/transition-digest/v2";
 pub const ANCHOR_ROOT_ADVANCE_V2: &str = "DSM/anchor-root-advance/v2";
 /// Root-advance message `M_{i+1}` — the single message all three signatures cover.
 pub const ROOT_ADVANCE_MESSAGE_V2: &str = "DSM/root-advance/v2";
+/// The owner's authorization of one prepare: the digest the provisioned device key `pk_on`
+/// signs, binding this anchor's bundle `B`, the frontier and counter it advances from, the
+/// transition digest `D_{i+1}` and the device roots the release will carry. An anchor signs
+/// nothing for a prepare its owner did not authorize, whoever holds the link to it.
+pub const OWNER_AUTHORIZATION_V1: &str = "DSM/anchor/owner-authorization/v1";
 
 /// The digest of the appliance's record as R-memory holds it.
 pub const RMEM_RECORD_V1: &str = "DSM/anchor/rmem-record/v1";
 /// The seal of an R-memory header naming a record.
 pub const RMEM_HEADER_V1: &str = "DSM/anchor/rmem-header/v1";
+
+// --- The receiver's side of an offline payment (owner, 2026-11-07) ---
+/// The receive challenge `r_R = H(tag ‖ board TRNG ‖ chip RNG)` the receiver's appliance draws, from
+/// both hardware sources.
+pub const RECEIVE_CHALLENGE_V1: &str = "DSM/anchor/receive-challenge/v1";
+/// What a receive of a checked payment binds, as one digest (`receive::receive_binding`).
+pub const RECEIVE_BINDING_V1: &str = "DSM/anchor/receive-binding/v1";

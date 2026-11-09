@@ -33,13 +33,14 @@ cp target/aarch64-linux-android/release/libdsm_android_anchor.so \
    ../../dsm_client/android/app/src/main/jniLibs/arm64-v8a/libdsm_sdk.so
 ```
 
-## Device setup order (bench builds, operator-driven over ADB; each step gated + confirmed)
+## Device setup order
 
-1. Flash the Pico firmware (release only) and attach over USB-OTG (grants USB permission via the
-   attach intent → `PicoSelfTestActivity` runs the read-only H2/H3 self-test automatically).
-2. Counter birth: `--ez run_counter_init true --es confirm yes-init-counter-max`.
-3. Birth cage (IRREVERSIBLE, LAST): `--ez run_birth_cage true --es confirm yes-birth-cage-slot0`.
-4. Install the sender transport for the 2-phone test: `--ez install_anchor_transport true`.
+1. A new board goes through its try-run on the trial image before anything is burned on it
+   (`crates/dsm-anchor-secure-monitor/scripts/anchor-secure-boot/RUNBOOK.md`).
+2. Attach the appliance over USB-OTG. Android asks to allow it. Attaching changes nothing: a status
+   read of a new anchor reports it as awaiting its install.
+3. In the wallet's Appliance screen, try the install, read what it makes permanent, and install it.
+   The anchor goes through the try-run again itself and refuses, with nothing written, unless it passes.
 
 Every path fails closed: absent factory ⇒ offline-bearer sends error ("offline = chips"); any
 USB/chip failure inside an op ⇒ `DsmError` ⇒ no release.

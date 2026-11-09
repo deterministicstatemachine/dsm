@@ -416,7 +416,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::ContactProfile(_)
             | gp::envelope::Payload::ReceiptEmailResult(_)
             | gp::envelope::Payload::MoneyWaitingResponse(_)
-            | gp::envelope::Payload::PendingOfflineValueResponse(_),
+            | gp::envelope::Payload::PendingOfflineValueResponse(_)
+            | gp::envelope::Payload::UnloadReceivedResponse(_),
         ) => gp::envelope::Payload::Error(gp::Error {
             code: 409,
             message: "Responses should not be sent as requests".to_string(),
@@ -554,6 +555,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         Some(gp::envelope::Payload::SessionStateResponse(_))
         // Offline-bearer anchor status (signal (c)) — SDK-owned `anchor.status` query response.
         | Some(gp::envelope::Payload::AnchorStatusResponse(_))
+        // SDK-owned `anchor.tryRun` query response.
+        | Some(gp::envelope::Payload::AnchorTryRunResponse(_))
         // Offline-cash load/unload — SDK-owned `wallet.loadOffline`/`unloadOffline` response.
         | Some(gp::envelope::Payload::OfflineCashResponse(_))
         | Some(gp::envelope::Payload::TokenPolicyListResponse(_))

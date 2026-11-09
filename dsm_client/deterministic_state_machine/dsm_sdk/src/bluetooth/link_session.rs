@@ -30,8 +30,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{LazyLock, Mutex};
 
 use dsm::crypto::ble_link::{
-    complete, finish, initiate, respond, Answer, Confirm, Hello, Initiating, LinkIdentity,
-    LinkSession, Reply, Responding,
+    complete, finish, initiate, respond, Answer, Confirm, Hello, Initiating, LinkError,
+    LinkIdentity, LinkSession, Reply, Responding,
 };
 use dsm::types::error::DsmError;
 use zeroize::Zeroizing;
@@ -554,9 +554,20 @@ impl Links {
                     "a sealed record on a link with no session",
                 ));
             };
-            let plaintext = session.open(record).map_err(|e| {
-                DsmError::crypto(format!("link record: {e}"), None::<std::io::Error>)
-            })?;
+            // A record at or below the last one taken is one the radio carried again: a
+            // sender whose window ACK timed out resends its whole transfer. It is not
+            // taken a second time, and it is dropped without closing the link, so the
+            // records after it still arrive.
+            let plaintext = match session.open(record) {
+                Ok(plaintext) => plaintext,
+                Err(LinkError::Replayed { .. }) => return Ok(Inbound::default()),
+                Err(e) => {
+                    return Err(DsmError::crypto(
+                        format!("link record: {e}"),
+                        None::<std::io::Error>,
+                    ))
+                }
+            };
             match (*pairing, plaintext.as_slice()) {
                 // The client's first record from the server is its ready.
                 (Pairing::AwaitingReady, [READY]) => {

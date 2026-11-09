@@ -87,6 +87,11 @@ pub struct BilateralBleSession {
     /// to. It lives as session state and is never reconstructed at commit. `Some` iff this is a
     /// bearer transfer; `None` for ordinary transfers and on the receiver side.
     pub offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+    /// RECEIVER-only: the receive its board commits into its own offline account (owner,
+    /// 2026-11-07), stashed with the step's signed receipt before the board prepares, so a restart
+    /// commits the receive exactly as its board signed it. `None` on the sender side and until the
+    /// receiver's board is driven.
+    pub offline_receive: Option<dsm::types::device_state::OfflineReceive>,
     /// SENDER-only: the relationship tip the proposed step extends — its
     /// precommitment's parent. With the operation it hashes to the
     /// commitment, which is how a restart holds the precommitment again.
@@ -179,6 +184,20 @@ impl BilateralBleSession {
                 ),
                 None => (None, None, None, None),
             };
+        let (receive_anchor_bundle, receive_asset, receive_amount, receive_next_frontier) =
+            match &self.offline_receive {
+                Some(receive) => (
+                    Some(receive.anchor_bundle_b.to_vec()),
+                    Some(receive.asset.to_vec()),
+                    Some(i64::try_from(receive.amount).map_err(|e| {
+                        DsmError::invalid_operation(format!(
+                            "an offline receive's amount exceeds i64::MAX: {e}"
+                        ))
+                    })?),
+                    Some(receive.next_frontier.to_vec()),
+                ),
+                None => (None, None, None, None),
+            };
         Ok(BilateralSessionRecord {
             commitment_hash: self.commitment_hash.to_vec(),
             counterparty_device_id: self.counterparty_device_id.to_vec(),
@@ -199,6 +218,10 @@ impl BilateralBleSession {
             spend_next_frontier,
             owed_frame: self.owed_frame.clone(),
             terms_bytes: self.terms.as_ref().map(|t| t.to_bytes()),
+            receive_anchor_bundle,
+            receive_asset,
+            receive_amount,
+            receive_next_frontier,
         })
     }
 
@@ -246,6 +269,37 @@ impl BilateralBleSession {
                 ))
             }
         };
+        let offline_receive = match (
+            array32(
+                "receive_anchor_bundle",
+                record.receive_anchor_bundle.as_ref(),
+            )?,
+            array32("receive_asset", record.receive_asset.as_ref())?,
+            record.receive_amount,
+            array32(
+                "receive_next_frontier",
+                record.receive_next_frontier.as_ref(),
+            )?,
+        ) {
+            (Some(anchor_bundle_b), Some(asset), Some(amount), Some(next_frontier)) => {
+                Some(dsm::types::device_state::OfflineReceive {
+                    anchor_bundle_b,
+                    asset,
+                    amount: u64::try_from(amount).map_err(|negative| {
+                        DsmError::invalid_operation(format!(
+                            "persisted bilateral session: a negative offline receive ({negative})"
+                        ))
+                    })?,
+                    next_frontier,
+                })
+            }
+            (None, None, None, None) => None,
+            _ => {
+                return Err(DsmError::invalid_operation(
+                    "persisted bilateral session: part of an offline receive",
+                ))
+            }
+        };
         let terms = step_terms(&operation, record.terms_bytes.as_deref()).map_err(|e| {
             DsmError::invalid_operation(format!("persisted bilateral session: {e}"))
         })?;
@@ -267,6 +321,7 @@ impl BilateralBleSession {
             receiver_challenge: array32("receiver_challenge", record.receiver_challenge.as_ref())?,
             sent_child_root: array32("sent_child_root", record.sent_child_root.as_ref())?,
             offline_spend,
+            offline_receive,
             parent_tip: array32("parent_tip", record.parent_tip.as_ref())?,
             owed_frame: record.owed_frame.clone(),
             terms,
@@ -310,6 +365,11 @@ pub enum BilateralPhase {
     /// the step is claimed, so a response delivered again cannot release it twice (SA-112), and a
     /// restart finds it here and settles it by the recovery table.
     Releasing,
+    /// The receiver's side of an offline-bearer step (owner, 2026-11-07): its receipt is signed and
+    /// recorded with its EK and its account move, and its board is checking the payment and
+    /// committing the receive. A confirm delivered again, or a restart, settles it by what the board
+    /// reports: committed, the same receive commits on the phone; not committed, it is driven again.
+    Receiving,
     ConfirmPending, // Confirm sent; awaiting receiver acknowledgment before sender finalize
     Committed,      // Transaction finalized on both sides after receiver acknowledgment
     Failed,         // Error occurred
@@ -330,6 +390,7 @@ pub fn is_inflight_phase(phase: &BilateralPhase) -> bool {
             | BilateralPhase::PendingUserAction
             | BilateralPhase::Accepted
             | BilateralPhase::Releasing
+            | BilateralPhase::Receiving
             | BilateralPhase::ConfirmPending
     )
 }
@@ -352,6 +413,7 @@ pub fn phase_to_str(phase: &BilateralPhase) -> &'static str {
         BilateralPhase::Accepted => "accepted",
         BilateralPhase::Rejected => "rejected",
         BilateralPhase::Releasing => "releasing",
+        BilateralPhase::Receiving => "receiving",
         BilateralPhase::ConfirmPending => "confirm_pending",
         BilateralPhase::Committed => "committed",
         BilateralPhase::Failed => "failed",
@@ -367,6 +429,7 @@ pub fn phase_from_str(s: &str) -> Result<BilateralPhase, DsmError> {
         "accepted" => BilateralPhase::Accepted,
         "rejected" => BilateralPhase::Rejected,
         "releasing" => BilateralPhase::Releasing,
+        "receiving" => BilateralPhase::Receiving,
         "confirm_pending" => BilateralPhase::ConfirmPending,
         "committed" => BilateralPhase::Committed,
         "failed" => BilateralPhase::Failed,
@@ -423,6 +486,7 @@ mod tests {
             receiver_challenge: None,
             sent_child_root: None,
             offline_spend: None,
+            offline_receive: None,
             parent_tip: None,
             owed_frame: None,
             terms: None,

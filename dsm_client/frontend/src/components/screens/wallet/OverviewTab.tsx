@@ -8,6 +8,8 @@ import { TokenMark } from '../../TokenMark';
 import BluetoothIcon from '../../icons/BluetoothIcon';
 import type { DomainTransaction } from '../../../domain/types';
 import type { PendingOfflineState } from './hooks/usePendingOffline';
+import { dsmClient } from '../../../services/dsmClient';
+import type { ReceivedUnload } from '../../../dsm/offlineCash';
 
 const MAX_OVERVIEW_BALANCES = 5;
 
@@ -15,8 +17,10 @@ type Props = {
   balances: TokenBalanceView[];
   /** The store has not answered balances yet: neither a holding nor an empty wallet is known. */
   balancesLoading: boolean;
-  /** Payments received offline and held pending: in no balance above until they settle. */
+  /** Payments received offline, in this phone's offline balance: in no balance above until unloaded. */
   pendingOffline: PendingOfflineState;
+  /** Read the wallet again once received money has moved into the balance. */
+  onReceivedMoved: () => Promise<void>;
   transactions: DomainTransaction[];
   genesisB32: string;
   deviceB32: string;
@@ -24,8 +28,27 @@ type Props = {
   onSwitchToHistory: () => void;
 };
 
-function OverviewTabInner({ balances, balancesLoading, pendingOffline, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
+function OverviewTabInner({ balances, balancesLoading, pendingOffline, onReceivedMoved, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
   const [showAllBalances, setShowAllBalances] = useState(false);
+  // The unload asked for and not yet answered, if any.
+  const [unloading, setUnloading] = useState<Promise<ReceivedUnload> | null>(null);
+  const [unloadNotice, setUnloadNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  // One tap moves every payment received offline that is ready (owner, 2026-11-07); Rust says
+  // which moved and which still wait for their payers.
+  const unloadReceived = useCallback(async () => {
+    const asked = dsmClient.unloadReceived();
+    setUnloading(asked);
+    setUnloadNotice(null);
+    try {
+      const res = await asked;
+      setUnloadNotice({ kind: 'success', text: res.message });
+      await onReceivedMoved();
+    } catch (e) {
+      setUnloadNotice({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setUnloading(null);
+    }
+  }, [onReceivedMoved]);
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
   // Currencies, or the state objects (supply-one tokens: creatures, items) the wallet holds.
   const [shown, setShown] = useState<BalanceHoldingView>('currency');
@@ -107,15 +130,16 @@ function OverviewTabInner({ balances, balancesLoading, pendingOffline, transacti
         )}
       </section>
 
-      {/* Received offline and not yet settled: shown apart from the balances,
-          which do not include it, and not spendable until the payer comes
-          back online and the payment settles. */}
+      {/* Received offline: committed by this phone's own board into its
+          offline balance, shown apart from the balances, which do not include
+          it. It moves into the balance when the user unloads it, each payment
+          once its payer has been back online. */}
       {(pendingOffline.receipts.length > 0 || pendingOffline.error) && (
-        <section className="sb-card" aria-label="Pending settlement" data-testid="pending-offline">
+        <section className="sb-card" aria-label="Received offline" data-testid="pending-offline">
           <div className="sb-card__title">
-            <span className="sb-hero__label">Pending settlement</span>
+            <span className="sb-hero__label">Received offline</span>
           </div>
-          <div className="sb-hero__sub">Received offline. Spendable once the payer is back online and it settles.</div>
+          <div className="sb-hero__sub">In this phone's offline balance. Move it to your balance once the payer is back online.</div>
           {pendingOffline.receipts.map((r, i) => (
             <div className="sb-kv" style={{ padding: '6px 0' }} key={i} data-testid="pending-offline-receipt">
               <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -127,6 +151,23 @@ function OverviewTabInner({ balances, balancesLoading, pendingOffline, transacti
           ))}
           {pendingOffline.error && (
             <div className="sb-hero__sub" role="alert">Pending payments could not be read: {pendingOffline.error}</div>
+          )}
+          {pendingOffline.receipts.length > 0 && (
+            <button
+              type="button"
+              className="sb-btn sb-btn--ghost sb-btn--small sb-btn--block"
+              style={{ marginTop: 6 }}
+              onClick={unloadReceived}
+              disabled={unloading !== null}
+              data-testid="unload-received"
+            >
+              {unloading !== null ? 'Moving…' : 'Move to balance'}
+            </button>
+          )}
+          {unloadNotice && (
+            <div className="sb-hero__sub" role={unloadNotice.kind === 'error' ? 'alert' : 'status'} data-testid="unload-received-notice">
+              {unloadNotice.text}
+            </div>
           )}
         </section>
       )}

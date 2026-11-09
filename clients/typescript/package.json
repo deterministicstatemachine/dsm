@@ -1,0 +1,30 @@
+{
+  "name": "dsm-app-client",
+  "version": "0.1.0-beta.4",
+  "description": "A client for a dsm-app-host's local ingress: an application's own DSM account (DSM Connect, Amendment A11), and the terminal dev wallet",
+  "license": "MIT OR Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "dsm-dev-wallet": "dist/dev-wallet.js",
+    "dsm-app": "dist/app-cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "proto:gen": "mkdir -p src/generated && protoc --plugin=protoc-gen-es=./node_modules/.bin/protoc-gen-es --es_out=import_extension=.js:./src/generated --es_opt=target=ts -I ../../proto ../../proto/dsm_app.proto",
+    "build": "npm run proto:gen && tsc -p tsconfig.json",
+    "type-check": "npm run proto:gen && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "1.10.1"
+  },
+  "devDependencies": {
+    "@bufbuild/protoc-gen-es": "1.10.1",
+    "@types/node": "^20.19.0",
+    "typescript": "~5.6.3"
+  }
+}

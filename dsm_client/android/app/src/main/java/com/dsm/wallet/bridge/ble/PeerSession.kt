@@ -44,13 +44,13 @@ data class PeerSession(
     // ── Server-side state (was GattServerHost's 6 maps) ──────────────────
     var serverDevice: BluetoothDevice? = null,
     var subscribedCccds: MutableMap<UUID, Boolean> = mutableMapOf(),
-    var notificationCompletion: CompletableDeferred<Boolean>? = null,
-    var chunkAckChannel: Channel<Int>? = null,
+    @Volatile var notificationCompletion: CompletableDeferred<Boolean>? = null,
+    @Volatile var chunkAckChannel: Channel<Int>? = null,
     var notificationSendLock: Mutex = Mutex(),
     var writeBudget: BleWriteBudget = BleWriteBudget(),
 
     // ── Transfer nonce ───────────────────────────────────────────────────
-    var serverTransferNonce: Byte = 0,
+    @Volatile var serverTransferNonce: Byte = 0,
 
     // ── Reconnection backoff ─────────────────────────────────────────────
     // Tracks exponential backoff across connect/disconnect cycles.

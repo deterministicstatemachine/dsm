@@ -91,6 +91,16 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
   §6.28: a device whose head moves through ANOTHER relationship between its
   confirm and its commit cannot commit (the receipt it signed names its whole
   device root). This model has one relationship.
+
+  PaysOnlyLoaded (owner, 2026-11-07: an offline payment needs a board on both
+  sides, the money received lands in the receiver's own offline balance, and
+  it is paid on only once it has been unloaded): a device that has received
+  offline proposes no offline payment of its own until a boundary carries the
+  receive online: Boundary(d), a load or an unload, taken with no step in
+  flight, as the code takes one (`offline_spend_in_flight`). `cut` records
+  where each device's boundaries fell in its chain. The code refuses the
+  proposal (`account_received_since_boundary`) and, again, the release
+  (`own_offline_spend_chain`). NothingReceivedIsPaidOn holds it.
 ***************************************************************************)
 
 CONSTANTS
@@ -102,14 +112,15 @@ CONSTANTS
     LinkLossFailsNothing,
     ReceiverRefusesWhileInFlight,
     SenderCommitsAtRelease,
-    ConfirmOwedWithCommit
+    ConfirmOwedWithCommit,
+    PaysOnlyLoaded
 
 ASSUME Cardinality(Device) = 2
 ASSUME StepsPerDevice \in Nat \ {0}
 ASSUME INITIAL_BALANCE \in Nat
 ASSUME {FramesAfterDurable, CancelOnlyBeforeConfirm, LinkLossFailsNothing,
         ReceiverRefusesWhileInFlight, SenderCommitsAtRelease,
-        ConfirmOwedWithCommit} \subseteq BOOLEAN
+        ConfirmOwedWithCommit, PaysOnlyLoaded} \subseteq BOOLEAN
 
 \* A step is named by its proposer and a number.
 Step == Device \X (1..StepsPerDevice)
@@ -143,9 +154,10 @@ VARIABLES
     phase,    \* phase[d][s]: d's durable phase for step s
     parent,   \* parent[s]: the relationship tip s was proposed on
     net,      \* the frames in the air
-    link      \* whether the two devices are linked
+    link,     \* whether the two devices are linked
+    cut       \* cut[d]: the chain lengths at which d crossed a boundary online
 
-vars == <<chain, phase, parent, net, link>>
+vars == <<chain, phase, parent, net, link, cut>>
 
 Tip(d) == Len(chain[d])
 InChain(d, s) == \E i \in 1..Len(chain[d]) : chain[d][i] = s
@@ -154,6 +166,11 @@ Balance(d) ==
       - Cardinality({i \in 1..Len(chain[d]) : Proposer(chain[d][i]) = d})
       + Cardinality({i \in 1..Len(chain[d]) : Proposer(chain[d][i]) # d})
 InFlight(d) == \E s \in Step : phase[d][s] \in InFlightPhase
+\* d has received nothing offline since its last boundary: every step it holds
+\* past that boundary is its own.
+LastCut(d) == CHOOSE k \in cut[d] \cup {0} : \A n \in cut[d] \cup {0} : n <= k
+ReceivedNothing(d) ==
+    \A i \in (LastCut(d) + 1)..Len(chain[d]) : Proposer(chain[d][i]) = d
 
 \* A frame leaves only while the devices are linked; one that cannot leave
 \* is still owed by the phase that produced it.
@@ -168,6 +185,7 @@ Init ==
     /\ parent = [s \in Step |-> NoParent]
     /\ net = {}
     /\ link = TRUE
+    /\ cut = [d \in Device |-> {}]
 
 \* ------------------------------------------------------------------------
 \* The proposer's door: one step at a time. prepare_bilateral_transaction
@@ -180,6 +198,7 @@ Propose(s) ==
     /\ parent[s] = NoParent
     /\ ~InFlight(d)
     /\ Balance(d) >= 1
+    /\ PaysOnlyLoaded => ReceivedNothing(d)
     /\ phase' = [phase EXCEPT ![d][s] = "Prepared"]
     /\ parent' = [parent EXCEPT ![s] = Tip(d)]
     /\ Emit("prepare", s)
@@ -416,7 +435,15 @@ LinkUp ==
     /\ link' = TRUE
     /\ UNCHANGED <<chain, phase, parent, net>>
 
-Next ==
+\* A boundary online, a load or an unload, carries d's offline steps since its
+\* last one online: taken only with no step of d's in flight.
+Boundary(d) ==
+    /\ ~InFlight(d)
+    /\ cut' = [cut EXCEPT ![d] = @ \cup {Len(chain[d])}]
+    /\ UNCHANGED <<chain, phase, parent, net, link>>
+
+\* Every step of the protocol leaves the boundaries where they fell.
+ProtocolNext ==
     \/ \E s \in Step :
           \/ Propose(s)
           \/ RecvPrepare(s)
@@ -433,19 +460,23 @@ Next ==
     \/ LinkDown
     \/ LinkUp
 
+Next ==
+    \/ ProtocolNext /\ UNCHANGED cut
+    \/ \E d \in Device : Boundary(d)
+
 \* Fairness: a user eventually decides on a proposal it holds, and while the
 \* link is up an owed frame is eventually sent and a frame in the air is
 \* eventually taken. Proposing, cancelling and the link itself are free.
 Fairness ==
     /\ \A s \in Step :
-          /\ WF_vars(UserAccept(s) \/ UserReject(s))
-          /\ WF_vars(RecvPrepare(s))
-          /\ WF_vars(RecvResponse(s))
-          /\ WF_vars(RecvReject(s))
-          /\ WF_vars(RecvCancel(s))
-          /\ WF_vars(RecvConfirm(s))
-          /\ WF_vars(RecvAck(s))
-    /\ \A d \in Device, s \in Step : WF_vars(Resend(d, s))
+          /\ WF_vars((UserAccept(s) \/ UserReject(s)) /\ UNCHANGED cut)
+          /\ WF_vars(RecvPrepare(s) /\ UNCHANGED cut)
+          /\ WF_vars(RecvResponse(s) /\ UNCHANGED cut)
+          /\ WF_vars(RecvReject(s) /\ UNCHANGED cut)
+          /\ WF_vars(RecvCancel(s) /\ UNCHANGED cut)
+          /\ WF_vars(RecvConfirm(s) /\ UNCHANGED cut)
+          /\ WF_vars(RecvAck(s) /\ UNCHANGED cut)
+    /\ \A d \in Device, s \in Step : WF_vars(Resend(d, s) /\ UNCHANGED cut)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -459,6 +490,7 @@ TypeOK ==
     /\ parent \in [Step -> {NoParent} \cup Nat]
     /\ net \subseteq [kind : Kind, step : Step]
     /\ link \in BOOLEAN
+    /\ cut \in [Device -> SUBSET Nat]
 
 \* The two devices hold one relationship chain: one is a prefix of the other.
 NoFork ==
@@ -509,6 +541,13 @@ TokenConservation ==
            IN Balance(d) + Balance(Peer(d)) = 2 * INITIAL_BALANCE
 
 BalancesNonNegative == \A d \in Device : Balance(d) >= 0
+
+\* Money received offline is never paid on offline: no device commits a step of
+\* its own after one it received unless a boundary online fell between them.
+NothingReceivedIsPaidOn ==
+    \A d \in Device : \A i, j \in 1..Len(chain[d]) :
+        (i < j /\ Proposer(chain[d][i]) # d /\ Proposer(chain[d][j]) = d)
+            => \E k \in cut[d] : i <= k /\ k < j
 
 \* The durable boundary, frame by frame: a confirm in the air was sent by a
 \* proposer whose ConfirmPending is durable; an ack by a receiver whose

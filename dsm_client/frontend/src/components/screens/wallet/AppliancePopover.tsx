@@ -3,42 +3,26 @@
 // Rust read from it. The first connection needs the user: plug it in, tap
 // Connect, and allow it when Android asks. After that Android keeps the
 // permission while the appliance stays plugged in, and the send screen
-// connects on its own whenever Offline is chosen.
+// connects on its own whenever Offline is chosen. Connecting does nothing permanent: a new
+// appliance is offered its try-run and its install here, and only here.
 import React, { useEffect, useRef } from 'react';
 import { Notice } from '../../common/ScreenFrame';
 import { useBackButton } from '../../../hooks/useBackButton';
+import AnchorInstallPanel from '../../AnchorInstallPanel';
+import { applianceConnected, applianceStateText, type ApplianceRead } from '../../applianceRead';
 import type { AnchorStatus } from '../../../dsm/anchor';
-
-/** What the last read of the appliance said, or that none has happened. */
-export type ApplianceRead =
-  | { kind: 'unread' }
-  | { kind: 'read'; status: AnchorStatus }
-  | { kind: 'error'; message: string };
 
 type Props = {
   read: ApplianceRead;
   busy: boolean;
   /** Reads the appliance through Rust, which attaches it. */
   onConnect: () => Promise<void>;
+  /** Takes the anchor as its install reported it, which says what a read afterwards does not. */
+  onInstalled: (installed: AnchorStatus) => Promise<void>;
   onClose: () => void;
 };
 
-export function applianceConnected(read: ApplianceRead): boolean {
-  return read.kind === 'read' && read.status.connected;
-}
-
-function stateText(read: ApplianceRead): string {
-  switch (read.kind) {
-    case 'unread':
-      return 'Not checked yet';
-    case 'read':
-      return read.status.statusText || (read.status.connected ? 'Connected' : 'Not connected');
-    case 'error':
-      return 'Not connected';
-  }
-}
-
-export function AppliancePopover({ read, busy, onConnect, onClose }: Props): React.JSX.Element {
+export function AppliancePopover({ read, busy, onConnect, onInstalled, onClose }: Props): React.JSX.Element {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   useBackButton(true, onClose);
   useEffect(() => {
@@ -72,7 +56,7 @@ export function AppliancePopover({ read, busy, onConnect, onClose }: Props): Rea
           <p>Android asks once. While the appliance stays plugged in, it connects on its own whenever you choose Offline.</p>
           <div className="sb-kv">
             <span className="sb-kv__k">State</span>
-            <span className="sb-kv__v" data-testid="appliance-state">{stateText(read)}</span>
+            <span className="sb-kv__v" data-testid="appliance-state">{applianceStateText(read)}</span>
           </div>
           {read.kind === 'read' && read.status.connected && (
             <>
@@ -89,6 +73,9 @@ export function AppliancePopover({ read, busy, onConnect, onClose }: Props): Rea
                 <span className="sb-kv__v sb-kv__v--mono">{read.status.frontierRootB32}</span>
               </div>
             </>
+          )}
+          {read.kind === 'read' && read.status.awaitingInstall && (
+            <AnchorInstallPanel onInstalled={onInstalled} />
           )}
           {read.kind === 'error' && <Notice kind="error">{read.message}</Notice>}
         </div>

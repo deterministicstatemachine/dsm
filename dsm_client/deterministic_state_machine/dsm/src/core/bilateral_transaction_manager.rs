@@ -189,28 +189,34 @@ pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
     msg
 }
 
-/// The bytes the receiver's acceptance σ_B covers: the step `commitment_hash`
-/// and the challenge `r_R` the step's release must answer. The challenge is
-/// under σ_B so that a relay cannot substitute it: the proposer takes only
-/// the challenge its receiver signed, and so stages and commits its anchor
-/// transition only toward a challenge the receiver will accept.
+/// The bytes the receiver's acceptance σ_B covers: the step `commitment_hash`,
+/// the challenge `r_R` the step's release must answer, which the receiver's
+/// board drew, and the bundle `B_r` of that board, whose receive commit is the
+/// step's acknowledgement (owner, 2026-11-07: an offline payment needs a board
+/// on both sides). Both are under σ_B so that a relay cannot substitute either:
+/// the proposer takes only the challenge its receiver signed, and checks the
+/// acknowledgement only under the anchor its receiver named.
 pub fn bilateral_accept_sign_message(
     commitment_hash: &[u8; 32],
     receiver_challenge: &[u8; 32],
+    receiver_bundle: &[u8; 32],
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(21 + 32 + 32);
-    msg.extend_from_slice(b"DSM/bilateral-accept\0");
+    let mut msg = Vec::with_capacity(24 + 32 + 32 + 32);
+    msg.extend_from_slice(b"DSM/bilateral-accept/v2\0");
     msg.extend_from_slice(commitment_hash);
     msg.extend_from_slice(receiver_challenge);
+    msg.extend_from_slice(receiver_bundle);
     msg
 }
 
-/// The receiver's acceptance of a step, as the proposer holds it: σ_B and
-/// the challenge σ_B binds ([`bilateral_accept_sign_message`]).
+/// The receiver's acceptance of a step, as the proposer holds it: σ_B, and
+/// the challenge and the receiver's bundle σ_B binds
+/// ([`bilateral_accept_sign_message`]).
 #[derive(Clone, Copy, Debug)]
 pub struct ReceiverAcceptance<'a> {
     pub signature: &'a [u8],
     pub receiver_challenge: &'a [u8; 32],
+    pub receiver_bundle: &'a [u8; 32],
 }
 
 /// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
@@ -473,17 +479,19 @@ impl BilateralTransactionManager {
     }
 
     /// The receiver's acceptance σ_B of the step `commitment_hash`, binding
-    /// the challenge `receiver_challenge` its release must answer
-    /// ([`bilateral_accept_sign_message`]).
+    /// the challenge `receiver_challenge` its board drew and that board's
+    /// bundle `receiver_bundle` ([`bilateral_accept_sign_message`]).
     pub fn sign_acceptance(
         &self,
         commitment_hash: &[u8; 32],
         receiver_challenge: &[u8; 32],
+        receiver_bundle: &[u8; 32],
     ) -> Result<Vec<u8>, DsmError> {
         self.signature_keypair
             .sign(&bilateral_accept_sign_message(
                 commitment_hash,
                 receiver_challenge,
+                receiver_bundle,
             ))
             .map_err(|e| {
                 error!("[BTM] sign_acceptance: failed to sign: {}", e);
@@ -690,7 +698,11 @@ impl BilateralTransactionManager {
             .clone();
 
         let valid = SignatureKeyPair::verify_raw(
-            &bilateral_accept_sign_message(pre_commitment_hash, acceptance.receiver_challenge),
+            &bilateral_accept_sign_message(
+                pre_commitment_hash,
+                acceptance.receiver_challenge,
+                acceptance.receiver_bundle,
+            ),
             acceptance.signature,
             &counterparty_pubkey,
         )

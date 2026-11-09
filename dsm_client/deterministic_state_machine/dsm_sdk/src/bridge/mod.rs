@@ -107,7 +107,7 @@ pub trait AppRouter: Send + Sync {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 
     /// v2 producer phase 1 (Software-Authority / Hardware-Identity): stage the next offline-bearer
@@ -166,6 +166,37 @@ pub trait AppRouter: Send + Sync {
         appliance_next_root: [u8; 32],
     ) -> Result<(), dsm::types::error::DsmError>;
 
+    /// The receiver's side of an offline payment (owner, 2026-11-07): this device's board draws the
+    /// receive challenge and holds it open. Delegates to [`CoreSDK::draw_receive_challenge`].
+    fn draw_receive_challenge(
+        &self,
+    ) -> Result<([u8; 32], crate::anchor::AnchorPin), dsm::types::error::DsmError>;
+
+    /// Stage the receive of a payer's release on this device's board. Delegates to
+    /// [`CoreSDK::stage_offline_receive`].
+    fn stage_offline_receive(
+        &self,
+        paid: &anchor_core::root_advance::OfflineRelease,
+        receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError>;
+
+    /// The receiver's board checks the payer's release and commits the staged receive over the
+    /// receiver's device roots; answers the receive's release, the acknowledgement. Delegates to
+    /// [`CoreSDK::receive_offline_bearer`].
+    fn receive_offline_bearer(
+        &self,
+        staged: &crate::sdk::core_sdk::StagedBearerTransition,
+        paid: &anchor_core::root_advance::OfflineRelease,
+        payer: &anchor_core::receive::PayerDisclosure,
+        receiver_challenge: [u8; 32],
+        device_root_before: [u8; 32],
+        device_root_after: [u8; 32],
+    ) -> Result<Vec<u8>, dsm::types::error::DsmError>;
+
+    /// After a restart, finish a receive whose phone side committed before its board finalized.
+    /// Delegates to [`CoreSDK::finalize_committed_receive`].
+    fn finalize_committed_receive(&self) -> Result<Option<[u8; 32]>, dsm::types::error::DsmError>;
+
     /// Execute a prepared bilateral advance through the canonical
     /// [`CoreSDK::execute_on_relationship`] chokepoint.
     ///
@@ -195,7 +226,7 @@ pub trait AppRouter: Send + Sync {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
         before_commit: Option<
             &dyn Fn(
                 &dsm::types::device_state::AdvanceOutcome,
@@ -366,14 +397,15 @@ pub fn anchor_enrollment_store(
     ANCHOR_ENROLLMENT_STORE.read().ok()?.clone()
 }
 
-/// SENDER-side fused-anchor appliance factory. Produces the fresh `AnchorAppliance` the offline-bearer
-/// release is built on: a client driving the physical RP2350/TROPIC01, installed by the device layer.
-/// `build_offline_bearer_release` calls it ONCE and caches the result (the appliance is stateful —
-/// its counter advances and its witness key erases on COMMIT).
+/// The phone's fused-anchor appliance factory, for both sides of an offline payment (owner,
+/// 2026-11-07: an offline payment needs a board on both sides). Produces the fresh `AnchorAppliance`
+/// the payer's release and the receiver's receive are built on: a client driving the physical
+/// RP2350/TROPIC01, installed by the device layer. A `CoreSDK` calls it ONCE and caches the result
+/// (the appliance is stateful — its counter advances and its witness key erases on COMMIT).
 ///
-/// `None` until installed, and no appliance transport exists yet to install: offline-bearer is
-/// unavailable and the send FAILS CLOSED — "offline = chips". The factory returns `Result` so a
-/// failed chip connect (e.g. STATUS unreadable) propagates as a fail-closed error.
+/// `None` until the device layer installs it: offline-bearer is then unavailable and every offline
+/// send and receive FAILS CLOSED — "offline = chips". The factory returns `Result` so a failed chip
+/// connect (e.g. STATUS unreadable) propagates as a fail-closed error.
 type AnchorApplianceFactory = Arc<
     dyn Fn() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, dsm::types::error::DsmError>
         + Send
@@ -382,12 +414,13 @@ type AnchorApplianceFactory = Arc<
 static ANCHOR_APPLIANCE_FACTORY: Lazy<RwLock<Option<AnchorApplianceFactory>>> =
     Lazy::new(|| RwLock::new(None));
 
-/// Install (or replace) the sender-side anchor-appliance factory (the physical-chip producer).
+/// Install (or replace) the phone's anchor-appliance factory (the physical-chip producer), which
+/// serves the payer's release and the receiver's receive alike.
 pub fn install_anchor_appliance_factory(factory: AnchorApplianceFactory) {
     if let Ok(mut g) = ANCHOR_APPLIANCE_FACTORY.write() {
         *g = Some(factory);
         log::info!(
-            "[SDK] AnchorApplianceFactory installed (offline-bearer release = physical chip)"
+            "[SDK] AnchorApplianceFactory installed (offline release and receive = physical chip)"
         );
     }
 }

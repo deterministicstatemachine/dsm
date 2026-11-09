@@ -605,7 +605,18 @@ fn get_database_path() -> Result<PathBuf> {
 /// own parent (DSM Amendment A14 restored, A19 removed by the owner's ruling
 /// of 2026-11-03), so no frontier is kept. A database made at 42 is refused at
 /// open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 43;
+///
+/// v44: an offline payment needs a board on both sides (owner, 2026-11-07). A
+/// payment received offline names the receiving account's own bundle
+/// (`pending_offline_receipt.receiver_bundle`): it sits in that account's
+/// received amount until its unload. `own_offline_hop` replaces
+/// `own_offline_spend`: an account moves between its boundaries by spends,
+/// receives and the unloads of received payments, in order (`seq`).
+/// `bilateral_sessions` keeps a receive's account move (`receive_*`) while the
+/// receiver's board commits it, and `offline_acknowledgement` keeps each step's
+/// acknowledgement, the receiver board's receive commit. A database made at 43
+/// is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 44;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1048,9 +1059,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             payload_hash        BLOB NOT NULL CHECK (length(payload_hash) = 32)
         );
 
-        -- Value this device received offline, pending until it is settled
-        -- online (SA-91): neither online balance nor offline allocation. A
-        -- settlement admitted online marks it settled, once.
+        -- A payment this device received offline (owner, 2026-11-07): its
+        -- board's receive commit put it in its own offline account's received
+        -- amount, where it waits for its unload. The unload, admitted online
+        -- once the payer's own history shows the spend, marks it settled, once.
         CREATE TABLE IF NOT EXISTS pending_offline_receipt(
             release_message     BLOB PRIMARY KEY,   -- 32B M
             payer_genesis       BLOB NOT NULL,      -- 32B
@@ -1062,18 +1074,29 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- The bearer transfer as this device accepted it, which its
             -- settlement carries (SA-133).
             operation           BLOB NOT NULL,
-            settled_position    INTEGER
+            settled_position    INTEGER,
+            -- The bundle of this device's own offline account, which holds the
+            -- payment received until its unload (owner, 2026-11-07).
+            receiver_bundle     BLOB NOT NULL       -- 32B
         );
 
         -- This device's own offline-bearer spends no boundary of its online
         -- history has exposed yet: the chain each confirm carries from the
         -- account its receivers recorded (SA-116). Written with the step that
         -- spent, taken out by the boundary that carries them online.
-        CREATE TABLE IF NOT EXISTS own_offline_spend(
+        CREATE TABLE IF NOT EXISTS own_offline_hop(
             bundle              BLOB NOT NULL,      -- 32B
-            anchor_counter      INTEGER NOT NULL,   -- u_i the spend started from
-            hop                 BLOB NOT NULL,      -- OfflineSpendHop
-            PRIMARY KEY(bundle, anchor_counter)
+            seq                 INTEGER NOT NULL,   -- the step's place since the last boundary
+            hop                 BLOB NOT NULL,      -- OfflineAccountHop
+            PRIMARY KEY(bundle, seq)
+        );
+
+        -- Each offline step's acknowledgement: the receiver board's receive
+        -- commit (its release), kept by the payer that checked it and by the
+        -- receiver that answers a confirm delivered again with it.
+        CREATE TABLE IF NOT EXISTS offline_acknowledgement(
+            commitment_hash     BLOB PRIMARY KEY,   -- 32B
+            acknowledgement     BLOB NOT NULL       -- dsm.anchor.OfflineRelease
         );
         DROP TABLE IF EXISTS economic_admitted;
 
@@ -1837,6 +1860,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             spend_asset               BLOB,
             spend_amount              INTEGER,
             spend_next_frontier       BLOB,
+            receive_anchor_bundle     BLOB,
+            receive_asset             BLOB,
+            receive_amount            INTEGER,
+            receive_next_frontier     BLOB,
             owed_frame                BLOB,
             terms_bytes               BLOB
         );

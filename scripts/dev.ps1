@@ -60,10 +60,10 @@ function Show-Help {
     Write-Host "    typecheck     Frontend TypeScript type-check" -ForegroundColor Gray
     Write-Host "    lint          cargo fmt check + clippy" -ForegroundColor Gray
     Write-Host "    fmt           Auto-format Rust code" -ForegroundColor Gray
-    Write-Host "    nodes-up      Set up DB and start 5 local storage nodes" -ForegroundColor Gray
-    Write-Host "    nodes-down    Stop local storage nodes" -ForegroundColor Gray
-    Write-Host "    nodes-status  Check local storage node health" -ForegroundColor Gray
-    Write-Host "    db-setup      Create dev PostgreSQL role + database" -ForegroundColor Gray
+    Write-Host "    nodes-up      Start your own local storage set (5 nodes; needs PostgreSQL)" -ForegroundColor Gray
+    Write-Host "    nodes-down    Stop the local storage nodes" -ForegroundColor Gray
+    Write-Host "    nodes-status  Health of every local node, over verified TLS" -ForegroundColor Gray
+    Write-Host "    nodes-reset   Stop the nodes, drop their databases, forget the set" -ForegroundColor Gray
     Write-Host "    clean         Remove all build artifacts" -ForegroundColor Gray
     Write-Host ""
     Write-Host "  Android builds require WSL2 — run 'make android' inside WSL2." -ForegroundColor Yellow
@@ -122,7 +122,7 @@ function Invoke-Setup {
 
     if (-not (Get-Command "psql" -ErrorAction SilentlyContinue)) {
         Warn "psql not found — install PostgreSQL from https://www.postgresql.org/download/windows/"
-        Warn "Required for nodes-up / db-setup targets"
+        Warn "Required for the nodes-up target"
     } else {
         Ok "psql $(psql --version)"
     }
@@ -209,142 +209,103 @@ function Invoke-Fmt {
     Ok "Format complete."
 }
 
-function Invoke-DbSetup {
-    Step "Setting up dev PostgreSQL databases..."
-    Require "psql" "Install PostgreSQL: https://www.postgresql.org/download/windows/"
+# ---------------------------------------------------------------------------
+# Local storage set (the same as `make nodes-up`): the network's pinned members
+# as five local nodes, prepared by crates/dsm-dev-net, under .dsm-dev\net.
+# ---------------------------------------------------------------------------
+$DevNet     = Join-Path $RepoRoot ".dsm-dev\net"
+$ExeSuffix  = if ($IsWindows -or $Env:OS -eq "Windows_NT") { ".exe" } else { "" }
+$NodeBin    = Join-Path $RepoRoot "target\release\storage_node$ExeSuffix"
+$DevNetBin  = Join-Path $RepoRoot "target\release\dsm-dev-net$ExeSuffix"
 
-    $Env:PGHOST = if ($Env:PGHOST) { $Env:PGHOST } else { "localhost" }
-    $Env:PGPORT = if ($Env:PGPORT) { $Env:PGPORT } else { "5432" }
-    $Env:PGUSER = if ($Env:PGUSER) { $Env:PGUSER } else { "postgres" }
-    $DbUser = "dsm"
-    $DbPass = "dsm"
+function Get-DevPgUrl {
+    if ($Env:DSM_DEV_PG_URL) { return $Env:DSM_DEV_PG_URL }
+    $user = if ($Env:PGUSER) { $Env:PGUSER } elseif ($Env:USERNAME) { $Env:USERNAME } else { $Env:USER }
+    return "postgresql://$user@localhost:5432/postgres?sslmode=disable"
+}
 
-    function PsqlExec([string]$sql, [string]$db = "postgres") {
-        $result = & psql -h $Env:PGHOST -p $Env:PGPORT -U $Env:PGUSER -d $db -tAc $sql 2>&1
-        return $result
+function Build-DevNet {
+    Require "cargo" "Install Rust from https://rustup.rs"
+    Set-Location $RepoRoot
+    Step "Building the storage node and dsm-dev-net (release)..."
+    cargo build --release --locked -p dsm_storage_node -p dsm-dev-net
+    if ($LASTEXITCODE -ne 0) { Fail "the build failed" }
+}
+
+function Get-DevMembers {
+    Get-ChildItem -Path $DevNet -Filter "dsm-node-*.toml" | Sort-Object Name | ForEach-Object {
+        $port = (Select-String -Path $_.FullName -Pattern '^port = (\d+)$').Matches[0].Groups[1].Value
+        [pscustomobject]@{ Name = $_.BaseName; Config = $_.FullName; Port = [int]$port }
     }
+}
 
-    # Create role if missing
-    $roleExists = PsqlExec "SELECT 1 FROM pg_roles WHERE rolname='$DbUser'"
-    if ($roleExists -ne "1") {
-        PsqlExec "CREATE ROLE $DbUser LOGIN PASSWORD '$DbPass'" | Out-Null
-        Ok "Created role: $DbUser"
-    } else {
-        Ok "Role $DbUser already exists"
-    }
-
-    # Create 5 databases (one per storage node)
-    for ($i = 1; $i -le 5; $i++) {
-        $dbName = "dsm_storage_$i"
-        $dbExists = PsqlExec "SELECT 1 FROM pg_database WHERE datname='$dbName'"
-        if ($dbExists -ne "1") {
-            PsqlExec "CREATE DATABASE $dbName OWNER $DbUser" | Out-Null
-            PsqlExec "GRANT ALL PRIVILEGES ON DATABASE $dbName TO $DbUser" | Out-Null
-            Ok "Created database: $dbName"
-        } else {
-            Ok "Database $dbName already exists"
-        }
-    }
-
-    Ok "Database setup complete."
+function Test-DevNode([string]$Name, [int]$Port) {
+    # Verified TLS against the member's own CA (curl ships with Windows 10+).
+    & curl -fsS --cacert (Join-Path $DevNet "$Name-ca.pem") --connect-timeout 2 --max-time 5 `
+        "https://127.0.0.1:$Port/api/v2/health" *> $null
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Invoke-NodesUp {
-    Step "Starting DSM storage nodes (5 nodes)..."
-    Require "cargo"  "Install Rust from https://rustup.rs"
-
-    Set-Location $RepoRoot
-
-    # Build the storage node binary if needed
-    if (-not (Test-Path "target\debug\dsm_storage_node.exe") -and
-        -not (Test-Path "target\release\dsm_storage_node.exe")) {
-        Step "Building storage node binary first..."
-        cargo build --locked -p dsm_storage_node
+    Step "Starting your local storage set (5 nodes)..."
+    Build-DevNet
+    if (-not (Test-Path (Join-Path $DevNet "dsm_env_config.toml"))) {
+        & $DevNetBin prepare --dir $DevNet --pg (Get-DevPgUrl) --first-port 8080
+        if ($LASTEXITCODE -ne 0) { Fail "dsm-dev-net prepare failed" }
     }
-
-    $Binary = if (Test-Path "target\release\dsm_storage_node.exe") {
-        "target\release\dsm_storage_node.exe"
-    } else {
-        "target\debug\dsm_storage_node.exe"
+    $logs = Join-Path $DevNet "logs"; $run = Join-Path $DevNet "run"
+    New-Item -ItemType Directory -Force -Path $logs, $run | Out-Null
+    $failed = 0
+    foreach ($m in Get-DevMembers) {
+        if (Test-DevNode $m.Name $m.Port) { Ok "$($m.Name) already serving on :$($m.Port)"; continue }
+        $log = Join-Path $logs "$($m.Name).log"
+        $Env:RUST_LOG = "info"
+        $proc = Start-Process -FilePath $NodeBin -ArgumentList "--config", $m.Config `
+            -RedirectStandardOutput $log -RedirectStandardError "$log.err" -PassThru -NoNewWindow
+        Set-Content -Path (Join-Path $run "$($m.Name).pid") -Value $proc.Id
+        $up = 0
+        for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Milliseconds 500
+            if (Test-DevNode $m.Name $m.Port) { $up = 1; break }
+            if ($proc.HasExited) { break }
+        }
+        if ($up -eq 1) { Ok "$($m.Name) serving on https://127.0.0.1:$($m.Port)" }
+        else { Warn "$($m.Name) did not start; see $log"; $failed = 1 }
     }
-
-    $Ports = @(8080, 8081, 8082, 8083, 8084)
-    $Pids  = @()
-
-    for ($i = 0; $i -lt 5; $i++) {
-        $port    = $Ports[$i]
-        $dataDir = Join-Path $RepoRoot "data-dev-node$($i+1)"
-        New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
-
-        $logFile = Join-Path $RepoRoot "logs\node$($i+1).log"
-        New-Item -ItemType Directory -Force -Path (Split-Path $logFile) | Out-Null
-
-        $proc = Start-Process -FilePath $Binary `
-            -ArgumentList "--port", $port, "--data-dir", $dataDir `
-            -RedirectStandardOutput $logFile `
-            -RedirectStandardError  "$logFile.err" `
-            -PassThru -NoNewWindow
-        $Pids += $proc.Id
-        Ok "Node $($i+1) started (port $port, PID $($proc.Id))"
-    }
-
-    # Write PIDs file for nodes-down
-    $PidFile = Join-Path $RepoRoot ".nodes.pids"
-    $Pids -join "`n" | Set-Content $PidFile
-    Ok "Nodes running. PIDs saved to .nodes.pids"
-    Ok "Stop with: .\scripts\dev.ps1 nodes-down"
+    Ok "Client config: $(Join-Path $DevNet 'dsm_env_config.toml')"
+    if ($failed -ne 0) { Fail "not every node started" }
 }
 
 function Invoke-NodesDown {
-    Step "Stopping DSM storage nodes..."
-    $PidFile = Join-Path $RepoRoot ".nodes.pids"
-
-    if (-not (Test-Path $PidFile)) {
-        Warn ".nodes.pids not found — nothing to stop (or nodes were not started with this script)"
-        return
+    Step "Stopping your local storage set..."
+    $run = Join-Path $DevNet "run"
+    if (-not (Test-Path $run)) { Ok "nothing to stop"; return }
+    Get-ChildItem -Path $run -Filter "*.pid" | ForEach-Object {
+        $nodePid = [int](Get-Content $_.FullName)
+        $proc = Get-Process -Id $nodePid -ErrorAction SilentlyContinue
+        if ($proc) { Stop-Process -Id $nodePid -Force; Ok "stopped $($_.BaseName)" }
+        Remove-Item $_.FullName
     }
-
-    Get-Content $PidFile | ForEach-Object {
-        $pid = [int]$_
-        try {
-            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
-            Ok "Stopped PID $pid"
-        } catch {
-            Warn "Could not stop PID $pid (may have already exited)"
-        }
-    }
-
-    Remove-Item $PidFile -ErrorAction SilentlyContinue
-    Ok "Nodes stopped."
 }
 
 function Invoke-NodesStatus {
-    Step "Checking DSM storage node health..."
-    $Ports = @(8080, 8081, 8082, 8083, 8084)
-    $Running = 0
-
-    foreach ($Port in $Ports) {
-        try {
-            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/v2/health" -UseBasicParsing -TimeoutSec 2
-            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
-                Ok "Node on port $Port: healthy"
-                $Running++
-            } else {
-                Warn "Node on port $Port: HTTP $($response.StatusCode)"
-            }
-        } catch {
-            Warn "Node on port $Port: not responding"
-        }
+    Step "Checking your local storage set..."
+    if (-not (Test-Path (Join-Path $DevNet "dsm_env_config.toml"))) { Fail "no set prepared: .\scripts\dev.ps1 nodes-up" }
+    $failed = 0
+    foreach ($m in Get-DevMembers) {
+        if (Test-DevNode $m.Name $m.Port) { Ok "$($m.Name) healthy on https://127.0.0.1:$($m.Port)" }
+        else { Warn "$($m.Name) NOT serving on :$($m.Port)"; $failed = 1 }
     }
+    if ($failed -ne 0) { Fail "not every node is serving" }
+}
 
-    Write-Host ""
-    if ($Running -eq $Ports.Length) {
-        Ok "All local storage nodes are healthy."
-    } elseif ($Running -eq 0) {
-        Warn "No local storage nodes are responding."
-    } else {
-        Warn "$Running/$($Ports.Length) local storage nodes are responding."
-    }
+function Invoke-NodesReset {
+    Invoke-NodesDown
+    Build-DevNet
+    & $DevNetBin drop --pg (Get-DevPgUrl)
+    if ($LASTEXITCODE -ne 0) { Fail "dsm-dev-net drop failed" }
+    if (Test-Path $DevNet) { Remove-Item -Recurse -Force $DevNet }
+    Ok "forgot the set; the next nodes-up prepares a new one"
 }
 
 function Invoke-Clean {
@@ -379,10 +340,10 @@ switch ($Target.ToLower()) {
     "typecheck"     { Invoke-Typecheck }
     "lint"          { Invoke-Lint }
     "fmt"           { Invoke-Fmt }
-    "db-setup"      { Invoke-DbSetup }
-    "nodes-up"      { Invoke-DbSetup; Invoke-NodesUp }
+    "nodes-up"      { Invoke-NodesUp }
     "nodes-down"    { Invoke-NodesDown }
     "nodes-status"  { Invoke-NodesStatus }
+    "nodes-reset"   { Invoke-NodesReset }
     "clean"         { Invoke-Clean }
     default         { Fail "Unknown target: '$Target'. Run '.\scripts\dev.ps1 help'" }
 }

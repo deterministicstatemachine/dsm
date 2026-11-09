@@ -255,6 +255,25 @@ impl DisclosedAnchor {
     }
 }
 
+/// The anchor this device pinned for `counterparty`: the one a receiver's response named (owner,
+/// 2026-11-07: the payer checks the receiver board's acknowledgement under it), or a sender's.
+pub(crate) fn pinned_anchor_of(
+    counterparty: &[u8; 32],
+) -> Result<dsm::types::offline_chain::ChainAnchor, DsmError> {
+    let store = crate::bridge::anchor_enrollment_store().ok_or_else(|| {
+        DsmError::state_machine("offline step: no anchor enrollment store installed")
+    })?;
+    store
+        .get(counterparty)
+        .map(|existing| dsm::types::offline_chain::ChainAnchor::from(&existing.pin))
+        .ok_or_else(|| {
+            DsmError::invalid_operation(
+                "offline step: no anchor is pinned for the counterparty, so its board's \
+                 acknowledgement cannot be checked (fail closed)",
+            )
+        })
+}
+
 /// Parse an anchor disclosure, refusing any field of the wrong length: a v2
 /// disclosure carries `pk_chip` (without it `σ^chip` cannot be verified) and
 /// the birth commitment (without it `B` cannot be recomputed).
@@ -408,6 +427,38 @@ pub(crate) fn settle_release_on_appliance(
         other => Err(DsmError::state_machine(format!(
             "the anchor reports {other:?}, not this step's prepared or committed release \
              (fail closed)"
+        ))),
+    }
+}
+
+/// Settle, by what the board reports, a step recorded as receiving whose receive did not finish:
+/// - prepared, counter unchanged: the prepared receive is cancelled (the challenge stays open), and
+///   once the board reports nothing pending with its counter unmoved, the receive is driven again;
+/// - nothing pending, counter unmoved: driven again;
+/// - this step's receive committed, counter moved: the same receive, emitted again, for the phone to
+///   commit — never a second receive, and the counter does not move again;
+/// - anything else: fail closed, the step stays receiving.
+///
+/// Answers the committed receive's release, or none when it is to be driven again.
+pub(crate) fn settle_receive_on_board(
+    router: &dyn crate::bridge::AppRouter,
+    next_frontier: [u8; 32],
+) -> Result<Option<Vec<u8>>, DsmError> {
+    let observed = match router.observe_offline_bearer_recovery()? {
+        RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
+            router.cancel_offline_bearer_release()?;
+            router.observe_offline_bearer_recovery()?
+        }
+        other => other,
+    };
+    match observed {
+        RecoverOutcome::Accept(root) if root != next_frontier => Ok(None),
+        RecoverOutcome::ReemitCommitted(committed) if committed == next_frontier => {
+            Ok(Some(router.reemit_offline_bearer()?.offline_release))
+        }
+        other => Err(DsmError::state_machine(format!(
+            "the board reports {other:?}, not this step's prepared or committed receive (fail \
+             closed: the step stays receiving)"
         ))),
     }
 }
@@ -1018,13 +1069,16 @@ impl BilateralBleHandler {
                 }
             } else if matches!(
                 session.phase,
-                BilateralPhase::PendingUserAction | BilateralPhase::Accepted
+                BilateralPhase::PendingUserAction
+                    | BilateralPhase::Accepted
+                    | BilateralPhase::Receiving
             ) {
                 // A proposal this device took: its user may still accept it,
-                // and its acceptance still be confirmed. Both read the
-                // relationship's anchor, which a restart does not keep. One
-                // that cannot be held again stays in flight: its proposer may
-                // have committed.
+                // its acceptance still be confirmed, and a receive its board
+                // was driving still be settled by the confirm delivered again.
+                // Each reads the relationship's anchor, which a restart does
+                // not keep. One that cannot be held again stays in flight: its
+                // proposer, or its board, may have committed.
                 if let Err(e) = self.hold_receiver_step_again(&session).await {
                     warn!(
                         "[BLE_HANDLER] receiver step {} is not held again: {e}",
@@ -1071,9 +1125,33 @@ impl BilateralBleHandler {
         }
 
         // A step whose ack the session holds is taken up now: the ack is
-        // verified again, against the heads as they stand, and filed.
+        // verified again, against the heads as they stand, with the acknowledgement kept for it,
+        // and filed.
         for (commitment_hash, ack) in acknowledged {
-            match self.record_commit_ack(commitment_hash, &ack).await {
+            let acknowledgement = match crate::storage::client_db::offline_spends::acknowledgement(
+                &commitment_hash,
+            ) {
+                Ok(Some(kept)) => kept,
+                Ok(None) => {
+                    warn!(
+                        "[BLE_HANDLER] acknowledged step {} holds no acknowledgement: it waits \
+                             for the ack to be delivered again",
+                        bytes_to_base32(&commitment_hash[..8])
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                            "[BLE_HANDLER] acknowledged step {}: its acknowledgement is unreadable: {e}",
+                            bytes_to_base32(&commitment_hash[..8])
+                        );
+                    continue;
+                }
+            };
+            match self
+                .record_commit_ack(commitment_hash, &ack, &acknowledgement)
+                .await
+            {
                 Ok(true) => {
                     if let Err(e) = self.take_verified_ack(&commitment_hash).await {
                         warn!(
@@ -1211,6 +1289,27 @@ impl BilateralBleHandler {
         if let Some(reason) = crate::sdk::core_sdk::value_egress_refusal(&operation) {
             return Err(DsmError::invalid_operation(format!(
                 "bilateral prepare refused: {reason}"
+            )));
+        }
+        // Money received offline is paid on only once it has been unloaded, and a contact takes no
+        // offline payment whose account history holds a receive (owner, 2026-11-07): a device whose
+        // account received offline since its last boundary proposes no offline payment, before any
+        // receiver's board draws a challenge for it.
+        if let Some(bundle) =
+            crate::storage::client_db::offline_spends::account_received_since_boundary().map_err(
+                |e| {
+                    DsmError::storage(
+                        format!("this device's offline steps: {e}"),
+                        None::<std::io::Error>,
+                    )
+                },
+            )?
+        {
+            return Err(DsmError::invalid_operation(format!(
+                "bilateral prepare refused: this phone received money offline (into its account \
+                 under {}) since it was last online; it pays offline again once it has been back \
+                 online and loaded or unloaded",
+                bytes_to_base32(&bundle[..8])
             )));
         }
 
@@ -1367,6 +1466,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             sent_child_root: None,
             offline_spend: None,
+            offline_receive: None,
             parent_tip: Some(pre_commitment.parent_tip),
             owed_frame: None,
             terms: terms.clone(),
@@ -2045,6 +2145,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             sent_child_root: None,
             offline_spend: None,
+            offline_receive: None,
             parent_tip: None,
             owed_frame: None,
             terms,
@@ -2097,6 +2198,24 @@ impl BilateralBleHandler {
 
         // Return empty response + transfer metadata for orchestration layer hooks
         Ok((Vec::new(), transfer_meta))
+    }
+
+    /// Another offline receive this device accepted and has not yet received: a session other than
+    /// `besides` in which this device is the payee, accepted or receiving. Answers its payer.
+    async fn receive_waiting_beside(&self, besides: &[u8; 32]) -> Option<[u8; 32]> {
+        let sessions = self.sessions.sessions.lock().await;
+        sessions
+            .values()
+            .filter(|s| &s.commitment_hash != besides)
+            .filter(|s| {
+                matches!(
+                    s.phase,
+                    BilateralPhase::Accepted | BilateralPhase::Receiving
+                ) && matches!(&s.operation, Operation::Transfer { to_device_id, .. }
+                        if to_device_id.as_slice() == self.device_id.as_slice())
+            })
+            .map(|s| s.counterparty_device_id)
+            .next()
     }
 
     /// Create accept envelope for a pending proposal (receiver calls after user approves)
@@ -2159,21 +2278,33 @@ impl BilateralBleHandler {
             m.local_signing_public_key()
         };
 
-        // Receiver challenge r_R: the receiver-generated freshness
-        // nonce the sender MUST bind into the offline release, so a replayed or pre-computed release
-        // for a different receiver session is rejected. Fresh CSPRNG per prepare-response
-        // (deterministic under a seeded test RNG). Stashed against this commitment so the confirm's
-        // release can be checked to bind the same r_R.
-        let receiver_challenge: [u8; 32] = dsm::crypto::rng::random_bytes(32)
-            .try_into()
-            .map_err(|_| DsmError::invalid_operation("random_bytes(32) wrong length"))?;
-        // σ_B: the acceptance of the step and of the challenge it issues, so
-        // the proposer stages its release only toward this challenge.
-        let acceptance_signature = self
-            .bilateral_tx_manager
-            .read()
-            .await
-            .sign_acceptance(&origin_commitment_hash, &receiver_challenge)?;
+        // An offline payment needs a board on both sides (owner, 2026-11-07): this device's board
+        // draws the challenge r_R the sender's release must answer, from both its hardware sources,
+        // and its receive commit is the step's acknowledgement. A phone with no board of its own
+        // receives nothing offline. The board holds one challenge open at a time, and a payer may
+        // release against an accepted challenge at any moment, so a second receive is not accepted
+        // while one this device accepted is waiting for its confirm: drawing again would leave that
+        // payer's release unreceivable.
+        if let Some(waiting) = self.receive_waiting_beside(&origin_commitment_hash).await {
+            return Err(DsmError::invalid_operation(format!(
+                "this phone is already receiving an offline payment from {}: it accepts another \
+                 once that one has arrived",
+                bytes_to_base32(&waiting[..8])
+            )));
+        }
+        let router = crate::bridge::app_router().ok_or_else(|| {
+            DsmError::state_machine("offline receive: the app router is not installed")
+        })?;
+        let (receiver_challenge, board) = router.draw_receive_challenge()?;
+        let receiver_anchor = self.build_anchor_disclosure(&board, &session.operation)?;
+        // σ_B: the acceptance of the step, of the challenge its board drew and of that board's
+        // bundle, so the proposer stages its release only toward this challenge and checks the
+        // acknowledgement only under this anchor.
+        let acceptance_signature = self.bilateral_tx_manager.read().await.sign_acceptance(
+            &origin_commitment_hash,
+            &receiver_challenge,
+            &board.bundle,
+        )?;
 
         // Detached ML-KEM identity binding (ADR 0002), as on the request path. Without it there
         // is no response to send.
@@ -2195,6 +2326,7 @@ impl BilateralBleHandler {
             receiver_challenge: receiver_challenge.to_vec(),
             responder_kyber_public_key,
             responder_kyber_binding_sig,
+            receiver_anchor: Some(receiver_anchor),
         };
 
         // Wrap in envelope
@@ -2432,6 +2564,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             sent_child_root: None,
             offline_spend: None,
+            offline_receive: None,
             parent_tip: None,
             owed_frame: Some(rejection.clone()),
             terms,
@@ -2775,6 +2908,11 @@ impl BilateralBleHandler {
             .map_err(|_| {
                 DsmError::invalid_operation("the receiver's pinned genesis is not 32 bytes")
             })?;
+        // The receiver's board (owner, 2026-11-07): the anchor whose board drew the challenge and
+        // will commit the receive, pinned or admitted from the response, its bundle under σ_B.
+        let (receiver_anchor, receiver_pin) = self
+            .receiver_anchor(counterparty_device_id, &receiver_contact, prepare_response)
+            .await?;
         let acceptance = dsm::bilateral::offline::decide_prepare_response(
             commitment_hash,
             dsm::bilateral::offline::ResponseClaims {
@@ -2789,6 +2927,7 @@ impl BilateralBleHandler {
                 },
                 signature: &prepare_response.local_signature,
                 receiver_challenge: &prepare_response.receiver_challenge,
+                receiver_bundle: &receiver_anchor.bundle,
             },
             &dsm::bilateral::offline::PinnedPeer {
                 device_id: counterparty_device_id,
@@ -2797,6 +2936,18 @@ impl BilateralBleHandler {
                 kyber_public_key: &receiver_contact.kyber_public_key,
             },
         )?;
+        // A first offline step to this receiver pins its anchor before anything is released toward
+        // it: the acknowledgement is checked under this pin. Like a receiver's pin of a sender's
+        // anchor, it is a memory of what to verify, never an acceptance.
+        if let Some(enrollment) = receiver_pin {
+            crate::storage::client_db::anchor_enrollments::admit_anchor_enrollment(&enrollment)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("the receiver's anchor pin: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+        }
 
         // A response delivered again for a step whose anchor release was left
         // unfinished settles it first: committed with the same release when the
@@ -2955,6 +3106,11 @@ impl BilateralBleHandler {
             terms,
             r_r,
         )?;
+        // Nothing has moved on the anchor yet: a receive since the account's last boundary refuses
+        // the release here (owner, 2026-11-07).
+        crate::storage::client_db::offline_spends::own_offline_spend_chain(
+            &staged.staged.pin.bundle,
+        )?;
         let offline_spend = staged.spend;
         // Sender deltas are ALWAYS empty on this transport: bearer value moves via the
         // allocation debit (`offline_spend`), and nothing else here moves value.
@@ -2965,7 +3121,7 @@ impl BilateralBleHandler {
             &[],
             // Bearer: draw the value from the offline account instead of the online balance. The
             // same descriptor is stashed on the session and used at the canonical commit.
-            Some(offline_spend),
+            Some(dsm::types::device_state::OfflineMove::Spend(offline_spend)),
         )?;
         // The root the relationship path authenticates h_n under: the device
         // head the step starts from (the relationship was established before
@@ -3219,6 +3375,8 @@ impl BilateralBleHandler {
         };
         let counterparty_device_id = session.counterparty_device_id;
         let op_bytes = session.operation.to_bytes();
+        // The receiver's anchor σ_B named, pinned from its response.
+        let receiver_bundle = pinned_anchor_of(&counterparty_device_id)?.bundle;
 
         let prepared = {
             let mut manager = self.bilateral_tx_manager.write().await;
@@ -3235,6 +3393,7 @@ impl BilateralBleHandler {
                     dsm::core::bilateral_transaction_manager::ReceiverAcceptance {
                         signature: &acceptance,
                         receiver_challenge: &challenge,
+                        receiver_bundle: &receiver_bundle,
                     },
                     Vec::new(),
                     Some(offline_spend),
@@ -3331,22 +3490,35 @@ impl BilateralBleHandler {
                 // The spends no boundary has exposed yet, before this one: the chain this
                 // confirm carries from the account the receiver recorded (SA-116). This spend
                 // joins them in the same transaction.
-                let chain = crate::storage::client_db::offline_spends::own_offline_spends_in_tx(
+                // Every one a spend: a receive since the last boundary was refused before the
+                // anchor moved (`own_offline_spend_chain`, at the proposal and at the stage).
+                let chain = crate::storage::client_db::offline_spends::own_offline_hops_in_tx(
                     tx,
                     &offline_spend.anchor_bundle_b,
                 )
-                .map_err(|e| storage("this device's unexposed offline spends", e))?
+                .map_err(|e| storage("this device's unexposed offline steps", e))?
                 .iter()
-                .map(|hop| {
-                    generated::OfflineSpendHop::decode(hop.as_slice()).map_err(|e| {
-                        DsmError::serialization_error(
-                            "OfflineSpendHop",
-                            "protobuf",
-                            Some(e.to_string()),
-                            Some(e),
-                        )
-                    })
-                })
+                .map(
+                    |hop| match dsm::types::offline_chain::AccountHop::from_bytes(hop)? {
+                        dsm::types::offline_chain::AccountHop::Spend(spend) => {
+                            generated::OfflineSpendHop::decode(
+                                spend.to_proto().encode_to_vec().as_slice(),
+                            )
+                            .map_err(|e| {
+                                DsmError::serialization_error(
+                                    "OfflineSpendHop",
+                                    "protobuf",
+                                    Some(e.to_string()),
+                                    Some(e),
+                                )
+                            })
+                        }
+                        _ => Err(DsmError::invalid_operation(
+                            "sender commit: the account received offline since its last boundary, \
+                         which this step's stage refuses",
+                        )),
+                    },
+                )
                 .collect::<Result<Vec<_>, DsmError>>()?;
                 let witness = own
                     .step_writes
@@ -3355,7 +3527,8 @@ impl BilateralBleHandler {
                         dsm::types::receipt_types::ReceiptLeaf::OfflineAccount(witness) => {
                             Some((**witness).clone())
                         }
-                        dsm::types::receipt_types::ReceiptLeaf::Relationship => None,
+                        dsm::types::receipt_types::ReceiptLeaf::Relationship
+                        | dsm::types::receipt_types::ReceiptLeaf::OfflineReceive(_) => None,
                     })
                     .ok_or_else(|| {
                         DsmError::invalid_operation(
@@ -3368,11 +3541,10 @@ impl BilateralBleHandler {
                     offline_spend.asset,
                     offline_spend.amount,
                 )?;
-                crate::storage::client_db::offline_spends::record_own_offline_spend_in_tx(
+                crate::storage::client_db::offline_spends::record_own_offline_hop_in_tx(
                     tx,
                     &offline_spend.anchor_bundle_b,
-                    witness.pre_counter,
-                    &hop.to_proto().encode_to_vec(),
+                    &dsm::types::offline_chain::AccountHop::Spend(hop),
                 )
                 .map_err(|e| storage("this spend, for the chain of the next", e))?;
                 // The confirm, from the advance that commits: its entropy, the successor tip both
@@ -3409,7 +3581,9 @@ impl BilateralBleHandler {
                 &prepared.deltas,
                 // Bearer→allocation: the SAME account spend the confirm-build sim used, so the value
                 // is drawn from the offline account and the committed root byte-matches the sent one.
-                prepared.offline_spend,
+                prepared
+                    .offline_spend
+                    .map(dsm::types::device_state::OfflineMove::Spend),
                 None,
                 &settle,
             )?;
@@ -3667,11 +3841,54 @@ impl BilateralBleHandler {
         sender: [u8; 32],
         contact: &crate::storage::client_db::types::ContactRecord,
         confirm_request: &generated::BilateralConfirmRequest,
+        commitment_hash: [u8; 32],
     ) -> Result<dsm::types::offline_chain::ChainAnchor, DsmError> {
         let store = crate::bridge::anchor_enrollment_store().ok_or_else(|| {
             DsmError::state_machine("offline-bearer confirm: no anchor enrollment store installed")
         })?;
         if let Some(existing) = store.get(&sender) {
+            // A confirm that discloses an anchor other than the pinned one is refused here, by
+            // name, before the receipt is read under the pinned bundle: read that way, a changed
+            // bundle only fails the receipt's Merkle paths, and the person is told nothing of
+            // what changed. The pinned anchor is kept (SA-175: a later identity never replaces
+            // the binding through a transfer). On the rig a trial anchor born again after its
+            // board lost power came back under a new bundle, and its receiver saw only
+            // "the receipt's writes are not one tree's worth of paths".
+            if let Some(disclosure) = confirm_request.anchor_disclosure.as_ref() {
+                let disclosed = disclosed_anchor(disclosure)?;
+                if disclosed.anchor_id != existing.pin.anchor_id
+                    || disclosed.bundle != existing.pin.bundle
+                {
+                    let reason = if disclosed.anchor_id == existing.pin.anchor_id {
+                        "the sender's anchor is the pinned chip born again under a new bundle; the \
+                         pinned anchor is kept and this payment is refused"
+                    } else {
+                        "the sender's anchor is not the one pinned for them; the pinned anchor is \
+                         kept and this payment is refused"
+                    };
+                    warn!(
+                        "[BILATERAL] fused anchor disclosure REJECTED for {} ({reason})",
+                        bytes_to_base32(&sender[..8])
+                    );
+                    self.emit_event(&generated::BilateralEventNotification {
+                        display_amount: None,
+                        event_type: generated::BilateralEventType::BilateralEventAnchorChanged
+                            .into(),
+                        counterparty_device_id: sender.to_vec(),
+                        commitment_hash: commitment_hash.to_vec(),
+                        transaction_hash: None,
+                        amount: None,
+                        token_id: None,
+                        status: "anchor_identity_changed".to_string(),
+                        message: reason.to_string(),
+                        sender_ble_address: None,
+                        failure_reason: None,
+                    });
+                    return Err(DsmError::invalid_operation(format!(
+                        "offline-bearer confirm refused: {reason}"
+                    )));
+                }
+            }
             return Ok(dsm::types::offline_chain::ChainAnchor::from(&existing.pin));
         }
         let contact_verified = {
@@ -3704,6 +3921,103 @@ impl BilateralBleHandler {
             pk_chip: disclosed.pk_chip,
             pk_host: disclosed.partition_pk,
         })
+    }
+
+    /// The receiver's anchor for a step this device proposed (owner, 2026-11-07: an offline payment
+    /// needs a board on both sides): the anchor this device pinned for the receiver, or, on the first
+    /// offline step to it, the one its response discloses — only for a verified contact, under the
+    /// offline-bearer policy, and only when the disclosed bundle recomputes from the disclosed keys
+    /// and birth, the receiver's pinned online key and its device id. A response that names another
+    /// anchor than the pinned one is refused, and surfaced. Answers the anchor, and its enrollment to
+    /// pin when it is new.
+    async fn receiver_anchor(
+        &self,
+        receiver: [u8; 32],
+        contact: &crate::storage::client_db::types::ContactRecord,
+        response: &generated::BilateralPrepareResponse,
+    ) -> Result<
+        (
+            dsm::types::offline_chain::ChainAnchor,
+            Option<dsm::crypto::anchor_enrollment::AnchorEnrollment>,
+        ),
+        DsmError,
+    > {
+        let disclosure = response.receiver_anchor.as_ref().ok_or_else(|| {
+            DsmError::invalid_operation(
+                "the receiver named no board of its own: an offline payment is received only \
+                 through the receiver's board (fail closed)",
+            )
+        })?;
+        let contact_verified = {
+            let mgr = self.bilateral_tx_manager.read().await;
+            mgr.has_verified_contact(&receiver)
+        };
+        if !contact_verified {
+            return Err(DsmError::invalid_operation(
+                "a receiver's anchor is admitted only for a verified contact",
+            ));
+        }
+        let disclosed = disclosed_anchor(disclosure)?;
+        let canonical_policy = dsm::types::operations::canonical_offline_bearer_policy().policy_id;
+        if disclosed.policy != canonical_policy {
+            return Err(DsmError::invalid_operation(
+                "the receiver's anchor is not enrolled under the offline-bearer policy",
+            ));
+        }
+        dsm::crypto::anchor_enrollment::require_bundle_of(
+            disclosed.keys(),
+            dsm::crypto::anchor_enrollment::BundleOwner {
+                online_key: &contact.public_key,
+                device_id: &receiver,
+                policy: &disclosed.policy,
+                birth_commitment: &disclosed.birth_commitment,
+            },
+        )?;
+        let candidate = dsm::crypto::anchor_enrollment::FusedAnchorPin {
+            bundle: disclosed.bundle,
+            anchor_id: disclosed.anchor_id,
+            enrolled_counter: disclosed.enrolled_counter,
+            partition_pk: disclosed.partition_pk.clone(),
+            pk_chip: disclosed.pk_chip.clone(),
+        };
+        let store = crate::bridge::anchor_enrollment_store().ok_or_else(|| {
+            DsmError::state_machine("offline step: no anchor enrollment store installed")
+        })?;
+        let existing = store.get(&receiver);
+        let anchor = dsm::types::offline_chain::ChainAnchor::from(&candidate);
+        match dsm::crypto::anchor_enrollment::pin_admit_decision(
+            receiver,
+            &contact.public_key,
+            disclosed.policy,
+            &disclosed.birth_commitment,
+            &candidate,
+            existing.as_ref(),
+        ) {
+            dsm::crypto::anchor_enrollment::PinAdmitDecision::Admit(e) => Ok((anchor, Some(e))),
+            dsm::crypto::anchor_enrollment::PinAdmitDecision::NoChange => Ok((anchor, None)),
+            dsm::crypto::anchor_enrollment::PinAdmitDecision::Reject(reason) => {
+                warn!(
+                    "[BILATERAL] the receiver {} names another anchor than the pinned one ({reason}); keeping the pin",
+                    bytes_to_base32(&receiver[..8])
+                );
+                self.emit_event(&generated::BilateralEventNotification {
+                    display_amount: None,
+                    event_type: generated::BilateralEventType::BilateralEventAnchorChanged.into(),
+                    counterparty_device_id: receiver.to_vec(),
+                    commitment_hash: Vec::new(),
+                    transaction_hash: None,
+                    amount: None,
+                    token_id: None,
+                    status: "anchor_identity_changed".to_string(),
+                    message: reason.to_string(),
+                    sender_ble_address: None,
+                    failure_reason: None,
+                });
+                Err(DsmError::invalid_operation(format!(
+                    "the receiver names another anchor than the one pinned for it: {reason}"
+                )))
+            }
+        }
     }
 
     /// What a sender's anchor disclosure asks of this receiver, decided before anything is
@@ -3852,7 +4166,11 @@ impl BilateralBleHandler {
             })?;
 
         if !self
-            .record_commit_ack(commitment_hash, &response.counter_signed_receipt)
+            .record_commit_ack(
+                commitment_hash,
+                &response.counter_signed_receipt,
+                &response.receive_acknowledgement,
+            )
             .await?
         {
             return Ok(());
@@ -3875,6 +4193,7 @@ impl BilateralBleHandler {
         &self,
         commitment_hash: [u8; 32],
         counter_signed_receipt: &[u8],
+        receive_acknowledgement: &[u8],
     ) -> Result<bool, DsmError> {
         let phase = {
             let sessions = self.sessions.sessions.lock().await;
@@ -3910,11 +4229,16 @@ impl BilateralBleHandler {
         // Core decides on the ack: it is the receiver's counter-signed receipt,
         // verified against the receiver's pinned identity, the Device Tree
         // commitment kept for it and its EK chain head on this relationship.
-        let (counterparty_device_id, step_operation) = {
+        let (counterparty_device_id, step_operation, owed_confirm) = {
             let sessions = self.sessions.sessions.lock().await;
-            sessions
-                .get(&commitment_hash)
-                .map(|s| (s.counterparty_device_id, s.operation.clone()))
+            sessions.get(&commitment_hash).map(|s| {
+                (
+                    s.counterparty_device_id,
+                    s.operation.clone(),
+                    s.owed()
+                        .filter(|frame| frame.kind == OfflineFrameKind::Confirm),
+                )
+            })
         }
         .ok_or_else(|| {
             DsmError::invalid_operation(format!(
@@ -3963,15 +4287,39 @@ impl BilateralBleHandler {
                 None::<std::io::Error>,
             )
         })?;
+        // The release this device's anchor made for the step, as the confirm it owes carries it: the
+        // acknowledgement must be the receiver's board's receive of exactly it.
+        let own_release = {
+            let owed = owed_confirm.ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "commit ack: the step holds no confirm, so no release to check the \
+                     acknowledgement against",
+                )
+            })?;
+            let envelope = crate::envelope::from_canonical_bytes(&owed.bytes).map_err(|e| {
+                DsmError::invalid_operation(format!("commit ack: the owed confirm: {e}"))
+            })?;
+            let confirm = self.extract_confirm_request(&envelope)?;
+            anchor_core::proto::pb::OfflineRelease::decode(confirm.offline_release.as_slice())
+                .map_err(|e| DsmError::invalid_operation(format!("commit ack: own release: {e}")))?
+                .to_release()
+                .map_err(|e| {
+                    DsmError::invalid_operation(format!("commit ack: own release: {e:?}"))
+                })?
+        };
+        let receiver_anchor = pinned_anchor_of(&counterparty_device_id)?;
         dsm::bilateral::offline::decide_commit_ack(
             Some(commitment_hash),
             counter_signed_receipt,
+            receive_acknowledgement,
             dsm::bilateral::offline::ConfirmedStep {
                 commitment_hash,
                 sender_device_id: self.device_id,
                 receiver_device_tree_root: receiver_device_tree,
                 receiver_chain_head: receiver_chain_head.as_deref(),
                 operation: &step_operation,
+                own_release: &own_release,
+                receiver_anchor: &receiver_anchor,
             },
             &dsm::bilateral::offline::PinnedPeer {
                 device_id: counterparty_device_id,
@@ -3981,6 +4329,18 @@ impl BilateralBleHandler {
             },
         )?;
 
+        // The acknowledgement verified: kept with the payment (owner, 2026-11-07), before the
+        // step is finalized, so a restart files a step whose acknowledgement it holds.
+        crate::storage::client_db::offline_spends::keep_acknowledgement(
+            &commitment_hash,
+            receive_acknowledgement,
+        )
+        .map_err(|e| {
+            DsmError::storage(
+                format!("commit ack: keep the acknowledgement: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         // The counter-signed receipt is the step's proof: it is kept beside the
         // sender's own receipt and written before the step is finalized.
         let with_receipt = {
@@ -4111,7 +4471,12 @@ impl BilateralBleHandler {
                 .answer_committed_confirm(commitment_hash, &confirm_request)
                 .await;
         }
-        if session.phase != BilateralPhase::Accepted {
+        // A receiving step is taken up again by the confirm delivered again: the board reports
+        // whether its receive committed.
+        if !matches!(
+            session.phase,
+            BilateralPhase::Accepted | BilateralPhase::Receiving
+        ) {
             return Err(DsmError::invalid_operation("session not in accepted phase"));
         }
 
@@ -4178,6 +4543,7 @@ impl BilateralBleHandler {
                 session.counterparty_device_id,
                 &sender_contact,
                 &confirm_request,
+                commitment_hash,
             )
             .await?;
         let sender_bearer_leaves = crate::bluetooth::anchor_accept::bearer_leaves_of_release(
@@ -4338,10 +4704,11 @@ impl BilateralBleHandler {
             (adopted, admission)
         };
 
-        // What the step credits: nothing online. A bearer transfer's value is
-        // pending until it is reconciled online (SA-91): it is recorded below, in
-        // the step's own transaction, and settled by an admitted transition of its
-        // own once the sender's online history exposes the spend.
+        // What the step credits (owner, 2026-11-07: an offline payment needs a board on both sides,
+        // and the money received lands in the receiver's own offline balance): nothing online. This
+        // device's own board checks the payer's release and commits the receive, and the payment
+        // lands in this device's own offline account, in what it holds received, where it waits
+        // for its unload. The board's receive commit is the acknowledgement.
         let Operation::Transfer {
             amount,
             policy_commit: signed_policy_commit,
@@ -4372,23 +4739,43 @@ impl BilateralBleHandler {
             )));
         }
         let anchor = &sender_anchor;
-        let release_message = anchor_core::proto::pb::OfflineRelease::decode(
+        let paid = anchor_core::proto::pb::OfflineRelease::decode(
             confirm_request.offline_release.as_slice(),
         )
         .map_err(|e| DsmError::invalid_operation(format!("receiver confirm: the release: {e}")))?
         .to_release()
-        .map_err(|e| DsmError::invalid_operation(format!("receiver confirm: the release: {e:?}")))?
-        .cert
-        .root_advance_message;
-        let pending_receipt = crate::storage::client_db::offline_receipts::PendingOfflineReceipt {
-            release_message,
-            payer_genesis: sender_genesis,
-            payer_device: session.counterparty_device_id,
-            bundle: anchor.bundle,
-            asset: policy_commit,
-            amount: amount.value(),
-            commitment_hash,
-            operation: session.operation.to_bytes(),
+        .map_err(|e| {
+            DsmError::invalid_operation(format!("receiver confirm: the release: {e:?}"))
+        })?;
+        // What the board checks the payer's anchor under: every field its bundle binds, the keys
+        // and birth the confirm discloses, the payer's pinned online key and its device id.
+        let payer_disclosure = {
+            let disclosed =
+                disclosed_anchor(confirm_request.anchor_disclosure.as_ref().ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "receiver confirm: the confirm discloses no anchor for the board to check \
+                         the release under",
+                    )
+                })?)?;
+            if disclosed.bundle != anchor.bundle {
+                return Err(DsmError::invalid_operation(
+                    "receiver confirm: the confirm discloses another anchor than the release's",
+                ));
+            }
+            anchor_core::receive::PayerDisclosure {
+                online_id_pk: sender_contact.public_key.clone(),
+                anchor_id: disclosed.anchor_id,
+                chip_pk: disclosed.pk_chip.clone(),
+                partition_pk: disclosed.partition_pk.clone(),
+                enrolled_counter: u32::try_from(disclosed.enrolled_counter).map_err(|e| {
+                    DsmError::invalid_operation(format!(
+                        "receiver confirm: the payer's enrolled counter: {e}"
+                    ))
+                })?,
+                device_id: session.counterparty_device_id,
+                policy_hash: disclosed.policy,
+                birth_commitment: disclosed.birth_commitment,
+            }
         };
 
         let router = crate::bridge::app_router().ok_or_else(|| {
@@ -4397,13 +4784,65 @@ impl BilateralBleHandler {
             )
         })?;
 
-        // The receiver signs its receipt from the advance that commits: the
-        // advance is prepared, its receipt is built from that outcome and
-        // counter-signed before the transaction opens, with no other advance
-        // in between. Everything the step writes — the credit, the
-        // relationship tip, the history with its receipt, both cert-chain
-        // heads, the adopted anchor frontier, the EK step objects and the
-        // session's end — then commits in one transaction, before any ack.
+        // Where this device's board stands for the receive. A step already receiving (a confirm
+        // delivered again, or one taken up after a restart) is settled by what the board reports:
+        // its receive committed, the same receive is emitted again and commits on the phone; not
+        // committed, it is driven again from its recorded receipt. A fresh step stages it.
+        let receiving = session.phase == BilateralPhase::Receiving;
+        let committed_ack: Option<Vec<u8>> = if receiving {
+            let receive = session.offline_receive.ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "a receiving step holds no record of the receive its board commits",
+                )
+            })?;
+            settle_receive_on_board(router.as_ref(), receive.next_frontier)?
+        } else {
+            None
+        };
+        let staged = match &committed_ack {
+            Some(_) => None,
+            None => Some(router.stage_offline_receive(&paid, receiver_challenge)?),
+        };
+        let receive = match (&session.offline_receive, &staged) {
+            (Some(recorded), Some(st)) if st.appliance_next_root != recorded.next_frontier => {
+                return Err(DsmError::invalid_operation(
+                    "receiver confirm: the board would stage another receive than the one this \
+                     step recorded (fail closed)",
+                ))
+            }
+            (Some(recorded), _) => *recorded,
+            (None, Some(st)) => dsm::types::device_state::OfflineReceive {
+                anchor_bundle_b: st.pin.bundle,
+                asset: policy_commit,
+                amount: amount.value(),
+                next_frontier: st.appliance_next_root,
+            },
+            (None, None) => {
+                return Err(DsmError::invalid_operation(
+                    "receiver confirm: no receive is staged or recorded for this step",
+                ))
+            }
+        };
+        let pending_receipt = crate::storage::client_db::offline_receipts::PendingOfflineReceipt {
+            release_message: paid.cert.root_advance_message,
+            payer_genesis: sender_genesis,
+            payer_device: session.counterparty_device_id,
+            bundle: anchor.bundle,
+            asset: policy_commit,
+            amount: amount.value(),
+            commitment_hash,
+            operation: session.operation.to_bytes(),
+            receiver_bundle: receive.anchor_bundle_b,
+        };
+
+        // The receiver signs its receipt from the advance that commits, records it with its EK
+        // and the receive as this step's own (`Receiving`), and only then drives its board, inside
+        // the advance with no other advance in between: the board signs exactly the two device
+        // roots the receipt proves. Everything the step writes — the receive into the offline
+        // account, the relationship tip, the history with its receipt, both cert-chain heads, the
+        // adopted anchor frontier, the payment received, the receive as the account's step, the
+        // acknowledgement, the EK step objects and the session's end — then commits in one
+        // transaction, before any ack.
         let ak = self
             .bilateral_tx_manager
             .read()
@@ -4422,160 +4861,278 @@ impl BilateralBleHandler {
         )
         .map_err(|e| DsmError::invalid_operation(format!("receiver confirm: {e}")))?;
         let counterparty_device_id = session.counterparty_device_id;
-        type SignedReceipt = (
-            Vec<u8>,
-            SignedStepKey,
-            dsm::types::receipt_types::StitchedReceiptV2,
-        );
-        let signed: std::sync::Mutex<Option<SignedReceipt>> = std::sync::Mutex::new(None);
-        let sign_step = |o: &dsm::types::device_state::AdvanceOutcome| -> Result<(), DsmError> {
-            // The receiver's own step credits it: its receipt writes the
-            // relationship leaf only.
-            let parent_tip = o.relationship_pair().0;
-            let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt(
-                self.device_id,
-                counterparty_device_id,
-                o,
-                None,
-                &device_tree_commitment,
-            )?;
-            // §11.1 receiver counter-sign: B-side per-step EK, cert, signature
-            // and Kyber ciphertext on this device's copy of the receipt.
-            let (receipt_bytes, signed_key) = self.sign_receipt_with_per_step_ek_for_bilateral(
-                &ak,
-                unsigned_receipt_bytes,
-                &counterparty_device_id,
-                parent_tip,
-                commitment_hash, // bilateral commitment IS the precommit for this step
-                BilateralSide::B,
-            )?;
-            let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-                &receipt_bytes,
-            )?;
-            *signed.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some((receipt_bytes, signed_key, receipt));
-            Ok(())
-        };
-        let commit_step = |tx: &rusqlite::Transaction<'_>,
-                           o: &dsm::types::device_state::AdvanceOutcome|
-         -> Result<(), DsmError> {
-            let signed = signed.lock().unwrap_or_else(|p| p.into_inner());
-            let (receipt_bytes, signed_key, counter_signed) = signed.as_ref().ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "receiver confirm: the step's receipt was not signed before its commit",
-                )
-            })?;
-            settlement.write_in_tx(tx, o, new_chain_tip, Some(receipt_bytes))?;
-            let head_moved = |what: &str,
-                              outcome: crate::storage::client_db::CasHeadOutcome|
-             -> Result<(), DsmError> {
-                match outcome {
-                    crate::storage::client_db::CasHeadOutcome::Advanced { .. }
-                    | crate::storage::client_db::CasHeadOutcome::GenesisInit => Ok(()),
-                    other => Err(DsmError::invalid_operation(format!(
-                        "receiver confirm: {what} cert-chain head did not move from the head the \
-                         step was verified against: {other:?}"
-                    ))),
+        // The closures run on this thread, inside the advance: cells, not locks, and gone before
+        // the next await.
+        let advanced: Result<(Vec<u8>, Vec<u8>), DsmError> = {
+            let receipt_bytes_cell =
+                std::cell::RefCell::new(session.stitched_receipt_bytes.clone());
+            let ack_cell: std::cell::RefCell<Option<Vec<u8>>> = std::cell::RefCell::new(None);
+            let session_for_stash = session.clone();
+            let sign_step = |o: &dsm::types::device_state::AdvanceOutcome| -> Result<(), DsmError> {
+                let proofs = o.offline_state_proofs.as_ref().ok_or_else(|| {
+                    DsmError::state_machine(
+                        "the receive's advance produced no offline-state proofs (fail closed)",
+                    )
+                })?;
+                if receiving {
+                    // Both-or-neither: the receive commits exactly the root its receipt and its
+                    // board name.
+                    if session_for_stash.sent_child_root != Some(o.child_r_a) {
+                        return Err(DsmError::invalid_operation(
+                            "both-or-neither violation: the receive's advance is not the one its \
+                             receipt was signed over (fail closed: the step stays receiving)",
+                        ));
+                    }
+                } else {
+                    let st = staged.as_ref().ok_or_else(|| {
+                        DsmError::invalid_operation("receiver confirm: no receive is staged")
+                    })?;
+                    // The receiver's own step: its receipt writes the relationship leaf and its own
+                    // offline account, under the counter and frontiers its board will sign.
+                    let parent_tip = o.relationship_pair().0;
+                    let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt(
+                        self.device_id,
+                        counterparty_device_id,
+                        o,
+                        Some(dsm::verification::receipt_verification::BearerLeaves {
+                            bundle: receive.anchor_bundle_b,
+                            counter: st.transition.anchor_counter,
+                            frontier: st.appliance_prev_root,
+                            next_frontier: st.appliance_next_root,
+                        }),
+                        &device_tree_commitment,
+                    )?;
+                    // §11.1 receiver counter-sign: B-side per-step EK, cert, signature
+                    // and Kyber ciphertext on this device's copy of the receipt.
+                    let (receipt_bytes, signed_key) = self
+                        .sign_receipt_with_per_step_ek_for_bilateral(
+                            &ak,
+                            unsigned_receipt_bytes,
+                            &counterparty_device_id,
+                            parent_tip,
+                            commitment_hash, // bilateral commitment IS the precommit for this step
+                            BilateralSide::B,
+                        )?;
+                    // Recorded before the board moves: a restart finds the step receiving, with the
+                    // receipt, the EK and the receive its board commits.
+                    let mut stash = session_for_stash.clone();
+                    stash.phase = BilateralPhase::Receiving;
+                    stash.stitched_receipt_bytes = Some(receipt_bytes.clone());
+                    stash.sent_child_root = Some(o.child_r_a);
+                    stash.offline_receive = Some(receive);
+                    keep_with_signing_key(&stash, &signed_key, &[BilateralPhase::Accepted]).map_err(
+                        |e| {
+                            DsmError::storage(
+                                format!(
+                                    "the receive could not be recorded, so the board does not move: {e}"
+                                ),
+                                None::<std::io::Error>,
+                            )
+                        },
+                    )?;
+                    *receipt_bytes_cell.borrow_mut() = Some(receipt_bytes);
                 }
+                // The board's receive commit: the one it already holds for this step, emitted again,
+                // or, when nothing of it committed, the board checks the payment and commits it now.
+                let emitted = match &committed_ack {
+                    Some(committed) => committed.clone(),
+                    None => {
+                        let st = staged.as_ref().ok_or_else(|| {
+                            DsmError::invalid_operation("receiver confirm: no receive is staged")
+                        })?;
+                        router.receive_offline_bearer(
+                            st,
+                            &paid,
+                            &payer_disclosure,
+                            receiver_challenge,
+                            o.transition.pre_root(),
+                            o.child_r_a,
+                        )?
+                    }
+                };
+                // The receive with its offline-state proofs attached (outside every signature): the
+                // account's next boundary carries it as one of its steps.
+                *ack_cell.borrow_mut() = Some(crate::sdk::core_sdk::attach_offline_state_proofs(
+                    &emitted,
+                    proofs.parent.clone(),
+                    proofs.child.clone(),
+                )?);
+                Ok(())
             };
-            let storage = |what: &str, e: anyhow::Error| {
-                DsmError::storage(
-                    format!("receiver confirm: {what}: {e}"),
-                    None::<std::io::Error>,
-                )
-            };
-            head_moved(
-                "the sender's",
-                crate::storage::client_db::cas_advance_counterparty_cert_chain_head_with_conn(
+            let commit_step = |tx: &rusqlite::Transaction<'_>,
+                               o: &dsm::types::device_state::AdvanceOutcome|
+             -> Result<(), DsmError> {
+                let receipt_bytes = receipt_bytes_cell.borrow().clone().ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "receiver confirm: the step's receipt was not signed before its commit",
+                    )
+                })?;
+                let acknowledgement = ack_cell.borrow().clone().ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "receiver confirm: the board committed no receive before the step's commit",
+                    )
+                })?;
+                let counter_signed =
+                    dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                        &receipt_bytes,
+                    )?;
+                settlement.write_in_tx(tx, o, new_chain_tip, Some(&receipt_bytes))?;
+                let storage = |what: &str, e: anyhow::Error| {
+                    DsmError::storage(
+                        format!("receiver confirm: {what}: {e}"),
+                        None::<std::io::Error>,
+                    )
+                };
+                match crate::storage::client_db::cas_advance_counterparty_cert_chain_head_with_conn(
                     tx,
                     &rel_key,
                     sender_chain_head.as_deref(),
                     &verified_a_side_ek_pk,
                 )
-                .map_err(|e| storage("the sender's cert-chain head", e))?,
-            )?;
-            head_moved(
-                "this device's",
-                crate::storage::client_db::cas_advance_local_cert_chain_head_with_conn(
+                .map_err(|e| storage("the sender's cert-chain head", e))?
+                {
+                    crate::storage::client_db::CasHeadOutcome::Advanced { .. }
+                    | crate::storage::client_db::CasHeadOutcome::GenesisInit => {}
+                    other => {
+                        return Err(DsmError::invalid_operation(format!(
+                            "receiver confirm: the sender's cert-chain head did not move from the head \
+                             the step was verified against: {other:?}"
+                        )))
+                    }
+                }
+                if crate::storage::client_db::promote_pending_local_head_with_conn(
                     tx,
-                    &signed_key.rel_key,
-                    signed_key.expected_prev.as_deref(),
-                    &signed_key.ek_pk,
-                    &signed_key.ek_sk,
-                    &signed_key.at_rest_key,
+                    &rel_key,
+                    &commitment_hash,
                 )
-                .map_err(|e| storage("this device's cert-chain head", e))?,
-            )?;
-            move_peer_head_pin_in_tx(
-                tx,
-                &self.device_id,
-                &counterparty_device_id,
-                verified.receipt(),
-                &commitment_hash,
-            )?;
-            crate::storage::client_db::anchor_enrollments::store_accepted_anchor_root_with_conn(
-                tx,
-                &counterparty_device_id,
-                &adopted_anchor_state.next_root,
-                adopted_anchor_state.next_anchor_counter,
-            )
-            .map_err(|e| storage("the adopted anchor frontier", e))?;
-            if let AnchorAdmission::Pin(enrollment) = &anchor_admission {
-                crate::storage::client_db::anchor_enrollments::admit_anchor_enrollment_with_conn(
-                    tx, enrollment,
+                .map_err(|e| storage("this device's cert-chain head", e))?
+                .is_none()
+                {
+                    return Err(DsmError::invalid_operation(
+                        "receiver confirm: no EK was stashed for this receive when it was recorded",
+                    ));
+                }
+                move_peer_head_pin_in_tx(
+                    tx,
+                    &self.device_id,
+                    &counterparty_device_id,
+                    verified.receipt(),
+                    &commitment_hash,
+                )?;
+                crate::storage::client_db::anchor_enrollments::store_accepted_anchor_root_with_conn(
+                    tx,
+                    &counterparty_device_id,
+                    &adopted_anchor_state.next_root,
+                    adopted_anchor_state.next_anchor_counter,
                 )
-                .map_err(|e| storage("the sender's anchor pin", e))?;
-            }
-            crate::storage::client_db::offline_receipts::record_pending_offline_receipt_in_tx(
-                tx,
-                &pending_receipt,
-            )
-            .map_err(|e| storage("the payment received offline, pending", e))?;
-            crate::sdk::economic_admission_flow::record_ble_ek_steps_in_tx(
-                tx,
-                &ek_step_set,
-                &o.new_device_state.root(),
-                &rel_key,
-                &[
-                    crate::sdk::economic_admission_flow::EkStep::of_sender(
-                        &counterparty_device_id,
-                        verified.receipt(),
+                .map_err(|e| storage("the adopted anchor frontier", e))?;
+                if let AnchorAdmission::Pin(enrollment) = &anchor_admission {
+                    crate::storage::client_db::anchor_enrollments::admit_anchor_enrollment_with_conn(
+                        tx, enrollment,
+                    )
+                    .map_err(|e| storage("the sender's anchor pin", e))?;
+                }
+                crate::storage::client_db::offline_receipts::record_pending_offline_receipt_in_tx(
+                    tx,
+                    &pending_receipt,
+                )
+                .map_err(|e| storage("the payment received offline", e))?;
+                // The receive is one of the account's steps: its next boundary carries it.
+                let witness = counter_signed
+                    .step_writes
+                    .iter()
+                    .find_map(|write| match &write.leaf {
+                        dsm::types::receipt_types::ReceiptLeaf::OfflineReceive(witness) => {
+                            Some((**witness).clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "receiver confirm: the receipt writes no receive into the offline account",
+                        )
+                    })?;
+                crate::storage::client_db::offline_spends::record_own_offline_hop_in_tx(
+                    tx,
+                    &receive.anchor_bundle_b,
+                    &dsm::types::offline_chain::AccountHop::Receive(
+                        dsm::types::offline_chain::ReceiveHop::new(
+                            &acknowledgement,
+                            witness,
+                            receive.asset,
+                            receive.amount,
+                        )?,
                     ),
-                    crate::sdk::economic_admission_flow::EkStep::of_receiver(
-                        &self.device_id,
-                        counter_signed,
-                    ),
-                ],
-            )?;
-            crate::storage::client_db::delete_bilateral_session_from_with_conn(
-                tx,
-                &commitment_hash,
-                &[phase_to_str(&BilateralPhase::Accepted)],
-            )
-            .map_err(|e| storage("the session's end", e))?;
-            Ok(())
+                )
+                .map_err(|e| storage("the receive, for the account's next boundary", e))?;
+                crate::storage::client_db::offline_spends::keep_acknowledgement_in_tx(
+                    tx,
+                    &commitment_hash,
+                    &acknowledgement,
+                )
+                .map_err(|e| storage("the acknowledgement", e))?;
+                crate::sdk::economic_admission_flow::record_ble_ek_steps_in_tx(
+                    tx,
+                    &ek_step_set,
+                    &o.new_device_state.root(),
+                    &rel_key,
+                    &[
+                        crate::sdk::economic_admission_flow::EkStep::of_sender(
+                            &counterparty_device_id,
+                            verified.receipt(),
+                        ),
+                        crate::sdk::economic_admission_flow::EkStep::of_receiver(
+                            &self.device_id,
+                            &counter_signed,
+                        ),
+                    ],
+                )?;
+                crate::storage::client_db::delete_bilateral_session_from_with_conn(
+                    tx,
+                    &commitment_hash,
+                    &[
+                        phase_to_str(&BilateralPhase::Accepted),
+                        phase_to_str(&BilateralPhase::Receiving),
+                    ],
+                )
+                .map_err(|e| storage("the session's end", e))?;
+                Ok(())
+            };
+            router
+                .execute_on_relationship_for_bilateral(
+                    rel_key,
+                    session.counterparty_device_id,
+                    session.operation.clone(),
+                    &[],
+                    Some(dsm::types::device_state::OfflineMove::Receive(receive)),
+                    Some(&sign_step),
+                    &commit_step,
+                )
+                .map_err(|e| {
+                    DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
+                })
+                .and_then(|_| {
+                    let counter_signed_receipt =
+                        receipt_bytes_cell.into_inner().ok_or_else(|| {
+                            DsmError::invalid_operation(
+                                "receiver confirm: the committed step holds no signed receipt",
+                            )
+                        })?;
+                    let receive_acknowledgement = ack_cell.into_inner().ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "receiver confirm: the committed step holds no acknowledgement",
+                        )
+                    })?;
+                    Ok((counter_signed_receipt, receive_acknowledgement))
+                })
         };
-        router
-            .execute_on_relationship_for_bilateral(
-                rel_key,
-                session.counterparty_device_id,
-                session.operation.clone(),
-                &[],
-                None,
-                Some(&sign_step),
-                &commit_step,
-            )
-            .map_err(|e| {
-                DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
-            })?;
-        let (counter_signed_receipt, _, _) = signed
-            .into_inner()
-            .unwrap_or_else(|p| p.into_inner())
-            .ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "receiver confirm: the committed step holds no signed receipt",
-                )
-            })?;
+        // A receive that did not commit leaves its step as its record holds it: receiving once the
+        // receipt was recorded and the board was driven, so the confirm delivered again settles it
+        // by what the board reports rather than signing a second receipt.
+        let (counter_signed_receipt, receive_acknowledgement) = match advanced {
+            Ok(done) => done,
+            Err(e) => return Err(self.take_up_recorded_step(&commitment_hash, e).await),
+        };
 
         if let AnchorAdmission::Pin(enrollment) = &anchor_admission {
             self.announce_anchor_pinned(
@@ -4613,6 +5170,18 @@ impl BilateralBleHandler {
         {
             session.phase = BilateralPhase::Committed;
         }
+        // The phone's step is durable and its acknowledgement kept: the board's frontier advances
+        // to it, which uses the challenge up. A board that does not advance now is advanced at its
+        // next use (`finalize_committed_receive`), and the confirm delivered again is answered from
+        // the committed step.
+        router
+            .finalize_offline_bearer(receive.next_frontier)
+            .map_err(|e| {
+                DsmError::state_machine(format!(
+                    "the payment is received and its acknowledgement kept, but this phone's DSM \
+                     Anchor did not advance its frontier; it advances at the board's next use: {e}"
+                ))
+            })?;
 
         self.prune_terminal_sessions_for_counterparty(&session.counterparty_device_id)
             .await;
@@ -4662,6 +5231,8 @@ impl BilateralBleHandler {
                     // the counter-signature and persist a fully co-signed
                     // archive.
                     counter_signed_receipt,
+                    // The board's receive commit: the acknowledgement (owner, 2026-11-07).
+                    receive_acknowledgement,
                 },
             ))
             .await;
@@ -4699,6 +5270,40 @@ impl BilateralBleHandler {
     /// lost. Core decides from the step's pinned sender's signature
     /// (`decide_committed_confirm`); the answer is the ack the step committed,
     /// rebuilt from the receipt in this device's history row.
+    /// The step `commitment_hash`, whose receive did not commit with `failed`, taken back into memory
+    /// as its durable record holds it: receiving, when its receipt was recorded before the board
+    /// moved; gone, when the step committed and its session ended. Answers `failed`, or why the
+    /// record could not be read beside it.
+    async fn take_up_recorded_step(
+        &self,
+        commitment_hash: &[u8; 32],
+        failed: DsmError,
+    ) -> DsmError {
+        let recorded = crate::storage::client_db::get_bilateral_session(commitment_hash)
+            .map_err(|e| e.to_string())
+            .and_then(|record| match record {
+                Some(record) => BilateralBleSession::from_record(&record)
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+                None => Ok(None),
+            });
+        let mut sessions = self.sessions.sessions.lock().await;
+        match recorded {
+            Ok(Some(restored)) => {
+                sessions.insert(*commitment_hash, restored);
+                failed
+            }
+            Ok(None) => {
+                sessions.remove(commitment_hash);
+                failed
+            }
+            Err(unread) => DsmError::storage(
+                format!("{failed}; and the step's record could not be read back: {unread}"),
+                None::<std::io::Error>,
+            ),
+        }
+    }
+
     async fn answer_committed_confirm(
         &self,
         commitment_hash: [u8; 32],
@@ -4739,6 +5344,15 @@ impl BilateralBleHandler {
         let counter_signed_receipt = row.proof_data.ok_or_else(|| {
             DsmError::invalid_operation("the committed step's history row holds no receipt")
         })?;
+        // The board's receive commit, kept with the step: the acknowledgement again.
+        let receive_acknowledgement =
+            crate::storage::client_db::offline_spends::acknowledgement(&commitment_hash)
+                .map_err(|e| storage("the step's acknowledgement", e))?
+                .ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "the committed step keeps no acknowledgement of its board's receive",
+                    )
+                })?;
         let ack = self
             .create_envelope(generated::envelope::Payload::BilateralCommitResponse(
                 generated::BilateralCommitResponse {
@@ -4746,6 +5360,7 @@ impl BilateralBleHandler {
                         v: commitment_hash.to_vec(),
                     }),
                     counter_signed_receipt,
+                    receive_acknowledgement,
                 },
             ))
             .await;
@@ -5476,6 +6091,7 @@ mod tests {
             receiver_challenge: None,
             sent_child_root: None,
             offline_spend: None,
+            offline_receive: None,
             parent_tip: None,
             owed_frame: None,
             terms: None,
@@ -5706,6 +6322,7 @@ mod tests {
             receiver_challenge: None,
             sent_child_root: None,
             offline_spend: None,
+            offline_receive: None,
             parent_tip: None,
             owed_frame: None,
             terms: None,
@@ -5788,6 +6405,7 @@ mod tests {
                 amount: 1,
                 next_frontier: [6u8; 32],
             }),
+            offline_receive: None,
             parent_tip: Some(tip),
             owed_frame: None,
             terms: None,
@@ -5825,6 +6443,7 @@ mod tests {
                         v: commitment.to_vec(),
                     }),
                     counter_signed_receipt: vec![9; 16],
+                    receive_acknowledgement: Vec::new(),
                 },
             )),
         });
@@ -5869,6 +6488,7 @@ mod tests {
                             v: commitment.to_vec(),
                         }),
                         counter_signed_receipt: vec![9; 16],
+                        receive_acknowledgement: Vec::new(),
                     },
                 )),
             })
@@ -5930,6 +6550,10 @@ mod tests {
             spend_amount: None,
             owed_frame: None,
             terms_bytes: Some(terms.to_bytes()),
+            receive_anchor_bundle: None,
+            receive_asset: None,
+            receive_amount: None,
+            receive_next_frontier: None,
         }
     }
 

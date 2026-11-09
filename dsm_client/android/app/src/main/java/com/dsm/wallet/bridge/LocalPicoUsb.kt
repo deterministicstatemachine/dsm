@@ -13,7 +13,8 @@ import android.hardware.usb.UsbManager
 import android.util.Log
 
 /**
- * H2 — the Phone->Pico USB-OTG transport (the sender phone A talking to its own Pico A).
+ * H2 — the Phone->Pico USB-OTG transport: each phone talking to its own Pico, the payer's to release
+ * an offline payment and the receiver's to receive it (owner, 2026-11-07: both sides hold a board).
  *
  * OPAQUE BYTE TRANSPORT ONLY. This class understands nothing about TROPIC /
  * protobuf — Rust builds the request frame and decodes the response. All this does is: open the
@@ -40,6 +41,12 @@ object LocalPicoUsb {
     internal const val DSM_ANCHOR_VENDOR_ID = 0x1209
     internal const val DSM_ANCHOR_PRODUCT_ID = 0xD5A1
     private const val WRITE_TIMEOUT_MS = 2000
+    // Android's USB host library (libusbhost) refuses one bulk request longer than 16 KiB, its
+    // MAX_USBFS_BUFFER_SIZE, outright: the 49,896-byte OP_AUTHORIZE frame (a 4 KiB head and the
+    // owner's 49,856-byte SPHINCS+ signature) came back -1 on the phone, at once. A frame goes out
+    // in requests no longer than that; the firmware reads a request by its length prefix, never by
+    // the USB packets it arrived in.
+    internal const val MAX_BULK_REQUEST_BYTES = 16_384
     private const val READ_TIMEOUT_MS = 500
     private const val CONTROL_TIMEOUT_MS = 1000
     // Drain the firmware boot banner / self-test chatter off the CDC before the first transaction
@@ -48,11 +55,13 @@ object LocalPicoUsb {
     private const val DRAIN_QUIET_POLLS = 4   // ~800ms of silence ends the drain
     private const val DRAIN_MAX_POLLS = 40    // hard cap (~8s worst case) so boot chatter can finish
     // Max idle bulk-IN polls before failing closed (each blocks up to READ_TIMEOUT_MS). Bounds the
-    // total read wait deterministically without a wall-clock deadline (repo invariant). The appliance
-    // PREPARE runs a BLAKE3-SPHINCS+ (SPX128f) keygen + sign on the RP2350 and takes ~7s on real
-    // silicon, during which the firmware sends nothing; 40 polls x 500ms = ~20s covers it with margin
-    // (16 = ~8s was too tight and intermittently timed out a valid PREPARE -> false online recovery).
-    private const val MAX_EMPTY_POLLS = 40
+    // total read wait deterministically without a wall-clock deadline (repo invariant). The firmware
+    // sends nothing while it serves: a try-run is a whole spend and its records around two chip
+    // reboots, and an install is that and more. 600 polls x 500ms = ~5 min covers them, and it is
+    // only ever spent on an anchor still serving: a hung one is reset by its own watchdog, which
+    // drops the device, and a read of a dropped device fails at once. An install this outruns is
+    // read back from the anchor (`CoreSDK::anchor_install`), never reported as failed on the wait.
+    private const val MAX_EMPTY_POLLS = 600
 
     @Volatile private var appContext: Context? = null
     private var connection: UsbDeviceConnection? = null
@@ -86,7 +95,9 @@ object LocalPicoUsb {
         val inp = epIn ?: return resetAndFail()
 
         Log.d(TAG, "passthrough req len=${frame.size}")
-        val wrote = conn.bulkTransfer(out, frame, frame.size, WRITE_TIMEOUT_MS)
+        val wrote = writeInRequests(frame) { offset, length ->
+            conn.bulkTransfer(out, frame, offset, length, WRITE_TIMEOUT_MS)
+        }
         if (wrote < frame.size) {
             Log.w(TAG, "USB write short ($wrote/${frame.size}) — recover online")
             return resetAndFail()
@@ -105,6 +116,20 @@ object LocalPicoUsb {
         val body = readExact(conn, inp, bodyLen) ?: return resetAndFail()
         Log.d(TAG, "passthrough resp len=${body.size}")
         return body
+    }
+
+    /** Writes `frame` through `write(offset, length)` in requests of at most [MAX_BULK_REQUEST_BYTES]
+     * each; `write` answers the bytes it took, or a negative error. Answers the bytes written in all,
+     * which falls short of `frame.size` as soon as one request takes less than asked or fails. */
+    internal fun writeInRequests(frame: ByteArray, write: (offset: Int, length: Int) -> Int): Int {
+        var sent = 0
+        while (sent < frame.size) {
+            val length = minOf(MAX_BULK_REQUEST_BYTES, frame.size - sent)
+            val wrote = write(sent, length)
+            if (wrote < length) return sent + maxOf(wrote, 0)
+            sent += wrote
+        }
+        return sent
     }
 
     /** Tear down the cached connection so the next transceive reopens + reconfigures from scratch
@@ -231,6 +256,9 @@ object LocalPicoUsb {
     private fun setControlLine(conn: UsbDeviceConnection, commId: Int): Int {
         val lineCoding = byteArrayOf(0x00, 0xC2.toByte(), 0x01, 0x00, 0x00, 0x00, 0x08)
         val lc = conn.controlTransfer(0x21, 0x20, 0, commId, lineCoding, lineCoding.size, CONTROL_TIMEOUT_MS)
+        // DTR down and up: the firmware starts a new frame on the rise, so a frame an earlier process
+        // left partway is not read against this one.
+        conn.controlTransfer(0x21, 0x22, 0x00, commId, null, 0, CONTROL_TIMEOUT_MS)
         val cls = conn.controlTransfer(0x21, 0x22, 0x03, commId, null, 0, CONTROL_TIMEOUT_MS)
         Log.i(TAG, "CDC line (comm iface $commId): setLineCoding=$lc setControlLineState=$cls")
         return cls

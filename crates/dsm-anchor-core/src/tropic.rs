@@ -26,6 +26,8 @@ pub enum TropicError {
     Refused,
     /// After closing its birth the chip still accepts a command the closed birth denies.
     CageOpen,
+    /// The board's random generator failed its own health tests: nothing random is drawn from it.
+    NoEntropy,
 }
 
 /// TROPIC01 primitives used over an authenticated L3 session, mediated by the RP2350
@@ -46,11 +48,70 @@ pub trait Tropic {
     /// via the chip's own key-read primitive, not through this trait.
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError>;
 
+    /// Whether `signature` is the resident key's over `message`, under its public half `pk_chip`.
+    /// The chip hedges its Ed25519 signatures, so two over one message differ: a signature is checked
+    /// by verifying it, never by signing again and comparing.
+    fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool;
+
     /// Close the chip to a second birth: the pairing slot the appliance runs on may no longer
     /// re-initialize the counter, write or invalidate pairing keys, or write the chip's access
     /// configuration, and the closed configuration is in force when this returns. A chip already
     /// closed is closed. Irreversible on silicon.
     fn close_birth(&mut self) -> Result<(), TropicError>;
+
+    /// Set the counter back to its start after a try-run's spend moved it. The chip takes this only
+    /// before its birth is closed, and a power cut before it is undone by the next boot.
+    fn set_counter_back(&mut self) -> Result<(), TropicError>;
+
+    /// Go through what closing the birth needs with its permanent parts substituted, reporting each
+    /// step ([`crate::try_run`]). Leaves the chip as it found it: what is written is undone, and what
+    /// cannot be undone is not written but checked to be what the chip would take.
+    fn rehearse_birth(&mut self) -> Vec<crate::try_run::TryStep>;
+
+    /// Fresh randomness for a receive challenge, from both hardware sources: 32 bytes from the
+    /// board's own generator, passed by its health tests, and 32 from the chip's (`Random_Value_Get`).
+    fn challenge_entropy(&mut self) -> Result<ChallengeEntropy, TropicError>;
+}
+
+/// Randomness for one receive challenge, from each hardware source.
+pub struct ChallengeEntropy {
+    pub board: [u8; 32],
+    pub chip: [u8; 32],
+}
+
+impl Drop for ChallengeEntropy {
+    fn drop(&mut self) {
+        crate::util::zeroize(&mut self.board);
+        crate::util::zeroize(&mut self.chip);
+    }
+}
+
+/// A chip lent for a while, as a try-run borrows it.
+impl<T: Tropic + ?Sized> Tropic for &mut T {
+    fn counter_get(&mut self) -> Result<u32, TropicError> {
+        (**self).counter_get()
+    }
+    fn counter_update(&mut self) -> Result<(), TropicError> {
+        (**self).counter_update()
+    }
+    fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
+        (**self).chip_sign(message)
+    }
+    fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        (**self).chip_signature_holds(pk_chip, message, signature)
+    }
+    fn close_birth(&mut self) -> Result<(), TropicError> {
+        (**self).close_birth()
+    }
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        (**self).set_counter_back()
+    }
+    fn rehearse_birth(&mut self) -> Vec<crate::try_run::TryStep> {
+        (**self).rehearse_birth()
+    }
+    fn challenge_entropy(&mut self) -> Result<ChallengeEntropy, TropicError> {
+        (**self).challenge_entropy()
+    }
 }
 
 /// Forward `Tropic` through a `Box`, so a firmware holding the appliance in a `'static` slot can
@@ -68,8 +129,20 @@ impl<T: Tropic + ?Sized> Tropic for alloc::boxed::Box<T> {
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
         (**self).chip_sign(message)
     }
+    fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        (**self).chip_signature_holds(pk_chip, message, signature)
+    }
     fn close_birth(&mut self) -> Result<(), TropicError> {
         (**self).close_birth()
+    }
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        (**self).set_counter_back()
+    }
+    fn rehearse_birth(&mut self) -> Vec<crate::try_run::TryStep> {
+        (**self).rehearse_birth()
+    }
+    fn challenge_entropy(&mut self) -> Result<ChallengeEntropy, TropicError> {
+        (**self).challenge_entropy()
     }
 }
 
@@ -104,6 +177,17 @@ pub trait PartitionSig {
     fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
     /// Verify a partition signature over a 32-byte digest under the pinned `pk`.
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool;
+    /// Verify the owner's authorization of a prepare: a signature over the
+    /// [`crate::appliance::owner_authorization_digest`] under the device key `pk_on` the anchor
+    /// was provisioned for (DSM's device key scheme, BLAKE3-SPHINCS+ SPX256f).
+    fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool;
+    /// A device key in the owner's scheme from a 32-byte seed, `(sk, pk)`: the try-run's rehearsal
+    /// owner, so its payment goes through the same authorization a real one does. A key the anchor
+    /// derives for itself is never the key it was provisioned for, so it authorizes nothing real.
+    fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError>;
+    /// A signature in the owner's scheme over a 32-byte digest: the rehearsal owner's
+    /// authorization of the try-run's own payment.
+    fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
 }
 
 /// Verification of the partition witness `σ^host` alone: what a receiver or a walker of an

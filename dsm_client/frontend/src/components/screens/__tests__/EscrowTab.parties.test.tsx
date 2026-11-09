@@ -72,6 +72,7 @@ describe('the escrow lock form (SA-158)', () => {
       contacts,
       refreshContacts: contactsStore.refreshContacts,
       addContact: contactsStore.addContact,
+      unpairContact: contactsStore.unpair,
       setError: contactsStore.setError,
     };
     await act(async () => {

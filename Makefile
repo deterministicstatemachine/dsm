@@ -10,7 +10,8 @@
 #   make doctor       — check local prerequisites without changing files
 #   make setup        — first-time onboarding
 #   make build        — Rust workspace build
-#   make nodes-up     — start local storage nodes
+#   make nodes-up     — start your own local storage set
+#   make app-dev      — your app's own DSM account on it (BUILDING_APPS.md)
 #   make android      — build debug APK (includes native libs)
 #   make install      — build + install APK on all connected adb devices
 #   make test         — Rust + frontend tests
@@ -42,7 +43,7 @@ ANDROID_APP_GRADLE := $(ANDROID_DIR)/app/build.gradle.kts
 .PHONY: menu
 menu: ## Interactive launcher for common developer tasks
 	@bash -lc 'set -e; \
-		options=(setup doctor build frontend android install test lint nodes-up nodes-down nodes-status clean quit); \
+		options=(setup doctor build frontend android install test lint nodes-up nodes-down nodes-status app-dev dev-wallet starter phones-local dev-down clean quit); \
 		PS3="Select DSM task: "; \
 		select opt in "$${options[@]}"; do \
 			case "$$opt" in \
@@ -314,6 +315,11 @@ ios-simulator: ios-project ## Build the app for the arm64 iOS Simulator (needs i
 		-destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData \
 		ARCHS=arm64 build
 
+.PHONY: ios-simulator-run
+ios-simulator-run: ## Install and launch the wallet on the booted iOS Simulator, or SIM=<udid> (after make ios-simulator)
+	xcrun simctl install $(or $(SIM),booted) $(IOS_DIR)/DerivedData/Build/Products/Debug-iphonesimulator/DsmWallet.app
+	xcrun simctl launch $(or $(SIM),booted) com.dsm.wallet
+
 .PHONY: ios-device
 ios-device: ios-project ## Build the app for a connected iPhone/iPad, signed by Xcode's automatic provisioning (IOS_TEAM=<Apple team id>)
 	cd $(IOS_DIR) && xcodebuild -project DsmWallet.xcodeproj -scheme DsmWallet -configuration Debug \
@@ -547,24 +553,96 @@ deny: ## Run cargo-deny license and advisory checks
 	cargo deny check
 
 # ---------------------------------------------------------------------------
-# STORAGE NODES (local dev)
+# STORAGE NODES (local dev): the network's pinned members on this machine
 # ---------------------------------------------------------------------------
 
 .PHONY: nodes-up
-nodes-up: ## Start the 5 local storage dev nodes (TLS under a local dev CA)
-	@$(STORAGE_NODE_DIR)/scripts/dev/start_dev_nodes.sh
+nodes-up: ## Start your own storage set: 5 local nodes, TLS under its own CA (needs PostgreSQL)
+	@bash scripts/dev_net.sh up
 
 .PHONY: nodes-down
-nodes-down: ## Stop the 5 local storage dev nodes
-	@bash $(STORAGE_NODE_DIR)/scripts/dev/stop_dev_nodes.sh
+nodes-down: ## Stop the local storage nodes
+	@bash scripts/dev_net.sh down
 
 .PHONY: nodes-status
-nodes-status: ## Check local storage node health and port status
-	@bash $(STORAGE_NODE_DIR)/scripts/dev/check_node_status.sh
+nodes-status: ## Health of every local storage node, over verified TLS
+	@bash scripts/dev_net.sh status
 
 .PHONY: nodes-reset
-nodes-reset: ## Stop nodes and clean local node logs and pid files
-	@bash $(REPO_ROOT)/scripts/dev_nodes_reset.sh
+nodes-reset: ## Stop the local nodes, drop their databases, forget the set and the accounts made on it
+	@bash scripts/dev_net.sh reset
+
+# ---------------------------------------------------------------------------
+# BUILD AN APP ON DSM (BUILDING_APPS.md)
+# ---------------------------------------------------------------------------
+
+TS_CLIENT_DIR := $(REPO_ROOT)/clients/typescript
+PY_CLIENT_DIR := $(REPO_ROOT)/clients/python
+STARTER_DIR := $(REPO_ROOT)/examples/connect-starter
+DSM_APP := node $(TS_CLIENT_DIR)/dist/app-cli.js
+DSM_WALLET := node $(TS_CLIENT_DIR)/dist/dev-wallet.js
+
+.PHONY: clients
+clients: ## Build the TypeScript client and generate the Python client's types from proto/dsm_app.proto
+	cd $(TS_CLIENT_DIR) && npm ci --no-audit --no-fund && npm run build
+	protoc -I $(REPO_ROOT)/proto --python_out=$(PY_CLIENT_DIR)/dsm_app_client/generated $(REPO_ROOT)/proto/dsm_app.proto
+
+.PHONY: app-dev
+app-dev: clients ## Start your app's own DSM account on the local set (nodes too) and fund it
+	@bash scripts/app_dev.sh up app
+	@$(DSM_APP) fund
+
+.PHONY: app-dev-down
+app-dev-down: ## Stop your app's account
+	@bash scripts/app_dev.sh down app
+
+.PHONY: dev-wallet
+dev-wallet: clients ## Start a player's wallet in the terminal (a second account) and fund it
+	@bash scripts/app_dev.sh up wallet
+	@$(DSM_WALLET) fund
+
+.PHONY: dev-wallet-down
+dev-wallet-down: ## Stop the terminal wallet
+	@bash scripts/app_dev.sh down wallet
+
+.PHONY: dev-wallet-connect
+dev-wallet-connect: ## Connect the terminal wallet to an app: CODE=dsm:connect/v1:...
+	@test -n "$(CODE)" || (echo "usage: make dev-wallet-connect CODE=dsm:connect/v1:..." && exit 2)
+	@$(DSM_WALLET) connect "$(CODE)"
+
+.PHONY: dev-wallet-pending
+dev-wallet-pending: ## Requests waiting for the terminal wallet's approval
+	@$(DSM_WALLET) pending
+
+.PHONY: wallet
+wallet: ## Any terminal-wallet command: ARGS="approve <session> <seq>" (ARGS=help lists them)
+	@$(DSM_WALLET) $(ARGS)
+
+.PHONY: app
+app: ## Any command on your app's account: ARGS="sessions" (ARGS=help lists them)
+	@$(DSM_APP) $(ARGS)
+
+.PHONY: starter
+starter: clients ## Run the Connect starter app on http://127.0.0.1:3000 (after make app-dev)
+	cd $(STARTER_DIR) && npm ci --no-audit --no-fund && npm run build && npm start
+
+.PHONY: phones-local
+phones-local: ## Point the wallet on every adb device and booted iOS Simulator at the local set
+	@bash scripts/phones_local.sh point
+
+.PHONY: phones-connect
+phones-connect: ## Open a connect code in the wallet on every phone: CODE=dsm:connect/v1:...
+	@bash scripts/phones_local.sh open "$(CODE)"
+
+.PHONY: developer-path
+developer-path: ## The whole developer path end to end, as CI runs it (scripts/developer_path_check.sh)
+	@bash scripts/developer_path_check.sh
+
+.PHONY: dev-down
+dev-down: ## Stop the terminal wallet, your app's account and the local nodes
+	@bash scripts/app_dev.sh down wallet
+	@bash scripts/app_dev.sh down app
+	@bash scripts/dev_net.sh down
 
 # ---------------------------------------------------------------------------
 # PROTO / CODEGEN

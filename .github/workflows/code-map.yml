@@ -61,7 +61,7 @@ jobs:
           components: rust-analyzer
           targets: aarch64-linux-android
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: requirement-map
 
@@ -107,7 +107,7 @@ jobs:
       # sets a cfg is refused from it, so it is kept with them.
       - name: The indexes and fixture run of a commit with the same key
         id: kept
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.key.outputs.key }}
           path: |
@@ -186,7 +186,7 @@ jobs:
               && steps.fixture.outcome == 'success' && steps.indexes.outcome == 'success'
               && steps.map.outcome == 'success' && steps.check.outcome == 'success'
               && steps.mutations.outcome == 'success' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.key.outputs.key }}
           path: |
@@ -276,7 +276,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: pin-evidence
 

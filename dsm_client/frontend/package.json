@@ -52,12 +52,12 @@
   },
   "dependencies": {
     "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
+    "@types/react-dom": "^19.3.0",
     "buffer": "^6.0.3",
     "html5-qrcode": "^2.3.8",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@babel/core": "7.29.7",
@@ -68,7 +68,7 @@
     "@testing-library/user-event": "^14.5.1",
     "@types/jest": "^30.0.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "^26.4.1",
+    "@types/node": "^26.6.6",
     "@types/qrcode": "^1.5.5",
     "@typescript-eslint/eslint-plugin": "^8.62.1",
     "@typescript-eslint/parser": "^8.62.1",
@@ -90,7 +90,7 @@
     "prettier": "^3.9.4",
     "style-loader": "^4.0.0",
     "ts-jest": "^29.4.11",
-    "ts-loader": "^9.6.0",
+    "ts-loader": "^9.6.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.0",
     "webpack": "^5.107.2",

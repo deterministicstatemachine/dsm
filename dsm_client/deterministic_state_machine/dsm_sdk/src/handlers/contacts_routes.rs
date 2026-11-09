@@ -3,7 +3,8 @@
 //!
 //! Handles `contacts.list`, `contacts.readContactCode`, `contacts.addManual`,
 //! and the details the wallet shows for a person (DSM Amendment A17):
-//! `contacts.setProfile`, `contacts.ownProfile` and `contacts.setOwnProfile`.
+//! `contacts.setProfile`, `contacts.ownProfile` and `contacts.setOwnProfile`;
+//! and `contacts.unpair`, which pairs a contact's phone again.
 
 use prost::Message;
 
@@ -91,7 +92,7 @@ impl AppRouterImpl {
             }
         }
         // Pairing takes the new contact up now, if the session lets it run.
-        crate::bluetooth::contact_added();
+        crate::bluetooth::contact_to_pair();
         Ok(added)
     }
 
@@ -255,6 +256,49 @@ impl AppRouterImpl {
                 };
                 let mut reply = contact_add_response(&contact);
                 reply.profile = Some(stored);
+                pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(reply))
+            }
+            // Unpair and pair again: this phone forgets its pairing with the
+            // contact and reaches it to pair anew over a new link handshake.
+            "contacts.unpair" => {
+                let req = match decode_proto_arg::<generated::ContactUnpairRequest>(
+                    &i.args,
+                    "contacts.unpair",
+                ) {
+                    Ok(req) => req,
+                    Err(e) => return err(e),
+                };
+                let device_id = match <[u8; 32]>::try_from(req.device_id.as_slice()) {
+                    Ok(id) => id,
+                    Err(e) => return err(format!("contacts.unpair: a device id is 32 bytes: {e}")),
+                };
+                let Some(contact) = self.contact_manager.get_verified_contact(device_id).await
+                else {
+                    return err("contacts.unpair: the contact is not held in memory".into());
+                };
+                let orchestrator = crate::bluetooth::get_pairing_orchestrator();
+                if let Err(e) = orchestrator.unpair(device_id).await {
+                    return err(format!("contacts.unpair: {e}"));
+                }
+                crate::bluetooth::contact_to_pair();
+                let record = match crate::storage::client_db::get_contact_by_device_id(&device_id) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => {
+                        return err("contacts.unpair: the contact has no persisted row".into())
+                    }
+                    Err(e) => return err(format!("contacts.unpair: contact lookup: {e}")),
+                };
+                let session = orchestrator.get_session_status(&device_id).await;
+                let mut reply = contact_add_response(&contact);
+                // proto3: the empty string is how an absent address encodes.
+                reply.ble_address = match &record.ble_address {
+                    Some(address) => address.clone(),
+                    None => String::new(),
+                };
+                reply.pairing = crate::bluetooth::pairing_orchestrator::contact_pairing_phase(
+                    record.ble_address.as_deref().filter(|a| !a.is_empty()),
+                    session.as_ref(),
+                ) as i32;
                 pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(reply))
             }
             "contacts.setOwnProfile" => {

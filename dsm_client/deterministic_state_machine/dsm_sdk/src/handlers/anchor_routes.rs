@@ -2,6 +2,8 @@
 //! Anchor route handlers for the app router (offline-bearer signal (c)).
 //!
 //! Query routes:
+//! - `anchor.tryRun` → an install gone through on the connected anchor with its permanent parts
+//!   substituted, what it found, and what installing would make permanent. Binds nothing.
 //! - `anchor.status` → read-only [`AnchorStatusResponse`] diagnostics snapshot of the sender's
 //!   anchor appliance (RP2350/TROPIC01). Purely observational: no staging, no counter move, no
 //!   device-state mutation. When no appliance can attach it reports `anchor_connected=false`
@@ -9,29 +11,82 @@
 
 use dsm::types::proto as generated;
 
-use crate::bridge::{AppQuery, AppResult};
+use crate::bridge::{AppInvoke, AppQuery, AppResult};
 
 use super::app_router_impl::AppRouterImpl;
-use super::response_helpers::pack_envelope_ok;
+use super::response_helpers::{err, pack_envelope_ok};
+
+fn status_response(
+    snap: crate::sdk::core_sdk::AnchorStatusSnapshot,
+) -> generated::AnchorStatusResponse {
+    generated::AnchorStatusResponse {
+        anchor_connected: snap.connected,
+        anchor_id: snap.anchor_id.to_vec(),
+        pk_chip: snap.pk_chip,
+        partition_pk: snap.partition_pk,
+        anchor_counter: snap.anchor_counter,
+        frontier_root: snap.frontier_root.to_vec(),
+        enrolled_counter: snap.enrolled_counter,
+        bundle: snap.bundle.to_vec(),
+        status: snap.status,
+        awaiting_install: snap.awaiting_install,
+    }
+}
 
 impl AppRouterImpl {
+    /// `anchor.install`: install the connected anchor for this device, for good, or as a trial on the
+    /// trial image. The one route that makes an anchor permanent, and only ever on being told to: the
+    /// anchor goes through its try-run again first, and refuses with nothing written unless it passes.
+    pub(crate) async fn handle_anchor_invoke(&self, i: AppInvoke) -> AppResult {
+        if i.method != "anchor.install" {
+            return err(format!("unknown anchor route: {}", i.method));
+        }
+        let core = self.core_sdk.clone();
+        match tokio::task::block_in_place(move || core.anchor_install()) {
+            Ok(snap) => pack_envelope_ok(generated::envelope::Payload::AnchorStatusResponse(
+                status_response(snap),
+            )),
+            Err(e) => err(format!("anchor.install: {e}")),
+        }
+    }
+
     /// Dispatch handler for `anchor.*` query routes.
     pub(crate) async fn handle_anchor_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "anchor.status" => {
-                let snap = self.core_sdk.anchor_appliance_status();
-                let resp = generated::AnchorStatusResponse {
-                    anchor_connected: snap.connected,
-                    anchor_id: snap.anchor_id.to_vec(),
-                    pk_chip: snap.pk_chip,
-                    partition_pk: snap.partition_pk,
-                    anchor_counter: snap.anchor_counter,
-                    frontier_root: snap.frontier_root.to_vec(),
-                    enrolled_counter: snap.enrolled_counter,
-                    bundle: snap.bundle.to_vec(),
-                    status: snap.status,
-                };
-                pack_envelope_ok(generated::envelope::Payload::AnchorStatusResponse(resp))
+                pack_envelope_ok(generated::envelope::Payload::AnchorStatusResponse(
+                    status_response(self.core_sdk.anchor_appliance_status()),
+                ))
+            }
+            "anchor.tryRun" => {
+                let core = self.core_sdk.clone();
+                match tokio::task::block_in_place(move || core.anchor_try_run()) {
+                    Ok(report) => {
+                        pack_envelope_ok(generated::envelope::Payload::AnchorTryRunResponse(
+                            generated::AnchorTryRunResponse {
+                                passed: report.passed,
+                                steps: report
+                                    .steps
+                                    .into_iter()
+                                    .map(|step| generated::AnchorTryRunStep {
+                                        name: step.name,
+                                        passed: step.passed,
+                                        detail: step.detail,
+                                        production: step.requirement
+                                            == anchor_core::try_run::Requirement::Production,
+                                    })
+                                    .collect(),
+                                trial: matches!(
+                                    report.install,
+                                    Some(anchor_core::enrollment::Install::ForTrial)
+                                ),
+                                permanent: report.permanent,
+                                refused: report.refused,
+                            },
+                        ))
+                    }
+                    Err(e) => err(format!("anchor.tryRun: {e}")),
+                }
             }
             _ => super::response_helpers::err(format!("unknown anchor query: {}", q.path)),
         }

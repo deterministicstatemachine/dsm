@@ -32,31 +32,42 @@ fn main() {
     // contention with this monitor build. This is the cross-crate NS packaging (replaces the stub).
     let ns_crate = manifest.join("../dsm-anchor-nonsecure-app");
     println!("cargo:rerun-if-changed={}/src/main.rs", ns_crate.display());
-    println!("cargo:rerun-if-changed={}/dsm-ns-sram.x", ns_crate.display());
+    println!(
+        "cargo:rerun-if-changed={}/dsm-ns-sram.x",
+        ns_crate.display()
+    );
     println!("cargo:rerun-if-changed={}/memory.x", ns_crate.display());
-    let ns_target = out.join("ns-app-target");
-    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let status = Command::new(&cargo)
-        .current_dir(&ns_crate)
-        .args(["build", "--release", "--target-dir"])
-        .arg(&ns_target)
-        // Do not inherit this monitor build's RUSTFLAGS/target; the NS crate's .cargo/config sets its
-        // own (dsm-ns-sram.x). Clear the vars cargo would otherwise propagate.
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("CARGO_BUILD_TARGET")
-        .status()
-        .expect("build dsm-anchor-nonsecure-app");
-    assert!(status.success(), "Non-secure app build failed");
-    let ns_elf = ns_target.join("thumbv8m.main-none-eabihf/release/dsm-anchor-nonsecure-app");
+    // A monitor update for a burned board carries the very image whose digest is in its OTP, not a
+    // rebuild of it: `DSM_ANCHOR_NS_BIN` names the `ns_app.bin` sign.sh kept when that board was signed.
+    println!("cargo:rerun-if-env-changed=DSM_ANCHOR_NS_BIN");
     let ns_bin = out.join("ns_app.bin");
-    let status = Command::new("arm-none-eabi-objcopy")
-        .args(["-O", "binary"])
-        .arg(&ns_elf)
-        .arg(&ns_bin)
-        .status()
-        .expect("objcopy the Non-secure app image");
-    assert!(status.success(), "objcopy of the Non-secure app failed");
+    if let Some(kept) = env::var_os("DSM_ANCHOR_NS_BIN") {
+        println!("cargo:rerun-if-changed={}", PathBuf::from(&kept).display());
+        std::fs::copy(&kept, &ns_bin).expect("copy the kept Non-secure image");
+    } else {
+        let ns_target = out.join("ns-app-target");
+        let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = Command::new(&cargo)
+            .current_dir(&ns_crate)
+            .args(["build", "--release", "--target-dir"])
+            .arg(&ns_target)
+            // Do not inherit this monitor build's RUSTFLAGS/target; the NS crate's .cargo/config sets
+            // its own (dsm-ns-sram.x). Clear the vars cargo would otherwise propagate.
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_BUILD_TARGET")
+            .status()
+            .expect("build dsm-anchor-nonsecure-app");
+        assert!(status.success(), "Non-secure app build failed");
+        let ns_elf = ns_target.join("thumbv8m.main-none-eabihf/release/dsm-anchor-nonsecure-app");
+        let status = Command::new("arm-none-eabi-objcopy")
+            .args(["-O", "binary"])
+            .arg(&ns_elf)
+            .arg(&ns_bin)
+            .status()
+            .expect("objcopy the Non-secure app image");
+        assert!(status.success(), "objcopy of the Non-secure app failed");
+    }
 
     // Assemble the reviewed asm (NSC veneer + the NS payload) with clang for ARMv8-M, archive both
     // into one static lib linked into the monitor. `-I <OUT_DIR>` lets the payload `.incbin ns_app.bin`.
@@ -90,7 +101,10 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=dsm_sg_veneer");
-    println!("cargo:rustc-link-search={}", env::current_dir().unwrap().display());
+    println!(
+        "cargo:rustc-link-search={}",
+        env::current_dir().unwrap().display()
+    );
     // The monitor does not CALL the gateway (the separate Non-secure app image does), so force the
     // veneer (and, transitively, the Secure handler it references) to be linked + kept, and export
     // the NSC entry for the app to resolve at the fixed NSC address.

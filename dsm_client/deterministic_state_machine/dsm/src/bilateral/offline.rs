@@ -331,11 +331,14 @@ pub fn decide_prepare(
 /// prepare response.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Acceptance {
-    /// σ_B over the step's commitment and `receiver_challenge`.
+    /// σ_B over the step's commitment, `receiver_challenge` and `receiver_bundle`.
     pub signature: Vec<u8>,
-    /// The receiver's challenge `r_R` a bearer release answers, as σ_B
-    /// signs it.
+    /// The receiver's challenge `r_R` a bearer release answers, drawn by the
+    /// receiver's board, as σ_B signs it.
     pub receiver_challenge: [u8; 32],
+    /// The bundle `B_r` of the receiver's board, whose receive commit is the
+    /// step's acknowledgement, as σ_B signs it.
+    pub receiver_bundle: [u8; 32],
 }
 
 /// What a prepare response claims: the commitment it answers, its
@@ -347,6 +350,8 @@ pub struct ResponseClaims<'a> {
     pub credentials: PeerCredentials<'a>,
     pub signature: &'a [u8],
     pub receiver_challenge: &'a [u8],
+    /// The bundle of the receiver's board the response names.
+    pub receiver_bundle: &'a [u8; 32],
 }
 
 /// The proposer's decision on a prepare response for the step
@@ -371,13 +376,18 @@ pub fn decide_prepare_response(
     })?;
     verify_signature_over(
         receiver,
-        &bilateral_accept_sign_message(&commitment_hash, &receiver_challenge),
+        &bilateral_accept_sign_message(
+            &commitment_hash,
+            &receiver_challenge,
+            claims.receiver_bundle,
+        ),
         claims.signature,
         "acceptance",
     )?;
     Ok(Acceptance {
         signature: claims.signature.to_vec(),
         receiver_challenge,
+        receiver_bundle: *claims.receiver_bundle,
     })
 }
 
@@ -528,7 +538,8 @@ pub fn spend_starts_at_the_record(
         .iter()
         .find_map(|write| match &write.leaf {
             ReceiptLeaf::OfflineAccount(witness) => Some(witness.pre_account_root),
-            ReceiptLeaf::Relationship => None,
+            // A sender's receipt names the account it spent from; a receive is the receiver's.
+            ReceiptLeaf::Relationship | ReceiptLeaf::OfflineReceive(_) => None,
         })
         .ok_or_else(|| {
             DsmError::invalid_operation(
@@ -665,7 +676,7 @@ pub fn decide_committed_confirm(
 }
 
 /// What the sender holds for a step it confirmed and awaits the ack of.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct ConfirmedStep<'a> {
     pub commitment_hash: [u8; 32],
     pub sender_device_id: [u8; 32],
@@ -674,22 +685,49 @@ pub struct ConfirmedStep<'a> {
     /// The receiver's EK chain head on this relationship, once a step has
     /// been acknowledged; before that, its pinned AK signs the first EK.
     pub receiver_chain_head: Option<&'a [u8]>,
-    /// The step's operation: the receiver's own receipt of it writes only its
-    /// relationship leaf, and its child tip is recomputed from it.
+    /// The step's operation: its child tip is recomputed from it, and it
+    /// decides which leaves the receiver's own receipt writes.
     pub operation: &'a Operation,
+    /// This device's own release of the step, which the acknowledgement must
+    /// receive.
+    pub own_release: &'a anchor_core::root_advance::OfflineRelease,
+    /// The receiver's anchor as this device pinned it from the response.
+    pub receiver_anchor: &'a crate::types::offline_chain::ChainAnchor,
 }
 
-/// The sender's decision on an acknowledgment: it is the receiver's
-/// counter-signed receipt of the step — its own copy, from the receiver to
-/// this device, holding its state rules against the receiver's Device Tree
-/// commitment, and answering the step's commitment with the receiver's
-/// B-side EK chained from its head. Nothing else in an ack is authority.
+/// What the sender takes from a verified acknowledgement.
+#[derive(Debug)]
+pub struct VerifiedAck {
+    /// The receiver's counter-signed receipt of the step.
+    pub receipt: StitchedReceiptV2,
+    /// The receiver's board's receive commit, as it verified.
+    pub acknowledged: anchor_core::receive::Acknowledged,
+}
+
+/// The sender's decision on an acknowledgment (owner, 2026-11-07: an offline
+/// payment needs a board on both sides, and the payer's phone checks the
+/// acknowledgement). It is two things, both required:
+///
+/// - the receiver's board's receive commit of exactly this device's release:
+///   its certificate verifies under the receiver's pinned anchor, its receive
+///   names this release's bundle, message and counter, its challenge is the one
+///   the release answered, and it pays nothing but receives from this device
+///   ([`anchor_core::receive::verify_acknowledgement`]);
+/// - the receiver's counter-signed receipt of the step — its own copy, from the
+///   receiver to this device, holding its state rules against the receiver's
+///   Device Tree commitment, with its offline account write held to the
+///   counter and frontiers the receive commit signed, between exactly the two
+///   device roots the board signed, and answering the step's commitment with
+///   the receiver's B-side EK chained from its head.
+///
+/// Nothing else in an ack is authority.
 pub fn decide_commit_ack(
     named_commitment: Option<[u8; 32]>,
     counter_signed_receipt: &[u8],
+    acknowledgement: &[u8],
     step: ConfirmedStep<'_>,
     receiver: &PinnedPeer<'_>,
-) -> Result<StitchedReceiptV2, DsmError> {
+) -> Result<VerifiedAck, DsmError> {
     if named_commitment != Some(step.commitment_hash) {
         return Err(DsmError::invalid_operation(
             "the acknowledgment names another commitment",
@@ -718,6 +756,48 @@ pub fn decide_commit_ack(
              possible substitution",
         ));
     }
+    if acknowledgement.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "the acknowledgment carries no receive commit of the receiver's board: an offline \
+             payment is received only through it",
+        ));
+    }
+    let ack = {
+        use prost::Message;
+        anchor_core::proto::pb::OfflineRelease::decode(acknowledgement)
+            .map_err(|e| DsmError::invalid_operation(format!("the acknowledgement: {e}")))?
+            .to_release()
+            .map_err(|e| DsmError::invalid_operation(format!("the acknowledgement: {e:?}")))?
+    };
+    let anchor = step.receiver_anchor;
+    let acknowledged = anchor_core::receive::verify_acknowledgement::<
+        crate::types::offline_chain::Ed25519Chip,
+        crate::types::offline_chain::SphincsHost,
+    >(
+        &ack,
+        &anchor_core::receive::ReceiverPin {
+            bundle: &anchor.bundle,
+            anchor_id: &anchor.anchor_id,
+            pk_chip: &anchor.pk_chip,
+            pk_host: &anchor.pk_host,
+        },
+        &receiver.device_id,
+        step.own_release,
+    )
+    .map_err(|e| {
+        DsmError::invalid_operation(format!(
+            "the acknowledgement is not the receiver's board's receive of this release: {e:?}"
+        ))
+    })?;
+    // The receipt proves the move the receiver's board signed: between its two device roots.
+    if receipt.parent_root != acknowledged.receiver_device_root_before
+        || receipt.child_root != acknowledged.receiver_device_root_after
+    {
+        return Err(DsmError::invalid_operation(
+            "the receiver's receipt proves another move of its device root than its board's \
+             receive commit signed",
+        ));
+    }
     verify_receipt_state(
         &receipt,
         &ReceiptStateContext {
@@ -726,7 +806,12 @@ pub fn decide_commit_ack(
             ),
             author_genesis: receiver.genesis,
             operation: step.operation,
-            bearer: None,
+            bearer: Some(BearerLeaves {
+                bundle: anchor.bundle,
+                counter: acknowledged.counter,
+                frontier: acknowledged.frontier,
+                next_frontier: acknowledged.next_frontier,
+            }),
         },
     )?;
     verify_per_step_ek_signing(
@@ -736,7 +821,10 @@ pub fn decide_commit_ack(
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;
-    Ok(receipt)
+    Ok(VerifiedAck {
+        receipt,
+        acknowledged,
+    })
 }
 
 #[cfg(test)]
@@ -802,9 +890,16 @@ mod tests {
         }
 
         fn sign_acceptance(&self, commitment_hash: &[u8; 32], challenge: &[u8; 32]) -> Vec<u8> {
-            self.sign(&bilateral_accept_sign_message(commitment_hash, challenge))
+            self.sign(&bilateral_accept_sign_message(
+                commitment_hash,
+                challenge,
+                &RECEIVER_BUNDLE,
+            ))
         }
     }
+
+    /// The bundle of the receiver's board the tests' acceptances name.
+    const RECEIVER_BUNDLE: [u8; 32] = [0xB8; 32];
 
     fn refused<T: std::fmt::Debug>(r: Result<T, DsmError>, why: &str) {
         let e = r.expect_err(why).to_string();
@@ -1671,6 +1766,7 @@ mod tests {
                     credentials: credentials(&receiver),
                     signature,
                     receiver_challenge: challenge,
+                    receiver_bundle: &RECEIVER_BUNDLE,
                 },
                 &receiver.pinned(),
             )
@@ -1682,6 +1778,7 @@ mod tests {
             Acceptance {
                 signature: accepted.clone(),
                 receiver_challenge: challenge,
+                receiver_bundle: RECEIVER_BUNDLE,
             }
         );
         refused(decide(commitment, &[], &challenge), "carries no signature");
@@ -1720,7 +1817,7 @@ mod tests {
         let commitment = [0x57u8; 32];
         let issued = [0x58u8; 32];
         let substituted = [0x59u8; 32];
-        let decide = |signature: &[u8], challenge: &[u8]| {
+        let decide_under = |signature: &[u8], challenge: &[u8], bundle: &[u8; 32]| {
             decide_prepare_response(
                 commitment,
                 ResponseClaims {
@@ -1728,11 +1825,22 @@ mod tests {
                     credentials: credentials(&receiver),
                     signature,
                     receiver_challenge: challenge,
+                    receiver_bundle: bundle,
                 },
                 &receiver.pinned(),
             )
         };
+        let decide = |signature: &[u8], challenge: &[u8]| {
+            decide_under(signature, challenge, &RECEIVER_BUNDLE)
+        };
         let sigma_b = receiver.sign_acceptance(&commitment, &issued);
+        // The receiver's board's bundle is under σ_B too (owner, 2026-11-07): a relay that names
+        // another anchor for the receiver is refused, so the payer never checks an acknowledgement
+        // under an anchor the receiver did not name.
+        refused(
+            decide_under(&sigma_b, &issued, &[0x5A; 32]),
+            "not signed over its commitment by the pinned AK",
+        );
 
         assert_eq!(
             decide(&sigma_b, &issued)
@@ -1868,6 +1976,7 @@ mod tests {
         let receiver = Peer::new(0x62);
         let mut payer = Payer::loaded_on(
             sender.party.head(),
+            sender.party.signing_secret_key(),
             sender.genesis,
             0x61,
             40,
@@ -2403,8 +2512,13 @@ mod tests {
         );
     }
 
+    /// What an acknowledgment is decided on before the receiver's board's receive commit: the step
+    /// it names and the receipt it carries. Each refusal here stands whatever the receive commit is,
+    /// and a receipt with no receive commit beside it is refused (owner, 2026-11-07: an offline
+    /// payment is received only through the receiver's board). The receive commit itself is checked
+    /// end to end, both boards running, in the SDK's offline step tests.
     #[test]
-    fn an_ack_is_only_the_receivers_counter_signed_receipt() {
+    fn an_ack_is_refused_without_its_step_its_receipt_or_its_receive_commit() {
         let receiver = Peer::new(0x71);
         let sender = Peer::new(0x72);
         let sender_device_id = sender.device_id;
@@ -2420,19 +2534,30 @@ mod tests {
             &commitment_hash,
         );
         let other = Peer::new(0x74);
+        let own_release = crate::types::offline_chain::fixture::Payer::loaded(0x75, 10)
+            .spend([0x76; 32], 1)
+            .0
+            .release()
+            .clone();
+        let receiver_anchor = crate::types::offline_chain::ChainAnchor {
+            bundle: RECEIVER_BUNDLE,
+            anchor_id: [0xA7; 32],
+            pk_chip: vec![0xC7; 32],
+            pk_host: vec![0xC8; 64],
+        };
         let step = |sender_device_id: [u8; 32]| ConfirmedStep {
             commitment_hash,
             sender_device_id,
             receiver_device_tree_root: root,
             receiver_chain_head: None,
             operation: &transfer.operation,
+            own_release: &own_release,
+            receiver_anchor: &receiver_anchor,
         };
         let decide = |named: [u8; 32], bytes: &[u8], step: ConfirmedStep<'_>| {
-            decide_commit_ack(Some(named), bytes, step, &receiver.pinned())
+            decide_commit_ack(Some(named), bytes, &[], step, &receiver.pinned())
         };
 
-        decide(commitment_hash, &ack, step(sender_device_id))
-            .expect("the receiver's own acknowledgment");
         refused(
             decide(held_tip, &ack, step(sender_device_id)),
             "names another commitment",
@@ -2446,34 +2571,22 @@ mod tests {
             "possible substitution",
         );
         refused(
-            decide(
-                commitment_hash,
-                &ack,
-                ConfirmedStep {
-                    receiver_chain_head: Some(other.public_key()),
-                    ..step(sender_device_id)
-                },
-            ),
-            "does NOT chain",
-        );
-        let (a_side, _) = signed_receipt(
-            &receiver,
-            &sender,
-            &credit.receipt,
-            &credit.c_pre,
-            BilateralSide::A,
-            &commitment_hash,
+            decide(commitment_hash, &ack, step(sender_device_id)),
+            "carries no receive commit of the receiver's board",
         );
         refused(
-            decide(commitment_hash, &a_side, step(sender_device_id)),
-            "B-side artifacts",
+            decide_commit_ack(
+                Some(commitment_hash),
+                &ack,
+                &anchor_core::proto::encode_release(&own_release.to_pb()),
+                step(sender_device_id),
+                &receiver.pinned(),
+            ),
+            "not the receiver's board's receive of this release",
         );
     }
 }
 
-/// The receive rule against real spends: a payer's anchor-released spends,
-/// built through its own `advance`, and the receiver's record of the account
-/// the payer's load left.
 #[cfg(test)]
 mod receive_rule_tests {
     use super::*;

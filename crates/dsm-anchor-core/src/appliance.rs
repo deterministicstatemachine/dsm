@@ -53,6 +53,16 @@ pub enum ApplianceError {
     Tropic(TropicError),
     /// The partition could not sign `σ^host`; nothing is prepared.
     Partition(PartitionError),
+    /// No authorization of the owner's device key `pk_on` stands for this prepare: none was taken,
+    /// the one taken was for another anchor, frontier or payment ([`owner_authorization_digest`]),
+    /// or a signature did not verify. Nothing is signed, nothing is prepared.
+    OwnerUnauthorized,
+    /// A receive was asked for with no challenge open, or under another challenge than the open one.
+    NoOpenChallenge,
+    /// A receive names no payment this appliance checked, or another than the one it checked.
+    PaymentUnchecked,
+    /// The payer's release did not pass this appliance's own check.
+    PaymentRefused(crate::receive::PaymentRefusal),
 }
 
 /// Prepared record (§12.2): the certificate carrying the appliance's two on-device identity
@@ -88,6 +98,8 @@ pub struct Active {
     pub anchor_counter: u64,
     pub status: Status,
     pub record: Record,
+    /// The receive challenge this appliance drew and has not used up (see [`crate::receive`]).
+    pub open_challenge: Option<[u8; 32]>,
 }
 
 impl Active {
@@ -98,6 +110,7 @@ impl Active {
             anchor_counter: 0,
             status: Status::Ready,
             record: Record::Empty,
+            open_challenge: None,
         }
     }
 }
@@ -128,6 +141,32 @@ pub enum BootRecoveryRefusal {
     OutcomeAfterReset(RecoverOutcome),
 }
 
+/// The digest the owner's device key signs to authorize one prepare: this anchor's bundle `B`,
+/// the frontier `h_i` and counter `u_i` it advances from, the transition digest `D_{i+1}` (which
+/// binds the transition and the receiver's challenge) and the device roots `R_i`/`R_{i+1}` the
+/// release will carry. Bound to all of them, a signature authorizes this one prepare on this one
+/// anchor: replayed elsewhere, or after the anchor has moved, it authorizes nothing.
+pub fn owner_authorization_digest(
+    bundle: &[u8; 32],
+    prev_frontier: &[u8; 32],
+    anchor_counter: u64,
+    transition_digest: &[u8; 32],
+    sender_device_root_before: &[u8; 32],
+    sender_device_root_after: &[u8; 32],
+) -> [u8; 32] {
+    crate::hash::h(
+        crate::domain::OWNER_AUTHORIZATION_V1,
+        &[
+            bundle,
+            prev_frontier,
+            &anchor_counter.to_le_bytes(),
+            transition_digest,
+            sender_device_root_before,
+            sender_device_root_after,
+        ],
+    )
+}
+
 /// The v2 software-authority / hardware-identity appliance for one active frontier.
 pub struct Appliance<T: Tropic, P: PartitionSig> {
     pub h0: u32,
@@ -142,6 +181,23 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     /// pin keys, the owner's online key and its device id, `B` recomputes from what is disclosed.
     pub birth_commitment: [u8; 32],
     pub active: Active,
+    /// What its install made: for good, or a trial.
+    pub install: crate::enrollment::Install,
+    /// The device key `pk_on` the anchor was provisioned for (`B` binds `H(pk_on)`): the one key
+    /// whose signature authorizes a prepare.
+    pub owner_pk: Vec<u8>,
+    /// The owner's standing authorization: the digest of the one prepare it allows
+    /// ([`Self::authorize`]), consumed by the prepare that claims it. Held in memory only: a reboot
+    /// drops it, and the owner authorizes again.
+    authorized: Option<[u8; 32]>,
+    /// The owner's DSM device id its bundle binds: a payment it receives must name it.
+    pub owner_device_id: [u8; 32],
+    /// The policy its bundle binds: a payer's anchor must be enrolled under it too.
+    pub policy_hash: [u8; 32],
+    /// What the receive of the payer's release this appliance last checked must bind
+    /// ([`crate::receive::receive_binding`]), held until that receive is finalized. Not durable:
+    /// after a power cut the payment is checked again.
+    pub checked: Option<[u8; 32]>,
     /// SECRET partition signing key (non-exportable on device).
     partition_sk: Vec<u8>,
     tropic: T,
@@ -149,13 +205,16 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
 }
 
 impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
-    /// Construct from a [`Birth`] result. Starts at the genesis frontier `h_0`, counter 0.
+    /// Construct from a [`Birth`] result for the owner whose device key is `owner_pk`, installed as
+    /// `install` says. Starts at the genesis frontier `h_0`, counter 0.
     pub fn new(
         tropic: T,
         h0: u32,
         anchor_id: [u8; 32],
         partition_device_id: [u8; 32],
         birth: Birth,
+        install: crate::enrollment::Install,
+        owner_pk: Vec<u8>,
     ) -> Self {
         Self {
             h0,
@@ -166,10 +225,34 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             chip_pk: birth.chip_pk,
             birth_commitment: birth.birth_commitment,
             active: Active::genesis(birth.genesis_frontier),
+            install,
+            owner_pk,
+            authorized: None,
+            owner_device_id: birth.device_id,
+            policy_hash: birth.policy_hash,
+            checked: None,
             partition_sk: birth.partition_sk,
             tropic,
             _p: PhantomData,
         }
+    }
+
+    /// The owner's authorization of the next prepare: `signature`, under the device key the anchor
+    /// was provisioned for, over `digest`, the [`owner_authorization_digest`] of the prepare it
+    /// allows. Taken only while Ready and held until a prepare consumes it; a later one replaces it,
+    /// and one that does not verify drops any held. The digest is checked when the prepare arrives,
+    /// against what this anchor recomputes from its own state and the prepare's contents, so an
+    /// authorization for another anchor, another frontier or another payment allows nothing here.
+    pub fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), ApplianceError> {
+        if self.active.status != Status::Ready {
+            return Err(ApplianceError::WrongState);
+        }
+        if !P::owner_verify(&self.owner_pk, digest, signature) {
+            self.authorized = None;
+            return Err(ApplianceError::OwnerUnauthorized);
+        }
+        self.authorized = Some(*digest);
+        Ok(())
     }
 
     /// Close the chip to a second birth ([`Tropic::close_birth`]).
@@ -197,6 +280,10 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// DSM layer (which owns the tree); the appliance signs over them. The receiver
     /// independently verifies their SMT inclusion, so a wrong root yields a release the
     /// receiver rejects fail-closed.
+    ///
+    /// Refused too unless the owner's standing authorization ([`Self::authorize`]) is for this very
+    /// prepare: the anchor serves its owner, not whoever holds the link to it. The authorization is
+    /// consumed by this call whatever its outcome.
     pub fn prepare(
         &mut self,
         t: &Transition,
@@ -215,6 +302,22 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         }
         if t.next_anchor_counter != t.anchor_counter + 1 {
             return Err(ApplianceError::IndexMismatch);
+        }
+        // A receive is prepared only against the open challenge, for exactly the payment checked
+        // under it.
+        if t.action_type == crate::receive::ACTION_RECEIVE {
+            match &self.active.open_challenge {
+                Some(open) if ct_eq_32(open, receiver_challenge) => {}
+                _ => return Err(ApplianceError::NoOpenChallenge),
+            }
+            match &self.checked {
+                Some(binding)
+                    if ct_eq_32(
+                        binding,
+                        &crate::receive::receive_binding(t, receiver_challenge),
+                    ) => {}
+                _ => return Err(ApplianceError::PaymentUnchecked),
+            }
         }
         // Read H once and reject an exhausted down-counter before signing. commit() guards
         // this too; prepare must not build a release that can never commit.
@@ -236,6 +339,21 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         let h_next = anchor_root_advance(&self.active.root, &d);
         if !ct_eq_32(&h_next, t.next_root) {
             return Err(ApplianceError::NextRootMismatch);
+        }
+
+        // The owner authorized exactly this prepare, from this frontier and counter, or nothing
+        // is signed. The authorization is consumed here whatever follows: it serves one prepare.
+        let expected = owner_authorization_digest(
+            &self.bundle,
+            &self.active.root,
+            t.anchor_counter,
+            &d,
+            sender_device_root_before,
+            sender_device_root_after,
+        );
+        match self.authorized.take() {
+            Some(authorized) if ct_eq_32(&authorized, &expected) => {}
+            _ => return Err(ApplianceError::OwnerUnauthorized),
         }
 
         let m = root_advance_message(
@@ -380,21 +498,85 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// §12.6 Finalize: advance the active frontier to `(h_{i+1}, u_i+1)`, guarded by
     /// `active.u = H₀ − H`.
     pub fn finalize(&mut self) -> Result<[u8; 32], ApplianceError> {
-        let (next_frontier, next_anchor_counter) = match &self.active.record {
-            Record::Committed(c) if c.committed => (c.next_frontier, c.next_anchor_counter),
+        let (next_frontier, next_anchor_counter, action) = match &self.active.record {
+            Record::Committed(c) if c.committed => (
+                c.next_frontier,
+                c.next_anchor_counter,
+                c.release.transition.action_type,
+            ),
             _ => return Err(ApplianceError::NotCommitted),
         };
         let live_u = self.live_index()?;
         if self.active.anchor_counter != live_u {
             return Err(ApplianceError::CounterMismatch);
         }
+        // A receive's finalize uses its challenge up: the release it received answers no other.
+        let open_challenge = if action == crate::receive::ACTION_RECEIVE {
+            self.checked = None;
+            None
+        } else {
+            self.active.open_challenge
+        };
         self.active = Active {
             root: next_frontier,
             anchor_counter: next_anchor_counter,
             status: Status::Ready,
             record: Record::Empty,
+            open_challenge,
         };
         Ok(next_frontier)
+    }
+
+    /// Draw a receive challenge from both hardware sources and hold it open, in place of any open
+    /// one (see [`crate::receive`]). Refused unless Ready: a receive or a release in progress keeps
+    /// the challenge it has.
+    pub fn draw_challenge(&mut self) -> Result<[u8; 32], ApplianceError> {
+        if self.active.status != Status::Ready {
+            return Err(ApplianceError::WrongState);
+        }
+        let entropy = self
+            .tropic
+            .challenge_entropy()
+            .map_err(ApplianceError::Tropic)?;
+        let challenge = crate::hash::h(
+            crate::domain::RECEIVE_CHALLENGE_V1,
+            &[&entropy.board, &entropy.chip],
+        );
+        self.checked = None;
+        self.active.open_challenge = Some(challenge);
+        Ok(challenge)
+    }
+
+    /// Check the payer's release against the open challenge ([`crate::receive::check_payment`]) and
+    /// hold what was checked for the receive that names it. Refused unless Ready with a challenge
+    /// open. Nothing is signed and nothing durable changes.
+    pub fn check_payment(
+        &mut self,
+        transition: &Transition,
+        cert: &crate::receive::PaymentCert,
+        payer: &crate::receive::PayerDisclosure,
+    ) -> Result<(), ApplianceError> {
+        if self.active.status != Status::Ready {
+            return Err(ApplianceError::WrongState);
+        }
+        let open = self
+            .active
+            .open_challenge
+            .ok_or(ApplianceError::NoOpenChallenge)?;
+        let checked = crate::receive::check_payment::<T, P>(
+            &self.tropic,
+            transition,
+            cert,
+            payer,
+            &crate::receive::Receiver {
+                device_id: &self.owner_device_id,
+                policy_hash: &self.policy_hash,
+                open_challenge: &open,
+            },
+        )
+        .map_err(ApplianceError::PaymentRefused)?;
+        self.checked = Some(checked);
+        Ok(())
     }
 
     /// Cancel a prepared (not yet committed) record.
@@ -466,8 +648,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                 // Both on-device witnesses (σ^chip, σ^host) are formed atomically in prepare and
                 // no counter has moved, so a Prepared record is safe to complete when it is the
                 // record this appliance signed: its message recomputes from its own fields and
-                // transition, σ^host verifies under the pinned partition key, and σ^chip is what
-                // the chip signs over that message now (Ed25519 is deterministic).
+                // transition, and σ^host and σ^chip verify under the pinned keys.
                 let (root_ok, holds, m, sigma_chip, sigma_host) = match &self.active.record {
                     Record::Prepared(p) => {
                         let c = &p.cert;
@@ -502,14 +683,15 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                 if !root_ok {
                     return RecoverOutcome::DowngradeOnline;
                 }
-                if !holds || !P::part_verify(&self.partition_pk, &m, &sigma_host) {
+                if !holds
+                    || !P::part_verify(&self.partition_pk, &m, &sigma_host)
+                    || !self
+                        .tropic
+                        .chip_signature_holds(&self.chip_pk, &m, &sigma_chip)
+                {
                     return RecoverOutcome::OnlineCancelOrResolve;
                 }
-                match self.tropic.chip_sign(&m) {
-                    Ok(signed) if signed == sigma_chip => RecoverOutcome::AcceptPreparedCanComplete,
-                    Ok(_other) => RecoverOutcome::OnlineCancelOrResolve,
-                    Err(_unreachable_chip) => RecoverOutcome::DowngradeOnline,
-                }
+                RecoverOutcome::AcceptPreparedCanComplete
             }
             Status::Ready => {
                 // The software counter `active.u` is the authority; the TROPIC01 counter is its
@@ -539,13 +721,14 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     ///
     /// `Accept` (no durable transaction, counters agree) and `ReemitCommitted` (a committed
     /// release whose counter already moved; the host re-emits and finalizes the same successor)
-    /// serve. `AcceptPreparedCanComplete` (prepared, counter unchanged) takes the reset rule: no
-    /// host session can own a prepared record across a reboot, so the record is cancelled and
-    /// recovery must then return `Accept`. Every other outcome refuses.
+    /// serve. A prepared record with its counter unchanged takes the reset rule, whether or not it
+    /// would have completed (`AcceptPreparedCanComplete`, `OnlineCancelOrResolve`): no host session
+    /// can own one across a reboot and nothing has moved, so it is cancelled and recovery must then
+    /// return `Accept`. Every other outcome refuses.
     pub fn recover_at_boot(&mut self) -> Result<(), BootRecoveryRefusal> {
         match self.recover() {
             RecoverOutcome::Accept(_) | RecoverOutcome::ReemitCommitted(_) => Ok(()),
-            RecoverOutcome::AcceptPreparedCanComplete => {
+            RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
                 self.cancel().map_err(BootRecoveryRefusal::PreparedReset)?;
                 match self.recover() {
                     RecoverOutcome::Accept(_) => Ok(()),

@@ -1,34 +1,40 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Real appliance integration for the Secure monitor.
+//! Real appliance integration for the Secure monitor: this board's clocks, SPI bus and entropy, and
+//! the anchor held for the SG handler.
 //!
-//! This is the ONLY place the monitor touches the DSM protocol, and it does so by REUSING
-//! `dsm-anchor-core`: the anchor's states (`anchor_core::anchor::Anchor`), its durable record
-//! (`anchor_core::rmem::SlottedStore` over TROPIC01 R-memory) and the appliance it serves. The chip
-//! (`σ^chip`) and partition (`σ^host`) leaf crypto are bound through the `Tropic` / `PartitionSig`
-//! traits; the chip session itself is [`crate::chip`].
+//! The chip session and the bring-up are `dsm-anchor-chip`, the same code the rehearsal runs against
+//! Tropic Square's chip model. The protocol is `dsm-anchor-core`.
 //!
 //! The monitor's request entry is the NSC `sg` veneer, a hardware `bxns` it cannot thread state
-//! into, so the anchor lives in a `'static` slot of a nameable type, the concrete TROPIC01 session
-//! erased behind `Box<dyn Tropic>` and `Box<dyn SlotMemory>`.
-//!
-//! Identity: every secret the anchor's identity needs derives from the board's sealed secret
-//! ([`crate::sealed`]); what the anchor is bound to (the owner's device id, online key, policy and
-//! genesis) arrives once, in the owner's provisioning.
+//! into, so the anchor lives in a `'static` slot of a nameable type.
 
 extern crate alloc;
-use alloc::boxed::Box;
-use alloc::rc::Rc;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
-use anchor_core::anchor::{Anchor, AnchorBootRefusal};
-use anchor_core::enrollment::ChipBirth;
-use anchor_core::hash::{h, kdf};
-use anchor_core::proto::{decode_request, pb};
-use anchor_core::rmem::{LayoutError, SlotMemory, SlottedStore};
-use anchor_core::service::MAX_FRAME_LEN;
-use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
-use dsm_sphincs::SphincsVariant;
+#[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+use anchor_chip::bring_up::{bring_up, serve_measured, BoardAnchor};
+#[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+use anchor_core::enrollment::Install;
+
+/// What an install on this image makes. The trial image's binds nothing (owner, 2026-11-06;
+/// CONFORMANCE_GAPS §6.152): its record is
+/// cleared at each boot, the counter set back, and the pairing key and the cage only checked
+/// ([`anchor_chip::bring_up::bring_up`]). It keys a chip whose PTRNG Tropic Square left untested, as
+/// the correction waits for the last step. The production image installs for good, and refuses that
+/// chip.
+#[cfg(all(
+    feature = "bench_self_enroll",
+    not(any(feature = "prepare_chip", feature = "identify_chip"))
+))]
+const INSTALL: Install = Install::ForTrial;
+#[cfg(not(feature = "bench_self_enroll"))]
+const INSTALL: Install = Install::ForGood;
+use anchor_chip::bring_up::{BringUpFailure, Measurement};
+use anchor_chip::Board;
+use anchor_core::proto::decode_request;
+use anchor_core::service::{err, refusal};
 
 use embedded_hal_bus::spi::ExclusiveDevice;
 use hal::fugit::RateExtU32;
@@ -36,83 +42,120 @@ use hal::Clock;
 use rp235x_hal as hal;
 use tropic01::Tropic01;
 
-use crate::chip::{ChipSession, OpenRefused, RMemSlots, RealChip};
+use crate::boundary;
 use crate::sealed::{self, SealedError};
-use crate::{SG_ERR_ENCODING, SG_ERR_INTERNAL, SG_ERR_MEASUREMENT};
 
 const XTAL_HZ: u32 = 12_000_000;
-/// σ^host scheme — MUST match the receiver (byte-compatible SPX128f).
-const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
-/// The counter's lifetime budget `H0` at birth: tropic01 `MCOUNTER_VALUE_MAX`.
-const ENROLL_H0: u32 = 0xFFFF_FFFE;
-/// The first R-memory data slot of the anchor's record.
-const RECORD_FIRST_SLOT: u16 = 0;
-
-type Store = SlottedStore<Box<dyn SlotMemory>>;
 
 /// The anchor, driven by the SG handler. `'static` slot: the SG entry is a `bxns`, so the handler
 /// reaches the anchor here rather than by argument. Single-threaded Secure context (no interrupt or
 /// second core touches it — core1 is contained), so `static mut` access through `addr_of_mut!` is
 /// sound, matching the `LAST_SEQ` / mailbox pattern in `main`.
-static mut MONITOR_APP: Option<Anchor<Box<dyn Tropic>, SphincsPart, Store>> = None;
+static mut MONITOR_APP: Monitor = Monitor::NotBroughtUp;
 
-/// BLAKE3-SPHINCS+ SPX128f as the partition (`σ^host`) signature scheme — the SAME crate + contract
-/// as the pico anchor, so an anchor born here verifies on the same receiver.
-pub struct SphincsPart;
-impl PartitionSig for SphincsPart {
-    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
-        let kp =
-            dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed).map_err(partition_error)?;
-        Ok((kp.secret_key.clone(), kp.public_key.clone()))
+/// What the handler finds in its slot.
+enum Monitor {
+    NotBroughtUp,
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+    Up(BoardAnchor),
+    /// What the identify image read from the chip, for every `OP_IDENTIFY`.
+    #[cfg(feature = "identify_chip")]
+    Identified(anchor_core::identify::ChipSurvey),
+    /// Why the anchor did not come up, for the answer to any request: with debug disabled this is
+    /// the only way to learn it from a locked board. Names steps and chip faults, never a secret.
+    Refused(String),
+}
+
+/// The RP2350 as the chip session's board.
+struct Rp2350Board<R> {
+    rosc: R,
+}
+
+impl<R: core::borrow::Borrow<hal::rosc::RingOscillator<hal::rosc::Enabled>>> Board
+    for Rp2350Board<R>
+{
+    fn random_key(&self) -> Option<[u8; 32]> {
+        let mut hasher = blake3::Hasher::new_derive_key("DSM/anchor/session-entropy/v1");
+        for _block in 0..TRNG_BLOCKS {
+            let mut block = trng_block()?;
+            hasher.update(&block);
+            crate::zeroize(&mut block);
+        }
+        // The ring oscillator's own bits go in too, and nothing rests on them.
+        for _byte in 0..32 {
+            let byte = (0..8).fold(0u8, |acc, _bit| {
+                (acc << 1) | u8::from(self.rosc.borrow().get_random_bit())
+            });
+            hasher.update(&[byte]);
+        }
+        Some(*hasher.finalize().as_bytes())
     }
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
-        dsm_sphincs::sign(PART_VARIANT, sk, digest).map_err(partition_error)
+
+    fn wait_100ms(&self) {
+        cortex_m::asm::delay(15_000_000);
     }
-    fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
-        dsm_sphincs::verify(PART_VARIANT, pk, digest, sig).unwrap_or(false)
+
+    fn alive(&self) {
+        boundary::feed_watchdog_in_service();
+    }
+
+    /// The bootrom's version byte: "the value 2 for A2 silicon, 3 for A3 silicon, and 4 for A4 silicon"
+    /// (RP2350 datasheet, "Bootrom Contents"). It is in ROM, so a chip cannot be told otherwise by
+    /// anything flash holds.
+    fn silicon_revision(&self) -> u8 {
+        unsafe { core::ptr::read_volatile(BOOTROM_VERSION_BYTE as *const u8) }
     }
 }
 
-/// The SPHINCS+ failure, as the partition reports it.
-fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
-    match e {
-        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
-            PartitionError::SecretKey
-        }
-        dsm_sphincs::Error::Crypto(
-            dsm_sphincs::CryptoFailure::EmptySigningMessage
-            | dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
-        ) => PartitionError::Message,
-        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
-            PartitionError::SelfCheck
-        }
-    }
-}
+/// Where the bootrom keeps its version.
+const BOOTROM_VERSION_BYTE: usize = 0x0000_0013;
+/// TRNG blocks of 192 bits behind each key.
+const TRNG_BLOCKS: usize = 3;
+/// `clk_sys` cycles between samples of the TRNG's ring oscillator. The block's documented minimum is 17.
+const TRNG_SAMPLE_CYCLES: u32 = 1024;
+/// A failed health test is tried again this many times before the source is called failed.
+const TRNG_TRIES: usize = 8;
+/// Reads of `RNG_ISR` one block may take: about 0.7 s, against the ~5 ms a block takes.
+const TRNG_POLLS: u32 = 10_000_000;
+/// `RNG_ISR` and `RNG_ICR`: `EHR_VALID`, `AUTOCORR_ERR`, `CRNGT_ERR`, `VN_ERR`.
+const TRNG_ALL_FLAGS: u32 = 0xF;
+const TRNG_HEALTH_FAILED: u32 = 0xE;
 
-/// The anchor's identity on this board. The public part roots in the chip's fused `stpub` and
-/// `chip_id`; every secret derives from the sealed secret, which nothing outside this board holds.
-struct ChipIdentity {
-    anchor_id: [u8; 32],
-    partition_device_id: [u8; 32],
-    partition_key_seed: [u8; 32],
-    birth_entropy: [u8; 32],
-    birth_host_nonce: [u8; 32],
-    birth_witness: [u8; 32],
-    pairing: [u8; 32],
-}
-impl ChipIdentity {
-    fn derive(stpub: &[u8; 32], chip_id_hash: &[u8; 32], sealed: &[u8; 32]) -> Self {
-        let root = h("DSM/anchor/chip-root/v1", &[stpub, chip_id_hash]);
-        Self {
-            anchor_id: h("DSM/anchor/anchor-id/v1", &[&root]),
-            partition_device_id: h("DSM/anchor/partition-device-id/v1", &[&root]),
-            partition_key_seed: kdf(sealed, "DSM/anchor/partition-seed/v2", &[&root]),
-            birth_entropy: kdf(sealed, "DSM/anchor/birth-entropy/v2", &[&root]),
-            birth_host_nonce: kdf(sealed, "DSM/anchor/birth-host-nonce/v2", &[&root]),
-            birth_witness: kdf(sealed, "DSM/anchor/birth-witness/v2", &[&root]),
-            pairing: kdf(sealed, "DSM/anchor/pairing-key/v1", &[&root]),
+/// One 192-bit block from the RP2350's TRNG, passed by the block's own health tests (autocorrelation,
+/// continuous, von Neumann). `None` when it never passes: there is no lesser source behind it.
+fn trng_block() -> Option<[u8; 24]> {
+    let trng = unsafe { &*hal::pac::TRNG::ptr() };
+    for _try in 0..TRNG_TRIES {
+        trng.rng_icr().write(|w| unsafe { w.bits(TRNG_ALL_FLAGS) });
+        trng.sample_cnt1()
+            .write(|w| unsafe { w.bits(TRNG_SAMPLE_CYCLES) });
+        trng.rnd_source_enable().write(|w| unsafe { w.bits(1) });
+        for _poll in 0..TRNG_POLLS {
+            let flags = trng.rng_isr().read();
+            if flags.bits() & TRNG_HEALTH_FAILED != 0 {
+                break;
+            }
+            if flags.ehr_valid().bit_is_set() {
+                let words = [
+                    trng.ehr_data0().read().bits(),
+                    trng.ehr_data1().read().bits(),
+                    trng.ehr_data2().read().bits(),
+                    trng.ehr_data3().read().bits(),
+                    trng.ehr_data4().read().bits(),
+                    trng.ehr_data5().read().bits(),
+                ];
+                trng.rnd_source_enable().write(|w| unsafe { w.bits(0) });
+                let mut block = [0u8; 24];
+                for (bytes, word) in block.chunks_exact_mut(4).zip(words) {
+                    bytes.copy_from_slice(&word.to_le_bytes());
+                }
+                return Some(block);
+            }
         }
+        trng.rnd_source_enable().write(|w| unsafe { w.bits(0) });
+        trng.trng_sw_reset().write(|w| unsafe { w.bits(1) });
     }
+    None
 }
 
 /// The TROPIC01 driver error on the monitor's bus: rp235x SPI and GPIO are infallible, and the
@@ -135,66 +178,82 @@ pub enum InitStage {
     Recovery = 8,
     Sealed = 9,
     Layout = 10,
+    Entropy = 11,
+    /// A chip that is given nothing: refused before the first write to it.
+    Unfit = 12,
+    /// The `prepare_chip` image has done the one thing it does.
+    #[cfg(feature = "prepare_chip")]
+    Prepared = 13,
 }
 
 /// Why [`init`] refused to install the anchor: the failing stage and the cause it reported.
-/// Its `Debug` rendering is what `main` copies into `DSM_SECURE_INIT_CAUSE`.
 pub enum InitFailure {
     Clocks(hal::clocks::InitError),
-    ChipId(ChipError),
-    CertStore(ChipError),
-    /// tropic01 does not export its `PublicKeyError`, so the cause is carried type-erased.
-    CertStoreKey(Box<dyn core::fmt::Debug>),
+    /// The TRNG never passed its health tests: nothing can be keyed on this board.
+    Entropy,
     /// The board's sealed secret, or the secure boot it requires, is not there.
     Sealed(SealedError),
-    Session(OpenRefused<ChipError>),
-    /// The counter or the resident chip key.
-    Enroll(TropicError),
-    /// The R-memory record does not fit.
-    Layout(LayoutError),
-    /// The record could not be restored, or §26 recovery refused it.
-    Recovery(AnchorBootRefusal),
+    BringUp(BringUpFailure<ChipError>),
+    /// The `prepare_chip` image configured this chip: what it now says it is.
+    #[cfg(feature = "prepare_chip")]
+    Prepared(anchor_chip::session::ChipFacts),
 }
 
 impl InitFailure {
     pub fn stage(&self) -> InitStage {
         match self {
             Self::Clocks(_) => InitStage::Clocks,
-            Self::ChipId(_) => InitStage::ChipId,
-            Self::CertStore(_) => InitStage::CertStore,
-            Self::CertStoreKey(_) => InitStage::CertStoreKey,
+            Self::Entropy => InitStage::Entropy,
             Self::Sealed(_) => InitStage::Sealed,
-            Self::Session(_) => InitStage::Session,
-            Self::Enroll(_) => InitStage::Enroll,
-            Self::Layout(_) => InitStage::Layout,
-            Self::Recovery(_) => InitStage::Recovery,
+            Self::BringUp(BringUpFailure::ChipId(_)) => InitStage::ChipId,
+            Self::BringUp(BringUpFailure::CertStore(_)) => InitStage::CertStore,
+            Self::BringUp(BringUpFailure::CertStoreKey(_)) => InitStage::CertStoreKey,
+            Self::BringUp(BringUpFailure::Session(_)) => InitStage::Session,
+            Self::BringUp(BringUpFailure::Unfit(_)) => InitStage::Unfit,
+            #[cfg(feature = "prepare_chip")]
+            Self::Prepared(_) => InitStage::Prepared,
+            Self::BringUp(BringUpFailure::Enroll(_)) => InitStage::Enroll,
+            Self::BringUp(BringUpFailure::Layout(_)) => InitStage::Layout,
+            Self::BringUp(BringUpFailure::Recovery(_)) => InitStage::Recovery,
         }
     }
 }
 
 impl core::fmt::Debug for InitFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let stage = self.stage();
         match self {
-            Self::Clocks(cause) => write!(f, "{stage:?}: {cause:?}"),
-            Self::ChipId(cause) | Self::CertStore(cause) => write!(f, "{stage:?}: {cause:?}"),
-            Self::CertStoreKey(cause) => write!(f, "{stage:?}: {cause:?}"),
-            Self::Sealed(cause) => write!(f, "{stage:?}: {cause:?}"),
-            Self::Session(cause) => write!(f, "{stage:?}: {cause:?}"),
-            Self::Enroll(cause) => write!(f, "{stage:?}: {cause:?}"),
-            Self::Layout(cause) => write!(f, "{stage:?}: {cause:?}"),
-            Self::Recovery(cause) => write!(f, "{stage:?}: {cause:?}"),
+            Self::Clocks(cause) => write!(f, "Clocks: {cause:?}"),
+            Self::Entropy => write!(f, "the TRNG did not pass its health tests"),
+            Self::Sealed(cause) => write!(f, "Sealed: {cause:?}"),
+            Self::BringUp(cause) => write!(f, "{cause:?}"),
+            #[cfg(feature = "prepare_chip")]
+            Self::Prepared(facts) => write!(
+                f,
+                "{}. Its PTRNG is now configured and tested at every start-up. Load the trial image",
+                facts.describe()
+            ),
         }
     }
 }
 
-/// Bring up the TROPIC01 from Secure and install the anchor in `MONITOR_APP`: unprovisioned when
-/// its R-memory holds no record, otherwise restored from the record through §26 recovery. Fail-
-/// closed: any failure returns the failing stage and leaves `MONITOR_APP = None`, so the SG handler
-/// refuses every request (`SG_ERR_INTERNAL`). Steals the peripherals it needs
-/// (CLOCKS/PLL/XOSC/ROSC/TIMER0/SPI0 + GP16-19); `main` must not re-init clocks after.
+/// Keep why the anchor did not come up, for the answer to every request.
+///
+/// SAFETY: single-threaded reset context, before the Non-secure launch.
+pub unsafe fn keep_refusal(failure: &InitFailure) {
+    *core::ptr::addr_of_mut!(MONITOR_APP) = Monitor::Refused(format!("{failure:?}"));
+}
+
+/// Bring up the TROPIC01 from Secure and install the anchor in `MONITOR_APP`. Fail-closed: any
+/// failure returns the failing stage and installs nothing, so every request is answered with the
+/// refusal. The sealed secret and the secure context are checked first: a board without
+/// them does nothing to its chip. Steals the peripherals it needs (CLOCKS/PLL/XOSC/ROSC/TIMER0/SPI0
+/// + GP16-19); `main` must not re-init clocks after.
+///
+/// Never inlined: `main` does not return, so a frame of its own is held under every request served
+/// after the launch. What bring-up needs is given back here, before the launch.
 ///
 /// SAFETY: single-threaded reset context, called once from `main` before the Non-secure launch.
+#[inline(never)]
 pub unsafe fn init() -> Result<(), InitFailure> {
     let mut pac = hal::pac::Peripherals::steal();
     let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
@@ -209,11 +268,70 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     )
     .map_err(InitFailure::Clocks)?;
 
+    // The TRNG keys each L3 handshake, and is out of reset before anything needs it.
+    pac.RESETS.reset().modify(|_, w| w.trng().clear_bit());
+    for _read in 0..TRNG_POLLS {
+        if pac.RESETS.reset_done().read().trng().bit_is_set() {
+            break;
+        }
+    }
+    let rosc = hal::rosc::RingOscillator::new(pac.ROSC).initialize();
+    // A source that fails now answers every request with why, instead of a chip that will not open.
+    match (Rp2350Board { rosc: &rosc }).random_key() {
+        Some(mut proof) => crate::zeroize(&mut proof),
+        None => return Err(InitFailure::Entropy),
+    }
+
+    // The board's sealed secret: without it the anchor has no identity to serve under.
+    #[cfg(not(feature = "bench_self_enroll"))]
+    let mut sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
+    // A board locked for production is a finished unit, and the trial stands down on it. Any other
+    // board, its secret page blank or written by an earlier procedure, takes the trial under a secret
+    // of this boot held nowhere: the page is neither used nor written.
+    #[cfg(all(
+        feature = "bench_self_enroll",
+        not(any(feature = "identify_chip", feature = "prepare_chip"))
+    ))]
+    let mut sealed: [u8; 32] = {
+        match sealed::read_sealed_secret() {
+            Ok(mut burned) => {
+                crate::zeroize(&mut burned);
+                if sealed::locked_for_production().map_err(InitFailure::Sealed)? {
+                    return Err(InitFailure::Sealed(SealedError::AlreadySealed));
+                }
+            }
+            Err(SealedError::Unprovisioned) => {}
+            Err(cause) => return Err(InitFailure::Sealed(cause)),
+        }
+        (Rp2350Board { rosc: &rosc })
+            .random_key()
+            .ok_or(InitFailure::Entropy)?
+    };
+    // The prepare image writes the chip irreversibly, so it runs only on a board whose secret page is
+    // blank, and its secret is one of this boot held nowhere.
+    #[cfg(feature = "prepare_chip")]
+    let mut sealed: [u8; 32] = match sealed::read_sealed_secret() {
+        Err(SealedError::Unprovisioned) => (Rp2350Board { rosc: &rosc })
+            .random_key()
+            .ok_or(InitFailure::Entropy)?,
+        Ok(_burned) => return Err(InitFailure::Sealed(SealedError::AlreadySealed)),
+        Err(cause) => return Err(InitFailure::Sealed(cause)),
+    };
+    // The identify image binds nothing and needs no secret. It says whether the board holds one.
+    #[cfg(feature = "identify_chip")]
+    let board_otp = match sealed::read_sealed_secret() {
+        Ok(mut burned) => {
+            crate::zeroize(&mut burned);
+            "a secret is sealed in its OTP page"
+        }
+        Err(SealedError::Unprovisioned) => "its OTP secret page is blank",
+        Err(cause) => return Err(InitFailure::Sealed(cause)),
+    };
+    #[cfg(feature = "production")]
+    sealed::assert_secure_context().map_err(InitFailure::Sealed)?;
+
     // Let the TROPIC01 settle after cold power-up before the first SPI transaction (~1 s @150 MHz).
     cortex_m::asm::delay(150_000_000);
-
-    // The ring oscillator's entropy keys each L3 handshake; the chip session keeps it to reopen.
-    let rosc = hal::rosc::RingOscillator::new(pac.ROSC).initialize();
 
     let timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
     let sio = hal::Sio::new(pac.SIO);
@@ -245,89 +363,113 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         cortex_m::asm::delay(150_000_000); // ~1 s @150 MHz
     }
 
-    // Phase 2: read the REAL chip identity (chip_id + device-cert stpub) BEFORE session_start
-    // consumes the NoSession handle. Fail closed if the chip will not disclose a real identity.
-    let mut tropic = Tropic01::new(spi_dev);
-    let chip_id = tropic.get_info_chip_id().map_err(InitFailure::ChipId)?;
-    let chip_id_hash = h("DSM/anchor/chip-id/v1", &[chip_id]);
-    let cert_store = tropic
-        .get_info_cert_store()
-        .map_err(InitFailure::CertStore)?;
-    let stpub: [u8; 32] = *cert_store
-        .public_key()
-        .map_err(|cause| InitFailure::CertStoreKey(Box::new(cause)))?;
-    // Space the cert-store read from session_start's own internal cert read — the TROPIC needs a gap
-    // between back-to-back L2 reads (the pico gets this implicitly from USB polling).
-    cortex_m::asm::delay(15_000_000); // ~100 ms @150 MHz
-                                      // The board's sealed secret: without it the anchor has no identity to serve under.
-    let sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
-    #[cfg(feature = "production")]
-    sealed::assert_secure_context().map_err(InitFailure::Sealed)?;
-    let ident = ChipIdentity::derive(&stpub, &chip_id_hash, &sealed);
-
-    // Phase 3: the authenticated L3 session, on the board's own pairing slot once born.
-    let session = ChipSession::open(tropic, ident.pairing, rosc).map_err(InitFailure::Session)?;
-    let session = Rc::new(RefCell::new(session));
-
-    // Phase 4: the counter (initialized once on a virgin chip) and the resident chip key.
-    let live = session
-        .borrow_mut()
-        .counter_at_birth(ENROLL_H0)
-        .map_err(InitFailure::Enroll)?;
-    if live > ENROLL_H0 {
-        return Err(InitFailure::Enroll(TropicError::Refused));
+    // This image does one thing, and every request then hears how it went.
+    #[cfg(feature = "prepare_chip")]
+    {
+        let prepared = anchor_chip::bring_up::prepare_chip(
+            Tropic01::new(spi_dev),
+            sealed,
+            Rp2350Board { rosc },
+        );
+        crate::zeroize(&mut sealed);
+        return Err(match prepared {
+            Ok(facts) => InitFailure::Prepared(facts),
+            Err(cause) => InitFailure::BringUp(cause),
+        });
     }
-    let chip_pk = session
-        .borrow_mut()
-        .resident_key()
-        .map_err(InitFailure::Enroll)?;
-    let chip = ChipBirth {
-        anchor_id: ident.anchor_id,
-        partition_device_id: ident.partition_device_id,
-        chip_pk,
-        enrolled_counter: ENROLL_H0,
-        partition_trng: ident.birth_entropy,
-        chip_birth_witness: ident.birth_witness,
-        host_nonce: ident.birth_host_nonce,
-        partition_key_seed: ident.partition_key_seed,
-    };
 
-    // Phase 5: the record in R-memory, and the anchor it describes.
-    let slots: Box<dyn SlotMemory> = Box::new(RMemSlots {
-        session: session.clone(),
-    });
-    let store =
-        SlottedStore::new(slots, RECORD_FIRST_SLOT, MAX_FRAME_LEN).map_err(InitFailure::Layout)?;
-    let tropic: Box<dyn Tropic> = Box::new(RealChip {
-        session,
-        h0: ENROLL_H0,
-    });
-    let anchor = Anchor::boot(chip, tropic, store).map_err(InitFailure::Recovery)?;
-    *core::ptr::addr_of_mut!(MONITOR_APP) = Some(anchor);
-    Ok(())
+    // This image reads the chip, writes nothing, and answers every OP_IDENTIFY with what it read.
+    #[cfg(feature = "identify_chip")]
+    {
+        let mut survey =
+            anchor_chip::bring_up::identify_chip(Tropic01::new(spi_dev), Rp2350Board { rosc })
+                .map_err(InitFailure::BringUp)?;
+        survey
+            .readings
+            .push(anchor_core::identify::ChipReading::new(
+                "the board's OTP",
+                Ok(String::from(board_otp)),
+            ));
+        *core::ptr::addr_of_mut!(MONITOR_APP) = Monitor::Identified(survey);
+        return Ok(());
+    }
+
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+    let brought_up = bring_up(
+        Tropic01::new(spi_dev),
+        &sealed,
+        Rp2350Board { rosc },
+        INSTALL,
+    );
+    // Everything the anchor needs derives from it, and nothing needs it again this boot.
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+    crate::zeroize(&mut sealed);
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+    let anchor = brought_up.map_err(InitFailure::BringUp)?;
+    #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+    {
+        *core::ptr::addr_of_mut!(MONITOR_APP) = Monitor::Up(anchor);
+        Ok(())
+    }
 }
 
-fn op_requires_measurement(op: i32) -> bool {
-    matches!(
-        pb::Op::try_from(op),
-        Ok(pb::Op::Prepare | pb::Op::Commit | pb::Op::Emit | pb::Op::Finalize | pb::Op::Recover)
-    )
-}
-
-/// Decode the Secure request copy, apply the §2 measurement gate to the DECODED op (never the
-/// untrusted mailbox opcode hint), and serve it through the anchor. Returns the encoded
-/// `ApplianceResponse` frame, or an `SG_ERR_*` status on a gate/decode/uninitialized failure.
+/// Serve the Secure request copy through the anchor, under the measurement taken for it. An anchor
+/// that did not come up answers with why.
 ///
 /// SAFETY: single-threaded Secure context; the SG handler is the only caller.
-pub unsafe fn service_request(frame: &[u8], measurement_ok: bool) -> Result<Vec<u8>, u32> {
-    let req = decode_request(frame).map_err(|_| SG_ERR_ENCODING)?;
-    if op_requires_measurement(req.op) && !measurement_ok {
-        // §7.12 measurement failure => no counter movement, no TROPIC/host signature.
-        return Err(SG_ERR_MEASUREMENT);
-    }
+pub unsafe fn service_request(frame: Vec<u8>, _measurement: Measurement) -> Vec<u8> {
     let slot = &mut *core::ptr::addr_of_mut!(MONITOR_APP);
-    let anchor = slot.take().ok_or(SG_ERR_INTERNAL)?;
-    let (anchor, answer) = anchor.serve(frame);
-    *slot = Some(anchor);
-    Ok(answer)
+    match core::mem::replace(slot, Monitor::NotBroughtUp) {
+        #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+        Monitor::Up(anchor) => {
+            // The anchor owns the frame from here: it is held no longer than its request needs
+            // it (§4.9: wiped when let go), so a try-run's payment signs with it gone.
+            let (anchor, answer) = serve_measured(anchor, frame, _measurement);
+            *slot = Monitor::Up(anchor);
+            answer
+        }
+        #[cfg(feature = "identify_chip")]
+        Monitor::Identified(survey) => {
+            let answer = anchor_core::identify::answer(&frame, &survey);
+            *slot = Monitor::Identified(survey);
+            answer
+        }
+        Monitor::Refused(reason) => {
+            let answer = not_up(&frame, &reason);
+            *slot = Monitor::Refused(reason);
+            answer
+        }
+        Monitor::NotBroughtUp => not_up(&frame, "the anchor was not brought up"),
+    }
+}
+
+/// Whether a request frame of `total` bytes may be taken in now: any request's, a head with an
+/// authorization's signature after it at most, and a larger one, a payment check's, only while the
+/// anchor holds no record for its copies to meet.
+///
+/// SAFETY: single-threaded Secure context; the SG handler is the only caller.
+pub unsafe fn takes_frame(total: usize) -> bool {
+    total <= anchor_chip::MAX_REQUEST_BYTES || takes_a_payment_check(total)
+}
+
+#[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
+unsafe fn takes_a_payment_check(total: usize) -> bool {
+    let slot = &*core::ptr::addr_of!(MONITOR_APP);
+    total <= anchor_chip::MAX_FRAME_BYTES
+        && matches!(slot, Monitor::Up(anchor) if anchor.takes_a_payment_check())
+}
+
+/// The identify and chip-preparing images serve no payment, so they take no frame larger than a
+/// prepare's.
+#[cfg(any(feature = "prepare_chip", feature = "identify_chip"))]
+unsafe fn takes_a_payment_check(total: usize) -> bool {
+    total <= anchor_chip::MAX_REQUEST_BYTES
+}
+
+/// The answer of an anchor that did not come up, to whichever op asked.
+fn not_up(frame: &[u8], reason: &str) -> Vec<u8> {
+    match decode_request(frame) {
+        Ok(req) => refusal(req.op, err::NOT_UP, reason),
+        Err(_undecodable) => refusal(0, err::NOT_UP, reason),
+    }
 }

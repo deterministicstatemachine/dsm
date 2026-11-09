@@ -1055,7 +1055,14 @@ impl AppRouterImpl {
                     if !matches!(ble_send_result, Ok(crate::host::Delivery::Sent)) {
                         crate::bluetooth::owed_frame_driver::kick();
                     }
-                    match ble_send_result {
+                    // The proposal stands whether or not the link carried its prepare this
+                    // instant: a prepare the link did not take is owed, and goes when the link
+                    // returns. The answer is the proposal's either way, named by its commitment,
+                    // and the screen follows the step from Rust's pending list; only what the
+                    // link did is said. On the phone this answered a refusal when the link was
+                    // down for a moment, and the screen said *Not sent* while the prepare then
+                    // went out and the payment completed.
+                    let message = match ble_send_result {
                         Ok(crate::host::Delivery::Sent) => {
                             crate::bluetooth::owed_frame_driver::delivered(
                                 counterparty_device_id,
@@ -1063,33 +1070,31 @@ impl AppRouterImpl {
                                     commitment_hash,
                                     crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
                                 )],
-                            )
+                            );
+                            "prepare sent over BLE; the transfer completes when the peer's \
+                             response arrives"
+                                .to_string()
                         }
                         Ok(crate::host::Delivery::NotNow) => {
-                            return err(
-                                "wallet.sendOffline: no paired link to the counterparty now; the \
-                                 prepare is sent again when the link returns"
-                                    .into(),
-                            );
+                            "no paired link to the counterparty now; the prepare is owed and goes \
+                             when the link returns"
+                                .to_string()
                         }
                         Err(e) => {
-                            return err(format!(
-                                "{e}; the prepare is sent again when the link returns"
-                            ));
+                            log::warn!("[wallet.sendOffline] {e}; the prepare is owed and goes when the link returns");
+                            format!("{e}; the prepare is owed and goes when the link returns")
                         }
-                    }
+                    };
 
-                    // This device's own answer: the prepare went out and the proposal
-                    // is identified by its commitment. The peer's prepare response,
-                    // when it arrives over BLE, is a different message.
+                    // This device's own answer: the proposal is identified by its commitment.
+                    // The peer's prepare response, when it arrives over BLE, is a different
+                    // message.
                     let resp = generated::BilateralTransferResponse {
                         success: true,
                         transaction_hash: Some(generated::Hash32 {
                             v: commitment_hash.to_vec(),
                         }),
-                        message: "prepare sent over BLE; the transfer completes when the peer's \
-                                  response arrives"
-                            .to_string(),
+                        message,
                     };
                     pack_envelope_ok(generated::envelope::Payload::BilateralTransferResponse(
                         resp,

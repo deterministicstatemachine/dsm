@@ -14,12 +14,14 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `2778bb9dab75145755463bbe2fe37bd20ddb5f10` | 4527 |
+| `specs/DSM_High_Level_Explainer.md` | `bc1afdb311b0886dd08a9af8c213e4b0aa99622e` | 4529 |
 | `specs/SoFi_Settlement_Specification.md` | `2f4aeca7089c85a9388ace3658b9cf4b23e572c0` | 3131 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
 | `specs/DSM_Storage_Node_Specification.md` | `118d8afac5beff4e404fb0eaaf0e6ede3f764f8e` | 647 |
 
 Storage node pin updated 2026-11-08 for the owner's decision of 2026-11-05 (each operator's own certificate), quoted in the specification: a storage set has no shared CA, and each member is pinned to its own operator's CA. No requirement row names a storage CA, so every row reads as written.
+
+Explainer pin updated 2026-11-04 after DSM Amendment A32 (MR-DSM-0357, MR-DSM-0358).
 
 Explainer pin updated 2026-11-04 after A28's first-spend exception came out (direction pasted into the session, 2026-11-04): MR-DSM-0348 removed, and every other row reads as written. The edit replaced one line in place.
 
@@ -195,7 +197,7 @@ Reconciled on 2026-09-22 from two extractions: `claude-chat` (798 rows) and `cha
 | DSM_Storage_Node_Specification.md | 128 | 122 | 6 |
 | **Total** | **859** | **652** | **207** |
 
-Added afterwards by amendment (§7.1): DSM 82, SoFi 100, storage 30, for 1075 canonical requirements in all.
+Added afterwards by amendment (§7.1): DSM 84, SoFi 100, storage 30, for 1077 canonical requirements in all.
 
 Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sources** are the extraction IDs merged into the row (`cc:` claude-chat, `gpt:` chatgpt); the first source locates the quote. **Flags** carry the findings in §8.7 that bear on the row.
 
@@ -554,6 +556,8 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0349 | obligation | explicit | A payer tells each of its contacts of each offline load and unload it admits, sealed to that contact on the relationship's route, naming the economic position it is admitted at. What is owed is durable from the transaction that commits the boundary, is delivered only once the boundary is admitted, is delivered again at a later sync if delivery failed, and a holder whose contacts could not all be told is told so. | amendment: DSM Amendment A30 (2026-11-04) | owner | none |
 | MR-DSM-0350 | obligation | explicit | A contact told of some of a payer's boundaries is told of every one since, in order; a contact told of none, one added after the boundary among them, is told of the latest alone at the payer's next sync. | amendment: DSM Amendment A30 (2026-11-04) | owner | none |
 | MR-DSM-0351 | invariant | explicit | A boundary notice is discovery and no authority: a contact's sync validates the step it names, one hop, at a cost that does not grow with the payer's history, and only that check records an offline account. A notice naming a step that is no boundary records nothing; a position not established is left and read again, never read as its negation; one that verifies as wrong, or whose bytes name no position, is refused and not read again. | amendment: DSM Amendment A30 (2026-11-04) | owner | none |
+| MR-DSM-0357 | prohibition | explicit | Connecting an anchor makes nothing permanent. A status read binds nothing, and an anchor is installed only when its holder tells the wallet to, after the wallet has shown what the install makes permanent. | amendment: DSM Amendment A32 (2026-11-04) | owner request | none |
+| MR-DSM-0358 | obligation | explicit | Before anything permanent, an anchor goes through its install on its real chip and board with the permanent parts substituted, and leaves the chip as it found it. The provisioning goes through it again and refuses, with nothing written, unless it passes. A trial image does the same on a new board before anything is burned, and it cannot provision. | amendment: DSM Amendment A32 (2026-11-04) | owner request | none |
 
 ### 8.2 SoFi settlement specification
 

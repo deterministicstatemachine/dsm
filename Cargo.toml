@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/dsm-anchor-core",
     "crates/dsm-app-host",
+    "crates/dsm-dev-net",
     "crates/dsm-sphincs",
     "crates/dsm-receipt-service",
     "crates/wildstate-duel",
@@ -23,6 +24,8 @@ exclude = [
     "crates/dsm-android-anchor",
     # Host used-chip bench harness (native serialport dep); built directly, not in CI.
     "crates/dsm-anchor-bench",
+    # The anchor's chip code; its tests need Tropic Square's model (ci/tropic01_model.sh).
+    "crates/dsm-anchor-chip",
     # RP2350 TrustZone measurement-seal images (thumbv8m-only; two-image build).
     "crates/dsm-anchor-secure-monitor",
     "crates/dsm-anchor-nonsecure-app",

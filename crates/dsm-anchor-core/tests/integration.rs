@@ -7,8 +7,11 @@
 use anchor_core::accept::{
     accept_offline, AcceptError, DsmVerifier, OfflineStateRefused, VerifierContext,
 };
-use anchor_core::appliance::{Appliance, BootRecoveryRefusal, Record, RecoverOutcome, Status};
-use anchor_core::enrollment::{birth, BirthInputs};
+use anchor_core::appliance::{
+    owner_authorization_digest, Appliance, ApplianceError, BootRecoveryRefusal, Record,
+    RecoverOutcome, Status,
+};
+use anchor_core::enrollment::{birth, BirthInputs, Install};
 use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OfflineRelease, OwnedTransition,
@@ -25,7 +28,6 @@ const GENESIS_ROOT: [u8; 32] = [0x11; 32];
 const POLICY: [u8; 32] = [0x33; 32];
 const RECIP: [u8; 32] = [0x44; 32];
 const RCHAL: [u8; 32] = [0x55; 32];
-const ONLINE_PK: [u8; 32] = [0x66; 32];
 // Sender device SMT roots supplied by the DSM layer for a transfer (the appliance signs over
 // them; the receiver's DsmVerifier proves their SMT inclusion — mocked true here).
 const R_I: [u8; 32] = [0x51; 32];
@@ -42,6 +44,7 @@ const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX1
 /// it under the pinned `pk_chip`.
 struct Chip {
     h: u32,
+    start: u32,
     resident: SigningKey,
     closed_births: u32,
 }
@@ -49,6 +52,7 @@ impl Chip {
     fn with_h(h: u32) -> Self {
         Self {
             h,
+            start: h,
             resident: SigningKey::from_bytes(&[0xC0; 32]),
             closed_births: 0,
         }
@@ -71,6 +75,36 @@ impl Tropic for Chip {
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
         Ok(self.resident.sign(message).to_bytes().to_vec())
     }
+    fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        matches!(
+            (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
+            (Ok(key), Ok(signature)) if matches!(
+                ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                    .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                Ok(())
+            )
+        )
+    }
+
+    fn set_counter_back(&mut self) -> Result<(), TropicError> {
+        self.h = self.start;
+        Ok(())
+    }
+
+    fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
+        vec![anchor_core::try_run::TryStep::new(
+            "this software chip's counter reads",
+            self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
+        )]
+    }
+
+    fn challenge_entropy(&mut self) -> Result<anchor_core::tropic::ChallengeEntropy, TropicError> {
+        Ok(anchor_core::tropic::ChallengeEntropy {
+            board: software_entropy(),
+            chip: software_entropy(),
+        })
+    }
+
     fn close_birth(&mut self) -> Result<(), TropicError> {
         self.closed_births += 1;
         Ok(())
@@ -108,6 +142,18 @@ impl PartitionSig for Partition {
     }
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
         matches!(dsm_sphincs::verify(PARTITION, pk, digest, sig), Ok(valid) if valid)
+    }
+    fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+        matches!(dsm_sphincs::verify(dsm_sphincs::SphincsVariant::SPX256f, pk_on, digest, sig), Ok(valid) if valid)
+    }
+    fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(dsm_sphincs::SphincsVariant::SPX256f, seed)
+                .map_err(partition_error)?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
+    }
+    fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest).map_err(partition_error)
     }
 }
 
@@ -163,6 +209,66 @@ impl DsmVerifier for Dsm {
 
 // --- helpers ---
 
+/// The owner's device key, BLAKE3-SPHINCS+ SPX256f from a fixed seed: the key the anchors here are
+/// provisioned for, whose signature authorizes a prepare.
+fn owner_key() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEY: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| match Partition::owner_keygen(&[0x0A; 32]) {
+        Ok(key) => key,
+        Err(e) => panic!("the owner's key: {e:?}"),
+    })
+}
+
+/// The owner-authorization digest of preparing `t` on `a`, under challenge `rc` with device roots
+/// `before`/`after`, and the owner's signature of it.
+fn owner_authorization<T: Tropic, P: PartitionSig>(
+    a: &Appliance<T, P>,
+    t: &OwnedTransition,
+    rc: &[u8; 32],
+    before: &[u8; 32],
+    after: &[u8; 32],
+) -> ([u8; 32], Vec<u8>) {
+    let digest = owner_authorization_digest(
+        &a.bundle,
+        &a.active.root,
+        t.anchor_counter,
+        &transition_digest(&t.as_transition(), rc),
+        before,
+        after,
+    );
+    (digest, owner_sign(&digest))
+}
+
+fn owner_sign(digest: &[u8; 32]) -> Vec<u8> {
+    match Partition::owner_sign(&owner_key().0, digest) {
+        Ok(sig) => sig,
+        Err(e) => panic!("the owner signs: {e:?}"),
+    }
+}
+
+/// The owner authorizes preparing `t` on `a`: the authorization it then holds for that prepare.
+fn authorize<T: Tropic, P: PartitionSig>(
+    a: &mut Appliance<T, P>,
+    t: &OwnedTransition,
+    rc: &[u8; 32],
+    before: &[u8; 32],
+    after: &[u8; 32],
+) {
+    let (digest, signature) = owner_authorization(a, t, rc, before, after);
+    a.authorize(&digest, &signature).unwrap();
+}
+
+/// An `OP_AUTHORIZE` frame as it goes over the wire: the message, then the signature after it.
+fn authorize_frame(digest: &[u8; 32], signature: &[u8]) -> Vec<u8> {
+    let mut frame = encode_request(&pb::ApplianceRequest {
+        op: pb::Op::Authorize as i32,
+        authorization_digest: digest.to_vec(),
+        ..Default::default()
+    });
+    frame.extend_from_slice(signature);
+    frame
+}
+
 struct Fixture {
     a: App,
     part_pk: Vec<u8>,
@@ -174,7 +280,7 @@ struct Fixture {
 fn fixture(h: u32) -> Fixture {
     let chip_pk = Chip::with_h(0).pk(); // deterministic (csk fixed)
     let b = birth::<Partition>(&BirthInputs {
-        partition_trng: &[0x01; 32],
+        birth_entropy: &[0x01; 32],
         chip_birth_witness: &[0x02; 32],
         host_nonce: &[0x03; 32],
         device_id: &DEVICE,
@@ -182,7 +288,7 @@ fn fixture(h: u32) -> Fixture {
         partition_device_id: &PART_DEV,
         anchor_id: &ANCHOR,
         chip_pk: &chip_pk,
-        online_id_pk: &ONLINE_PK,
+        online_id_pk: &owner_key().1,
         partition_key_seed: &[0x04; 32],
         enrolled_counter: H0,
         genesis_root: &GENESIS_ROOT,
@@ -191,7 +297,15 @@ fn fixture(h: u32) -> Fixture {
     let part_pk = b.partition_pk.clone();
     let bundle = b.bundle;
     let frontier0 = b.genesis_frontier;
-    let a = Appliance::new(Chip::with_h(h), H0, ANCHOR, PART_DEV, b);
+    let a = Appliance::new(
+        Chip::with_h(h),
+        H0,
+        ANCHOR,
+        PART_DEV,
+        b,
+        Install::ForGood,
+        owner_key().1.clone(),
+    );
     Fixture {
         a,
         part_pk,
@@ -229,6 +343,7 @@ fn make_transition(prev_frontier: [u8; 32], u: u64) -> OwnedTransition {
 fn valid_release() -> (OfflineRelease, Vec<u8>, Vec<u8>, [u8; 32], [u8; 32]) {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.commit().unwrap();
@@ -262,6 +377,7 @@ fn full_lifecycle_prepare_commit_emit_finalize() {
     let t = make_transition(f.frontier0, 0);
     let next_frontier = t.next_root;
 
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     assert_eq!(f.a.active.status, Status::Prepared);
@@ -287,6 +403,7 @@ fn two_sequential_transfers() {
     let mut f = fixture(H0);
     let t0 = make_transition(f.frontier0, 0);
     let frontier1 = t0.next_root;
+    authorize(&mut f.a, &t0, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t0.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.commit().unwrap();
@@ -294,6 +411,7 @@ fn two_sequential_transfers() {
 
     let t1 = make_transition(frontier1, 1);
     let frontier2 = t1.next_root;
+    authorize(&mut f.a, &t1, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t1.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.commit().unwrap();
@@ -357,6 +475,7 @@ fn recover_committed_reemits() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
     let next_frontier = t.next_root;
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.commit().unwrap();
@@ -372,6 +491,7 @@ fn recover_committed_reemits() {
 fn recover_prepared_can_complete() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     assert_eq!(f.a.recover(), RecoverOutcome::AcceptPreparedCanComplete);
@@ -383,6 +503,7 @@ fn recover_ready_fails_closed_when_the_chip_counter_disagrees_with_the_software_
     // frontier never recorded. Recovery must not pair the advanced counter with the old frontier.
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.commit().unwrap();
@@ -419,6 +540,7 @@ fn recover_at_boot_serves_a_ready_appliance_whose_counters_agree() {
 fn recover_at_boot_refuses_a_chip_counter_advanced_past_the_software_counter() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.commit().unwrap();
@@ -430,30 +552,29 @@ fn recover_at_boot_refuses_a_chip_counter_advanced_past_the_software_counter() {
     );
 }
 
+/// A prepared record that would not complete is still only prepared: its counter did not move and
+/// it was never exported. The boot resets it as any other, and the anchor does not die of it.
 #[test]
-fn recover_at_boot_refuses_a_prepared_record_missing_its_signatures() {
+fn recover_at_boot_resets_a_prepared_record_missing_its_signatures() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     if let Record::Prepared(p) = &mut f.a.active.record {
         p.cert.sigma_host.clear();
     }
-    assert_eq!(
-        f.a.recover_at_boot(),
-        Err(BootRecoveryRefusal::Outcome(
-            RecoverOutcome::OnlineCancelOrResolve
-        ))
-    );
-    // Refusal leaves the record for online resolution; nothing was cancelled.
-    assert_eq!(f.a.active.status, Status::Prepared);
-    assert!(matches!(f.a.active.record, Record::Prepared(_)));
+    assert_eq!(f.a.recover(), RecoverOutcome::OnlineCancelOrResolve);
+    assert_eq!(f.a.recover_at_boot(), Ok(()));
+    assert_eq!(f.a.active.status, Status::Ready);
+    assert!(matches!(f.a.active.record, Record::Empty));
 }
 
 #[test]
 fn recover_at_boot_resets_a_prepared_record_whose_counter_did_not_move() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     assert_eq!(f.a.recover_at_boot(), Ok(()));
@@ -468,6 +589,7 @@ fn recover_at_boot_serves_a_committed_release_for_reemission() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
     let next_frontier = t.next_root;
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.commit().unwrap();
@@ -481,6 +603,7 @@ fn recover_at_boot_serves_a_committed_release_for_reemission() {
 fn cancel_returns_to_ready() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.cancel().unwrap();
@@ -501,6 +624,215 @@ fn proto_release_roundtrip() {
     accept_offline::<_, Ed25519Chip, Partition>(&back, &c, &Dsm::ok()).unwrap();
 }
 
+/// An anchor signs nothing for a prepare its owner did not authorize, whoever holds the link to
+/// it. No authorization, a stranger's signature, the owner's authorization of another payment, of
+/// other device roots, or of this payment from a frontier the anchor does not stand at: each leaves
+/// the prepare refused, nothing signed or recorded, the anchor Ready at its frontier with its
+/// counter unmoved. Its owner's own authorization of this prepare is then taken. MUTATION CONTROL:
+/// deleting the owner check in `Appliance::prepare` lets each through: red at "no authorization".
+#[test]
+fn a_prepare_its_owner_did_not_authorize_signs_nothing() {
+    let mut f = fixture(H0);
+    let t = make_transition(f.frontier0, 0);
+    let (digest, _) = owner_authorization(&f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    let prepare = |a: &mut App| a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT);
+
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "no authorization"
+    );
+
+    let (stranger, _) = match Partition::owner_keygen(&[0x0B; 32]) {
+        Ok(key) => key,
+        Err(e) => panic!("a stranger's key: {e:?}"),
+    };
+    let strangers = match Partition::owner_sign(&stranger, &digest) {
+        Ok(sig) => sig,
+        Err(e) => panic!("the stranger signs: {e:?}"),
+    };
+    assert_eq!(
+        f.a.authorize(&digest, &strangers),
+        Err(ApplianceError::OwnerUnauthorized),
+        "a stranger's signature over the very digest authorizes nothing"
+    );
+    assert_eq!(prepare(&mut f.a), Err(ApplianceError::OwnerUnauthorized));
+
+    // The owner authorized another payment: a different challenge.
+    authorize(&mut f.a, &t, &[0x56; 32], &R_I, &R_NEXT);
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "an authorization of another payment"
+    );
+    // ... and other device roots.
+    authorize(&mut f.a, &t, &RCHAL, &R_NEXT, &R_I);
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "an authorization over other device roots"
+    );
+    // ... and this payment from a frontier the anchor does not stand at (stale, or another anchor's).
+    let elsewhere = owner_authorization_digest(
+        &f.a.bundle,
+        &[0x99; 32],
+        0,
+        &transition_digest(&t.as_transition(), &RCHAL),
+        &R_I,
+        &R_NEXT,
+    );
+    f.a.authorize(&elsewhere, &owner_sign(&elsewhere)).unwrap();
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "an authorization from another frontier"
+    );
+
+    assert_eq!(f.a.active.status, Status::Ready);
+    assert_eq!(f.a.active.root, f.frontier0);
+    assert!(matches!(f.a.active.record, Record::Empty));
+    assert_eq!(f.a.live_index(), Ok(0), "the counter has not moved");
+
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    assert_eq!(
+        prepare(&mut f.a),
+        Ok(()),
+        "its owner's own authorization is taken"
+    );
+    assert_eq!(f.a.active.status, Status::Prepared);
+}
+
+/// An authorization serves one prepare. The prepare that claims it consumes it, whether it then
+/// goes through or is refused for naming another payment; a cancelled prepare does not give it
+/// back; and a later one replaces an earlier one. MUTATION CONTROL: keeping the authorization after
+/// a prepare (a `clone` in place of the `take`) lets the second prepare through: red at "reuse".
+#[test]
+fn an_authorization_serves_one_prepare_and_is_consumed_with_it() {
+    let mut f = fixture(H0);
+    let t = make_transition(f.frontier0, 0);
+    let prepare = |a: &mut App| a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT);
+
+    // Consumed by the prepare it allowed: cancelled, the same prepare needs a new one.
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    assert_eq!(prepare(&mut f.a), Ok(()));
+    f.a.cancel().unwrap();
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "reuse"
+    );
+
+    // A prepare refused before the owner check (here its successor frontier is not the derived
+    // one) leaves the authorization standing: nothing was signed and nothing consumed it.
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    assert_eq!(
+        f.a.prepare(&t.as_transition(), &[0x57; 32], &R_I, &R_NEXT),
+        Err(ApplianceError::NextRootMismatch)
+    );
+    // Consumed by a prepare it did not allow, too: one that passes every structural check but
+    // names other device roots spends it.
+    assert_eq!(
+        f.a.prepare(&t.as_transition(), &RCHAL, &R_NEXT, &R_I),
+        Err(ApplianceError::OwnerUnauthorized),
+        "another payment under the standing authorization"
+    );
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "the mismatch consumed it"
+    );
+
+    // A later authorization replaces an earlier one: only the latest stands.
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    authorize(&mut f.a, &t, &[0x58; 32], &R_I, &R_NEXT);
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "the earlier authorization no longer stands"
+    );
+
+    // One that does not verify drops the one standing.
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    let (digest, _) = owner_authorization(&f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    assert_eq!(
+        f.a.authorize(&digest, &[0u8; 8]),
+        Err(ApplianceError::OwnerUnauthorized)
+    );
+    assert_eq!(prepare(&mut f.a), Err(ApplianceError::OwnerUnauthorized));
+
+    // Not taken while a prepare stands: the anchor is not Ready.
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    assert_eq!(prepare(&mut f.a), Ok(()));
+    assert_eq!(
+        f.a.authorize(&digest, &owner_sign(&digest)),
+        Err(ApplianceError::WrongState)
+    );
+}
+
+/// Over the wire: an authorization is the message and the signature after it, verified from the
+/// frame itself. A prepare without one is refused with its own code; an authorization frame with
+/// no signature, a signature after any other op, and a message longer than a request's largest are
+/// each refused unread. The authorized prepare then goes through.
+#[test]
+fn over_the_wire_an_authorization_is_the_message_and_the_signature_after_it() {
+    let mut f = fixture(H0);
+    let t = make_transition(f.frontier0, 0);
+    let prep = pb::ApplianceRequest {
+        op: pb::Op::Prepare as i32,
+        transition: Some(t.to_pb()),
+        receiver_challenge: RCHAL.to_vec(),
+        sender_device_root_before: R_I.to_vec(),
+        sender_device_root_after: R_NEXT.to_vec(),
+        ..Default::default()
+    };
+    let r = decode_response(&handle(&mut f.a, &encode_request(&prep))).unwrap();
+    assert!(!r.ok);
+    assert_eq!(r.error, err::OWNER_UNAUTHORIZED);
+
+    let (digest, signature) = owner_authorization(&f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    assert_eq!(
+        signature.len(),
+        anchor_core::service::OWNER_AUTHORIZATION_BYTES
+    );
+    let no_signature = authorize_frame(&digest, &[]);
+    let r = decode_response(&handle(&mut f.a, &no_signature)).unwrap();
+    assert_eq!(r.error, err::MISSING_FIELD);
+
+    let mut signed_prepare = encode_request(&prep);
+    signed_prepare.extend_from_slice(&signature);
+    let r = decode_response(&handle(&mut f.a, &signed_prepare)).unwrap();
+    assert_eq!(r.error, err::BAD_PROTO, "a signature after any other op");
+
+    let mut too_long = prep.clone();
+    too_long.transition = Some(make_transition(f.frontier0, 0).to_pb());
+    if let Some(transition) = too_long.transition.as_mut() {
+        transition.old_leaf_proof = vec![0xAB; anchor_core::service::REQUEST_HEAD_MAX];
+    }
+    let r = decode_response(&handle(&mut f.a, &encode_request(&too_long))).unwrap();
+    assert_eq!(
+        r.error,
+        err::FRAME_TOO_LARGE,
+        "a message longer than a request's largest"
+    );
+
+    let r = decode_response(&handle(&mut f.a, &authorize_frame(&digest, &signature))).unwrap();
+    assert!(r.ok, "authorize: error {}", r.error);
+    assert_eq!(r.op, pb::Op::Authorize as i32);
+    let r = decode_response(&handle(&mut f.a, &encode_request(&prep))).unwrap();
+    assert!(r.ok, "prepare: error {}", r.error);
+    assert_eq!(f.a.active.status, Status::Prepared);
+}
+
+/// The owner's authorization is one SPX256f signature: the length the frame decoder splits at is
+/// the scheme's.
+#[test]
+fn owner_authorization_is_one_spx256f_signature() {
+    assert_eq!(
+        anchor_core::service::OWNER_AUTHORIZATION_BYTES,
+        dsm_sphincs::signature_bytes(dsm_sphincs::SphincsVariant::SPX256f)
+    );
+}
+
 #[test]
 fn service_handle_full_flow() {
     let mut f = fixture(H0);
@@ -515,6 +847,9 @@ fn service_handle_full_flow() {
         sender_device_root_after: R_NEXT.to_vec(),
         ..Default::default()
     };
+    let (digest, signature) = owner_authorization(&f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    let r = decode_response(&handle(&mut f.a, &authorize_frame(&digest, &signature))).unwrap();
+    assert!(r.ok, "authorize failed: {}", r.error);
     let r = decode_response(&handle(&mut f.a, &encode_request(&prep))).unwrap();
     assert!(r.ok, "prepare failed: {}", r.error);
 
@@ -567,4 +902,20 @@ fn service_rejects_host_boot() {
     let r = decode_response(&handle(&mut f.a, &encode_request(&req))).unwrap();
     assert!(!r.ok);
     assert_eq!(r.error, err::BAD_OP);
+}
+
+/// 32 bytes from the process's own randomness: this software chip's generator.
+fn software_entropy() -> [u8; 32] {
+    use std::hash::{BuildHasher, Hasher};
+    let drawn: Vec<u8> = (0..4u8)
+        .flat_map(|lane| {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u8(lane);
+            hasher.finish().to_le_bytes()
+        })
+        .collect();
+    match drawn.try_into() {
+        Ok(bytes) => bytes,
+        Err(short) => panic!("four lanes of eight bytes, not {}", short.len()),
+    }
 }

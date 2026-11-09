@@ -711,22 +711,38 @@ fn own_boundary_ancestry(
             "offline boundary: the attached anchor is not the account's",
         ));
     }
-    let chain = client_db::offline_spends::own_offline_spends(bundle)
-        .map_err(|e| storage_err("this device's unexposed offline spends", e))?;
+    // Every step of the account since its last boundary: spends, its board's receives and the
+    // unloads of received payments (owner, 2026-11-07), in order.
+    let chain = client_db::offline_spends::own_offline_hops(bundle)
+        .map_err(|e| storage_err("this device's unexposed offline steps", e))?;
     let funded = match &boundary.account_move.before {
         dsm::types::offline_account::StepBefore::Boundary { funding_chain, .. } => *funding_chain,
-        dsm::types::offline_account::StepBefore::Spend { .. } => {
+        _ => {
             return Err(DsmError::invalid_operation(
-                "offline boundary: Core took a spend where a boundary was asked",
+                "offline boundary: Core took another step where a boundary was asked",
             ))
         }
     };
-    let since = match (funded, chain.first()) {
-        (None, _) => BoundarySince::Opened {
+    let first = chain
+        .first()
+        .map(|bytes| dsm::types::offline_chain::AccountHop::from_bytes(bytes))
+        .transpose()?;
+    let since = match (funded, &first) {
+        // An account's first boundary: the account as it opened, at the frontier the first of its
+        // board's steps started from, or, with none, the one it stands at.
+        (None, Some(hop)) => BoundarySince::Opened {
+            frontier: hop.starts_at_frontier().ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "offline boundary: the account's first step is the unload of a payment it \
+                     never received",
+                )
+            })?,
+        },
+        (None, None) => BoundarySince::Opened {
             frontier: boundary.account_move.account.frontier(),
         },
-        (Some(_), Some(first)) => BoundarySince::Previous {
-            account_root: dsm::types::offline_chain::SpendHop::from_bytes(first)?.starts_from(),
+        (Some(_), Some(hop)) => BoundarySince::Previous {
+            account_root: hop.starts_from(),
         },
         (Some(_), None) => BoundarySince::Previous {
             account_root: boundary.pre_account_root,

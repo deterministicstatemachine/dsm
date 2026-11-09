@@ -89,6 +89,34 @@ enum Op {
   OP_PROVISION   = 9;  // provision an unprovisioned anchor for the device `provision` names, once;
                        // answered with the STATUS pin material of the anchor it made
   OP_RECOVER     = 10; // §26 recovery: complete a durable commit if it can, and answer the outcome
+  OP_AUTHORIZE   = 13; // the owner's authorization of the next OP_PREPARE: the digest it signed in
+                       // the head, its signature after the head on the wire (see ApplianceRequest)
+  OP_TRY_RUN     = 11; // go through an install of `provision` with the permanent parts
+                       // substituted; nothing is bound. See try_run.rs.
+  OP_IDENTIFY    = 12; // what the chip says it is and what it holds, read with nothing written to
+                       // it or to the board's OTP. Only the identify image serves it. See identify.rs.
+  // The receiver's side of an offline payment (owner, 2026-11-07). See receive.rs.
+  OP_CHALLENGE     = 14; // draw a receive challenge from both hardware sources and hold it open
+  OP_CHECK_PAYMENT = 15; // check the payer's release against the open challenge, before the receive
+}
+
+// What a payer discloses of its enrollment, for its bundle B to recompute (every field B binds).
+message PayerDisclosure {
+  bytes  online_id_pk     = 1;
+  bytes  anchor_id        = 2;  // 32
+  bytes  chip_pk          = 3;
+  bytes  partition_pk     = 4;
+  uint32 enrolled_counter = 5;
+  bytes  device_id        = 6;  // 32
+  bytes  policy_hash      = 7;  // 32
+  bytes  birth_commitment = 8;  // 32
+}
+
+// What an install of this anchor makes.
+enum InstallKind {
+  INSTALL_UNSPECIFIED = 0;
+  INSTALL_FOR_GOOD    = 1; // the production image: the pairing key, the cage and the record, for good
+  INSTALL_FOR_TRIAL   = 2; // the trial image: the record in slots the next boot clears; nothing permanent
 }
 
 // The §26 recovery outcome, as OP_RECOVER answers it.
@@ -115,6 +143,35 @@ message ApplianceRequest {
   reserved 6;  // the raw-SPI relay's MOSI bytes
   reserved "spi_payload";
   Provisioning provision            = 7;  // OP_PROVISION: the device the anchor is bound to
+  // OP_AUTHORIZE: the owner-authorization digest (anchor-core `owner_authorization_digest`) the owner
+  // signed with the device key the anchor was provisioned for (BLAKE3-SPHINCS+ SPX256f). The
+  // signature is not a field: on the wire it follows this message, as the frame's last
+  // OWNER_AUTHORIZATION_BYTES (49,856) bytes, so the anchor verifies it from the frame it holds and
+  // copies it nowhere. Any frame longer than a signature is read that way; a frame longer than
+  // REQUEST_HEAD_MAX (4 KiB) that is not one is refused unread.
+  bytes authorization_digest        = 8;
+  // OP_TRY_RUN, OP_PROVISION: the wallet's rehearsal owner key (SPX256f), derived apart from its
+  // device key: the try-run's payment is authorized under it, through the same check a real one is.
+  bytes rehearsal_pk                = 9;
+  OfflineRelease payment            = 10;  // OP_CHECK_PAYMENT: the payer's transition and certificate
+  PayerDisclosure payer             = 11;  // OP_CHECK_PAYMENT: the payer's enrollment
+}
+
+// One thing a try-run went through.
+message TryRunStep {
+  string name       = 1;
+  bool   passed     = 2;
+  string detail     = 3;  // why it did not pass
+  // A production install's requirement alone (a chip that tests its PTRNG): a development board
+  // may leave it unmet, and an install still refuses until it is met.
+  bool   production = 4;
+}
+
+// One thing the identify image read from the chip: its value, or why it did not read.
+message ChipReading {
+  string name   = 1;
+  string value  = 2;
+  string unread = 3;
 }
 
 // The secure core's response.
@@ -140,6 +197,23 @@ message ApplianceResponse {
   // owner's online key and device id, B recomputes from what the chip discloses.
   bytes  pin_birth_commitment  = 14;
   Recovery recovery            = 15; // OP_RECOVER: the outcome (its frontier in active_root)
+  // Why a refusal was made, when the code alone does not say: a locked board has no debug port.
+  string detail                = 16;
+  repeated TryRunStep try_run  = 17; // OP_TRY_RUN: what it went through
+  repeated string permanent    = 18; // OP_TRY_RUN: what installing makes permanent
+  bytes transport_check        = 19; // OP_TRY_RUN: as long as the release it signed, which stays on
+                                     // the anchor; try_run::transport_check, for the host to compare
+  repeated ChipReading chip_readings = 20; // OP_IDENTIFY: what the chip says and holds
+  // OP_IDENTIFY: the chip's four X.509 certificates as it gives them: device, part group,
+  // TROPIC01 CA, Tropic Square root.
+  repeated bytes chip_certificates   = 21;
+  InstallKind install                = 22; // OP_STATUS, OP_TRY_RUN: what an install here makes
+  // OP_TRY_RUN, OP_PROVISION: the rehearsal payment's owner-authorization digest the run waits on
+  // (32). An OP_AUTHORIZE carrying the rehearsal key's signature of it continues the run; any other
+  // request ends it, and the anchor is left as it was found.
+  bytes awaiting_authorization       = 23;
+  bytes receiver_challenge           = 24; // OP_CHALLENGE: the challenge drawn (32)
+  bytes open_challenge               = 25; // OP_STATUS: the challenge held open (32), if any
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the
@@ -166,6 +240,7 @@ message DurableActive {
     DurablePrepared prepared       = 3;
     DurableCommitted committed     = 4;
   }
+  bytes open_challenge             = 5;  // 32  the receive challenge held open, or empty
 }
 
 // What the host supplies when it provisions an anchor for its device, once: the identity the
