@@ -22,8 +22,6 @@ pub struct AppState {
     /// `configured_member_id` as the header value the echo layer sends.
     member_id_header: axum::http::HeaderValue,
     pub db_pool: Arc<db::DBPool>,
-    /// The client pinned to the storage set's CA (see [`set_client`]).
-    pub set_client: reqwest::Client,
     /// The canonical storage set this node is a member of (`[storage_set]
     /// members = [...]` in config, canonical id derived exactly as clients derive
     /// it). `None` = not configured: the node serves the storage contract but
@@ -43,8 +41,17 @@ pub struct AppState {
     pub spool_waits: api::transport::b0x::SpoolWaits,
 }
 
+/// One set-mate, as this node's own configuration names it: where it is
+/// reached, and the client pinned to the CA that set-mate's operator holds.
+#[derive(Debug, Clone)]
+pub struct SetMate {
+    pub member: String,
+    pub endpoint: String,
+    pub client: reqwest::Client,
+}
+
 /// This node's view of the canonical storage set it belongs to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct NodeStorageSet {
     /// `compute_storage_set_id` over the `(member_id, incarnation)` pairs.
     pub id: [u8; 32],
@@ -56,11 +63,12 @@ pub struct NodeStorageSet {
     /// This node's own register incarnation, as its database holds it and
     /// the set commits it.
     pub own_incarnation: [u8; 32],
-    /// Where each set-mate is reached, from this node's own configuration
-    /// (`endpoint` on `[[storage_set.members]]`). A node mirrors every
-    /// set-mate's ByteCommits by fetching them at this endpoint and nowhere
-    /// else (storage spec §14, mirror provenance and mirror sync).
-    pub endpoints: Vec<(String, String)>,
+    /// Every other member, from this node's own configuration (`endpoint` and
+    /// `ca_cert` on `[[storage_set.members]]`). A node mirrors every set-mate's
+    /// ByteCommits by fetching them at this endpoint and nowhere else, over a
+    /// client that trusts that set-mate's CA and no other member's (storage
+    /// spec §14, mirror provenance and mirror sync).
+    pub set_mates: Vec<SetMate>,
 }
 
 impl NodeStorageSet {
@@ -105,24 +113,25 @@ impl NodeStorageSet {
             id,
             members,
             own_incarnation,
-            endpoints: Vec::new(),
+            set_mates: Vec::new(),
         })
     }
 
-    /// Attach each set-mate's configured endpoint. A node mirrors every node
-    /// it shares the set with (storage spec §14), so every member other than
-    /// `own_node_id` needs one. Refuses a missing endpoint, an endpoint for an
-    /// id that is not a member, a member named twice, and an endpoint that is
-    /// not an `https://` origin: a mirrored ByteCommit is kept on the word of
-    /// the node that answered, so the answer must come from the node the
-    /// set's CA names, never from whoever sits on the path to it (storage
-    /// spec §14, mirror provenance; §22.8).
-    pub fn with_endpoints(
+    /// Attach each member's configured `(id, endpoint, CA certificate)`. A node
+    /// mirrors every node it shares the set with (storage spec §14), so every
+    /// member other than `own_node_id` needs an endpoint and a CA. Refuses a
+    /// missing one of either, an endpoint for an id that is not a member, a
+    /// member named twice, and an endpoint that is not an `https://` origin: a
+    /// mirrored ByteCommit is kept on the word of the node that answered, so
+    /// the answer must come from the node holding a certificate from that
+    /// member's own CA, never from whoever sits on the path to it, another
+    /// member included (storage spec §14, mirror provenance; §22.8).
+    pub fn with_set_mates(
         mut self,
         own_node_id: &str,
-        endpoints: Vec<(String, String)>,
+        configured: Vec<(String, String, Option<String>)>,
     ) -> anyhow::Result<Self> {
-        for (i, (member, endpoint)) in endpoints.iter().enumerate() {
+        for (i, (member, endpoint, _)) in configured.iter().enumerate() {
             if !self.members.iter().any(|(m, _)| m == member) {
                 anyhow::bail!("storage_set endpoint names {member:?}, which is not a member");
             }
@@ -134,28 +143,43 @@ impl NodeStorageSet {
             if url.scheme() != "https" || url.host_str().is_none() {
                 anyhow::bail!(
                     "storage_set endpoint {endpoint:?} for {member:?} is not an https:// origin: \
-                     a set-mate is reached over TLS to the certificate the set's CA issued it"
+                     a set-mate is reached over TLS to a certificate from its own CA"
                 );
             }
-            if endpoints[..i].iter().any(|(m, _)| m == member) {
+            if configured[..i].iter().any(|(m, _, _)| m == member) {
                 anyhow::bail!("storage_set names an endpoint for {member:?} twice");
             }
         }
         for (member, _) in &self.members {
-            if member != own_node_id && !endpoints.iter().any(|(m, _)| m == member) {
+            if member != own_node_id && !configured.iter().any(|(m, _, _)| m == member) {
                 anyhow::bail!(
                     "storage_set member {member:?} has no endpoint: this node mirrors every \
                      set-mate's ByteCommits and can reach one only at its configured endpoint"
                 );
             }
         }
-        self.endpoints = endpoints;
+        let mut set_mates = Vec::with_capacity(configured.len());
+        for (member, endpoint, ca_cert) in configured {
+            if member == own_node_id {
+                continue;
+            }
+            let Some(ca_cert) = ca_cert else {
+                anyhow::bail!(
+                    "storage_set member {member:?} has no `ca_cert`: this node knows a set-mate \
+                     only by a certificate from that set-mate's own CA"
+                );
+            };
+            let client = set_client::pinned_set_client(ca_cert.as_bytes()).map_err(|e| {
+                anyhow::anyhow!("storage_set member {member:?}: its `ca_cert`: {e}")
+            })?;
+            set_mates.push(SetMate {
+                member,
+                endpoint,
+                client,
+            });
+        }
+        self.set_mates = set_mates;
         Ok(self)
-    }
-
-    /// `(member id, endpoint)` for every member with a configured endpoint.
-    pub fn member_endpoints(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.endpoints.iter().map(|(m, e)| (m.as_str(), e.as_str()))
     }
 }
 
@@ -164,11 +188,7 @@ impl AppState {
     /// that cannot be sent as the identity echo: a set-mate mirroring this
     /// node keeps a ByteCommit only when the echo names the member the
     /// ByteCommit names (storage spec §14, mirror sync).
-    pub fn new(
-        member_id: String,
-        db_pool: Arc<db::DBPool>,
-        set_client: reqwest::Client,
-    ) -> anyhow::Result<Self> {
+    pub fn new(member_id: String, db_pool: Arc<db::DBPool>) -> anyhow::Result<Self> {
         let member_id_header = axum::http::HeaderValue::from_str(&member_id).map_err(|e| {
             anyhow::anyhow!("node id {member_id:?} cannot be sent as the identity echo: {e}")
         })?;
@@ -176,7 +196,6 @@ impl AppState {
             configured_member_id: member_id,
             member_id_header,
             db_pool,
-            set_client,
             storage_set: None,
             mirror_syncs: Arc::new(api::objects::bytecommit::MirrorSyncs::default()),
             committed: Arc::new(db::CommittedCells::default()),
@@ -258,16 +277,28 @@ mod storage_set_tests {
         assert!(NodeStorageSet::new(members(), "n1", [0xC1; 32]).is_ok());
     }
 
-    /// A set-mate is reached only over TLS to the certificate the set's CA
-    /// issued it: an endpoint that is cleartext, or not a URL, is refused at
-    /// startup, and an https origin is taken.
+    /// A CA certificate a set-mate's operator could hold.
+    fn a_ca() -> String {
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .unwrap()
+            .cert
+            .pem()
+    }
+
+    /// A set-mate is reached only over TLS to a certificate from its own CA:
+    /// an endpoint that is cleartext, or not a URL, is refused at startup, and
+    /// an https origin is taken.
     #[test]
     fn a_set_mate_endpoint_that_is_not_https_is_refused() {
         let set = || NodeStorageSet::new(members(), "n1", [0xC1; 32]).unwrap();
-        let endpoints = |n2: &str| {
+        let configured = |n2: &str| {
             vec![
-                ("n2".to_string(), n2.to_string()),
-                ("n3".to_string(), "https://10.0.0.3:8080".to_string()),
+                ("n2".to_string(), n2.to_string(), Some(a_ca())),
+                (
+                    "n3".to_string(),
+                    "https://10.0.0.3:8080".to_string(),
+                    Some(a_ca()),
+                ),
             ]
         };
         for refused in [
@@ -277,14 +308,61 @@ mod storage_set_tests {
             "ftp://10.0.0.2",
         ] {
             let err = set()
-                .with_endpoints("n1", endpoints(refused))
+                .with_set_mates("n1", configured(refused))
                 .expect_err("a set-mate endpoint that is not an https origin");
             assert!(err.to_string().contains(refused), "{err}");
         }
         let taken = set()
-            .with_endpoints("n1", endpoints("https://10.0.0.2:8080"))
+            .with_set_mates("n1", configured("https://10.0.0.2:8080"))
             .unwrap();
-        assert_eq!(taken.member_endpoints().count(), 2);
+        assert_eq!(taken.set_mates.len(), 2);
+    }
+
+    /// A set-mate is known only by its own CA, so a node never starts without
+    /// one for each set-mate, or with one that is not a certificate. Its own
+    /// entry needs none, and holds no client: it mirrors no one at its own
+    /// address.
+    #[test]
+    fn a_set_mate_without_a_ca_of_its_own_is_refused() {
+        let set = || NodeStorageSet::new(members(), "n1", [0xC1; 32]).unwrap();
+        let entry = |member: &str, ca: Option<String>| {
+            (
+                member.to_string(),
+                format!("https://{member}.example:8080"),
+                ca,
+            )
+        };
+        let err = set()
+            .with_set_mates(
+                "n1",
+                vec![entry("n2", None), entry("n3", Some(a_ca()))],
+            )
+            .expect_err("a set-mate with no CA");
+        assert!(err.to_string().contains("no `ca_cert`"), "{err}");
+
+        let err = set()
+            .with_set_mates(
+                "n1",
+                vec![
+                    entry("n2", Some("not a certificate".to_string())),
+                    entry("n3", Some(a_ca())),
+                ],
+            )
+            .expect_err("a CA that is not a certificate");
+        assert!(format!("{err:#}").contains("not PEM"), "{err:#}");
+
+        let taken = set()
+            .with_set_mates(
+                "n1",
+                vec![
+                    entry("n1", None),
+                    entry("n2", Some(a_ca())),
+                    entry("n3", Some(a_ca())),
+                ],
+            )
+            .unwrap();
+        let mates: Vec<&str> = taken.set_mates.iter().map(|m| m.member.as_str()).collect();
+        assert_eq!(mates, ["n2", "n3"]);
     }
 
     #[test]

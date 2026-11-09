@@ -7,15 +7,18 @@
 //! a Postgres database of its own that already holds its member's pinned
 //! register incarnation, as a node restored from its database does, served by
 //! the storage node's own binary over TLS from a CA of this set's own, with a
-//! certificate naming its member and the loopback address. A device trusts
-//! that CA and nothing else, and reaches the set through the client config
+//! certificate naming its member and the loopback address. Each member has a
+//! CA of its own, as each operator of the public set does (owner, 2026-11-05),
+//! and every member and device pins each member to its own CA. A device trusts
+//! those CAs and nothing else, and reaches the set through the client config
 //! this writes. Nothing here answers for a node: `scripts/dev_net.sh` starts
 //! the real binary on each config.
 //!
 //! - `prepare --dir DIR --pg URL --first-port PORT`: every node's database
 //!   (dropped and created), its incarnation, its certificate and its config,
-//!   and the client config (`DIR/dsm_env_config.toml`, trusting
-//!   `DIR/dev-ca.pem`). Refused when `DIR` already holds a set.
+//!   and the client config (`DIR/dsm_env_config.toml`, each member's CA
+//!   inline, also kept as `DIR/<member>-ca.pem`). Refused when `DIR` already
+//!   holds a set.
 //! - `drop --pg URL`: every node's database, dropped.
 //!
 //! `URL` names the Postgres server's administrative database, e.g.
@@ -213,24 +216,26 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// The set's CA, and each node's certificate and key from it.
+/// Each member's own CA, and its certificate and key from that CA.
 fn write_tls(dir: &Path, members: &[Member]) -> Result<(), String> {
-    let ca_key = rcgen::KeyPair::generate().map_err(|e| format!("the CA's key: {e}"))?;
-    let mut ca = rcgen::CertificateParams::new(Vec::<String>::new())
-        .map_err(|e| format!("the CA's parameters: {e}"))?;
-    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    ca.distinguished_name
-        .push(rcgen::DnType::CommonName, "DSM-Storage-CA (developer set)");
-    ca.key_usages = vec![
-        rcgen::KeyUsagePurpose::KeyCertSign,
-        rcgen::KeyUsagePurpose::DigitalSignature,
-    ];
-    let ca_cert = ca
-        .self_signed(&ca_key)
-        .map_err(|e| format!("the CA's certificate: {e}"))?;
-    write(&dir.join("dev-ca.pem"), ca_cert.pem().as_bytes())?;
-    let issuer = rcgen::Issuer::new(ca, ca_key);
     for m in members {
+        let ca_key = rcgen::KeyPair::generate().map_err(|e| format!("{}'s CA key: {e}", m.id))?;
+        let mut ca = rcgen::CertificateParams::new(Vec::<String>::new())
+            .map_err(|e| format!("{}'s CA parameters: {e}", m.id))?;
+        ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            format!("DSM-Storage-CA {} (developer set)", m.id),
+        );
+        ca.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let ca_cert = ca
+            .self_signed(&ca_key)
+            .map_err(|e| format!("{}'s CA certificate: {e}", m.id))?;
+        write(&ca_path(dir, m), ca_cert.pem().as_bytes())?;
+        let issuer = rcgen::Issuer::new(ca, ca_key);
         let key = rcgen::KeyPair::generate().map_err(|e| format!("{}'s key: {e}", m.id))?;
         let mut params = rcgen::CertificateParams::new(vec![m.id.clone(), m.host.to_string()])
             .map_err(|e| format!("{}'s parameters: {e}", m.id))?;
@@ -249,16 +254,28 @@ fn write_tls(dir: &Path, members: &[Member]) -> Result<(), String> {
     Ok(())
 }
 
+/// Where `m`'s own CA certificate is kept.
+fn ca_path(dir: &Path, m: &Member) -> PathBuf {
+    dir.join(format!("{}-ca.pem", m.id))
+}
+
+/// `m`'s own CA certificate, as the `ca_cert` its entries carry.
+fn ca_cert(dir: &Path, m: &Member) -> Result<String, String> {
+    let path = ca_path(dir, m);
+    std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
+}
+
 /// Each node's config: the binary's own, naming every member of the set.
 fn write_node_configs(dir: &Path, pg: &str, members: &[Member]) -> Result<(), String> {
     let mut set = String::new();
     for m in members {
         writeln!(
             set,
-            "\n[[storage_set.members]]\nid = \"{}\"\nregister_incarnation = \"{}\"\nendpoint = \"{}\"",
+            "\n[[storage_set.members]]\nid = \"{}\"\nregister_incarnation = \"{}\"\nendpoint = \"{}\"\nca_cert = \"\"\"\n{}\"\"\"",
             m.id,
             encode_base32_crockford(&m.incarnation),
-            m.endpoint()
+            m.endpoint(),
+            ca_cert(dir, m)?
         )
         .map_err(|e| format!("the set's members: {e}"))?;
     }
@@ -268,14 +285,13 @@ fn write_node_configs(dir: &Path, pg: &str, members: &[Member]) -> Result<(), St
              # developer's set (written by dsm-dev-net prepare).\n\n\
              [node]\nid = \"{id}\"\n\n\
              [network]\nlisten_addr = \"{host}\"\nport = {port}\n\n\
-             [tls]\ncert_path = \"{cert}\"\nkey_path = \"{key}\"\nca_path = \"{ca}\"\n\n\
+             [tls]\ncert_path = \"{cert}\"\nkey_path = \"{key}\"\n\n\
              [database]\nurl = \"{url}\"\n{set}",
             id = m.id,
             host = m.host,
             port = m.port,
             cert = dir.join(format!("{}.crt", m.id)).display(),
             key = dir.join(format!("{}.key", m.id)).display(),
-            ca = dir.join("dev-ca.pem").display(),
             url = with_database(pg, &m.database)?,
         );
         write(&dir.join(format!("{}.toml", m.id)), config.as_bytes())?;
@@ -284,22 +300,22 @@ fn write_node_configs(dir: &Path, pg: &str, members: &[Member]) -> Result<(), St
 }
 
 /// The client config a wallet or an application's account reaches the set
-/// with: every member, its endpoint and incarnation, and the set's CA.
+/// with: every member, its endpoint and incarnation, and its own CA.
 fn write_client_config(dir: &Path, members: &[Member]) -> Result<(), String> {
     let loopback = members.iter().all(|m| m.host.is_loopback());
     let mut config = format!(
         "# The developer's own storage set on this machine (dsm-dev-net prepare).\n\
          allow_localhost = {loopback}\n\
-         bitcoin_network = \"signet\"\n\
-         custom_ca_certs = [\"dev-ca.pem\"]\n"
+         bitcoin_network = \"signet\"\n"
     );
     for m in members {
         writeln!(
             config,
-            "\n[[nodes]]\nname = \"{}\"\nendpoint = \"{}\"\nregister_incarnation = \"{}\"",
+            "\n[[nodes]]\nname = \"{}\"\nendpoint = \"{}\"\nregister_incarnation = \"{}\"\nca_cert = \"\"\"\n{}\"\"\"",
             m.id,
             m.endpoint(),
-            encode_base32_crockford(&m.incarnation)
+            encode_base32_crockford(&m.incarnation),
+            ca_cert(dir, m)?
         )
         .map_err(|e| format!("the client config: {e}"))?;
     }

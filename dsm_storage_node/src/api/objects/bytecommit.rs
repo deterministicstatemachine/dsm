@@ -209,21 +209,25 @@ async fn mirror_sync(
         log::warn!("bytecommit mirror: this node is in no storage set");
         return Err(StatusCode::CONFLICT);
     };
-    let own = state.configured_member_id.as_str();
-    let client = &state.set_client;
-    let syncs = set
-        .member_endpoints()
-        .filter(|(member, _)| *member != own)
-        .map(|(member, endpoint)| {
-            let state = &state;
-            async move {
-                let syncs = state.mirror_syncs.of(member);
-                syncs
-                    .run(|| sync_one(state, client, endpoint, member.as_bytes(), &syncs.frontier))
-                    .await
-                    .map_err(|e| log::warn!("bytecommit mirror: {member} at {endpoint}: {e}"))
-            }
-        });
+    let syncs = set.set_mates.iter().map(|mate| {
+        let state = &state;
+        let (member, endpoint) = (mate.member.as_str(), mate.endpoint.as_str());
+        async move {
+            let syncs = state.mirror_syncs.of(member);
+            syncs
+                .run(|| {
+                    sync_one(
+                        state,
+                        &mate.client,
+                        endpoint,
+                        member.as_bytes(),
+                        &syncs.frontier,
+                    )
+                })
+                .await
+                .map_err(|e| log::warn!("bytecommit mirror: {member} at {endpoint}: {e}"))
+        }
+    });
     let outcomes = futures::future::join_all(syncs).await;
     if outcomes.iter().any(Result::is_err) {
         return Err(StatusCode::BAD_GATEWAY);

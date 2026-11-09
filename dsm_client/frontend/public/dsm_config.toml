@@ -2,7 +2,6 @@
 # This file is bundled into Android assets via webpack CopyPlugin.
 # The authoritative config read by the SDK is dsm_env_config.toml (same directory).
 allow_localhost = false
-custom_ca_certs = ["ca.crt"]
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1
 mempool_api_url = "https://mempool.space"

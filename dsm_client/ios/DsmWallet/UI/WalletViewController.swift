@@ -105,15 +105,14 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
 
     private var baseDir: URL { AppDelegate.storageBaseDir }
 
-    /// The environment config the SDK reads: the bundled one, copied beside
-    /// the fleet's CA into the storage directory on every start; a developer's
+    /// The environment config the SDK reads: the bundled one, copied into the
+    /// storage directory on every start; a developer's
     /// override is honoured in debug builds only (the Documents folder is
     /// writable by anyone holding the phone, and the storage nodes a wallet
     /// trusts are not theirs to name).
     private func materializeEnvConfig() -> URL? {
         let assetName = "dsm_env_config.toml"
         let files = baseDir
-        materializeAssetIfBundled("ca.crt", into: files)
         #if DEBUG
         if let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
             let override = documents.appendingPathComponent(assetName)
@@ -155,20 +154,6 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
             return nil
         }
         return out
-    }
-
-    /// A bundled asset the SDK reads from the storage directory (the fleet's
-    /// CA); a build without it bundles nothing of that name, and that is not a
-    /// failure.
-    private func materializeAssetIfBundled(_ name: String, into dir: URL) {
-        guard let source = Bundle.main.url(forResource: "www", withExtension: nil)?.appendingPathComponent(name),
-              FileManager.default.fileExists(atPath: source.path) else { return }
-        do {
-            let bytes = try Data(contentsOf: source)
-            try bytes.write(to: dir.appendingPathComponent(name), options: .atomic)
-        } catch {
-            DsmLog.warn(tag, "the bundled \(name) was not copied: \(error)")
-        }
     }
 
     private func reportEnvConfigFailure(kind: String, message: String, help: String) {

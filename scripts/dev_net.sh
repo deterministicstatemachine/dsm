@@ -9,8 +9,9 @@
 # pinned register incarnation, and its certificate names its member.
 #
 # Everything lives under .dsm-dev/net/ (never in git):
-#   dsm_env_config.toml + dev-ca.pem   the client config: wallets and app hosts use it
+#   dsm_env_config.toml                the client config: wallets and app hosts use it
 #   dsm-node-N.toml/.crt/.key          each node's config and TLS
+#   dsm-node-N-ca.pem                  each node's own CA (inline in both configs too)
 #   logs/, run/                        each node's log and pid
 #
 # Usage:
@@ -51,7 +52,7 @@ port_of() {
 }
 
 healthy() {
-    curl -fsS --cacert "$NET/dev-ca.pem" --connect-timeout 2 --max-time 5 \
+    curl -fsS --cacert "$NET/$1-ca.pem" --connect-timeout 2 --max-time 5 \
         "https://127.0.0.1:$(port_of "$1")/api/v2/health" >/dev/null 2>&1
 }
 

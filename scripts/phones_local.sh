@@ -10,13 +10,13 @@
 # Android (debug builds read a developer override; release builds never do):
 #   - `adb reverse` for the five nodes (8080-8084) and the app's relay (8443),
 #     so the phone reaches them at 127.0.0.1, the address their certificates name;
-#   - the client config as files/dsm_env_config.override.toml and the set's CA
-#     as files/dev-ca.pem (never files/ca.crt: the app rewrites that one with
-#     the bundled fleet CA on every launch);
+#   - the client config, each member's CA inline, as
+#     files/dsm_env_config.override.toml;
 #   - the wallet restarted.
 #
 # iOS Simulator (Debug builds read <app Documents>/dsm_env_config.toml):
-#   - the client config and dev-ca.pem copied into the wallet's Documents;
+#   - the client config, each member's CA inline, copied into the wallet's
+#     Documents;
 #   - the wallet restarted. The Simulator shares this Mac's network, so
 #     127.0.0.1 reaches the nodes and the relay directly.
 #
@@ -63,10 +63,8 @@ point_android() {
         return 1
     fi
     adb -t "$t" push "$NET/dsm_env_config.toml" /data/local/tmp/dsm_env_config.override.toml >/dev/null
-    adb -t "$t" push "$NET/dev-ca.pem" /data/local/tmp/dev-ca.pem >/dev/null
     adb -t "$t" shell run-as "$APP_ID" cp /data/local/tmp/dsm_env_config.override.toml files/dsm_env_config.override.toml
-    adb -t "$t" shell run-as "$APP_ID" cp /data/local/tmp/dev-ca.pem files/dev-ca.pem
-    adb -t "$t" shell rm -f /data/local/tmp/dsm_env_config.override.toml /data/local/tmp/dev-ca.pem
+    adb -t "$t" shell rm -f /data/local/tmp/dsm_env_config.override.toml
     adb -t "$t" shell am force-stop "$APP_ID"
     adb -t "$t" shell am start -n "$APP_ID/.ui.MainActivity" >/dev/null
     echo "[phones] android transport $t: on the local set (adb reverse ${PORTS[*]})"
@@ -80,7 +78,6 @@ point_simulator() {
     fi
     mkdir -p "$container/Documents"
     cp "$NET/dsm_env_config.toml" "$container/Documents/dsm_env_config.toml"
-    cp "$NET/dev-ca.pem" "$container/Documents/dev-ca.pem"
     xcrun simctl terminate "$udid" "$APP_ID" >/dev/null 2>&1 || :
     xcrun simctl launch "$udid" "$APP_ID" >/dev/null
     echo "[phones] simulator $udid: on the local set"

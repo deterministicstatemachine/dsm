@@ -53,11 +53,11 @@ for (const item of REQUIRED) {
   }
 }
 
-// The network config and the fleet's CA must be exactly the tracked files in
-// frontend/public/: a copy that differs by one byte means the APK would ship a
-// fleet or a CA nobody committed.
+// The network config, which names each member's CA, must be exactly the tracked
+// file in frontend/public/: a copy that differs by one byte means the APK would
+// ship a fleet or a CA nobody committed.
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
-for (const name of ['dsm_env_config.toml', 'ca.crt']) {
+for (const name of ['dsm_env_config.toml']) {
   const shipped = path.join(ASSETS_DIR, name);
   const tracked = path.join(PUBLIC_DIR, name);
   if (!fs.existsSync(shipped) || !fs.existsSync(tracked)) {

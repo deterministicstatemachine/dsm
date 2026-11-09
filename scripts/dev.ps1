@@ -239,9 +239,9 @@ function Get-DevMembers {
     }
 }
 
-function Test-DevNode([int]$Port) {
-    # Verified TLS against the set's own CA (curl ships with Windows 10+).
-    & curl -fsS --cacert (Join-Path $DevNet "dev-ca.pem") --connect-timeout 2 --max-time 5 `
+function Test-DevNode([string]$Name, [int]$Port) {
+    # Verified TLS against the member's own CA (curl ships with Windows 10+).
+    & curl -fsS --cacert (Join-Path $DevNet "$Name-ca.pem") --connect-timeout 2 --max-time 5 `
         "https://127.0.0.1:$Port/api/v2/health" *> $null
     return ($LASTEXITCODE -eq 0)
 }
@@ -257,7 +257,7 @@ function Invoke-NodesUp {
     New-Item -ItemType Directory -Force -Path $logs, $run | Out-Null
     $failed = 0
     foreach ($m in Get-DevMembers) {
-        if (Test-DevNode $m.Port) { Ok "$($m.Name) already serving on :$($m.Port)"; continue }
+        if (Test-DevNode $m.Name $m.Port) { Ok "$($m.Name) already serving on :$($m.Port)"; continue }
         $log = Join-Path $logs "$($m.Name).log"
         $Env:RUST_LOG = "info"
         $proc = Start-Process -FilePath $NodeBin -ArgumentList "--config", $m.Config `
@@ -266,7 +266,7 @@ function Invoke-NodesUp {
         $up = 0
         for ($i = 0; $i -lt 40; $i++) {
             Start-Sleep -Milliseconds 500
-            if (Test-DevNode $m.Port) { $up = 1; break }
+            if (Test-DevNode $m.Name $m.Port) { $up = 1; break }
             if ($proc.HasExited) { break }
         }
         if ($up -eq 1) { Ok "$($m.Name) serving on https://127.0.0.1:$($m.Port)" }
@@ -293,7 +293,7 @@ function Invoke-NodesStatus {
     if (-not (Test-Path (Join-Path $DevNet "dsm_env_config.toml"))) { Fail "no set prepared: .\scripts\dev.ps1 nodes-up" }
     $failed = 0
     foreach ($m in Get-DevMembers) {
-        if (Test-DevNode $m.Port) { Ok "$($m.Name) healthy on https://127.0.0.1:$($m.Port)" }
+        if (Test-DevNode $m.Name $m.Port) { Ok "$($m.Name) healthy on https://127.0.0.1:$($m.Port)" }
         else { Warn "$($m.Name) NOT serving on :$($m.Port)"; $failed = 1 }
     }
     if ($failed -ne 0) { Fail "not every node is serving" }

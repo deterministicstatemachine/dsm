@@ -79,7 +79,6 @@ pub fn whole_era(whole: u64) -> u64 {
 /// own nodes fails to load a config rather than reaching this set's.
 pub struct FleetGuard {
     config_path: std::path::PathBuf,
-    ca_path: std::path::PathBuf,
 }
 
 impl FleetGuard {
@@ -96,10 +95,11 @@ impl FleetGuard {
 
 impl Drop for FleetGuard {
     fn drop(&mut self) {
-        for path in [&self.config_path, &self.ca_path] {
-            if let Err(e) = std::fs::remove_file(path) {
-                eprintln!("fleet config {} was not removed: {e}", path.display());
-            }
+        if let Err(e) = std::fs::remove_file(&self.config_path) {
+            eprintln!(
+                "fleet config {} was not removed: {e}",
+                self.config_path.display()
+            );
         }
     }
 }
@@ -116,20 +116,15 @@ pub fn point_sdk_at(members: &[(String, String, [u8; 32])], ca_pem: &[u8]) -> Fl
     crate::sdk::final_reads::forget_everything();
     let config_path =
         std::env::temp_dir().join(format!("dsm_sdk_fleet_{}.toml", std::process::id()));
-    // The fleet's CA beside the config, named relative to it, as the bundled
-    // config names the CA bundled beside it.
-    let ca_name = format!("dsm_sdk_fleet_{}.ca.pem", std::process::id());
-    let ca_path = std::env::temp_dir().join(&ca_name);
-    std::fs::write(&ca_path, ca_pem).expect("write the fleet's CA");
-    let mut cfg = format!(
+    let ca_pem = std::str::from_utf8(ca_pem).expect("the fleet's CA is PEM");
+    let mut cfg = String::from(
         "allow_localhost = true\n\
-         bitcoin_network = \"signet\"\n\
-         custom_ca_certs = [\"{ca_name}\"]\n"
+         bitcoin_network = \"signet\"\n",
     );
     for (member_id, endpoint, incarnation) in members {
         cfg.push_str(&format!(
             "\n[[nodes]]\nname = \"{member_id}\"\nendpoint = \"{endpoint}\"\n\
-             register_incarnation = \"{}\"\n",
+             register_incarnation = \"{}\"\nca_cert = \"\"\"\n{ca_pem}\"\"\"\n",
             crate::util::text_id::encode_base32_crockford(incarnation)
         ));
     }
@@ -141,10 +136,7 @@ pub fn point_sdk_at(members: &[(String, String, [u8; 32])], ca_pem: &[u8]) -> Fl
         Some(path_text.as_str()),
         "the env config path was set to another file first"
     );
-    FleetGuard {
-        config_path,
-        ca_path,
-    }
+    FleetGuard { config_path }
 }
 
 /// The network's PINNED root-register member ids, in pin order.

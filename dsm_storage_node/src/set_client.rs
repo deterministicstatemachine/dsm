@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The HTTP client a node reaches its set-mates with. It trusts exactly the
-//! storage set's CA: every set-mate presents a certificate chaining to that
-//! one anchor. A node reaches a set-mate only to mirror its ByteCommits
-//! (storage spec §14, mirror sync), at the endpoint its own configuration
-//! names for it, and nowhere else: a redirect is an answer, never followed,
+//! The HTTP client a node reaches one set-mate with. It trusts exactly that
+//! set-mate's CA, which that set-mate's operator holds: a certificate from any
+//! other member's CA is refused, so no member can pose as another. A node
+//! reaches a set-mate only to mirror its ByteCommits (storage spec §14, mirror
+//! sync), at the endpoint its own configuration names for it, and nowhere else: a redirect is an answer, never followed,
 //! so a set-mate's endpoint cannot send the node to fetch from another
 //! address (storage spec §14, mirror provenance 1).
 
@@ -25,10 +25,10 @@ use std::time::Duration;
 pub const SET_MATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const SET_MATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A client pinned to `set_ca_pem`, the storage set's CA certificate.
-pub fn pinned_set_client(set_ca_pem: &[u8]) -> anyhow::Result<Client> {
-    let ca = CertificateDer::from_pem_slice(set_ca_pem)
-        .map_err(|e| anyhow::anyhow!("the storage set's CA certificate is not PEM: {e}"))?;
+/// A client pinned to `set_mate_ca_pem`, the CA certificate of one set-mate.
+pub fn pinned_set_client(set_mate_ca_pem: &[u8]) -> anyhow::Result<Client> {
+    let ca = CertificateDer::from_pem_slice(set_mate_ca_pem)
+        .map_err(|e| anyhow::anyhow!("the set-mate's CA certificate is not PEM: {e}"))?;
     let mut root_store = RootCertStore::empty();
     root_store.add(ca)?;
 

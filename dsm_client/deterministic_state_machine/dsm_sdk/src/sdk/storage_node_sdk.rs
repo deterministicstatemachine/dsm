@@ -29,24 +29,23 @@ use crate::util::text_id::encode_base32_crockford;
 // ── The HTTP client ─────────────────────────────────────────────────────────
 
 /// The CA material a storage client is built from: the resolved env-config
-/// path and the bytes of every PEM it names, in order. Two calls that resolve
-/// the same material get the same client; a re-pointed config or a replaced
-/// certificate produces different material and so a fresh build.
+/// path and, for each member the config names, its id and the PEM of the CA
+/// its operator holds. Two calls that resolve the same material get the same
+/// client; a re-pointed or edited config produces different material and so a
+/// fresh build.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct CaMaterial {
     env_path: Option<String>,
-    certs: Vec<(std::path::PathBuf, Vec<u8>)>,
+    certs: Vec<(String, Vec<u8>)>,
 }
 
 fn ca_error(what: String) -> DsmError {
     DsmError::storage(what, None::<std::io::Error>)
 }
 
-/// Read the env config and every CA certificate it names. A config that
-/// cannot be read or parsed, or that names a certificate that cannot be read,
-/// is an error: a client built without a certificate the config requires
-/// cannot reach the members that use it. With no env config there is no CA,
-/// and [`member_client`] builds no client from no CA.
+/// Read the env config and every member's CA certificate in it. A config that
+/// cannot be read or parsed is an error. With no env config there is no CA, and
+/// [`member_client`] builds no client from no CA.
 fn resolve_ca_material() -> Result<CaMaterial, DsmError> {
     let env_path = crate::network::resolved_env_config_path();
     let Some(path) = env_path.as_ref() else {
@@ -80,119 +79,71 @@ fn stamp(path: &std::path::Path) -> Result<Stamp, DsmError> {
 }
 
 /// One env config's certificates as read: the config's stamp, and each
-/// certificate's path, stamp and bytes.
+/// member's id and CA certificate.
 struct CaRead {
     config: Stamp,
-    certs: Vec<(std::path::PathBuf, Stamp, Vec<u8>)>,
-}
-
-impl CaRead {
-    fn certs(&self) -> Vec<(std::path::PathBuf, Vec<u8>)> {
-        self.certs
-            .iter()
-            .map(|(path, _, bytes)| (path.clone(), bytes.clone()))
-            .collect()
-    }
+    certs: Vec<(String, Vec<u8>)>,
 }
 
 /// Every env config's certificates this process read, by the config's path.
 /// Every storage call resolves its client's material, and reading and parsing
-/// the config and each certificate from disk for every member of every call
-/// is work that only repeats what was read: a config and its certificates
-/// are read again once one of them is changed (its stamp differs), so a
-/// re-pointed config or a replaced certificate still takes effect.
+/// the config from disk for every member of every call is work that only
+/// repeats what was read: a config is read again once it is changed (its stamp
+/// differs), so a re-pointed config still takes effect.
 static CA_READS: std::sync::Mutex<std::collections::BTreeMap<String, CaRead>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-/// The certificates read from the config at `path`, when neither it nor any
-/// of them changed since.
-fn unchanged_ca_certs(
-    path: &str,
-    config: &Stamp,
-) -> Result<Option<Vec<(std::path::PathBuf, Vec<u8>)>>, DsmError> {
-    let reads = match CA_READS.lock() {
+/// Every member's CA certificate in the env config at `path`: as last read when
+/// the config has not changed since, read from disk otherwise.
+fn read_ca_certs(path: &str) -> Result<Vec<(String, Vec<u8>)>, DsmError> {
+    let config = stamp(std::path::Path::new(path))?;
+    let mut reads = match CA_READS.lock() {
         Ok(reads) => reads,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let Some(read) = reads.get(path) else {
-        return Ok(None);
-    };
-    if read.config != *config {
-        return Ok(None);
+    if let Some(read) = reads.get(path).filter(|read| read.config == config) {
+        return Ok(read.certs.clone());
     }
-    for (cert_path, was, _) in &read.certs {
-        if stamp(cert_path)? != *was {
-            return Ok(None);
-        }
-    }
-    Ok(Some(read.certs()))
-}
-
-/// Every CA certificate the env config at `path` names: as last read when
-/// neither the config nor any certificate changed since, read from disk
-/// otherwise.
-fn read_ca_certs(path: &str) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, DsmError> {
-    let config = stamp(std::path::Path::new(path))?;
-    if let Some(certs) = unchanged_ca_certs(path, &config)? {
-        return Ok(certs);
-    }
-    let read = CaRead {
-        config,
-        certs: read_ca_certs_from_disk(path)?,
-    };
-    let certs = read.certs();
-    match CA_READS.lock() {
-        Ok(mut reads) => reads.insert(path.to_string(), read),
-        Err(poisoned) => poisoned.into_inner().insert(path.to_string(), read),
-    };
+    let certs = read_ca_certs_from_disk(path)?;
+    reads.insert(
+        path.to_string(),
+        CaRead {
+            config,
+            certs: certs.clone(),
+        },
+    );
     Ok(certs)
 }
 
-/// Every CA certificate the env config at `path` names, read from disk, each
-/// stamped before it was read: a file changed while it was read is then read
-/// again next time.
-fn read_ca_certs_from_disk(
-    path: &str,
-) -> Result<Vec<(std::path::PathBuf, Stamp, Vec<u8>)>, DsmError> {
-    let config_dir = std::path::Path::new(path)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+/// Every member's `ca_cert` in the env config at `path`, read from disk. A
+/// member with none names no CA, and no client is built for it; a `nodes` or a
+/// `ca_cert` that is present but of the wrong type is a malformed config, not
+/// an empty one.
+fn read_ca_certs_from_disk(path: &str) -> Result<Vec<(String, Vec<u8>)>, DsmError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| ca_error(format!("storage client: env config {path}: {e}")))?;
     let config: toml::Value = toml::from_str(&text)
         .map_err(|e| ca_error(format!("storage client: env config {path}: {e}")))?;
-    let mut certs = Vec::new();
-    // An absent key names no CA, and no member can then be known by its
-    // certificate; a key that is present but not a list of paths is a
-    // malformed config, not an empty one.
-    let entries = match config.get("custom_ca_certs") {
-        None => None,
-        Some(value) => Some(value.as_array().ok_or_else(|| {
-            ca_error(format!(
-                "storage client: {path}: custom_ca_certs is not a list of certificate paths"
-            ))
-        })?),
+    let nodes = match config.get("nodes") {
+        None => &[][..],
+        Some(nodes) => nodes
+            .as_array()
+            .ok_or_else(|| ca_error(format!("storage client: {path}: nodes is not a list")))?
+            .as_slice(),
     };
-    if let Some(entries) = entries {
-        for entry in entries {
-            let named = entry.as_str().ok_or_else(|| {
+    let mut certs = Vec::new();
+    for node in nodes {
+        let name = node
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| ca_error(format!("storage client: {path}: a node has no name")))?;
+        if let Some(ca_cert) = node.get("ca_cert") {
+            let ca_cert = ca_cert.as_str().ok_or_else(|| {
                 ca_error(format!(
-                    "storage client: {path}: custom_ca_certs holds a non-string entry"
+                    "storage client: {path}: {name}'s ca_cert is not a string"
                 ))
             })?;
-            let cert_path = if std::path::Path::new(named).is_absolute() {
-                std::path::PathBuf::from(named)
-            } else {
-                config_dir.join(named)
-            };
-            let was = stamp(&cert_path)?;
-            let bytes = std::fs::read(&cert_path).map_err(|e| {
-                ca_error(format!(
-                    "storage client: CA certificate {}: {e}",
-                    cert_path.display()
-                ))
-            })?;
-            certs.push((cert_path, was, bytes));
+            certs.push((name.to_string(), ca_cert.as_bytes().to_vec()));
         }
     }
     Ok(certs)
@@ -220,12 +171,13 @@ pub fn require_https(endpoint: &str) -> Result<(), DsmError> {
     }
 }
 
-/// Accepts a member's certificate only when it chains to one of the CAs the
-/// env config names AND names the member, as a DNS name among its subject
+/// Accepts a member's certificate only when it chains to the CA the env config
+/// names for that member AND names the member, as a DNS name among its subject
 /// alternative names, whatever address the member was dialled at. A member
 /// signs nothing (storage spec §2), so the certificate is the only thing that
 /// says which member answered; a certificate for another member of the same
-/// set, at this member's address, is refused.
+/// set at this member's address, or one naming this member from another
+/// member's CA, is refused.
 #[derive(Debug)]
 struct NamesTheMember {
     chain: std::sync::Arc<rustls::client::WebPkiServerVerifier>,
@@ -268,45 +220,32 @@ impl rustls::client::danger::ServerCertVerifier for NamesTheMember {
     }
 }
 
-/// The client for `member_id`, built from resolved material: it trusts the
-/// CAs the material holds and nothing else (no system store), and accepts
-/// only a certificate that names `member_id`.
+/// The client for `member_id`, built from resolved material: it trusts the CA
+/// the material holds for that member and nothing else (no system store, no
+/// other member's CA), and accepts only a certificate that names `member_id`.
 fn build_member_client(
     material: &CaMaterial,
     member_id: &str,
 ) -> Result<reqwest::Client, DsmError> {
     use rustls::pki_types::pem::PemObject;
-    if material.certs.is_empty() {
-        return Err(ca_error(
-            "storage client: the env config names no CA (`custom_ca_certs`), so no member \
-             can be known by its certificate"
-                .to_string(),
-        ));
-    }
+    let Some((_, bytes)) = material.certs.iter().find(|(id, _)| id == member_id) else {
+        return Err(ca_error(format!(
+            "storage client: the env config names no CA (`ca_cert`) for {member_id}, so it \
+             cannot be known by its certificate"
+        )));
+    };
     let mut roots = rustls::RootCertStore::empty();
-    for (cert_path, bytes) in &material.certs {
-        let mut held = 0usize;
-        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(bytes) {
-            let cert = cert.map_err(|e| {
-                ca_error(format!(
-                    "storage client: CA certificate {}: {e}",
-                    cert_path.display()
-                ))
-            })?;
-            roots.add(cert).map_err(|e| {
-                ca_error(format!(
-                    "storage client: CA certificate {}: {e}",
-                    cert_path.display()
-                ))
-            })?;
-            held += 1;
-        }
-        if held == 0 {
-            return Err(ca_error(format!(
-                "storage client: {} holds no certificate",
-                cert_path.display()
-            )));
-        }
+    for cert in rustls::pki_types::CertificateDer::pem_slice_iter(bytes) {
+        let cert = cert
+            .map_err(|e| ca_error(format!("storage client: {member_id}'s ca_cert: {e}")))?;
+        roots
+            .add(cert)
+            .map_err(|e| ca_error(format!("storage client: {member_id}'s ca_cert: {e}")))?;
+    }
+    if roots.is_empty() {
+        return Err(ca_error(format!(
+            "storage client: {member_id}'s ca_cert holds no certificate"
+        )));
     }
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(
@@ -345,12 +284,11 @@ fn build_member_client(
 }
 
 /// The HTTP client for the member `member_id`, reached at `endpoint`: over
-/// `https://` only, trusting only the CAs the env config names, and accepting
-/// only a certificate that names `member_id`. The material is resolved on
-/// every call, and read from disk again whenever the config or a certificate
-/// changed ([`read_ca_certs`]), so a re-pointed config or a replaced
-/// certificate takes effect; each member's client is built once per material
-/// and shared.
+/// `https://` only, trusting only the CA the env config names for it, and
+/// accepting only a certificate that names `member_id`. The material is
+/// resolved on every call, and read from disk again whenever the config changed
+/// ([`read_ca_certs`]), so a re-pointed config takes effect; each member's
+/// client is built once per material and shared.
 pub fn member_client(member_id: &str, endpoint: &str) -> Result<reqwest::Client, DsmError> {
     require_https(endpoint)?;
     let material = resolve_ca_material()?;
@@ -1367,28 +1305,27 @@ impl SetClient {
 mod tests {
     use super::{build_member_client, read_ca_certs, CaMaterial, LatestByteCommit, MemberClient};
 
-    /// The env config the app bundles names the CA bundled beside it, and the
-    /// storage client builds from that CA through the same reader and builder
-    /// every client is made by. (Which CA issued the fleet's certificates is
-    /// not decidable offline; a device run against the fleet is what shows the
-    /// bundled CA verifies them.)
+    /// The env config the app bundles names a CA for every member, and the
+    /// storage client builds each member's client from it through the same
+    /// reader and builder every client is made by. (Which CA issued a node's
+    /// certificate is not decidable offline; a device run against the fleet is
+    /// what shows the bundled CAs verify them.)
     #[test]
     fn the_bundled_env_config_names_a_ca_the_storage_client_builds_from() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../frontend/public/dsm_env_config.toml"
         );
-        let certs = read_ca_certs(path).expect("the bundled CA is named and readable");
-        assert_eq!(certs.len(), 1, "exactly the fleet's CA");
-        assert!(certs[0].0.ends_with("ca.crt"));
-        build_member_client(
-            &CaMaterial {
-                env_path: Some(path.to_string()),
-                certs,
-            },
-            "dsm-node-1",
-        )
-        .expect("the storage client builds from the bundled CA");
+        let certs = read_ca_certs(path).expect("the bundled config reads");
+        assert_eq!(certs.len(), 5, "a CA for each of the five members");
+        let material = CaMaterial {
+            env_path: Some(path.to_string()),
+            certs: certs.clone(),
+        };
+        for (member, _) in &certs {
+            build_member_client(&material, member)
+                .expect("the storage client builds from the member's bundled CA");
+        }
     }
 
     /// A relay in front of one member: it holds the first connection it
@@ -1731,21 +1668,17 @@ mod tests {
 
     fn config(body: &str) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("root.pem"), b"PEM").expect("pem");
         let path = dir.path().join("env.toml");
         std::fs::write(&path, body).expect("config");
         let path = path.to_string_lossy().into_owned();
         (dir, path)
     }
 
-    /// An absent `custom_ca_certs` names no CA; a present one is a list of
-    /// readable certificate paths or the config is malformed — a scalar, a
-    /// table, a non-string entry or an unreadable file is an error, never
-    /// "no certificates".
-    /// A member is known only by a certificate from a CA the env config
-    /// names, so no client is built from no CA (the system store is never
-    /// trusted in its place), nor from a named file that holds no
-    /// certificate, nor for a member id no certificate can carry.
+    /// A member is known only by a certificate from the CA the env config names
+    /// for it, so no client is built from no CA (the system store is never
+    /// trusted in its place), nor for a member only other members' CAs are
+    /// named for, nor from a `ca_cert` that holds no certificate, nor for a
+    /// member id no certificate can carry.
     #[test]
     fn no_client_is_built_without_a_named_ca_or_for_an_unnameable_member() {
         let none = CaMaterial {
@@ -1757,7 +1690,7 @@ mod tests {
 
         let not_pem = CaMaterial {
             env_path: None,
-            certs: vec![(std::path::PathBuf::from("root.pem"), b"PEM".to_vec())],
+            certs: vec![("dsm-node-1".to_string(), b"PEM".to_vec())],
         };
         let refused = build_member_client(&not_pem, "dsm-node-1").unwrap_err();
         assert!(
@@ -1772,9 +1705,14 @@ mod tests {
             .into_bytes();
         let named = CaMaterial {
             env_path: None,
-            certs: vec![(std::path::PathBuf::from("ca.pem"), ca)],
+            certs: vec![
+                ("dsm-node-1".to_string(), ca.clone()),
+                ("not a name".to_string(), ca),
+            ],
         };
         build_member_client(&named, "dsm-node-1").expect("a client for a nameable member");
+        let refused = build_member_client(&named, "dsm-node-2").unwrap_err();
+        assert!(refused.to_string().contains("names no CA"), "{refused}");
         let refused = build_member_client(&named, "not a name").unwrap_err();
         assert!(
             refused
@@ -1797,53 +1735,66 @@ mod tests {
         }
     }
 
-    /// A config and its certificates are read once while none of them
-    /// changes: a certificate that can no longer be opened, but is unchanged,
-    /// is not opened again, and every call resolves what was read. A
-    /// replaced certificate is read again, and its new bytes are the
-    /// material.
+    /// A config is read once while it does not change: a config that can no
+    /// longer be opened, but is unchanged, is not opened again, and every call
+    /// resolves what was read. An edited config is read again, and its new
+    /// bytes are the material.
     #[cfg(unix)]
     #[test]
     fn unchanged_ca_material_is_not_read_again_and_a_replaced_one_is() {
         use std::os::unix::fs::PermissionsExt;
-        let (dir, path) = config("custom_ca_certs = [\"root.pem\"]\n");
-        let pem = dir.path().join("root.pem");
+        let (_dir, path) = config("[[nodes]]\nname = \"m\"\nca_cert = \"PEM\"\n");
         let first = read_ca_certs(&path).expect("the certificates");
         assert_eq!(first[0].1, b"PEM");
 
-        std::fs::set_permissions(&pem, std::fs::Permissions::from_mode(0o000))
-            .expect("the certificate made unreadable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("the config made unreadable");
         let again = read_ca_certs(&path);
-        std::fs::set_permissions(&pem, std::fs::Permissions::from_mode(0o644))
-            .expect("the certificate readable again");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("the config readable again");
         assert_eq!(
-            again.expect("an unchanged certificate is not opened again"),
+            again.expect("an unchanged config is not opened again"),
             first
         );
 
-        std::fs::write(&pem, b"REPLACED PEM").expect("the certificate replaced");
+        std::fs::write(
+            &path,
+            "[[nodes]]\nname = \"m\"\nca_cert = \"REPLACED PEM\"\n",
+        )
+        .expect("the config replaced");
         let replaced = read_ca_certs(&path).expect("the certificates");
         assert_eq!(
             replaced[0].1, b"REPLACED PEM",
-            "a replaced certificate is read again"
+            "an edited config is read again"
         );
     }
 
+    /// Each member's `ca_cert` is read under its own name. A config with no
+    /// nodes, or a node with none, names no CA for it; a `nodes` or a `ca_cert`
+    /// of another type, or a node with no name, is an error, never "no
+    /// certificates".
     #[test]
-    fn custom_ca_certs_is_a_list_of_readable_paths_or_an_error() {
+    fn each_members_ca_cert_is_a_string_or_an_error() {
         let (_d, path) = config("network_id = \"x\"\n");
-        assert!(read_ca_certs(&path).expect("absent key").is_empty());
+        assert!(read_ca_certs(&path).expect("no nodes").is_empty());
 
-        let (_d, path) = config("custom_ca_certs = [\"root.pem\"]\n");
-        let certs = read_ca_certs(&path).expect("a list of paths");
-        assert_eq!(certs.len(), 1);
-        assert_eq!(certs[0].1, b"PEM");
+        let (_d, path) = config(
+            "[[nodes]]\nname = \"a\"\nca_cert = \"PEM A\"\n\
+             [[nodes]]\nname = \"b\"\n\
+             [[nodes]]\nname = \"c\"\nca_cert = \"PEM C\"\n",
+        );
+        assert_eq!(
+            read_ca_certs(&path).expect("a CA per named member"),
+            vec![
+                ("a".to_string(), b"PEM A".to_vec()),
+                ("c".to_string(), b"PEM C".to_vec()),
+            ]
+        );
 
         for malformed in [
-            "custom_ca_certs = \"root.pem\"\n",
-            "[custom_ca_certs]\nfile = \"root.pem\"\n",
-            "custom_ca_certs = [1]\n",
-            "custom_ca_certs = [\"missing.pem\"]\n",
+            "nodes = \"a\"\n",
+            "[[nodes]]\nname = \"a\"\nca_cert = 1\n",
+            "[[nodes]]\nca_cert = \"PEM\"\n",
         ] {
             let (_d, path) = config(malformed);
             assert!(read_ca_certs(&path).is_err(), "{malformed}");
@@ -1891,7 +1842,7 @@ mod tests {
         let addr = handle.listening().await.expect("the member listens");
         let material = CaMaterial {
             env_path: None,
-            certs: vec![(std::path::PathBuf::from("ca.pem"), ca.pem.clone())],
+            certs: vec![(member_id.to_string(), ca.pem.clone())],
         };
         let member = MemberClient {
             member_id: member_id.to_string(),
@@ -1899,6 +1850,49 @@ mod tests {
             client: build_member_client(&material, member_id).expect("the member's client"),
         };
         (member, handle)
+    }
+
+    /// A member is known only by the CA named for it. A certificate naming the
+    /// member, from the CA named for ANOTHER member of the same set, is what an
+    /// operator standing in for that member would serve: the connection is
+    /// refused before anything is read. The same node reached through the CA
+    /// named for it answers, so the refusal is the CA.
+    #[tokio::test]
+    async fn a_certificate_from_another_members_ca_is_refused() {
+        let own_ca = TestCa::new();
+        let others_ca = TestCa::new();
+        let (member, _handle) = member_at(&own_ca, "dsm-node-1", axum::Router::new()).await;
+
+        let client = |dsm_node_1_ca: &[u8], dsm_node_2_ca: &[u8]| {
+            build_member_client(
+                &CaMaterial {
+                    env_path: None,
+                    certs: vec![
+                        ("dsm-node-1".to_string(), dsm_node_1_ca.to_vec()),
+                        ("dsm-node-2".to_string(), dsm_node_2_ca.to_vec()),
+                    ],
+                },
+                "dsm-node-1",
+            )
+            .expect("the member's client")
+        };
+
+        let refused = client(&others_ca.pem, &own_ca.pem)
+            .get(&member.endpoint)
+            .send()
+            .await
+            .expect_err("a certificate from another member's CA");
+        assert!(
+            super::with_causes(&refused).contains("invalid peer certificate"),
+            "{}",
+            super::with_causes(&refused)
+        );
+
+        client(&own_ca.pem, &others_ca.pem)
+            .get(&member.endpoint)
+            .send()
+            .await
+            .expect("the member, through the CA named for it, answers");
     }
 
     /// Every member `apps` names, as one set, in that order.

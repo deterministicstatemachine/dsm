@@ -82,12 +82,12 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// The env config a host reads to reach `fleet`: every member, its endpoint
-/// and incarnation, and the set's CA beside it, as the bundled config names
-/// the fleet's.
+/// incarnation and CA, as the bundled config names the fleet's.
 fn env_config(dir: &Path, fleet: &nodes::NodeSet) -> PathBuf {
-    if let Err(e) = std::fs::write(dir.join("fleet-ca.pem"), fleet.ca_pem()) {
-        panic!("the fleet's CA: {e}");
-    }
+    let ca_pem = match std::str::from_utf8(fleet.ca_pem()) {
+        Ok(ca_pem) => ca_pem,
+        Err(e) => panic!("the fleet's CA is PEM: {e}"),
+    };
     // The config admits loopback endpoints exactly when the fleet serves at one.
     let loopback = fleet.endpoints().iter().any(|endpoint| {
         let url = match reqwest::Url::parse(endpoint) {
@@ -102,15 +102,11 @@ fn env_config(dir: &Path, fleet: &nodes::NodeSet) -> PathBuf {
             Err(e) => panic!("the node endpoint {endpoint} is not at an IP address: {e}"),
         }
     });
-    let mut cfg = format!(
-        "allow_localhost = {loopback}\n\
-         bitcoin_network = \"signet\"\n\
-         custom_ca_certs = [\"fleet-ca.pem\"]\n"
-    );
+    let mut cfg = format!("allow_localhost = {loopback}\nbitcoin_network = \"signet\"\n");
     for (member_id, endpoint, incarnation) in fleet.members() {
         cfg.push_str(&format!(
             "\n[[nodes]]\nname = \"{member_id}\"\nendpoint = \"{endpoint}\"\n\
-             register_incarnation = \"{}\"\n",
+             register_incarnation = \"{}\"\nca_cert = \"\"\"\n{ca_pem}\"\"\"\n",
             dsm_sdk::util::text_id::encode_base32_crockford(&incarnation)
         ));
     }

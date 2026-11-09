@@ -2,7 +2,7 @@
 //! ByteCommits on the served assembly (storage spec §14): a node's own chain,
 //! proofs that it commits a cell's entries, and a mirror filled only by
 //! fetching from the set-mate itself — two real nodes over real HTTPS, each
-//! serving a certificate from the set's CA and pinned to it.
+//! serving a certificate from its CA and pinned to the other's.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -26,17 +26,18 @@ fn node_state_on(
     id: &str,
     set: &[&str],
     endpoints: &[(&str, &str)],
+    ca_pem: &str,
 ) -> Arc<AppState> {
-    let state = AppState::new(id.to_string(), pool, common::set_client()).expect("app state");
+    let state = AppState::new(id.to_string(), pool).expect("app state");
     let members: Vec<(String, [u8; 32])> = set.iter().map(|m| (m.to_string(), [7u8; 32])).collect();
-    let endpoints = endpoints
+    let configured = endpoints
         .iter()
-        .map(|(m, e)| (m.to_string(), e.to_string()))
+        .map(|(m, e)| (m.to_string(), e.to_string(), Some(ca_pem.to_string())))
         .collect();
     let set = NodeStorageSet::new(members, id, [7u8; 32])
         .expect("set")
-        .with_endpoints(id, endpoints)
-        .expect("endpoints");
+        .with_set_mates(id, configured)
+        .expect("set-mates");
     Arc::new(state.with_storage_set(set))
 }
 
@@ -47,7 +48,13 @@ async fn node_state(
     set: &[&str],
     endpoints: &[(&str, &str)],
 ) -> Arc<AppState> {
-    node_state_on(common::fresh_store(store).await, id, set, endpoints)
+    node_state_on(
+        common::fresh_store(store).await,
+        id,
+        set,
+        endpoints,
+        &common::node_ca_pem(),
+    )
 }
 
 /// A loopback listener and the `https://` endpoint a set-mate's
@@ -314,12 +321,14 @@ async fn a_rewritten_cycle_is_kept_beside_the_first() {
         "dsm-node-b",
         &set,
         &[("dsm-node-a", &ua)],
+        &common::node_ca_pem(),
     ));
     let b2 = app(node_state_on(
         b_db,
         "dsm-node-b",
         &set,
         &[("dsm-node-a", &ua2)],
+        &common::node_ca_pem(),
     ));
 
     let key = [0x41; 32];
@@ -342,7 +351,7 @@ async fn a_rewritten_cycle_is_kept_beside_the_first() {
 async fn a_node_in_no_set_refuses_a_mirror_sync() {
     let pool = common::fresh_store("bc_no_set").await;
     let state = Arc::new(
-        AppState::new("dsm-node-z".to_string(), pool, common::set_client()).expect("app state"),
+        AppState::new("dsm-node-z".to_string(), pool).expect("app state"),
     );
     assert_eq!(sync(&app(state)).await, StatusCode::CONFLICT);
 }
@@ -501,6 +510,35 @@ async fn a_set_mates_redirect_is_not_followed() {
         "a redirect is not a set-mate's answer"
     );
     assert!(mirrored(&b, b"dsm-node-a", 1).await.is_empty());
+}
+
+/// A set-mate is known only by a certificate from the CA configured for it. A
+/// node serving at that endpoint under any other member's CA is not it: the
+/// connection is refused, the sync fails, and nothing enters the mirror. The
+/// same node under the configured CA is mirrored, so the refusal is the CA.
+#[tokio::test]
+async fn a_set_mate_certified_by_another_members_ca_is_not_mirrored() {
+    let a = app(node_state("bc_other_ca_a", "dsm-node-a", &["dsm-node-a"], &[]).await);
+    put(&a, [0x71; 32], b"held by a").await;
+    let (a_listener, a_url) = listener().await;
+    common::serve_tls(a_listener, a.clone()).await;
+    close(&a).await;
+
+    let set = ["dsm-node-a", "dsm-node-b"];
+    let endpoints = [("dsm-node-a", a_url.as_str())];
+    let refusing = app(node_state_on(
+        common::fresh_store("bc_other_ca_b").await,
+        "dsm-node-b",
+        &set,
+        &endpoints,
+        &common::another_members_ca_pem(),
+    ));
+    assert_eq!(sync(&refusing).await, StatusCode::BAD_GATEWAY);
+    assert!(mirrored(&refusing, b"dsm-node-a", 1).await.is_empty());
+
+    let taking = app(node_state("bc_own_ca_b", "dsm-node-b", &set, &endpoints).await);
+    assert_eq!(sync(&taking).await, StatusCode::NO_CONTENT);
+    assert_eq!(mirrored(&taking, b"dsm-node-a", 1).await.len(), 1);
 }
 
 /// A set-mate that does not answer at its configured endpoint fails the

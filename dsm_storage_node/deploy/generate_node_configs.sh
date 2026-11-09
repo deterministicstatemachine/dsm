@@ -11,7 +11,6 @@
 #     ├── .env                     (PostgreSQL credentials; mode 0600)
 #     ├── config/node.toml         (node-specific config, holding the database
 #     │                             password; mode 0600)
-#     ├── certs/ca.crt             (shared CA certificate)
 #     ├── certs/node.crt           (per-node TLS cert)
 #     ├── certs/node.key           (per-node TLS key)
 #     └── docker-compose.node.yml  (copied from deploy/)
@@ -44,11 +43,11 @@ fi
 #
 # The CA private key exists in exactly one place — ${OUT_DIR}/ca/ca.key. It is
 # not in git, and it cannot be reconstructed. (The public cert lives beside it
-# at ${OUT_DIR}/ca/ca.crt and is bundled into clients as the app asset
-# dsm_client/frontend/public/ca.crt. A second committed copy at scripts/ca.crt
+# at ${OUT_DIR}/ca/ca.crt; it is the `ca_cert` of every member in each node's
+# config and in the client env config. A second committed copy at scripts/ca.crt
 # was deleted 2026-09-12: it had drifted to a DIFFERENT CA with the same
 # subject, so the two disagreed silently about which fleet a client could
-# trust. Keep exactly one public cert in the tree.) Deleting it means the deployed fleet's certificates can never
+# trust.) Deleting it means the deployed fleet's certificates can never
 # be reissued or extended: every node must be redeployed with a new CA, and
 # every client CA bundle re-pushed, before anything can talk to anything.
 #
@@ -103,10 +102,12 @@ PG_PASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
 # So these bundles ship with `[storage_set]` commented out (each node serves the
 # storage contract and mirrors no set-mate until the set is written). Boot them, collect each node's logged
 # `register incarnation for node <id>: <Base32-Crockford>`, write the full member
-# list into every node config AND the client env config, then restart.
+# list, with each member's `ca_cert`, into every node config AND the client env
+# config, then restart.
 echo "Storage set: NOT configured by this generator (phase 1)."
 echo "  Boot the fleet, collect each node's logged register incarnation, then"
-echo "  write [[storage_set.members]] into every node config and restart."
+echo "  write [[storage_set.members]], with each member's ca_cert, into every node"
+echo "  config and restart."
 
 # ----- Per-Node Bundles -----
 for i in $(seq 1 "${N}"); do
@@ -135,7 +136,6 @@ EXTEOF
         -extfile "${NODE_DIR}/certs/ext.cnf" \
         -out "${NODE_DIR}/certs/node.crt" 2>/dev/null
     rm -f "${NODE_DIR}/certs/node.csr" "${NODE_DIR}/certs/ext.cnf"
-    cp "${CA_DIR}/ca.crt" "${NODE_DIR}/certs/ca.crt"
     chmod 600 "${NODE_DIR}/certs/node.key"
 
     # --- Node config from template ---

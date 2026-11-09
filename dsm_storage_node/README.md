@@ -31,10 +31,12 @@ Storage Node (Rust / Axum)
 
 There is no consensus, no leader election and no gossip between nodes. A node
 reaches a set-mate only to mirror its ByteCommits, at the endpoint its own
-configuration names, over a client pinned to the storage set's CA.
+configuration names, over a client pinned to that set-mate's own CA.
 
 The environment config the app ships (`dsm_env_config.toml`) names the fleet
-it connects to.
+it connects to, and the CA each member is known by.
+
+**Running a public node?** Follow [RUN_A_NODE.md](RUN_A_NODE.md).
 
 ## Local Multi-Node Development (Optional)
 
@@ -61,10 +63,10 @@ make nodes-up
 make nodes-status
 ```
 
-Everything lives in `.dsm-dev/net/`: each node's config, certificate, log and
-pid, and the client config wallets and app hosts use
-(`dsm_env_config.toml`, trusting `dev-ca.pem`). Postgres is reached at
-`DSM_DEV_PG_URL` (default `postgresql://$USER@localhost:5432/postgres?sslmode=disable`).
+Everything lives in `.dsm-dev/net/`: each node's config, certificate, its own
+CA, log and pid, and the client config wallets and app hosts use
+(`dsm_env_config.toml`, naming each member's CA as its `ca_cert`). Postgres is
+reached at `DSM_DEV_PG_URL` (default `postgresql://$USER@localhost:5432/postgres?sslmode=disable`).
 
 ### Stop
 
@@ -127,8 +129,9 @@ src/
 
 A node starts from its TOML config (`--config`, required). It refuses to start
 without `node.id`, `network.listen_addr`, `network.port`, `database.url`, and
-`tls.cert_path` / `tls.key_path` / `tls.ca_path` (the storage set's CA, which
-mirror sync pins set-mates to). `network.max_connections` and
+`tls.cert_path` / `tls.key_path`, or in a set without each set-mate's `endpoint`
+and `ca_cert` (the CA that member's operator holds, which mirror sync pins that
+set-mate to). `network.max_connections` and
 `http.body_limit_bytes` default when absent and are refused when of the wrong
 type. The database connection requires TLS unless its URL says
 `sslmode=disable`. It serves TLS only. See `config/production.toml`, and the
@@ -365,7 +368,7 @@ sleep 30 && bash deploy/check_nodes.sh <IPs>
 
 ### Security Notes
 
-- TLS certificates are self-signed, generated fresh per deployment
+- TLS certificates chain to an operator's own CA, generated fresh per deployment
 - SSH is key-based only, from the one `allowed_ssh_cidr` block (required, never 0.0.0.0/0)
 - Security groups and firewall rules allow only ports 8080 (API) and 22 (SSH)
 - Node instances carry `prevent_destroy` and keep their disks if deleted; AWS root volumes are encrypted and instance metadata takes IMDSv2 tokens only

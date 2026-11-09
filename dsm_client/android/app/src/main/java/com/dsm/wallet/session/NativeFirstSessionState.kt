@@ -20,7 +20,6 @@ object NativeFirstCutoverReset {
         "dsm_env_config.toml",
         "dsm_env_config.override.toml",
         "dsm_env_config.local.toml",
-        "ca.crt",
     )
 
     fun resetIfNeeded(context: Context) {
