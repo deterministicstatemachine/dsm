@@ -57,7 +57,7 @@ What this replaces, in cost: a hardware key per user and its replacements; SMS c
 - **A wallet connects** by scanning a `dsm:connect/v1:` code your app shows. The player approves a **grant**: what your app may ask for without asking them again, with caps.
 - **Your app then asks**, and reads the **fact** your own account established.
 
-Your app needs a server side, even a small one, because the account's secret must never reach a browser page. The [starter](examples/connect-starter/) is one file.
+Your app needs a server side, even a small one, because the account's secret must never reach a browser page. The [starter](examples/connect-starter/) is one file, and its page is where you build your app from pieces.
 
 ## Start in five minutes
 
@@ -68,7 +68,15 @@ make app-dev       # your own storage set on this machine, and your app's accoun
 make starter       # the starter app: open http://127.0.0.1:3000
 ```
 
-In the starter, press **Show a connect code**. Then connect a wallet. With no phone:
+The starter's page is a builder. It has three kinds of pieces, in the order an app uses them:
+
+1. **Objects your app issues**: a coin, points, an item (supply 1 is a one-of-a-kind), a ticket; and a shop, a vault that sells one object for another.
+2. **What the wallet lets your app do**: the offer. Tick the grants (send, owns, accept, contacts, match, trade), set each cap, and press **Show the connect code**.
+3. **Ask a connected wallet**: send, prove what it owns, sign in, sign a statement, accept or receive an object, price or make a trade through your shop, stake on a match, decide it, collect.
+
+Under every piece is the exact code it is, in TypeScript or Python, with a Copy button. The page never makes up that code: it asks the starter's server, which runs one mapping from piece to client call ([src/pieces.ts](examples/connect-starter/src/pieces.ts)) both to show the code and to make the call. Set the pieces up the way your app needs them, press the button to see it happen, then paste the code into your own app.
+
+Press **Show the connect code**. Then connect a wallet. With no phone:
 
 ```bash
 make dev-wallet                                  # a player's wallet in the terminal, funded
@@ -84,7 +92,7 @@ make phones-connect CODE=dsm:connect/v1:...      # open the code in each wallet
 
 After `make nodes-reset` (a new set, with new CAs), clear the phones' wallets and run `make phones-local` again.
 
-Back in the starter, the wallet appears under **Connected wallets**. Ask it to send 0.05 ERA and watch the fact become `received`. Ask for 0.20, over the per-request cap, and it waits for the player: `make dev-wallet-pending`, then `make wallet ARGS="approve <connection> <seq>"` (or approve it on the phone). Press **Sign in** and approve that the same way: the fact is `signed`.
+Back in the starter, the wallet appears under **Connected wallets**. Under **Ask a connected wallet**, ask it to send 0.05 ERA and watch the fact become `received`. Ask for 0.20, over the per-request cap, and it waits for the player: `make dev-wallet-pending`, then `make wallet ARGS="approve <connection> <seq>"` (or approve it on the phone). Ask it to **sign in** and approve that the same way: the fact is `signed`.
 
 `make dev-down` stops everything. `make developer-path` runs the whole path, every helper once, as CI does.
 

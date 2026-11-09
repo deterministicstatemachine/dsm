@@ -9,27 +9,31 @@
   :root {
     --bg: #f6f7f9; --card: #ffffff; --ink: #14171c; --muted: #5d6673; --line: #e2e5ea;
     --accent: #2457d6; --accent-ink: #ffffff; --good: #137a43; --wait: #a15c00; --bad: #b42318;
+    --code-bg: #0f1216; --code-ink: #e8ebef;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f1216; --card: #171b21; --ink: #e8ebef; --muted: #98a1ad; --line: #272d36;
       --accent: #6b93ff; --accent-ink: #0b0d10; --good: #4cc98a; --wait: #f0b45a; --bad: #ff7a6e;
+      --code-bg: #0a0c0f; --code-ink: #dfe4ea;
     }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink);
          font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
   header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
   h1 { font-size: 22px; margin: 0; }
   h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  h3 { font-size: 14px; margin: 14px 0 6px; }
   .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 20px; }
   section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
   .wide { grid-column: 1 / -1; }
   button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px;
            padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
   button.quiet { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button.tiny { padding: 3px 8px; font-size: 12px; font-weight: 500; }
   button:disabled { opacity: .5; cursor: default; }
   .qr { background: #fff; border-radius: 8px; padding: 8px; width: 220px; max-width: 100%; margin: 12px 0; }
   .qr svg { display: block; width: 100%; height: auto; }
@@ -42,8 +46,24 @@
   .connection:first-of-type { border-top: 0; padding-top: 0; }
   .grants { margin: 6px 0 10px; padding-left: 18px; color: var(--muted); font-size: 13px; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
-  input { width: 110px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px;
+  input, select { padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px;
           background: var(--bg); color: var(--ink); font: inherit; }
+  input { width: 110px; }
+  input.long { width: 220px; }
+  label.field { display: inline-flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 2px; }
+  label.check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+  label.check input { width: auto; }
+  .piece { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 8px; }
+  .piece.off .body { display: none; }
+  .piece .head { display: flex; align-items: center; gap: 8px; }
+  .piece .head b { flex: 1; }
+  .piece .why { color: var(--muted); font-size: 13px; }
+  .codebox { position: relative; margin-top: 12px; }
+  .codebox pre { margin: 0; background: var(--code-bg); color: var(--code-ink); border-radius: 10px; padding: 34px 14px 12px;
+                 font: 12px/1.5 ui-monospace, Menlo, monospace; overflow-x: auto; white-space: pre; }
+  .codebox .tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; }
+  .codebox .tools button { background: rgba(255,255,255,.12); color: var(--code-ink); }
+  .codebox .tools button.on { background: var(--accent); color: var(--accent-ink); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--muted); font-weight: 500; }
@@ -52,6 +72,7 @@
   .err { color: var(--bad); }
   .muted { color: var(--muted); }
   .scroll { overflow-x: auto; }
+  .note { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
 </style>
 </head>
 <body>
@@ -60,30 +81,76 @@
     <h1 id="name">Connect Starter</h1>
     <span class="id" id="account"></span>
   </header>
-  <p class="muted">An ordinary web app, plugged into DSM. This page never touches the app's account: it asks this app's server,
-    and the server asks the account. What counts is the <b>fact</b> the account established itself (a transfer it accepted,
-    a proof it verified, a signature it checked), never what a wallet says.</p>
+  <p class="muted">Build an app from pieces. Each piece is one call on your app's account; the code under it is that
+    call, in TypeScript or Python, ready to paste into your own app. Press the button and this page makes the same call,
+    through this app's server (the only thing that holds the account's secret). What counts is the <b>fact</b> the
+    account established itself (a transfer it accepted, a proof it verified, a signature it checked), never what a wallet says.</p>
+  <div class="row">
+    <span class="muted">Show code in</span>
+    <button class="quiet tiny on" id="lang-ts" onclick="setLang('ts')">TypeScript</button>
+    <button class="quiet tiny" id="lang-py" onclick="setLang('py')">Python</button>
+  </div>
 
   <div class="grid">
     <section>
-      <h2>Connect a wallet</h2>
-      <button id="offer">Show a connect code</button>
+      <h2>1. Objects your app issues</h2>
+      <div id="owned" class="muted">…</div>
+      <div id="vaults" class="muted"></div>
+
+      <h3>Issue an object</h3>
+      <p class="note">A coin, points, an item, a ticket. Supply 1 makes a one-of-a-kind. Your account holds the supply and gives it out.</p>
+      <div class="row" id="issue-fields">
+        <label class="field">Symbol <input id="issue-symbol" value="GOLD"></label>
+        <label class="field">Name <input id="issue-name" value="Starter gold"></label>
+        <label class="field">Supply <input id="issue-supply" value="1000000"></label>
+        <label class="field">Decimals <input id="issue-decimals" value="2" size="3"></label>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="issue-transferable" checked> holders can pass it on</label>
+        <label class="check"><input type="checkbox" id="issue-burnable"> holders can destroy it</label>
+        <button onclick="run('/api/issue', issuePiece())">Issue</button>
+      </div>
+      <div class="codebox" data-code="issue"><pre></pre></div>
+
+      <h3>Open a shop</h3>
+      <p class="note">A vault that trades between two objects you hold. Wallets buy through it with the trade grant.</p>
+      <div class="row">
+        <label class="field">Sells <select id="vault-a" data-objects></select></label>
+        <label class="field">Reserve <input id="vault-ra" value="1000"></label>
+        <label class="field">For <select id="vault-b" data-objects data-default="ERA"></select></label>
+        <label class="field">Reserve <input id="vault-rb" value="10"></label>
+        <label class="field">Fee (bps) <input id="vault-fee" value="30" size="4"></label>
+        <button onclick="run('/api/vault', vaultPiece())">Open</button>
+      </div>
+      <div class="codebox" data-code="vault"><pre></pre></div>
+    </section>
+
+    <section>
+      <h2>2. What the wallet lets your app do</h2>
+      <p class="note">The offer: what a wallet grants once, on the device, so your app can ask without asking again. Caps are in the object's own units.</p>
+      <div class="row"><label class="field">Your app's name <input class="long" id="offer-name"></label></div>
+      <div id="grant-pieces"></div>
+      <div class="row"><button id="offer">Show the connect code</button></div>
       <div id="offered" hidden>
         <div class="qr" id="qr"></div>
         <p class="row"><a id="open">Open in the DSM wallet on this device</a></p>
         <p class="code" id="code"></p>
       </div>
+      <div class="codebox" data-code="offer"><pre></pre></div>
     </section>
-    <section>
-      <h2>This app owns</h2>
-      <div id="owned" class="muted">…</div>
+
+    <section class="wide">
+      <h2>3. Ask a connected wallet</h2>
       <div class="row">
-        <input id="issue-symbol" value="SWORD" aria-label="Symbol">
-        <input id="issue-supply" value="1" aria-label="Supply">
-        <button class="quiet" onclick="act('/api/issue', {symbol: el('issue-symbol').value, name: el('issue-symbol').value.toLowerCase(), supply: el('issue-supply').value})">Issue</button>
+        <label class="field">Wallet <select id="ask-connection"></select></label>
+        <label class="field">Ask it to <select id="ask-kind" onchange="renderAskFields()"></select></label>
       </div>
-      <div id="vaults" class="muted"></div>
+      <p class="note" id="ask-why"></p>
+      <div class="row" id="ask-fields"></div>
+      <div class="row"><button id="ask-run" onclick="runAsk()">Ask</button></div>
+      <div class="codebox" data-code="ask"><pre></pre></div>
     </section>
+
     <section class="wide">
       <h2>Connected wallets</h2>
       <div id="connections" class="muted">No wallet has connected yet.</div>
@@ -107,6 +174,8 @@
 <script>
   const el = (id) => document.getElementById(id);
   const text = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  let lang = "ts";
+  let state = { name: "", owned: [], connections: [], coin: undefined };
 
   async function api(path, payload) {
     const res = await fetch(path, payload === undefined ? {} : {
@@ -117,9 +186,181 @@
     return body;
   }
 
+  // ── objects: the symbols this account knows, for every object picker ──
+  function symbols() {
+    const out = ["ERA"];
+    for (const o of state.owned) if (!out.includes(o.symbol)) out.push(o.symbol);
+    return out;
+  }
+  function fillObjectSelects() {
+    for (const s of document.querySelectorAll("select[data-objects]")) {
+      const keep = s.value || s.dataset.default || "";
+      const names = symbols();
+      s.innerHTML = names.map((n) => `<option>${text(n)}</option>`).join("");
+      s.value = names.includes(keep) ? keep : (names.includes(s.dataset.default) ? s.dataset.default : names[0]);
+    }
+  }
+
+  // ── piece 1: issue, vault ──
+  function issuePiece() {
+    return {
+      symbol: el("issue-symbol").value.trim().toUpperCase(), name: el("issue-name").value, supply: el("issue-supply").value,
+      decimals: Number(el("issue-decimals").value || 0), transferable: el("issue-transferable").checked, burnable: el("issue-burnable").checked,
+    };
+  }
+  function vaultPiece() {
+    return { a: el("vault-a").value, reserveA: el("vault-ra").value, b: el("vault-b").value, reserveB: el("vault-rb").value, feeBps: Number(el("vault-fee").value || 30), label: `${state.name} shop` };
+  }
+
+  // ── piece 2: the offer's grants ──
+  const GRANTS = [
+    { kind: "send", name: "Send", why: "the wallet sends your app an object, up to a cap each time and in all", on: true,
+      fields: [["object", "Object", "ERA", "objects"], ["perRequest", "Per request", "0.10"], ["total", "In all", "1.00"]] },
+    { kind: "owns", name: "Owns", why: "the wallet proves what it owns of these objects (yours are always included)", on: true,
+      fields: [["objects", "Objects", "ERA", "list"]] },
+    { kind: "accept", name: "Accept", why: "the wallet takes up objects your app issues, so you can give them", on: true, fields: [] },
+    { kind: "contacts", name: "Contacts", why: "the wallet tells your app who its contacts are (their identities), nothing more", on: false, fields: [] },
+    { kind: "match", name: "Match", why: "the wallet stakes in matches your app referees, within a cap", on: true,
+      fields: [["object", "Object", "ERA", "objects"], ["perRequest", "Per match", "1.00"], ["total", "In all", "2.00"]] },
+    { kind: "trade", name: "Trade", why: "the wallet buys through your shop, within a cap on what it spends", on: false,
+      fields: [["from", "Spends", "ERA", "objects"], ["to", "Buys", "GOLD", "objects"], ["perRequest", "Per trade", "1.00"], ["total", "In all", "5.00"]] },
+  ];
+  function fieldHtml(prefix, [id, label, value, kind]) {
+    const key = `${prefix}-${id}`;
+    if (kind === "objects") return `<label class="field">${label} <select id="${key}" data-objects data-default="${text(value)}"></select></label>`;
+    if (kind === "list") return `<label class="field">${label} <input id="${key}" class="long" value="${text(value)}" placeholder="ERA, GOLD"></label>`;
+    return `<label class="field">${label} <input id="${key}" value="${text(value)}"></label>`;
+  }
+  function renderGrantPieces() {
+    el("grant-pieces").innerHTML = GRANTS.map((g) => `
+      <div class="piece${g.on ? "" : " off"}" id="grant-${g.kind}">
+        <div class="head"><label class="check"><input type="checkbox" ${g.on ? "checked" : ""} onchange="toggleGrant('${g.kind}', this.checked)"> <b>${g.name}</b></label>
+          <span class="why">${g.why}</span></div>
+        <div class="body row">${g.fields.map((f) => fieldHtml(`grant-${g.kind}`, f)).join("")}</div>
+      </div>`).join("");
+  }
+  function toggleGrant(kind, on) {
+    GRANTS.find((g) => g.kind === kind).on = on;
+    el(`grant-${kind}`).classList.toggle("off", !on);
+    codeChanged();
+  }
+  function readFields(prefix, fields) {
+    const out = {};
+    for (const [id, , , kind] of fields) {
+      const v = el(`${prefix}-${id}`).value;
+      out[id] = kind === "list" ? v.split(",").map((s) => s.trim()).filter((s) => s.length > 0) : v;
+    }
+    return out;
+  }
+  function offerPiece() {
+    return { name: el("offer-name").value || state.name, grants: GRANTS.filter((g) => g.on).map((g) => ({ kind: g.kind, ...readFields(`grant-${g.kind}`, g.fields) })) };
+  }
+
+  // ── piece 3: asks ──
+  const ASKS = [
+    { kind: "send", name: "send your app an object", why: "Inside the grant it runs at once; over a cap it waits for the player on the device. The fact is received, once your account accepted the transfer.",
+      fields: [["object", "Object", "ERA", "objects"], ["amount", "Amount", "0.05"], ["memo", "Memo", ""]] },
+    { kind: "owns", name: "prove what it owns", why: "A proof your account verifies itself, not a number the wallet states. The fact is owns.",
+      fields: [["objects", "Objects", "ERA", "list"]] },
+    { kind: "login", name: "sign in", why: "A password, an authenticator code and a security key in one request: the player approves the words on the device, the wallet's identity signs them, your account checks them. The fact is signed.", fields: [] },
+    { kind: "sign", name: "sign a statement", why: "Any one-line statement you choose, shown whole and approved on the device. Never inside a grant.",
+      fields: [["statement", "Statement", "I accept the tournament rules", "long"]] },
+    { kind: "accept", name: "accept an object you issued", why: "The wallet takes the object up, so it can hold it. Give it after.",
+      fields: [["object", "Object", "GOLD", "objects"]] },
+    { kind: "give", name: "receive an object from you", why: "Your account asks the wallet to accept the object, then gives it. A one-of-a-kind, a ticket, a reward.",
+      fields: [["object", "Object", "GOLD", "objects"], ["amount", "Amount", "1"]] },
+    { kind: "contacts", name: "tell you its contacts", why: "Their identities and nothing more. Needs the Contacts grant.", fields: [] },
+    { kind: "price", name: "price a trade through your shop", why: "What the amount would get, through your vaults. Information, never a fact.",
+      fields: [["from", "Spends", "ERA", "objects"], ["to", "Buys", "GOLD", "objects"], ["amount", "Amount", "0.50"]] },
+    { kind: "trade", name: "buy through your shop", why: "The wallet accepts the object, your app prices the trade, then asks for it at no less than this share of the price.",
+      fields: [["from", "Spends", "ERA", "objects"], ["to", "Buys", "GOLD", "objects"], ["amount", "Amount", "0.50"], ["atLeastPercent", "At least %", "95"]] },
+    { kind: "stake", name: "stake on a match you referee", why: "Needs a second connected wallet as the opponent. Side B passes side A's stake id, so both share one verdict. The fact is staked.",
+      fields: [["match", "Match", "match 1"], ["object", "Object", "ERA", "objects"], ["amount", "Amount", "1.00"], ["side", "Side", "A"], ["against", "Against (side A's stake id)", "", "long"]] },
+    { kind: "decide", name: "— your app decides a match", why: "Your account's key decides who the stakes pay: A, B, or void (each back to its owner). Not a request to a wallet.",
+      fields: [["stake", "Stake id", "", "long"], ["decision", "Decision", "A"]] },
+    { kind: "collect", name: "collect a decided match", why: "The winner's wallet collects the stakes (one or two ids). The fact is collected.",
+      fields: [["stakes", "Stake ids", "", "list"]] },
+  ];
+  function renderAskKinds() {
+    el("ask-kind").innerHTML = ASKS.map((a) => `<option value="${a.kind}">${text(a.name)}</option>`).join("");
+    renderAskFields();
+  }
+  function currentAsk() { return ASKS.find((a) => a.kind === el("ask-kind").value); }
+  function renderAskFields() {
+    const a = currentAsk();
+    el("ask-why").textContent = a.why;
+    el("ask-fields").innerHTML = a.fields.map((f) => fieldHtml("ask", f)).join("");
+    fillObjectSelects();
+    el("ask-run").textContent = a.kind === "decide" ? "Decide" : a.kind === "give" ? "Give" : "Ask";
+    codeChanged();
+  }
+  function askPiece() {
+    const a = currentAsk();
+    return { kind: a.kind, ...readFields("ask", a.fields) };
+  }
+  async function runAsk() {
+    const p = askPiece();
+    const connection = el("ask-connection").value;
+    if (p.kind === "decide") return run("/api/decide", { stake: p.stake, decision: p.decision });
+    if (!connection) return alert("connect a wallet first");
+    if (p.kind === "give") return run("/api/give", { connection, object: p.object, amount: p.amount });
+    return run("/api/ask", { connection, ask: p });
+  }
+
+  // ── the code under each piece: asked of the server, which runs the same mapping ──
+  function codeAskFor(which) {
+    const connection = el("ask-connection").value || "<connection id>";
+    switch (which) {
+      case "issue": return { piece: "issue", issue: issuePiece() };
+      case "vault": return { piece: "vault", vault: vaultPiece() };
+      case "offer": return { piece: "offer", offer: offerPiece() };
+      case "ask": {
+        const p = askPiece();
+        if (p.kind === "decide") return { piece: "decide", decide: { stake: p.stake || "<stake id>", decision: p.decision } };
+        if (p.kind === "give") return { piece: "give", connection, give: { object: p.object, amount: p.amount } };
+        if (p.kind === "stake" && !p.against) delete p.against;
+        return { piece: "ask", connection, ask: p };
+      }
+    }
+  }
+  let codeTimer;
+  function codeChanged() {
+    clearTimeout(codeTimer);
+    codeTimer = setTimeout(async () => {
+      for (const box of document.querySelectorAll(".codebox")) {
+        try {
+          const code = await api("/api/code", codeAskFor(box.dataset.code));
+          box.querySelector("pre").textContent = code[lang];
+        } catch (e) {
+          box.querySelector("pre").textContent = `// ${e.message}`;
+        }
+        if (!box.querySelector(".tools")) {
+          box.insertAdjacentHTML("beforeend", `<div class="tools"><button class="tiny" onclick="copyCode(this)">Copy</button></div>`);
+        }
+      }
+    }, 200);
+  }
+  function copyCode(button) {
+    navigator.clipboard.writeText(button.closest(".codebox").querySelector("pre").textContent);
+    button.textContent = "Copied";
+    setTimeout(() => { button.textContent = "Copy"; }, 1200);
+  }
+  function setLang(l) {
+    lang = l;
+    el("lang-ts").classList.toggle("on", l === "ts");
+    el("lang-py").classList.toggle("on", l === "py");
+    codeChanged();
+  }
+  document.addEventListener("input", codeChanged);
+  document.addEventListener("change", codeChanged);
+
+  // ── running a piece ──
+  async function run(path, payload) {
+    try { await api(path, payload); await refresh(); } catch (e) { alert(e.message); }
+  }
   el("offer").onclick = async () => {
     try {
-      const offer = await api("/api/offer", {});
+      const offer = await api("/api/offer", offerPiece());
       el("qr").innerHTML = offer.qr;
       el("code").textContent = offer.code;
       el("open").href = offer.code;
@@ -127,40 +368,35 @@
     } catch (e) { alert(e.message); }
   };
 
-  async function act(path, payload) {
-    try { await api(path, payload); await refresh(); } catch (e) { alert(e.message); }
-  }
-
+  // ── what the account shows ──
   function render(s) {
+    const objectsBefore = symbols().join(",");
+    state = s;
     el("name").textContent = s.name;
     document.title = s.name;
+    if (el("offer-name").value === "") el("offer-name").value = s.name;
     el("account").textContent = "account " + s.account;
     el("owned").innerHTML = s.owned.map((o) =>
       `<div class="owned"><span>${text(o.symbol)} <span class="muted">${text(o.kind)}</span></span><span class="amount">${text(o.amount)}</span></div>`).join("");
-    el("vaults").innerHTML = s.vaults.map((v) => `<div>vault ${text(v.pair)}: ${text(v.reserves)}${v.active ? "" : " (closed)"}</div>`).join("");
+    el("vaults").innerHTML = s.vaults.map((v) => `<div>shop ${text(v.pair)}: ${text(v.reserves)}${v.active ? "" : " (closed)"}</div>`).join("");
+    if (symbols().join(",") !== objectsBefore) { fillObjectSelects(); codeChanged(); }
+    const connected = s.connections.filter((c) => c.connected);
+    const pick = el("ask-connection");
+    const keep = pick.value;
+    pick.innerHTML = connected.length === 0 ? `<option value="">no wallet connected</option>` : connected.map((c) => `<option value="${c.id}">${text(c.id)}</option>`).join("");
+    if (connected.some((c) => c.id === keep)) pick.value = keep; else if (connected.length > 0 && keep !== pick.value) codeChanged();
     el("connections").innerHTML = s.connections.length === 0 ? "No wallet has connected yet." : s.connections.map((c) => `
       <div class="connection">
-        <div><b>${c.connected ? "Connected" : "Disconnected"}</b> <span class="id">wallet ${text(c.wallet)}</span></div>
+        <div><b>${c.connected ? "Connected" : "Disconnected"}</b> <span class="id">connection ${text(c.id)} · wallet ${text(c.wallet)}</span></div>
         <ul class="grants">${c.grants.map((g) => `<li>${text(g)}</li>`).join("")}</ul>
-        ${c.connected ? `<div class="row">
-          <input id="amt-${c.id}" value="0.05" aria-label="Amount in ERA">
-          <button onclick="act('/api/send', {connection: '${c.id}', amount: el('amt-${c.id}').value})">Ask it to send ERA</button>
-          <button class="quiet" onclick="act('/api/owns', {connection: '${c.id}'})">Ask what it owns</button>
-          <button class="quiet" onclick="act('/api/login', {connection: '${c.id}'})">Sign in</button>
-        </div><div class="row">
-          <input id="obj-${c.id}" value="SWORD" aria-label="Object to give">
-          <button class="quiet" onclick="act('/api/give', {connection: '${c.id}', object: el('obj-${c.id}').value, amount: '1'})">Give it one</button>
-          <input id="era-${c.id}" value="0.50" aria-label="ERA to trade">
-          <button class="quiet" onclick="act('/api/trade', {connection: '${c.id}', era: el('era-${c.id}').value})">Sell it the coin</button>
-        </div>` : ""}
       </div>`).join("");
     el("requests").innerHTML = s.requests.length === 0
       ? `<tr><td colspan="4" class="muted">Nothing asked yet.</td></tr>`
       : s.requests.slice().reverse().map((r) => `<tr>
-          <td>${text(r.seq)}</td><td>${text(r.what)}</td>
+          <td>${text(r.seq)}</td><td>${text(r.what)}<div class="id">${text(r.connection)}</div></td>
           <td>${r.error ? `<span class="err">${text(r.error)}</span>` : text(r.outcome || "unanswered") + (r.reason ? `<div class="muted">${text(r.reason)}</div>` : "")}</td>
           <td><span class="${r.fact && r.fact !== "none" ? "fact" : "fact-none"}">${text(r.fact || "…")}</span>
-            <div class="muted">${text(r.detail)}${r.owns.map((o) => `<br>owns ${text(o.amount)} of ${text(o.object).slice(0, 12)}…`).join("")}${r.signedAsAsked === undefined ? "" : r.signedAsAsked ? "<br>signed the words asked for" : "<br>signed other words"}</div></td>
+            <div class="muted">${text(r.detail)}${r.owns.map((o) => `<br>owns ${text(o.amount)} of ${text(o.object).slice(0, 12)}…`).join("")}${r.price ? `<br>price: ${text(r.price.in)} in, ${text(r.price.out)} out (smallest units)` : ""}${r.stakes.map((s) => `<br>stake <span class="id">${text(s)}</span>`).join("")}${r.signedAsAsked === undefined ? "" : r.signedAsAsked ? "<br>signed the words asked for" : "<br>signed other words"}</div></td>
         </tr>`).join("");
     el("activity").innerHTML = s.activity.slice().reverse().map((a) =>
       `<tr><td>${text(a.seq)}</td><td>${text(a.name)}</td><td>${text(a.summary)}</td><td>${text(a.result)}</td></tr>`).join("");
@@ -169,7 +405,10 @@
   async function refresh() {
     try { render(await api("/api/state")); } catch (e) { el("owned").textContent = e.message; }
   }
-  refresh();
+  renderGrantPieces();
+  renderAskKinds();
+  fillObjectSelects();
+  refresh().then(codeChanged);
   setInterval(refresh, 2000);
 </script>
 </body>

@@ -2018,10 +2018,25 @@ impl AppRouterImpl {
                     };
                     match app::landed_payment(&session, req.seq, policy_commit, *amount)? {
                         Some(tx) => {
-                            store::app_record_fact(tx.as_bytes(), &sid, req.seq)
-                                .map_err(|e| e.to_string())?;
+                            // Two readers of the same request (an application's
+                            // page and its server polling at once) may both find
+                            // the payment landed; the first records it, and the
+                            // second reports what was recorded, as the escrow
+                            // facts below do.
+                            let recorded =
+                                match store::app_record_fact(tx.as_bytes(), &sid, req.seq) {
+                                    Ok(()) => tx,
+                                    Err(e) => match store::app_fact_of(&sid, req.seq)
+                                        .map_err(|e| e.to_string())?
+                                    {
+                                        Some(fact) => String::from_utf8(fact).map_err(|e| {
+                                            format!("the recorded fact is not a transfer id: {e}")
+                                        })?,
+                                        None => return Err(e.to_string()),
+                                    },
+                                };
                             status.fact = generated::ConnectFact::Paid as i32;
-                            status.paid_tx = tx.into_bytes();
+                            status.paid_tx = recorded.into_bytes();
                             status.fact_detail = "the transfer is accepted onto this account's relationship with the wallet".into();
                         }
                         None => {
