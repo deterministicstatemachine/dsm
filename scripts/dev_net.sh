@@ -30,7 +30,8 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NET="$REPO/.dsm-dev/net"
-PG_URL="${DSM_DEV_PG_URL:-postgresql://${USER}@localhost:5432/postgres?sslmode=disable}"
+# The login name, not $USER: a container, sudo or cron shell may not set it.
+PG_URL="${DSM_DEV_PG_URL:-postgresql://$(id -un)@localhost:5432/postgres?sslmode=disable}"
 FIRST_PORT=8080
 NODE_BIN="$REPO/target/release/storage_node"
 DEV_NET_BIN="$REPO/target/release/dsm-dev-net"
