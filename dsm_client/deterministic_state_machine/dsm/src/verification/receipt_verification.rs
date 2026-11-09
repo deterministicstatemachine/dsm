@@ -17,18 +17,20 @@ use crate::types::offline_account::offline_account_leaf_key;
 use crate::types::operations::Operation;
 use crate::types::receipt_types::{DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2};
 
-/// What the verifier holds of the author's own offline-bearer spend from the
-/// release it verified, never from the receipt: the pinned bundle, and the
-/// release's signed counter and frontiers.
+/// What the verifier holds of the author's own offline-account move from the
+/// board certificate it verified, never from the receipt: the author's pinned
+/// bundle, and the certificate's signed counter and frontiers. The sender's are
+/// its release's; the receiver's are its board's receive commit's, the
+/// acknowledgement the payer checked (owner, 2026-11-07).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BearerLeaves {
     /// The author's pinned anchor bundle `B`.
     pub bundle: [u8; 32],
-    /// The software counter `u_i` the spend started from.
+    /// The software counter `u_i` the move started from.
     pub counter: u64,
-    /// The frontier `h_i` the spend started from.
+    /// The frontier `h_i` the move started from.
     pub frontier: [u8; 32],
-    /// The frontier `h_{i+1}` the spend advanced to.
+    /// The frontier `h_{i+1}` the move advanced to.
     pub next_frontier: [u8; 32],
 }
 
@@ -43,8 +45,18 @@ pub struct ReceiptStateContext<'a> {
     pub author_genesis: [u8; 32],
     /// The operation the step carries.
     pub operation: &'a Operation,
-    /// Present exactly for the author's own offline-bearer spend.
+    /// Present exactly for an offline-bearer transfer, on either side: the
+    /// author's own board's certificate of its move.
     pub bearer: Option<BearerLeaves>,
+}
+
+/// Which way an offline-bearer transfer moves its author's offline account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountSide {
+    /// The sender's spend, from its loaded allocation.
+    Spend,
+    /// The recipient's receive, into what it holds received.
+    Receive,
 }
 
 /// The state rules of a receipt, whoever checks it: the sender before it signs
@@ -113,32 +125,41 @@ pub fn verify_receipt_state(
         ));
     }
 
-    // The leaves the step writes follow from its operation: a spend the author
-    // makes offline also moves its anchor counter and its allocation.
-    let offline_spend = match ctx.operation {
+    // The leaves the step writes follow from its operation: an offline-bearer
+    // transfer also moves its author's offline account — the sender's spend
+    // from its allocation, the recipient's receive into what it holds received
+    // (owner, 2026-11-07) — with its counter and frontier.
+    let offline_move = match ctx.operation {
         Operation::Transfer {
             to_device_id,
             amount,
             policy_commit,
             ..
-        } if operation_requires_offline_bearer(ctx.operation)
-            && to_device_id.as_slice() == receipt.devid_b =>
-        {
-            Some((amount.value(), *policy_commit))
+        } if operation_requires_offline_bearer(ctx.operation) => {
+            let side = if to_device_id.as_slice() == receipt.devid_b {
+                AccountSide::Spend
+            } else if to_device_id.as_slice() == receipt.devid_a {
+                AccountSide::Receive
+            } else {
+                return Err(DsmError::invalid_operation(
+                    "an offline-bearer transfer pays one of its receipt's two parties",
+                ));
+            };
+            Some((side, amount.value(), *policy_commit))
         }
         _ => None,
     };
-    let bearer = match (offline_spend, ctx.bearer) {
-        (Some(spend), Some(leaves)) => Some((spend, leaves)),
+    let bearer = match (offline_move, ctx.bearer) {
+        (Some(moved), Some(leaves)) => Some((moved, leaves)),
         (None, None) => None,
         (Some(_), None) => {
             return Err(DsmError::invalid_operation(
-                "an offline-bearer spend is verified against the release it advances",
+                "an offline-bearer transfer is verified against its author's board certificate",
             ))
         }
         (None, Some(_)) => {
             return Err(DsmError::invalid_operation(
-                "only the author's own offline-bearer spend writes its offline account",
+                "only an offline-bearer transfer writes its author's offline account",
             ))
         }
     };
@@ -156,7 +177,10 @@ pub fn verify_receipt_state(
     for write in &receipt.step_writes {
         let (key, pre, post) = match (&write.leaf, &bearer) {
             (ReceiptLeaf::Relationship, _) => (rel_key, receipt.parent_tip, receipt.child_tip),
-            (ReceiptLeaf::OfflineAccount(witness), Some(((amount, asset), release))) => {
+            (
+                ReceiptLeaf::OfflineAccount(witness),
+                Some(((AccountSide::Spend, amount, asset), release)),
+            ) => {
                 // The account the spend started from is the release's: its
                 // counter and both frontiers are the ones the release signed.
                 if witness.pre_counter != release.counter
@@ -169,6 +193,28 @@ pub fn verify_receipt_state(
                 }
                 (
                     offline_account_leaf_key(&release.bundle),
+                    witness.pre_account_root,
+                    witness.post_account_root(asset, *amount)?,
+                )
+            }
+            (
+                ReceiptLeaf::OfflineReceive(witness),
+                Some(((AccountSide::Receive, amount, asset), received)),
+            ) => {
+                // The account the receive started from is the one the
+                // receiver's board advanced: its counter and both frontiers are
+                // the ones its receive commit signed.
+                if witness.pre_counter != received.counter
+                    || witness.pre_frontier != received.frontier
+                    || witness.next_frontier != received.next_frontier
+                {
+                    return Err(DsmError::invalid_operation(
+                        "the receipt's offline account is not the one its board's receive \
+                         advances",
+                    ));
+                }
+                (
+                    offline_account_leaf_key(&received.bundle),
                     witness.pre_account_root,
                     witness.post_account_root(asset, *amount)?,
                 )

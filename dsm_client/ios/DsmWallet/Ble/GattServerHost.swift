@@ -90,10 +90,11 @@ final class GattServerHost: NSObject, CBPeripheralManagerDelegate {
 
     /// Write `records` to the central at `peer`, in order, as `GattServerHost
     /// .sendChunkedNotifications` does on Android: the first notification of
-    /// the transfer carries `0xFF ‖ nonce` before its record, every window of
-    /// ten waits for the client's chunk ACK, and a window whose ACK does not
-    /// come has the whole transfer tried again under a new nonce, up to three
-    /// times (the client's reassembly takes a repeated record once). Blocks
+    /// each attempt carries `0xFF ‖ nonce` before its record, every window of
+    /// ten waits for the client's chunk ACK under that nonce, and a window
+    /// whose ACK does not come has the transfer go again from that window
+    /// under a new nonce, up to three attempts (the client's link drops a
+    /// record it already took, and its reassembly keeps each chunk once). Blocks
     /// the caller (Rust's thread) until every record is taken or the link is
     /// gone. Answers `BleCoordinator.writeSent` or `writeNotNow`.
     func notify(_ peer: PeerSession, records: [Data]) -> Int32 {
@@ -108,6 +109,8 @@ final class GattServerHost: NSObject, CBPeripheralManagerDelegate {
             DsmLog.warn(tag, "notify: \(peer.address) is not subscribed to TX_RESPONSE; \(records.count) records refused")
             return BleCoordinator.writeNotNow
         }
+        // Every record before it was acknowledged; an attempt starts here.
+        var resumeFrom = 0
         for attempt in 1...BleConstants.transferMaxAttempts {
             var nonce: UInt8 = 0
             queue.sync {
@@ -115,26 +118,29 @@ final class GattServerHost: NSObject, CBPeripheralManagerDelegate {
                 nonce = peer.serverTransferNonce
                 peer.lastAck = nil
             }
-            DsmLog.info(tag, "notify: \(records.count) records to \(peer.address) (nonce \(nonce), attempt \(attempt))")
+            DsmLog.info(tag, "notify: records \(resumeFrom + 1)..\(records.count) to \(peer.address) (nonce \(nonce), attempt \(attempt))")
             // The window whose ACK did not come, when one did not.
             var timedOutAt: Int?
-            for (index, record) in records.enumerated() {
-                let data = index == 0 ? Data([BleConstants.chunkAckMarker, nonce]) + record : record
+            for index in resumeFrom..<records.count {
+                let record = records[index]
+                let data = index == resumeFrom ? Data([BleConstants.chunkAckMarker, nonce]) + record : record
                 guard send(manager, central, txResponse, data, peer) else {
                     return BleCoordinator.writeNotNow
                 }
-                // The client ACKs on window boundaries only, never a final partial window.
+                // The client ACKs on window boundaries only, never a final partial window,
+                // and counts this attempt's notifications from its first.
                 let chunkNumber = index + 1
-                if chunkNumber % BleConstants.notificationWindow == 0, !awaitAck(peer, atLeast: chunkNumber) {
-                    DsmLog.error(tag, "notify: ACK timeout at \(chunkNumber)/\(records.count) (attempt \(attempt))")
+                if chunkNumber % BleConstants.notificationWindow == 0, !awaitAck(peer, atLeast: chunkNumber - resumeFrom) {
+                    DsmLog.error(tag, "notify: ACK timeout at \(chunkNumber)/\(records.count) (attempt \(attempt)); the next attempt resumes at \(chunkNumber - BleConstants.notificationWindow + 1)")
                     timedOutAt = chunkNumber
+                    resumeFrom = chunkNumber - BleConstants.notificationWindow
                     break
                 }
             }
             if timedOutAt == nil {
                 return BleCoordinator.writeSent
             }
-            // The link recovers for a moment, then the transfer goes again.
+            // The link recovers for a moment, then the transfer goes again from that window.
             let paused = peer.notifyReady.wait(timeout: .now() + .milliseconds(500))
             DsmLog.info(tag, "notify: retrying the transfer to \(peer.address) after a pause (\(paused))")
         }
@@ -268,11 +274,16 @@ final class GattServerHost: NSObject, CBPeripheralManagerDelegate {
             let address = request.central.identifier.uuidString
             let peer = coordinator.peer(address)
             if peer.central == nil { peer.central = request.central }
-            // The client's transport-level chunk ACK: `0xFF ‖ b3 b2 b1 b0`.
+            // The client's transport-level chunk ACK: `0xFF ‖ nonce ‖ b3 b2 b1 b0`.
+            // A count under an earlier attempt's nonce says nothing of this attempt.
             if data.count == BleConstants.chunkAckLength, data[data.startIndex] == BleConstants.chunkAckMarker {
-                let count = data.dropFirst().reduce(0) { ($0 << 8) | Int($1) }
-                peer.lastAck = count
-                peer.ackArrived.signal()
+                let nonce = data[data.startIndex + 1]
+                if nonce == peer.serverTransferNonce {
+                    peer.lastAck = data.dropFirst(2).reduce(0) { ($0 << 8) | Int($1) }
+                    peer.ackArrived.signal()
+                } else {
+                    DsmLog.warn(tag, "a chunk ACK from \(address) under nonce \(nonce), not \(peer.serverTransferNonce): not taken")
+                }
                 continue
             }
             coordinator.inbound(peer, role: BleConstants.linkRoleServer, bytes: data)

@@ -421,7 +421,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _counterparty_devid: [u8; 32],
                 _operation: dsm::types::operations::Operation,
                 _deltas: &[dsm::types::device_state::BalanceDelta],
-                _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+                _offline: Option<dsm::types::device_state::OfflineMove>,
             ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
                 Err(requires_genesis("simulate_advance_for_confirm"))
             }
@@ -473,13 +473,43 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 Err(requires_genesis("finalize_offline_bearer"))
             }
 
+            fn draw_receive_challenge(
+                &self,
+            ) -> Result<([u8; 32], crate::anchor::AnchorPin), DsmError> {
+                Err(requires_genesis("draw_receive_challenge"))
+            }
+
+            fn stage_offline_receive(
+                &self,
+                _paid: &anchor_core::root_advance::OfflineRelease,
+                _receiver_challenge: [u8; 32],
+            ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, DsmError> {
+                Err(requires_genesis("stage_offline_receive"))
+            }
+
+            fn receive_offline_bearer(
+                &self,
+                _staged: &crate::sdk::core_sdk::StagedBearerTransition,
+                _paid: &anchor_core::root_advance::OfflineRelease,
+                _payer: &anchor_core::receive::PayerDisclosure,
+                _receiver_challenge: [u8; 32],
+                _device_root_before: [u8; 32],
+                _device_root_after: [u8; 32],
+            ) -> Result<Vec<u8>, DsmError> {
+                Err(requires_genesis("receive_offline_bearer"))
+            }
+
+            fn finalize_committed_receive(&self) -> Result<Option<[u8; 32]>, DsmError> {
+                Err(requires_genesis("finalize_committed_receive"))
+            }
+
             fn execute_on_relationship_for_bilateral(
                 &self,
                 _rel_key: [u8; 32],
                 _counterparty_devid: [u8; 32],
                 _operation: dsm::types::operations::Operation,
                 _deltas: &[dsm::types::device_state::BalanceDelta],
-                _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+                _offline: Option<dsm::types::device_state::OfflineMove>,
                 _before_commit: Option<
                     &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
                 >,

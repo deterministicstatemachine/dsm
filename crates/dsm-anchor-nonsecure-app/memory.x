@@ -5,17 +5,17 @@
  * app is linked at its Non-secure SRAM VMA (see dsm-ns-sram.x). Regions + fixed cross-image symbols
  * mirror the monitor's memory.x so both agree on the boundary addresses.
  *
- *   SECURE  [0x20000000, 0x20060000)  monitor (Secure world) — NOT accessible to this app (SAU)
- *   NSC     [0x20060000, 0x20061000)  the single Non-Secure-Callable SG veneer entry
- *   NS      [0x20061000, 0x2007e000)  this app: vectors + code + rodata + data + bss + stack
+ *   SECURE  [0x20000000, 0x20064000)  monitor (Secure world) — NOT accessible to this app (SAU)
+ *   NSC     [0x20064000, 0x20065000)  the single Non-Secure-Callable SG veneer entry
+ *   NS      [0x20065000, 0x2007e000)  this app: vectors + code + rodata + data + bss + stack
  *   MAILBOX [0x2007e000, 0x20080000)  the fixed shared SG mailbox slot (NS RW + S RW; DMA denied)
  */
 MEMORY {
-    NS : ORIGIN = 0x20061000, LENGTH = 116K
+    NS : ORIGIN = 0x20065000, LENGTH = 100K
 }
 
-__nsc_start     = 0x20060000;
-__ns_sram_start = 0x20061000;
+__nsc_start     = 0x20064000;
+__ns_sram_start = 0x20065000;
 __ns_sram_end   = 0x20080000;
 /* The end of the window the monitor measures, [__ns_sram_start, __ns_rx_end): the same constant as
  * the monitor's memory.x. This image fills it exactly with code, read-only data and a fixed fill,

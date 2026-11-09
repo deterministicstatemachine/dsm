@@ -20,6 +20,8 @@ export interface ContactsContextValue extends ContactsState {
   refreshContacts: () => Promise<void>;
   /** Adds the contact a card names; empty alias: Rust names it by its device. */
   addContact: (alias: string, card: ContactCard, profile?: PersonProfile) => Promise<AddContactResult>;
+  /** Unpairs a contact's phone (Base32 device id) and pairs it again. */
+  unpairContact: (deviceIdB32: string) => Promise<void>;
   setError: (error: string | null) => void;
 }
 
@@ -29,6 +31,7 @@ const defaultValue: ContactsContextValue = {
   error: null,
   refreshContacts: async () => {},
   addContact: async () => { throw new Error('addContact is used outside ContactsProvider'); },
+  unpairContact: async () => { throw new Error('unpairContact is used outside ContactsProvider'); },
   setError: () => {},
 };
 
@@ -79,6 +82,7 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
     error: state.error,
     refreshContacts: contactsStore.refreshContacts,
     addContact: contactsStore.addContact,
+    unpairContact: contactsStore.unpair,
     setError: contactsStore.setError,
   }), [state]);
 

@@ -123,7 +123,12 @@ internal object UnifiedBleBridge {
 
     fun stopBlePairingScan(): Boolean {
         val svc = bleCoordinator ?: return false
-        return try { svc.stopScanning() } catch (_: Throwable) { false }
+        return try {
+            svc.stopPairingScan()
+        } catch (t: Throwable) {
+            Log.w("UnifiedBleBridge", "stopBlePairingScan failed; answering whether the scanner is off", t)
+            !svc.isScanning()
+        }
     }
 
 

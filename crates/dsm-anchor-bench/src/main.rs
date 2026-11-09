@@ -14,10 +14,24 @@
 //!     the whole thing repeats — proving an abandoned `Prepared` does not strand the appliance.
 //!
 //! It NEVER sends COMMIT — Phase 3 (the first real decrement) is deliberately out of scope here.
+//!
+//! `--check` is the runbook's Step 9: what the anchor says about itself over USB, and whether its
+//! Non-secure image passes the measurement gate, with nothing written to the chip. It sends STATUS
+//! and a PREPARE with no transition, which every anchor refuses, and never a provisioning.
+//!
+//! `--try-run` goes through an install on the board in front of it, with the permanent parts
+//! substituted, and reports each step, how long the whole of it took, and what an install would make
+//! permanent. It is what a new board runs before anything is burned on it, on the trial image, and it
+//! never provisions.
+//!
+//! `--identify` asks a board running the identify image what its chip is and holds, prints every
+//! reading, and saves the chip's four certificates under `--certs <dir>` by the names Tropic Square's
+//! `verify.sh` reads. Nothing is written to the chip or the board.
 //! RELEASE-only: a debug build refuses to run (SPHINCS+/BLE timing is invalid in debug).
 
 use std::time::Duration;
 
+use anchor_core::appliance::owner_authorization_digest;
 use anchor_core::proto::{decode_response, encode_request, pb};
 
 /// Known-good self-test transition shape (mirrors the firmware's `prepare_request`). The on-chip
@@ -51,12 +65,30 @@ struct Args {
     deny: Vec<String>,
     /// Operator chip label for the bench log (e.g. "used chip A").
     label: Option<String>,
+    /// Run the read-only check of the board, and nothing else.
+    check: Check,
     /// Operator-supplied firmware build hash/commit for the bench log (the harness cannot read it
     /// off the chip; you built + flashed it, so you record it).
     fw_commit: Option<String>,
+    /// Where `--identify` saves the chip's certificates.
+    certs: String,
+}
+
+/// What this run is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// The used-chip phases.
+    No,
+    /// The read-only check.
+    Yes,
+    /// A try-run of an install.
+    TryRun,
+    /// What the identify image read from the chip.
+    Identify,
 }
 
 fn parse_args() -> Result<Args, String> {
+    let mut check = Check::No;
     let mut port = None;
     let mut baud = 115_200u32;
     let mut repeats = 5usize;
@@ -64,6 +96,7 @@ fn parse_args() -> Result<Args, String> {
     let mut deny = Vec::new();
     let mut label = None;
     let mut fw_commit = None;
+    let mut certs = String::from("tropic01-certs");
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -84,6 +117,10 @@ fn parse_args() -> Result<Args, String> {
             "--deny" => deny.push(norm_id(&it.next().ok_or("--deny needs an anchor-id")?)),
             "--label" => label = it.next(),
             "--fw-commit" => fw_commit = it.next(),
+            "--check" => check = Check::Yes,
+            "--try-run" => check = Check::TryRun,
+            "--identify" => check = Check::Identify,
+            "--certs" => certs = it.next().ok_or("--certs needs a directory")?,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -95,7 +132,9 @@ fn parse_args() -> Result<Args, String> {
         allow,
         deny,
         label,
+        check,
         fw_commit,
+        certs,
     })
 }
 
@@ -133,7 +172,33 @@ fn roundtrip(
     port: &mut dyn serialport::SerialPort,
     req: &pb::ApplianceRequest,
 ) -> Result<pb::ApplianceResponse, String> {
-    let body = encode_request(req);
+    let resp = answer(port, req)?;
+    if !resp.ok {
+        return Err(format!(
+            "op {} failed on-chip (error {}) {}",
+            resp.op, resp.error, resp.detail
+        ));
+    }
+    Ok(resp)
+}
+
+/// The anchor's answer to one op, refused or not. Fails on a transport or decode error.
+fn answer(
+    port: &mut dyn serialport::SerialPort,
+    req: &pb::ApplianceRequest,
+) -> Result<pb::ApplianceResponse, String> {
+    answer_with_tail(port, req, &[])
+}
+
+/// [`answer`] with `tail` after the message: an `OP_AUTHORIZE`'s signature, which the anchor reads
+/// from the frame's end.
+fn answer_with_tail(
+    port: &mut dyn serialport::SerialPort,
+    req: &pb::ApplianceRequest,
+    tail: &[u8],
+) -> Result<pb::ApplianceResponse, String> {
+    let mut body = encode_request(req);
+    body.extend_from_slice(tail);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
     port.write_all(&frame).map_err(|e| format!("write: {e}"))?;
@@ -149,14 +214,305 @@ fn roundtrip(
     let mut resp_body = vec![0u8; len];
     port.read_exact(&mut resp_body)
         .map_err(|e| format!("read body ({len} B): {e}"))?;
-    let resp = decode_response(&resp_body).map_err(|e| format!("decode: {e:?}"))?;
-    if !resp.ok {
+    decode_response(&resp_body).map_err(|e| format!("decode: {e:?}"))
+}
+
+/// How long one op may leave the port silent. The board's watchdog ends a hung one well before this.
+const OP_WAIT_SECS: u64 = 60;
+/// How long a try-run may: a whole spend and its records, around two chip reboots.
+const TRY_RUN_WAIT_SECS: u64 = 600;
+
+/// A STATUS request.
+fn status_request() -> pb::ApplianceRequest {
+    pb::ApplianceRequest {
+        op: pb::Op::Status as i32,
+        ..Default::default()
+    }
+}
+
+/// The bench's keys in the owner's scheme (BLAKE3-SPHINCS+ SPX256f), from fixed seeds: the device
+/// key the bench's device provisions a trial board under, and the rehearsal key its try-runs are
+/// authorized under. The seeds are the bench's, not a wallet's, so these authorize nothing on an
+/// anchor a wallet provisioned; and the bench installs nothing for good ([`adopt`]).
+struct BenchKeys {
+    owner_sk: Vec<u8>,
+    owner_pk: Vec<u8>,
+    rehearsal_sk: Vec<u8>,
+    rehearsal_pk: Vec<u8>,
+}
+
+fn bench_keys() -> Result<BenchKeys, String> {
+    let key = |what: &[u8]| -> Result<(Vec<u8>, Vec<u8>), String> {
+        let seed = anchor_core::hash::h("DSM/anchor/try-run/bench/v1", &[what]);
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(dsm_sphincs::SphincsVariant::SPX256f, &seed)
+                .map_err(|e| format!("the bench's key: {e:?}"))?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
+    };
+    let (owner_sk, owner_pk) = key(b"owner key")?;
+    let (rehearsal_sk, rehearsal_pk) = key(b"rehearsal key")?;
+    Ok(BenchKeys {
+        owner_sk,
+        owner_pk,
+        rehearsal_sk,
+        rehearsal_pk,
+    })
+}
+
+fn sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, String> {
+    dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest)
+        .map_err(|e| format!("the bench signs: {e:?}"))
+}
+
+/// The device the bench provisions a trial board for: the bench's own identity, no wallet's.
+fn bench_provisioning(keys: &BenchKeys) -> pb::Provisioning {
+    let name = |what: &str| -> Vec<u8> {
+        anchor_core::hash::h("DSM/anchor/try-run/bench/v1", &[what.as_bytes()]).to_vec()
+    };
+    pb::Provisioning {
+        device_id: name("device"),
+        online_id_pk: keys.owner_pk.clone(),
+        policy_hash: name("policy"),
+        genesis_root: name("genesis"),
+    }
+}
+
+/// A try-run or a provisioning, as the wallet drives it: the request and, when the anchor answers
+/// with the digest its rehearsal payment waits on, the rehearsal key's authorization of it. Answers
+/// what the anchor answered last.
+fn rehearse(
+    port: &mut dyn serialport::SerialPort,
+    req: &pb::ApplianceRequest,
+    keys: &BenchKeys,
+) -> Result<pb::ApplianceResponse, String> {
+    let begun = answer(port, req)?;
+    if begun.awaiting_authorization.is_empty() {
+        return Ok(begun);
+    }
+    let digest: [u8; 32] = begun
+        .awaiting_authorization
+        .as_slice()
+        .try_into()
+        .map_err(|e| format!("a {}-byte digest: {e}", begun.awaiting_authorization.len()))?;
+    let signature = sign(&keys.rehearsal_sk, &digest)?;
+    answer_with_tail(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        },
+        &signature,
+    )
+}
+
+/// A try-run of an install, for a device no wallet holds: the board's own identity is what is tried.
+/// A nonzero exit unless every step passed.
+fn try_run(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    let keys = bench_keys()?;
+    port.set_timeout(Duration::from_secs(TRY_RUN_WAIT_SECS))
+        .map_err(|e| format!("the port's wait: {e}"))?;
+    let started = std::time::Instant::now();
+    let run = rehearse(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::TryRun as i32,
+            provision: Some(bench_provisioning(&keys)),
+            rehearsal_pk: keys.rehearsal_pk.clone(),
+            ..Default::default()
+        },
+        &keys,
+    )?;
+    let took = started.elapsed();
+    let mut broken = Vec::new();
+    let mut production_unmet = Vec::new();
+    for step in &run.try_run {
+        let verdict = if step.passed {
+            "ok    "
+        } else if step.production {
+            "PROD  "
+        } else {
+            "FAILED"
+        };
+        println!("[TRY] {verdict} {} {}", step.name, step.detail);
+        if !step.passed && step.production {
+            production_unmet.push(step.name.as_str());
+        } else if !step.passed {
+            broken.push(step.name.as_str());
+        }
+    }
+    println!("[TRY] the whole of it took {:.1} s", took.as_secs_f64());
+    if !run.detail.is_empty() {
+        println!("[TRY] {}", run.detail);
+    }
+    if !broken.is_empty() {
         return Err(format!(
-            "op {} failed on-chip (error {})",
-            resp.op, resp.error
+            "the try-run did not work on this board (error {}): {}",
+            run.error,
+            broken.join("; ")
         ));
     }
-    Ok(resp)
+    // A run that stopped short of its payment carries no check of the transport; one that went
+    // through carries it whatever production still needs.
+    let carried = run.transport_check.len();
+    if carried == 0 || run.transport_check != anchor_core::try_run::transport_check(carried) {
+        return Err(format!(
+            "the anchor's largest answer did not come through whole ({carried} bytes)"
+        ));
+    }
+    println!("[TRY] ok     its largest answer, {carried} bytes in parts, came through whole");
+    println!("[TRY] the anchor works on this board. Nothing was made permanent.");
+    if production_unmet.is_empty() {
+        println!(
+            "[TRY] production: every requirement is met. An install would make these permanent:"
+        );
+        for line in &run.permanent {
+            println!("[TRY]   - {line}");
+        }
+    } else {
+        println!("[TRY] production: not ready. An install refuses until these are met:");
+        for name in production_unmet {
+            println!("[TRY]   - {name}");
+        }
+    }
+    Ok(())
+}
+
+/// The names Tropic Square's `verify.sh` reads the chip's certificates under, in the store's order.
+const CERT_FILES: [&str; 4] = [
+    "t01_ese_cert.der",
+    "t01_xxxx_ca_cert.der",
+    "t01_ca_cert.der",
+    "tropicsquare_root_ca_cert.der",
+];
+
+/// What the identify image read from the chip: every reading, and its certificates saved to `certs`.
+/// A nonzero exit when the board is not running the identify image or the chip gave no certificates.
+fn identify(port: &mut dyn serialport::SerialPort, certs: &str) -> Result<(), String> {
+    let read = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Identify as i32,
+            ..Default::default()
+        },
+    )?;
+    if !read.ok {
+        return Err(format!(
+            "the board did not identify its chip (error {}): {}",
+            read.error, read.detail
+        ));
+    }
+    for reading in &read.chip_readings {
+        if reading.unread.is_empty() {
+            println!("[CHIP] {:<34} {}", reading.name, reading.value);
+        } else {
+            println!("[CHIP] {:<34} UNREAD: {}", reading.name, reading.unread);
+        }
+    }
+    if read.chip_certificates.len() != CERT_FILES.len() {
+        return Err("the chip did not give the four certificates of its chain".to_string());
+    }
+    std::fs::create_dir_all(certs).map_err(|e| format!("{certs}: {e}"))?;
+    for (name, der) in CERT_FILES.iter().zip(&read.chip_certificates) {
+        let path = std::path::Path::new(certs).join(name);
+        std::fs::write(&path, der).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("[CERT] {} ({} bytes)", path.display(), der.len());
+    }
+    println!("[CHIP] read only: nothing was written to the chip or the board");
+    Ok(())
+}
+
+/// The runbook's Step 9, read-only: what the anchor reports, and the measurement gate's verdict. A
+/// PREPARE with no transition passes the gate and is then refused, so nothing moves.
+fn check(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    use anchor_core::service::err;
+    let bare = |op: pb::Op| pb::ApplianceRequest {
+        op: op as i32,
+        ..Default::default()
+    };
+    let status = answer(port, &bare(pb::Op::Status))?;
+    match status.error {
+        err::NONE => println!(
+            "[CHECK] the anchor serves: provisioned, closed, counter u={}",
+            status.active_anchor_counter
+        ),
+        err::NOT_PROVISIONED => println!("[CHECK] the anchor is up and not provisioned"),
+        err::NOT_UP => println!("[CHECK] the anchor did NOT come up: {}", status.detail),
+        other => println!("[CHECK] status refused: error {other} {}", status.detail),
+    }
+    let gate = answer(port, &bare(pb::Op::Prepare))?;
+    match gate.error {
+        err::MEASUREMENT => println!("[CHECK] measurement gate REFUSED: {}", gate.detail),
+        err::NOT_UP => println!("[CHECK] measurement gate NOT REACHED: the anchor is not up"),
+        other => println!("[CHECK] measurement gate passed (prepare answered error {other})"),
+    }
+    Ok(())
+}
+
+/// The board as the bench finds it. One not provisioned is provisioned for the bench's own device,
+/// as a trial only: an image that would install for good is left alone, and the bench stops. One
+/// already provisioned is someone's: the bench's prepares are then refused by the anchor (error 10),
+/// and the bench says so.
+fn adopt(port: &mut dyn serialport::SerialPort, keys: &BenchKeys) -> Result<(), String> {
+    let status = answer(port, &status_request())?;
+    if status.ok {
+        println!("[ADOPT] the anchor is provisioned already; the bench authorizes prepares with its own key, which that anchor takes only if the bench provisioned it");
+        return Ok(());
+    }
+    if status.error != anchor_core::service::err::NOT_PROVISIONED {
+        return Err(format!(
+            "the anchor is not serving (error {}): {}",
+            status.error, status.detail
+        ));
+    }
+    port.set_timeout(Duration::from_secs(TRY_RUN_WAIT_SECS))
+        .map_err(|e| format!("the port's wait: {e}"))?;
+    let request = pb::ApplianceRequest {
+        op: pb::Op::Provision as i32,
+        provision: Some(bench_provisioning(keys)),
+        rehearsal_pk: keys.rehearsal_pk.clone(),
+        ..Default::default()
+    };
+    let begun = answer(port, &request)?;
+    if begun.awaiting_authorization.is_empty() {
+        return Err(format!(
+            "the provisioning did not reach its payment (error {}): {}",
+            begun.error, begun.detail
+        ));
+    }
+    if begun.install != pb::InstallKind::InstallForTrial as i32 {
+        return Err(
+            "FATAL: this image installs for good; the bench provisions nothing permanent. Flash the              trial image (bench_self_enroll) for the bench."
+                .to_string(),
+        );
+    }
+    let digest: [u8; 32] = begun
+        .awaiting_authorization
+        .as_slice()
+        .try_into()
+        .map_err(|e| format!("a {}-byte digest: {e}", begun.awaiting_authorization.len()))?;
+    let signature = sign(&keys.rehearsal_sk, &digest)?;
+    let provisioned = answer_with_tail(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        },
+        &signature,
+    )?;
+    if !provisioned.ok {
+        return Err(format!(
+            "the trial provisioning was refused (error {}): {}",
+            provisioned.error, provisioned.detail
+        ));
+    }
+    port.set_timeout(Duration::from_secs(OP_WAIT_SECS))
+        .map_err(|e| format!("the port's wait: {e}"))?;
+    println!(
+        "[ADOPT] the trial board is provisioned for the bench's device; its next boot ends that"
+    );
+    Ok(())
 }
 
 /// STATUS -> `(u, H0, active_root)`. `u = H0 - live` is the DSM anchor coordinate; the raw counter is
@@ -176,7 +532,11 @@ fn status(port: &mut dyn serialport::SerialPort) -> Result<(u64, u64, Vec<u8>), 
     ))
 }
 
-fn prepare(port: &mut dyn serialport::SerialPort, prev_root: &[u8]) -> Result<(), String> {
+fn prepare(
+    port: &mut dyn serialport::SerialPort,
+    prev_root: &[u8],
+    keys: &BenchKeys,
+) -> Result<(), String> {
     // v2: the successor frontier is DERIVED, never invented — the appliance enforces
     // `next_root == anchor_root_advance(prev_root, D)` where `D = transition_digest(Δ°, r_R)`
     // (Δ° excludes next_root, so D is computable first). Compute it host-side from the same
@@ -204,6 +564,37 @@ fn prepare(port: &mut dyn serialport::SerialPort, prev_root: &[u8]) -> Result<()
     };
     let d = anchor_core::root_advance::transition_digest(&owned.as_transition(), &RCHAL);
     owned.next_root = anchor_core::root_advance::anchor_root_advance(&prev, &d);
+    // The bench authorizes this prepare under its own device key, as a wallet does under its own.
+    let status = roundtrip(port, &status_request())?;
+    let bundle: [u8; 32] = status
+        .anchor_bundle
+        .as_slice()
+        .try_into()
+        .map_err(|e| format!("a {}-byte bundle: {e}", status.anchor_bundle.len()))?;
+    let digest = owner_authorization_digest(
+        &bundle,
+        &prev,
+        owned.anchor_counter,
+        &d,
+        &BENCH_R_I,
+        &BENCH_R_NEXT,
+    );
+    let signature = sign(&keys.owner_sk, &digest)?;
+    let authorized = answer_with_tail(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        },
+        &signature,
+    )?;
+    if !authorized.ok {
+        return Err(format!(
+            "the anchor took no authorization from the bench (error {}): it was provisioned by              another owner, or is not the bench's; power-cycle a trial board for the bench to              provision it",
+            authorized.error
+        ));
+    }
     roundtrip(
         port,
         &pb::ApplianceRequest {
@@ -249,7 +640,8 @@ fn cancel(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
 
 fn open(args: &Args) -> Result<Box<dyn serialport::SerialPort>, String> {
     serialport::new(&args.port, args.baud)
-        .timeout(Duration::from_secs(10))
+        // A serve holds the board silent: a signature, then the chip commands around its records.
+        .timeout(Duration::from_secs(OP_WAIT_SECS))
         .open()
         .map_err(|e| format!("open {}: {e}", args.port))
 }
@@ -439,12 +831,13 @@ fn phase2(
     mut port: Box<dyn serialport::SerialPort>,
     args: &Args,
     expected_id: &str,
+    keys: &BenchKeys,
 ) -> Result<(), String> {
     println!("\n== Phase 2: prepare/cancel proof (no counter movement) ==");
     let (_, h0, _) = status(port.as_mut())?;
     for round in 1..=2 {
         let prev_root = status(port.as_mut())?.2;
-        prepare(port.as_mut(), &prev_root)?;
+        prepare(port.as_mut(), &prev_root, keys)?;
         let (u_prep, h0_prep, _) = status(port.as_mut())?;
         if u_prep != 0 || h0_prep != h0 {
             return Err(format!(
@@ -501,8 +894,10 @@ fn run() -> Result<(), String> {
                 .to_string(),
         );
     }
-    const USAGE: &str =
-        "usage: used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
+    const USAGE: &str = "usage: used-chip-bench --port <serial> --check\n       \
+         used-chip-bench --port <serial> --try-run\n       \
+         used-chip-bench --port <serial> --identify [--certs <dir>]\n       \
+         used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
                          [--deny <id> ...] [--label \"used chip A\"] [--fw-commit <hash>] \
                          [--baud 115200] [--repeats 5]\n  \
                          (run once with no --allow to print the connected chip's anchor-id)";
@@ -530,14 +925,22 @@ fn run() -> Result<(), String> {
     );
 
     let mut port = open(&args)?;
+    match args.check {
+        Check::Yes => return check(port.as_mut()),
+        Check::TryRun => return try_run(port.as_mut()),
+        Check::Identify => return identify(port.as_mut(), &args.certs),
+        Check::No => {}
+    }
     // Structural guard against the one operational rule: read the chip's anchor-id and refuse unless
     // it is an explicitly allow-listed USED bench chip (never the sealed clean/virgin chip), with a
     // typed operator confirmation. Non-mutating: the gate itself only sends STATUS.
     let chip_id = gate_chip(port.as_mut(), &args)?;
+    let keys = bench_keys()?;
+    adopt(port.as_mut(), &keys)?;
     bench_log(port.as_mut(), &args, &chip_id)?;
     println!("[CHIP] confirmed USED bench chip {chip_id} — running Phases 1-2");
     phase1(port.as_mut(), args.repeats)?;
-    phase2(port, &args, &chip_id)?;
+    phase2(port, &args, &chip_id, &keys)?;
 
     println!(
         "\nALL SAFE PHASES PASSED. The used chip is adopted (u=0), reads are stable, and abandoned"

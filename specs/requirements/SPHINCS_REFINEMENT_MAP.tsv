@@ -89,7 +89,7 @@ dsm_client/deterministic_state_machine/dsm/src/economic/claim.rs	243	signing_dig
 dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	169	sign_economic_root_claim	claim auth + key binding; unproved	a145855f3959dc7a8eae6b8f45b4b9e3ab7e09ff
 dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	102	substrate_signing_digest	substrate-bound digest; unproved	62dfe289f52a48a607313f2bd5138174cb832778
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2283	signing_bytes	operation-specific canonical signing bytes; unproved	5417b920de721d94e5edfb4cbe545d0c1fe1cb20
-dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	441	relationship_finalized_signing_target	finalized relationship digest; unproved	0e03890fadd7da8f941d9023a02e8666f1321d47
+dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	448	relationship_finalized_signing_target	finalized relationship digest; unproved	490d6312ab75634aa73c379991550da103b29e99
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	811	process_envelope_v3	JNI → ingress; unproved	13342e162aa82712da11037ed9dd37d7ca8d5de0
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	207	dispatch_envelope_via_ingress	ingress dispatch; unproved	13342e162aa82712da11037ed9dd37d7ca8d5de0
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	876	Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3	JNI byte-array and unwind boundary; unproved	13342e162aa82712da11037ed9dd37d7ca8d5de0
@@ -101,5 +101,5 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	Wrap
 dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	b88c48793f371ead186b2df61c2ed13063e2fdc3
 dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	b88c48793f371ead186b2df61c2ed13063e2fdc3
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_flow.rs	1	module boundary	unproved	6344bcb9ceebf6f759010c47af73a3764aa4cf35
-crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	db2e000da944235f88d7393724ea53149f4557fb
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	ea3e6c93a512f0f062b2327c051aad2582893bcd
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	1	module boundary	unproved	4b576a53c9b2537abc36542e6b30cc489dee4765

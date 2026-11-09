@@ -24,3 +24,6 @@ embedded-alloc = "0.6"
 # USB-CDC host transport (the Non-secure data path).
 usb-device = "0.3"
 usbd-serial = "0.2"
+
+# Its own workspace: excluded from the root manifest.
+[workspace]

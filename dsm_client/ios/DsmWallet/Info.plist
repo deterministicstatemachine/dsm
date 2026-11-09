@@ -38,6 +38,8 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>DSM reaches storage nodes an operator runs on this network, such as a test fleet on a computer beside you.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>DSM transfers money to a contact's phone over Bluetooth while both apps are open.</string>
 	<key>NSCameraUsageDescription</key>

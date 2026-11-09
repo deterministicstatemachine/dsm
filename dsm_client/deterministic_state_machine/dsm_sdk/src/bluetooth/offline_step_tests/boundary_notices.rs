@@ -8,19 +8,28 @@
 use super::*;
 use crate::economic_fixtures::whole_era;
 use crate::sdk::b0x_sdk::{B0xSDK, OFFLINE_BOUNDARY_NOTICE_METHOD};
-use crate::storage::client_db::economic_lineage::{latest_offline_account, offline_account_below};
+use crate::sdk::economic_registers::asked_cells;
+use crate::storage::client_db::economic_lineage::{
+    get_admitted_coordinate, latest_offline_account, offline_account_below,
+};
 use crate::storage::client_db::offline_boundary_notices::owed_to;
-use crate::test_support::appliance::{HostAppliance, InstalledAppliance};
+use crate::test_support::appliance::{HostAppliance, InstalledPair};
 use dsm::economic::peer_lineage::PeerOfflineAccount;
+use dsm::economic::register::economic_root_register_key;
 use dsm::types::device_state::DeviceState;
 use dsm::types::offline_account::OfflineAccount;
 
 /// A funded and loaded through the wallet route. B has run no sync since.
-async fn loaded_with_no_sync_since() -> (Pair, OfflineDevice, OfflineDevice, InstalledAppliance) {
+async fn loaded_with_no_sync_since() -> (Pair, OfflineDevice, OfflineDevice, InstalledPair) {
     let pair = Pair::boot(100, 0).await;
     let a = OfflineDevice::new(&pair.a);
     let b = OfflineDevice::new(&pair.b);
-    let appliance = HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
+    let appliance = HostAppliance::install_pair(
+        &pair.a,
+        HostAppliance::birth(&pair.a, [0xC4; 32], 16),
+        &pair.b,
+        HostAppliance::birth(&pair.b, [0xB4; 32], 16),
+    );
     a.device.enter();
     let loaded = offline_cash(&a, "wallet.loadOffline", "20.00").await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
@@ -31,7 +40,7 @@ async fn loaded_with_no_sync_since() -> (Pair, OfflineDevice, OfflineDevice, Ins
 fn recorded_by(
     reader: &TestDevice,
     payer: &TestDevice,
-    appliance: &InstalledAppliance,
+    appliance: &InstalledPair,
 ) -> Option<PeerOfflineAccount> {
     let bundle = appliance.pin().bundle;
     reader.enter();
@@ -69,7 +78,11 @@ async fn a_load_reaches_a_contact_by_its_sync_and_the_first_offline_payment_is_t
     let commitment = offline_step(&a, &b, bearer_transfer(&b, whole_era(7))).await;
     assert_committed_on_both(&a, &b, &commitment);
     b.device.enter();
-    assert_eq!(pending_era(), whole_era(7), "B holds the payment pending");
+    assert_eq!(
+        pending_era(),
+        whole_era(7),
+        "B holds the payment in its offline balance, waiting for its unload"
+    );
 
     a.device.enter();
     let unloaded = offline_cash(&a, "wallet.unloadOffline", "10.00").await;
@@ -77,7 +90,22 @@ async fn a_load_reaches_a_contact_by_its_sync_and_the_first_offline_payment_is_t
     let synced = pair.b.sync().await;
     assert_eq!(synced.errors, Vec::<String>::new(), "B's second sync");
     b.device.enter();
-    assert_eq!(pending_era(), 0, "B settled the payment");
+    assert_eq!(
+        pending_era(),
+        whole_era(7),
+        "B's sync moves nothing on its own"
+    );
+    // B's own unload of the payment received (owner, 2026-11-07), checked against A's history.
+    let moved = b
+        .device
+        .invoke(
+            "wallet.unloadReceived",
+            &crate::generated::ArgPack::default(),
+        )
+        .await;
+    assert!(moved.success, "B's unload: {:?}", moved.error_message);
+    b.device.enter();
+    assert_eq!(pending_era(), 0, "B's unload moved the payment online");
     assert_eq!(pair.b.era_balance(), whole_era(7), "B's online balance");
 }
 
@@ -133,6 +161,74 @@ async fn a_load_followed_by_an_online_payment_still_reaches_the_contact() {
     assert_committed_on_both(&a, &b, &commitment);
     b.device.enter();
     assert_eq!(pending_era(), whole_era(7), "B holds the payment pending");
+}
+
+/// A contact checks a load one hop (DSM Amendment A14): from that step's own
+/// parent, reading nothing behind it. A pays B three times online before it loads,
+/// so the load sits past a history. B's sync, told of the load, asks for A's
+/// register key at the load's position and at no earlier one, and records the
+/// account the load left. MUTATION CONTROL: a check that reads behind the step asks
+/// for one of A's earlier positions and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_contact_checks_a_load_one_hop_and_reads_nothing_behind_it() {
+    let pair = Pair::boot(100, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    for round in 1..=3u64 {
+        let sent = pair.a.send(&pair.b, whole_era(5)).await;
+        assert!(
+            sent.success,
+            "A's online send {round}: {:?}",
+            sent.error_message
+        );
+        let synced = pair.b.sync().await;
+        assert_eq!(synced.errors, Vec::<String>::new(), "B's sync {round}");
+    }
+    let appliance = HostAppliance::install_pair(
+        &pair.a,
+        HostAppliance::birth(&pair.a, [0xC4; 32], 16),
+        &pair.b,
+        HostAppliance::birth(&pair.b, [0xB4; 32], 16),
+    );
+    a.device.enter();
+    let loaded = offline_cash(&a, "wallet.loadOffline", "20.00").await;
+    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    a.device.enter();
+    let (load_at, _) = get_admitted_coordinate()
+        .expect("A's admitted coordinate reads")
+        .expect("A admitted its load");
+
+    asked_cells::take();
+    let synced = pair.b.sync().await;
+    assert_eq!(synced.errors, Vec::<String>::new(), "B's sync");
+    let asked = asked_cells::take();
+
+    let read: Vec<u64> = (1..=load_at)
+        .filter(|position| {
+            asked.contains_key(&economic_root_register_key(
+                &pair.a.genesis,
+                &pair.a.device_id,
+                *position,
+            ))
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec![load_at],
+        "B read A only at the load, at position {load_at}"
+    );
+
+    let recorded = recorded_by(&pair.b, &pair.a, &appliance).expect("B's sync recorded the load");
+    a.device.enter();
+    let head = a.device.router().core_sdk.device_head().expect("A's head");
+    let held = head
+        .offline_account(&appliance.pin().bundle)
+        .expect("A's offline account");
+    assert_eq!(
+        recorded.account_root(),
+        &held.root(),
+        "the account the load left"
+    );
 }
 
 /// Every boundary since a contact was last told reaches it in order, each
@@ -211,7 +307,12 @@ async fn a_notice_is_believed_in_nothing_and_no_notice_creates_a_record() {
     let pair = Pair::boot(100, 0).await;
     let a = OfflineDevice::new(&pair.a);
     let b = OfflineDevice::new(&pair.b);
-    let appliance = HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
+    let appliance = HostAppliance::install_pair(
+        &pair.a,
+        HostAppliance::birth(&pair.a, [0xC4; 32], 16),
+        &pair.b,
+        HostAppliance::birth(&pair.b, [0xB4; 32], 16),
+    );
     let tip = a.tip_with(&b);
     let funded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
     let mut b0x = B0xSDK::new(
@@ -316,6 +417,7 @@ async fn a_balance_the_payers_host_invented_is_refused_under_its_real_chip() {
         bundle,
         OfflineAccount::restore(
             allocations,
+            real.received_amounts().clone(),
             real.counter(),
             real.frontier(),
             real.funding_chain(),

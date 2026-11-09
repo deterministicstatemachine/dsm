@@ -306,13 +306,26 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      */
     fun stopScanning(): Boolean {
         return runOperationBool(BleOpLane.LIFECYCLE) {
-            lastScanStopTimestamp = System.currentTimeMillis()
             scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
             val wasScanning = scanner.isScanning()
             val stopped = scanner.stopScanning()
+            // Only a scan that ran holds back the next start: a stop with nothing
+            // scanning must not make a reach that needs the scanner wait.
+            if (wasScanning) lastScanStopTimestamp = System.currentTimeMillis()
             if (wasScanning && stopped) radioEvents.scanStopped()
             stopped
         }
+    }
+
+    /**
+     * Pairing's stop. While Rust is reaching for a contact by scan ([requestConnect]
+     * left it to the next device the scan finds), the scan is the reach's: pairing
+     * finishing must not end it. The reach's scan stops at the device it connects to.
+     */
+    fun stopPairingScan(): Boolean {
+        val reaching = pendingTarget != null
+        if (reaching) Log.i("BleCoordinator", "pairing scan stop: a reach for a contact is scanning; left on")
+        return reaching || stopScanning()
     }
 
     /**
@@ -591,6 +604,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         // Remove stale session so future scans can reconnect to this peer
                         clearClient(peer)
                         if (peer.isEmpty) peers.remove(event.deviceAddress)
+                        // A link that closed before Rust opened it leaves its reach target to
+                        // the scan's next link.
+                        reachTargets.remove(event.deviceAddress)?.let { pendingTarget = it }
                         com.dsm.wallet.bridge.Unified.onDeviceDisconnected(event.deviceAddress)
                         // Exponential backoff on reconnection to prevent battery drain
                         // and Android scan-rate-limit violations from rapid reconnect loops.
@@ -725,6 +741,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         val opened = peer.clientRouteReady
                         clearClient(peer)
                         if (peer.isEmpty) peers.remove(event.deviceAddress)
+                        // A contact Rust asked to reach at an address it last saw there: the
+                        // address may have rotated, so the scan's next link names it instead.
+                        reachTargets.remove(event.deviceAddress)?.let { pendingTarget = it }
                         if (!opened) {
                             resumePairingScan(event.deviceAddress, event.details)
                         }

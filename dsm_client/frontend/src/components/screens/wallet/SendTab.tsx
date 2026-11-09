@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Send tab — transaction form with online/offline mode toggle.
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { sendTransfer } from '../../../domain/sendTransfer';
+import { sendTransfer, sendingWords } from '../../../domain/sendTransfer';
+import type { PendingBilateralPhase } from '../../../domain/bilateral';
 import { emailReceiptIfDue } from '../../../domain/sendReceipt';
 import { appRuntimeStore } from '../../../runtime/appRuntimeStore';
 import { useUX } from '../../../contexts/UXContext';
 import ConfirmModal from '../../ConfirmModal';
-import UnderConstructionModal from '../../UnderConstructionModal';
 import { TokenMark } from '../../TokenMark';
 import { TokenSelect } from '../../common/TokenSelect';
 import { Notice } from '../../common/ScreenFrame';
 import { InfoTip } from '../../common/InfoTip';
 import BluetoothIcon from '../../icons/BluetoothIcon';
-import { getAnchorStatus } from '../../../dsm/anchor';
+import { getAnchorStatus, type AnchorStatus } from '../../../dsm/anchor';
 import { OfflineFundingPopover } from './OfflineFundingPopover';
-import { AppliancePopover, applianceConnected } from './AppliancePopover';
-import type { ApplianceRead } from './AppliancePopover';
+import { AppliancePopover } from './AppliancePopover';
+import { applianceConnected, type ApplianceRead } from '../../applianceRead';
 import { useFx } from '../../fx/FxProvider';
 import { fxAmountLabel } from '../../fx/fxEngine';
 import type { TokenBalanceView } from '../../../dsm/types';
@@ -66,8 +66,10 @@ function SendTabInner({
   });
   const [txMode, setTxMode] = useState<'online' | 'offline'>('online');
   // Offline sending is not open yet: choosing it says so and the send stays online.
-  const [notice, setNotice] = useState<string | null>(null);
   const [sendingTx, setSendingTx] = useState(false);
+  // An offline step in flight: its phase as Rust lists it, and the way to stop waiting on it.
+  const [sendPhase, setSendPhase] = useState<PendingBilateralPhase | null>(null);
+  const leave = useRef<AbortController | null>(null);
   const [showSendConfirm, setShowSendConfirm] = useState(false);
   const [fundingOpen, setFundingOpen] = useState(false);
   const [applianceOpen, setApplianceOpen] = useState(false);
@@ -76,9 +78,10 @@ function SendTabInner({
   const loadWalletDataRef = useRef(loadWalletData);
   loadWalletDataRef.current = loadWalletData;
 
-  // Rust attaches the appliance on this read. The first time, Android asks the
-  // user to allow it; from then on, while it stays plugged in, it connects on
-  // its own, so choosing Offline is enough. Once it is connected the balances
+  // Rust attaches an installed appliance on this read, and a new one stays as it
+  // is. The first time, Android asks the user to allow it; from then on, while it
+  // stays plugged in, it connects on its own, so choosing Offline is enough. Once
+  // it is connected the balances
   // can name their offline allocations, so they are read again.
   const connectAppliance = useCallback(async () => {
     setApplianceBusy(true);
@@ -96,6 +99,13 @@ function SendTabInner({
   useEffect(() => {
     if (txMode === 'offline') void connectAppliance();
   }, [txMode, connectAppliance]);
+
+  // The install's own answer stands as the read: it says what an earlier trial's account held when
+  // the install closed one, which a status read afterwards does not.
+  const installedAppliance = useCallback(async (status: AnchorStatus) => {
+    setAppliance({ kind: 'read', status });
+    if (status.connected) await loadWalletDataRef.current();
+  }, []);
 
   // Only what Rust listed. With no balances there is nothing to send, and the
   // form says so rather than offering a token the wallet does not hold.
@@ -156,13 +166,16 @@ function SendTabInner({
       const tokenId = selectedSendBalance.tokenId;
 
       // The send itself is the one both skins make (domain/sendTransfer).
+      const controller = new AbortController();
+      leave.current = controller;
+      setSendPhase(null);
       const outcome = await sendTransfer({
         mode: txMode,
         to: sendForm.selectedContactKey,
         tokenId,
         amount: sendForm.amount,
         note: sendForm.note,
-      });
+      }, { onPhase: setSendPhase, leave: controller.signal });
       if (outcome.kind === 'open') {
         // Not finished and not failed: the step is open on both appliances and
         // completes when they are together again. The form is done with it.
@@ -214,6 +227,8 @@ function SendTabInner({
       fx.play({ anim: 'fail', title: 'Not sent', caption: msg, tone: 'bad', okLabel: 'Back' });
     } finally {
       setSendingTx(false);
+      setSendPhase(null);
+      leave.current = null;
     }
   }, [sendForm, selectedContact, txMode, selectedSendBalance, loadWalletData, setError, onSendComplete, fx, notifyToast]);
 
@@ -266,7 +281,7 @@ function SendTabInner({
         </span>
         <div className="sb-seg sb-seg--block" role="group" aria-label="Transaction mode">
           <button type="button" className={`sb-seg__opt${txMode === 'online' ? ' active' : ''}`} onClick={() => setTxMode('online')}>Online</button>
-          <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setNotice('Under construction, check back soon.')}>Offline</button>
+          <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
         </div>
         {txMode === 'offline' && (
           <>
@@ -364,6 +379,12 @@ function SendTabInner({
             : 'Select a recipient'}
         </div>
 
+        {sendingTx && txMode === 'offline' && selectedContact !== null ? (
+          <div className="sb-field" data-testid="send-in-flight">
+            <div className="sb-hint">{sendingWords(sendPhase, selectedContact.alias)}</div>
+            <button type="button" className="sb-btn" onClick={() => leave.current?.abort()}>Leave it open</button>
+          </div>
+        ) : null}
         <div className="sb-actions">
           <button type="button" onClick={onCancel} className="sb-btn">Cancel</button>
           <button
@@ -375,7 +396,6 @@ function SendTabInner({
           </button>
         </div>
       </form>
-      <UnderConstructionModal title="Offline" message={notice} onClose={() => setNotice(null)} />
       <ConfirmModal
         visible={showSendConfirm}
         title="Send"
@@ -398,6 +418,7 @@ function SendTabInner({
           read={appliance}
           busy={applianceBusy}
           onConnect={connectAppliance}
+          onInstalled={installedAppliance}
           onClose={() => setApplianceOpen(false)}
         />
       )}

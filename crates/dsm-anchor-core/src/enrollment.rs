@@ -4,10 +4,11 @@
 //! `B` fuses the three identity factors — the online identity commitment `H(pk_on)`, the
 //! chip static identity `stpub`, the resident chip key `pk_chip` (`σ^chip`), and the
 //! partition key `pk_host` (`σ^host`) — with the enrolled counter `H0`, the device id, the
-//! policy hash, and a public birth commitment `S_birth`. The birth fuse preimage `s_birth`
-//! is destroyed immediately after `S_birth` is committed, so public enrollment data cannot
-//! recreate `B` on new hardware. There is no partition ratchet and no boot head — the v2
-//! anchor advances only the forward-only frontier `h_i`.
+//! policy hash, and a public birth commitment `S_birth`. The birth fuse preimage `s_birth` is
+//! never stored and is wiped once `S_birth` is computed, but each boot derives it again from the
+//! board's sealed secret: public enrollment data cannot recreate `B`, and the sealed secret can.
+//! There is no partition ratchet and no boot head — the v2 anchor advances only the forward-only
+//! frontier `h_i`.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -23,10 +24,11 @@ pub fn commit(x: &[u8]) -> [u8; 32] {
     h(domain::ANCHOR_COMMIT_V2, &[x])
 }
 
-/// Inputs to the birth ceremony. The 32-byte entropy fields come from the RP2350 TRNG, the
-/// TROPIC01 birth witness, and the host; the rest are the enrolled identity and policy.
+/// Inputs to the birth ceremony. On the board the three 32-byte secret fields are each derived from
+/// its sealed secret and the chip's identity, so a boot derives the same birth; the rest are the
+/// enrolled identity and policy.
 pub struct BirthInputs<'a> {
-    pub partition_trng: &'a [u8; 32],
+    pub birth_entropy: &'a [u8; 32],
     pub chip_birth_witness: &'a [u8; 32],
     pub host_nonce: &'a [u8; 32],
     pub device_id: &'a [u8; 32],
@@ -61,6 +63,10 @@ pub struct Birth {
     pub partition_sk: Vec<u8>,
     /// Resident chip public key `pk_chip` (`σ^chip`; echoed for pinning, bound into `B`).
     pub chip_pk: Vec<u8>,
+    /// The owner's DSM device id `B` binds: the device a payment to this anchor must name.
+    pub device_id: [u8; 32],
+    /// The policy `B` binds: the policy a payer's anchor must be enrolled under too.
+    pub policy_hash: [u8; 32],
 }
 
 /// `B = H("DSM/anchor-bundle/v2" ‖ H(pk_on) ‖ stpub ‖ commit(pk_chip) ‖ commit(pk_host) ‖
@@ -99,17 +105,19 @@ pub fn anchor_bundle(
 /// genesis frontier, and **destroys the birth fuse preimage**.
 pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Result<Birth, PartitionError> {
     // Partition keypair (pre-bundle, so its pubkey can be bound into B).
-    let part_seed = h(
+    let mut part_seed = h(
         domain::PARTITION_KEY_SEED_V1,
         &[inp.partition_key_seed, inp.partition_device_id],
     );
-    let (partition_sk, partition_pk) = P::part_keygen(&part_seed)?;
+    let keypair = P::part_keygen(&part_seed);
+    zeroize(&mut part_seed);
+    let (partition_sk, partition_pk) = keypair?;
 
     // One-way birth fuse and its public commitment (binds fresh device entropy into B).
     let mut s_birth = h(
         domain::BIRTH_SECRET_V1,
         &[
-            inp.partition_trng,
+            inp.birth_entropy,
             inp.chip_birth_witness,
             inp.host_nonce,
             inp.device_id,
@@ -141,6 +149,8 @@ pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Result<Birth, PartitionError
         partition_pk,
         partition_sk,
         chip_pk: inp.chip_pk.to_vec(),
+        device_id: *inp.device_id,
+        policy_hash: *inp.policy_hash,
     })
 }
 
@@ -158,6 +168,17 @@ pub struct Provisioning {
     pub genesis_root: [u8; 32],
 }
 
+/// What an install of this anchor makes. The production image installs for good; the trial image
+/// installs for a trial (owner, 2026-11-06: nothing permanent, "even including the bind").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Install {
+    /// The pairing key, the cage and the record, for good.
+    ForGood,
+    /// The record in the slots a try-run writes, which the next boot clears, and the chip's pairing
+    /// key, counter start and access rules left as they are: it serves until the board loses power.
+    ForTrial,
+}
+
 /// What the chip itself contributes to its birth: its identity, its keys and its entropy. A host
 /// never supplies these.
 #[derive(Clone)]
@@ -169,10 +190,21 @@ pub struct ChipBirth {
     pub chip_pk: Vec<u8>,
     /// Enrolled TROPIC01 counter value `H₀`.
     pub enrolled_counter: u32,
-    pub partition_trng: [u8; 32],
+    pub birth_entropy: [u8; 32],
     pub chip_birth_witness: [u8; 32],
     pub host_nonce: [u8; 32],
     pub partition_key_seed: [u8; 32],
+    /// What an install of this anchor makes.
+    pub install: Install,
+}
+
+impl Drop for ChipBirth {
+    fn drop(&mut self) {
+        zeroize(&mut self.birth_entropy);
+        zeroize(&mut self.chip_birth_witness);
+        zeroize(&mut self.host_nonce);
+        zeroize(&mut self.partition_key_seed);
+    }
 }
 
 impl ChipBirth {
@@ -182,7 +214,7 @@ impl ChipBirth {
         provisioning: &Provisioning,
     ) -> Result<Birth, PartitionError> {
         birth::<P>(&BirthInputs {
-            partition_trng: &self.partition_trng,
+            birth_entropy: &self.birth_entropy,
             chip_birth_witness: &self.chip_birth_witness,
             host_nonce: &self.host_nonce,
             device_id: &provisioning.device_id,

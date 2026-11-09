@@ -69,9 +69,10 @@ pub fn pairing_follows(may_run: bool) {
     log::debug!("[pairing] no radio in this build; pairing may_run={may_run} is not acted on");
 }
 
-/// A contact was added: it is paired now if the session lets pairing run. A
-/// running loop is woken to take it up; otherwise one is started.
-pub fn contact_added() {
+/// A contact to pair: one just added, or one unpaired to pair again. It is
+/// paired now if the session lets pairing run. A running loop is woken to take
+/// it up; otherwise one is started.
+pub fn contact_to_pair() {
     #[cfg(feature = "bluetooth")]
     {
         if !crate::sdk::session_manager::pairing_may_run_now() {

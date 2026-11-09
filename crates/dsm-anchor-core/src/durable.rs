@@ -17,6 +17,7 @@
 
 extern crate alloc;
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use prost::Message;
@@ -41,6 +42,11 @@ pub enum StoreError {
     Corrupt,
     /// The record is larger than the store was laid out to hold.
     TooLarge,
+    /// The chip answered and will not give this slot back, as a write cut short can leave it. The
+    /// slot holds no record; the store reads the record before it.
+    Unreadable,
+    /// A slot read back does not hold what was just written to it. The record before it stands.
+    NotHeld,
 }
 
 /// Where the appliance's durable record lives: one record, replaced whole.
@@ -50,6 +56,86 @@ pub trait ActiveStore {
     fn write(&mut self, record: &[u8]) -> Result<(), StoreError>;
     /// The record last written in full; `None` if the appliance was never born into this store.
     fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
+    /// With no record in the store: try `record` where the store's own record would go, read it back
+    /// and erase it. Refused over a record.
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError>;
+    /// [`Self::write`], where no record is ever read from: what a try-run writes through.
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError>;
+    /// [`Self::read`] of what [`Self::trial_write`] wrote.
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
+    /// Erase whatever a try-run wrote, a power cut's remains included.
+    fn trial_clear(&mut self) -> Result<(), StoreError>;
+}
+
+/// A store behind a `Box`, as a firmware holds it, and as a try-run drives its trial slots.
+impl<S: ActiveStore + ?Sized> ActiveStore for Box<S> {
+    fn write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).write(record)
+    }
+    fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).read()
+    }
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).try_record(record)
+    }
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).trial_write(record)
+    }
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).trial_read()
+    }
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        (**self).trial_clear()
+    }
+}
+
+/// A store a try-run lends out for the length of one payment.
+impl<S: ActiveStore + ?Sized> ActiveStore for &mut S {
+    fn write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).write(record)
+    }
+    fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).read()
+    }
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).try_record(record)
+    }
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        (**self).trial_write(record)
+    }
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).trial_read()
+    }
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        (**self).trial_clear()
+    }
+}
+
+/// A store's trial slots, driven as the store itself: what a try-run's payment and a trial install
+/// keep their record in. The trial image clears them at every boot. The record is the anchor's own,
+/// written and read as any record is, in slots no install for good reads. Its own slots are still
+/// tried before an install, as for one for good.
+pub struct TrialRecords<S>(pub S);
+
+impl<S: ActiveStore> ActiveStore for TrialRecords<S> {
+    fn write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.0.trial_write(record)
+    }
+    fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.trial_read()
+    }
+    fn try_record(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.0.try_record(record)
+    }
+    fn trial_write(&mut self, record: &[u8]) -> Result<(), StoreError> {
+        self.0.trial_write(record)
+    }
+    fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.trial_read()
+    }
+    fn trial_clear(&mut self) -> Result<(), StoreError> {
+        self.0.trial_clear()
+    }
 }
 
 /// Why a stored record is not an appliance record.
@@ -79,6 +165,8 @@ pub enum DurableError {
     NotProvisioned,
     /// The store already holds a record: an anchor is provisioned once.
     AlreadyProvisioned,
+    /// The try-run did not pass, so nothing was bound: the step it stopped at, and why.
+    TryRun(String),
 }
 
 impl From<ApplianceError> for DurableError {
@@ -132,6 +220,9 @@ fn active_pb(active: &Active) -> pb::DurableActive {
         root: active.root.to_vec(),
         anchor_counter: active.anchor_counter,
         record,
+        open_challenge: active
+            .open_challenge
+            .map_or_else(Vec::new, |challenge| challenge.to_vec()),
     }
 }
 
@@ -174,11 +265,16 @@ fn active_from_pb(d: pb::DurableActive) -> Result<Active, RecordError> {
             )
         }
     };
+    let open_challenge = match d.open_challenge.as_slice() {
+        [] => None,
+        held => Some(arr32(held)?),
+    };
     Ok(Active {
         root: arr32(&d.root)?,
         anchor_counter: d.anchor_counter,
         status,
         record,
+        open_challenge,
     })
 }
 
@@ -237,12 +333,18 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     /// Provision the anchor for the device `provisioning` names: the birth ceremony over the
     /// chip's own identity and that device's, and the first record written before the appliance
     /// serves anything. Refused when the store already holds a record: an anchor is provisioned
-    /// once, and never for a second device.
+    /// once, and never for a second device. Refused too, with nothing written, unless a try-run of
+    /// this very install passes first ([`crate::try_run`]): nothing permanent happens on a chip that
+    /// has not just gone through it. The try-run is born for `rehearsal`, the device under its
+    /// rehearsal owner key, and its payment is authorized by `sign`, that key's holder: the anchor
+    /// never signs as an owner, and the owner's device key never signs a rehearsal.
     pub fn provision(
         chip: &ChipBirth,
-        tropic: T,
+        mut tropic: T,
         mut store: S,
         provisioning: Provisioning,
+        rehearsal: &Provisioning,
+        sign: impl FnOnce(&[u8; 32]) -> Result<Vec<u8>, String>,
     ) -> Result<Self, ProvisionRefused<T, S>> {
         let refused = |error, tropic, store| ProvisionRefused {
             error,
@@ -254,6 +356,33 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             Ok(Some(_)) => return Err(refused(DurableError::AlreadyProvisioned, tropic, store)),
             Err(e) => return Err(refused(DurableError::Store(e), tropic, store)),
         }
+        let run = crate::try_run::rehearse_with::<T, P, S>(
+            chip,
+            &mut tropic,
+            &mut store,
+            rehearsal,
+            sign,
+        );
+        if let Some(failed) = run.blocking(chip.install) {
+            let why = alloc::format!("{}: {:?}", failed.name, failed.outcome);
+            return Err(refused(DurableError::TryRun(why), tropic, store));
+        }
+        Self::born(chip, tropic, store, provisioning)
+    }
+
+    /// The birth ceremony and the first record written, before the appliance serves anything: what
+    /// a provisioning does once it may, and what a try-run goes through.
+    pub(crate) fn born(
+        chip: &ChipBirth,
+        tropic: T,
+        mut store: S,
+        provisioning: Provisioning,
+    ) -> Result<Self, ProvisionRefused<T, S>> {
+        let refused = |error, tropic, store| ProvisionRefused {
+            error,
+            tropic,
+            store,
+        };
         let birth = match chip.birth::<P>(&provisioning) {
             Ok(birth) => birth,
             Err(e) => {
@@ -276,6 +405,8 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             chip.anchor_id,
             chip.partition_device_id,
             birth,
+            chip.install,
+            provisioning.online_id_pk.clone(),
         );
         Ok(Self {
             app,
@@ -301,6 +432,8 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             chip.partition_device_id,
             chip.birth::<P>(&provisioning)
                 .map_err(ApplianceError::Partition)?,
+            chip.install,
+            provisioning.online_id_pk.clone(),
         );
         app.active = active;
         Ok(Self {
@@ -381,6 +514,13 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
         self.persist()
     }
 
+    /// [`Appliance::authorize`]: the owner's standing authorization of the next prepare. Held in
+    /// memory only, so nothing is written: a reboot drops it, and the owner authorizes again.
+    pub fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DurableError> {
+        self.app.authorize(digest, signature)?;
+        Ok(())
+    }
+
     /// [`Appliance::commit`] with its record written between the phases: the committed candidate
     /// before the counter moves, then the counter-committed record after it.
     pub fn commit(&mut self) -> Result<(), DurableError> {
@@ -404,6 +544,27 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
         Ok(next)
     }
 
+    /// [`Appliance::draw_challenge`], then the open challenge written: a payer may release against it
+    /// after a power cut, and the receive must still be possible then.
+    pub fn draw_challenge(&mut self) -> Result<[u8; 32], DurableError> {
+        let challenge = match self.app.draw_challenge() {
+            Ok(challenge) => challenge,
+            Err(e) => return Err(self.back_to_written(e)),
+        };
+        self.persist()?;
+        Ok(challenge)
+    }
+
+    /// [`Appliance::check_payment`]. Nothing durable changes.
+    pub fn check_payment(
+        &mut self,
+        transition: &Transition,
+        cert: &crate::receive::PaymentCert,
+        payer: &crate::receive::PayerDisclosure,
+    ) -> Result<(), ApplianceError> {
+        self.app.check_payment(transition, cert, payer)
+    }
+
     /// [`Appliance::cancel`], then the emptied record written.
     pub fn cancel(&mut self) -> Result<(), DurableError> {
         self.app.cancel()?;
@@ -419,11 +580,11 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     }
 
     /// [`Appliance::recover_at_boot`] over the durable record: a prepared record no session can
-    /// own across the reboot is cancelled durably, then recovery must accept.
+    /// own across the reboot, its counter unchanged, is cancelled durably, then recovery must accept.
     pub fn recover_at_boot(&mut self) -> Result<(), DurableBootRefusal> {
         match self.recover() {
             RecoverOutcome::Accept(_) | RecoverOutcome::ReemitCommitted(_) => Ok(()),
-            RecoverOutcome::AcceptPreparedCanComplete => {
+            RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
                 self.cancel().map_err(DurableBootRefusal::Reset)?;
                 match self.recover() {
                     RecoverOutcome::Accept(_) => Ok(()),

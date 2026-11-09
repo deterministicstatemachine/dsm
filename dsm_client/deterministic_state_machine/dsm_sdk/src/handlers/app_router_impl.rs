@@ -2579,7 +2579,7 @@ impl AppRouter for AppRouterImpl {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
         before_commit: Option<
             &dyn Fn(
                 &dsm::types::device_state::AdvanceOutcome,
@@ -2595,7 +2595,7 @@ impl AppRouter for AppRouterImpl {
             counterparty_devid,
             operation,
             deltas,
-            offline_spend,
+            offline,
             before_commit,
             settle,
         )
@@ -2607,14 +2607,14 @@ impl AppRouter for AppRouterImpl {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        offline: Option<dsm::types::device_state::OfflineMove>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk.simulate_advance_for_confirm(
             rel_key,
             counterparty_devid,
             operation,
             deltas,
-            offline_spend,
+            offline,
         )
     }
 
@@ -2679,6 +2679,44 @@ impl AppRouter for AppRouterImpl {
         self.core_sdk.finalize_offline_bearer(appliance_next_root)
     }
 
+    fn draw_receive_challenge(
+        &self,
+    ) -> Result<([u8; 32], crate::anchor::AnchorPin), dsm::types::error::DsmError> {
+        self.core_sdk.draw_receive_challenge()
+    }
+
+    fn stage_offline_receive(
+        &self,
+        paid: &anchor_core::root_advance::OfflineRelease,
+        receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError> {
+        self.core_sdk
+            .stage_offline_receive(paid, receiver_challenge)
+    }
+
+    fn receive_offline_bearer(
+        &self,
+        staged: &crate::sdk::core_sdk::StagedBearerTransition,
+        paid: &anchor_core::root_advance::OfflineRelease,
+        payer: &anchor_core::receive::PayerDisclosure,
+        receiver_challenge: [u8; 32],
+        device_root_before: [u8; 32],
+        device_root_after: [u8; 32],
+    ) -> Result<Vec<u8>, dsm::types::error::DsmError> {
+        self.core_sdk.receive_offline_bearer(
+            staged,
+            paid,
+            payer,
+            receiver_challenge,
+            device_root_before,
+            device_root_after,
+        )
+    }
+
+    fn finalize_committed_receive(&self) -> Result<Option<[u8; 32]>, dsm::types::error::DsmError> {
+        self.core_sdk.finalize_committed_receive()
+    }
+
     // ====================== QUERY ======================
     async fn query(&self, q: AppQuery) -> AppResult {
         self.ensure_bitcoin_tap_restored().await;
@@ -2735,7 +2773,7 @@ impl AppRouter for AppRouterImpl {
             // Session routes
             "session.status" => self.handle_session_query(q).await,
             // Offline-bearer anchor status (signal (c)) — read-only diagnostics
-            "anchor.status" => self.handle_anchor_query(q).await,
+            "anchor.status" | "anchor.tryRun" => self.handle_anchor_query(q).await,
             // Recovery routes
             p if p.starts_with("recovery.") => self.handle_recovery_query(q).await,
             // Bitcoin query routes
@@ -2762,14 +2800,20 @@ impl AppRouter for AppRouterImpl {
             "wallet.sendSmart" | "wallet.sendOffline" => {
                 Box::pin(self.handle_wallet_invoke(i)).await
             }
+            // The one route that makes an anchor permanent.
+            "anchor.install" => Box::pin(self.handle_anchor_invoke(i)).await,
             // Offline-cash load/unload (two-regime money model)
             "wallet.loadOffline" | "wallet.unloadOffline" => {
                 Box::pin(self.handle_offline_cash_invoke(i)).await
             }
+            // Money received offline, moved online by the receiver's own unload (owner,
+            // 2026-11-07).
+            "wallet.unloadReceived" => Box::pin(self.handle_unload_received_invoke(i)).await,
             // Contacts invoke routes
-            "contacts.addManual" | "contacts.setProfile" | "contacts.setOwnProfile" => {
-                Box::pin(self.handle_contacts_invoke(i)).await
-            }
+            "contacts.addManual"
+            | "contacts.setProfile"
+            | "contacts.setOwnProfile"
+            | "contacts.unpair" => Box::pin(self.handle_contacts_invoke(i)).await,
             // Email receipts (DSM Amendment A17): outside the protocol.
             "receipts.email" => Box::pin(self.handle_receipts_invoke(i)).await,
             // DSM Connect (DSM Amendment A11)

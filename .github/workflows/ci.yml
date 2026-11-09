@@ -746,18 +746,10 @@ jobs:
   # --------------------------------------------------------------------------
   # --------------------------------------------------------------------------
   # Embedded: the no_std / bare-metal compile paths that `cargo test` never
-  # exercises, plus the two excluded anchor crates that need no external
-  # checkout. No untrusted GitHub event inputs are used.
-  #
-  # WHAT THIS DOES NOT COVER, and why. The anchor crate
-  # dsm-anchor-secure-monitor reaches `tropic01 = { path =
-  # "../../../../libtropic-rs/tropic01" }`. That resolves ABOVE
-  # $GITHUB_WORKSPACE, which actions/checkout cannot write to, and no commit is
-  # pinned anywhere in this repo (tropic01 is `publish = false`, so there is no
-  # registry version either). Cloning an unpinned third-party repo at CI time
-  # would also make the dependency invisible to the spdx and sbom jobs. That
-  # crate stays uncovered until libtropic-rs is vendored into the workspace
-  # or pinned by SHA. Do not add it to this job without doing that first.
+  # exercises, the excluded anchor crates, the production firmware, and the
+  # rehearsal of its chip code on Tropic Square's TROPIC01 model. The driver is
+  # pinned by commit in dsm-anchor-chip and dsm-anchor-secure-monitor. No
+  # untrusted GitHub event inputs are used.
   # --------------------------------------------------------------------------
   embedded:
     name: Embedded (no_std + excluded anchor crates)
@@ -811,6 +803,35 @@ jobs:
           cargo build --release --locked
           cargo clippy --release --locked -- -D warnings
           cargo test --release --locked
+
+      # The firmware as a burn takes it: the production profile, its memory map's
+      # assertions at the link, and no Secure symbol in mutable flash. It runs
+      # nowhere here; what it runs on the chip is the rehearsal below.
+      - name: Install the firmware's tools
+        run: sudo apt-get install -y binutils-arm-none-eabi clang
+
+      - name: dsm-anchor-secure-monitor builds its four images (thumbv8m)
+        working-directory: crates/dsm-anchor-secure-monitor
+        run: |
+          cargo build --release --locked --features bench_self_enroll,prepare_chip
+          cargo build --release --locked --features bench_self_enroll,identify_chip
+          cargo build --release --locked --features bench_self_enroll
+          cargo build --release --locked --features production
+          ./scripts/check-secure-no-xip.sh
+          python3 scripts/stack-bound.py target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor --limit 60416
+
+      - name: Install the TROPIC01 model
+        run: bash ci/tropic01_model.sh "$RUNNER_TEMP/tropic01-model" >> "$GITHUB_ENV"
+
+      # The chip code the monitor runs, on the vendor's model: birth, cage, spend
+      # and a power cut at every point of them, against the Secure heap's budget.
+      - name: dsm-anchor-chip rehearsal on the model
+        working-directory: crates/dsm-anchor-chip
+        run: |
+          cargo test --release --locked --test chip_model -- --test-threads=2
+          cargo test --release --locked --test secure_heap
+          cargo clippy --release --locked --all-targets -- -D warnings
+          cargo fmt --check
 
   # --------------------------------------------------------------------------
   # Lean 4: kernel-check the proof tree. No untrusted GitHub event inputs are

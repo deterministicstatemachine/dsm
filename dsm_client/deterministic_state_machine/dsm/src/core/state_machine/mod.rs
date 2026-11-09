@@ -108,7 +108,7 @@ impl StateMachine {
         counterparty_devid: [u8; 32],
         operation: Operation,
         deltas: &[crate::types::device_state::BalanceDelta],
-        offline_spend: Option<crate::types::device_state::OfflineSpend>,
+        offline: Option<crate::types::device_state::OfflineMove>,
     ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
         let ds = self.device_state.as_ref().ok_or_else(|| {
             DsmError::state_machine(
@@ -118,13 +118,7 @@ impl StateMachine {
 
         // Core derives the transition's one entropy inside `advance`, from
         // the relationship tip (Part VII step 3). Nothing is passed in.
-        ds.advance(
-            rel_key,
-            counterparty_devid,
-            operation,
-            deltas,
-            offline_spend,
-        )
+        ds.advance(rel_key, counterparty_devid, operation, deltas, offline)
     }
 
     /// Install a previously prepared AdvanceOutcome as the new device head.

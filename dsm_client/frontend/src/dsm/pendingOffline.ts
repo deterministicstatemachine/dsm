@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// The payments this device received offline and holds pending (owner ruling,
-// 2026-10-28: shown "separately from spendable balance, including asset,
-// amount and pending-settlement status"). Rust keeps them, names the payer and
-// renders each amount; this only reads them. They are in no balance and in no
-// offline allocation until they settle, once the payer's return online exposes
-// its signed spend chain.
+// The payments this device received offline, waiting for their unload (owner
+// ruling, 2026-10-28: shown "separately from spendable balance, including
+// asset, amount and pending-settlement status"). Each was committed by this
+// device's own board and is held in its offline balance, apart from the
+// allocation it pays from (owner, 2026-11-07). Rust keeps them, names the payer
+// and renders each amount; this only reads them. They are in no online balance
+// until the user unloads them (`unloadReceived`), and each moves only once its
+// payer's return online has exposed its signed spend chain.
 
 import * as pb from '../proto/dsm_app_pb';
 import { routerQueryBin } from './WebViewBridge';

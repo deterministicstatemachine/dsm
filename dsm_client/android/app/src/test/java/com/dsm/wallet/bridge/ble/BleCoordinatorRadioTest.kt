@@ -129,6 +129,47 @@ class BleCoordinatorRadioTest {
     }
 
     @Test
+    fun a_stop_with_nothing_scanning_does_not_hold_back_the_next_start() {
+        var running = 0
+        whenever(scanner.isScanning()).thenAnswer { running > 0 }
+        whenever(scanner.startScanning(any())).thenAnswer { running = 1; running > 0 }
+        whenever(scanner.stopScanning()).thenAnswer { running = 0; running == 0 }
+        // Pairing ending with nothing running: no scan ran, so no gap is owed.
+        coordinator.stopPairingScan()
+        assertTrue("a reach may start the scanner at once", coordinator.startScanning())
+        assertEquals(listOf("scanStarted"), recorded.events)
+    }
+
+    @Test
+    fun a_stop_after_a_running_scan_still_holds_back_an_immediate_restart() {
+        var running = 0
+        whenever(scanner.isScanning()).thenAnswer { running > 0 }
+        whenever(scanner.startScanning(any())).thenAnswer { running = 1; running > 0 }
+        whenever(scanner.stopScanning()).thenAnswer { running = 0; running == 0 }
+        assertTrue(coordinator.startScanning())
+        assertTrue(coordinator.stopScanning())
+        assertFalse("the radio's gap between scans still holds", coordinator.startScanning())
+    }
+
+    @Test
+    fun pairing_ending_leaves_on_the_scan_a_reach_for_a_contact_is_using() {
+        var running = 0
+        whenever(advertiser.isAdvertising()).thenAnswer { running >= 0 }
+        whenever(scanner.isScanning()).thenAnswer { running > 0 }
+        whenever(scanner.startScanning(any())).thenAnswer { running = 1; running > 0 }
+        whenever(scanner.stopScanning()).thenAnswer { running = 0; running == 0 }
+        // A reach with no address to try goes to the scan, for the next device it finds.
+        coordinator.requestConnect(ByteArray(32) { 0x42 }, "")
+        // The reach runs on the lifecycle lane, so a start issued after it runs after it.
+        assertTrue(coordinator.startAdvertising())
+        assertTrue("the reach's scan is running", coordinator.isScanning())
+
+        assertTrue(coordinator.stopPairingScan())
+        verify(scanner, never()).stopScanning()
+        assertTrue("the reach still has its scanner", coordinator.isScanning())
+    }
+
+    @Test
     fun a_scan_the_stack_fails_after_starting_is_reported_stopped() {
         coordinator.onScanFailed(2)
         assertEquals(listOf("scanStopped"), recorded.events)

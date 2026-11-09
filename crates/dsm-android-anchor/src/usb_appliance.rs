@@ -16,10 +16,15 @@
 //! fabricate a release.
 
 use anchor_core::appliance::RecoverOutcome;
+use anchor_core::enrollment::Install;
 use anchor_core::proto::{decode_response, encode_release, encode_request, pb};
 use anchor_core::root_advance::{OwnedTransition, Transition};
+use anchor_core::service::err;
+use anchor_core::try_run::Requirement;
 use dsm::types::error::DsmError;
-use dsm_sdk::anchor::{AnchorAppliance, AnchorPin, ApplianceStatus};
+use dsm_sdk::anchor::{
+    AnchorAppliance, AnchorPin, ApplianceStatus, RehearsalOwner, TryRunReport, TryRunStep,
+};
 
 use crate::usb_pico::UsbTransceive;
 
@@ -36,18 +41,38 @@ fn arr32(b: &[u8]) -> Result<[u8; 32], DsmError> {
 }
 
 /// One appliance op over the transport: frame `LE32(len) ++ ApplianceRequest`, run the opaque USB
-/// round-trip and decode the `ApplianceResponse`, refused or not.
+/// round-trip and decode the `ApplianceResponse`, refused or not. An answer to another op is a stream
+/// out of step, never this op's answer: an undecodable frame's refusal alone carries no op.
 fn exchange(
     usb: &UsbTransceive,
     req: pb::ApplianceRequest,
 ) -> Result<pb::ApplianceResponse, DsmError> {
-    let body = encode_request(&req);
+    exchange_with_tail(usb, req, &[])
+}
+
+/// One request over the wire with `tail` after its message: an `OP_AUTHORIZE`'s signature, which
+/// the anchor reads from the frame's end (anchor-core `decode_frame`).
+fn exchange_with_tail(
+    usb: &UsbTransceive,
+    req: pb::ApplianceRequest,
+    tail: &[u8],
+) -> Result<pb::ApplianceResponse, DsmError> {
+    let op = req.op;
+    let mut body = encode_request(&req);
+    body.extend_from_slice(tail);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
     let resp_body = usb(frame)?;
-    decode_response(&resp_body).map_err(|e| {
+    let resp = decode_response(&resp_body).map_err(|e| {
         DsmError::invalid_operation(format!("anchor appliance: decode response: {e:?}"))
-    })
+    })?;
+    if resp.op == op || (resp.op == pb::Op::Unspecified as i32 && !resp.ok) {
+        return Ok(resp);
+    }
+    Err(DsmError::invalid_operation(format!(
+        "anchor appliance: op {op} was answered as op {} (the stream is out of step)",
+        resp.op
+    )))
 }
 
 /// One appliance op that must succeed: fail closed unless the chip reported `ok`. Free function so
@@ -58,12 +83,42 @@ fn roundtrip(
 ) -> Result<pb::ApplianceResponse, DsmError> {
     let resp = exchange(usb, req)?;
     if !resp.ok {
-        return Err(DsmError::invalid_operation(format!(
-            "anchor appliance: op {} failed on-chip (error code {})",
-            resp.op, resp.error
-        )));
+        return Err(refused(&resp));
     }
     Ok(resp)
+}
+
+/// A try-run or a provisioning, as two requests: `req`, and when the anchor answers with the digest
+/// its rehearsal payment waits on, the rehearsal owner's authorization of it. Answers what the anchor
+/// answered last: the run's report, or for a provisioning that passed, the anchor's status.
+fn rehearse(
+    usb: &UsbTransceive,
+    req: pb::ApplianceRequest,
+    rehearsal: &RehearsalOwner,
+) -> Result<pb::ApplianceResponse, DsmError> {
+    let begun = exchange(usb, req)?;
+    if begun.awaiting_authorization.is_empty() {
+        return Ok(begun);
+    }
+    let digest = arr32(&begun.awaiting_authorization)?;
+    let signature = rehearsal.sign(&digest)?;
+    exchange_with_tail(
+        usb,
+        pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        },
+        &signature,
+    )
+}
+
+/// A refusal as the wallet reports it: the op, the appliance's code and, when it gave one, its reason.
+fn refused(resp: &pb::ApplianceResponse) -> DsmError {
+    DsmError::invalid_operation(format!(
+        "anchor appliance: op {} failed on-chip (error code {}) {}",
+        resp.op, resp.error, resp.detail
+    ))
 }
 
 fn bare(op: pb::Op) -> pb::ApplianceRequest {
@@ -111,13 +166,54 @@ fn pin_of(s: &pb::ApplianceResponse) -> Result<AnchorPin, DsmError> {
     Ok(pin)
 }
 
+/// The identity an install binds, on the wire.
+fn provisioning_pb(provisioning: &anchor_core::enrollment::Provisioning) -> pb::Provisioning {
+    pb::Provisioning {
+        device_id: provisioning.device_id.to_vec(),
+        online_id_pk: provisioning.online_id_pk.clone(),
+        policy_hash: provisioning.policy_hash.to_vec(),
+        genesis_root: provisioning.genesis_root.to_vec(),
+    }
+}
+
+/// The install an answer names: for good, or a trial its next boot ends. `None` when it names none,
+/// as an anchor that would not run a try-run at all does.
+fn install_of(r: &pb::ApplianceResponse) -> Option<Install> {
+    match pb::InstallKind::try_from(r.install) {
+        Ok(pb::InstallKind::InstallForGood) => Some(Install::ForGood),
+        Ok(pb::InstallKind::InstallForTrial) => Some(Install::ForTrial),
+        Ok(pb::InstallKind::InstallUnspecified) => None,
+        Err(_unknown) => None,
+    }
+}
+
 impl AnchorAppliance for UsbAnchorAppliance {
     fn status(&mut self) -> Result<ApplianceStatus, DsmError> {
         let r = self.roundtrip(bare(pb::Op::Status))?;
         Ok(ApplianceStatus {
             root: arr32(&r.active_root)?,
             anchor_counter: r.active_anchor_counter,
+            install: install_of(&r).ok_or_else(|| {
+                DsmError::invalid_operation("anchor appliance: STATUS named no install")
+            })?,
+            open_challenge: match r.open_challenge.as_slice() {
+                [] => None,
+                held => Some(arr32(held)?),
+            },
         })
+    }
+
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DsmError> {
+        let req = pb::ApplianceRequest {
+            op: pb::Op::Authorize as i32,
+            authorization_digest: digest.to_vec(),
+            ..Default::default()
+        };
+        let resp = exchange_with_tail(&self.usb, req, signature)?;
+        if !resp.ok {
+            return Err(refused(&resp));
+        }
+        Ok(())
     }
 
     fn prepare(
@@ -195,29 +291,114 @@ impl AnchorAppliance for UsbAnchorAppliance {
             return Ok(None);
         }
         if !status.ok {
-            return Err(DsmError::invalid_operation(format!(
-                "anchor appliance: op {} failed on-chip (error code {})",
-                status.op, status.error
-            )));
+            return Err(refused(&status));
         }
         pin_of(&status).map(Some)
+    }
+
+    fn try_run(
+        &mut self,
+        provisioning: &anchor_core::enrollment::Provisioning,
+        rehearsal: &RehearsalOwner,
+    ) -> Result<TryRunReport, DsmError> {
+        // A try-run that does not pass is an answer, and so is an anchor that will not run one: the
+        // report says which. Only a transport that failed is an error.
+        let req = pb::ApplianceRequest {
+            op: pb::Op::TryRun as i32,
+            provision: Some(provisioning_pb(provisioning)),
+            rehearsal_pk: rehearsal.public_key().to_vec(),
+            ..Default::default()
+        };
+        let resp = rehearse(&self.usb, req, rehearsal)?;
+        let mut steps: Vec<TryRunStep> = resp
+            .try_run
+            .iter()
+            .map(|step| TryRunStep {
+                name: step.name.clone(),
+                passed: step.passed,
+                detail: step.detail.clone(),
+                requirement: if step.production {
+                    Requirement::Production
+                } else {
+                    Requirement::Works
+                },
+            })
+            .collect();
+        // The transport carried an answer as long as the largest the anchor ever gives: checked on
+        // any run that went through its payment, whatever production still needs.
+        let carried = resp.transport_check.len();
+        let whole =
+            carried > 0 && resp.transport_check == anchor_core::try_run::transport_check(carried);
+        if resp.ok || carried > 0 {
+            steps.push(TryRunStep {
+                name: "the anchor's largest answer came through whole".to_string(),
+                passed: whole,
+                detail: if whole {
+                    String::new()
+                } else {
+                    format!("{carried} bytes arrived")
+                },
+                requirement: Requirement::Works,
+            });
+        }
+        // A run that went through answers with its steps; only an anchor that would not run one at
+        // all is a refusal, and it says why.
+        let refused = match resp.error {
+            err::NONE | err::TRY_RUN_FAILED => String::new(),
+            code if resp.detail.is_empty() => {
+                format!("the anchor refused the try-run (error {code})")
+            }
+            _ => resp.detail.clone(),
+        };
+        Ok(TryRunReport {
+            passed: resp.ok && whole,
+            steps,
+            install: install_of(&resp),
+            permanent: resp.permanent.clone(),
+            refused,
+        })
+    }
+
+    fn draw_challenge(&mut self) -> Result<[u8; 32], DsmError> {
+        let r = self.roundtrip(bare(pb::Op::Challenge))?;
+        arr32(&r.receiver_challenge)
+    }
+
+    fn check_payment(
+        &mut self,
+        payment: &anchor_core::root_advance::OfflineRelease,
+        payer: &anchor_core::receive::PayerDisclosure,
+    ) -> Result<(), DsmError> {
+        // Only what the anchor checks goes over the cable: the transition and the certificate. The
+        // offline-state proofs and any spend chain are the phone's to verify.
+        let req = pb::ApplianceRequest {
+            op: pb::Op::CheckPayment as i32,
+            payment: Some(Box::new(pb::OfflineRelease {
+                transition: Some(payment.transition.to_pb()),
+                cert: Some(payment.cert.to_pb()),
+                ..Default::default()
+            })),
+            payer: Some(Box::new(payer.to_pb())),
+            ..Default::default()
+        };
+        self.roundtrip(req).map(|_| ())
     }
 
     fn provision(
         &mut self,
         provisioning: &anchor_core::enrollment::Provisioning,
+        rehearsal: &RehearsalOwner,
     ) -> Result<AnchorPin, DsmError> {
         let req = pb::ApplianceRequest {
             op: pb::Op::Provision as i32,
-            provision: Some(pb::Provisioning {
-                device_id: provisioning.device_id.to_vec(),
-                online_id_pk: provisioning.online_id_pk.clone(),
-                policy_hash: provisioning.policy_hash.to_vec(),
-                genesis_root: provisioning.genesis_root.to_vec(),
-            }),
+            provision: Some(provisioning_pb(provisioning)),
+            rehearsal_pk: rehearsal.public_key().to_vec(),
             ..Default::default()
         };
-        self.roundtrip(req)?;
+        let resp = rehearse(&self.usb, req, rehearsal)?;
+        if !resp.ok {
+            return Err(refused(&resp));
+        }
         self.status_pin()
     }
 }
@@ -240,6 +421,7 @@ mod tests {
             pin_partition_pk: vec![0x07; 64],
             pin_chip_pk: vec![0x0C; 32],
             pin_birth_commitment: vec![0x5B; 32],
+            install: pb::InstallKind::InstallForGood as i32,
             ..Default::default()
         })
     }
@@ -349,6 +531,37 @@ mod tests {
         assert_eq!(
             app.provisioned_pin().expect("status").map(|pin| pin.bundle),
             None
+        );
+    }
+
+    /// An answer left over from another op is never taken as this op's: a stale release or status
+    /// read as the answer would be believed. MUTATION CONTROL: dropping the op check in `exchange`
+    /// takes the status as the commit's answer and turns this red.
+    #[test]
+    fn an_answer_to_another_op_is_refused() {
+        let usb: UsbTransceive = Arc::new(|_frame| Ok(status_response(0)));
+        let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
+        let refused = app
+            .commit()
+            .expect_err("a status answer is no commit's answer");
+        assert!(refused.to_string().contains("out of step"), "{refused}");
+    }
+
+    /// A refusal the firmware gives before it knows the op, and its reason, reach the wallet.
+    #[test]
+    fn a_refusal_with_no_op_keeps_its_reason() {
+        let usb: UsbTransceive = Arc::new(|_frame| {
+            Ok(anchor_core::service::refusal(
+                pb::Op::Unspecified as i32,
+                anchor_core::service::err::NOT_UP,
+                "Sealed: secure boot is not enabled in OTP",
+            ))
+        });
+        let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
+        let refused = app.commit().expect_err("an anchor that is not up");
+        assert!(
+            refused.to_string().contains("secure boot is not enabled"),
+            "{refused}"
         );
     }
 

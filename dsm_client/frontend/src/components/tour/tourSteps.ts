@@ -170,7 +170,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'wallet',
     target: '.send-tab .sb-seg[aria-label="Transaction mode"]',
     title: 'Online or offline',
-    body: "Online goes through the storage nodes: the person you pay does not need to be nearby or awake, it lands in their inbox. Offline is cash in hand: two appliances side by side over Bluetooth, with no network at all. Offline opens with the hardware appliance, so in this build it says it is under construction. Here is how it works.",
+    body: "Online goes through the storage nodes: the person you pay does not need to be nearby or awake, it lands in their inbox. Offline is cash in hand: two appliances side by side over Bluetooth, with no network at all. Offline needs the hardware appliance, plugged into the phone. Here is how it works.",
   },
   {
     id: 'offline-how',

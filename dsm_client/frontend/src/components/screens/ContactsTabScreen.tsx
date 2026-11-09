@@ -36,7 +36,24 @@ const ContactsTabScreen: React.FC<Props> = () => {
     } catch {}
     return 'list';
   });
-  const { contacts, refreshContacts, isLoading: contextLoading } = useContacts();
+  const { contacts, refreshContacts, unpairContact, isLoading: contextLoading } = useContacts();
+  // The contact whose unpair is under way, and the last unpair Rust refused.
+  const [unpairing, setUnpairing] = useState<string | null>(null);
+  const [unpairRefused, setUnpairRefused] = useState<{ deviceId: string; message: string } | null>(null);
+
+  // Unpair and pair again: this phone forgets the pairing and reaches the
+  // contact's phone to pair anew over a new link handshake.
+  const unpair = useCallback((deviceId: string) => {
+    setUnpairing(deviceId);
+    setUnpairRefused(null);
+    unpairContact(deviceId).then(
+      () => setUnpairing(null),
+      (e: unknown) => {
+        setUnpairing(null);
+        setUnpairRefused({ deviceId, message: e instanceof Error ? e.message : String(e) });
+      },
+    );
+  }, [unpairContact]);
   const { transactions, refresh: refreshTransactions } = useTransactions();
   const [selected, setSelected] = useState<number | null>(null);
   const [error] = useState<string | null>(null);
@@ -294,6 +311,19 @@ const ContactsTabScreen: React.FC<Props> = () => {
                             <span className="sb-kv__k">Verified</span>
                             <span className="sb-kv__v">{c.genesisVerifiedOnline ? 'YES' : 'NO'}</span>
                           </div>
+
+                          <button
+                            type="button"
+                            className="sb-btn sb-btn--primary"
+                            style={{ marginTop: 8, width: '100%' }}
+                            disabled={unpairing === c.deviceId}
+                            onClick={() => unpair(c.deviceId)}
+                          >
+                            {unpairing === c.deviceId ? 'Unpairing…' : 'Unpair and pair again'}
+                          </button>
+                          {unpairRefused?.deviceId === c.deviceId && (
+                            <Notice kind="error">{unpairRefused.message}</Notice>
+                          )}
 
                           <Disclosure summary={`Stitched receipts (${contactTxs.length})`} className="sb-details--plain">
                             {contactTxs.length === 0 ? (

@@ -22,19 +22,17 @@ blake3 = { version = "1", default-features = false }
 subtle = { version = "2", default-features = false }
 # RP2350 HAL — SAU/ACCESSCTRL, OTP reads (rom_data/otp), SRAM-image boot.
 rp235x-hal = { version = "0.3", features = ["binary-info", "critical-section-impl", "rt"] }
-# Secure fault/panic handler (halts; never returns to Non-secure).
-panic-halt = "1.0"
 cortex-m = "0.7"
-cortex-m-rt = "0.7"
+# `.data` stays as the bootrom loaded and verified it: nothing is copied from flash after that.
+cortex-m-rt = { version = "0.7", features = ["skip-data-copy"] }
 # Heap for the Secure working set (SPHINCS+ signing / release staging) — SEPARATE from the NS heap.
 embedded-alloc = "0.6"
-# σ^chip: TROPIC01 resident Ed25519 signing over the DSM root-advance message (Secure-only SPI0).
-tropic01 = { path = "../../../../libtropic-rs/tropic01" }
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+# σ^chip and σ^host: the chip session and bring-up, the same code the rehearsal runs on the model.
+dsm-anchor-chip = { path = "../dsm-anchor-chip" }
+# The TROPIC01 driver, pinned by commit: a firmware build is reproducible only if its driver is.
+tropic01 = { git = "https://github.com/tropicsquare/libtropic-rs", rev = "0cacb5ed94e5df491bfbb39e8702cc47598f7d63" }
 embedded-hal = "1.0"
 embedded-hal-bus = "0.3"
-# σ^host: shared no_std BLAKE3-SPHINCS+ (SPX128f) — the SAME crate the pico anchor uses (PartitionSig).
-dsm-sphincs = { path = "../dsm-sphincs" }
 
 [build-dependencies]
 # Compiles the -mcmse NSC veneer and links --cmse-implib to emit the Secure Gateway import library.
@@ -44,14 +42,52 @@ cc = "1"
 # Production profile marker. A production build sets this; it FORBIDS `bench_self_enroll` (a build
 # that enables both fails to compile — see the compile_error in main.rs).
 production = []
-# BENCH-ONLY measurement enrollment (never production). Sources `mu_enrolled` from the NS image
-# measured at THIS boot instead of OTP, so authority ops work on an unsealed board WITHOUT burning
-# OTP. It does NOT weaken `measurement_ok`: the full fresh measure + constant-time compare runs on
-# every authority op — only the enrolled digest's SOURCE changes, and only when OTP is blank. If OTP
-# IS sealed, bench mode refuses (fail-closed) so a real seal is never overridden. Mutually exclusive
-# with `production`.
+# The trial image (never production): the one a new board runs before anything is burned on it.
+# It sources `mu_enrolled` from the NS image measured at THIS boot instead of OTP, and its secret is
+# fresh each boot and held nowhere, so a try-run goes through an install on the real board and chip
+# with nothing burned. It does NOT weaken `measurement_ok`: the full fresh measure + constant-time
+# compare runs on every authority op — only the enrolled digest's SOURCE changes, and only when the
+# digest's OTP page is blank. If that page IS sealed it refuses (fail-closed) so a real seal is never
+# overridden. A secret an earlier procedure wrote to the secret's page is neither used nor written; on a
+# board locked for production (secure boot enabled) it stands down. It refuses every provisioning, so it
+# can make no install. Mutually exclusive with `production`.
 bench_self_enroll = []
+# The image that does one thing, on a test part whose PTRNG Tropic Square left unconfigured (erratum
+# OI_TR01_ERR_2026090100, T005, T101, T103): clears CFG_START_UP[RNGTEST_DIS], irreversibly, erases any
+# key generated before that, reboots the chip and says how it went. It installs nothing and answers
+# every request with that outcome. Only built on purpose, and a trial image in all else.
+prepare_chip = ["bench_self_enroll"]
+# The image that reads the board's chip and writes nothing, to it or to OTP: its part, firmware and
+# certificates, its configuration and access rules, its pairing slots, counter, resident key slot and
+# R-memory, and whether the board's OTP holds a sealed secret. It answers OP_IDENTIFY with that and
+# serves nothing else. What a board runs to say which chip it carries before anything is decided for it.
+identify_chip = ["bench_self_enroll"]
 
-# Size: the Secure TCB, its heap and its stack share one 256 KiB SRAM region.
+# Size: the Secure TCB, its heap and its stack share one 400 KiB SRAM region.
 [profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+
+# The cryptography keeps "s". Its speed is what the watchdog's budget and the phone's wait were set
+# against: a SPHINCS+ signature takes ~7 s on this silicon against a ~16.7 s budget. The rest gives up
+# speed nothing depends on, which frees about 19 KB of Secure SRAM.
+[profile.release.package.dsm-sphincs]
 opt-level = "s"
+[profile.release.package.blake3]
+opt-level = "s"
+[profile.release.package.curve25519-dalek]
+opt-level = "s"
+[profile.release.package.ed25519-dalek]
+opt-level = "s"
+[profile.release.package.x25519-dalek]
+opt-level = "s"
+[profile.release.package.aes]
+opt-level = "s"
+[profile.release.package.aes-gcm]
+opt-level = "s"
+[profile.release.package.sha2]
+opt-level = "s"
+
+# Its own workspace: excluded from the root manifest.
+[workspace]

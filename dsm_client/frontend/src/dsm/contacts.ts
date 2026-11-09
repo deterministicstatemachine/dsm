@@ -208,6 +208,21 @@ function protoArg(body: Uint8Array): Uint8Array {
   return new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(body) }).toBinary();
 }
 
+/**
+ * Unpairs a contact's phone and pairs it again: this phone forgets the pairing
+ * and reaches the contact to pair anew over a new link handshake. Answers the
+ * contact as it stands right after the unpair.
+ */
+export async function unpairContact(deviceIdB32: string): Promise<pb.ContactAddResponse> {
+  const req = new pb.ContactUnpairRequest({ deviceId: new Uint8Array(decodeBase32Crockford(deviceIdB32)) });
+  const env = decodeFramedEnvelopeV3(await routerInvokeBin('contacts.unpair', protoArg(req.toBinary())));
+  if (env.payload.case === 'error') throw refusal('contacts.unpair', env.payload.value);
+  if (env.payload.case !== 'contactAddResponse') {
+    throw new Error(`STRICT: contacts.unpair answered ${env.payload.case}`);
+  }
+  return env.payload.value;
+}
+
 /** Replaces the details the wallet holds for a contact (DSM Amendment A17). */
 export async function setContactProfile(deviceIdB32: string, profile: PersonProfile): Promise<PersonProfile> {
   const req = new pb.ContactSetProfileRequest({
