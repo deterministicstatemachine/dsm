@@ -274,3 +274,4 @@ dsm_client/android/.kotlin/
 # The developer environment `make app-dev` runs (scripts/dev_net.sh, scripts/app_dev.sh):
 # the local storage set, its CA and keys, each account's data, secrets and logs.
 /.dsm-dev/
+/.venv/

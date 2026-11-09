@@ -61,7 +61,7 @@ Your app needs a server side, even a small one, because the account's secret mus
 
 ## Start in five minutes
 
-You need what [QUICKSTART.md](QUICKSTART.md) lists for local storage nodes (Rust, Node.js 20+, protoc, PostgreSQL).
+You need what [QUICKSTART.md](QUICKSTART.md)'s prerequisites list (Rust, Node.js 20+, protoc, and PostgreSQL for the local storage set).
 
 ```bash
 make app-dev       # your own storage set on this machine, and your app's account on it, funded
@@ -130,7 +130,12 @@ if (login.fact === "signed") console.log(`${player.peer} signed in`);
 
 ### Python (3.10+)
 
-[clients/python/](clients/python/). `make clients` generates its protobuf types; install it with `pip install -e clients/python`.
+[clients/python/](clients/python/). `make clients` generates its protobuf types; install it into a virtual environment:
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e clients/python
+```
 
 ```python
 from dsm_app_client import local_app, grant, ask
@@ -145,6 +150,12 @@ if paid.fact == "received":
     sword = app.issue("SWORD", "Sword", "1")
     app.wait(app.request(player, ask.accept(sword)), until="answered")
     app.give(player, sword, "1")
+```
+
+[clients/python/examples/first_payment.py](clients/python/examples/first_payment.py) is this, as a program: it prints the connect code, waits for a wallet to connect to it, asks for 0.05 ERA and prints the fact.
+
+```bash
+python3 clients/python/examples/first_payment.py              # then: make dev-wallet-connect CODE=<the code it prints>
 ```
 
 Any other language: generate types from [`proto/dsm_app.proto`](proto/dsm_app.proto) and send an `IngressRequest` (a `RouterInvokeOp` or `RouterQueryOp`: the route's name and an `ArgPack` holding its request message) to `POST /ingress`. An `IngressResponse` comes back: either an error, or `0x03` followed by an `Envelope`. [clients/typescript/src/ingress.ts](clients/typescript/src/ingress.ts) is the whole exchange, in one short file.
@@ -216,6 +227,7 @@ The first lines it logs name the relay and its certificate pin, the ingress, and
 - `make dev-wallet` runs a second account as a player's wallet, and `make dev-wallet2` a third for matches. `make wallet ARGS=...` (and `make wallet2 ARGS=...`) drives them: `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`.
 - `make app ARGS=...` drives your app's account from the terminal: `offer`, `connections`, `send`, `owns`, `accept`, `login`, `result`, `issue`, `give`, `owned`, `activity`.
 - `make developer-path` runs every helper once against your local set: connect, send inside and over the grant, prove what is owned, sign in, issue and give an item, open a vault and trade, referee a match between two wallets, disconnect; then the Python client. CI runs it on every change.
+- `make first-run` is a newcomer's first run, proven: a clean Ubuntu (in Docker) with nothing on it but what QUICKSTART.md's prerequisites say to install, a fresh clone, and this page's commands alone, in TypeScript (the starter) and in Python (`first_payment.py`), each to a wallet connected and a payment received. The prerequisites are read out of QUICKSTART.md, and every command it types is one this page shows, so the docs cannot drift from what works. A release runs it.
 
 ## Reference
 

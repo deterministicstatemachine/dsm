@@ -141,8 +141,21 @@ fn with_database(url: &str, database: &str) -> Result<String, String> {
     })
 }
 
+/// An error with every cause behind it. The pool and tokio-postgres say
+/// "invalid configuration" and keep the reason ("password missing") as the
+/// source, which is the part a developer needs.
+fn causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = e.to_string();
+    let mut next = e.source();
+    while let Some(cause) = next {
+        text.push_str(&format!(": {cause}"));
+        next = cause.source();
+    }
+    text
+}
+
 async fn admin_client(pg: &str) -> Result<db::DBPool, String> {
-    db::create_pool(pg, 1).map_err(|e| format!("connect to {pg}: {e}"))
+    db::create_pool(pg, 1).map_err(|e| format!("connect to {pg}: {e:#}"))
 }
 
 async fn drop_databases(pg: &str, members: &[Member]) -> Result<(), String> {
@@ -150,7 +163,7 @@ async fn drop_databases(pg: &str, members: &[Member]) -> Result<(), String> {
     let client = admin
         .get()
         .await
-        .map_err(|e| format!("a connection to {pg}: {e}"))?;
+        .map_err(|e| format!("a connection to {pg}: {}", causes(&e)))?;
     for m in members {
         client
             .batch_execute(&format!(
@@ -171,14 +184,14 @@ async fn prepare_databases(pg: &str, members: &[Member]) -> Result<(), String> {
     let client = admin
         .get()
         .await
-        .map_err(|e| format!("a connection to {pg}: {e}"))?;
+        .map_err(|e| format!("a connection to {pg}: {}", causes(&e)))?;
     for m in members {
         client
             .batch_execute(&format!("CREATE DATABASE {}", m.database))
             .await
             .map_err(|e| format!("create {}: {e}", m.database))?;
         let url = with_database(pg, &m.database)?;
-        let pool = db::create_pool(&url, 1).map_err(|e| format!("connect to {url}: {e}"))?;
+        let pool = db::create_pool(&url, 1).map_err(|e| format!("connect to {url}: {e:#}"))?;
         db::init_db(&pool)
             .await
             .map_err(|e| format!("{}: the node's schema: {e}", m.database))?;
@@ -188,7 +201,7 @@ async fn prepare_databases(pg: &str, members: &[Member]) -> Result<(), String> {
             let node = pool
                 .get()
                 .await
-                .map_err(|e| format!("a connection to {url}: {e}"))?;
+                .map_err(|e| format!("a connection to {url}: {}", causes(&e)))?;
             node.execute(
                 "INSERT INTO register_incarnation (only_row, incarnation) VALUES (1, $1)",
                 &[&m.incarnation.to_vec()],

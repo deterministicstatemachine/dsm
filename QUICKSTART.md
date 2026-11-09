@@ -48,11 +48,13 @@ brew install git protobuf node
 brew install --cask temurin@17
 ```
 
-Linux (Ubuntu/Debian):
+Linux (Ubuntu/Debian; Ubuntu's own `nodejs` package is older than the Node.js 20 this repo needs, so Node comes from NodeSource):
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential git curl protobuf-compiler nodejs npm openjdk-17-jdk
+sudo apt install -y build-essential git curl protobuf-compiler openjdk-17-jdk
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
 ```
 
 All platforms:
@@ -62,7 +64,24 @@ All platforms:
 - `cargo-ndk` if you want Android native builds
 - Set `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`) before `make android`, `make android-libs`, or `make install`
 - Xcode (macOS) and `cbindgen` (`cargo install cbindgen`) if you want the iOS app
-- PostgreSQL if you want local storage nodes (`make nodes-up`) or to plug an app into DSM (`make app-dev`)
+- PostgreSQL if you want local storage nodes (`make nodes-up`) or to plug an app into DSM (`make app-dev`), below
+
+### PostgreSQL, for local storage nodes
+
+The local set keeps each node's data on a PostgreSQL server on this machine, reached as your own login. Python 3.10+ and a virtual environment are for the Python client ([BUILDING_APPS.md](BUILDING_APPS.md)).
+
+macOS (Homebrew's server already has a role named after your login, and takes it on localhost):
+
+```bash
+brew install postgresql@17 && brew services start postgresql@17
+```
+
+Linux (the server takes your login over its socket once it has a role of that name; `python3-venv` for the Python client):
+
+```bash
+sudo apt install -y postgresql python3-venv && sudo service postgresql start
+sudo -u postgres createuser -s "$(id -un)"
+```
 
 Windows:
 
@@ -181,7 +200,7 @@ make nodes-down    # stop the nodes
 make nodes-reset   # stop them, drop their databases, forget the set and the accounts made on it
 ```
 
-PostgreSQL must run with `fsync=on` and `full_page_writes=on` (the defaults). The set is reached as `DSM_DEV_PG_URL`, by default `postgresql://$USER@localhost:5432/postgres?sslmode=disable`. Everything the set needs lives under `.dsm-dev/net/`, including the client config wallets use (`dsm_env_config.toml`, trusting `dev-ca.pem`).
+PostgreSQL must run with `fsync=on` and `full_page_writes=on` (the defaults). The set is reached as `DSM_DEV_PG_URL`; by default, your login's role on the server at localhost, over Debian/Ubuntu's socket where there is one (`postgresql://<login>@/postgres?host=/var/run/postgresql&sslmode=disable`), else TCP port 5432 (`postgresql://<login>@localhost:5432/postgres?sslmode=disable`). Everything the set needs lives under `.dsm-dev/net/`, including the client config wallets use (`dsm_env_config.toml`, trusting `dev-ca.pem`).
 
 Point the wallets on your phones at it (debug builds only):
 
