@@ -97,14 +97,15 @@ ENV PATH="/home/newcomer/.cargo/bin:${PATH}"
 # nothing the newcomer types uses it. (--with-deps adds Chromium's own shared
 # libraries and fonts; none is anything DSM builds against.)
 ENV FIRST_RUN_HAND=/home/newcomer/.first-run-hand
-RUN mkdir -p "$FIRST_RUN_HAND" && cd "$FIRST_RUN_HAND" && npm init -y >/dev/null \
+RUN mkdir -p "$FIRST_RUN_HAND" && cd "$FIRST_RUN_HAND" \
+    && echo '{ "name": "first-run-hand", "private": true }' >package.json \
     && npm install --no-audit --no-fund playwright@1.65.0 \
     && npx playwright install --with-deps chromium
 EOF
 cp "$REPO/scripts/first_run_page.mjs" "$OUT/first_run_page.mjs"
 echo "[first-run] building the clean machine ($IMAGE)"
-docker build -q -t "$IMAGE" "$OUT" >"$OUT/image.log" 2>&1 || {
-    cat "$OUT/image.log" >&2
+docker build --progress=plain -t "$IMAGE" "$OUT" >"$OUT/image.log" 2>&1 || {
+    tail -60 "$OUT/image.log" >&2
     echo "[first-run] the clean machine did not build: the prerequisites above do not install" >&2
     exit 1
 }
