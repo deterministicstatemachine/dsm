@@ -8,6 +8,7 @@ The developer walkthrough ("Plug your app into DSM") is a short series of videos
 | 3. Your app's own DSM account | [ep3-account.tape](tapes/ep3-account.tape) | none |
 | 4. Make an offer, connect a wallet | [ep4-connect.tape](tapes/ep4-connect.tape) | scanning the starter's code and approving, on both |
 | 5. Ask the wallet for things | [ep5-requests.tape](tapes/ep5-requests.tape) | approving a send over the cap and a sign-in, on both |
+| 6. Trades, matches and duels (advanced) | [ep6-advanced.tape](tapes/ep6-advanced.tape) | none |
 
 ## Terminal shots
 
