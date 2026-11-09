@@ -15,14 +15,16 @@
 # does a release.
 #
 # What the newcomer does, in order:
-#   make app-dev; make starter; press "Show the connect code" (the starter's
-#   POST /api/offer, which is what the button sends); make dev-wallet;
-#   make dev-wallet-connect CODE=...; ask the wallet to send 0.05 ERA (the
-#   page's button: POST /api/ask) and watch the fact become `received`.
+#   make app-dev; make starter; open http://127.0.0.1:3000 in a browser and
+#   press "Show the connect code"; make dev-wallet; make dev-wallet-connect
+#   CODE=...; on the page, ask the connected wallet to send 0.05 ERA and watch
+#   that request's row show the fact `received`. The browser is real: headless
+#   Chromium presses the page's own buttons and reads its table
+#   (scripts/first_run_page.mjs), so the page is proven, not its HTTP alone.
 #   Then Python: the virtual environment and pip install the guide shows,
 #   clients/python/examples/first_payment.py, a second wallet (a wallet
 #   connects to an app once, and the first is still connected to the
-#   starter) connected to the code it prints, and its fact `received`.
+#   starter) connected to the code it prints, and its own request `received`.
 #
 # Needs Docker. Logs under .dsm-dev/first-run/. FIRST_RUN_IMAGE_ONLY=1 builds
 # the clean machine and stops.
@@ -90,7 +92,16 @@ RUN set -e; . /first-run/prerequisites.sh
 # QUICKSTART.md, All platforms: "Rust via rustup.rs", which says to run this.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
 ENV PATH="/home/newcomer/.cargo/bin:${PATH}"
+# The tester's hand, not the newcomer's machine: a browser to press the page's
+# buttons with (scripts/first_run_page.mjs). It lives here, off PATH, and
+# nothing the newcomer types uses it. (--with-deps adds Chromium's own shared
+# libraries and fonts; none is anything DSM builds against.)
+ENV FIRST_RUN_HAND=/home/newcomer/.first-run-hand
+RUN mkdir -p "$FIRST_RUN_HAND" && cd "$FIRST_RUN_HAND" && npm init -y >/dev/null \
+    && npm install --no-audit --no-fund playwright@1.65.0 \
+    && npx playwright install --with-deps chromium
 EOF
+cp "$REPO/scripts/first_run_page.mjs" "$OUT/first_run_page.mjs"
 echo "[first-run] building the clean machine ($IMAGE)"
 docker build -q -t "$IMAGE" "$OUT" >"$OUT/image.log" 2>&1 || {
     cat "$OUT/image.log" >&2
@@ -112,6 +123,7 @@ set -euo pipefail
 step() { printf '\n==== [%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 json() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const v=JSON.parse(d);console.log($1)})"; }
 starter() { curl -fsS --max-time 10 "$@"; }
+page() { node /first-run/first_run_page.mjs "$@"; }   # the tester's hand on the page: a real browser
 
 step "the machine: node $(node --version), $(protoc --version), $(cargo --version | cut -d' ' -f1-2), $(psql --version), $(python3 --version)"
 sudo service postgresql start >/dev/null   # the machine booted: its server is up
@@ -128,8 +140,8 @@ for _ in $(seq 1 300); do starter http://127.0.0.1:3000/api/state >/dev/null 2>&
 starter http://127.0.0.1:3000/api/state >/dev/null || { echo "the starter never answered:"; tail -20 ~/starter.log; exit 1; }
 echo "your account owns: $(starter http://127.0.0.1:3000/api/state | json 'v.owned.map(o=>o.symbol+" "+o.amount).join(", ")')"
 
-step "press Show the connect code   (the button's call: POST /api/offer)"
-CODE=$(starter -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:3000/api/offer | json 'v.code')
+step "open http://127.0.0.1:3000 in a browser and press Show the connect code"
+CODE=$(page offer)
 echo "${CODE:0:48}..."
 
 step "make dev-wallet"
@@ -138,22 +150,9 @@ make dev-wallet
 step "make dev-wallet-connect CODE=..."
 make dev-wallet-connect CODE="$CODE"
 
-step "ask the connected wallet to send 0.05 ERA   (the button's call: POST /api/ask)"
-CONNECTION=$(starter http://127.0.0.1:3000/api/state | json 'v.connections.filter(c=>c.connected)[0].id')
-starter -X POST -H 'content-type: application/json' \
-    -d "{\"connection\":\"$CONNECTION\",\"ask\":{\"kind\":\"send\",\"object\":\"ERA\",\"amount\":\"0.05\"}}" \
-    http://127.0.0.1:3000/api/ask >/dev/null
-REQUESTS=""
-for _ in $(seq 1 240); do
-    REQUESTS=$(starter http://127.0.0.1:3000/api/state | json 'v.requests.map(r=>r.outcome+"/"+r.fact+(r.error?" error: "+r.error:"")).join("; ")')
-    case "$REQUESTS" in *received*) break ;; esac
-    sleep 1
-done
-echo "the request: $REQUESTS"
-case "$REQUESTS" in
-    *received*) echo "TYPESCRIPT: a wallet connected, 0.05 ERA received" ;;
-    *) echo "TYPESCRIPT: the fact never became received"; exit 1 ;;
-esac
+step "on the page: ask the connected wallet to send 0.05 ERA, and watch that request's row"
+page send 0.05
+echo "TYPESCRIPT: a wallet connected, 0.05 ERA received"
 
 step "python3 -m venv .venv && . .venv/bin/activate"
 python3 -m venv .venv && . .venv/bin/activate

@@ -27,14 +27,20 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import QRCode from "qrcode";
-import { AppAccount, ask, localAccount, loginStatement } from "dsm-app-client";
+import { AppAccount, localAccount, loginStatement } from "dsm-app-client";
 import type { Connection, Decision, RequestRef, Result } from "dsm-app-client";
 import {
+  askCall,
+  giveCall,
+  issueCall,
+  loginCall,
+  offerCall,
   pyOf,
-  stakeIds,
-  toAsk,
-  toGrant,
+  stakeCall,
+  stakeIdCall,
+  tradeCalls,
   tsOf,
+  vaultCall,
   type AskPiece,
   type CodeAsk,
   type DecidePiece,
@@ -337,7 +343,7 @@ function codeAsk(f: Fields): CodeAsk {
     case "vault":
       return { piece: "vault", vault: vaultPiece(object(f, "vault")) };
     case "give":
-      return { piece: "give", connection: text(f, "connection"), give: givePiece(object(f, "give")) };
+      return { piece: "give", connection: text(f, "connection"), give: givePiece(object(f, "give")), app: NAME };
     case "decide":
       return { piece: "decide", decide: decidePiece(object(f, "decide")) };
     default:
@@ -384,32 +390,33 @@ function label(p: AskPiece): string {
   }
 }
 
-/** Make the request a piece describes, exactly as its code says. */
+/** Make the request a piece describes: the calls its shown code makes, with their values. */
 async function makeAsk(app: AppAccount, c: Connection, p: AskPiece): Promise<{ seq: string; priced?: string }> {
   switch (p.kind) {
     case "login": {
       const nonce = crypto.randomUUID();
-      return remember(await app.request(c, ask.login(NAME, nonce)), label(p), loginStatement(NAME, nonce));
+      return remember(await app.request(c, loginCall(NAME, nonce).value), label(p), loginStatement(NAME, nonce));
     }
     case "trade": {
       // A wallet receives only what it has taken up itself: the object the trade
       // pays out is accepted first, as an item is before it is given.
-      const accepted = await app.wait(await app.request(c, ask.accept(p.to)), { until: "answered" });
+      const t = tradeCalls(p);
+      const accepted = await app.wait(await app.request(c, t.accept.value), { until: "answered" });
       if (accepted.outcome !== "carried_out") throw new Error(`the wallet did not accept ${p.to}: ${accepted.reason}`);
-      const priced = await app.wait(await app.request(c, ask.price(p.from, p.to, p.amount)));
+      const priced = await app.wait(await app.request(c, t.price.value));
       if (priced.price === undefined) throw new Error(`no price: ${priced.reason}`);
-      const atLeast = (priced.price.amountOut * BigInt(p.atLeastPercent)) / 100n;
-      const ref = await app.request(c, ask.trade(p.from, p.to, p.amount, atLeast));
+      const atLeast = t.atLeast(priced.price.amountOut).value;
+      const ref = await app.request(c, t.trade(atLeast).value);
       vaultsChanged = true;
       return { ...remember(ref, label(p)), priced: priced.price.amountOut.toString() };
     }
     case "stake": {
       const other = (await app.connections()).find((o) => o.connected && o.id !== c.id);
       if (other === undefined) throw new Error("a match needs a second connected wallet");
-      return remember(await app.request(c, toAsk(p, other.opponent)), label(p));
+      return remember(await app.request(c, stakeCall(p, other.opponent).value), label(p));
     }
     default:
-      return remember(await app.request(c, toAsk(p)), label(p));
+      return remember(await app.request(c, askCall(p).value), label(p));
   }
 }
 
@@ -436,7 +443,7 @@ async function route(app: AppAccount, page: string, req: IncomingMessage, res: S
       const name = optionalText(fields, "name", NAME);
       const pieces = fields.grants === undefined ? defaultGrants(coin) : objects(fields, "grants").map(grantPiece);
       if (pieces.length === 0) throw new Error("an offer asks for at least one grant");
-      const offer = await app.offer({ name, grants: pieces.map(toGrant) });
+      const offer = await app.offer(offerCall({ name, grants: pieces }).value);
       const qr = await QRCode.toString(offer.code, { type: "svg", errorCorrectionLevel: "M", margin: 1 });
       send(res, 200, { code: offer.code, qr });
       return;
@@ -447,30 +454,23 @@ async function route(app: AppAccount, page: string, req: IncomingMessage, res: S
       return;
     }
     case "POST /api/issue": {
-      const p = issuePiece(fields);
-      const issued = await app.issue({
-        symbol: p.symbol,
-        name: p.name,
-        supply: p.supply,
-        decimals: p.decimals,
-        transferable: p.transferable,
-        burnable: p.burnable,
-      });
+      const issued = await app.issue(issueCall(issuePiece(fields)).value);
       send(res, 200, { id: issued.id, symbol: issued.symbol, kind: issued.kind });
       return;
     }
     case "POST /api/give": {
       const c = await connected(app, text(fields, "connection"));
       const p = givePiece(fields);
-      const accepted = await app.wait(await app.request(c, ask.accept(p.object)), { until: "answered" });
+      const accepted = await app.wait(await app.request(c, askCall({ kind: "accept", object: p.object }).value), { until: "answered" });
       if (accepted.outcome !== "carried_out") throw new Error(`the wallet did not accept ${p.object}: ${accepted.reason}`);
-      await app.give(c, p.object, p.amount, `${NAME}: ${p.object}`);
+      const g = giveCall(NAME, p).value;
+      await app.give(c, g.object, g.amount, g.memo);
       send(res, 200, { given: `${p.amount} ${p.object}` });
       return;
     }
     case "POST /api/vault": {
       const p = vaultPiece(fields);
-      const vault = await app.openVault({ a: p.a, reserveA: p.reserveA, b: p.b, reserveB: p.reserveB, feeBps: p.feeBps, label: p.label });
+      const vault = await app.openVault(vaultCall(p).value);
       // The offer's trade grant names the object this vault sells for ERA.
       coin = (await app.object(p.a === "ERA" ? p.b : p.a)).id;
       vaultsChanged = true;
@@ -479,9 +479,7 @@ async function route(app: AppAccount, page: string, req: IncomingMessage, res: S
     }
     case "POST /api/decide": {
       const p = decidePiece(fields);
-      const [stake] = stakeIds([p.stake]);
-      if (stake === undefined) throw new Error("stake is required");
-      const verdict = await app.decide(stake, p.decision);
+      const verdict = await app.decide(stakeIdCall(p.stake).value, p.decision);
       send(res, 200, { state: verdict.state, outcome: Buffer.from(verdict.outcome).toString() });
       return;
     }

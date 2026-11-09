@@ -392,9 +392,9 @@
       </div>`).join("");
     el("requests").innerHTML = s.requests.length === 0
       ? `<tr><td colspan="4" class="muted">Nothing asked yet.</td></tr>`
-      : s.requests.slice().reverse().map((r) => `<tr>
+      : s.requests.slice().reverse().map((r) => `<tr data-connection="${text(r.connection)}" data-seq="${text(r.seq)}">
           <td>${text(r.seq)}</td><td>${text(r.what)}<div class="id">${text(r.connection)}</div></td>
-          <td>${r.error ? `<span class="err">${text(r.error)}</span>` : text(r.outcome || "unanswered") + (r.reason ? `<div class="muted">${text(r.reason)}</div>` : "")}</td>
+          <td class="outcome">${r.error ? `<span class="err">${text(r.error)}</span>` : text(r.outcome || "unanswered") + (r.reason ? `<div class="muted">${text(r.reason)}</div>` : "")}</td>
           <td><span class="${r.fact && r.fact !== "none" ? "fact" : "fact-none"}">${text(r.fact || "…")}</span>
             <div class="muted">${text(r.detail)}${r.owns.map((o) => `<br>owns ${text(o.amount)} of ${text(o.object).slice(0, 12)}…`).join("")}${r.price ? `<br>price: ${text(r.price.in)} in, ${text(r.price.out)} out (smallest units)` : ""}${r.stakes.map((s) => `<br>stake <span class="id">${text(s)}</span>`).join("")}${r.signedAsAsked === undefined ? "" : r.signedAsAsked ? "<br>signed the words asked for" : "<br>signed other words"}</div></td>
         </tr>`).join("");
