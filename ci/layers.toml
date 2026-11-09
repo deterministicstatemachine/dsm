@@ -1,10 +1,12 @@
 # The dependency map behind the CI layer selector (ci/select_layers.py).
 #
 # A pull request runs the smallest set of validation layers the dependency
-# graph proves is safe; pushes to main, the nightly run and the FULL preset
-# run everything. Precedence, in this order:
-#   1. FULL triggers: event push/schedule, preset FULL, any file under
-#      [full_triggers], or any changed file no surface maps — unknown = FULL.
+# graph proves is safe; the FULL preset (CI started by hand) runs everything.
+# A push to main runs the layers its own diff maps to and is never FULL
+# (owner, 2026-11-09): there, [full_triggers] and unmapped paths add nothing.
+# Precedence, in this order:
+#   1. FULL triggers: preset FULL, or on a pull request any file under
+#      [full_triggers] or any changed file no surface maps — unknown = FULL.
 #   2. Surface mapping: every surface a file matches (a path may map to more
 #      than one; the SDK's jni/bridge modules are SDK *and* JNI_ANDROID).
 #   3. Escalation: the transitive closure over [escalation], because the
@@ -42,7 +44,8 @@ FRONTEND          = []
 FORMAL            = []
 SDK_NODE_PROTOCOL = []
 
-# Any of these changing runs FULL, whatever else the diff says.
+# Any of these changing runs FULL on a pull request, whatever else the diff
+# says. On a push to main they add nothing (see the top of this file).
 [full_triggers]
 paths = [
   "**/Cargo.toml",

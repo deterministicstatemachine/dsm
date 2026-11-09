@@ -12,12 +12,17 @@ explicit file list, and prints GitHub Actions outputs:
     summary=<text>             one line for the job log
 
 Precedence (ci/layers.toml documents the same order):
-  1. FULL: event push/schedule, preset FULL, a [full_triggers] path, or an
-     unmapped path (unknown = FULL).
+  1. FULL: preset FULL (CI started by hand, the default), or on a pull
+     request a [full_triggers] path or an unmapped path (unknown = FULL).
   2. Surface mapping: every surface a file matches (multi-match).
   3. Escalation closure over [escalation].
   A preset other than FULL means "pretend that surface changed": the closure
   of that surface, regardless of the diff.
+
+A push to main is never FULL (owner, 2026-11-09: "Should be only when you
+manually do it on main that it runs the full thing"). It runs the layers its
+own diff maps to; a [full_triggers] or unmapped path adds nothing on a push,
+because the pull request it came from already ran its own selection.
 """
 from __future__ import annotations
 
@@ -81,7 +86,7 @@ def closure(seed: set[str], escalation: dict[str, list[str]]) -> set[str]:
 
 def select(cfg: dict, files: list[str], event: str, preset: str | None) -> tuple[set[str], bool, str]:
     """Return (layers, full, reason)."""
-    if event in ("push", "schedule"):
+    if event == "schedule":
         return set(ALL_LAYERS), True, f"event={event}: FULL always"
     if preset:
         preset = preset.strip().upper()
@@ -92,27 +97,31 @@ def select(cfg: dict, files: list[str], event: str, preset: str | None) -> tuple
         layers = closure({preset}, cfg["escalation"])
         return layers, False, f"preset={preset}: pretend {preset} changed → {sorted(layers)}"
 
+    push = event == "push"
     ignored = cfg.get("ignored", {}).get("paths", [])
     considered = [f for f in files if not matches_any(f, ignored)]
     if not considered:
+        if push:
+            return set(), False, "push: no mapped changes, no test layer"
         # Nothing but ignored files (or an empty diff). Nothing to prove; the
         # cheapest honest answer is still to run FULL rather than nothing.
         return set(ALL_LAYERS), True, "no mapped changes: FULL"
 
     full_globs = cfg["full_triggers"]["paths"]
-    for f in considered:
-        if matches_any(f, full_globs):
-            return set(ALL_LAYERS), True, f"FULL trigger: {f}"
+    if not push:
+        for f in considered:
+            if matches_any(f, full_globs):
+                return set(ALL_LAYERS), True, f"FULL trigger: {f}"
 
     seed: set[str] = set()
     for f in considered:
         hit = [name for name, globs in cfg["surfaces"].items() if matches_any(f, globs)]
-        if not hit:
+        if not hit and not push:
             return set(ALL_LAYERS), True, f"unmapped path: {f} → FULL"
         seed.update(hit)
 
     layers = closure(seed, cfg["escalation"])
-    return layers, False, f"changed {sorted(seed)} → {sorted(layers)}"
+    return layers, False, f"{'push: ' if push else ''}changed {sorted(seed)} → {sorted(layers)}"
 
 
 def rust_matrix(cfg: dict, layers: set[str]) -> list[dict]:
@@ -173,12 +182,12 @@ def main() -> int:
     cfg = load_map(Path(args.map))
     if args.files is not None:
         files = args.files
-    elif args.event in ("push", "schedule") or (args.preset and args.preset.strip()):
+    elif args.event == "schedule" or (args.preset and args.preset.strip()):
         files = []
     else:
-        if not args.base:
+        if not args.base or set(args.base) == {"0"}:
             print("select_layers: no base for a diff → FULL", file=sys.stderr)
-            files, args.event = [], "push"
+            files, args.event, args.preset = [], "dispatch", "FULL"
         else:
             files = changed_files(args.base, args.head)
     layers, full, reason = select(cfg, files, args.event, args.preset or None)
