@@ -116,7 +116,7 @@ export default function ModernAddContact(): React.JSX.Element {
           </button>
           <div className="s-field" style={{ marginTop: 18 }}>
             <label className="s-label" htmlFor="s-paste">Or paste a code they sent you</label>
-            <input id="s-paste" className="s-input" placeholder="dsm:contact/v3:…" value={pasted} onChange={(e) => setPasted(e.target.value)} />
+            <input id="s-paste" className="s-input" placeholder="dsm:contact/v3:…" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={pasted} onChange={(e) => setPasted(e.target.value)} />
           </div>
           <button type="button" className="s-btn s-btn-quiet" disabled={pasted.trim().length === 0 || step.kind === 'reading'} onClick={() => read(pasted)}>
             {step.kind === 'reading' ? 'Reading…' : 'Use this code'}

@@ -376,7 +376,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                   id="add-token-anchor"
                   type="text"
                   className="sb-input sb-input--mono"
-                  placeholder="CPTA policy anchor"
+                  placeholder="CPTA policy anchor" autoCapitalize="none" autoCorrect="off" spellCheck={false}
                   aria-label="CPTA policy anchor"
                   value={addingAnchor}
                   onChange={(e) => setAddingAnchor(e.target.value)}
