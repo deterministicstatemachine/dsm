@@ -1974,7 +1974,9 @@ mod tests {
             "a step on a relationship the device never established is refused"
         );
 
-        let established = head.establish_relationship(devid_b).expect("establish");
+        let established = head
+            .relationship_established_by_fixture(devid_b)
+            .expect("establish");
         let outcome = established
             .advance(rel_key, devid_b, state_step(), &[], None)
             .expect("the first step");

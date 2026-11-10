@@ -29,6 +29,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
 use crate::types::error::DsmError;
 use crate::types::offline_account::{offline_account_leaf_key, OfflineAccount};
+use crate::core::relationship_lifecycle::{next_lifecycle, RelationshipLifecycle};
 use crate::types::operations::Operation;
 
 /// The canonical per-device head per §2.2.
@@ -178,6 +179,18 @@ impl RealizedHead {
         counterparty_devid: [u8; 32],
     ) -> Result<RealizedHead, DsmError> {
         self.0.establish_relationship(counterparty_devid).map(Self)
+    }
+
+    /// The relationship with `counterparty_devid` established on this device
+    /// alone, its ESTABLISH step applied: see
+    /// [`DeviceState::relationship_established_by_fixture`].
+    pub fn relationship_established_by_fixture(
+        &self,
+        counterparty_devid: [u8; 32],
+    ) -> Result<RealizedHead, DsmError> {
+        self.0
+            .relationship_established_by_fixture(counterparty_devid)
+            .map(Self)
     }
 
     /// This head with `pending` as its admission in flight: see
@@ -355,6 +368,11 @@ pub struct RelChainTip {
     /// `Yes`/`No`; imported/capsule-restored tips are `Unknown` until history proves
     /// otherwise. There is no legacy/default form — every tip carries this explicitly.
     pub value_capability: ValueCapability,
+
+    /// Where the relationship stands on this chain (Amendment A33): opened
+    /// at `h_0`, established by its ESTABLISH step, ended by a TERMINATE.
+    /// A device's own relationship is established from its creation.
+    pub lifecycle: RelationshipLifecycle,
 }
 
 /// One accepted state in a per-relationship straight hash chain (§2.1).
@@ -965,6 +983,13 @@ impl DeviceState {
             &counterparty_devid,
         );
         self.smt.update_leaf(&rel_key, &h0);
+        // A device's own relationship takes no establishment (Amendment
+        // A33); every other opens here and is established by its first step.
+        let lifecycle = if counterparty_devid == self.devid {
+            RelationshipLifecycle::Established
+        } else {
+            RelationshipLifecycle::Opened
+        };
         self.tips.insert(
             rel_key,
             RelChainTip {
@@ -972,8 +997,44 @@ impl DeviceState {
                 counterparty_devid,
                 tip_entropy: Vec::new(),
                 value_capability: ValueCapability::No,
+                lifecycle,
             },
         );
+    }
+
+    /// Where the relationship under `rel_key` stands on this chain, if this
+    /// device holds it (Amendment A33).
+    pub fn relationship_lifecycle(&self, rel_key: &[u8; 32]) -> Option<RelationshipLifecycle> {
+        self.tips.get(rel_key).map(|t| t.lifecycle)
+    }
+
+    /// The relationship with `counterparty_devid` established on this device
+    /// alone: its leaf at `h_0`, then its ESTABLISH step applied here as a
+    /// device applies a countersigned one. For fixtures and tests that need
+    /// a relationship steps can move on without the other device; production
+    /// establishes through the step both devices sign.
+    pub fn relationship_established_by_fixture(
+        &self,
+        counterparty_devid: [u8; 32],
+    ) -> Result<Self, DsmError> {
+        let opened = self.establish_relationship(counterparty_devid)?;
+        let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(
+            &self.devid,
+            &counterparty_devid,
+        );
+        let made_from =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &self.devid,
+                &counterparty_devid,
+            );
+        let establish = crate::core::relationship_lifecycle::establish_operation(
+            &counterparty_devid,
+            &made_from,
+        );
+        Ok(opened
+            .advance(rel_key, counterparty_devid, establish, &[], None)?
+            .new_device_state
+            .into_head())
     }
 
     /// Establish the relationship with `counterparty_devid`: its leaf enters
@@ -1347,7 +1408,6 @@ impl DeviceState {
             | Operation::Update { .. }
             | Operation::Delete { .. }
             | Operation::AddRelationship { .. }
-            | Operation::RemoveRelationship { .. }
             | Operation::Link { .. }
             | Operation::Unlink { .. }
             | Operation::Invalidate { .. }
@@ -1376,10 +1436,18 @@ impl DeviceState {
             | Operation::DlvUnlock { .. }
             | Operation::DlvClaim { .. }
             | Operation::DlvInvalidate { .. }
-            // Recovery's own operations; recovery's verifiers read them
+            // Recovery's own operation; recovery's verifiers read it
             // (`recovery::chain_segment`, `recovery::succession_binding`).
-            | Operation::CreateRelationship { .. }
             | Operation::Recovery { .. } => Ok(()),
+            // A relationship's ESTABLISH and TERMINATE (Amendment A33) write
+            // its lifecycle; a `CreateRelationship` or `RemoveRelationship`
+            // that is neither writes nothing.
+            Operation::CreateRelationship { .. } | Operation::RemoveRelationship { .. } => {
+                match crate::core::relationship_lifecycle::lifecycle_step_of(operation)? {
+                    Some(_) => Ok(()),
+                    None => Err(DsmError::ZeroEffectTransition),
+                }
+            }
         }
     }
 
@@ -1450,6 +1518,20 @@ impl DeviceState {
                 "advance: the relationship is not established on this device",
             )
         })?;
+        // Where the relationship stands after this step (Amendment A33):
+        // value moves only on an established relationship, an establishment
+        // opens one, a termination ends one for good.
+        let lifecycle = {
+            let current = self
+                .tips
+                .get(&rel_key)
+                .map(|t| t.lifecycle)
+                .ok_or_else(|| {
+                    DsmError::invalid_operation("advance: the relationship's tip is not held")
+                })?;
+            next_lifecycle(current, &operation, &self.devid, &counterparty_devid)
+                .map_err(|e| DsmError::invalid_operation(format!("advance: {e}")))?
+        };
 
         // §9.5 + balance conservation (token-policy doctrine §4; code
         // correspondence: lean4 DSMOfflineFinality.lean commit_conservation /
@@ -1759,6 +1841,7 @@ impl DeviceState {
                 // digest is `child_chain_tip`, already committed to the SMT.
                 tip_entropy: new_chain_state.entropy.clone(),
                 value_capability,
+                lifecycle,
             },
         );
 
@@ -2499,9 +2582,9 @@ pub(crate) mod tests {
         let bob = devid(0xB0);
         let carol = devid(0xC0);
         let dev = fresh_device(0xA8)
-            .establish_relationship(bob)
+            .relationship_established_by_fixture(bob)
             .expect("establish bob")
-            .establish_relationship(carol)
+            .relationship_established_by_fixture(carol)
             .expect("establish carol");
         let bob_key = compute_smt_key(&dev.devid, &bob);
         let carol_key = compute_smt_key(&dev.devid, &carol);
@@ -2537,9 +2620,17 @@ pub(crate) mod tests {
             compute_smt_key(&base.devid, &bob),
             compute_smt_key(&base.devid, &carol),
         );
-        let establish = |first: [u8; 32], second: [u8; 32]| {
+        // Opening a relationship (its leaf at h_0) in either order gives one
+        // root; its establishment step is a step, seeded from the root it is
+        // taken from, and steps are ordered.
+        let open = |first: [u8; 32], second: [u8; 32]| {
             base.establish_relationship(first)
                 .and_then(|d| d.establish_relationship(second))
+                .expect("both relationships")
+        };
+        let establish = |first: [u8; 32], second: [u8; 32]| {
+            base.relationship_established_by_fixture(first)
+                .and_then(|d| d.relationship_established_by_fixture(second))
                 .expect("both relationships")
         };
         let step = |dev: &DeviceState, key: [u8; 32], counterparty: [u8; 32]| {
@@ -2548,12 +2639,12 @@ pub(crate) mod tests {
                 .new_device_state
                 .into_head()
         };
-        let bob_first = establish(bob, carol);
         assert_eq!(
-            bob_first.root(),
-            establish(carol, bob).root(),
-            "the order relationships were established in is not state"
+            open(bob, carol).root(),
+            open(carol, bob).root(),
+            "the order relationships were opened in is not state"
         );
+        let bob_first = establish(bob, carol);
 
         let stepped = step(&step(&bob_first, bob_key, bob), carol_key, carol);
         let mut late = stepped.clone();
@@ -3348,7 +3439,9 @@ pub(crate) mod tests {
             .new_device_state;
         let cp = devid(0xC5);
         let rk = compute_smt_key(&loaded.devid, &cp);
-        let loaded = loaded.establish_relationship(cp).expect("establish");
+        let loaded = loaded
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
         let spend = |amt: u64, asset: [u8; 32]| {
             Some(OfflineMove::Spend(OfflineSpend {
                 anchor_bundle_b: bundle,
@@ -3476,7 +3569,9 @@ pub(crate) mod tests {
         loaded.genesis = genesis;
         let cp = devid(0xC7);
         let rk = compute_smt_key(&loaded.devid, &cp);
-        let loaded = loaded.establish_relationship(cp).expect("establish");
+        let loaded = loaded
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
         let out = loaded
             .advance(
                 rk,
@@ -3605,7 +3700,9 @@ pub(crate) mod tests {
         let peers = [devid(0xC8), devid(0xC9)];
         let mut start = loaded;
         for p in peers {
-            start = start.establish_relationship(p).expect("establish");
+            start = start
+                .relationship_established_by_fixture(p)
+                .expect("establish");
         }
         let commitment = DeviceTreeAcceptanceCommitment::from_root(
             crate::common::device_tree::DeviceTree::single(start.devid).root(),
@@ -3749,7 +3846,7 @@ pub(crate) mod tests {
         let cp = devid(0xC6);
         let rk = compute_smt_key(&dev.devid, &cp);
         let plain = dev
-            .establish_relationship(cp)
+            .relationship_established_by_fixture(cp)
             .expect("establish")
             .advance(
                 rk,
@@ -3793,7 +3890,9 @@ pub(crate) mod tests {
         // Relationship whose FIRST op is value-bearing → Yes.
         let cp = devid(0xC0);
         let rk = compute_smt_key(&dev.devid, &cp);
-        let dev = dev.establish_relationship(cp).expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
         let o1 = dev
             .advance(
                 rk,
@@ -3832,7 +3931,9 @@ pub(crate) mod tests {
         // A DIFFERENT relationship whose first-ever op is non-value → `No` (witnessed birth).
         let cp2 = devid(0xD0);
         let rk2 = compute_smt_key(&dev.devid, &cp2);
-        let dev = dev.establish_relationship(cp2).expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(cp2)
+            .expect("establish");
         let o3 = dev
             .advance(rk2, cp2, op(), &[], None)
             .expect("first non-value advance");
@@ -3859,12 +3960,16 @@ pub(crate) mod tests {
 
         let tip_with_balances = |seed: u64| {
             // differing balance state, each reached through a token creation
+            // The relationship is established before the portfolios differ,
+            // so its establishment step (seeded from the root it was taken
+            // from) is the same on both and the two burns share one parent.
             let dev = fresh_device(0xAA)
+                .relationship_established_by_fixture(bob)
+                .expect("establish")
                 .created_token(token, 100 + seed)
                 .expect("token created")
                 .with_pending_economic_admission(None);
             let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-            let dev = dev.establish_relationship(bob).expect("establish");
             dev.advance(
                 rk,
                 bob,
@@ -3880,13 +3985,12 @@ pub(crate) mod tests {
         };
 
         // Two devices with different balance portfolios, the same succession
-        // facts. The balance map is NOT an input to the tip: the only way the
-        // portfolio reaches it is through the transition entropy, which for a
-        // fresh relationship is seeded from the device root (Part VII step 3:
-        // `e_n = H(DSM/genesis-entropy; root)`, `h_n = root`). So the two tips
-        // differ, and swapping ONLY the entropy reproduces the other device's
-        // tip from this device's facts — nothing else about the portfolio is
-        // in the preimage.
+        // facts. The balance map is NOT an input to the tip. A relationship's
+        // first step is seeded from the device root (Part VII step 3:
+        // `e_n = H(DSM/genesis-entropy; root)`, `h_n = root`), which is where
+        // a portfolio could reach a tip; here that first step is the
+        // establishment, taken before the portfolios differ, so the burns'
+        // entropies come from the chain alone and the two tips are one tip.
         let out0 = tip_with_balances(0);
         let out7 = tip_with_balances(7);
         let facts = |o: &AdvanceOutcome| {
@@ -3903,21 +4007,11 @@ pub(crate) mod tests {
             facts(&out7),
             "the succession facts are identical"
         );
-        assert_ne!(out0.transition_entropy(), out7.transition_entropy());
-        let (rk, parent, cp, op_bytes) = facts(&out0);
+        assert_eq!(out0.transition_entropy(), out7.transition_entropy());
         assert_eq!(
-            relationship_chain_tip_v2(
-                &rk,
-                &parent,
-                &cp,
-                &op_bytes,
-                &out7.transition_entropy(),
-                None
-            ),
+            out0.new_chain_state.compute_chain_tip(),
             out7.new_chain_state.compute_chain_tip(),
-            "with the other device's entropy and THIS device's facts the tip is the other \
-             device's tip — the balance portfolio enters through the entropy alone, never \
-             through the commitment"
+            "two portfolios, one tip: the balance map is no input to the commitment"
         );
 
         // And the helper IS the commitment — one preimage, two entry points.
@@ -3926,7 +4020,9 @@ pub(crate) mod tests {
             .expect("token created")
             .with_pending_economic_admission(None);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let dev = dev.establish_relationship(bob).expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(bob)
+            .expect("establish");
         let out = dev
             .advance(
                 rk,
@@ -3972,8 +4068,12 @@ pub(crate) mod tests {
         let rk_bob = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
         let rk_chrl =
             crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &charlie);
-        let dev = dev.establish_relationship(bob).expect("establish");
-        let dev = dev.establish_relationship(charlie).expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(bob)
+            .expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(charlie)
+            .expect("establish");
 
         let parent_root = dev.root();
 
@@ -4037,7 +4137,9 @@ pub(crate) mod tests {
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let dev = dev.establish_relationship(bob).expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(bob)
+            .expect("establish");
         let h0 = dev
             .chain_tip(&rk)
             .expect("the established relationship holds its h_0");
@@ -4096,7 +4198,9 @@ pub(crate) mod tests {
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let dev = dev.establish_relationship(bob).expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(bob)
+            .expect("establish");
 
         let r = dev.advance(
             rk,
@@ -4130,7 +4234,9 @@ pub(crate) mod tests {
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let dev = dev.establish_relationship(bob).expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(bob)
+            .expect("establish");
 
         let credit_op = credit_transfer_op(1, token);
         let err = format!(
@@ -4182,7 +4288,9 @@ pub(crate) mod tests {
             net_delta += signed;
 
             let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, party);
-            dev = dev.establish_relationship(*party).expect("establish");
+            dev = dev
+                .relationship_established_by_fixture(*party)
+                .expect("establish");
             let op = value_op(dir, amt, token);
             let out = dev
                 .clone()
@@ -4231,7 +4339,9 @@ pub(crate) mod tests {
         let dev = fresh_device(0x73);
         let cp = devid(0x74);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
-        let established = dev.establish_relationship(cp).expect("establish");
+        let established = dev
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
         let refused = established
             .advance(rk, cp, Operation::Noop, &[], None)
             .expect_err("a Noop advances nothing");
@@ -4257,7 +4367,9 @@ pub(crate) mod tests {
         let dev = fresh_device(0x75);
         let cp = devid(0x76);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
-        let established = dev.establish_relationship(cp).expect("establish");
+        let established = dev
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
         let policy = [0x5Au8; 32];
         let adopted = established.adopt_token(policy).expect("first adoption");
         let head = *adopted.smt.root();
@@ -4323,7 +4435,9 @@ pub(crate) mod tests {
         let dev = fresh_device(0x77);
         let cp = devid(0x78);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
-        let established = dev.establish_relationship(cp).expect("establish");
+        let established = dev
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
         let policy = [0x5Bu8; 32];
         assert!(!established.has_adopted(&policy));
         let adopted = established
@@ -4366,19 +4480,28 @@ pub(crate) mod tests {
             "a step on an unestablished relationship must be refused"
         );
 
-        let established = dev.establish_relationship(cp).expect("establish");
-        assert_ne!(
-            established.root(),
-            dev.root(),
-            "establishing advances the root"
-        );
+        let opened = dev.establish_relationship(cp).expect("establish");
+        assert_ne!(opened.root(), dev.root(), "establishing advances the root");
         let h0 = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &dev.devid, &cp,
         );
-        assert_eq!(established.chain_tip(&rk), Some(h0));
-        assert!(
-            established.establish_relationship(cp).is_err(),
-            "a relationship is established once"
+        assert_eq!(opened.chain_tip(&rk), Some(h0));
+        let twice = opened
+            .establish_relationship(cp)
+            .expect_err("a relationship is established once");
+        assert!(twice.to_string().contains("already established"), "{twice}");
+        // A value step waits for the establishment step (Amendment A33).
+        let early = opened
+            .advance(rk, cp, op(), &[], None)
+            .expect_err("a step on an opened relationship is refused until it is established");
+        assert!(early.to_string().contains("not established"), "{early}");
+        let established = dev
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
+        assert_ne!(
+            established.chain_tip(&rk),
+            Some(h0),
+            "the establishment step moves the leaf on from h_0"
         );
 
         let first = established
@@ -4394,7 +4517,10 @@ pub(crate) mod tests {
             .transition
             .write_at(&rk)
             .expect("the step writes its relationship");
-        assert_eq!(rel_write.pre, Some(h0));
+        // The write's pre-value is the leaf the establishment step left, not
+        // `h_0`: the relationship's first value step follows its first step.
+        assert_eq!(rel_write.pre, established.chain_tip(&rk));
+        assert_ne!(rel_write.pre, Some(h0));
         let folded = crate::merkle::batch_fold::verify_batch::<
             crate::merkle::sparse_merkle_tree::DeviceSmtHashes,
         >(&established.root(), first.transition.writes())
@@ -4437,7 +4563,9 @@ pub(crate) mod tests {
         let dev = fresh_device(0x73);
         let cp = devid(0x74);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
-        let mut head = dev.establish_relationship(cp).expect("establish");
+        let mut head = dev
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
         let mut proofs = vec![holds_only_its_current_head(&head, &rk, &[])];
         for _ in 0..2 {
             head = head
@@ -4471,7 +4599,9 @@ pub(crate) mod tests {
             .collect();
         let mut head = dev.clone();
         for cp in &counterparties {
-            head = head.establish_relationship(*cp).expect("establish");
+            head = head
+                .relationship_established_by_fixture(*cp)
+                .expect("establish");
         }
 
         let own = compute_smt_key(&dev.devid, &dev.devid);
@@ -4594,7 +4724,9 @@ pub(crate) mod tests {
         let dev = fresh_device(0xE1);
         let cp = devid(0xE2);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
-        let dev = dev.establish_relationship(cp).expect("establish");
+        let dev = dev
+            .relationship_established_by_fixture(cp)
+            .expect("establish");
         (dev, cp, rk)
     }
 
@@ -4621,16 +4753,17 @@ pub(crate) mod tests {
             dev.derive_transition_entropy(&rk, &op()),
             "the outcome's entropy must be Core's derivation from the tip, nothing else"
         );
-        // The derivation is the hash-adjacency formula itself, not merely stable.
+        // The derivation is the hash-adjacency formula itself, not merely
+        // stable: from the tip's own entropy and digest, which the
+        // establishment step left (its own came from the root, the genesis
+        // seeding of a relationship's first step).
         let explicit = {
-            let root = dev.root();
-            let mut g = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
-            g.update(&root);
-            let prior_entropy = g.finalize();
+            let tip = dev.chain_tip(&rk).expect("the established tip");
+            let prior_entropy = dev.tip_entropy(&rk).expect("the establishment's entropy");
             let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STATE_ENTROPY);
-            h.update(prior_entropy.as_bytes());
+            h.update(prior_entropy);
             h.update(&op().to_bytes());
-            h.update(&root);
+            h.update(&tip);
             *h.finalize().as_bytes()
         };
         assert_eq!(a.transition_entropy(), explicit);
@@ -4958,7 +5091,7 @@ pub(crate) mod tests {
         let mut live = DeviceState::new(devid(0xC1), devid(0xC2), vec![0x01; 32]);
         for b in 0..40u8 {
             live = live
-                .establish_relationship(devid(b))
+                .relationship_established_by_fixture(devid(b))
                 .expect("a new relationship");
         }
         let live = live

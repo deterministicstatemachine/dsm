@@ -90,6 +90,10 @@ pub struct RecipientAcceptanceJournal {
     /// may not originate on that relationship.
     pub peer_finalized: bool,
     pub status: String,
+    /// Whether the accepted step moves value. A transfer's reply carries the
+    /// recipient's economic release and cannot go without it; a relationship
+    /// step's (Amendment A33) carries none.
+    pub moves_value: bool,
 }
 
 impl std::fmt::Debug for RecipientAcceptanceJournal {
@@ -127,7 +131,7 @@ const JOURNAL_COLS: &str = "relationship_key, parent_tip, child_tip, counterpart
      expected_local_b_head, new_local_b_head, new_local_b_sk_enc, \
      expected_counterparty_a_head, new_counterparty_a_head, receipt_bytes, \
      projection_parent_tip, projection_target_tip, applied_parent_tip_b, applied_child_tip_b, \
-     release_bytes, peer_finalized, status";
+     release_bytes, peer_finalized, status, moves_value";
 
 /// Domain-separated hash binding the EXACT persisted full receipt bytes (signed EK
 /// artifact). Hash the precise stored/outbox bytes — never deserialize+reserialize.
@@ -167,6 +171,7 @@ fn row_to_journal(row: &rusqlite::Row) -> rusqlite::Result<RecipientAcceptanceJo
         release_bytes: go(19)?,
         peer_finalized: row.get::<_, i64>(20)? != 0,
         status: row.get::<_, String>(21)?,
+        moves_value: row.get::<_, i64>(22)? != 0,
     })
 }
 
@@ -208,7 +213,7 @@ pub fn insert_prepared_acceptance_journal_with_conn(
     conn.execute(
         &format!(
             "INSERT INTO acceptance_fold_journal ({JOURNAL_COLS}) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)"
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
         ),
         params![
             rec.relationship_key.as_slice(),
@@ -234,6 +239,7 @@ pub fn insert_prepared_acceptance_journal_with_conn(
             // Never set here: only the verified certificate flips it.
             0i64,
             STATUS_PREPARED,
+            rec.moves_value as i64,
         ],
     )?;
     Ok(())
@@ -694,6 +700,9 @@ pub struct PendingOutboundReply {
     /// The exact frozen `RecipientEconomicReleaseV1` wire bytes — what the
     /// sender finalizes on.
     pub release_bytes: Option<Vec<u8>>,
+    /// Whether the step moved value: a reply without a release goes out only
+    /// for a relationship step (Amendment A33).
+    pub moves_value: bool,
 }
 
 fn col32(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<[u8; 32]> {
@@ -722,7 +731,7 @@ pub fn pending_outbound_replies() -> Result<Vec<PendingOutboundReply>> {
     let mut stmt = conn.prepare(
         "SELECT r.commitment, r.relationship_key, r.counterparty_device_id, r.child_tip,
                 r.receipt_bytes, j.projection_parent_tip,
-                j.applied_parent_tip_b, j.applied_child_tip_b, r.release_bytes
+                j.applied_parent_tip_b, j.applied_child_tip_b, r.release_bytes, j.moves_value
          FROM recipient_outbound_reply r
          JOIN acceptance_fold_journal j
            ON j.commitment = r.commitment
@@ -743,6 +752,7 @@ pub fn pending_outbound_replies() -> Result<Vec<PendingOutboundReply>> {
                 applied_parent_tip_b: col32(row, 6)?,
                 applied_child_tip_b: col32(row, 7)?,
                 release_bytes: row.get::<_, Option<Vec<u8>>>(8)?,
+                moves_value: row.get::<_, i64>(9)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -997,6 +1007,9 @@ mod tests {
             applied_child_tip_b: [0xE4u8; 32],
             release_bytes: None,
             peer_finalized: false,
+            // As `journal_row` derives it: a journal with a release is a
+            // transfer's.
+            moves_value: Option::<Vec<u8>>::None.is_some(),
             relationship_key: rel,
             parent_tip: parent,
             child_tip: child,

@@ -262,8 +262,8 @@ async fn each_contact_is_told_what_it_is_owed_of_a_payers_boundaries() {
     // C arrives after both.
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&pair.fleet).await;
-    c.add_contact(&pair.a).await;
-    pair.a.add_contact(&c).await;
+    c.add_and_establish(&pair.a).await;
+    pair.a.add_and_establish(&c).await;
     assert!(recorded_by(&c, &pair.a, &appliance).is_none());
     pair.a.enter();
     assert_eq!(owed_to(&c.device_id, unloaded_at).unwrap(), [unloaded_at]);

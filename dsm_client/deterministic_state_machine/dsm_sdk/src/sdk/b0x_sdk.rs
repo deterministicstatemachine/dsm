@@ -355,6 +355,9 @@ enum ReadStop {
 pub enum B0xEntryKind {
     /// An online transfer request.
     Transfer,
+    /// A relationship's lifecycle step (DSM Amendment A33): an ESTABLISH or
+    /// a TERMINATE, carried as a transfer request is.
+    LifecycleStep,
     /// A request whose body is not what its invoke method names, and why.
     /// Listed as unverified; nothing is taken from it.
     Unrecognized { reason: String },
@@ -509,6 +512,47 @@ pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
 /// Explicit invoke method of a `RelationshipFinalizedV1` finality certificate
 /// (finality barrier). Same discipline: discriminated by this string alone.
 pub(crate) const RELATIONSHIP_FINALIZED_METHOD: &str = "relationship.finalized.v1";
+
+/// The invoke method of an online transfer: the one step that moves value.
+pub(crate) const WALLET_SEND_METHOD: &str = "wallet.send";
+/// The invoke methods of a relationship's lifecycle steps (DSM Amendment
+/// A33): the ESTABLISH both sides sign, and either side's TERMINATE. The
+/// request is an `OnlineTransferRequest` carrying the signed operation and
+/// nothing else: no terms, no economic locators.
+pub(crate) const RELATIONSHIP_ESTABLISH_METHOD: &str = "relationship.establish.v1";
+pub(crate) const RELATIONSHIP_TERMINATE_METHOD: &str = "relationship.terminate.v1";
+
+/// The invoke method a signed operation travels under.
+pub(crate) fn step_method(op: &Operation) -> Result<&'static str, DsmError> {
+    use dsm::core::relationship_lifecycle::{lifecycle_step_of, LifecycleStep};
+    match op {
+        Operation::Transfer { .. } => Ok(WALLET_SEND_METHOD),
+        other => match lifecycle_step_of(other)? {
+            Some(LifecycleStep::Establish { .. }) => Ok(RELATIONSHIP_ESTABLISH_METHOD),
+            Some(LifecycleStep::Terminate { .. }) => Ok(RELATIONSHIP_TERMINATE_METHOD),
+            None => Err(DsmError::invalid_operation(format!(
+                "a {} is not a step a device spools",
+                other.get_operation_type()
+            ))),
+        },
+    }
+}
+
+/// The device a spooled step is addressed to, from its signed operation.
+pub(crate) fn step_recipient(op: &Operation) -> Result<Vec<u8>, DsmError> {
+    use dsm::core::relationship_lifecycle::{lifecycle_step_of, LifecycleStep};
+    match op {
+        Operation::Transfer { to_device_id, .. } => Ok(to_device_id.clone()),
+        other => match lifecycle_step_of(other)? {
+            Some(LifecycleStep::Establish { counterparty, .. }) => Ok(counterparty.to_vec()),
+            Some(LifecycleStep::Terminate { to, .. }) => Ok(to.to_vec()),
+            None => Err(DsmError::invalid_operation(format!(
+                "a {} names no recipient",
+                other.get_operation_type()
+            ))),
+        },
+    }
+}
 
 /// One finality certificate as it came off the wire: the node message id it
 /// is ACKed under, the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`),
@@ -1785,13 +1829,8 @@ impl B0xSDK {
             .ok_or_else(|| {
                 DsmError::internal("device_id base32 decode failed", None::<std::io::Error>)
             })?;
-        let Operation::Transfer { to_device_id, .. } = &params.transaction else {
-            return Err(DsmError::internal(
-                "submit_to_b0x: expected Operation::Transfer",
-                None::<std::io::Error>,
-            ));
-        };
-        let to_device_id_bytes = to_device_id.clone();
+        let to_device_id_bytes = step_recipient(&params.transaction)?;
+        let method = step_method(&params.transaction)?;
 
         // The signed operation and the terms it commits to, and nothing that
         // restates either: the recipient reads the recipient, amount and asset
@@ -1815,7 +1854,7 @@ impl B0xSDK {
         // for the contact — a key carried here would be a key nothing reads.
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: "wallet.send".to_string(),
+            method: method.to_string(),
             args: Some(arg_pack),
             cosigners: vec![],
             evidence: None,
@@ -2257,11 +2296,25 @@ impl B0xSDK {
                     ));
                 }
             }
-            _ => {
-                return Err(DsmError::internal(
-                    "only Transfer operations are supported for b0x submission",
-                    None::<std::io::Error>,
-                ));
+            other => {
+                // A relationship's lifecycle step (Amendment A33) travels as a
+                // transfer does, with no terms: it moves nothing.
+                match dsm::core::relationship_lifecycle::lifecycle_step_of(other)? {
+                    Some(_) => {
+                        if !params.transfer_terms.is_empty() {
+                            return Err(DsmError::internal(
+                                "a relationship step carries no terms",
+                                None::<std::io::Error>,
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(DsmError::internal(
+                            "only transfers and relationship steps are spooled",
+                            None::<std::io::Error>,
+                        ));
+                    }
+                }
             }
         }
 
@@ -2773,9 +2826,13 @@ impl B0xSDK {
             let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
                 continue;
             };
-            if invoke.method != "wallet.send" {
-                continue;
-            }
+            let kind = match invoke.method.as_str() {
+                WALLET_SEND_METHOD => B0xEntryKind::Transfer,
+                RELATIONSHIP_ESTABLISH_METHOD | RELATIONSHIP_TERMINATE_METHOD => {
+                    B0xEntryKind::LifecycleStep
+                }
+                _ => continue,
+            };
             let Some(arg_pack) = &invoke.args else {
                 // A transfer with no request is listed as what it is, never
                 // dropped.
@@ -2785,7 +2842,7 @@ impl B0xSDK {
                     inbox_key: String::new(),
                     sender_device_id: sender_dev,
                     kind: B0xEntryKind::Unrecognized {
-                        reason: "the wallet.send invoke carries no request".to_string(),
+                        reason: format!("the {} invoke carries no request", invoke.method),
                     },
                     transfer_wire_bytes: Vec::new(),
                     copy_key: copy_key.to_string(),
@@ -2799,7 +2856,7 @@ impl B0xSDK {
                 transaction_id: tid,
                 inbox_key: String::new(),
                 sender_device_id: sender_dev,
-                kind: B0xEntryKind::Transfer,
+                kind,
                 transfer_wire_bytes: arg_pack.body.clone(),
                 copy_key: copy_key.to_string(),
             });

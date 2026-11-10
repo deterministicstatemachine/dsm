@@ -120,11 +120,71 @@ pub(crate) fn derive_local_send_status_for_device_id(
 pub(crate) fn derive_local_send_status_for_contact(
     contact: &ContactRecord,
 ) -> generated::RelationshipSendStatus {
+    derive_step_status_for_contact(contact, StepKind::Transfer)
+}
+
+/// What a device is about to originate on a relationship: a transfer, which
+/// needs the relationship established on both sides (Amendment A33), or a
+/// lifecycle step, which is how it gets established or ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StepKind {
+    Transfer,
+    Lifecycle,
+}
+
+/// Whether the relationship's state lets `kind` go, as the one place the
+/// rule is written: value moves only on an established relationship; an
+/// establishment or a termination is refused only on a relationship that has
+/// ended or is ending.
+pub(crate) fn relationship_state_block(
+    state: client_db::RelationshipState,
+    kind: StepKind,
+) -> Option<generated::RelationshipSendStatus> {
+    use client_db::RelationshipState as S;
+    match (state, kind) {
+        (S::Established, _) => None,
+        (S::Opened | S::Proposed, StepKind::Lifecycle) => None,
+        (S::Opened | S::Proposed, StepKind::Transfer) => Some(blocked_status(
+            generated::RelationshipSendBlockReason::NotEstablished,
+            "Waiting for them to add you",
+        )),
+        (S::Ending, _) => Some(blocked_status(
+            generated::RelationshipSendBlockReason::Ending,
+            "You ended this relationship; waiting for their acknowledgement",
+        )),
+        (S::Ended, _) => Some(blocked_status(
+            generated::RelationshipSendBlockReason::Ended,
+            "This relationship has ended",
+        )),
+    }
+}
+
+pub(crate) fn derive_step_status_for_contact(
+    contact: &ContactRecord,
+    kind: StepKind,
+) -> generated::RelationshipSendStatus {
     if contact.public_key.is_empty() {
         return blocked_status(
             generated::RelationshipSendBlockReason::InternalError,
             "Relationship is missing a canonical public key",
         );
+    }
+
+    // Where the relationship stands comes first (Amendment A33): a
+    // relationship not established on both sides, or ended, refuses a
+    // transfer whatever its tips say.
+    match client_db::relationship_state(&contact.device_id) {
+        Ok(state) => {
+            if let Some(blocked) = relationship_state_block(state, kind) {
+                return blocked;
+            }
+        }
+        Err(e) => {
+            return blocked_status(
+                generated::RelationshipSendBlockReason::InternalError,
+                format!("The relationship's state is unreadable: {e}"),
+            );
+        }
     }
 
     match finality_barrier_block(&contact.device_id) {

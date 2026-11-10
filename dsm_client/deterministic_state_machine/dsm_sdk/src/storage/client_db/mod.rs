@@ -51,6 +51,7 @@ pub mod publication;
 pub mod recipient_receipt_fold;
 pub mod recipient_staging;
 pub mod recovery;
+pub mod relationship_lifecycle;
 pub mod route_writes;
 pub mod sender_outbox;
 pub mod sender_proposal;
@@ -82,6 +83,7 @@ pub use sender_proposal::*;
 pub use contacts::*;
 pub use counterparty_canonical_heads::*;
 pub use genesis::*;
+pub use relationship_lifecycle::*;
 pub use manifold_seeds::*;
 pub use nonces::*;
 pub use online_outbox::*;
@@ -615,8 +617,9 @@ fn get_database_path() -> Result<PathBuf> {
 /// `bilateral_sessions` keeps a receive's account move (`receive_*`) while the
 /// receiver's board commits it, and `offline_acknowledgement` keeps each step's
 /// acknowledgement, the receiver board's receive commit. A database made at 43
-/// is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 44;
+/// is refused at open. 45 adds `contact_relationship`, where each relationship
+/// stands (DSM Amendment A33); a database made at 44 is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 45;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1170,6 +1173,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             chain_tip_commitment        BLOB
         );
 
+        -- Where each relationship stands on this device (DSM Amendment A33):
+        -- opened when the contact is added, proposed while this device's
+        -- ESTABLISH awaits the countersignature, established once held, ending
+        -- while this device's TERMINATE awaits its acknowledgement, ended for
+        -- good. Written by store_contact and the lifecycle steps alone.
+        CREATE TABLE IF NOT EXISTS contact_relationship(
+            device_id   BLOB PRIMARY KEY,
+            state       TEXT NOT NULL CHECK (state IN (
+                'opened', 'proposed', 'established', 'ending', 'ended'
+            ))
+        );
+
         -- Storage-node auth tokens are gone with writer authorization
         -- (storage spec §4); an older database drops its table here.
         DROP TABLE IF EXISTS auth_tokens;
@@ -1415,6 +1430,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- in the SAME accept transaction (3.5b PR4). The B->A reply
             -- carries THIS; bare sig_b cannot finalize the sender.
             release_bytes                BLOB,
+            -- 1 for a transfer, whose reply needs the release; 0 for a
+            -- relationship step (DSM Amendment A33), whose reply carries none.
+            moves_value                  INTEGER NOT NULL CHECK (moves_value IN (0, 1)),
             -- Finality barrier (recipient gate): 1 once the SENDER's verified
             -- RelationshipFinalizedV1 for this transition landed. Only the
             -- certificate handler flips it. While any non-rejected row on a

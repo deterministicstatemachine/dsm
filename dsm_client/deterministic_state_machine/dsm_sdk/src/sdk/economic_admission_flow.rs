@@ -2267,58 +2267,38 @@ pub(crate) struct RecipientAdmissionBuild {
     pub ek_step_rows: Vec<([u8; 32], [u8; 32], Vec<u8>)>,
 }
 
-/// Build the recipient's admission from the exact prepared successor — SYNC,
-/// runs inside `build_acceptance` under the state-machine lock (DB reads
-/// only, no core re-entry, no awaits). Ordering: countersign wire bytes from
-/// the generated B artifacts → both EkCertStepV1 objects (prior addrs from
-/// the tracking table) → the acceptance bundle → `CreditSourceFacts::
-/// PeerDebit` with the bundle addr as an OUTPUT → `build_dsm_admission` with
-/// bundle + steps as extra frozen artifacts → the signed release from the
-/// build's own coordinates.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_recipient_admission(
-    prereqs: &RecipientAdmissionPrereqs,
-    tree: &mut EconomicSmt,
-    genesis: &[u8; 32],
-    devid: &[u8; 32],
-    chain_state: &RelationshipChainState,
-    signed_op: &Operation,
-    b_artifacts: &crate::handlers::recipient_receipt::GeneratedBArtifacts,
-    incoming: &IncomingTransfer<'_>,
+/// Both signers' `EkCertStepV1` objects for one accepted step, and each
+/// side's predecessor address: what the acceptance records in the step
+/// chain (`economic_lineage`), a transfer's admission bundle references, and
+/// a lifecycle step (Amendment A33) records without a bundle.
+pub(crate) struct EkStepObjects {
+    /// This device's own send in flight that this apply follows (a step that
+    /// crossed it): its step object, recorded ahead of the countersignature.
+    pub own_send_step: Option<Vec<u8>>,
+    pub a_prior: Option<[u8; 32]>,
+    pub b_prior: Option<[u8; 32]>,
+    pub a_step_bytes: Vec<u8>,
+    pub b_step_bytes: Vec<u8>,
+    pub a_step_addr: [u8; 32],
+    pub b_step_addr: [u8; 32],
+}
+
+/// The step objects of one accepted step: the sender's (`receipt.ek_pk_a`,
+/// chained from its latest recorded step) and this device's (`b.ek_pk_b`,
+/// chained from its own send in flight when the step crossed it, else from
+/// its latest recorded step).
+pub(crate) fn ek_step_objects(
     rel_key: &[u8; 32],
-) -> Result<RecipientAdmissionBuild, DsmError> {
+    peer_devid: &[u8; 32],
+    devid: &[u8; 32],
+    receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+    b: &dsm::types::receipt_types::CountersignB,
+    applied_parent_tip_b: &[u8; 32],
+) -> Result<EkStepObjects, DsmError> {
     use prost::Message;
-    let evidence_bytes = incoming.evidence_bytes;
-
-    // ── The exact countersign wire bytes (deterministic from the journal
-    // receipt — the same derivation the reply delta uses) ──────────────────
-    let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-        &b_artifacts.receipt_bytes,
-    )
-    .map_err(|e| DsmError::invalid_operation(format!("countersigned receipt: {e}")))?;
-    let b = receipt
-        .split_countersign_b()
-        .map_err(|e| DsmError::invalid_operation(format!("countersign split: {e}")))?
-        .1;
-    let evidence_digest_a =
-        dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(evidence_bytes);
-    let countersign_bytes = dsm::types::proto::ReceiptCountersignB {
-        commitment: b_artifacts.commitment.to_vec(),
-        receipt_evidence_digest_a: evidence_digest_a.to_vec(),
-        sig_b: b.sig_b.clone(),
-        ek_cert_b: b.ek_cert_b.clone(),
-        ek_pk_b: b.ek_pk_b.clone(),
-        b_parent_tip: b_artifacts.applied_parent_tip_b.to_vec(),
-        b_child_tip: b_artifacts.applied_child_tip_b.to_vec(),
-        // The bundle is acceptance PROVENANCE — it never carries the
-        // finalization release; only the promoted reply delta does.
-        recipient_economic_release_addr: Vec::new(),
-    }
-    .encode_to_vec();
-
     // ── Both sides' EK step objects for THIS step; the bundle references
     // each side's PREDECESSOR (None at relationship genesis) ───────────────
-    let a_prior = client_db::economic_lineage::latest_ek_step(rel_key, &prereqs.peer_devid)
+    let a_prior = client_db::economic_lineage::latest_ek_step(rel_key, peer_devid)
         .map_err(|e| storage_err("ek step chain (A)", e))?
         .map(|(_, addr, _)| addr);
     let b_chain_head = client_db::economic_lineage::latest_ek_step(rel_key, devid)
@@ -2337,7 +2317,7 @@ pub(crate) fn build_recipient_admission(
             Some(send)
                 if matches!(
                     dsm::verification::receipt_verification::per_step_ek_predecessor_in_lineage(
-                        &b_artifacts.applied_parent_tip_b,
+                        &*applied_parent_tip_b,
                         Some((&send.canonical_child, ())),
                         None,
                         (),
@@ -2395,6 +2375,127 @@ pub(crate) fn build_recipient_admission(
     .encode_to_vec();
     let a_step_addr = dsm::economic::peer_acceptance::ek_cert_step_addr(&a_step_bytes);
     let b_step_addr = dsm::economic::peer_acceptance::ek_cert_step_addr(&b_step_bytes);
+    Ok(EkStepObjects {
+        own_send_step,
+        a_prior,
+        b_prior,
+        a_step_bytes,
+        b_step_bytes,
+        a_step_addr,
+        b_step_addr,
+    })
+}
+
+/// The step-chain rows a lifecycle step's acceptance records (Amendment
+/// A33), in chain order: the sender's step, this device's own send in flight
+/// when the step crossed it, and this device's countersignature. The same
+/// rows a transfer's admission records, with no bundle to publish.
+pub(crate) fn lifecycle_ek_step_rows(
+    rel_key: &[u8; 32],
+    peer_devid: &[u8; 32],
+    devid: &[u8; 32],
+    b_artifacts: &crate::handlers::recipient_receipt::GeneratedBArtifacts,
+) -> Result<Vec<([u8; 32], [u8; 32], Vec<u8>)>, DsmError> {
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        &b_artifacts.receipt_bytes,
+    )
+    .map_err(|e| DsmError::invalid_operation(format!("countersigned receipt: {e}")))?;
+    let b = receipt
+        .split_countersign_b()
+        .map_err(|e| DsmError::invalid_operation(format!("countersign split: {e}")))?
+        .1;
+    let objects = ek_step_objects(
+        rel_key,
+        peer_devid,
+        devid,
+        &receipt,
+        &b,
+        &b_artifacts.applied_parent_tip_b,
+    )?;
+    let own_send_row = match &objects.own_send_step {
+        Some(step) => {
+            use prost::Message;
+            let addr = dsm::economic::peer_acceptance::ek_cert_step_addr(step);
+            let ek_pk = dsm::types::proto::EkCertStepV1::decode(step.as_slice())
+                .map_err(|e| storage_err("the send in flight's step object", e))?
+                .ek_pk;
+            Some((*devid, addr, ek_pk))
+        }
+        None => None,
+    };
+    let mut rows = vec![(*peer_devid, objects.a_step_addr, receipt.ek_pk_a.clone())];
+    rows.extend(own_send_row);
+    rows.push((*devid, objects.b_step_addr, b.ek_pk_b.clone()));
+    Ok(rows)
+}
+
+/// Build the recipient's admission from the exact prepared successor — SYNC,
+/// runs inside `build_acceptance` under the state-machine lock (DB reads
+/// only, no core re-entry, no awaits). Ordering: countersign wire bytes from
+/// the generated B artifacts → both EkCertStepV1 objects (prior addrs from
+/// the tracking table) → the acceptance bundle → `CreditSourceFacts::
+/// PeerDebit` with the bundle addr as an OUTPUT → `build_dsm_admission` with
+/// bundle + steps as extra frozen artifacts → the signed release from the
+/// build's own coordinates.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_recipient_admission(
+    prereqs: &RecipientAdmissionPrereqs,
+    tree: &mut EconomicSmt,
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+    chain_state: &RelationshipChainState,
+    signed_op: &Operation,
+    b_artifacts: &crate::handlers::recipient_receipt::GeneratedBArtifacts,
+    incoming: &IncomingTransfer<'_>,
+    rel_key: &[u8; 32],
+) -> Result<RecipientAdmissionBuild, DsmError> {
+    use prost::Message;
+    let evidence_bytes = incoming.evidence_bytes;
+
+    // ── The exact countersign wire bytes (deterministic from the journal
+    // receipt — the same derivation the reply delta uses) ──────────────────
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        &b_artifacts.receipt_bytes,
+    )
+    .map_err(|e| DsmError::invalid_operation(format!("countersigned receipt: {e}")))?;
+    let b = receipt
+        .split_countersign_b()
+        .map_err(|e| DsmError::invalid_operation(format!("countersign split: {e}")))?
+        .1;
+    let evidence_digest_a =
+        dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(evidence_bytes);
+    let countersign_bytes = dsm::types::proto::ReceiptCountersignB {
+        commitment: b_artifacts.commitment.to_vec(),
+        receipt_evidence_digest_a: evidence_digest_a.to_vec(),
+        sig_b: b.sig_b.clone(),
+        ek_cert_b: b.ek_cert_b.clone(),
+        ek_pk_b: b.ek_pk_b.clone(),
+        b_parent_tip: b_artifacts.applied_parent_tip_b.to_vec(),
+        b_child_tip: b_artifacts.applied_child_tip_b.to_vec(),
+        // The bundle is acceptance PROVENANCE — it never carries the
+        // finalization release; only the promoted reply delta does.
+        recipient_economic_release_addr: Vec::new(),
+    }
+    .encode_to_vec();
+
+    // ── Both sides' EK step objects for THIS step; the bundle references
+    // each side's PREDECESSOR (None at relationship genesis) ───────────────
+    let EkStepObjects {
+        own_send_step,
+        a_prior,
+        b_prior,
+        a_step_bytes,
+        b_step_bytes,
+        a_step_addr,
+        b_step_addr,
+    } = ek_step_objects(
+        rel_key,
+        &prereqs.peer_devid,
+        devid,
+        &receipt,
+        &b,
+        &b_artifacts.applied_parent_tip_b,
+    )?;
 
     // ── The acceptance bundle — the signed transfer, and the exact receipt
     // and countersign wire bytes. The transfer leg carries the signed parts

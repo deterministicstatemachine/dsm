@@ -531,6 +531,9 @@ async fn a_send_pays_the_contact_chosen_not_the_first_of_its_alias() {
         "A adds C under B's alias: {:?}",
         same_alias.error_message
     );
+    // Both have added each other: the relationship's establishment completes
+    // (Amendment A33) before A pays C.
+    c.add_and_establish(&p.a).await;
 
     for (chosen, amount) in [(&c, "10"), (&p.b, "20")] {
         let sent =

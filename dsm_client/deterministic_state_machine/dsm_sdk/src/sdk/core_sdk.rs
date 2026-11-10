@@ -1853,6 +1853,334 @@ impl CoreSDK {
         Ok(())
     }
 
+    /// Where the relationship with `counterparty_devid` stands on this
+    /// device's chain (DSM Amendment A33), or `None` when this device holds
+    /// no leaf for it.
+    pub fn relationship_lifecycle(
+        &self,
+        counterparty_devid: [u8; 32],
+    ) -> Option<dsm::core::relationship_lifecycle::RelationshipLifecycle> {
+        let sm = self.state_machine.lock();
+        let head = sm.device_head()?;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &head.devid(),
+            &counterparty_devid,
+        );
+        head.relationship_lifecycle(&rel_key)
+    }
+}
+
+/// A counterparty's lifecycle step as the ingestion boundary verified it
+/// (Amendment A33): the signed operation, the exact bytes SIG A covers, and
+/// the receipt's signed pair and transition entropy.
+pub struct IncomingLifecycleStep<'a> {
+    pub op: dsm::types::operations::Operation,
+    pub tx_id: &'a crate::types::identifiers::TransactionId,
+    pub sender_device_id: &'a str,
+    pub canonical_operation_bytes: &'a [u8],
+    pub signed_parent_tip: [u8; 32],
+    pub signed_child_tip: [u8; 32],
+    pub sender_transition_entropy: [u8; 32],
+}
+
+impl CoreSDK {
+    /// Apply a counterparty's lifecycle step (DSM Amendment A33: ESTABLISH or
+    /// TERMINATE) on this device's chain for the relationship, staged as a
+    /// transfer is (`apply_incoming_transfer_staged`): the signed parent must
+    /// be the pinned head of the sender, the signed child its successor under
+    /// the signed operation; the apply identity, the nonce (the operation's
+    /// own digest: a step is applied once), the sender's canonical head and
+    /// the acceptance all commit in ONE transaction. Nothing economic: the
+    /// step moves no value, so no admission, no deltas, no release.
+    pub fn apply_incoming_lifecycle_step_staged<A>(
+        &self,
+        incoming: IncomingLifecycleStep<'_>,
+        build_acceptance: impl FnOnce(
+            &dsm::types::device_state::AdvanceOutcome,
+            ([u8; 32], [u8; 32]),
+        ) -> Result<A, DsmError>,
+        write_acceptance: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+    ) -> Result<crate::sdk::apply_outcome::ApplyOutcome, DsmError> {
+        use crate::sdk::apply_outcome::ApplyOutcome;
+        use crate::storage::client_db::{
+            self as cdb, CanonicalApplyInsertOutcome, CanonicalApplyLookup, CanonicalApplyRecord,
+        };
+        use dsm::core::relationship_lifecycle::{lifecycle_step_of, LifecycleStep};
+        let IncomingLifecycleStep {
+            op,
+            tx_id,
+            sender_device_id,
+            canonical_operation_bytes,
+            signed_parent_tip,
+            signed_child_tip,
+            sender_transition_entropy,
+        } = incoming;
+
+        if canonical_operation_bytes.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_lifecycle_step: empty canonical operation bytes",
+            ));
+        }
+        let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
+            .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
+        let local_arr = <[u8; 32]>::try_from(local_device_id_bytes.as_slice())
+            .map_err(|e| DsmError::state_machine(format!("local device_id: {e}")))?;
+        let sender_id_bytes = crate::util::text_id::decode_base32_crockford(sender_device_id)
+            .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
+        let sender_arr = <[u8; 32]>::try_from(sender_id_bytes.as_slice()).map_err(|e| {
+            DsmError::invalid_operation(format!(
+                "apply_incoming_lifecycle_step: sender_device_id must decode to 32 bytes: {e}"
+            ))
+        })?;
+        // The step names this device, by the sender.
+        let step = lifecycle_step_of(&op)?.ok_or_else(|| {
+            DsmError::invalid_operation(
+                "apply_incoming_lifecycle_step: the operation is not a lifecycle step",
+            )
+        })?;
+        let names_this_device = match step {
+            LifecycleStep::Establish { counterparty, .. } => counterparty == local_arr,
+            LifecycleStep::Terminate { from, to } => from == sender_arr && to == local_arr,
+        };
+        if !names_this_device {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_lifecycle_step: the step is not addressed to this device by its \
+                 sender",
+            ));
+        }
+
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
+        let parent_tip = signed_parent_tip;
+        let child_tip = signed_child_tip;
+        let precommit_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
+            &parent_tip,
+            canonical_operation_bytes,
+            &sender_transition_entropy,
+        )?;
+        let operation_digest = cdb::canonical_apply_operation_digest(canonical_operation_bytes);
+        // A lifecycle step carries no nonce: it is applied once by its own
+        // digest, spent in this relationship as a transfer's nonce is.
+        let nonce: Vec<u8> = operation_digest.to_vec();
+        let nonce_hash = cdb::relationship_nonce_hash(&rel_key, &nonce);
+        let canonical_apply_id = cdb::compute_canonical_apply_id(
+            &rel_key,
+            &parent_tip,
+            &child_tip,
+            &precommit_digest,
+            &operation_digest,
+            &sender_arr,
+            &local_arr,
+            &nonce_hash,
+        );
+
+        match cdb::lookup_canonical_apply_status(
+            &canonical_apply_id,
+            &rel_key,
+            &parent_tip,
+            &nonce_hash,
+        )
+        .map_err(|e| {
+            DsmError::internal(
+                format!("canonical apply lookup failed: {e}"),
+                None::<std::convert::Infallible>,
+            )
+        })? {
+            CanonicalApplyLookup::Duplicate(record) => {
+                return Ok(ApplyOutcome::AlreadyAppliedSameOperation { record: *record });
+            }
+            CanonicalApplyLookup::Conflict => {
+                return Ok(ApplyOutcome::Conflict {
+                    reason: "a different operation identity already consumed this (relationship, \
+                             parent) or step"
+                        .to_string(),
+                });
+            }
+            CanonicalApplyLookup::Fresh => {}
+        }
+
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local_arr,
+            &sender_arr,
+        );
+        let pinned_a_head = match cdb::pinned_counterparty_a_head(&rel_key).map_err(|e| {
+            DsmError::internal(
+                format!("A-side head pin failed: {e}"),
+                None::<std::convert::Infallible>,
+            )
+        })? {
+            Some(pinned) => pinned,
+            // No row is a fresh relationship: its one tip both sides derive.
+            None => init_tip,
+        };
+        if parent_tip != pinned_a_head {
+            return Ok(ApplyOutcome::Conflict {
+                reason: format!(
+                    "signed parent ({}..) is not the pinned counterparty A-side head ({}..) — \
+                     stale, replayed, or forked sender lineage",
+                    crate::util::text_id::encode_base32_crockford(&parent_tip[..4]),
+                    crate::util::text_id::encode_base32_crockford(&pinned_a_head[..4]),
+                ),
+            });
+        }
+        let expected_child = successor_child_tip(
+            &rel_key,
+            &parent_tip,
+            &local_arr,
+            &op.to_bytes(),
+            &sender_transition_entropy,
+        );
+        if child_tip != expected_child {
+            return Ok(ApplyOutcome::Conflict {
+                reason: format!(
+                    "signed child ({}..) is not the successor of the signed parent under the \
+                     signed operation and the carried transition entropy ({}..)",
+                    crate::util::text_id::encode_base32_crockford(&child_tip[..4]),
+                    crate::util::text_id::encode_base32_crockford(&expected_child[..4]),
+                ),
+            });
+        }
+
+        let tx_id_str = String::from_utf8_lossy(tx_id.as_bytes()).into_owned();
+        let record_for = |outcome: &dsm::types::device_state::AdvanceOutcome| {
+            let (applied_parent_tip_b, applied_child_tip_b) = outcome.relationship_pair();
+            CanonicalApplyRecord {
+                relationship_key: rel_key,
+                parent_tip,
+                child_tip,
+                precommit_digest,
+                operation_digest,
+                sender_device: sender_arr,
+                recipient_device: local_arr,
+                nonce_hash,
+                applied_parent_root_b: outcome.parent_r_a,
+                applied_child_root_b: outcome.child_r_a,
+                applied_parent_tip_b,
+                applied_child_tip_b,
+            }
+        };
+        let build = |outcome: &dsm::types::device_state::AdvanceOutcome| -> Result<A, DsmError> {
+            build_acceptance(outcome, outcome.relationship_pair())
+        };
+        let in_tx_extra = {
+            let nonce = nonce.clone();
+            let tx_id_str = tx_id_str.clone();
+            move |tx: &rusqlite::Transaction<'_>,
+                  outcome: &dsm::types::device_state::AdvanceOutcome,
+                  artifacts: &A|
+                  -> Result<(), DsmError> {
+                let spent = cdb::is_nonce_spent_with_conn(tx, &rel_key, &nonce).map_err(|e| {
+                    DsmError::internal(
+                        format!("in-tx step check failed: {e}"),
+                        None::<std::convert::Infallible>,
+                    )
+                })?;
+                if spent {
+                    return Err(DsmError::invalid_operation(
+                        "full-state apply race: the step was applied concurrently (fail closed)",
+                    ));
+                }
+                cdb::mark_nonce_spent_with_conn(tx, &rel_key, &nonce, &tx_id_str, &sender_arr, 0)
+                    .map_err(|e| {
+                    DsmError::internal(
+                        format!("in-tx step consume failed: {e}"),
+                        None::<std::convert::Infallible>,
+                    )
+                })?;
+                let record = record_for(outcome);
+                match cdb::insert_canonical_apply_identity_with_conn(tx, &record).map_err(|e| {
+                    DsmError::internal(
+                        format!("in-tx canonical apply insert failed: {e}"),
+                        None::<std::convert::Infallible>,
+                    )
+                })? {
+                    CanonicalApplyInsertOutcome::Inserted => {}
+                    CanonicalApplyInsertOutcome::DuplicateSameOperation(_)
+                    | CanonicalApplyInsertOutcome::Conflict => {
+                        return Err(DsmError::invalid_operation(
+                            "full-state apply race: canonical apply identity inserted \
+                             concurrently (fail closed)",
+                        ))
+                    }
+                }
+                match cdb::cas_advance_counterparty_canonical_head_with_conn(
+                    tx,
+                    &rel_key,
+                    &sender_arr,
+                    &parent_tip,
+                    &child_tip,
+                    &canonical_apply_id,
+                    &init_tip,
+                )
+                .map_err(|e| {
+                    DsmError::internal(
+                        format!("in-tx counterparty canonical head CAS failed: {e}"),
+                        None::<std::convert::Infallible>,
+                    )
+                })? {
+                    cdb::CasCanonicalHeadOutcome::Advanced
+                    | cdb::CasCanonicalHeadOutcome::GenesisInit
+                    | cdb::CasCanonicalHeadOutcome::AlreadyAtTarget => {}
+                    cdb::CasCanonicalHeadOutcome::Conflict { current } => {
+                        return Err(DsmError::internal(
+                            format!(
+                                "counterparty canonical head moved during apply (now {}..) — \
+                                 nothing committed; retry",
+                                match current {
+                                    Some(c) =>
+                                        crate::util::text_id::encode_base32_crockford(&c[..4]),
+                                    None => "none".to_string(),
+                                }
+                            ),
+                            None::<std::convert::Infallible>,
+                        ))
+                    }
+                }
+                write_acceptance(tx, outcome, artifacts)
+            }
+        };
+
+        let exec = self.execute_on_relationship_staged_with_admission(
+            rel_key,
+            sender_arr,
+            op,
+            &[],
+            build,
+            in_tx_extra,
+            None,
+        );
+        match exec {
+            Ok(staged) => {
+                let record = record_for(&staged.outcome);
+                log::info!(
+                    "[apply_lifecycle_step] ✅ applied {step:?} tx={tx_id_str} (single full-state tx)"
+                );
+                Ok(ApplyOutcome::Applied {
+                    record,
+                    advance: Box::new(staged.outcome),
+                })
+            }
+            Err(e) => match cdb::get_canonical_apply_identity_by_id(&canonical_apply_id) {
+                Ok(Some(record)) => Ok(ApplyOutcome::AlreadyAppliedSameOperation { record }),
+                _ => {
+                    let msg = e.to_string();
+                    if msg.contains("apply parent validation failed")
+                        || msg.contains("apply child validation failed")
+                        || msg.contains("full-state apply race")
+                    {
+                        Ok(ApplyOutcome::Conflict { reason: msg })
+                    } else {
+                        Err(e)
+                    }
+                }
+            },
+        }
+    }
+
     /// The allocation of `asset` in the offline account of the enrolled anchor bundle `B`, if the
     /// account is open and holds one.
     pub fn offline_cash_balance(&self, anchor_bundle_b: [u8; 32], asset: [u8; 32]) -> Option<u64> {

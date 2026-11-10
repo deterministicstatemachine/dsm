@@ -47,14 +47,46 @@ pub struct RecognizedTransfer {
     /// The signed operation, with SIG A attached — byte-identical to what the
     /// sender advanced.
     pub op: Operation,
-    /// The terms that open `op`'s commitment: its token, nonce, mode and memo.
-    pub opened: dsm::types::operations::TransferTerms,
-    /// What the transfer moves and says: `op`'s amount, `opened`'s token and
-    /// memo.
-    pub terms: super::recipient_accept::TransferTerms,
+    /// What the step is: a transfer with its terms, or a relationship's
+    /// lifecycle step (Amendment A33).
+    pub step: RecognizedStep,
     pub staged: StagedTransfer,
     /// The economic locator hints this copy carried. Untrusted.
     pub hint: LocatorHint,
+}
+
+/// What a recognized step is.
+#[derive(Debug, Clone)]
+pub enum RecognizedStep {
+    Transfer {
+        /// The terms that open the operation's commitment: its token, nonce,
+        /// mode and memo.
+        opened: dsm::types::operations::TransferTerms,
+        /// What the transfer moves and says: the operation's amount, the
+        /// opened terms' token and memo.
+        terms: super::recipient_accept::TransferTerms,
+    },
+    /// ESTABLISH or TERMINATE on the relationship with the sender.
+    Lifecycle(dsm::core::relationship_lifecycle::LifecycleStep),
+}
+
+impl RecognizedTransfer {
+    /// The transfer's terms, when the step is a transfer.
+    pub fn transfer_terms(&self) -> Option<&super::recipient_accept::TransferTerms> {
+        match &self.step {
+            RecognizedStep::Transfer { terms, .. } => Some(terms),
+            RecognizedStep::Lifecycle(_) => None,
+        }
+    }
+
+    /// The terms that open the transfer's commitment, when the step is a
+    /// transfer.
+    pub fn opened_terms(&self) -> Option<&dsm::types::operations::TransferTerms> {
+        match &self.step {
+            RecognizedStep::Transfer { opened, .. } => Some(opened),
+            RecognizedStep::Lifecycle(_) => None,
+        }
+    }
 }
 
 /// A receipt half this device verified: its `sig_a` chain for
@@ -266,51 +298,106 @@ fn verify_candidate_transfer(
     };
     // derive sender: the contact whose key verified
     let sender = candidate;
-    // check recipient
-    let Operation::Transfer {
-        to_device_id,
-        amount,
-        policy_commit,
-        ..
-    } = &op
-    else {
-        return Ok(NotRecognized(format!(
-            "the signed operation is a {}, not a transfer",
-            op.get_operation_type()
-        )));
-    };
     let here = this_device()?;
-    if !crate::sdk::core_sdk::addressed_to(to_device_id, &here) {
-        return Ok(NotRecognized(
-            "the signed transfer is addressed to another device".to_string(),
-        ));
-    }
-    // open the terms: the nonce and memo are read from terms that open the
-    // signed commitment, and a transfer without them is refused whole
-    // (pre-audit item 4)
-    let opened = match open_terms(&req.transfer_terms, &op) {
-        Ok(terms) => terms,
-        Err(why) => return Ok(NotRecognized(why)),
+    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&here, &sender);
+    // Nothing is taken on a relationship this device has ended or is ending
+    // (Amendment A33), except the other side's own termination, crossing
+    // this device's: that one is recorded.
+    let relationship = crate::storage::client_db::relationship_state(&sender)
+        .map_err(|e| format!("the relationship with {header_sender} is unreadable: {e}"))?;
+    // check recipient, and what the step is
+    let step = match &op {
+        Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            ..
+        } => {
+            if !crate::sdk::core_sdk::addressed_to(to_device_id, &here) {
+                return Ok(NotRecognized(
+                    "the signed transfer is addressed to another device".to_string(),
+                ));
+            }
+            if relationship.is_over() {
+                return Ok(NotRecognized(format!(
+                    "the relationship with {header_sender} has ended; nothing is taken on it"
+                )));
+            }
+            if !relationship.admits_value() {
+                return Ok(NotRecognized(format!(
+                    "the relationship with {header_sender} is not established; its first step is \
+                     the establishment both sides sign"
+                )));
+            }
+            // open the terms: the nonce and memo are read from terms that
+            // open the signed commitment, and a transfer without them is
+            // refused whole (pre-audit item 4)
+            let opened = match open_terms(&req.transfer_terms, &op) {
+                Ok(terms) => terms,
+                Err(why) => return Ok(NotRecognized(why)),
+            };
+            let terms = super::recipient_accept::TransferTerms::of(amount, policy_commit, &opened);
+            RecognizedStep::Transfer { opened, terms }
+        }
+        other => {
+            use dsm::core::relationship_lifecycle::{lifecycle_step_of, LifecycleStep};
+            let step = match lifecycle_step_of(other) {
+                Ok(Some(step)) => step,
+                Ok(None) => {
+                    return Ok(NotRecognized(format!(
+                        "the signed operation is a {}, not a transfer or a relationship step",
+                        other.get_operation_type()
+                    )))
+                }
+                Err(e) => return Ok(NotRecognized(format!("the relationship step: {e}"))),
+            };
+            let names_this_device = match step {
+                LifecycleStep::Establish { counterparty, .. } => counterparty == here,
+                LifecycleStep::Terminate { from, to } => from == sender && to == here,
+            };
+            if !names_this_device {
+                return Ok(NotRecognized(
+                    "the signed relationship step is addressed to another device".to_string(),
+                ));
+            }
+            if !req.transfer_terms.is_empty() {
+                return Ok(NotRecognized(
+                    "a relationship step carries no terms".to_string(),
+                ));
+            }
+            if relationship.is_over() && !matches!(step, LifecycleStep::Terminate { .. }) {
+                return Ok(NotRecognized(format!(
+                    "the relationship with {header_sender} has ended; nothing is taken on it"
+                )));
+            }
+            RecognizedStep::Lifecycle(step)
+        }
     };
-    // derive the object key
+    // derive the object key. A transfer is spent by its nonce, a lifecycle
+    // step by its own digest: each is applied once in this relationship.
+    let op_bytes = op.to_bytes();
+    let nonce: Vec<u8> = match &step {
+        RecognizedStep::Transfer { opened, .. } => opened.nonce.clone(),
+        RecognizedStep::Lifecycle(_) => {
+            crate::storage::client_db::canonical_apply_operation_digest(
+                &req.canonical_operation_bytes,
+            )
+            .to_vec()
+        }
+    };
     let staged = StagedTransfer {
-        op_id: transfer_object_id(&op.to_bytes()),
+        op_id: transfer_object_id(&op_bytes),
         sender,
         // Spent in this relationship only, as the apply spends it.
-        nonce_hash: crate::storage::client_db::relationship_nonce_hash(
-            &dsm::core::bilateral_transaction_manager::compute_smt_key(&here, &sender),
-            &opened.nonce,
-        ),
+        nonce_hash: crate::storage::client_db::relationship_nonce_hash(&rel_key, &nonce),
         canonical_operation_bytes: req.canonical_operation_bytes,
         signature: req.signature,
         terms: req.transfer_terms,
     };
-    let terms = super::recipient_accept::TransferTerms::of(amount, policy_commit, &opened);
     Ok(TransferRecognition::Recognized(Box::new(
         RecognizedTransfer {
             op,
-            opened,
-            terms,
+            step,
             staged,
             hint: LocatorHint {
                 economic_position: req.sender_economic_position,
@@ -1249,10 +1336,14 @@ mod tests {
         else {
             panic!("the transfer with its own terms is recognized");
         };
-        assert_eq!(recognized.opened, terms);
-        assert_eq!(recognized.terms.memo, "the memo A signed");
         assert_eq!(
-            recognized.terms.policy_commit,
+            recognized.opened_terms().expect("a transfer's terms"),
+            &terms
+        );
+        let terms = recognized.transfer_terms().expect("a transfer's terms");
+        assert_eq!(terms.memo, "the memo A signed");
+        assert_eq!(
+            terms.policy_commit,
             dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy")
         );
     }
@@ -1294,8 +1385,8 @@ mod tests {
         let (p, one) = sent().await;
         let mut c = crate::test_support::two_device::TestDevice::create("C", 0x0C);
         c.boot(&p.fleet).await;
-        c.add_contact(&p.a).await;
-        p.a.add_contact(&c).await;
+        c.add_and_establish(&p.a).await;
+        p.a.add_and_establish(&c).await;
         c.enter();
         let tip = |device: &crate::test_support::two_device::TestDevice| {
             device.enter();
@@ -1749,7 +1840,16 @@ mod tests {
         else {
             panic!("the sent transfer is recognized");
         };
-        let rival = signed_by_a(&p, p.b.device_id, 7, honest.opened.nonce.clone());
+        let rival = signed_by_a(
+            &p,
+            p.b.device_id,
+            7,
+            honest
+                .opened_terms()
+                .expect("a transfer's terms")
+                .nonce
+                .clone(),
+        );
         staged(ingest_transfer_half(
             &rival,
             &one.header_sender,

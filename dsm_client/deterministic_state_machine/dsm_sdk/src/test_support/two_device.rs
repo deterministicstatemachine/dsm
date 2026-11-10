@@ -214,6 +214,59 @@ impl TestDevice {
         );
     }
 
+    /// Where the relationship with `peer` stands on this device (Amendment A33).
+    pub fn relationship_state(
+        &self,
+        peer: &TestDevice,
+    ) -> crate::storage::client_db::RelationshipState {
+        self.enter();
+        crate::storage::client_db::relationship_state(&peer.device_id)
+            .expect("the relationship's state")
+    }
+
+    /// Add `peer` as a contact and, once `peer` has added this device, see
+    /// the relationship's ESTABLISH step through on both devices: the maker's
+    /// step, the other's countersignature, the maker's finalization and
+    /// certificate, each a sync the background poller would run. A device
+    /// whose peer has not added it yet holds its contact and waits.
+    pub async fn add_and_establish(&self, peer: &TestDevice) {
+        use crate::storage::client_db::RelationshipState;
+        self.add_contact(peer).await;
+        let both_added = {
+            peer.enter();
+            crate::storage::client_db::get_contact_by_device_id(&self.device_id)
+                .expect("the peer's contacts")
+                .is_some()
+        };
+        if !both_added {
+            return;
+        }
+        let mut last_errors: Vec<String> = Vec::new();
+        for _ in 0..8 {
+            let established = self.relationship_state(peer) == RelationshipState::Established
+                && peer.relationship_state(self) == RelationshipState::Established;
+            if established {
+                return;
+            }
+            let mine = self.sync().await;
+            let theirs = peer.sync().await;
+            last_errors = mine
+                .errors
+                .iter()
+                .map(|e| format!("{}: {e}", self.slot))
+                .chain(theirs.errors.iter().map(|e| format!("{}: {e}", peer.slot)))
+                .collect();
+        }
+        panic!(
+            "{} and {} did not establish their relationship: {:?} / {:?}; the last syncs said: {}",
+            self.slot,
+            peer.slot,
+            self.relationship_state(peer),
+            peer.relationship_state(self),
+            last_errors.join(" | ")
+        );
+    }
+
     /// Symmetric relationship key with `peer` (the same value from either side).
     pub fn rel_key_with(&self, peer: &TestDevice) -> [u8; 32] {
         dsm::core::bilateral_transaction_manager::compute_smt_key(&self.device_id, &peer.device_id)
@@ -413,8 +466,8 @@ impl Pair {
         let mut b = TestDevice::create("B", 0x0B);
         a.boot(&fleet).await;
         b.boot(&fleet).await;
-        a.add_contact(&b).await;
-        b.add_contact(&a).await;
+        a.add_and_establish(&b).await;
+        b.add_and_establish(&a).await;
         if a_funding > 0 {
             a.fund_admitted(a_funding).await;
         }

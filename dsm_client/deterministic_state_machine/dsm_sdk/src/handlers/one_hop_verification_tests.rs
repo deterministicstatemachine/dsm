@@ -101,8 +101,8 @@ async fn three_devices() -> (Pair, TestDevice) {
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
     for peer in [&p.a, &p.b] {
-        c.add_contact(peer).await;
-        peer.add_contact(&c).await;
+        c.add_and_establish(peer).await;
+        peer.add_and_establish(&c).await;
     }
     c.fund_admitted(100).await;
     (p, c)
@@ -431,9 +431,9 @@ async fn a_contact_with_a_history_pays_in_one_step_after_the_add() {
     let p = Pair::boot(100, 0).await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
-    c.add_contact(&p.b).await;
+    c.add_and_establish(&p.b).await;
     c.fund_admitted(100).await;
-    p.b.add_contact(&c).await;
+    p.b.add_and_establish(&c).await;
 
     let sent = c.send(&p.b, 10).await;
     assert!(sent.success, "{:?}", sent.error_message);
@@ -881,8 +881,8 @@ async fn the_same_payment_costs_every_receiver_the_same() {
     let p = Pair::boot(100, 0).await;
     let mut d = TestDevice::create("D", 0x0D);
     d.boot(&p.fleet).await;
-    d.add_contact(&p.a).await;
-    p.a.add_contact(&d).await;
+    d.add_and_establish(&p.a).await;
+    p.a.add_and_establish(&d).await;
 
     let sent = p.a.send(&d, 10).await;
     assert!(sent.success, "{:?}", sent.error_message);
@@ -925,8 +925,8 @@ async fn acceptance_cost_is_one_position_whatever_the_history() {
     let p = Pair::boot((unseen + 20).div_ceil(100) * 100, 0).await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
-    c.add_contact(&p.a).await;
-    p.a.add_contact(&c).await;
+    c.add_and_establish(&p.a).await;
+    p.a.add_and_establish(&c).await;
     for _ in 0..unseen {
         let sent = p.a.send(&c, 1).await;
         assert!(sent.success, "{:?}", sent.error_message);

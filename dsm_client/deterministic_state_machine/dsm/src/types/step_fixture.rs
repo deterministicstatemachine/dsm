@@ -254,7 +254,7 @@ pub(crate) fn transfer_step(sender: &Party, receiver: &Party, amount: u64) -> St
         .head()
         .admitted_faucet_claim(1)
         .expect("the faucet payout")
-        .establish_relationship(receiver.device_id())
+        .relationship_established_by_fixture(receiver.device_id())
         .expect("the relationship is established");
     let h_n = head
         .chain_tip(&compute_smt_key(&sender.device_id(), &receiver.device_id()))
@@ -278,7 +278,7 @@ pub(crate) fn credit_step(receiver: &Party, sender: &Party, operation: &Operatio
     };
     let head = receiver
         .head()
-        .establish_relationship(sender.device_id())
+        .relationship_established_by_fixture(sender.device_id())
         .expect("the relationship is established");
     step(
         receiver,

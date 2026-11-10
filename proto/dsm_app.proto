@@ -1794,6 +1794,30 @@ enum RelationshipSendBlockReason {
   RELATIONSHIP_SEND_BLOCK_REASON_PENDING_CATCHUP = 1;
   RELATIONSHIP_SEND_BLOCK_REASON_STATE_DIVERGENCE = 2;
   RELATIONSHIP_SEND_BLOCK_REASON_INTERNAL_ERROR = 3;
+  // The relationship is not established on both sides yet (DSM Amendment
+  // A33): this device's ESTABLISH step awaits the other side's add, or the
+  // other side's step has not arrived.
+  RELATIONSHIP_SEND_BLOCK_REASON_NOT_ESTABLISHED = 4;
+  // This device ended the relationship; the other side has not acknowledged yet.
+  RELATIONSHIP_SEND_BLOCK_REASON_ENDING = 5;
+  // The relationship has ended, for good.
+  RELATIONSHIP_SEND_BLOCK_REASON_ENDED = 6;
+}
+
+// Where a relationship stands on this device (DSM Amendment A33). Set by
+// Rust alone; the wallet shows it.
+enum RelationshipState {
+  RELATIONSHIP_STATE_UNSPECIFIED = 0;
+  // The contact is added; no establishment is on the chain yet.
+  RELATIONSHIP_STATE_OPENED = 1;
+  // This device made the ESTABLISH step and waits for the other side's add.
+  RELATIONSHIP_STATE_PROPOSED = 2;
+  // The countersigned ESTABLISH is held: value may move.
+  RELATIONSHIP_STATE_ESTABLISHED = 3;
+  // This device ended the relationship and waits for the acknowledgement.
+  RELATIONSHIP_STATE_ENDING = 4;
+  // A termination is on the chain: final.
+  RELATIONSHIP_STATE_ENDED = 5;
 }
 
 message RelationshipSendStatus {
@@ -3623,6 +3647,13 @@ message ContactUnpairRequest {
   bytes device_id = 1 [(dsm_fixed_len)=32];
 }
 
+// contacts.terminate: end the relationship with the contact (DSM Amendment
+// A33): this device makes the TERMINATE step on the relationship's chain and
+// nothing moves on it from then on. Answers the contact as it stands after.
+message ContactTerminateRequest {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+}
+
 message ContactManualAddRequest {
   string alias = 1;
   bytes  device_id = 2 [(dsm_fixed_len)=32];
@@ -3655,6 +3686,8 @@ message ContactAddResponse {
   ContactPairingPhase pairing = 14;
   // The contact's details as the wallet holds them; absent when none were set.
   ContactProfileV1 profile = 15;
+  // Where the relationship stands on this device (DSM Amendment A33).
+  RelationshipState relationship_state = 16;
 }
 
 // Where BLE pairing with a contact stands, as the SDK's pairing loop has it.

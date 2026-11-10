@@ -532,8 +532,8 @@ async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through(
     let p = Pair::boot(100, 0).await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
-    c.add_contact(&p.b).await;
-    p.b.add_contact(&c).await;
+    c.add_and_establish(&p.b).await;
+    p.b.add_and_establish(&c).await;
     c.fund_admitted(100).await;
 
     // B's routes, in the order a sync reads them (sorted by address): one per

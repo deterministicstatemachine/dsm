@@ -2412,8 +2412,8 @@ async fn an_offline_payment_in_flight_holds_the_account_until_it_is_acknowledged
     let (pair, a, b, appliance, _) = bearer_pair().await;
     let mut c_device = TestDevice::create("C", 0x0C);
     c_device.boot(&pair.fleet).await;
-    c_device.add_contact(&pair.a).await;
-    pair.a.add_contact(&c_device).await;
+    c_device.add_and_establish(&pair.a).await;
+    pair.a.add_and_establish(&c_device).await;
     // C receives too, so it holds a board of its own (owner, 2026-11-07).
     let _boards = crate::test_support::appliance::HostAppliance::install_each(vec![
         (pair.a.device_id, appliance.payer.clone()),

@@ -440,9 +440,10 @@
  * `bilateral_sessions` keeps a receive's account move (`receive_*`) while the
  * receiver's board commits it, and `offline_acknowledgement` keeps each step's
  * acknowledgement, the receiver board's receive commit. A database made at 43
- * is refused at open.
+ * is refused at open. 45 adds `contact_relationship`, where each relationship
+ * stands (DSM Amendment A33); a database made at 44 is refused at open.
  */
-#define CLIENT_DB_SCHEMA_VERSION 44
+#define CLIENT_DB_SCHEMA_VERSION 45
 
 /**
  * The most frames whose chunks a startup keeps from a previous process.

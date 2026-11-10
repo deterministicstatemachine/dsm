@@ -153,13 +153,13 @@ pub(crate) struct CachedWithdrawalPlan {
 /// against this snapshot: if the head moved in between, the whole commit aborts
 /// while nothing has been sent yet — the only point at which losing that race is
 /// still free.
-struct PendingEkMaterial {
-    ek_pk: Vec<u8>,
-    ek_sk: Vec<u8>,
-    at_rest_key: [u8; 32],
-    is_init: bool,
-    expected_prev: Option<Vec<u8>>,
-    is_first_ek_step: bool,
+pub(crate) struct PendingEkMaterial {
+    pub(crate) ek_pk: Vec<u8>,
+    pub(crate) ek_sk: Vec<u8>,
+    pub(crate) at_rest_key: [u8; 32],
+    pub(crate) is_init: bool,
+    pub(crate) expected_prev: Option<Vec<u8>>,
+    pub(crate) is_first_ek_step: bool,
 }
 
 /// Everything an online send determines before anything becomes deliverable.
@@ -1342,165 +1342,9 @@ impl AppRouterImpl {
                 //
                 // The receipt challenge is signed by a per-step EK derived from
                 // canonical C_pre and fresh Kyber k_step material (keyed under Smaster).
-                let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-                    &rc_canonical,
-                ) {
-                    Ok(mut receipt) => match receipt.compute_commitment() {
-                        Ok(commitment) => {
-                            // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
-                            // unlocked wallet) + root AK keypair. The per-step EK seed +
-                            // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
-                            let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
-                                Ok(k) => k,
-                                Err(e) => {
-                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                        "wallet.send: chain-head key unavailable for cert chain (wallet locked?): {e}"
-                                    )));
-                                }
-                            };
-                            let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
-                                Ok(kp) => kp,
-                                Err(e) => {
-                                    // The canonical advance has ALREADY happened at this
-                                    // point, so bailing out without unwinding it would
-                                    // strand a debit and leave the relationship's modal
-                                    // lock held (blocking every later send). Every
-                                    // neighbouring arm rolls back; this one used to just
-                                    // return.
-                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                        "wallet.send: AK keypair unavailable for cert chain: {e}"
-                                    )));
-                                }
-                            };
-
-                            // §16.6 defect zero: snapshot the committed Local cert head
-                            // BEFORE signing. Signing must run outside the durable
-                            // transaction (it reads cert heads through its own
-                            // connection), so this snapshot is what the later CAS
-                            // compares against to detect the acceptance finalizer moving
-                            // the head underneath us.
-                            //
-                            // Compute relationship_key for chain head lookup.
-                            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                                &receipt.devid_a,
-                                &receipt.devid_b,
-                            );
-                            let local_head_before_signing =
-                                crate::storage::client_db::load_cert_chain_head_pubkey(
-                                    &rel_key,
-                                    crate::storage::client_db::CertChainSide::Local,
-                                )
-                                .ok()
-                                .flatten();
-
-                            // Per-step Kyber per whitepaper §11: encapsulate
-                            // against the recipient's Kyber pubkey to derive
-                            // `k_step`. Pull the pubkey from the contact record;
-                            // fail-closed if missing (no root path — contact
-                            // must be re-established with peer Kyber pubkey to
-                            // enable per-step EK signing).
-                            let recipient_kyber_pk =
-                                match crate::storage::client_db::get_contact_by_device_id(
-                                    &receipt.devid_b,
-                                ) {
-                                    Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
-                                    Ok(Some(_)) => {
-                                        return Err(dsm::types::error::DsmError::invalid_operation(
-                                        "wallet.send: recipient contact missing Kyber public key — \
-                                         re-establish contact to upgrade for per-step EK signing\
-                                         "
-                    ));
-                                    }
-                                    _ => {
-                                        return Err(dsm::types::error::DsmError::invalid_operation(
-                                        "wallet.send: recipient contact lookup failed"
-                    ));
-                                    }
-                                };
-
-                            // Sign with per-step EK (whitepaper §11.1 cert chain).
-                            let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
-                                commitment: &commitment,
-                                h_n: receipt.parent_tip,
-                                c_pre: receipt_sigma,
-                                devid_sender: receipt.devid_a,
-                                relationship_key: rel_key,
-                                root_ak_keypair: Some((&ak_pk, &ak_sk)),
-                                recipient_kyber_pk: &recipient_kyber_pk,
-                                // §11.1 Item 7: bind the per-step EK response
-                                // to the receipt commitment for this online
-                                // wallet.send transition.
-                                session_binding: &commitment,
-                            };
-                            match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
-                                Ok(out) => {
-                                    log::info!(
-                                        "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
-                                         cert_len={}, sig_len={}, used_root_ak={}",
-                                        out.ek_pk.len(),
-                                        out.ek_cert.len(),
-                                        out.sig.len(),
-                                        out.used_root_ak,
-                                    );
-
-                                    // Stamp per-step artifacts on the receipt.
-                                    receipt.set_ek_pk_a(out.ek_pk.clone());
-                                    receipt.set_ek_cert_a(out.ek_cert);
-                                    receipt.add_sig_a(out.sig);
-
-                                    // §11.1 lockstep: do NOT advance the committed Local
-                                    // chain head at sign time. STASH the new EK head as
-                                    // pending, keyed by this receipt commitment. It is
-                                    // promoted into `cert_chain_heads` only once the
-                                    // receiver's acceptance ACK is observed (storage.sync
-                                    // sweep), and dropped if the transfer fails. This keeps
-                                    // the sender's committed head unchanged for a transfer
-                                    // that is never accepted, so a failed/timed-out attempt
-                                    // cannot run the chain ahead of the receiver.
-                                    // §16.6 defect zero: the pending head is NOT written
-                                    // here. It is committed in ONE transaction with the
-                                    // proposal, the gate, and the durable outbox row —
-                                    // before anything is submitted — so a local failure can
-                                    // never strand a deliverable message against a
-                                    // rolled-back debit. Carry the material forward, plus
-                                    // the pre-signing head snapshot that guards the CAS.
-                                    pending_ek_material = Some(PendingEkMaterial {
-                                        ek_pk: out.ek_pk.clone(),
-                                        ek_sk: out.ek_sk.clone(),
-                                        at_rest_key,
-                                        is_init: out.used_root_ak,
-                                        expected_prev: local_head_before_signing.clone(),
-                                        is_first_ek_step: out.used_root_ak,
-                                    });
-
-                                    match receipt.to_full_protobuf() {
-                                        Ok(full_bytes) => full_bytes,
-                                        Err(e) => {
-                                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                                "wallet.send: receipt full serialization failed: {e}"
-                                            )));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                        "wallet.send: per-step EK signing failed: {e}"
-                                    )));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                "wallet.send: receipt commitment hash failed: {e}"
-                            )));
-                        }
-                    },
-                    Err(e) => {
-                        return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                            "wallet.send: receipt deserialization for signing failed: {e}"
-                        )));
-                    }
-                };
+                let (rc, ek_material) =
+                    self.sign_receipt_as_sender(&rc_canonical, receipt_sigma)?;
+                pending_ek_material = Some(ek_material);
 
                 log::info!(
                     "[wallet.send] §4.2 canonical advance + receipt self-verified + sig_a embedded: smt_key={:?}.. pre_root={:?}.. post_root={:?}.. receipt_len={}",
@@ -2199,6 +2043,190 @@ impl AppRouterImpl {
     }
 
     /// A committed send that can never complete, for `why`.
+
+    /// Sign a built receipt as its sender (party A): sig_a with a per-step
+    /// ephemeral key chained from this device's AK (whitepaper §11.1), the
+    /// key encapsulated for the recipient's Kyber key. Returns the full
+    /// receipt bytes with `sig_a`, `ek_pk_a` and `ek_cert_a` stamped, and the
+    /// pending EK material the durable commit stashes beside the proposal.
+    /// Runs inside the staged advance's pre-write window: it reads the
+    /// database and the wallet's keys and never re-enters `CoreSDK`.
+    pub(crate) fn sign_receipt_as_sender(
+        &self,
+        rc_canonical: &[u8],
+        c_pre: [u8; 32],
+    ) -> Result<(Vec<u8>, PendingEkMaterial), dsm::types::error::DsmError> {
+        // Assigned exactly where signing succeeds; every other path returns.
+        let pending_ek_material: Option<PendingEkMaterial>;
+        let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            rc_canonical,
+        ) {
+            Ok(mut receipt) => match receipt.compute_commitment() {
+                Ok(commitment) => {
+                    // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
+                    // unlocked wallet) + root AK keypair. The per-step EK seed +
+                    // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
+                    let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
+                        Ok(k) => k,
+                        Err(e) => {
+                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                "wallet.send: chain-head key unavailable for cert chain (wallet locked?): {e}"
+                            )));
+                        }
+                    };
+                    let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
+                        Ok(kp) => kp,
+                        Err(e) => {
+                            // The canonical advance has ALREADY happened at this
+                            // point, so bailing out without unwinding it would
+                            // strand a debit and leave the relationship's modal
+                            // lock held (blocking every later send). Every
+                            // neighbouring arm rolls back; this one used to just
+                            // return.
+                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                "wallet.send: AK keypair unavailable for cert chain: {e}"
+                            )));
+                        }
+                    };
+
+                    // §16.6 defect zero: snapshot the committed Local cert head
+                    // BEFORE signing. Signing must run outside the durable
+                    // transaction (it reads cert heads through its own
+                    // connection), so this snapshot is what the later CAS
+                    // compares against to detect the acceptance finalizer moving
+                    // the head underneath us.
+                    //
+                    // Compute relationship_key for chain head lookup.
+                    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                        &receipt.devid_a,
+                        &receipt.devid_b,
+                    );
+                    let local_head_before_signing =
+                        crate::storage::client_db::load_cert_chain_head_pubkey(
+                            &rel_key,
+                            crate::storage::client_db::CertChainSide::Local,
+                        )
+                        .ok()
+                        .flatten();
+
+                    // Per-step Kyber per whitepaper §11: encapsulate
+                    // against the recipient's Kyber pubkey to derive
+                    // `k_step`. Pull the pubkey from the contact record;
+                    // fail-closed if missing (no root path — contact
+                    // must be re-established with peer Kyber pubkey to
+                    // enable per-step EK signing).
+                    let recipient_kyber_pk =
+                        match crate::storage::client_db::get_contact_by_device_id(&receipt.devid_b)
+                        {
+                            Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
+                            Ok(Some(_)) => {
+                                return Err(dsm::types::error::DsmError::invalid_operation(
+                                    "wallet.send: recipient contact missing Kyber public key — \
+                                 re-establish contact to upgrade for per-step EK signing\
+                                 ",
+                                ));
+                            }
+                            _ => {
+                                return Err(dsm::types::error::DsmError::invalid_operation(
+                                    "wallet.send: recipient contact lookup failed",
+                                ));
+                            }
+                        };
+
+                    // Sign with per-step EK (whitepaper §11.1 cert chain).
+                    let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
+                        commitment: &commitment,
+                        h_n: receipt.parent_tip,
+                        c_pre: c_pre,
+                        devid_sender: receipt.devid_a,
+                        relationship_key: rel_key,
+                        root_ak_keypair: Some((&ak_pk, &ak_sk)),
+                        recipient_kyber_pk: &recipient_kyber_pk,
+                        // §11.1 Item 7: bind the per-step EK response
+                        // to the receipt commitment for this online
+                        // wallet.send transition.
+                        session_binding: &commitment,
+                    };
+                    match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
+                        Ok(out) => {
+                            log::info!(
+                                "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
+                                 cert_len={}, sig_len={}, used_root_ak={}",
+                                out.ek_pk.len(),
+                                out.ek_cert.len(),
+                                out.sig.len(),
+                                out.used_root_ak,
+                            );
+
+                            // Stamp per-step artifacts on the receipt.
+                            receipt.set_ek_pk_a(out.ek_pk.clone());
+                            receipt.set_ek_cert_a(out.ek_cert);
+                            receipt.add_sig_a(out.sig);
+
+                            // §11.1 lockstep: do NOT advance the committed Local
+                            // chain head at sign time. STASH the new EK head as
+                            // pending, keyed by this receipt commitment. It is
+                            // promoted into `cert_chain_heads` only once the
+                            // receiver's acceptance ACK is observed (storage.sync
+                            // sweep), and dropped if the transfer fails. This keeps
+                            // the sender's committed head unchanged for a transfer
+                            // that is never accepted, so a failed/timed-out attempt
+                            // cannot run the chain ahead of the receiver.
+                            // §16.6 defect zero: the pending head is NOT written
+                            // here. It is committed in ONE transaction with the
+                            // proposal, the gate, and the durable outbox row —
+                            // before anything is submitted — so a local failure can
+                            // never strand a deliverable message against a
+                            // rolled-back debit. Carry the material forward, plus
+                            // the pre-signing head snapshot that guards the CAS.
+                            pending_ek_material = Some(PendingEkMaterial {
+                                ek_pk: out.ek_pk.clone(),
+                                ek_sk: out.ek_sk.clone(),
+                                at_rest_key,
+                                is_init: out.used_root_ak,
+                                expected_prev: local_head_before_signing.clone(),
+                                is_first_ek_step: out.used_root_ak,
+                            });
+
+                            match receipt.to_full_protobuf() {
+                                Ok(full_bytes) => full_bytes,
+                                Err(e) => {
+                                    return Err(dsm::types::error::DsmError::invalid_operation(
+                                        format!(
+                                            "wallet.send: receipt full serialization failed: {e}"
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                "wallet.send: per-step EK signing failed: {e}"
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                        "wallet.send: receipt commitment hash failed: {e}"
+                    )));
+                }
+            },
+            Err(e) => {
+                return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                    "wallet.send: receipt deserialization for signing failed: {e}"
+                )));
+            }
+        };
+
+        let ek_material = pending_ek_material.ok_or_else(|| {
+            dsm::types::error::DsmError::invalid_operation(
+                "per-step EK material missing after signing",
+            )
+        })?;
+        Ok((rc, ek_material))
+    }
+
     fn stranded(&self, why: String) -> OnlineSent {
         log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
         OnlineSent::Stranded {
@@ -2813,7 +2841,8 @@ impl AppRouter for AppRouterImpl {
             "contacts.addManual"
             | "contacts.setProfile"
             | "contacts.setOwnProfile"
-            | "contacts.unpair" => Box::pin(self.handle_contacts_invoke(i)).await,
+            | "contacts.unpair"
+            | "contacts.terminate" => Box::pin(self.handle_contacts_invoke(i)).await,
             // Email receipts (DSM Amendment A17): outside the protocol.
             "receipts.email" => Box::pin(self.handle_receipts_invoke(i)).await,
             // DSM Connect (DSM Amendment A11)
