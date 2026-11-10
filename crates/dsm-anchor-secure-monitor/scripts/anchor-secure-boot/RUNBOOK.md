@@ -169,7 +169,8 @@ Name each board. Its secret and records live under `~/.dsm-anchor-secure-boot/bo
 ./provision-otp.sh --board <name> --check-blank
 ```
 It refuses when any row this procedure writes already holds a value, with one exception it names: a secret
-page an earlier procedure burned and locked exactly as Step 4 and Step 6 do. Such a board keeps that secret,
+page an earlier procedure burned and locked exactly as Step 4 and Step 6 do (the lock row says so; the
+bootloader cannot read the rows of a locked page). Such a board keeps that secret,
 which production reads through the same rows (OTP is never rewritten, and the board holds its only copy):
 skip Step 4 on it, and Step 6 locks the digest page alone. A secret page in any other state stops the procedure.
 

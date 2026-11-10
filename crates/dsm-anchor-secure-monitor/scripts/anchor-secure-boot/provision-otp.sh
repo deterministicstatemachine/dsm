@@ -73,8 +73,13 @@ run() { if [ "$COMMIT" = 1 ]; then echo "+ $*"; "$@"; else echo "[dry-run] $*"; 
 # procedure burned a secret there and locked the page exactly as this one does. A board of the second
 # kind goes on with that secret, which production reads through the same rows: OTP is never rewritten,
 # and the board holds the only copy. Anything else is a page this procedure did not write, and it stops.
+# The lock row decides: once it holds Step 6's value the USB bootloader has no access to the page, so the
+# rows themselves read as nothing here. The dump is a private temporary file, gone when this returns: a
+# secret written and not yet locked would be in it.
 secret_page() {
-  local dump="$BOARD_DIR/otp-read.bin"
+  local dump
+  dump="$(mktemp)"
+  trap 'rm -f "$dump"' RETURN
   picotool otp dump -r --output "$dump" >/dev/null
   python3 - "$dump" "$SECRET_ROW" "$SECRET_LOCK_ROW" "$SECRET_LOCK" <<'PAGE'
 import struct, sys
@@ -84,14 +89,14 @@ if len(rows) != 4096:
     sys.exit(f"ERROR: the dump holds {len(rows)} rows, not 4096")
 secret, lock_row, lock = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4], 16)
 written = [hex(r) for r in range(secret, secret + 16) if rows[r] != 0]
-if not written and rows[lock_row] == 0:
-    print("blank")
-elif len(written) == 16 and rows[lock_row] == lock:
+if rows[lock_row] == lock:
     print("sealed")
+elif not written and rows[lock_row] == 0:
+    print("blank")
 else:
     sys.exit(f"ERROR: the secret page is neither blank nor sealed as this procedure seals it: "
              f"rows written {written}, lock row {hex(rows[lock_row])} (expected 0 or {hex(lock)}). "
-             "Another procedure wrote this board; nothing here goes on with it.")
+             "Another procedure wrote this board, or Step 4 ran without Step 6; nothing here goes on with it.")
 PAGE
 }
 confirm() {
@@ -106,7 +111,8 @@ case "$CMD" in
   --check-blank)
     # READ-ONLY. Every row this procedure writes must still be zero, except a secret page an earlier
     # procedure sealed as this one seals it: that board keeps its secret, and Step 4 and the secret
-    # half of Step 6 are already done on it.
+    # half of Step 6 are already done on it. The kept dump holds no secret: `secret_page` has stopped
+    # on a page written and unlocked, and a locked page gives the bootloader nothing.
     page="$(secret_page)"
     dump="$BOARD_DIR/otp-before.bin"
     picotool otp dump -r --output "$dump"
