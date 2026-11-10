@@ -185,6 +185,12 @@ lean4/DSMRecognition.lean	DSMRecognition.valid_is_not_recognized_by_definition	(
 lean4/DSMRecognition.lean	DSMRecognition.wrong_coordinate_is_not_recognized	(none)
 lean4/DSMRecognition.lean	DSMRecognition.wrong_parent_is_not_recognized	(none)
 lean4/DSMRecognition.lean	DSMRecognition.wrong_proof_is_not_recognized	(none)
+lean4/DSMRelationshipLifecycle.lean	DSMRelationshipLifecycle.ended_is_final	propext
+lean4/DSMRelationshipLifecycle.lean	DSMRelationshipLifecycle.establish_once	propext
+lean4/DSMRelationshipLifecycle.lean	DSMRelationshipLifecycle.fold_allows_value_only_established	propext
+lean4/DSMRelationshipLifecycle.lean	DSMRelationshipLifecycle.fold_value_only_after_establish	propext
+lean4/DSMRelationshipLifecycle.lean	DSMRelationshipLifecycle.value_step_keeps_established	propext
+lean4/DSMRelationshipLifecycle.lean	DSMRelationshipLifecycle.value_step_needs_established	propext
 lean4/DSMRouteChain.lean	DSMRouteChain.chain_uniqueness	(none)
 lean4/DSMRouteChain.lean	DSMRouteChain.contains_of_grows	propext
 lean4/DSMRouteChain.lean	DSMRouteChain.final_stable	Quot.sound,propext

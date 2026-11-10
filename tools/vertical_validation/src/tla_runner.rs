@@ -39,7 +39,7 @@ use crate::tla_trace_replay::{
 /// 96 with the successor cells' `SofiSuccessorCells/copy-rule`. 95 since the
 /// offline door carries only the offline-bearer transfer (MR-DSM-0219): no step
 /// of the code commits on its ack, and `OfflineFinality/commit-on-ack` is gone.
-pub const EXPECTED_STANDARD_SPECS: usize = 102;
+pub const EXPECTED_STANDARD_SPECS: usize = 103;
 
 /// The TLC simulation trace a spec replays in Rust. No trace is replayed into
 /// the code: a model's code-level checks are its linked implementation traces
@@ -335,6 +335,7 @@ impl TlaRunner {
                     "TokenConservation".into(),
                     "ProjectionAgreement".into(),
                     "BarrierHeldDurably".into(),
+                    "NoValueBeforeEstablishment".into(),
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![
@@ -523,6 +524,15 @@ impl TlaRunner {
                 "DSM.tla",
                 "DSM_RecipientSkipsAdmission.cfg",
                 "TokenConservation",
+            ),
+            // A send on a relationship both sides opened but neither established
+            // (DSM Amendment A33): without the rule, value leaves before the
+            // establishment both sides sign.
+            expect_violation(
+                "DSM/send-before-establishment",
+                "DSM.tla",
+                "DSM_SendBeforeEstablishment.cfg",
+                "NoValueBeforeEstablishment",
             ),
             expect_violation(
                 "DSM/recipient-skips-admission-and-pin",
