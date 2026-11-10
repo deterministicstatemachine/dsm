@@ -565,7 +565,9 @@ jobs:
 
   # --------------------------------------------------------------------------
   # The developer path (BUILDING_APPS.md), end to end on real storage nodes:
-  # the local storage set (dsm-dev-net + the node binary on Postgres), an
+  # a local storage set (make app-dev-local: dsm-dev-net + the node binary on
+  # Postgres, so this job depends on no hosted node; a newcomer's make app-dev
+  # goes to the beta network, which the release's first-run job proves), an
   # app's own account and a player's terminal wallet (dsm-app-host), the
   # TypeScript and Python clients, the Connect starter app and its check
   # (connect, pay inside and over the grant, holdings, disconnect). Then every

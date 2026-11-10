@@ -175,8 +175,9 @@ export class Account {
   }
 
   /**
-   * Ask the development set's faucet for ERA, once. Returns what it said; a
-   * faucet that is not ready yet says so and funds nothing, so call it again.
+   * Ask the network's faucet for ERA, once (the beta network funds every new
+   * account; so does a local set). Returns what it said; a faucet that is not
+   * ready yet says so and funds nothing, so call it again.
    */
   async fund(): Promise<{ funded: boolean; message: string }> {
     const route = "faucet.claim";

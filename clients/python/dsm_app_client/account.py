@@ -53,7 +53,7 @@ def _raw_of(ref: ConnectionRef, what: str) -> bytes:
 
 
 class Account:
-    """What every account can do: name itself, say what it owns, be funded on a development set."""
+    """What every account can do: name itself, say what it owns, be funded by the network's faucet."""
 
     def __init__(self, ingress: Ingress) -> None:
         self.ingress = ingress
@@ -125,7 +125,7 @@ class Account:
         return payload(route, self.ingress.call("query", route, request, quiet=True), "wallet_amount_response").display_amount
 
     def fund(self) -> tuple[bool, str]:
-        """Ask the development set's faucet for ERA, once: (funded, what it said)."""
+        """Ask the network's faucet for ERA, once (the beta network funds every new account; so does a local set): (funded, what it said)."""
         route = "faucet.claim"
         request = pb.FaucetClaimRequest(device_id=self.identity().raw)
         claim = payload(route, self.ingress.call("invoke", route, request), "faucet_claim_response")

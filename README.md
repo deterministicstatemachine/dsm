@@ -38,7 +38,7 @@ When it is back:
 
 CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK is signed and uploaded by the maintainer.
 
-> **Early beta.** This release exists for developer onboarding and community feedback. It contains novel cryptographic protocols and is not ready for production use or for holding value. The app talks to a beta storage fleet on the `dsm-testnet` network id, and beta devices need an operator-side allowance before the fleet accepts their writes. If you want to test with real devices, open a [support](SUPPORT.md) thread first.
+> **Early beta.** This release exists for developer onboarding and community feedback. It contains novel cryptographic protocols and is not ready for production use or for holding value. The app talks to a beta storage fleet on the `dsm-testnet` network id; any wallet or app account may join it, and the faucet funds each new account. If you want to test with real devices, open a [support](SUPPORT.md) thread first.
 
 ## Who this README is for
 
@@ -205,12 +205,12 @@ Release APKs are signed by the maintainer; CI does not sign or upload them. Code
 
 ## Storage nodes and the beta fleet
 
-A storage node is index-only persistence: it stores and serves bytes, keeps write-once registers, and never signs, validates, or interprets protocol rules. The beta fleet is five nodes in GCP `us-central1` with a quorum of three. The client pins the five members and the quorum in `dsm/src/economic/register.rs` under the `dsm-testnet` network id; the same register profile drives the delivery fan-out, so a message is delivered to exactly the quorum's worth of members. The app ships configured for this fleet.
+A storage node is index-only persistence: it stores and serves bytes, keeps write-once registers, and never signs, validates, or interprets protocol rules. The beta fleet is five nodes on OVHcloud (Beauharnois) with a quorum of three. The client pins the five members and the quorum in `dsm/src/economic/register.rs` under the `dsm-testnet` network id; the same register profile drives the delivery fan-out, so a message is delivered to exactly the quorum's worth of members. The app ships configured for this fleet.
 
 - Local development nodes: `make nodes-up`, `make nodes-down`, `make nodes-status`, `make nodes-reset` (PostgreSQL required): the pinned members as five local nodes, prepared by [crates/dsm-dev-net/](crates/dsm-dev-net/). Code: [dsm_storage_node/](dsm_storage_node/).
-- Plugging an app into DSM: your app's own account (`make app-dev`), the TypeScript and Python clients, a starter app and terminal wallets. Guide: [BUILDING_APPS.md](BUILDING_APPS.md).
+- Plugging an app into DSM: your app's own account on the beta fleet (`make app-dev`; nothing of the network runs on your machine) or on a local set (`make app-dev-local`), the TypeScript and Python clients, a starter app and terminal wallets. Guide: [BUILDING_APPS.md](BUILDING_APPS.md).
 - Operators: Terraform and deployment scripts under `dsm_storage_node/`; the release workflow ships a Linux x86_64 binary with its SHA-256.
-- Beta admission: the fleet meters device writes, and a beta device needs an operator-side allowance before its first publication succeeds.
+- Beta admission: none. A new account publishes its directory entry and claims the faucet on its own (`make app-dev` does exactly that, 2026-11-09: a fresh account funded on the fleet in seconds); the fleet keeps no per-device allowance.
 
 ## Formal verification
 

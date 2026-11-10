@@ -36,7 +36,7 @@ Every request has two answers, and only one is evidence:
 
 Storage on DSM is paid for by the account that writes: a one-time entry payment (a flat rate to three storage operators), then credits consumed by each write, priced in token units by a network parameter. Nobody is billed per month or per user, and reading is free. That leaves you three ways to set things up:
 
-1. **Players pay their own way.** Each player's wallet is their own account, on the public set. In the beta, the faucet funds every new wallet. Later they buy ERA like anything else. Your app pays only for its own account's writes. This is the setup `make app-dev` and the public beta give you.
+1. **Players pay their own way.** Each player's wallet is their own account, on the public set. In the beta, the faucet funds every new wallet. Later they buy ERA like anything else. Your app pays only for its own account's writes. This is the setup `make app-dev` gives you: your app's account on the beta network, funded by the same faucet.
 2. **Your app pays for its players.** `give` a player ERA when they connect; their wallet spends it on its own writes. What you give is theirs, and works anywhere on DSM, so this is a gift, not a subscription.
 3. **Your app runs the storage, and players pay nothing.** Run your own storage set ([dsm_storage_node/RUN_A_NODE.md](dsm_storage_node/RUN_A_NODE.md)) and point your players' wallets at it, the way `make phones-local` points them at your local set. A node may enforce the entry payment and credits, or not; on your own set, that is your call. You pay the hosting; accounts on your set are still their owners', and a wallet on your set reaches only your set.
 
@@ -61,10 +61,10 @@ Your app needs a server side, even a small one, because the account's secret mus
 
 ## Start in five minutes
 
-You need what [QUICKSTART.md](QUICKSTART.md)'s prerequisites list (Rust, Node.js 20+, protoc, and PostgreSQL for the local storage set).
+You need what [QUICKSTART.md](QUICKSTART.md)'s prerequisites list (Rust, Node.js 20+, protoc) and outbound HTTPS. Nothing of the network runs on your machine: your app's account joins the beta network, the hosted storage set every wallet ships configured for, and the faucet funds it.
 
 ```bash
-make app-dev       # your own storage set on this machine, and your app's account on it, funded
+make app-dev       # your app's account on the beta network, funded
 make starter       # the starter app: open http://127.0.0.1:3000
 ```
 
@@ -83,18 +83,17 @@ make dev-wallet                                  # a player's wallet in the term
 make dev-wallet-connect CODE=dsm:connect/v1:...  # the code the starter shows
 ```
 
-With phones (debug builds of the wallet):
+With phones (debug builds of the wallet), which are on the beta network as installed:
 
 ```bash
-make phones-local                                # every adb device and booted iOS Simulator, on your local set
-make phones-connect CODE=dsm:connect/v1:...      # open the code in each wallet
+make phones-connect CODE=dsm:connect/v1:...      # open the code in each wallet (adb devices and booted iOS Simulators)
 ```
-
-After `make nodes-reset` (a new set, with new CAs), clear the phones' wallets and run `make phones-local` again.
 
 Back in the starter, the wallet appears under **Connected wallets**. Under **Ask a connected wallet**, ask it to send 0.05 ERA and watch the fact become `received`. Ask for 0.20, over the per-request cap, and it waits for the player: `make dev-wallet-pending`, then `make wallet ARGS="approve <connection> <seq>"` (or approve it on the phone). Ask it to **sign in** and approve that the same way: the fact is `signed`.
 
 `make dev-down` stops everything. `make developer-path` runs the whole path, every helper once, as CI does.
+
+**A storage set of your own, instead.** `make app-dev-local` runs the network's five storage nodes on this machine (PostgreSQL; [QUICKSTART.md](QUICKSTART.md#optional-local-storage-nodes)) and your app's account on them; `make dev-wallet` and the rest follow it there, and `make phones-local` points the phones at it (after `make nodes-reset`, a new set with new CAs, clear the phones' wallets and run it again). Nothing reaches outside your machine. An account exists only on the set it was made on, so `make dev-reset` forgets this machine's accounts (and the local set, if they were on it) before you change sets.
 
 ## The clients
 
@@ -213,7 +212,7 @@ dsm-app-host \
 |---|---|
 | `--data-dir` | The account: its state and `RECOVERY_MNEMONIC`. The first start creates the account and writes the mnemonic there (mode 0600). |
 | `--ingress-secret-dir` | Where each launch writes a new ingress secret, `ingress-token`. It must be apart from the data dir: your app gets the secret and nothing of the account. |
-| `--env-config` | The network's storage set, each member with its own CA. The wallet's own is [`dsm_client/frontend/public/dsm_env_config.toml`](dsm_client/frontend/public/dsm_env_config.toml); `make app-dev` uses your local set's. |
+| `--env-config` | The network's storage set, each member with its own CA. The wallet's own is [`dsm_client/frontend/public/dsm_env_config.toml`](dsm_client/frontend/public/dsm_env_config.toml), and `make app-dev` uses it too; `make app-dev-local` uses your local set's. |
 | `--game-bind` | The ingress your server calls. Loopback only; anything else is refused. |
 | `--relay-bind`, `--relay-endpoint`, `--relay-name` | Where wallets reach your account. The host makes its own TLS certificate for these names, and every connect code pins it, so you need no certificate authority. |
 
@@ -230,8 +229,8 @@ The first lines it logs name the relay and its certificate pin, the ingress, and
 
 - `make dev-wallet` runs a second account as a player's wallet, and `make dev-wallet2` a third for matches. `make wallet ARGS=...` (and `make wallet2 ARGS=...`) drives them: `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`.
 - `make app ARGS=...` drives your app's account from the terminal: `offer`, `connections`, `send`, `owns`, `accept`, `login`, `contacts`, `result`, `issue`, `give`, `owned`, `vault`, `vaults`, `price`, `trade`, `stake`, `decide`, `collect`, `activity` (`make app ARGS=help` lists them with their arguments).
-- `make developer-path` first proves that the code the starter's page shows under each piece is the code the starter runs: every shown call, in TypeScript and in Python, is evaluated with the real client and compared with what the server hands it, and every shown program is checked against the client (`npm test` in `examples/connect-starter`). Then it runs every helper once against your local set: connect, send inside and over the grant, prove what is owned, sign in, issue and give an item, open a vault and trade, referee a match between two wallets, disconnect; then the Python client. CI runs it on every change.
-- `make first-run` is a newcomer's first run, proven: a clean Ubuntu (in Docker) with nothing on it but what QUICKSTART.md's prerequisites say to install, a fresh clone, and this page's commands alone, in TypeScript (the starter's page, its buttons pressed in a real browser and its table read) and in Python (`first_payment.py`), each to a wallet connected and its own request's payment received. The prerequisites are read out of QUICKSTART.md, and every command it types is one this page shows, so the docs cannot drift from what works. A release runs it.
+- `make developer-path` first proves that the code the starter's page shows under each piece is the code the starter runs: every shown call, in TypeScript and in Python, is evaluated with the real client and compared with what the server hands it, and every shown program is checked against the client (`npm test` in `examples/connect-starter`). Then it runs every helper once against a local set (`make app-dev-local`, so CI depends on no hosted node): connect, send inside and over the grant, prove what is owned, sign in, issue and give an item, open a vault and trade, referee a match between two wallets, disconnect; then the Python client. CI runs it on every change.
+- `make first-run` is a newcomer's first run, proven: a clean Ubuntu (in Docker) with nothing on it but what QUICKSTART.md's prerequisites say to install (no PostgreSQL, no node), a fresh clone, and this page's commands alone, on the beta network, in TypeScript (the starter's page, its buttons pressed in a real browser and its table read) and in Python (`first_payment.py`), each to a wallet connected and its own request's payment received. The prerequisites are read out of QUICKSTART.md, and every command it types is one this page shows, so the docs cannot drift from what works. A release runs it.
 
 ## Reference
 
