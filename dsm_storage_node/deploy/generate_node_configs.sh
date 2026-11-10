@@ -4,7 +4,12 @@
 # Generates per-node deploy bundles for N EC2 instances.
 #
 # Usage:
-#   ./generate_node_configs.sh IP1 IP2 IP3 IP4 IP5 IP6
+#   ./generate_node_configs.sh [--ca-dir DIR] IP1 IP2 IP3 IP4 IP5 IP6
+#
+# --ca-dir DIR: sign the node certificates with the CA already in DIR
+# (ca.crt + ca.key) instead of minting a new one, so clients whose env config
+# carries that CA as each member's `ca_cert` keep trusting the fleet. Without
+# it a NEW CA is minted (see below).
 #
 # Output:
 #   deploy/nodes/node-{1..N}/
@@ -22,21 +27,30 @@ COMPOSE_SRC="${SCRIPT_DIR}/docker-compose.node.yml"
 OUT_DIR="${SCRIPT_DIR}/nodes"
 
 FORCE=0
+CA_SRC=""
 ARGS=()
-for a in "$@"; do
-    case "$a" in
-        --force) FORCE=1 ;;
-        *) ARGS+=("$a") ;;
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --force) FORCE=1; shift ;;
+        --ca-dir) CA_SRC="$2"; shift 2 ;;
+        *) ARGS+=("$1"); shift ;;
     esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 [--force] IP1 IP2 [IP3 ... IPN]"
+    echo "Usage: $0 [--force] [--ca-dir DIR] IP1 IP2 [IP3 ... IPN]"
     echo "  Generates per-node deploy bundles for DSM storage nodes."
     echo "  Minimum 2 nodes."
     echo "  --force: overwrite an existing bundle directory (see the warning below)."
+    echo "  --ca-dir DIR: sign with the CA in DIR (ca.crt + ca.key) instead of minting one."
     exit 1
+fi
+
+if [ -n "${CA_SRC}" ]; then
+    for f in ca.crt ca.key; do
+        [ -f "${CA_SRC}/${f}" ] || { echo "ERROR: --ca-dir ${CA_SRC} has no ${f}"; exit 1; }
+    done
 fi
 
 # THIS SCRIPT MINTS A NEW CA AND DELETES THE OLD ONE.
@@ -82,11 +96,17 @@ mkdir -p "${CA_DIR}"
 # Every file holding a secret (the CA key, each node's key, the database
 # password in .env and in node.toml) is created at mode 0600 — under umask 077,
 # never chmod-ed after it was written — and the password is never printed.
-echo "Generating CA key and certificate..."
-(umask 077 && openssl genrsa -out "${CA_DIR}/ca.key" 4096 2>/dev/null)
-openssl req -new -x509 -days 3650 -key "${CA_DIR}/ca.key" \
-    -subj "/C=XX/O=DSM/CN=DSM-Storage-CA" \
-    -out "${CA_DIR}/ca.crt" 2>/dev/null
+if [ -n "${CA_SRC}" ]; then
+    echo "Signing with the existing CA from ${CA_SRC} ($(openssl x509 -in "${CA_SRC}/ca.crt" -noout -subject))"
+    (umask 077 && cp "${CA_SRC}/ca.key" "${CA_DIR}/ca.key")
+    cp "${CA_SRC}/ca.crt" "${CA_DIR}/ca.crt"
+else
+    echo "Generating CA key and certificate..."
+    (umask 077 && openssl genrsa -out "${CA_DIR}/ca.key" 4096 2>/dev/null)
+    openssl req -new -x509 -days 3650 -key "${CA_DIR}/ca.key" \
+        -subj "/C=XX/O=DSM/CN=DSM-Storage-CA" \
+        -out "${CA_DIR}/ca.crt" 2>/dev/null
+fi
 
 # Generate a random PostgreSQL password (shared across all nodes for simplicity)
 PG_PASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
