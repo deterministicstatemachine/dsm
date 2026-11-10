@@ -40,7 +40,8 @@ export default function ModernAddContact(): React.JSX.Element {
   const read = useCallback((text: string) => {
     setProblem(null);
     setStep({ kind: 'reading' });
-    readContactCode(text.trim()).then(
+    // A phone keyboard capitalises the first letter typed; the scheme is a scheme, so its case is not the person's choice.
+    readContactCode(text.trim().replace(/^dsm:contact\/v3:/i, 'dsm:contact/v3:')).then(
       (card) => setStep({ kind: 'who', card, profile: profileFromCard(card) }),
       (e: unknown) => {
         setProblem(messageOf(e));
