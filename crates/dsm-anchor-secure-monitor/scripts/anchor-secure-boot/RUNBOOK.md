@@ -72,7 +72,10 @@ The parts:
 | T005 | I-config and R-config empty, tamper sensors off, engineering-sample key | Refused. Nothing here repairs one. |
 
 **Preparing a test part, only if the owner has decided to use one.** It clears that one bit, for good, which is
-Tropic Square's own correction, and erases any key the chip generated before it:
+Tropic Square's own correction, and erases any key the chip generated before it. Like the trial image it runs on
+any board not locked for production, whatever its secret page holds, under a secret of that boot held nowhere:
+it writes the chip and never the board (one image prepares every board: owner, 2026-11-08). The chip reboots
+and latches the change, so the trial image's `--try-run` after it is the proof that it took:
 
 ```
 cargo build --release --features bench_self_enroll,prepare_chip
@@ -165,7 +168,10 @@ Name each board. Its secret and records live under `~/.dsm-anchor-secure-boot/bo
 ```
 ./provision-otp.sh --board <name> --check-blank
 ```
-It refuses when any row this procedure writes already holds a value.
+It refuses when any row this procedure writes already holds a value, with one exception it names: a secret
+page an earlier procedure burned and locked exactly as Step 4 and Step 6 do. Such a board keeps that secret,
+which production reads through the same rows (OTP is never rewritten, and the board holds its only copy):
+skip Step 4 on it, and Step 6 locks the digest page alone. A secret page in any other state stops the procedure.
 
 ## Step 1 — create the boot signing key, once
 
@@ -206,6 +212,7 @@ request `NOT_UP`, naming what is missing (`secure boot is not enabled in OTP`).
 ./provision-otp.sh --board <name> --write-secret            # DRY RUN: prints the command
 ./provision-otp.sh --board <name> --write-secret --commit   # page 48
 ```
+On a board whose secret page Step 0 found sealed, both refuse: it already holds its secret and goes on with it.
 
 ## Step 5 — burn the firmware digest  ⚠️ IRREVERSIBLE
 
@@ -222,7 +229,8 @@ request `NOT_UP`, naming what is missing (`secure boot is not enabled in OTP`).
 ```
 Secure firmware reads both; Non-secure reads neither; nothing writes either. The USB bootloader
 reads the digest and never the secret. With `--commit` this removes `host-secret.bin`: nothing reads it
-again, and it could restore no board, since the chip's key does not leave the chip.
+again, and it could restore no board, since the chip's key does not leave the chip. On a board whose secret
+page Step 0 found sealed, only the digest page is locked here; its secret page is already as this leaves it.
 
 ## Step 7 — burn the boot key's hash  ⚠️ IRREVERSIBLE
 

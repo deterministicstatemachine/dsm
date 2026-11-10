@@ -69,6 +69,31 @@ MU_BIN="$BUILD_DIR/mu-enrolled.bin"
 OTP_JSON="$BUILD_DIR/bootkey-otp.json"
 
 run() { if [ "$COMMIT" = 1 ]; then echo "+ $*"; "$@"; else echo "[dry-run] $*"; fi; }
+# What the board's secret page holds, read fresh (READ-ONLY): `blank`, or `sealed` when an earlier
+# procedure burned a secret there and locked the page exactly as this one does. A board of the second
+# kind goes on with that secret, which production reads through the same rows: OTP is never rewritten,
+# and the board holds the only copy. Anything else is a page this procedure did not write, and it stops.
+secret_page() {
+  local dump="$BOARD_DIR/otp-read.bin"
+  picotool otp dump -r --output "$dump" >/dev/null
+  python3 - "$dump" "$SECRET_ROW" "$SECRET_LOCK_ROW" "$SECRET_LOCK" <<'PAGE'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+rows = [word & 0xffffff for (word,) in struct.iter_unpack("<I", data)]
+if len(rows) != 4096:
+    sys.exit(f"ERROR: the dump holds {len(rows)} rows, not 4096")
+secret, lock_row, lock = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4], 16)
+written = [hex(r) for r in range(secret, secret + 16) if rows[r] != 0]
+if not written and rows[lock_row] == 0:
+    print("blank")
+elif len(written) == 16 and rows[lock_row] == lock:
+    print("sealed")
+else:
+    sys.exit(f"ERROR: the secret page is neither blank nor sealed as this procedure seals it: "
+             f"rows written {written}, lock row {hex(rows[lock_row])} (expected 0 or {hex(lock)}). "
+             "Another procedure wrote this board; nothing here goes on with it.")
+PAGE
+}
 confirm() {
   [ "$COMMIT" = 1 ] || return 0
   picotool info -d || true
@@ -79,30 +104,41 @@ need() { [ -f "$1" ] || { echo "ERROR: no $1 — $2"; exit 1; }; }
 
 case "$CMD" in
   --check-blank)
-    # READ-ONLY. Every row this procedure writes must still be zero.
+    # READ-ONLY. Every row this procedure writes must still be zero, except a secret page an earlier
+    # procedure sealed as this one seals it: that board keeps its secret, and Step 4 and the secret
+    # half of Step 6 are already done on it.
+    page="$(secret_page)"
     dump="$BOARD_DIR/otp-before.bin"
     picotool otp dump -r --output "$dump"
-    python3 - "$dump" "$SECRET_ROW" "$DIGEST_ROW" "$ROLLBACK_ROW" <<'PY'
+    python3 - "$dump" "$SECRET_ROW" "$DIGEST_ROW" "$ROLLBACK_ROW" "$page" <<'PY'
 import struct, sys
 data = open(sys.argv[1], "rb").read()
 rows = [word & 0xffffff for (word,) in struct.iter_unpack("<I", data)]
 if len(rows) != 4096:
     sys.exit(f"ERROR: the dump holds {len(rows)} rows, not 4096")
-secret, digest, rollback = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
-watched = {"sealed secret": range(secret, secret + 16), "digest": range(digest, digest + 16),
+secret, digest, rollback, page = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+watched = {"digest": range(digest, digest + 16),
            "boot key 0": range(0x80, 0x90), "CRIT1": range(0x40, 0x48), "BOOT_FLAGS1": range(0x4b, 0x4e),
-           "secret page lock": range(0xf80 + 96, 0xf80 + 98), "digest page lock": range(0xf80 + 92, 0xf80 + 94),
+           "digest page lock": range(0xf80 + 92, 0xf80 + 94),
            "boot page locks": range(0xf80 + 2, 0xf80 + 6), "rollback version": range(rollback, rollback + 3),
            "rollback page lock": range(0xf80 + 88, 0xf80 + 90), "BOOT_FLAGS0": range(0x48, 0x4b)}
+if page == "blank":
+    watched["sealed secret"] = range(secret, secret + 16)
+    watched["secret page lock"] = range(0xf80 + 96, 0xf80 + 98)
 used = {name: [hex(r) for r in span if rows[r] != 0] for name, span in watched.items()}
 used = {name: found for name, found in used.items() if found}
 if used:
     sys.exit(f"ERROR: this board is not blank where the procedure writes: {used}")
-print("blank where the procedure writes")
+if page == "sealed":
+    print("blank where the procedure writes, except its sealed secret: an earlier procedure burned and "
+          "locked it as this one does, so this board keeps it. Skip Step 4; Step 6 locks the digest page alone.")
+else:
+    print("blank where the procedure writes")
 PY
     ;;
   --gen-secret)
     [ -f "$SECRET_BIN" ] && { echo "ERROR: $SECRET_BIN exists — refusing to regenerate a provisioned secret"; exit 1; }
+    [ "$(secret_page)" = blank ] || { echo "ERROR: this board already holds its sealed secret; it needs none generated"; exit 1; }
     python3 - "$SECRET_BIN" <<'PY'
 import os, sys
 fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -113,6 +149,7 @@ PY
     ;;
   --write-secret)
     need "$SECRET_BIN" "run --gen-secret for this board first"
+    [ "$(secret_page)" = blank ] || { echo "ERROR: this board already holds its sealed secret, and goes on with it: nothing to write"; exit 1; }
     confirm
     run picotool otp load -e -s "$SECRET_ROW" "$SECRET_BIN" -t bin ;;
   --write-digest)
@@ -120,8 +157,13 @@ PY
     confirm
     run picotool otp load -e -s "$DIGEST_ROW" "$MU_BIN" -t bin ;;
   --lock-pages)
+    page="$(secret_page)"
     confirm
-    run picotool otp set -r "$SECRET_LOCK_ROW" "$SECRET_LOCK"
+    if [ "$page" = sealed ]; then
+      echo "the secret page is already locked as this procedure locks it: only the digest page is locked"
+    else
+      run picotool otp set -r "$SECRET_LOCK_ROW" "$SECRET_LOCK"
+    fi
     run picotool otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK"
     # Nothing reads this copy again. It could restore no board, since the chip's key does not leave
     # the chip, and all it can still do is leak.

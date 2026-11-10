@@ -21,19 +21,13 @@ pub enum SealedError {
     /// The bootrom refused the critical-register query.
     #[cfg(any(
         feature = "production",
-        all(
-            feature = "bench_self_enroll",
-            not(any(feature = "identify_chip", feature = "prepare_chip"))
-        )
+        all(feature = "bench_self_enroll", not(feature = "identify_chip"))
     ))]
     Bootrom(hal::rom_data::BootRomApiErrorCode),
     /// This bootrom does not report the critical register.
     #[cfg(any(
         feature = "production",
-        all(
-            feature = "bench_self_enroll",
-            not(any(feature = "identify_chip", feature = "prepare_chip"))
-        )
+        all(feature = "bench_self_enroll", not(feature = "identify_chip"))
     ))]
     Unreported,
     #[cfg(feature = "production")]
@@ -46,8 +40,8 @@ pub enum SealedError {
     Unreadable(usize, hal::otp::Error),
     /// The OTP page was never provisioned.
     Unprovisioned,
-    /// A sealed secret where this image stands down: a trial image on a board locked for production,
-    /// a finished unit, or the prepare image on any board.
+    /// A board locked for production, a finished unit: the trial image and the prepare image stand
+    /// down on it. What its secret page holds decides nothing; neither image uses or writes the page.
     #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
     AlreadySealed,
 }
@@ -57,18 +51,12 @@ impl core::fmt::Debug for SealedError {
         match self {
             #[cfg(any(
                 feature = "production",
-                all(
-                    feature = "bench_self_enroll",
-                    not(any(feature = "identify_chip", feature = "prepare_chip"))
-                )
+                all(feature = "bench_self_enroll", not(feature = "identify_chip"))
             ))]
             Self::Bootrom(code) => write!(f, "bootrom: {code:?}"),
             #[cfg(any(
                 feature = "production",
-                all(
-                    feature = "bench_self_enroll",
-                    not(any(feature = "identify_chip", feature = "prepare_chip"))
-                )
+                all(feature = "bench_self_enroll", not(feature = "identify_chip"))
             ))]
             Self::Unreported => write!(f, "the bootrom does not report the critical register"),
             #[cfg(feature = "production")]
@@ -83,7 +71,7 @@ impl core::fmt::Debug for SealedError {
             Self::AlreadySealed => {
                 write!(
                     f,
-                    "this board's OTP holds a sealed secret where this image stands down"
+                    "this board is locked for production, and this image stands down on it"
                 )
             }
         }
@@ -109,10 +97,7 @@ pub fn assert_secure_context() -> Result<(), SealedError> {
 }
 
 /// Whether this board boots only signed images: secure boot enabled in OTP, as on every finished unit.
-#[cfg(all(
-    feature = "bench_self_enroll",
-    not(any(feature = "identify_chip", feature = "prepare_chip"))
-))]
+#[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
 pub fn locked_for_production() -> Result<bool, SealedError> {
     let crit = hal::rom_data::sys_info_api::otp_critical_register()
         .map_err(SealedError::Bootrom)?

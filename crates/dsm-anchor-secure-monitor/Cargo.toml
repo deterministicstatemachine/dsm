@@ -55,7 +55,9 @@ bench_self_enroll = []
 # The image that does one thing, on a test part whose PTRNG Tropic Square left unconfigured (erratum
 # OI_TR01_ERR_2026090100, T005, T101, T103): clears CFG_START_UP[RNGTEST_DIS], irreversibly, erases any
 # key generated before that, reboots the chip and says how it went. It installs nothing and answers
-# every request with that outcome. Only built on purpose, and a trial image in all else.
+# every request with that outcome. Only built on purpose, and a trial image in all else: it runs on
+# any board not locked for production, whatever its secret page holds, since it writes the chip and
+# never the board.
 prepare_chip = ["bench_self_enroll"]
 # The image that reads the board's chip and writes nothing, to it or to OTP: its part, firmware and
 # certificates, its configuration and access rules, its pairing slots, counter, resident key slot and

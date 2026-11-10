@@ -285,13 +285,13 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     // The board's sealed secret: without it the anchor has no identity to serve under.
     #[cfg(not(feature = "bench_self_enroll"))]
     let mut sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
-    // A board locked for production is a finished unit, and the trial stands down on it. Any other
-    // board, its secret page blank or written by an earlier procedure, takes the trial under a secret
-    // of this boot held nowhere: the page is neither used nor written.
-    #[cfg(all(
-        feature = "bench_self_enroll",
-        not(any(feature = "identify_chip", feature = "prepare_chip"))
-    ))]
+    // A board locked for production is a finished unit, and the trial and the prepare image stand
+    // down on it. Any other board, its secret page blank or written by an earlier procedure, takes
+    // either under a secret of this boot held nowhere: the page is neither used nor written. The
+    // prepare image writes the chip, never the board, and a board whose page an earlier procedure
+    // sealed goes on to production with that page as it is (one image prepares every board: owner,
+    // 2026-11-08).
+    #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
     let mut sealed: [u8; 32] = {
         match sealed::read_sealed_secret() {
             Ok(mut burned) => {
@@ -306,16 +306,6 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         (Rp2350Board { rosc: &rosc })
             .random_key()
             .ok_or(InitFailure::Entropy)?
-    };
-    // The prepare image writes the chip irreversibly, so it runs only on a board whose secret page is
-    // blank, and its secret is one of this boot held nowhere.
-    #[cfg(feature = "prepare_chip")]
-    let mut sealed: [u8; 32] = match sealed::read_sealed_secret() {
-        Err(SealedError::Unprovisioned) => (Rp2350Board { rosc: &rosc })
-            .random_key()
-            .ok_or(InitFailure::Entropy)?,
-        Ok(_burned) => return Err(InitFailure::Sealed(SealedError::AlreadySealed)),
-        Err(cause) => return Err(InitFailure::Sealed(cause)),
     };
     // The identify image binds nothing and needs no secret. It says whether the board holds one.
     #[cfg(feature = "identify_chip")]
