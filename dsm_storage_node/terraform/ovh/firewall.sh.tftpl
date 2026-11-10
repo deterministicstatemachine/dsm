@@ -1,0 +1,13 @@
+
+# Host firewall (terraform/ovh): the project's default security group lets
+# everything in, so the host decides. SSH from the operator's address only;
+# the storage API from anywhere; nothing else inbound. Docker publishes 8080
+# through its own chains, so the 8080 rule states the intent the kernel
+# already honours for the container.
+apt-get install -y -qq ufw
+ufw --force reset
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow from ${allowed_ssh_cidr} to any port 22 proto tcp
+ufw allow 8080/tcp
+ufw --force enable

@@ -272,3 +272,9 @@ WEBSITE_ROADMAP.md
 # docs/bench-proofs/ only when explicitly added (owner rule 2026-07-09).
 /.github/instructions
 dsm_client/android/.kotlin/
+dsm_storage_node/terraform/ovh/.terraform/
+dsm_storage_node/terraform/ovh/.terraform.lock.hcl
+dsm_storage_node/terraform/ovh/terraform.tfstate
+dsm_storage_node/terraform/ovh/terraform.tfstate.backup
+dsm_storage_node/terraform/ovh/terraform.tfstate.d/
+dsm_storage_node/terraform/ovh/terraform.tfvars

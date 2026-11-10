@@ -1,11 +1,12 @@
-# DSM environment config — the beta storage fleet (5 nodes, GCP us-central1).
+# DSM environment config — the beta storage fleet (5 nodes, OVHcloud BHS5).
 # Bundled into the APK: this file and ca.crt beside it are what a default
 # install reaches the network with.
 #
-# The fleet was reprovisioned 2026-11-03 on the storage node at e78fd9208;
-# every member minted a new register incarnation into its fresh database, and
+# The fleet was provisioned 2026-11-10 on OVHcloud Public Cloud (Beauharnois,
+# the owner's own hosting) after the GCP set went down; every member minted a
+# new register incarnation into its fresh database, and
 # the committed set id every member logs is
-#   YTSBGCJFS144MK92CN6FNK4ZAQ60JGYW05N89XXKT25ZRKSA03GG
+#   BE5WR3N11WNNBFFV823D6HYC6824C5DMH39RN1BRNZF8KF2BJ1WG
 # which is the id core pins (dsm::economic::register), so this list must stay
 # exactly the pinned pairs: `dsm_sdk::sdk::storage_set::tests::
 # the_bundled_env_config_resolves_the_pinned_beta_set` refuses anything else.
@@ -35,25 +36,25 @@ custom_ca_certs = ["ca.crt"]
 # every read of the canonical set fails closed.
 [[nodes]]
 name = "dsm-node-1"
-endpoint = "https://34.58.75.224:8080"
-register_incarnation = "0Y3VWSHQXT8C5K9PGQWRT5DS7492HKNT6J2P69DSHR53XSVD26M0"
+endpoint = "https://148.113.157.16:8080"
+register_incarnation = "DFGXMD8BV3JDETMTKDKJ97XA3840YDRV5RX67QJQBYVP42P8ASFG"
 
 [[nodes]]
 name = "dsm-node-2"
-endpoint = "https://35.254.209.202:8080"
-register_incarnation = "J7CX24XQG55SNZHS578HZJJMCFZNTQSNQX5ZAZ1VQPHKN0MFGAX0"
+endpoint = "https://167.114.146.179:8080"
+register_incarnation = "7CM13HKY8J8ZGBNA09KWGQ5KVXG0KT209YYXA60C5VPQ459H43GG"
 
 [[nodes]]
 name = "dsm-node-3"
-endpoint = "https://146.148.99.141:8080"
-register_incarnation = "PJRKQ7C2PF53TAA1SXAWNWXANHWNZ2H983MZ413KB9GTV2FYR5EG"
+endpoint = "https://167.114.146.40:8080"
+register_incarnation = "J86TN30E2AV7NBA6BCEC9HSQ1R55BTR6RCR1MHG3GMZ4GDRF113G"
 
 [[nodes]]
 name = "dsm-node-4"
-endpoint = "https://104.197.96.66:8080"
-register_incarnation = "SCY5EBT0HKAK8167A2NFJT5469ZFTGJA20356EP9JT9T4SR889RG"
+endpoint = "https://148.113.157.129:8080"
+register_incarnation = "F6JYSHQBDB16X707B75GSKHTVPBGAFN1STT7MHM8D6YQN35QXDD0"
 
 [[nodes]]
 name = "dsm-node-5"
-endpoint = "https://35.184.46.44:8080"
-register_incarnation = "B9GP57GMX98H4H67X45QYEQ0JJYQKPRGKNAZGPKCRCF69KVXED2G"
+endpoint = "https://167.114.146.6:8080"
+register_incarnation = "8MNWBZP9W26PJ5DCP8E59HSD4PK5E46DQ0BS77DKK4XVZWESCYK0"

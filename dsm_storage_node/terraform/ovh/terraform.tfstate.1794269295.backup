@@ -1,0 +1,165 @@
+{
+  "version": 4,
+  "terraform_version": "1.5.7",
+  "serial": 13,
+  "lineage": "5f7713a6-5716-8114-0e54-89e0c42e0602",
+  "outputs": {
+    "all_node_ips": {
+      "value": [
+        "148.113.143.169",
+        "167.114.146.43",
+        "15.235.41.134",
+        "148.113.231.20",
+        "51.79.101.236"
+      ],
+      "type": [
+        "tuple",
+        [
+          "string",
+          "string",
+          "string",
+          "string",
+          "string"
+        ]
+      ]
+    },
+    "fleet_summary": {
+      "value": {
+        "beta": [
+          "148.113.143.169",
+          "167.114.146.43",
+          "15.235.41.134",
+          "148.113.231.20",
+          "51.79.101.236"
+        ],
+        "private": []
+      },
+      "type": [
+        "object",
+        {
+          "beta": [
+            "tuple",
+            [
+              "string",
+              "string",
+              "string",
+              "string",
+              "string"
+            ]
+          ],
+          "private": [
+            "tuple",
+            []
+          ]
+        }
+      ]
+    },
+    "private_node_ips": {
+      "value": [],
+      "type": [
+        "tuple",
+        []
+      ]
+    }
+  },
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "openstack_compute_keypair_v2",
+      "name": "deploy",
+      "provider": "provider[\"registry.terraform.io/terraform-provider-openstack/openstack\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "fingerprint": "92:38:83:9f:b3:e6:47:53:f1:04:1b:93:a1:92:99:ba",
+            "id": "dsm-storage-deploy",
+            "name": "dsm-storage-deploy",
+            "private_key": "",
+            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICKQi/NOuJvKOLkybjeFCK5BsxLRZM/R+NvOq7U0d/pw dsm-fleet",
+            "region": "BHS5",
+            "user_id": "",
+            "value_specs": null
+          },
+          "sensitive_attributes": [],
+          "private": "bnVsbA=="
+        }
+      ]
+    },
+    {
+      "module": "module.beta",
+      "mode": "managed",
+      "type": "openstack_compute_instance_v2",
+      "name": "dsm_node",
+      "provider": "provider[\"registry.terraform.io/terraform-provider-openstack/openstack\"]",
+      "instances": [
+        {
+          "index_key": 4,
+          "schema_version": 0,
+          "attributes": {
+            "access_ip_v4": "51.79.101.236",
+            "access_ip_v6": "[2607:5300:205:300::27fb]",
+            "admin_pass": null,
+            "all_metadata": {
+              "fleet": "beta",
+              "node-idx": "5",
+              "project": "dsm-storage",
+              "role": "storage-node"
+            },
+            "all_tags": [],
+            "availability_zone": "nova",
+            "availability_zone_hints": null,
+            "block_device": [],
+            "config_drive": null,
+            "created": "2026-11-09 23:55:09 +0000 UTC",
+            "flavor_id": "0d338e52-cfba-4e32-914e-c2ea19d2a9df",
+            "flavor_name": "d2-4",
+            "force_delete": false,
+            "id": "ee65f594-6ac9-4266-b7d5-41febb645a06",
+            "image_id": "3d9d1baf-e769-4e10-a23a-0eff02da4706",
+            "image_name": "Ubuntu 22.04",
+            "key_pair": "dsm-storage-deploy",
+            "metadata": {
+              "fleet": "beta",
+              "node-idx": "5",
+              "project": "dsm-storage",
+              "role": "storage-node"
+            },
+            "name": "dsm-storage-node-5",
+            "network": [
+              {
+                "access_network": false,
+                "fixed_ip_v4": "51.79.101.236",
+                "fixed_ip_v6": "[2607:5300:205:300::27fb]",
+                "mac": "fa:16:3e:16:e3:7d",
+                "name": "Ext-Net",
+                "port": "",
+                "uuid": "d7eaf2f8-d9d8-465b-9244-fd4736660570"
+              }
+            ],
+            "network_mode": null,
+            "personality": [],
+            "power_state": "active",
+            "region": "BHS5",
+            "scheduler_hints": [],
+            "security_groups": [
+              "default"
+            ],
+            "stop_before_destroy": false,
+            "tags": null,
+            "timeouts": null,
+            "updated": "2026-11-09 23:55:51 +0000 UTC",
+            "user_data": "7757a5149ef87ec17af934c24c93d32bc8d23cbd",
+            "vendor_options": []
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxODAwMDAwMDAwMDAwLCJkZWxldGUiOjE4MDAwMDAwMDAwMDAsInVwZGF0ZSI6MTgwMDAwMDAwMDAwMH19",
+          "dependencies": [
+            "openstack_compute_keypair_v2.deploy"
+          ]
+        }
+      ]
+    }
+  ],
+  "check_results": null
+}

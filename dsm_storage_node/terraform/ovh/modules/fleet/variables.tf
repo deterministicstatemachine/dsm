@@ -1,0 +1,9 @@
+variable "name_prefix" { type = string }
+variable "node_count" { type = number }
+variable "flavor_name" { type = string }
+variable "image_name" { type = string }
+variable "key_pair" { type = string }
+variable "security_group" { type = string }
+variable "project_tag" { type = string }
+variable "fleet" { type = string }
+variable "user_data" { type = string }
