@@ -148,6 +148,17 @@ describe('the Modern skin', () => {
     expect(screen.queryByText(/^0$/)).not.toBeInTheDocument();
   });
 
+  it('offers the welcome claim to a new wallet that lists ERA at zero, and not once money has moved', () => {
+    // Rust lists ERA from the first day, at zero: that is still a wallet that holds nothing.
+    const { unmount } = renderShell([currency('ERA', '0.00', 0n)], []);
+    expect(within(screen.getByLabelText('Total balance')).getByText('0.00')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Get your welcome ERA' })).toBeInTheDocument();
+    unmount();
+    // Spent down to zero after payments: no welcome claim to offer again.
+    renderShell([currency('ERA', '0.00', 0n)], history);
+    expect(screen.queryByRole('button', { name: 'Get your welcome ERA' })).not.toBeInTheDocument();
+  });
+
   it('opens a contact from People and closes it with Back, as the phone back button does', async () => {
     renderShell();
     fireEvent.click(within(screen.getByRole('navigation', { name: 'Wallet sections' })).getByRole('button', { name: 'People' }));
