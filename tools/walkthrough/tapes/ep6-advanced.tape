@@ -25,7 +25,7 @@ Type `make dev-wallet-connect CODE="$CODE"`
 Enter
 Wait
 Sleep 5s
-Type `S=$(make -s app ARGS=connections | awk '$NF=="CONNECTED"{print $2}' | tail -1)`
+Type `S=$(make -s app ARGS=connections | awk -v w="$(make -s wallet ARGS=id)" '$4==w && $NF=="CONNECTED"{print $2}')`
 Enter
 Wait
 Type `make app ARGS="price $S ERA GOLD 0.50"`
@@ -72,7 +72,7 @@ Type `make wallet2 ARGS="connect $CODE2"`
 Enter
 Wait
 Sleep 4s
-Type `S2=$(make -s app ARGS=connections | awk '$NF=="CONNECTED"{print $2}' | tail -1)`
+Type `S2=$(make -s app ARGS=connections | awk -v w="$(make -s wallet2 ARGS=id)" '$4==w && $NF=="CONNECTED"{print $2}')`
 Enter
 Wait
 Type `make app ARGS="stake $S $S2 'match 1' ERA 1.00 A"`

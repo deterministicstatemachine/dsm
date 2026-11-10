@@ -2042,8 +2042,6 @@ impl AppRouterImpl {
         ))
     }
 
-    /// A committed send that can never complete, for `why`.
-
     /// Sign a built receipt as its sender (party A): sig_a with a per-step
     /// ephemeral key chained from this device's AK (whitepaper §11.1), the
     /// key encapsulated for the recipient's Kyber key. Returns the full
@@ -2137,7 +2135,7 @@ impl AppRouterImpl {
                     let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
                         commitment: &commitment,
                         h_n: receipt.parent_tip,
-                        c_pre: c_pre,
+                        c_pre,
                         devid_sender: receipt.devid_a,
                         relationship_key: rel_key,
                         root_ak_keypair: Some((&ak_pk, &ak_sk)),
@@ -2150,11 +2148,7 @@ impl AppRouterImpl {
                     match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
                         Ok(out) => {
                             log::info!(
-                                "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
-                                 cert_len={}, sig_len={}, used_root_ak={}",
-                                out.ek_pk.len(),
-                                out.ek_cert.len(),
-                                out.sig.len(),
+                                "[wallet.send] §11.1 per-step EK sign: used_root_ak={}",
                                 out.used_root_ak,
                             );
 
@@ -2227,6 +2221,7 @@ impl AppRouterImpl {
         Ok((rc, ek_material))
     }
 
+    /// A committed send that can never complete, for `why`.
     fn stranded(&self, why: String) -> OnlineSent {
         log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
         OnlineSent::Stranded {

@@ -2317,7 +2317,7 @@ pub(crate) fn ek_step_objects(
             Some(send)
                 if matches!(
                     dsm::verification::receipt_verification::per_step_ek_predecessor_in_lineage(
-                        &*applied_parent_tip_b,
+                        applied_parent_tip_b,
                         Some((&send.canonical_child, ())),
                         None,
                         (),

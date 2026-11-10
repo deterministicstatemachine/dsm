@@ -84,7 +84,7 @@ impl LiveDevice {
             .chain_tip(&compute_smt_key(&self.devid, &other))
             .is_none()
         {
-            self.head = self.head.establish_relationship(other)?;
+            self.head = self.head.relationship_established_by_fixture(other)?;
         }
         Ok(())
     }

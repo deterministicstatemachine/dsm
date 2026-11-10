@@ -3,7 +3,7 @@
 Output docs/walkthrough/clips/ep5-requests.mp4
 Source tools/walkthrough/tapes/_settings.tape
 
-Type `S=$(make -s app ARGS=connections | awk '$NF=="CONNECTED"{print $2}' | tail -1)`
+Type `S=$(make -s app ARGS=connections | awk -v w="$(make -s wallet ARGS=id)" '$4==w && $NF=="CONNECTED"{print $2}')`
 Enter
 Wait
 Sleep 2s
