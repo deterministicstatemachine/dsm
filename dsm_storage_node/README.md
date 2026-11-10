@@ -236,6 +236,24 @@ bash deploy/provision_aws.sh --ssh-key ~/.ssh/dsm-deploy --ssh-cidr <your IP>/32
 Terraform shows its plan and asks before it applies anything: each node's
 database lives on its instance.
 
+The beta fleet runs on OVHcloud Public Cloud (OpenStack, region BHS5). It is
+provisioned the same way, from the project's OpenStack RC file (the OVHcloud
+panel offers it per OpenStack user) and a password file it reads instead of
+asking; the project's security-group quota is zero on a fresh project, so each
+node's bootstrap installs a host firewall (SSH from `--ssh-cidr` only, 8080 from
+anywhere). Then the two-phase bring-up assembles the set:
+
+```bash
+bash deploy/provision_ovh.sh --ssh-key ~/.ssh/dsm-deploy --ssh-cidr <your IP>/32 \
+    --ca-dir deploy/nodes/ca      # reuse the CA the app's env config carries
+bash deploy/assemble_storage_set.sh --ssh-key ~/.ssh/dsm-deploy --ca-file deploy/nodes/ca/ca.crt \
+    <IP1> <IP2> <IP3> <IP4> <IP5>
+```
+
+`assemble_storage_set.sh` prints the five `(member, incarnation)` pairs and
+the set id every member logged; pin them in `dsm::economic::register`,
+`dsm_sdk::sdk::storage_set` and the bundled client env config.
+
 This single command:
 
 1. Provisions 6 EC2 instances across 3 AWS regions via Terraform
@@ -335,8 +353,10 @@ dsm_storage_node/
 ├── config/
 │   └── production.toml           # Node config template
 ├── deploy/
-│   ├── provision_aws.sh          # Main deploy orchestrator
-│   ├── generate_node_configs.sh   # Per-node TLS certs + configs
+│   ├── provision_aws.sh          # Main deploy orchestrator (AWS)
+│   ├── provision_ovh.sh          # The beta fleet on OVHcloud (OpenStack)
+│   ├── assemble_storage_set.sh   # Phase 2: collect incarnations, write the set, restart
+│   ├── generate_node_configs.sh   # Per-node TLS certs + configs (--ca-dir reuses a CA)
 │   ├── push_and_start.sh         # Docker build + push + start
 │   ├── check_nodes.sh            # Health check all nodes
 │   ├── teardown_aws.sh           # Destroy all AWS resources
@@ -346,10 +366,14 @@ dsm_storage_node/
     ├── aws/                      # 3 region providers + module calls
     │   ├── main.tf, variables.tf, outputs.tf
     │   └── modules/region/       # Per-region Terraform module
-    └── gcp/                      # The beta fleet: 5 nodes in us-central1
+    ├── gcp/                      # The former beta fleet: 5 nodes in us-central1 (down 2026-11-07)
+    │   ├── main.tf, variables.tf, outputs.tf
+    │   ├── user_data.sh          # Node bootstrap (Docker CE), used by every cloud
+    │   └── modules/region/
+    └── ovh/                      # The beta fleet: 5 nodes in BHS5; a private fleet at count 0
         ├── main.tf, variables.tf, outputs.tf
-        ├── user_data.sh          # Node bootstrap (Docker CE), used by both clouds
-        └── modules/region/
+        ├── firewall.sh.tftpl     # Host firewall appended to the bootstrap
+        └── modules/fleet/
 ```
 
 ### Cloud Troubleshooting
