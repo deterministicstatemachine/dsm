@@ -23,11 +23,13 @@ on:
       - '**/*.md'
   # Run on every PR regardless of base branch, so stacked PRs (whose base is
   # another feature branch, not main) are validated too — not only the one at
-  # the bottom of a stack that targets main. Push/schedule stay main-only.
+  # the bottom of a stack that targets main. Push stays main-only, and a push
+  # runs only the layers its own diff touches (owner, 2026-11-09).
   # Manual runs pick a validation preset. A preset means "pretend this
   # surface changed" and goes through the same escalation graph as an
   # automatic PR selection — it can never be weaker than automatic CI.
-  # FULL runs everything regardless of what git thinks changed.
+  # FULL (the default) runs everything regardless of what git thinks changed:
+  # the only run that does, along with the conformance evidence job.
   workflow_dispatch:
     inputs:
       preset:
@@ -74,9 +76,10 @@ jobs:
   # --------------------------------------------------------------------------
   # Layer selection. ci/layers.toml is the dependency map; ci/select_layers.py
   # applies it: FULL trigger → multi-surface mapping → escalation closure,
-  # unknown path = FULL. Pushes to main and nightly always run FULL. The
-  # selector's own tests run first — it proves itself before it may narrow
-  # anything — and ci/** is itself a FULL trigger.
+  # unknown path = FULL. A push to main runs only the layers its own diff
+  # maps to and is never FULL; FULL runs when CI is started by hand (owner,
+  # 2026-11-09). The selector's own tests run first — it proves itself before
+  # it may narrow anything — and ci/** is itself a FULL trigger on a PR.
   # --------------------------------------------------------------------------
   select:
     name: Select layers
@@ -92,23 +95,35 @@ jobs:
       sdk_node_protocol: ${{ steps.sel.outputs.sdk_node_protocol }}
       rust: ${{ steps.sel.outputs.rust }}
       rust_matrix: ${{ steps.sel.outputs.rust_matrix }}
+      sdk_sharded: ${{ steps.sel.outputs.sdk_sharded }}
+      sdk_shards: ${{ steps.sdk.outputs.sdk_shards }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Selector self-test
-        run: python3 ci/test_select_layers.py
+        run: |
+          python3 ci/test_select_layers.py
+          python3 ci/test_sdk_tests.py
 
       - name: Select
         id: sel
         env:
           EVENT: ${{ github.event_name }}
           PRESET: ${{ github.event.inputs.preset }}
-          BASE: ${{ github.event.pull_request.base.sha }}
+          # A pull request compares with its base; a push with the commit
+          # main was at before it.
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.sha }}
         run: |
           python3 ci/select_layers.py --event "$EVENT" --preset "$PRESET" --base "$BASE" --head "$HEAD" | tee -a "$GITHUB_OUTPUT"
+
+      # How many shards the dsm_sdk library suite splits into (ci/sdk_tests.py).
+      - name: SDK shards
+        id: sdk
+        if: steps.sel.outputs.sdk_sharded == 'true'
+        run: python3 ci/sdk_tests.py shards | tee -a "$GITHUB_OUTPUT"
 
   # --------------------------------------------------------------------------
   # Rust gates: purity checks, safety lints, fmt/clippy, the --all-features
@@ -220,11 +235,11 @@ jobs:
           bash ci/audit_every_lockfile.sh
 
   # --------------------------------------------------------------------------
-  # Rust tests, one job per crate group, in parallel. The union of the three
-  # groups is exactly `cargo test --workspace --exclude dsm_storage_node`
-  # plus the storage node's suite on Postgres — the same board, split.
-  # No path-scoping here: every PR runs every group. Scoping comes later and
-  # only once the dependency mapping is shown to be conservative.
+  # Rust tests, one job per crate group, in parallel. With `sdk-test` below,
+  # the union of the groups is exactly `cargo test --workspace --exclude
+  # dsm_storage_node` plus the storage node's suite on Postgres — the same
+  # board, split. Which groups run follows ci/layers.toml; dsm_sdk is not a
+  # group here, it runs sharded in `sdk-test`.
   # --------------------------------------------------------------------------
   rust-test:
     name: Rust tests (${{ matrix.group }})
@@ -301,17 +316,36 @@ jobs:
         # Merge before the runner captures them so evidence keeps their order.
         run: |
           exec 2>&1
-          ${{ matrix.run }}
+          set -o pipefail
+          { ${{ matrix.run }}
+          } | tee rust-test.log
+
+      # The conformance evidence job reads every test job's log.
+      - name: Keep the test log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: test-log-${{ matrix.group }}
+          path: rust-test.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   # --------------------------------------------------------------------------
-  # The exhaustive board, unsplit, on every push to main: the exact command
-  # CLAUDE.md names as "the board". PRs run the same tests through the
-  # per-crate matrix above; this job is the safety net that proves the union
-  # was the whole, on the commit that actually lands.
+  # dsm_sdk's suite, split across parallel runners (ci/sdk_tests.py).
+  #
+  # Its library tests were one job of ~1,460 tests run one at a time: about
+  # 150 minutes measured on 2026-11-09, nearly all of a three-hour run. Each
+  # shard builds the suite, lists the binary's tests, and runs its
+  # time-balanced share by exact name, still --test-threads=1. It then checks
+  # the log shows exactly its share run: a name that matched nothing, or a
+  # filter that matched more, fails the shard. Every shard plans from the same
+  # list and timing table, so the shards together run each test exactly once.
+  # Shard 1 also runs the integration tests and the doc tests (minutes).
   # --------------------------------------------------------------------------
-  rust-board:
-    name: Rust board (main)
-    if: github.event_name == 'push'
+  sdk-test:
+    name: Rust tests (dsm_sdk ${{ matrix.shard }}/${{ matrix.of }})
+    needs: [select]
+    if: needs.select.outputs.sdk_sharded == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -328,10 +362,13 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-    # The storage node's store is Postgres, and the SDK suites run their nodes
-    # on it: every node-backed test needs this server.
+    # The SDK suites run their storage nodes on Postgres.
     env:
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.select.outputs.sdk_shards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -351,47 +388,103 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: board
+          key: dsm_sdk
 
       - name: Install CI system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler ripgrep
 
-      - name: Test (whole workspace)
+      - name: Build and list the library tests
         run: |
           set -o pipefail
-          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee board.log
-          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board.log
+          cargo test --locked -p dsm_sdk --release --lib --no-run
+          cargo test --locked -p dsm_sdk --release --lib -- --list --format terse > sdk-list.txt
+          echo "$(grep -c ': test$' sdk-list.txt) library tests listed"
 
-      # Jest tests are evidence for the frontend's own behaviour (owner ruling,
-      # 2026-10-27): the board runs them too, and keeps Jest's own results.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: dsm_client/frontend/package-lock.json
-
-      - name: Test (frontend)
-        working-directory: dsm_client/frontend
+      - name: Choose this shard's tests
+        env:
+          SHARD: ${{ matrix.shard }}
+          OF: ${{ matrix.of }}
         run: |
-          npm ci
-          npm test -- --ci --json --outputFile="$GITHUB_WORKSPACE/jest.json"
+          python3 ci/sdk_tests.py plan --list sdk-list.txt --shard "$SHARD" --of "$OF" > sdk-shard.txt
 
-      # A requirement is Met only on tests that ran and passed on this board:
-      # the same gate the PR jobs run statically, given the logs. A test a row
-      # names that was not in these logs, crashed, or failed fails the board.
-      - name: Conformance evidence, executed
-        run: python3 ci/conformance_evidence.py --board-log board.log --jest-log jest.json
+      # --test-threads=1 and --release: see the `rust-test` job's Test step.
+      # With no names at all, `cargo test` would run EVERY test, so an empty
+      # share runs nothing instead.
+      - name: Test (library, this shard)
+        run: |
+          exec 2>&1
+          set -o pipefail
+          mapfile -t names < sdk-shard.txt
+          if [ "${#names[@]}" -eq 0 ]; then
+            echo "This shard was given no tests."
+            : > sdk-shard.log
+            exit 0
+          fi
+          cargo test --locked -p dsm_sdk --release --lib -- --exact --nocapture --test-threads=1 "${names[@]}" \
+            | tee sdk-shard.log
 
-      - name: Keep the board log
+      - name: The shard ran exactly the tests it was given
+        run: python3 ci/sdk_tests.py check --log sdk-shard.log --expect "$(wc -l < sdk-shard.txt)"
+
+      - name: Test (integration and doc tests)
+        if: matrix.shard == 1
+        run: |
+          exec 2>&1
+          set -o pipefail
+          { cargo test --locked -p dsm_sdk --release --test '*' -- --nocapture --test-threads=1
+            cargo test --locked -p dsm_sdk --release --doc -- --nocapture --test-threads=1
+          } | tee sdk-integration.log
+
+      # The conformance evidence job reads every test job's log.
+      - name: Keep the test logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: board-log
+          name: test-log-dsm_sdk-${{ matrix.shard }}
           path: |
-            board.log
-            jest.json
+            sdk-shard.log
+            sdk-integration.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Conformance evidence, executed: a requirement is Met only on tests that
+  # ran and passed. It reads the logs of every test job of a FULL run (CI
+  # started by hand): the Rust groups, every dsm_sdk shard, and Jest's own
+  # results (Jest tests are evidence for the frontend's own behaviour, owner
+  # ruling 2026-10-27). A test a row names that is in none of these logs,
+  # crashed, or failed fails this job. It replaces the unsplit board that
+  # re-ran the whole workspace serially on every push to main (~3h20m).
+  # --------------------------------------------------------------------------
+  evidence:
+    name: Conformance evidence (FULL)
+    needs: [select, rust-test, sdk-test, frontend]
+    if: always() && github.event_name == 'workflow_dispatch' && needs.select.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Fetch every test job's log
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: test-log-*
+          path: logs
+
+      - name: Fetch Jest's results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: jest-results
+          path: jest
+
+      - name: Conformance evidence, executed
+        run: |
+          mapfile -t logs < <(find logs -name '*.log' | sort)
+          args=()
+          for f in "${logs[@]}"; do args+=(--board-log "$f"); done
+          echo "${#logs[@]} test logs"
+          python3 ci/conformance_evidence.py "${args[@]}" --jest-log jest/jest.json
 
   # --------------------------------------------------------------------------
   # Storage node on Postgres — its only store, the one the fleet deploys.
@@ -549,8 +642,12 @@ jobs:
   formal-validation:
     name: Formal Validation
     runs-on: ubuntu-latest
-    needs: [select, rust-gates, rust-test]
-    if: github.event_name == 'workflow_dispatch' && needs.select.outputs.formal == 'true'
+    needs: [select, rust-gates, rust-test, sdk-test]
+    # A test job the selection skipped must not skip this one; a failed or
+    # cancelled one still does.
+    if: >-
+      always() && github.event_name == 'workflow_dispatch' && needs.select.outputs.formal == 'true' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -639,7 +736,16 @@ jobs:
         run: npm run type-check
 
       - name: Test
-        run: npm test -- --passWithNoTests --ci
+        run: npm test -- --passWithNoTests --ci --json --outputFile="$GITHUB_WORKSPACE/jest.json"
+
+      - name: Keep Jest's results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: jest-results
+          path: jest.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Build
         run: npm run build
@@ -1045,8 +1151,12 @@ jobs:
   sbom:
     name: SBOM
     runs-on: ubuntu-latest
-    needs: [select, rust-gates, rust-test]
-    if: needs.select.outputs.rust == 'true'
+    needs: [select, rust-gates, rust-test, sdk-test]
+    # A test job the selection skipped must not skip this one; a failed or
+    # cancelled one still does.
+    if: >-
+      always() && needs.select.outputs.rust == 'true' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -1081,8 +1191,12 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
-    needs: [select, rust-gates, rust-test]
-    if: needs.select.outputs.rust == 'true'
+    needs: [select, rust-gates, rust-test, sdk-test]
+    # A test job the selection skipped must not skip this one; a failed or
+    # cancelled one still does.
+    if: >-
+      always() && needs.select.outputs.rust == 'true' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

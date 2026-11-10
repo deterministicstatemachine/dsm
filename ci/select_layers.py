@@ -8,15 +8,21 @@ explicit file list, and prints GitHub Actions outputs:
     core|sdk|jni_android|storage|frontend|formal|sdk_node_protocol=true|false
     rust=true|false            any Rust layer selected (gates job)
     rust_matrix=<json>         the include-list for the Rust test matrix
+    sdk_sharded=true|false     the dsm_sdk suite runs (job sdk-test, sharded)
     summary=<text>             one line for the job log
 
 Precedence (ci/layers.toml documents the same order):
-  1. FULL: event push/schedule, preset FULL, a [full_triggers] path, or an
-     unmapped path (unknown = FULL).
+  1. FULL: preset FULL (CI started by hand, the default), or on a pull
+     request a [full_triggers] path or an unmapped path (unknown = FULL).
   2. Surface mapping: every surface a file matches (multi-match).
   3. Escalation closure over [escalation].
   A preset other than FULL means "pretend that surface changed": the closure
   of that surface, regardless of the diff.
+
+A push to main is never FULL (owner, 2026-11-09: "Should be only when you
+manually do it on main that it runs the full thing"). It runs the layers its
+own diff maps to; a [full_triggers] or unmapped path adds nothing on a push,
+because the pull request it came from already ran its own selection.
 """
 from __future__ import annotations
 
@@ -80,7 +86,7 @@ def closure(seed: set[str], escalation: dict[str, list[str]]) -> set[str]:
 
 def select(cfg: dict, files: list[str], event: str, preset: str | None) -> tuple[set[str], bool, str]:
     """Return (layers, full, reason)."""
-    if event in ("push", "schedule"):
+    if event == "schedule":
         return set(ALL_LAYERS), True, f"event={event}: FULL always"
     if preset:
         preset = preset.strip().upper()
@@ -91,27 +97,31 @@ def select(cfg: dict, files: list[str], event: str, preset: str | None) -> tuple
         layers = closure({preset}, cfg["escalation"])
         return layers, False, f"preset={preset}: pretend {preset} changed → {sorted(layers)}"
 
+    push = event == "push"
     ignored = cfg.get("ignored", {}).get("paths", [])
     considered = [f for f in files if not matches_any(f, ignored)]
     if not considered:
+        if push:
+            return set(), False, "push: no mapped changes, no test layer"
         # Nothing but ignored files (or an empty diff). Nothing to prove; the
         # cheapest honest answer is still to run FULL rather than nothing.
         return set(ALL_LAYERS), True, "no mapped changes: FULL"
 
     full_globs = cfg["full_triggers"]["paths"]
-    for f in considered:
-        if matches_any(f, full_globs):
-            return set(ALL_LAYERS), True, f"FULL trigger: {f}"
+    if not push:
+        for f in considered:
+            if matches_any(f, full_globs):
+                return set(ALL_LAYERS), True, f"FULL trigger: {f}"
 
     seed: set[str] = set()
     for f in considered:
         hit = [name for name, globs in cfg["surfaces"].items() if matches_any(f, globs)]
-        if not hit:
+        if not hit and not push:
             return set(ALL_LAYERS), True, f"unmapped path: {f} → FULL"
         seed.update(hit)
 
     layers = closure(seed, cfg["escalation"])
-    return layers, False, f"changed {sorted(seed)} → {sorted(layers)}"
+    return layers, False, f"{'push: ' if push else ''}changed {sorted(seed)} → {sorted(layers)}"
 
 
 def rust_matrix(cfg: dict, layers: set[str]) -> list[dict]:
@@ -123,9 +133,20 @@ def rust_matrix(cfg: dict, layers: set[str]) -> list[dict]:
             continue
         if any(u in layers for u in spec.get("unless", [])):
             continue
+        if spec.get("sharded"):
+            continue  # its own job (sdk-test), not a matrix entry
         run = spec["run"].replace("{lib_filters}", lib_filters)
         include.append({"group": group, "run": run})
     return include
+
+
+def active_groups(cfg: dict, layers: set[str]) -> set[str]:
+    """Every group the layers select, matrix entries and sharded ones alike."""
+    out = set()
+    for group, spec in cfg["groups"].items():
+        if any(w in layers for w in spec["when"]) and not any(u in layers for u in spec.get("unless", [])):
+            out.add(group)
+    return out
 
 
 def changed_files(base: str, head: str) -> list[str]:
@@ -144,6 +165,7 @@ def outputs(cfg: dict, layers: set[str], full: bool, reason: str) -> list[str]:
         lines.append(f"{layer.lower()}={'true' if layer in layers else 'false'}")
     lines.append(f"rust={'true' if layers & RUST_LAYERS else 'false'}")
     lines.append(f"rust_matrix={json.dumps(rust_matrix(cfg, layers))}")
+    lines.append(f"sdk_sharded={'true' if 'dsm_sdk' in active_groups(cfg, layers) else 'false'}")
     lines.append(f"summary={reason}")
     return lines
 
@@ -160,12 +182,12 @@ def main() -> int:
     cfg = load_map(Path(args.map))
     if args.files is not None:
         files = args.files
-    elif args.event in ("push", "schedule") or (args.preset and args.preset.strip()):
+    elif args.event == "schedule" or (args.preset and args.preset.strip()):
         files = []
     else:
-        if not args.base:
+        if not args.base or set(args.base) == {"0"}:
             print("select_layers: no base for a diff → FULL", file=sys.stderr)
-            files, args.event = [], "push"
+            files, args.event, args.preset = [], "dispatch", "FULL"
         else:
             files = changed_files(args.base, args.head)
     layers, full, reason = select(cfg, files, args.event, args.preset or None)

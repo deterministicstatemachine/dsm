@@ -275,3 +275,11 @@ dsm_client/android/.kotlin/
 # the local storage set, its CA and keys, each account's data, secrets and logs.
 /.dsm-dev/
 /.venv/
+dsm_storage_node/terraform/ovh/.terraform/
+dsm_storage_node/terraform/ovh/.terraform.lock.hcl
+dsm_storage_node/terraform/ovh/terraform.tfstate
+dsm_storage_node/terraform/ovh/terraform.tfstate.backup
+dsm_storage_node/terraform/ovh/terraform.tfstate.*.backup
+dsm_storage_node/terraform/ovh/terraform.tfstate.d/
+dsm_storage_node/terraform/ovh/terraform.tfvars
+dsm_storage_node/terraform/ovh/*.tfplan

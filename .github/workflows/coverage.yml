@@ -1,18 +1,12 @@
 # Coverage is a REPORT, not a merge gate: the main-branch ruleset requires no
-# status checks, and the Rust board in ci.yml already executes every test a
-# PR can affect. Re-running the whole workspace instrumented on every pull
-# request cost 77–87 minutes per PR (measured 2026-09-13) and was the entire
-# critical path. So it runs where the report is read from — every push to
-# main — and nightly, so a quiet main still gets a fresh number.
+# status checks. It runs the whole workspace instrumented, one test at a time,
+# so it runs only when started by hand (owner, 2026-11-09: "Should be only
+# when you manually do it on main that it runs the full thing"). On every
+# push to main it ran 5 hours and more, and hit GitHub's 6-hour limit.
 name: Coverage
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-  schedule:
-    - cron: '0 4 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
