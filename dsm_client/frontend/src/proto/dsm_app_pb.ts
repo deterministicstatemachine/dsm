@@ -347,6 +347,29 @@ export enum RelationshipSendBlockReason {
    * @generated from enum value: RELATIONSHIP_SEND_BLOCK_REASON_INTERNAL_ERROR = 3;
    */
   INTERNAL_ERROR = 3,
+
+  /**
+   * The relationship is not established on both sides yet (DSM Amendment
+   * A33): this device's ESTABLISH step awaits the other side's add, or the
+   * other side's step has not arrived.
+   *
+   * @generated from enum value: RELATIONSHIP_SEND_BLOCK_REASON_NOT_ESTABLISHED = 4;
+   */
+  NOT_ESTABLISHED = 4,
+
+  /**
+   * This device ended the relationship; the other side has not acknowledged yet.
+   *
+   * @generated from enum value: RELATIONSHIP_SEND_BLOCK_REASON_ENDING = 5;
+   */
+  ENDING = 5,
+
+  /**
+   * The relationship has ended, for good.
+   *
+   * @generated from enum value: RELATIONSHIP_SEND_BLOCK_REASON_ENDED = 6;
+   */
+  ENDED = 6,
 }
 // Retrieve enum metadata with: proto3.getEnumType(RelationshipSendBlockReason)
 proto3.util.setEnumType(RelationshipSendBlockReason, "dsm.RelationshipSendBlockReason", [
@@ -354,6 +377,66 @@ proto3.util.setEnumType(RelationshipSendBlockReason, "dsm.RelationshipSendBlockR
   { no: 1, name: "RELATIONSHIP_SEND_BLOCK_REASON_PENDING_CATCHUP" },
   { no: 2, name: "RELATIONSHIP_SEND_BLOCK_REASON_STATE_DIVERGENCE" },
   { no: 3, name: "RELATIONSHIP_SEND_BLOCK_REASON_INTERNAL_ERROR" },
+  { no: 4, name: "RELATIONSHIP_SEND_BLOCK_REASON_NOT_ESTABLISHED" },
+  { no: 5, name: "RELATIONSHIP_SEND_BLOCK_REASON_ENDING" },
+  { no: 6, name: "RELATIONSHIP_SEND_BLOCK_REASON_ENDED" },
+]);
+
+/**
+ * Where a relationship stands on this device (DSM Amendment A33). Set by
+ * Rust alone; the wallet shows it.
+ *
+ * @generated from enum dsm.RelationshipState
+ */
+export enum RelationshipState {
+  /**
+   * @generated from enum value: RELATIONSHIP_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The contact is added; no establishment is on the chain yet.
+   *
+   * @generated from enum value: RELATIONSHIP_STATE_OPENED = 1;
+   */
+  OPENED = 1,
+
+  /**
+   * This device made the ESTABLISH step and waits for the other side's add.
+   *
+   * @generated from enum value: RELATIONSHIP_STATE_PROPOSED = 2;
+   */
+  PROPOSED = 2,
+
+  /**
+   * The countersigned ESTABLISH is held: value may move.
+   *
+   * @generated from enum value: RELATIONSHIP_STATE_ESTABLISHED = 3;
+   */
+  ESTABLISHED = 3,
+
+  /**
+   * This device ended the relationship and waits for the acknowledgement.
+   *
+   * @generated from enum value: RELATIONSHIP_STATE_ENDING = 4;
+   */
+  ENDING = 4,
+
+  /**
+   * A termination is on the chain: final.
+   *
+   * @generated from enum value: RELATIONSHIP_STATE_ENDED = 5;
+   */
+  ENDED = 5,
+}
+// Retrieve enum metadata with: proto3.getEnumType(RelationshipState)
+proto3.util.setEnumType(RelationshipState, "dsm.RelationshipState", [
+  { no: 0, name: "RELATIONSHIP_STATE_UNSPECIFIED" },
+  { no: 1, name: "RELATIONSHIP_STATE_OPENED" },
+  { no: 2, name: "RELATIONSHIP_STATE_PROPOSED" },
+  { no: 3, name: "RELATIONSHIP_STATE_ESTABLISHED" },
+  { no: 4, name: "RELATIONSHIP_STATE_ENDING" },
+  { no: 5, name: "RELATIONSHIP_STATE_ENDED" },
 ]);
 
 /**
@@ -23043,6 +23126,47 @@ export class ContactUnpairRequest extends Message<ContactUnpairRequest> {
 }
 
 /**
+ * contacts.terminate: end the relationship with the contact (DSM Amendment
+ * A33): this device makes the TERMINATE step on the relationship's chain and
+ * nothing moves on it from then on. Answers the contact as it stands after.
+ *
+ * @generated from message dsm.ContactTerminateRequest
+ */
+export class ContactTerminateRequest extends Message<ContactTerminateRequest> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ContactTerminateRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ContactTerminateRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactTerminateRequest {
+    return new ContactTerminateRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ContactTerminateRequest {
+    return new ContactTerminateRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ContactTerminateRequest {
+    return new ContactTerminateRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ContactTerminateRequest | PlainMessage<ContactTerminateRequest> | undefined, b: ContactTerminateRequest | PlainMessage<ContactTerminateRequest> | undefined): boolean {
+    return proto3.util.equals(ContactTerminateRequest, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.ContactManualAddRequest
  */
 export class ContactManualAddRequest extends Message<ContactManualAddRequest> {
@@ -23180,6 +23304,13 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
    */
   profile?: ContactProfileV1;
 
+  /**
+   * Where the relationship stands on this device (DSM Amendment A33).
+   *
+   * @generated from field: dsm.RelationshipState relationship_state = 16;
+   */
+  relationshipState = RelationshipState.UNSPECIFIED;
+
   constructor(data?: PartialMessage<ContactAddResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -23200,6 +23331,7 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
     { no: 13, name: "send_status", kind: "message", T: RelationshipSendStatus },
     { no: 14, name: "pairing", kind: "enum", T: proto3.getEnumType(ContactPairingPhase) },
     { no: 15, name: "profile", kind: "message", T: ContactProfileV1 },
+    { no: 16, name: "relationship_state", kind: "enum", T: proto3.getEnumType(RelationshipState) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactAddResponse {

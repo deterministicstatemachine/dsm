@@ -8,6 +8,7 @@ import React, { useEffect, useState } from 'react';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 import logger from '../../utils/logger';
 import { pairingStage, pairingWordFor } from '../../domain/pairing';
+import { canSendTo, relationshipWordFor } from '../../domain/relationship';
 import { useContacts } from '../../contexts/ContactsContext';
 import { Avatar, Icon, personName } from './parts';
 import { modernNav } from './modernNav';
@@ -64,16 +65,20 @@ export default function ModernPeople(): React.JSX.Element {
                 <Avatar name={personName(c)} lookupKey={c.profile?.phoneLookupKey} deviceId={c.deviceId} />
                 <span className="s-row-main">
                   <span className="s-row-title" style={{ display: 'block' }}>{personName(c)}</span>
-                  {pairingWordFor(c) !== null ? (
+                  {relationshipWordFor(c) !== null ? (
+                    <span className="s-row-sub" style={{ display: 'block' }}>{relationshipWordFor(c)}</span>
+                  ) : pairingWordFor(c) !== null ? (
                     <span className="s-row-sub s-paired" style={{ display: 'flex' }}><Icon name="bluetooth" />{pairingWordFor(c)}</span>
                   ) : (
                     <span className="s-row-sub" style={{ display: 'block' }}>Send to {personName(c).split(' ')[0]}</span>
                   )}
                 </span>
               </button>
-              <button type="button" className="s-btn s-btn-small s-btn-primary" style={{ flex: '0 0 auto' }} onClick={() => modernNav.open({ kind: 'send', to: c.deviceId })}>
-                <Icon name="send" /> Send
-              </button>
+              {canSendTo(c) ? (
+                <button type="button" className="s-btn s-btn-small s-btn-primary" style={{ flex: '0 0 auto' }} onClick={() => modernNav.open({ kind: 'send', to: c.deviceId })}>
+                  <Icon name="send" /> Send
+                </button>
+              ) : null}
             </div>
           ))
         )}

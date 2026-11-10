@@ -22,6 +22,8 @@ export interface ContactsContextValue extends ContactsState {
   addContact: (alias: string, card: ContactCard, profile?: PersonProfile) => Promise<AddContactResult>;
   /** Unpairs a contact's phone (Base32 device id) and pairs it again. */
   unpairContact: (deviceIdB32: string) => Promise<void>;
+  /** Ends the relationship with a contact (Base32 device id): DSM Amendment A33. */
+  terminateContact: (deviceIdB32: string) => Promise<void>;
   setError: (error: string | null) => void;
 }
 
@@ -32,6 +34,7 @@ const defaultValue: ContactsContextValue = {
   refreshContacts: async () => {},
   addContact: async () => { throw new Error('addContact is used outside ContactsProvider'); },
   unpairContact: async () => { throw new Error('unpairContact is used outside ContactsProvider'); },
+  terminateContact: async () => { throw new Error('terminateContact is used outside ContactsProvider'); },
   setError: () => {},
 };
 
@@ -83,6 +86,7 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
     refreshContacts: contactsStore.refreshContacts,
     addContact: contactsStore.addContact,
     unpairContact: contactsStore.unpair,
+    terminateContact: contactsStore.terminate,
     setError: contactsStore.setError,
   }), [state]);
 

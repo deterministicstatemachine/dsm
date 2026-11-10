@@ -23,7 +23,7 @@ const MARK = 'MARKMARKMARKMARKMARKMARKMARKMARKMARKMARKMARKMARKMARK';
 /** A contact as contacts.list answers one: its genesis named, so verified. */
 function contact(alias: string, deviceId: string, profile?: DomainContact['profile']): DomainContact {
   const genesisHash = `G-${alias}`;
-  return { alias, deviceId, genesisHash, pairing: 'idle', genesisVerifiedOnline: genesisHash.length > 2, signingPublicKey: `K-${alias}`, profile };
+  return { alias, deviceId, genesisHash, pairing: 'idle', relationship: 'established', genesisVerifiedOnline: genesisHash.length > 2, signingPublicKey: `K-${alias}`, profile };
 }
 
 const contacts: DomainContact[] = [

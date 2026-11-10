@@ -299,11 +299,10 @@ export default function SofiScreen(): React.JSX.Element {
                 type="text"
                 className="sb-input sb-input--mono sb-input--small"
                 style={{ marginTop: 6 }}
-                placeholder="or paste a token's policy anchor" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                placeholder="or paste a token's policy anchor" autoCapitalize="none" autoCorrect="off"
                 aria-label="Token out anchor"
                 value={tokenOutAnchor}
                 onChange={(e) => setTokenOutAnchor(e.target.value)}
-                spellCheck={false}
               />
             </div>
 
