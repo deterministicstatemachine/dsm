@@ -26,6 +26,7 @@ function listed(alias: string, deviceId: Uint8Array<ArrayBuffer>): pb.ContactAdd
     genesisHash: new pb.Hash32({ v: id(0x20) }),
     signingPublicKey: new Uint8Array(64).fill(0x30),
     pairing: pb.ContactPairingPhase.IDLE,
+    relationshipState: pb.RelationshipState.ESTABLISHED,
   });
 }
 
@@ -63,6 +64,7 @@ async function showBob(unpairAnswer: Answer): Promise<{ sent: Uint8Array[]; bob:
     refreshContacts: contactsStore.refreshContacts,
     addContact: contactsStore.addContact,
     unpairContact: contactsStore.unpair,
+    terminateContact: async () => { throw new Error('terminateContact is not reached by this test'); },
     setError: contactsStore.setError,
   };
   const shown = contacts.find((c) => c.alias === 'bob');

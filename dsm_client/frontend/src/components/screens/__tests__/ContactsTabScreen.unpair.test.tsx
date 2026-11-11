@@ -26,6 +26,7 @@ function listed(alias: string, deviceId: Uint8Array<ArrayBuffer>, pairing: pb.Co
     genesisHash: new pb.Hash32({ v: id(0x20) }),
     signingPublicKey: new Uint8Array(64).fill(0x30),
     pairing,
+    relationshipState: pb.RelationshipState.ESTABLISHED,
   });
 }
 
@@ -67,6 +68,7 @@ async function showContacts(unpairAnswer: Answer): Promise<{ calls: Call[]; bob:
     refreshContacts: contactsStore.refreshContacts,
     addContact: contactsStore.addContact,
     unpairContact: contactsStore.unpair,
+    terminateContact: async () => { throw new Error('terminateContact is not reached by this test'); },
     setError: contactsStore.setError,
   };
   (globalThis as unknown as { requestAnimationFrame: () => number }).requestAnimationFrame = () => 0;

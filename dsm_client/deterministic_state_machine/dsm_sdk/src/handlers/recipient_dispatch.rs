@@ -47,14 +47,46 @@ pub struct RecognizedTransfer {
     /// The signed operation, with SIG A attached — byte-identical to what the
     /// sender advanced.
     pub op: Operation,
-    /// The terms that open `op`'s commitment: its token, nonce, mode and memo.
-    pub opened: dsm::types::operations::TransferTerms,
-    /// What the transfer moves and says: `op`'s amount, `opened`'s token and
-    /// memo.
-    pub terms: super::recipient_accept::TransferTerms,
+    /// What the step is: a transfer with its terms, or a relationship's
+    /// lifecycle step (Amendment A33).
+    pub step: RecognizedStep,
     pub staged: StagedTransfer,
     /// The economic locator hints this copy carried. Untrusted.
     pub hint: LocatorHint,
+}
+
+/// What a recognized step is.
+#[derive(Debug, Clone)]
+pub enum RecognizedStep {
+    Transfer {
+        /// The terms that open the operation's commitment: its token, nonce,
+        /// mode and memo.
+        opened: dsm::types::operations::TransferTerms,
+        /// What the transfer moves and says: the operation's amount, the
+        /// opened terms' token and memo.
+        terms: super::recipient_accept::TransferTerms,
+    },
+    /// ESTABLISH or TERMINATE on the relationship with the sender.
+    Lifecycle(dsm::core::relationship_lifecycle::LifecycleStep),
+}
+
+impl RecognizedTransfer {
+    /// The transfer's terms, when the step is a transfer.
+    pub fn transfer_terms(&self) -> Option<&super::recipient_accept::TransferTerms> {
+        match &self.step {
+            RecognizedStep::Transfer { terms, .. } => Some(terms),
+            RecognizedStep::Lifecycle(_) => None,
+        }
+    }
+
+    /// The terms that open the transfer's commitment, when the step is a
+    /// transfer.
+    pub fn opened_terms(&self) -> Option<&dsm::types::operations::TransferTerms> {
+        match &self.step {
+            RecognizedStep::Transfer { opened, .. } => Some(opened),
+            RecognizedStep::Lifecycle(_) => None,
+        }
+    }
 }
 
 /// A receipt half this device verified: its `sig_a` chain for
@@ -266,51 +298,106 @@ fn verify_candidate_transfer(
     };
     // derive sender: the contact whose key verified
     let sender = candidate;
-    // check recipient
-    let Operation::Transfer {
-        to_device_id,
-        amount,
-        policy_commit,
-        ..
-    } = &op
-    else {
-        return Ok(NotRecognized(format!(
-            "the signed operation is a {}, not a transfer",
-            op.get_operation_type()
-        )));
-    };
     let here = this_device()?;
-    if !crate::sdk::core_sdk::addressed_to(to_device_id, &here) {
-        return Ok(NotRecognized(
-            "the signed transfer is addressed to another device".to_string(),
-        ));
-    }
-    // open the terms: the nonce and memo are read from terms that open the
-    // signed commitment, and a transfer without them is refused whole
-    // (pre-audit item 4)
-    let opened = match open_terms(&req.transfer_terms, &op) {
-        Ok(terms) => terms,
-        Err(why) => return Ok(NotRecognized(why)),
+    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&here, &sender);
+    // Nothing is taken on a relationship this device has ended or is ending
+    // (Amendment A33), except the other side's own termination, crossing
+    // this device's: that one is recorded.
+    let relationship = crate::storage::client_db::relationship_state(&sender)
+        .map_err(|e| format!("the relationship with {header_sender} is unreadable: {e}"))?;
+    // check recipient, and what the step is
+    let step = match &op {
+        Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            ..
+        } => {
+            if !crate::sdk::core_sdk::addressed_to(to_device_id, &here) {
+                return Ok(NotRecognized(
+                    "the signed transfer is addressed to another device".to_string(),
+                ));
+            }
+            if relationship.is_over() {
+                return Ok(NotRecognized(format!(
+                    "the relationship with {header_sender} has ended; nothing is taken on it"
+                )));
+            }
+            if !relationship.admits_value() {
+                return Ok(NotRecognized(format!(
+                    "the relationship with {header_sender} is not established; its first step is \
+                     the establishment both sides sign"
+                )));
+            }
+            // open the terms: the nonce and memo are read from terms that
+            // open the signed commitment, and a transfer without them is
+            // refused whole (pre-audit item 4)
+            let opened = match open_terms(&req.transfer_terms, &op) {
+                Ok(terms) => terms,
+                Err(why) => return Ok(NotRecognized(why)),
+            };
+            let terms = super::recipient_accept::TransferTerms::of(amount, policy_commit, &opened);
+            RecognizedStep::Transfer { opened, terms }
+        }
+        other => {
+            use dsm::core::relationship_lifecycle::{lifecycle_step_of, LifecycleStep};
+            let step = match lifecycle_step_of(other) {
+                Ok(Some(step)) => step,
+                Ok(None) => {
+                    return Ok(NotRecognized(format!(
+                        "the signed operation is a {}, not a transfer or a relationship step",
+                        other.get_operation_type()
+                    )))
+                }
+                Err(e) => return Ok(NotRecognized(format!("the relationship step: {e}"))),
+            };
+            let names_this_device = match step {
+                LifecycleStep::Establish { counterparty, .. } => counterparty == here,
+                LifecycleStep::Terminate { from, to } => from == sender && to == here,
+            };
+            if !names_this_device {
+                return Ok(NotRecognized(
+                    "the signed relationship step is addressed to another device".to_string(),
+                ));
+            }
+            if !req.transfer_terms.is_empty() {
+                return Ok(NotRecognized(
+                    "a relationship step carries no terms".to_string(),
+                ));
+            }
+            if relationship.is_over() && !matches!(step, LifecycleStep::Terminate { .. }) {
+                return Ok(NotRecognized(format!(
+                    "the relationship with {header_sender} has ended; nothing is taken on it"
+                )));
+            }
+            RecognizedStep::Lifecycle(step)
+        }
     };
-    // derive the object key
+    // derive the object key. A transfer is spent by its nonce, a lifecycle
+    // step by its own digest: each is applied once in this relationship.
+    let op_bytes = op.to_bytes();
+    let nonce: Vec<u8> = match &step {
+        RecognizedStep::Transfer { opened, .. } => opened.nonce.clone(),
+        RecognizedStep::Lifecycle(_) => {
+            crate::storage::client_db::canonical_apply_operation_digest(
+                &req.canonical_operation_bytes,
+            )
+            .to_vec()
+        }
+    };
     let staged = StagedTransfer {
-        op_id: transfer_object_id(&op.to_bytes()),
+        op_id: transfer_object_id(&op_bytes),
         sender,
         // Spent in this relationship only, as the apply spends it.
-        nonce_hash: crate::storage::client_db::relationship_nonce_hash(
-            &dsm::core::bilateral_transaction_manager::compute_smt_key(&here, &sender),
-            &opened.nonce,
-        ),
+        nonce_hash: crate::storage::client_db::relationship_nonce_hash(&rel_key, &nonce),
         canonical_operation_bytes: req.canonical_operation_bytes,
         signature: req.signature,
         terms: req.transfer_terms,
     };
-    let terms = super::recipient_accept::TransferTerms::of(amount, policy_commit, &opened);
     Ok(TransferRecognition::Recognized(Box::new(
         RecognizedTransfer {
             op,
-            opened,
-            terms,
+            step,
             staged,
             hint: LocatorHint {
                 economic_position: req.sender_economic_position,
@@ -763,6 +850,21 @@ mod tests {
         (p, one)
     }
 
+    /// A member that holds `bytes` on `route` of its own accord: written into
+    /// its own database, past every check its protocol code makes, as a
+    /// faulty member's store can hold anything.
+    async fn member_holds(pool: &dsm_storage_node::db::DBPool, route: &str, bytes: &[u8]) {
+        let client = pool.get().await.expect("the member's database");
+        client
+            .execute(
+                "INSERT INTO inbox_spool(device_id, envelope, seq_num) VALUES ($1, $2, \
+                 COALESCE((SELECT MAX(seq_num) + 1 FROM inbox_spool WHERE device_id = $1), 1))",
+                &[&route, &bytes],
+            )
+            .await
+            .expect("the member holds the bytes");
+    }
+
     /// Rows in a staging table on the ENTERED device.
     fn rows(table: &str) -> i64 {
         let binding = client_db::get_connection().expect("conn");
@@ -873,6 +975,7 @@ mod tests {
         .expect("A's spool client");
         spool
             .submit_stored_envelope_with_retry(
+                &p.b.device_id,
                 route,
                 message_id,
                 &crate::sdk::b0x_sdk::B0xRetryConfig::default(),
@@ -1045,8 +1148,7 @@ mod tests {
             Some(paid_from.as_slice()),
             "the tip A paid from is B's previous tip with A"
         );
-        let previous_route =
-            dsm::crypto::spool_address::inbox_address(&p.b.genesis, &p.b.device_id, &paid_from);
+        let previous_route = p.b.inbox_from(&p.a, &paid_from);
         assert_eq!(
             previous_route, one.route,
             "the honest payment arrived on that route"
@@ -1249,10 +1351,14 @@ mod tests {
         else {
             panic!("the transfer with its own terms is recognized");
         };
-        assert_eq!(recognized.opened, terms);
-        assert_eq!(recognized.terms.memo, "the memo A signed");
         assert_eq!(
-            recognized.terms.policy_commit,
+            recognized.opened_terms().expect("a transfer's terms"),
+            &terms
+        );
+        let terms = recognized.transfer_terms().expect("a transfer's terms");
+        assert_eq!(terms.memo, "the memo A signed");
+        assert_eq!(
+            terms.policy_commit,
             dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy")
         );
     }
@@ -1294,8 +1400,8 @@ mod tests {
         let (p, one) = sent().await;
         let mut c = crate::test_support::two_device::TestDevice::create("C", 0x0C);
         c.boot(&p.fleet).await;
-        c.add_contact(&p.a).await;
-        p.a.add_contact(&c).await;
+        c.add_and_establish(&p.a).await;
+        p.a.add_and_establish(&c).await;
         c.enter();
         let tip = |device: &crate::test_support::two_device::TestDevice| {
             device.enter();
@@ -1306,7 +1412,7 @@ mod tests {
                 .expect("C's relationship tip with A")
         };
         let before = tip(&c);
-        let route = dsm::crypto::spool_address::inbox_address(&c.genesis, &c.device_id, &before);
+        let route = c.inbox_from(&p.a, &before);
 
         c.enter();
         let receipt = ingested(ingest_evidence_half(
@@ -1383,9 +1489,12 @@ mod tests {
             honest.devid_a,
             "the harness's A is seed 0x0A"
         );
-        // As A's wallet signs a wallet.send receipt: the relationship's
-        // first per-step EK, certified by A's AK, answering the commitment
-        // bound to itself.
+        // As A's wallet signs a wallet.send receipt: a per-step EK certified
+        // by A's chain head on the relationship (after the ESTABLISH step,
+        // never its AK: DSM Amendment A33), answering the commitment bound to
+        // itself.
+        let a_head = p.a.chain_head_sk(&p.b);
+        p.b.enter();
         let signed_by_a = |mut r: StitchedReceiptV2| -> Vec<u8> {
             let commitment = r.compute_commitment().expect("the commitment");
             let target = compute_receipt_challenge_response_target(&commitment, &commitment);
@@ -1395,7 +1504,7 @@ mod tests {
                 &r.transition_entropy,
             )
             .expect("the step's C_pre");
-            let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
+            let answer = a.answer_after(&b, &r.parent_tip, &c_pre, &target, &a_head);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
             r.add_sig_a(answer.sig);
@@ -1749,7 +1858,16 @@ mod tests {
         else {
             panic!("the sent transfer is recognized");
         };
-        let rival = signed_by_a(&p, p.b.device_id, 7, honest.opened.nonce.clone());
+        let rival = signed_by_a(
+            &p,
+            p.b.device_id,
+            7,
+            honest
+                .opened_terms()
+                .expect("a transfer's terms")
+                .nonce
+                .clone(),
+        );
         staged(ingest_transfer_half(
             &rival,
             &one.header_sender,
@@ -1836,6 +1954,10 @@ mod tests {
         let honest =
             StitchedReceiptV2::from_canonical_protobuf(&one.evidence_bytes).expect("the receipt");
         let (a, b) = (Party::from_seed(0x0A), Party::from_seed(0x0B));
+        // A's step is certified by A's chain head, not its AK, after the
+        // ESTABLISH step (DSM Amendment A33).
+        let a_head = p.a.chain_head_sk(&p.b);
+        p.b.enter();
         let signed_by_a = |mut r: StitchedReceiptV2| -> Vec<u8> {
             let commitment = r.compute_commitment().expect("the commitment");
             let target = compute_receipt_challenge_response_target(&commitment, &commitment);
@@ -1845,7 +1967,7 @@ mod tests {
                 &r.transition_entropy,
             )
             .expect("the step's C_pre");
-            let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
+            let answer = a.answer_after(&b, &r.parent_tip, &c_pre, &target, &a_head);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
             r.add_sig_a(answer.sig);
@@ -1930,9 +2052,7 @@ mod tests {
                 &id,
                 format!("fresh junk {i}").into_bytes(),
             );
-            dsm_storage_node::db::spool_insert(member.pool(), &one.route, &junk)
-                .await
-                .expect("the first member spools its own junk");
+            member_holds(member.pool(), &one.route, &junk).await;
         }
         assert!(
             p.holders_of(&one.message_id).await >= 1,
@@ -2177,9 +2297,7 @@ mod tests {
                 )
                 .await
                 .expect("the member withholds the honest copy");
-            dsm_storage_node::db::spool_insert(member.pool(), route, sealed)
-                .await
-                .expect("the member spools the other copy");
+            member_holds(member.pool(), route, sealed).await;
         }
     }
 
@@ -2333,6 +2451,19 @@ mod tests {
         }
         let copy_key = dsm::crypto::spool_address::envelope_merge_key(&inner);
         from.enter();
+        // The writer derives the route itself, from its own view of the
+        // relationship (DSM Amendment A34): it is the route the recipient reads.
+        let contact = client_db::get_contact_by_device_id(&to.device_id)
+            .expect("the writer's contacts")
+            .expect("the writer holds the recipient");
+        let tip = crate::handlers::app_router_impl::contact_relationship_tip(&contact)
+            .expect("the writer's tip with the recipient");
+        assert_eq!(
+            crate::sdk::spool_write::counterparty_inbox_address(&to.device_id, &to.genesis, &tip)
+                .expect("the writer's route"),
+            route,
+            "both sides derive the one route"
+        );
         crate::sdk::b0x_sdk::seal_for(&to.device_id, &id, &inner.encode_to_vec()).expect("seal");
         let mut spool = crate::sdk::b0x_sdk::B0xSDK::new(
             crate::util::text_id::encode_base32_crockford(&from.device_id),
@@ -2342,6 +2473,7 @@ mod tests {
         .expect("a spool client");
         spool
             .submit_stored_envelope_with_retry(
+                &to.device_id,
                 &route,
                 &id,
                 &crate::sdk::b0x_sdk::B0xRetryConfig::default(),

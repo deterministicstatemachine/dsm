@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT OR Apache-2.0
-"""The walkthrough's terminal episodes, checked so they never go stale.
+"""The walkthrough's terminal steps, checked so they never go stale.
 
-Each episode's terminal shots are a VHS tape (tools/walkthrough/tapes/*.tape):
-`vhs tools/walkthrough/tapes/ep3-account.tape` renders ep3-account.mp4. What a
-tape types is what a developer types, so:
+Each step is a tape (tools/walkthrough/tapes/*.tape, in VHS's tape format).
+What a tape types is what a developer types, so:
 
     check_tapes.py          every `make <target>` a tape types is a documented
                             target of the Makefile (`make help` lists it)
-    check_tapes.py --run    also runs every command the tapes type, in episode
+    check_tapes.py --run    also runs every command the tapes type, in step
                             order, in one bash session from the repo root,
                             failing on the first command that fails (CI's
                             developer-path job runs this)
@@ -69,7 +68,7 @@ def main(argv):
     run = "--run" in argv
     tapes = sorted(f for f in os.listdir(TAPES) if f.startswith("ep") and f.endswith(".tape"))
     if not tapes:
-        raise SystemExit(f"no episode tapes in {TAPES}")
+        raise SystemExit(f"no tapes in {TAPES}")
     targets = documented_targets()
     problems = []
     script = ["set -euo pipefail", "cd " + shlex.quote(ROOT)]

@@ -2038,8 +2038,8 @@ async fn a_transfer_taken_in_while_a_request_pays_is_not_the_requests() {
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
     c.fund_admitted(100).await;
-    c.add_contact(&p.b).await;
-    p.b.add_contact(&c).await;
+    c.add_and_establish(&p.b).await;
+    p.b.add_and_establish(&c).await;
     let era_before = p.b.era_balance();
     let paid_in = c.send(&p.b, 500).await;
     assert!(paid_in.success, "{:?}", paid_in.error_message);

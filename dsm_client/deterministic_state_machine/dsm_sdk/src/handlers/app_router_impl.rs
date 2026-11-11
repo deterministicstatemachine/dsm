@@ -153,13 +153,13 @@ pub(crate) struct CachedWithdrawalPlan {
 /// against this snapshot: if the head moved in between, the whole commit aborts
 /// while nothing has been sent yet — the only point at which losing that race is
 /// still free.
-struct PendingEkMaterial {
-    ek_pk: Vec<u8>,
-    ek_sk: Vec<u8>,
-    at_rest_key: [u8; 32],
-    is_init: bool,
-    expected_prev: Option<Vec<u8>>,
-    is_first_ek_step: bool,
+pub(crate) struct PendingEkMaterial {
+    pub(crate) ek_pk: Vec<u8>,
+    pub(crate) ek_sk: Vec<u8>,
+    pub(crate) at_rest_key: [u8; 32],
+    pub(crate) is_init: bool,
+    pub(crate) expected_prev: Option<Vec<u8>>,
+    pub(crate) is_first_ek_step: bool,
 }
 
 /// Everything an online send determines before anything becomes deliverable.
@@ -1342,165 +1342,9 @@ impl AppRouterImpl {
                 //
                 // The receipt challenge is signed by a per-step EK derived from
                 // canonical C_pre and fresh Kyber k_step material (keyed under Smaster).
-                let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-                    &rc_canonical,
-                ) {
-                    Ok(mut receipt) => match receipt.compute_commitment() {
-                        Ok(commitment) => {
-                            // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
-                            // unlocked wallet) + root AK keypair. The per-step EK seed +
-                            // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
-                            let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
-                                Ok(k) => k,
-                                Err(e) => {
-                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                        "wallet.send: chain-head key unavailable for cert chain (wallet locked?): {e}"
-                                    )));
-                                }
-                            };
-                            let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
-                                Ok(kp) => kp,
-                                Err(e) => {
-                                    // The canonical advance has ALREADY happened at this
-                                    // point, so bailing out without unwinding it would
-                                    // strand a debit and leave the relationship's modal
-                                    // lock held (blocking every later send). Every
-                                    // neighbouring arm rolls back; this one used to just
-                                    // return.
-                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                        "wallet.send: AK keypair unavailable for cert chain: {e}"
-                                    )));
-                                }
-                            };
-
-                            // §16.6 defect zero: snapshot the committed Local cert head
-                            // BEFORE signing. Signing must run outside the durable
-                            // transaction (it reads cert heads through its own
-                            // connection), so this snapshot is what the later CAS
-                            // compares against to detect the acceptance finalizer moving
-                            // the head underneath us.
-                            //
-                            // Compute relationship_key for chain head lookup.
-                            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                                &receipt.devid_a,
-                                &receipt.devid_b,
-                            );
-                            let local_head_before_signing =
-                                crate::storage::client_db::load_cert_chain_head_pubkey(
-                                    &rel_key,
-                                    crate::storage::client_db::CertChainSide::Local,
-                                )
-                                .ok()
-                                .flatten();
-
-                            // Per-step Kyber per whitepaper §11: encapsulate
-                            // against the recipient's Kyber pubkey to derive
-                            // `k_step`. Pull the pubkey from the contact record;
-                            // fail-closed if missing (no root path — contact
-                            // must be re-established with peer Kyber pubkey to
-                            // enable per-step EK signing).
-                            let recipient_kyber_pk =
-                                match crate::storage::client_db::get_contact_by_device_id(
-                                    &receipt.devid_b,
-                                ) {
-                                    Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
-                                    Ok(Some(_)) => {
-                                        return Err(dsm::types::error::DsmError::invalid_operation(
-                                        "wallet.send: recipient contact missing Kyber public key — \
-                                         re-establish contact to upgrade for per-step EK signing\
-                                         "
-                    ));
-                                    }
-                                    _ => {
-                                        return Err(dsm::types::error::DsmError::invalid_operation(
-                                        "wallet.send: recipient contact lookup failed"
-                    ));
-                                    }
-                                };
-
-                            // Sign with per-step EK (whitepaper §11.1 cert chain).
-                            let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
-                                commitment: &commitment,
-                                h_n: receipt.parent_tip,
-                                c_pre: receipt_sigma,
-                                devid_sender: receipt.devid_a,
-                                relationship_key: rel_key,
-                                root_ak_keypair: Some((&ak_pk, &ak_sk)),
-                                recipient_kyber_pk: &recipient_kyber_pk,
-                                // §11.1 Item 7: bind the per-step EK response
-                                // to the receipt commitment for this online
-                                // wallet.send transition.
-                                session_binding: &commitment,
-                            };
-                            match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
-                                Ok(out) => {
-                                    log::info!(
-                                        "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
-                                         cert_len={}, sig_len={}, used_root_ak={}",
-                                        out.ek_pk.len(),
-                                        out.ek_cert.len(),
-                                        out.sig.len(),
-                                        out.used_root_ak,
-                                    );
-
-                                    // Stamp per-step artifacts on the receipt.
-                                    receipt.set_ek_pk_a(out.ek_pk.clone());
-                                    receipt.set_ek_cert_a(out.ek_cert);
-                                    receipt.add_sig_a(out.sig);
-
-                                    // §11.1 lockstep: do NOT advance the committed Local
-                                    // chain head at sign time. STASH the new EK head as
-                                    // pending, keyed by this receipt commitment. It is
-                                    // promoted into `cert_chain_heads` only once the
-                                    // receiver's acceptance ACK is observed (storage.sync
-                                    // sweep), and dropped if the transfer fails. This keeps
-                                    // the sender's committed head unchanged for a transfer
-                                    // that is never accepted, so a failed/timed-out attempt
-                                    // cannot run the chain ahead of the receiver.
-                                    // §16.6 defect zero: the pending head is NOT written
-                                    // here. It is committed in ONE transaction with the
-                                    // proposal, the gate, and the durable outbox row —
-                                    // before anything is submitted — so a local failure can
-                                    // never strand a deliverable message against a
-                                    // rolled-back debit. Carry the material forward, plus
-                                    // the pre-signing head snapshot that guards the CAS.
-                                    pending_ek_material = Some(PendingEkMaterial {
-                                        ek_pk: out.ek_pk.clone(),
-                                        ek_sk: out.ek_sk.clone(),
-                                        at_rest_key,
-                                        is_init: out.used_root_ak,
-                                        expected_prev: local_head_before_signing.clone(),
-                                        is_first_ek_step: out.used_root_ak,
-                                    });
-
-                                    match receipt.to_full_protobuf() {
-                                        Ok(full_bytes) => full_bytes,
-                                        Err(e) => {
-                                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                                "wallet.send: receipt full serialization failed: {e}"
-                                            )));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                        "wallet.send: per-step EK signing failed: {e}"
-                                    )));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                                "wallet.send: receipt commitment hash failed: {e}"
-                            )));
-                        }
-                    },
-                    Err(e) => {
-                        return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                            "wallet.send: receipt deserialization for signing failed: {e}"
-                        )));
-                    }
-                };
+                let (rc, ek_material) =
+                    self.sign_receipt_as_sender(&rc_canonical, receipt_sigma)?;
+                pending_ek_material = Some(ek_material);
 
                 log::info!(
                     "[wallet.send] §4.2 canonical advance + receipt self-verified + sig_a embedded: smt_key={:?}.. pre_root={:?}.. post_root={:?}.. receipt_len={}",
@@ -1669,11 +1513,13 @@ impl AppRouterImpl {
                 chain_tip_arr == [0u8; 32],
             );
 
-            let routing_address = dsm::crypto::spool_address::inbox_address(
-                &recipient_genesis_raw,
+            // DSM Amendment A34: the relationship's first inbox, or the route
+            // bound to the recipient's lock this device holds the grant of.
+            let routing_address = crate::sdk::spool_write::counterparty_inbox_address(
                 &to_device_id,
+                &recipient_genesis_raw,
                 &chain_tip_arr,
-            );
+            )?;
             log::info!(
                 "[wallet.send] §16.4 Computed rotated b0x routing address: {}",
                 &routing_address[..16.min(routing_address.len())]
@@ -2198,6 +2044,185 @@ impl AppRouterImpl {
         ))
     }
 
+    /// Sign a built receipt as its sender (party A): sig_a with a per-step
+    /// ephemeral key chained from this device's AK (whitepaper §11.1), the
+    /// key encapsulated for the recipient's Kyber key. Returns the full
+    /// receipt bytes with `sig_a`, `ek_pk_a` and `ek_cert_a` stamped, and the
+    /// pending EK material the durable commit stashes beside the proposal.
+    /// Runs inside the staged advance's pre-write window: it reads the
+    /// database and the wallet's keys and never re-enters `CoreSDK`.
+    pub(crate) fn sign_receipt_as_sender(
+        &self,
+        rc_canonical: &[u8],
+        c_pre: [u8; 32],
+    ) -> Result<(Vec<u8>, PendingEkMaterial), dsm::types::error::DsmError> {
+        // Assigned exactly where signing succeeds; every other path returns.
+        let pending_ek_material: Option<PendingEkMaterial>;
+        let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            rc_canonical,
+        ) {
+            Ok(mut receipt) => match receipt.compute_commitment() {
+                Ok(commitment) => {
+                    // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
+                    // unlocked wallet) + root AK keypair. The per-step EK seed +
+                    // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
+                    let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
+                        Ok(k) => k,
+                        Err(e) => {
+                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                "wallet.send: chain-head key unavailable for cert chain (wallet locked?): {e}"
+                            )));
+                        }
+                    };
+                    let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
+                        Ok(kp) => kp,
+                        Err(e) => {
+                            // The canonical advance has ALREADY happened at this
+                            // point, so bailing out without unwinding it would
+                            // strand a debit and leave the relationship's modal
+                            // lock held (blocking every later send). Every
+                            // neighbouring arm rolls back; this one used to just
+                            // return.
+                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                "wallet.send: AK keypair unavailable for cert chain: {e}"
+                            )));
+                        }
+                    };
+
+                    // §16.6 defect zero: snapshot the committed Local cert head
+                    // BEFORE signing. Signing must run outside the durable
+                    // transaction (it reads cert heads through its own
+                    // connection), so this snapshot is what the later CAS
+                    // compares against to detect the acceptance finalizer moving
+                    // the head underneath us.
+                    //
+                    // Compute relationship_key for chain head lookup.
+                    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                        &receipt.devid_a,
+                        &receipt.devid_b,
+                    );
+                    let local_head_before_signing =
+                        crate::storage::client_db::load_cert_chain_head_pubkey(
+                            &rel_key,
+                            crate::storage::client_db::CertChainSide::Local,
+                        )
+                        .ok()
+                        .flatten();
+
+                    // Per-step Kyber per whitepaper §11: encapsulate
+                    // against the recipient's Kyber pubkey to derive
+                    // `k_step`. Pull the pubkey from the contact record;
+                    // fail-closed if missing (no root path — contact
+                    // must be re-established with peer Kyber pubkey to
+                    // enable per-step EK signing).
+                    let recipient_kyber_pk =
+                        match crate::storage::client_db::get_contact_by_device_id(&receipt.devid_b)
+                        {
+                            Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
+                            Ok(Some(_)) => {
+                                return Err(dsm::types::error::DsmError::invalid_operation(
+                                    "wallet.send: recipient contact missing Kyber public key — \
+                                 re-establish contact to upgrade for per-step EK signing\
+                                 ",
+                                ));
+                            }
+                            _ => {
+                                return Err(dsm::types::error::DsmError::invalid_operation(
+                                    "wallet.send: recipient contact lookup failed",
+                                ));
+                            }
+                        };
+
+                    // Sign with per-step EK (whitepaper §11.1 cert chain).
+                    let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
+                        commitment: &commitment,
+                        h_n: receipt.parent_tip,
+                        c_pre,
+                        devid_sender: receipt.devid_a,
+                        relationship_key: rel_key,
+                        root_ak_keypair: Some((&ak_pk, &ak_sk)),
+                        recipient_kyber_pk: &recipient_kyber_pk,
+                        // §11.1 Item 7: bind the per-step EK response
+                        // to the receipt commitment for this online
+                        // wallet.send transition.
+                        session_binding: &commitment,
+                    };
+                    match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
+                        Ok(out) => {
+                            log::info!(
+                                "[wallet.send] §11.1 per-step EK sign: used_root_ak={}",
+                                out.used_root_ak,
+                            );
+
+                            // Stamp per-step artifacts on the receipt.
+                            receipt.set_ek_pk_a(out.ek_pk.clone());
+                            receipt.set_ek_cert_a(out.ek_cert);
+                            receipt.add_sig_a(out.sig);
+
+                            // §11.1 lockstep: do NOT advance the committed Local
+                            // chain head at sign time. STASH the new EK head as
+                            // pending, keyed by this receipt commitment. It is
+                            // promoted into `cert_chain_heads` only once the
+                            // receiver's acceptance ACK is observed (storage.sync
+                            // sweep), and dropped if the transfer fails. This keeps
+                            // the sender's committed head unchanged for a transfer
+                            // that is never accepted, so a failed/timed-out attempt
+                            // cannot run the chain ahead of the receiver.
+                            // §16.6 defect zero: the pending head is NOT written
+                            // here. It is committed in ONE transaction with the
+                            // proposal, the gate, and the durable outbox row —
+                            // before anything is submitted — so a local failure can
+                            // never strand a deliverable message against a
+                            // rolled-back debit. Carry the material forward, plus
+                            // the pre-signing head snapshot that guards the CAS.
+                            pending_ek_material = Some(PendingEkMaterial {
+                                ek_pk: out.ek_pk.clone(),
+                                ek_sk: out.ek_sk.clone(),
+                                at_rest_key,
+                                is_init: out.used_root_ak,
+                                expected_prev: local_head_before_signing.clone(),
+                                is_first_ek_step: out.used_root_ak,
+                            });
+
+                            match receipt.to_full_protobuf() {
+                                Ok(full_bytes) => full_bytes,
+                                Err(e) => {
+                                    return Err(dsm::types::error::DsmError::invalid_operation(
+                                        format!(
+                                            "wallet.send: receipt full serialization failed: {e}"
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                "wallet.send: per-step EK signing failed: {e}"
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                        "wallet.send: receipt commitment hash failed: {e}"
+                    )));
+                }
+            },
+            Err(e) => {
+                return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                    "wallet.send: receipt deserialization for signing failed: {e}"
+                )));
+            }
+        };
+
+        let ek_material = pending_ek_material.ok_or_else(|| {
+            dsm::types::error::DsmError::invalid_operation(
+                "per-step EK material missing after signing",
+            )
+        })?;
+        Ok((rc, ek_material))
+    }
+
     /// A committed send that can never complete, for `why`.
     fn stranded(&self, why: String) -> OnlineSent {
         log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
@@ -2259,7 +2284,41 @@ pub(crate) struct TaggedInboxAddress {
     pub freshness: RouteFreshness,
 }
 
+/// Whether this device reads nothing more from `counterparty` (DSM Amendment
+/// A34): their relationship has ended (A33), this device awaits no
+/// finalization on it, and no step of its own on it awaits the other side.
+/// The last message an ended relationship carries is the acknowledgement of
+/// its TERMINATE or a finalization still owed, and each is awaited until it
+/// arrives.
+fn reads_nothing_more_from(
+    local_device_id: &[u8; 32],
+    counterparty: &[u8; 32],
+) -> Result<bool, String> {
+    let state = crate::storage::client_db::relationship_state(counterparty)
+        .map_err(|e| format!("the relationship's state: {e}"))?;
+    let ended = state == crate::storage::client_db::RelationshipState::Ended;
+    Ok(ended && nothing_awaited_on(local_device_id, counterparty)?)
+}
+
+/// Whether nothing on this device's relationship with `counterparty` is
+/// awaited: no finalization owed to this device, no step of its own waiting
+/// on the other side.
+fn nothing_awaited_on(local_device_id: &[u8; 32], counterparty: &[u8; 32]) -> Result<bool, String> {
+    let relationship_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(local_device_id, counterparty);
+    let awaits_finalization =
+        crate::storage::client_db::relationship_awaits_peer_finalization(&relationship_key)
+            .map_err(|e| format!("the relationship's finalizations: {e}"))?;
+    let own_step_pending = crate::storage::client_db::get_pending_online_outbox(counterparty)
+        .map_err(|e| format!("pending online outbox unreadable: {e}"))?
+        .is_some();
+    Ok(!(awaits_finalization || own_step_pending))
+}
+
 /// Collect per-contact B0x addresses tagged with route freshness.
+///
+/// A relationship that has ended with nothing on it awaited is not read at
+/// all ([`reads_nothing_more_from`]).
 ///
 /// Per contact: the current tip's address (`Current`), the previous tip's
 /// (`PreviousTip`) when one is stored and differs, and the pending online
@@ -2273,17 +2332,45 @@ pub(crate) fn collect_tagged_inbox_addresses(
     local_device_id: [u8; 32],
     contacts: &[crate::storage::client_db::ContactRecord],
 ) -> Result<Vec<TaggedInboxAddress>, String> {
-    let address_for = |tip: &[u8; 32]| {
-        dsm::crypto::spool_address::inbox_address(&local_genesis, &local_device_id, tip)
-    };
     let mut addresses = Vec::with_capacity(contacts.len() * 2);
 
     for contact in contacts {
+        let writer: [u8; 32] = contact
+            .device_id
+            .as_slice()
+            .try_into()
+            .map_err(|e| format!("contact {}'s device id: {e}", contact.alias))?;
+        let writer_genesis: [u8; 32] = contact
+            .genesis_hash
+            .as_slice()
+            .try_into()
+            .map_err(|e| format!("contact {}'s genesis: {e}", contact.alias))?;
+        // DSM Amendment A34: a grant ends with its relationship. Once the
+        // relationship has ended (A33) and nothing on it is still awaited,
+        // none of its inboxes is read, so the grant this device issued reaches
+        // no one: whatever its holder writes from then on is never taken in.
+        if reads_nothing_more_from(&local_device_id, &writer)? {
+            continue;
+        }
+        // DSM Amendment A34: the relationship's first inbox, or the route bound
+        // to this device's own lock; an address whose lock this device has not
+        // issued yet holds nothing to read.
+        let address_for = |tip: &[u8; 32]| {
+            crate::sdk::spool_write::inbox_address_of(
+                (&local_device_id, &local_genesis),
+                (&writer, &writer_genesis),
+                tip,
+                crate::sdk::spool_write::Side::Recipient,
+            )
+            .map_err(|e| format!("contact {}'s inbox address: {e}", contact.alias))
+        };
         let current_tip = contact_relationship_tip(contact)?;
-        addresses.push(TaggedInboxAddress {
-            address: address_for(&current_tip),
-            freshness: RouteFreshness::Current,
-        });
+        if let Some(address) = address_for(&current_tip)? {
+            addresses.push(TaggedInboxAddress {
+                address,
+                freshness: RouteFreshness::Current,
+            });
+        }
 
         if let Some(prev_tip_bytes) = contact.previous_chain_tip.as_deref() {
             let prev_tip: [u8; 32] = prev_tip_bytes.try_into().map_err(|_| {
@@ -2294,10 +2381,12 @@ pub(crate) fn collect_tagged_inbox_addresses(
                 )
             })?;
             if prev_tip != current_tip {
-                addresses.push(TaggedInboxAddress {
-                    address: address_for(&prev_tip),
-                    freshness: RouteFreshness::PreviousTip,
-                });
+                if let Some(address) = address_for(&prev_tip)? {
+                    addresses.push(TaggedInboxAddress {
+                        address,
+                        freshness: RouteFreshness::PreviousTip,
+                    });
+                }
             }
         }
 
@@ -2312,10 +2401,12 @@ pub(crate) fn collect_tagged_inbox_addresses(
                 )
             })?;
             if next_tip != current_tip {
-                addresses.push(TaggedInboxAddress {
-                    address: address_for(&next_tip),
-                    freshness: RouteFreshness::Current,
-                });
+                if let Some(address) = address_for(&next_tip)? {
+                    addresses.push(TaggedInboxAddress {
+                        address,
+                        freshness: RouteFreshness::Current,
+                    });
+                }
             }
         }
     }
@@ -2813,7 +2904,8 @@ impl AppRouter for AppRouterImpl {
             "contacts.addManual"
             | "contacts.setProfile"
             | "contacts.setOwnProfile"
-            | "contacts.unpair" => Box::pin(self.handle_contacts_invoke(i)).await,
+            | "contacts.unpair"
+            | "contacts.terminate" => Box::pin(self.handle_contacts_invoke(i)).await,
             // Email receipts (DSM Amendment A17): outside the protocol.
             "receipts.email" => Box::pin(self.handle_receipts_invoke(i)).await,
             // DSM Connect (DSM Amendment A11)
@@ -3005,11 +3097,20 @@ mod tests {
     }
 
     /// The addresses `collect_tagged_inbox_addresses` names, in its order.
+    /// Store each contact as adding one does, so it has the relationship row
+    /// every polled contact has.
+    fn stored(contacts: &[ContactRecord]) {
+        for contact in contacts {
+            crate::storage::client_db::store_contact(contact).expect("store the contact");
+        }
+    }
+
     fn inbox_addresses(
         genesis: [u8; 32],
         device: [u8; 32],
         contacts: &[ContactRecord],
     ) -> Vec<String> {
+        stored(contacts);
         collect_tagged_inbox_addresses(genesis, device, contacts)
             .expect("inbox routes")
             .into_iter()
@@ -3036,7 +3137,14 @@ mod tests {
         init_test_db();
         let genesis = [0x66u8; 32];
         let device = [0x77u8; 32];
-        let stored_tip = [0x5Au8; 32];
+        // The relationship's first tip: its first inbox is the open address
+        // of its route (DSM Amendment A34).
+        let stored_tip = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+            &device,
+            &genesis,
+            &[0x88u8; 32],
+            &[0x99u8; 32],
+        );
 
         let contact = ContactRecord {
             contact_id: "c_test".to_string(),
@@ -3056,7 +3164,9 @@ mod tests {
         };
 
         let addresses = inbox_addresses(genesis, device, &[contact]);
-        let expected = dsm::crypto::spool_address::inbox_address(&genesis, &device, &stored_tip);
+        let expected = dsm::crypto::spool_address::open_inbox_address(
+            &dsm::crypto::spool_address::inbox_route_digest(&genesis, &device, &stored_tip),
+        );
 
         assert_eq!(addresses, vec![expected]);
     }
@@ -3209,8 +3319,13 @@ mod tests {
         };
 
         let recipient_addresses = inbox_addresses(bob_genesis, bob_device, &[alice_as_bob_contact]);
-        let sender_route =
-            dsm::crypto::spool_address::inbox_address(&bob_genesis, &bob_device, &initial_tip);
+        let sender_route = dsm::crypto::spool_address::open_inbox_address(
+            &dsm::crypto::spool_address::inbox_route_digest(
+                &bob_genesis,
+                &bob_device,
+                &initial_tip,
+            ),
+        );
 
         assert!(
             recipient_addresses.contains(&sender_route),
@@ -3224,6 +3339,9 @@ mod tests {
         init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
+        // Every inbox after the relationship's first is bound to the lock this
+        // device issued the contact (DSM Amendment A34).
+        crate::test_support::grants::issue_grant_to((&device, &genesis), &[0xEEu8; 32]);
         let current_tip = [0xCCu8; 32];
         let previous_tip = [0xDDu8; 32];
 
@@ -3244,6 +3362,7 @@ mod tests {
             previous_chain_tip: Some(previous_tip.to_vec()),
         };
 
+        stored(std::slice::from_ref(&contact));
         let tagged =
             collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 2);
@@ -3262,6 +3381,9 @@ mod tests {
         init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
+        // Every inbox after the relationship's first is bound to the lock this
+        // device issued the contact (DSM Amendment A34).
+        crate::test_support::grants::issue_grant_to((&device, &genesis), &[0xEEu8; 32]);
         let tip = [0xCCu8; 32];
 
         let contact = ContactRecord {
@@ -3281,6 +3403,7 @@ mod tests {
             previous_chain_tip: Some(tip.to_vec()), // same as current
         };
 
+        stored(std::slice::from_ref(&contact));
         let tagged =
             collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 1);
@@ -3293,6 +3416,9 @@ mod tests {
         init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
+        // Every inbox after the relationship's first is bound to the lock this
+        // device issued the contact (DSM Amendment A34).
+        crate::test_support::grants::issue_grant_to((&device, &genesis), &[0xEEu8; 32]);
 
         let contact = ContactRecord {
             contact_id: "c_null".to_string(),
@@ -3311,6 +3437,7 @@ mod tests {
             previous_chain_tip: None,
         };
 
+        stored(std::slice::from_ref(&contact));
         let tagged =
             collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 1);
@@ -3323,6 +3450,12 @@ mod tests {
         init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
+        let first_tip = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+            &device,
+            &genesis,
+            &[0xEEu8; 32],
+            &[0xFFu8; 32],
+        );
 
         let contact = ContactRecord {
             contact_id: "c_projection".to_string(),
@@ -3338,10 +3471,19 @@ mod tests {
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            previous_chain_tip: Some([0xDDu8; 32].to_vec()),
+            previous_chain_tip: Some(first_tip.to_vec()),
         };
 
+        // The previous tip is the relationship's first: its open inbox is read.
+        // The current tip's inbox is bound to the lock this device issues its
+        // contact (DSM Amendment A34); none issued, nothing can be there yet,
+        // and it is not read.
         let strings = inbox_addresses(genesis, device, &[contact]);
-        assert_eq!(strings.len(), 2);
+        assert_eq!(
+            strings,
+            vec![dsm::crypto::spool_address::open_inbox_address(
+                &dsm::crypto::spool_address::inbox_route_digest(&genesis, &device, &first_tip),
+            )]
+        );
     }
 }

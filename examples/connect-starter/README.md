@@ -2,9 +2,16 @@
 
 An ordinary web app plugged into DSM, and the place to build one from pieces.
 
+From the repo root, your app's account on the beta network, funded (`make app-dev-local` puts it on a storage set of your own instead):
+
 ```bash
-make app-dev     # from the repo root: your app's account on your local storage set
-make starter     # http://127.0.0.1:3000
+make app-dev
+```
+
+Then the starter, on http://127.0.0.1:3000:
+
+```bash
+make starter
 ```
 
 The page has three kinds of pieces: objects your app issues (and a shop that sells one), what the wallet lets your app do (the offer and its grants), and what your app asks a connected wallet (send, owns, sign in, sign, accept, give, price, trade, stake, decide, collect). Under each piece is the code it is, in TypeScript or Python; the button makes the same call. Nothing on the page is a mock-up: every call reaches your account, and the facts it establishes show in the tables below.

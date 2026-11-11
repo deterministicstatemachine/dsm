@@ -22,10 +22,17 @@ use syn::visit::Visit;
 /// The Core modules that frame and address bytes, which a node may name.
 const FRAMING: &[&str] = &["storage_cell", "storage_object", "merkle", "types", "utils"];
 
+/// The items of Core's relationship write grants a node may name: the one
+/// check every node runs on a write (DSM Amendment A34), which verifies a
+/// write's proof against the address it names and signs nothing, and the
+/// kind of inbox that check answers with. Nothing that makes a key, a grant
+/// or a write.
+const WRITE_CHECK: &[&str] = &["verify_spool_write", "InboxKind"];
+
 /// Whether the Core path `dsm::<rest>` is one a storage node may name: the
 /// framing modules; the storage set's id and members; the domain-separated
-/// hasher; and a size bound of the route-chain and spool modules, which
-/// names no function either computes.
+/// hasher; a size bound of the route-chain and spool modules, which names no
+/// function either computes; and the write check ([`WRITE_CHECK`]).
 fn core_path_allowed(rest: &[String]) -> bool {
     let at = |i: usize| rest.get(i).map(String::as_str);
     let (module, item) = (at(0), at(1));
@@ -35,6 +42,9 @@ fn core_path_allowed(rest: &[String]) -> bool {
             && item.is_some_and(|i| ["storage_set_id", "StorageSetMembers"].contains(&i)))
         || (module == Some("crypto") && item == Some("domain"))
         || (matches!(module, Some("route_chain" | "spool")) && rest.len() == 2 && a_bound)
+        || (module == Some("core")
+            && item == Some("relationship_write_grant")
+            && at(2).is_some_and(|i| WRITE_CHECK.contains(&i)))
 }
 
 /// Names of application, economic and settlement concepts: what a node that
@@ -251,6 +261,14 @@ fn the_scanner_finds_each_dependency_a_storage_node_must_not_have() {
             "fn f() { dsm::route_chain::evaluate(); }",
             "a successor choice",
         ),
+        (
+            "fn f() { dsm::core::relationship_write_grant::signed_spool_write(); }",
+            "making a write",
+        ),
+        (
+            "fn f() { dsm::core::relationship_write_grant::derive_write_lock_keypair(); }",
+            "deriving a lock",
+        ),
     ] {
         assert!(
             !forbidden(source, kind).is_empty(),
@@ -260,6 +278,7 @@ fn the_scanner_finds_each_dependency_a_storage_node_must_not_have() {
     let allowed = "use dsm::storage_cell::entry_digest;\n\
                    const M: usize = dsm::route_chain::MAX_ENTRY_BYTES;\n\
                    fn f(p: &[(Vec<u8>, [u8; 32])]) { let _s = dsm::ccb::StorageSetMembers::new(p); }\n\
+                   fn g(b: &[u8], a: &[u8; 32], m: &[u8; 16]) { let _w = dsm::core::relationship_write_grant::verify_spool_write(b, a, m); }\n\
                    #[cfg(test)] mod tests { fn t() { dsm::crypto::kyber::kyber_decapsulate(); } }";
     assert_eq!(forbidden(allowed, "allowed"), Vec::<String>::new());
 }

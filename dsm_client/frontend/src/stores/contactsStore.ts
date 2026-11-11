@@ -169,6 +169,12 @@ class ContactsStore {
     await this.refreshContacts();
   };
 
+  /** Ends the relationship with a contact (DSM Amendment A33), then reads the list again. */
+  terminate = async (deviceIdB32: string): Promise<void> => {
+    await dsmClient.terminateContact(deviceIdB32);
+    await this.refreshContacts();
+  };
+
   private emit(): void {
     this.listeners.forEach((listener) => listener());
   }

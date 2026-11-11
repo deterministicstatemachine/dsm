@@ -187,7 +187,7 @@ impl ReceiptWrite {
 
 /// Per-field bound for a strict length-delimited wire message.
 #[derive(Clone, Copy)]
-enum FieldLimit {
+pub(crate) enum FieldLimit {
     /// The field must be exactly this many bytes.
     Fixed(usize),
     /// The field may be at most this many bytes.
@@ -288,7 +288,7 @@ fn read_canonical_varint(
 /// duplicates, per-field fixed/max lengths, and every `required` tag present.
 /// `wire` names the message in error strings ("receipt wire", "countersign
 /// wire") so callers can pin the reason.
-fn validate_length_delimited_wire(
+pub(crate) fn validate_length_delimited_wire(
     bytes: &[u8],
     wire: &str,
     max_tag: u32,

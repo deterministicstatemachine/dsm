@@ -117,7 +117,8 @@ CONSTANT
     \* Online rules, each TRUE as the code runs it; a falsification config
     \* flips one to show the invariant it carries.
     RecipientChecksAdmission, \* apply only a transfer whose sender's debit was admitted
-    RecipientChecksPin        \* apply only a transfer whose signed parent is the pinned head
+    RecipientChecksPin,       \* apply only a transfer whose signed parent is the pinned head
+    SendChecksEstablished     \* send only on a relationship established on both sides (A33)
 
 VARIABLES
     devices,           \* devices[g] = set of device IDs for genesis g
@@ -314,7 +315,7 @@ NetConsumes == (net # {}) /\ (net' \subseteq net) /\ (Cardinality(net') = Cardin
 TypeInvariant ==
     /\ devices \in [GenesisIds -> SUBSET DeviceIds]
     /\ \A g \in GenesisIds : Cardinality(devices[g]) <= MaxDevices
-    /\ relationships \in [DeviceIds \X DeviceIds -> [tip: Nat, state: {"active", "inactive"}]]
+    /\ relationships \in [DeviceIds \X DeviceIds -> [tip: Nat, state: {"inactive", "opened", "active", "ended"}]]
     /\ deviceRoots \in [DeviceIds -> Nat]
     /\ smtState \in [DeviceIds -> [RelKeys -> Nat]]
     /\ \A d1, d2 \in DeviceIds :
@@ -392,9 +393,10 @@ AddDevice(g, d) ==
     /\ step' = step + 1
     /\ UNCHANGED <<relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
-\* Create a bilateral relationship between two devices: both projections and
-\* both lineages start at the relationship's genesis seed, and each device
-\* pins the other's head there.
+\* Open a bilateral relationship between two devices (both add each other):
+\* both projections and both lineages start at the relationship's genesis
+\* seed, and each device pins the other's head there. Nothing moves on it
+\* yet (DSM Amendment A33): its first step is the establishment.
 CreateRelationship(d1, d2) ==
     LET g == nextMsgId
         start == [prev |-> 0, local |-> g, lin |-> g, pin |-> g, gate |-> 0, awaits |-> 0]
@@ -405,8 +407,8 @@ CreateRelationship(d1, d2) ==
     /\ smtState[d1][RelKey(d1, d2)] = 0
     /\ smtState[d2][RelKey(d1, d2)] = 0
     /\ relationships' = [relationships EXCEPT
-         ![<<d1, d2>>] = [tip |-> g, state |-> "active"],
-         ![<<d2, d1>>] = [tip |-> g, state |-> "active"]]
+         ![<<d1, d2>>] = [tip |-> g, state |-> "opened"],
+         ![<<d2, d1>>] = [tip |-> g, state |-> "opened"]]
     /\ smtState' = [smtState EXCEPT
          ![d1][RelKey(d1, d2)] = g,
          ![d2][RelKey(d1, d2)] = g]
@@ -541,7 +543,9 @@ Send(d, p, amt) ==
                fin |-> FALSE]
     IN
     /\ d # p
-    /\ relationships[<<d, p>>].state = "active"
+    \* value moves only on a relationship established on both sides (A33)
+    /\ SendChecksEstablished => relationships[<<d, p>>].state = "active"
+    /\ relationships[<<d, p>>].state \in {"opened", "active"}
     /\ <<d, p>> \notin offlineSessions
     /\ o.gate = 0
     /\ o.awaits = 0
@@ -783,6 +787,67 @@ EncryptWithKyber(d1, d2, msg) ==
 \*  - a symmetric offlineSessions relation
 \*  - a tip increment on OfflineTransfer
 \* ============================================================================
+
+\* The relationship's first step, ESTABLISH (DSM Amendment A33): a step on
+\* the chain that moves no value, made by one side and countersigned by the
+\* other, abstracted to the moment both hold it. Both lineages advance to
+\* the same successor, each device pins the other's new head, and both
+\* projections advance: the relationship is established on both sides.
+Establish(d1, d2) ==
+    LET tip == relationships[<<d1, d2>>].tip
+        c   == nextMsgId
+        o1  == online[<<d1, d2>>]
+        o2  == online[<<d2, d1>>]
+    IN
+    /\ d1 # d2
+    /\ relationships[<<d1, d2>>].state = "opened"
+    /\ relationships[<<d2, d1>>].state = "opened"
+    /\ Settled(d1, d2) /\ Settled(d2, d1)
+    /\ relationships[<<d2, d1>>].tip = tip
+    /\ o1.local = tip /\ o2.local = tip
+    /\ relationships' = [relationships EXCEPT
+         ![<<d1, d2>>] = [tip |-> c, state |-> "active"],
+         ![<<d2, d1>>] = [tip |-> c, state |-> "active"]]
+    /\ smtState' = [smtState EXCEPT
+         ![d1][RelKey(d1, d2)] = c,
+         ![d2][RelKey(d1, d2)] = c]
+    /\ deviceRoots' = [deviceRoots EXCEPT ![d1] = @ + 1, ![d2] = @ + 1]
+    /\ online' = [online EXCEPT
+         ![<<d1, d2>>] = [o1 EXCEPT !.prev = tip, !.local = c, !.lin = c, !.pin = c],
+         ![<<d2, d1>>] = [o2 EXCEPT !.prev = tip, !.local = c, !.lin = c, !.pin = c]]
+    /\ nextMsgId' = nextMsgId + 1
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, net, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, outbox, journal, certs, joins>>
+
+\* Either side ends the relationship with TERMINATE (DSM Amendment A33): a
+\* step that moves no value, made from the relationship's tip, acknowledged
+\* by the other side's countersignature; abstracted to the moment both hold
+\* it. Nothing moves on the relationship after it: Send needs "active".
+Terminate(d1, d2) ==
+    LET tip == relationships[<<d1, d2>>].tip
+        c   == nextMsgId
+        o1  == online[<<d1, d2>>]
+        o2  == online[<<d2, d1>>]
+    IN
+    /\ d1 # d2
+    /\ relationships[<<d1, d2>>].state \in {"opened", "active"}
+    /\ relationships[<<d2, d1>>].state = relationships[<<d1, d2>>].state
+    /\ Settled(d1, d2) /\ Settled(d2, d1)
+    /\ relationships[<<d2, d1>>].tip = tip
+    /\ o1.local = tip /\ o2.local = tip
+    /\ relationships' = [relationships EXCEPT
+         ![<<d1, d2>>] = [tip |-> c, state |-> "ended"],
+         ![<<d2, d1>>] = [tip |-> c, state |-> "ended"]]
+    /\ smtState' = [smtState EXCEPT
+         ![d1][RelKey(d1, d2)] = c,
+         ![d2][RelKey(d1, d2)] = c]
+    /\ deviceRoots' = [deviceRoots EXCEPT ![d1] = @ + 1, ![d2] = @ + 1]
+    /\ online' = [online EXCEPT
+         ![<<d1, d2>>] = [o1 EXCEPT !.prev = tip, !.local = c, !.lin = c, !.pin = c],
+         ![<<d2, d1>>] = [o2 EXCEPT !.prev = tip, !.local = c, !.lin = c, !.pin = c]]
+    /\ nextMsgId' = nextMsgId + 1
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, net, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, outbox, journal, certs, joins>>
 
 \* Start an offline session between two devices
 StartOfflineSession(d1, d2) ==
@@ -1055,6 +1120,8 @@ OnlineNext ==
 HarnessNext ==
     \/ OnlineNext
     \/ \E d1, d2 \in DeviceIds : CreateRelationship(d1, d2)
+    \/ \E d1, d2 \in DeviceIds : Establish(d1, d2)
+    \/ \E d1, d2 \in DeviceIds : Terminate(d1, d2)
     \/ EnterPhase1
     \/ EnterPhase2
     \/ EnterPhase3
@@ -1075,6 +1142,8 @@ SystemNext ==
     \/ OnlineNext
     \/ \E g \in GenesisIds, d \in DeviceIds : AddDevice(g, d)
     \/ \E d1, d2 \in DeviceIds : CreateRelationship(d1, d2)
+    \/ \E d1, d2 \in DeviceIds : Establish(d1, d2)
+    \/ \E d1, d2 \in DeviceIds : Terminate(d1, d2)
     \/ \E d \in DeviceIds : AddStorageNode(d)
     \/ \E d \in DeviceIds : GenerateKeys(d)
     \* Offline bilateral
@@ -1128,6 +1197,8 @@ NetworkStep ==
 
 RelationshipStep ==
     \/ \E d1, d2 \in DeviceIds : CreateRelationship(d1, d2)
+    \/ \E d1, d2 \in DeviceIds : Establish(d1, d2)
+    \/ \E d1, d2 \in DeviceIds : Terminate(d1, d2)
     \/ \E d1, d2 \in DeviceIds : StartOfflineSession(d1, d2)
     \/ \E d1, d2 \in DeviceIds, amount \in 1..MaxPayload : OfflineTransfer(d1, d2, amount)
 
@@ -1180,6 +1251,13 @@ NoDuplicateDevices ==
 ActiveRelationshipsSymmetric ==
     \A d1,d2 \in DeviceIds :
         relationships[<<d1,d2>>].state = "active" <=> relationships[<<d2,d1>>].state = "active"
+
+\* No value moves on a relationship that is not established (DSM Amendment
+\* A33): every send in the outbox left a relationship that was established
+\* when it left, and so is established or has since ended; never one merely
+\* opened.
+NoValueBeforeEstablishment ==
+    \A r \in outbox : relationships[<<r.from, r.to>>].state \in {"active", "ended"}
 
 \* Additional safety properties for advanced features
 VaultsOwnedByCreator ==

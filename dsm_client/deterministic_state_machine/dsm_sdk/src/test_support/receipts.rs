@@ -156,6 +156,21 @@ impl Party {
         c_pre: &[u8; 32],
         target: &[u8; 32],
     ) -> StepAnswer {
+        self.answer_after(toward, h_n, c_pre, target, self.signing_secret_key())
+    }
+
+    /// As [`Self::answer`], with `prior_sk` certifying the EK: the key this
+    /// party's chain on the relationship holds when the step is not the
+    /// relationship's first. After the ESTABLISH step every step is one (DSM
+    /// Amendment A33), so a wallet's step is certified by its chain head.
+    pub fn answer_after(
+        &self,
+        toward: &Party,
+        h_n: &[u8; 32],
+        c_pre: &[u8; 32],
+        target: &[u8; 32],
+        prior_sk: &[u8],
+    ) -> StepAnswer {
         let recipient_kem_pub_hash = dsm::crypto::blake3::domain_hash_bytes(
             dsm::common::domain_tags::TAG_DSM_KYBER_RECIPIENT_PUB_V1,
             toward.kyber_public_key(),
@@ -182,8 +197,8 @@ impl Party {
         );
         let (ek_pk, ek_sk) =
             ephemeral_key::generate_ephemeral_keypair(&seed).expect("the per-step EK");
-        let ek_cert = ephemeral_key::sign_ek_cert(self.signing_secret_key(), &ek_pk, h_n)
-            .expect("the AK certifies the EK");
+        let ek_cert = ephemeral_key::sign_ek_cert(prior_sk, &ek_pk, h_n)
+            .expect("the prior key certifies the EK");
         let sig = dsm::crypto::sphincs::sphincs_sign(&ek_sk, target).expect("the EK answers");
         StepAnswer {
             ek_pk,
@@ -288,7 +303,7 @@ pub fn transfer_step(sender: &Party, receiver: &Party, amount: u64) -> Step {
         .expect("the faucet payout")
         .new_device_state
         .with_pending_economic_admission(None)
-        .establish_relationship(receiver.device_id())
+        .relationship_established_by_fixture(receiver.device_id())
         .expect("the relationship is established");
     let h_n = head
         .chain_tip(&compute_smt_key(&me, &receiver.device_id()))

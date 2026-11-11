@@ -5,6 +5,10 @@
 # it but what QUICKSTART.md's prerequisites say to install, a fresh clone of
 # this commit, and BUILDING_APPS.md's commands alone, in the docs' order, in
 # TypeScript and in Python, each to a wallet connected and a payment received.
+# The accounts go where `make app-dev` puts them: on the beta network, the
+# hosted storage set, so the machine runs no node and no PostgreSQL (the
+# prerequisites QUICKSTART.md lists install neither), and the run needs
+# outbound HTTPS to the fleet.
 #
 # Nothing here knows more than the docs:
 #   - the Linux prerequisites are read out of QUICKSTART.md's "Prerequisites"
@@ -126,8 +130,8 @@ json() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const 
 starter() { curl -fsS --max-time 10 "$@"; }
 page() { node /first-run/first_run_page.mjs "$@"; }   # the tester's hand on the page: a real browser
 
-step "the machine: node $(node --version), $(protoc --version), $(cargo --version | cut -d' ' -f1-2), $(psql --version), $(python3 --version)"
-sudo service postgresql start >/dev/null   # the machine booted: its server is up
+step "the machine: node $(node --version), $(protoc --version), $(cargo --version | cut -d' ' -f1-2), $(python3 --version); no PostgreSQL, no storage node"
+if command -v psql >/dev/null 2>&1; then echo "psql is installed: the prerequisites changed under this check"; exit 1; fi
 
 step "git clone (the docs: git clone https://github.com/deterministicstatemachine/dsm.git; here, this commit)"
 git -c advice.detachedHead=false clone -q /first-run/dsm.bundle dsm && cd dsm

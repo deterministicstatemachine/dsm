@@ -10,15 +10,21 @@
 //! under ([`crate::crypto::spool_seal`]).
 //!
 //! A message goes to a relationship. Its inbox address is per relationship
-//! and changes every step: the hash of the recipient's genesis, the
+//! and changes every step: a hash of the recipient's genesis, the
 //! recipient's device id and the relationship's current chain tip (owner,
-//! 2026-09-23), each first hashed on its own axis:
+//! 2026-09-23), each first hashed on its own axis into the route digest.
+//! The relationship's first inbox is the open address of its route digest;
+//! every later inbox binds the digest to the recipient's write lock (owner,
+//! 2026-11-11, DSM Amendment A34), so a node checks a write against the lock
+//! the two wallets established, and learns no identity:
 //!
 //! ```text
 //! h_g = H(DSM/b0x-G ‖ genesis)
 //! h_d = H(DSM/b0x-D ‖ device id)
 //! h_t = H(DSM/b0x-T ‖ tip)
-//! address = Base32Crockford(H(DSM/b0x ‖ h_g ‖ h_d ‖ h_t))
+//! route = H(DSM/b0x-route/v1 ‖ h_g ‖ h_d ‖ h_t)
+//! first inbox = Base32Crockford(H(DSM/b0x ‖ route))
+//! later inbox = Base32Crockford(H(DSM/b0x-locked/v1 ‖ route ‖ lock public key))
 //! ```
 //!
 //! A transfer is spooled under an id its receipt commitment names, and each
@@ -28,9 +34,10 @@
 
 use crate::common::domain_tags::{
     TAG_DSM_B0X, TAG_DSM_B0X_ARTIFACT_SUBMISSION_ID, TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID,
-    TAG_DSM_B0X_D, TAG_DSM_B0X_ENVELOPE_CONTENT, TAG_DSM_B0X_G, TAG_DSM_B0X_REPLY_MESSAGE_ID,
-    TAG_DSM_B0X_SUBMISSION_ID, TAG_DSM_B0X_T, TAG_DSM_RECEIPT_EVIDENCE_A,
-    TAG_DSM_RECEIPT_EVIDENCE_B, TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
+    TAG_DSM_B0X_D, TAG_DSM_B0X_ENVELOPE_CONTENT, TAG_DSM_B0X_G, TAG_DSM_B0X_LOCKED,
+    TAG_DSM_B0X_REPLY_MESSAGE_ID, TAG_DSM_B0X_ROUTE, TAG_DSM_B0X_SUBMISSION_ID, TAG_DSM_B0X_T,
+    TAG_DSM_RECEIPT_EVIDENCE_A, TAG_DSM_RECEIPT_EVIDENCE_B,
+    TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
 };
 use crate::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher};
 use crate::crypto::domain::TaggedHashDomain;
@@ -45,20 +52,43 @@ fn component(tag: TaggedHashDomain<'_>, input: &[u8; 32]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// The inbox address of the relationship whose recipient is
-/// (`recipient_genesis`, `recipient_device`), at the relationship's tip
-/// `relationship_tip`: the name of the spool a sender writes to and its
-/// recipient reads.
-pub fn inbox_address(
+/// The route digest of the inbox whose recipient is (`recipient_genesis`,
+/// `recipient_device`), at the relationship's tip `relationship_tip`.
+pub fn inbox_route_digest(
     recipient_genesis: &[u8; 32],
     recipient_device: &[u8; 32],
     relationship_tip: &[u8; 32],
-) -> String {
-    let mut h = dsm_domain_hasher(TAG_DSM_B0X);
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_B0X_ROUTE);
     h.update(&component(TAG_DSM_B0X_G, recipient_genesis));
     h.update(&component(TAG_DSM_B0X_D, recipient_device));
     h.update(&component(TAG_DSM_B0X_T, relationship_tip));
-    encode_base32_crockford(h.finalize().as_bytes())
+    *h.finalize().as_bytes()
+}
+
+/// The open address of a route digest, as 32 bytes: a relationship's first
+/// inbox.
+pub fn open_inbox_address_bytes(route_digest: &[u8; 32]) -> [u8; 32] {
+    component(TAG_DSM_B0X, route_digest)
+}
+
+/// The open address of a route digest: a relationship's first inbox.
+pub fn open_inbox_address(route_digest: &[u8; 32]) -> String {
+    encode_base32_crockford(&open_inbox_address_bytes(route_digest))
+}
+
+/// The address of a route digest bound to the recipient's write lock, as 32
+/// bytes: every inbox of a relationship after its first.
+pub fn locked_inbox_address_bytes(route_digest: &[u8; 32], lock_public_key: &[u8]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_B0X_LOCKED);
+    h.update(route_digest);
+    h.update(lock_public_key);
+    *h.finalize().as_bytes()
+}
+
+/// The address of a route digest bound to the recipient's write lock.
+pub fn locked_inbox_address(route_digest: &[u8; 32], lock_public_key: &[u8]) -> String {
+    encode_base32_crockford(&locked_inbox_address_bytes(route_digest, lock_public_key))
 }
 
 fn message_id(tag: TaggedHashDomain<'_>, parts: &[&[u8]]) -> [u8; MESSAGE_ID_LEN] {
@@ -187,10 +217,6 @@ mod tests {
     #[test]
     fn the_address_and_the_ids_keep_the_bytes_they_had_in_the_sdk() {
         assert_eq!(
-            inbox_address(&[0x11; 32], &[0x22; 32], &[0x33; 32]),
-            "C9RKFPBCBK8MHD713XMQ9RK22JG1Y7KTS4MMDS8AXJ98E47Y6K40"
-        );
-        assert_eq!(
             encode_base32_crockford(&reply_message_id(&[0xA1; 32], &[0xB2; 32])),
             "XGTW4SKJT363VQ0Z6HC5QKG0M4"
         );
@@ -217,17 +243,38 @@ mod tests {
         }
     }
 
-    /// The address is the documented formula over the three axes.
+    /// The route digest is the documented formula over the three axes, the
+    /// first inbox its open address, and every later inbox the digest bound
+    /// to a lock (DSM Amendment A34).
     #[test]
-    fn the_inbox_address_is_the_domain_hashed_formula() {
+    fn the_inbox_addresses_are_the_domain_hashed_formulas() {
         let (genesis, device, tip) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32]);
-        let mut h = dsm_domain_hasher(TAG_DSM_B0X);
+        let mut h = dsm_domain_hasher(TAG_DSM_B0X_ROUTE);
         h.update(&component(TAG_DSM_B0X_G, &genesis));
         h.update(&component(TAG_DSM_B0X_D, &device));
         h.update(&component(TAG_DSM_B0X_T, &tip));
+        let route = *h.finalize().as_bytes();
+        assert_eq!(inbox_route_digest(&genesis, &device, &tip), route);
         assert_eq!(
-            inbox_address(&genesis, &device, &tip),
+            open_inbox_address(&route),
+            encode_base32_crockford(&component(TAG_DSM_B0X, &route))
+        );
+        let lock = [0x77u8; 64];
+        let mut h = dsm_domain_hasher(TAG_DSM_B0X_LOCKED);
+        h.update(&route);
+        h.update(&lock);
+        assert_eq!(
+            locked_inbox_address(&route, &lock),
             encode_base32_crockford(h.finalize().as_bytes())
+        );
+        assert_ne!(
+            open_inbox_address(&route),
+            locked_inbox_address(&route, &lock)
+        );
+        assert_ne!(
+            locked_inbox_address(&route, &lock),
+            locked_inbox_address(&route, &[0x78u8; 64]),
+            "another lock is another address"
         );
     }
 
@@ -236,8 +283,9 @@ mod tests {
     #[test]
     fn the_inbox_address_rotates_with_the_tip() {
         let (genesis, device) = ([0x41u8; 32], [0x42u8; 32]);
-        let a1 = inbox_address(&genesis, &device, &[0x43; 32]);
-        let a2 = inbox_address(&genesis, &device, &[0x44; 32]);
+        let lock = [0x77u8; 64];
+        let a1 = locked_inbox_address(&inbox_route_digest(&genesis, &device, &[0x43; 32]), &lock);
+        let a2 = locked_inbox_address(&inbox_route_digest(&genesis, &device, &[0x44; 32]), &lock);
         assert_ne!(a1, a2, "an address must rotate when the tip changes");
         for a in [&a1, &a2] {
             assert_eq!(a.len(), 52, "52 Base32 characters for a 32-byte digest");
@@ -253,8 +301,8 @@ mod tests {
             }
         }
         assert_ne!(
-            inbox_address(&genesis, &device, &[0x43; 32]),
-            inbox_address(&device, &genesis, &[0x43; 32]),
+            inbox_route_digest(&genesis, &device, &[0x43; 32]),
+            inbox_route_digest(&device, &genesis, &[0x43; 32]),
             "the genesis and device axes are separate domains"
         );
     }

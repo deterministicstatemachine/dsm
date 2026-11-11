@@ -38,7 +38,7 @@ When it is back:
 
 CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK is signed and uploaded by the maintainer.
 
-> **Early beta.** This release exists for developer onboarding and community feedback. It contains novel cryptographic protocols and is not ready for production use or for holding value. The app talks to a beta storage fleet on the `dsm-testnet` network id, and beta devices need an operator-side allowance before the fleet accepts their writes. If you want to test with real devices, open a [support](SUPPORT.md) thread first.
+> **Early beta.** This release exists for developer onboarding and community feedback. It contains novel cryptographic protocols and is not ready for production use or for holding value. The app talks to a beta storage fleet on the `dsm-testnet` network id; any wallet or app account may join it, and the faucet funds each new account. If you want to test with real devices, open a [support](SUPPORT.md) thread first.
 
 ## Who this README is for
 
@@ -195,41 +195,41 @@ Offline bearer transfer needs one thing software cannot provide: a way to tell a
 
 The wallet is a four-layer stack and no layer skips another: **React frontend → Kotlin container → JNI/SDK (Rust) → core (Rust)**. The frontend is pure rendering; every rule lives in Rust, and the Kotlin layer carries bytes. The container loads `libdsm_sdk.so` (built with cargo-ndk for every ABI and staged by the Gradle `refreshDsmJniLibs` task), serves the React bundle from the APK's assets through a WebView asset loader, and bridges UI and SDK over a binary MessagePort channel carrying Envelope v3 protobuf bytes. The USB anchor appliance is attached through the same bridge seam.
 
-```bash
-make android        # rebuild JNI libs, rebuild and copy the frontend bundle, clean Gradle assemble
-make android-libs   # only refresh the native libraries
-make install        # build and install a debug APK on a connected device
-```
+| Command | What it does |
+|---|---|
+| `make android` | Rebuilds the JNI libraries, rebuilds and copies in the frontend bundle, then runs a clean Gradle assemble |
+| `make android-libs` | Refreshes only the native libraries |
+| `make install` | Builds a debug APK and installs it on a connected device |
 
 Release APKs are signed by the maintainer; CI does not sign or upload them. Code: [dsm_client/android/](dsm_client/android/), the bridge in [SinglePathWebViewBridge.kt](dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/SinglePathWebViewBridge.kt), and [dsm_client/frontend/](dsm_client/frontend/).
 
 ## Storage nodes and the beta fleet
 
-A storage node is index-only persistence: it stores and serves bytes, keeps write-once registers, and never signs, validates, or interprets protocol rules. The beta fleet is five nodes in GCP `us-central1` with a quorum of three. The client pins the five members and the quorum in `dsm/src/economic/register.rs` under the `dsm-testnet` network id; the same register profile drives the delivery fan-out, so a message is delivered to exactly the quorum's worth of members. The app ships configured for this fleet.
+A storage node is index-only persistence: it stores and serves bytes, keeps write-once registers, and never signs, validates, or interprets protocol rules. The beta fleet is five nodes on OVHcloud (Beauharnois) with a quorum of three. The client pins the five members and the quorum in `dsm/src/economic/register.rs` under the `dsm-testnet` network id; the same register profile drives the delivery fan-out, so a message is delivered to exactly the quorum's worth of members. The app ships configured for this fleet.
 
 - Local development nodes: `make nodes-up`, `make nodes-down`, `make nodes-status`, `make nodes-reset` (PostgreSQL required): the pinned members as five local nodes, prepared by [crates/dsm-dev-net/](crates/dsm-dev-net/). Code: [dsm_storage_node/](dsm_storage_node/).
-- Plugging an app into DSM: your app's own account (`make app-dev`), the TypeScript and Python clients, a starter app and terminal wallets. Guide: [BUILDING_APPS.md](BUILDING_APPS.md).
+- Plugging an app into DSM: your app's own account on the beta fleet (`make app-dev`; nothing of the network runs on your machine) or on a local set (`make app-dev-local`), the TypeScript and Python clients, a starter app and terminal wallets. Guide: [BUILDING_APPS.md](BUILDING_APPS.md).
 - Operators: Terraform and deployment scripts under `dsm_storage_node/`; the release workflow ships a Linux x86_64 binary with its SHA-256.
-- Beta admission: the fleet meters device writes, and a beta device needs an operator-side allowance before its first publication succeeds.
+- Beta admission: none. A new account publishes its directory entry and claims the faucet on its own (`make app-dev` does exactly that, 2026-11-09: a fresh account funded on the fleet in seconds); the fleet keeps no per-device allowance.
 
 ## Formal verification
 
 - **TLA+** (`tla/`): `DSM.tla` and the protocol core, bilateral liveness, Tripwire, non-interference, offline finality, the single-appliance offline anchor, economic-register observation, SoFi v8 successor cells and fulfillment (with falsification and non-vacuity configs), and the dBTC abstract, concrete, and trust-reduction models, each with TLC configs. Claims are indexed in [PROOF_CLAIMS.md](tla/PROOF_CLAIMS.md); run with `tla/run_tlc.sh`.
-- **Lean 4** (`lean4/`, toolchain `v4.23.0`): 26 files covering the core theorem set with no `sorry`; the `lean` CI job builds them on every run. A sorry-free build is a build, not a witness; the frame theorems carry their own witnesses and mutation checks.
+- **Lean 4** (`lean4/`, toolchain `v4.23.0`): 21 modules covering the core theorem set, and the SPHINCS+ refinement in `lean4/Sphincs/`, with no `sorry`; the `lean` CI job builds them on every run. A sorry-free build is a build, not a witness; the frame theorems carry their own witnesses and mutation checks.
 - **Vertical validation** (`tools/vertical_validation`): `tla-check`, `proof-check`, `property-tests`, `implementation-traces` (transfer chain, signature rejection, fork divergence against the real state machine), `adversarial`, `crypto-kat`, `bilateral-throughput`, `benchmark`, `formal-report`, and `full`. The `formal-validation` CI job runs it.
 - **Production safety scan** (`ci/production_safety_checks.sh`): the ban list (wall clock, JSON in protocol paths, hex, envelope version) enforced as a CI gate.
 
 ## Development workflow
 
-```bash
-make help       # every target
-make menu       # interactive
-make doctor     # toolchain check
-make build      # Rust workspace
-make frontend   # React bundle
-make typecheck  # onboarding smoke check
-make lint       # fmt --check + clippy --all-targets, the second half of any green claim
-```
+| Command | What it does |
+|---|---|
+| `make help` | Lists every target |
+| `make menu` | An interactive menu of the common targets |
+| `make doctor` | Checks the toolchain |
+| `make build` | Builds the Rust workspace |
+| `make frontend` | Builds the React bundle |
+| `make typecheck` | The onboarding smoke check |
+| `make lint` | `fmt --check` and `clippy --all-targets`: the second half of any green claim |
 
 On Windows use `.\scripts\dev.ps1` for the Rust workspace and frontend, and WSL2 for Android builds and the shell helpers.
 

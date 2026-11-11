@@ -259,14 +259,13 @@ async fn each_contact_is_told_what_it_is_owed_of_a_payers_boundaries() {
         .expect("B recorded the load before the unload");
     assert_eq!(before.economic_position(), loaded_at);
 
-    // C arrives after both.
+    // C arrives after both. Establishing the relationship takes a sync on
+    // each side (DSM Amendment A33), and every sync of A's tells its contacts
+    // what they are owed: C is told during the establishment, once.
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&pair.fleet).await;
-    c.add_contact(&pair.a).await;
-    pair.a.add_contact(&c).await;
-    assert!(recorded_by(&c, &pair.a, &appliance).is_none());
-    pair.a.enter();
-    assert_eq!(owed_to(&c.device_id, unloaded_at).unwrap(), [unloaded_at]);
+    c.add_and_establish(&pair.a).await;
+    pair.a.add_and_establish(&c).await;
     let told = pair.a.sync().await;
     assert_eq!(told.errors, Vec::<String>::new(), "A's sync");
     pair.a.enter();

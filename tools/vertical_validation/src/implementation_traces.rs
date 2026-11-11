@@ -1005,7 +1005,7 @@ fn trace_bilateral_full_offline_finality(
             remote,
             side.remote_kp.public_key().to_vec(),
         )
-        .establish_relationship(local)
+        .relationship_established_by_fixture(local)
         {
             Ok(head) => head,
             Err(e) => return vec![format!("establishing the receiver's relationship: {e}")],
@@ -1385,7 +1385,7 @@ fn trace_side(
         ),
     );
     let head = trace_local_head(local, &local_kp)?
-        .establish_relationship(remote.0)
+        .relationship_established_by_fixture(remote.0)
         .map_err(|e| format!("establishing the trace relationship: {e}"))?;
     Ok(TraceSide {
         manager,

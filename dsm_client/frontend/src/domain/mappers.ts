@@ -42,6 +42,12 @@ function mapSendBlockReason(value: unknown): DomainRelationshipSendBlockReason |
       return 'state_divergence';
     case RelationshipSendBlockReason.INTERNAL_ERROR:
       return 'internal_error';
+    case RelationshipSendBlockReason.NOT_ESTABLISHED:
+      return 'not_established';
+    case RelationshipSendBlockReason.ENDING:
+      return 'ending';
+    case RelationshipSendBlockReason.ENDED:
+      return 'ended';
     default:
       return undefined;
   }
@@ -77,6 +83,7 @@ export function mapContactList(list: BilateralRelationshipDTO[]): DomainContact[
       // The address Rust holds for the contact: pairing confirmed it.
       bleAddress: c.bleAddress,
       pairing: c.pairing,
+      relationship: c.relationship,
       genesisVerifiedOnline: c.genesisVerifiedOnline,
       signingPublicKey: toBase32Crockford(c.publicKey),
       sendReady: sendStatus?.sendReady,

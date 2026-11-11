@@ -530,8 +530,8 @@ async fn a_second_offline_receive_waits_until_the_first_has_arrived() {
     let mut c_device = TestDevice::create("C", 0x0C);
     c_device.boot(&pair.fleet).await;
     c_device.fund_admitted(100).await;
-    c_device.add_contact(&pair.b).await;
-    pair.b.add_contact(&c_device).await;
+    c_device.add_and_establish(&pair.b).await;
+    pair.b.add_and_establish(&c_device).await;
     let _boards = HostAppliance::install_each(vec![
         (pair.a.device_id, appliance.payer.clone()),
         (pair.b.device_id, appliance.receiver.clone()),

@@ -466,6 +466,19 @@ async fn spool_sealed(
     inner: &dsm::types::proto::Envelope,
 ) -> String {
     from.enter();
+    // The writer derives the route itself, from its own view of the
+    // relationship (DSM Amendment A34): it is the route the recipient reads.
+    let contact = crate::storage::client_db::get_contact_by_device_id(&to.device_id)
+        .expect("the writer's contacts")
+        .expect("the writer holds the recipient");
+    let tip = crate::handlers::app_router_impl::contact_relationship_tip(&contact)
+        .expect("the writer's tip with the recipient");
+    assert_eq!(
+        crate::sdk::spool_write::counterparty_inbox_address(&to.device_id, &to.genesis, &tip)
+            .expect("the writer's route"),
+        route,
+        "both sides derive the one route"
+    );
     let id = crate::util::text_id::encode_base32_crockford(&inner.message_id);
     crate::sdk::b0x_sdk::seal_for(&to.device_id, &id, &inner.encode_to_vec())
         .expect("sealed to the recipient");
@@ -475,7 +488,7 @@ async fn spool_sealed(
         crate::sdk::storage_set::pinned_endpoints().expect("the pinned set"),
     )
     .expect("a spool client");
-    sdk.submit_stored_envelope(route, &id)
+    sdk.submit_stored_envelope(&to.device_id, route, &id)
         .await
         .expect("delivered to its quorum");
     dsm::crypto::spool_address::envelope_merge_key(inner)
@@ -510,7 +523,7 @@ fn route_with(b: &TestDevice, contact: &TestDevice) -> String {
         .expect("a contact of B's");
     let tip = crate::handlers::app_router_impl::contact_relationship_tip(record)
         .expect("a relationship tip");
-    dsm::crypto::spool_address::inbox_address(&b.genesis, &b.device_id, &tip)
+    b.inbox_from(contact, &tip)
 }
 
 /// Pre-audit item 11, the owner's ruling (2026-10-01): each inbox route has
@@ -532,30 +545,49 @@ async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through(
     let p = Pair::boot(100, 0).await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
-    c.add_contact(&p.b).await;
-    p.b.add_contact(&c).await;
+    c.add_and_establish(&p.b).await;
+    p.b.add_and_establish(&c).await;
     c.fund_admitted(100).await;
 
-    // B's routes, in the order a sync reads them (sorted by address): one per
-    // contact. The junk goes on the route read first, and the contact on the
+    // B's current routes, in the order a sync reads them (sorted by
+    // address): one per contact. Each contact's establishment (DSM Amendment
+    // A33) also left B its previous-tip route, which holds no payment. The
+    // junk goes on the current route read first, and the contact on the
     // other route pays, so the old global budget is spent before the payment
     // is reached.
     p.b.enter();
     let contacts = crate::storage::client_db::get_all_contacts().expect("B's contacts");
-    let routes = crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
+    let routes: Vec<_> = crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
         p.b.genesis,
         p.b.device_id,
         &contacts,
     )
-    .expect("B's routes");
-    assert_eq!(routes.len(), 2, "one route per contact");
+    .expect("B's routes")
+    .into_iter()
+    .filter(|route| {
+        matches!(
+            route.freshness,
+            crate::handlers::app_router_impl::RouteFreshness::Current
+        )
+    })
+    .collect();
+    assert_eq!(routes.len(), 2, "one current route per contact");
     let junked = routes[0].address.clone();
     let first_read = contacts
         .iter()
         .find(|k| {
             let tip = crate::handlers::app_router_impl::contact_relationship_tip(k)
                 .expect("a relationship tip");
-            dsm::crypto::spool_address::inbox_address(&p.b.genesis, &p.b.device_id, &tip) == junked
+            let writer: [u8; 32] = k.device_id.as_slice().try_into().expect("a device id");
+            let writer_genesis: [u8; 32] = k.genesis_hash.as_slice().try_into().expect("a genesis");
+            crate::sdk::spool_write::inbox_address_of(
+                (&p.b.device_id, &p.b.genesis),
+                (&writer, &writer_genesis),
+                &tip,
+                crate::sdk::spool_write::Side::Recipient,
+            )
+            .expect("the inbox address")
+                == Some(junked.clone())
         })
         .expect("the route read first is a contact's");
     let (junker, payer) = if first_read.device_id == p.a.device_id.to_vec() {
@@ -602,18 +634,14 @@ async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through(
 }
 
 /// Pre-audit item 11: a copy is passed over by its content, never by the id it
-/// is spooled under. Anyone can spool a copy under another message's id, and
-/// the node keeps both (storage spec §8). Passing junk over by id would hide
+/// is spooled under. A writer can spool a copy under another message's id,
+/// and the node keeps both (storage spec §8). Passing junk over by id would hide
 /// every copy under that id for good, an honest one included, which is the
 /// shadowing `envelope_merge_key` closed for the merge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
     let p = Pair::boot(100, 0).await;
-    // C, a third party: C holds B's keys to seal to; B does not know C.
-    let mut c = TestDevice::create("C", 0x0C);
-    c.boot(&p.fleet).await;
-    c.add_contact(&p.b).await;
     let route = route_with(&p.b, &p.a);
     let id: [u8; 16] = rand::random();
 
@@ -628,12 +656,26 @@ async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
     assert!(first.success, "{:?}", first.errors);
     assert_eq!(first.pulled, 1, "the junk was read: {first:?}");
 
-    // Another copy under the same id, other content, from another device.
+    // Another copy under the same id, other content. Only the relationship's
+    // writer reaches its inbox (DSM Amendment A34), so it is A's own. A's
+    // wallet seals one payload per id and keeps it (`b0x_sealed`); a writer
+    // that does not, a modified wallet, can put a second one under the id,
+    // and that writer is the one this test needs.
+    p.a.enter();
+    {
+        let binding = crate::storage::client_db::get_connection().expect("A's store");
+        let conn = binding.lock().expect("A's store is not poisoned");
+        conn.execute(
+            "DELETE FROM b0x_sealed WHERE message_id = ?1",
+            [crate::util::text_id::encode_base32_crockford(&id)],
+        )
+        .expect("A forgets its first seal");
+    }
     let other = spool_sealed(
-        &c,
+        &p.a,
         &p.b,
         &route,
-        &invoke_copy(&c, id, "wallet.send", Some(vec![0xFF])),
+        &invoke_copy(&p.a, id, "wallet.send", Some(vec![0xFF])),
     )
     .await;
     assert_ne!(other, junk, "two copies, one id");
@@ -655,9 +697,10 @@ async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
 /// the sender's path refuses and leaves) holds the read position where it is.
 /// On the old code every read started there and read at most its page cap, so
 /// what lay more than a cap behind it was never read, junk passed over or not.
-/// A third party puts one such copy on B's route with A, a cap's worth of
-/// copies that open to none of the spooled payloads behind it, and A then
-/// pays B.
+/// A puts one such copy on its route to B, a cap's worth of copies that open
+/// to none of the spooled payloads behind it, and then pays B. Only the
+/// relationship's writer reaches its inbox (DSM Amendment A34), so the junk
+/// is A's own.
 ///
 /// - The first sync stops at the cap before the payment, names the route
 ///   `more_pending`, and passes over the junk it read.
@@ -668,25 +711,21 @@ async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
 #[serial]
 async fn a_copy_that_waits_hides_nothing_more_than_a_page_cap_behind_it() {
     let p = Pair::boot(100, 0).await;
-    // C, a third party: C holds B's keys to seal to; B does not know C.
-    let mut c = TestDevice::create("C", 0x0C);
-    c.boot(&p.fleet).await;
-    c.add_contact(&p.b).await;
     let route = route_with(&p.b, &p.a);
 
     let pin = invoke_copy(
-        &c,
+        &p.a,
         rand::random(),
         crate::sdk::b0x_sdk::RECEIPT_COUNTERSIGN_B_METHOD,
         Some(vec![0xFF]),
     );
-    spool_sealed(&c, &p.b, &route, &pin).await;
+    spool_sealed(&p.a, &p.b, &route, &pin).await;
     // One page past the cap (64 entries a page, 16 pages a read).
     let cap = 16 * 64;
     let mut junk = Vec::with_capacity(cap + 64);
     for _ in 0..cap + 64 {
-        let unknown = invoke_copy(&c, rand::random(), "no.such.payload", None);
-        junk.push(spool_sealed(&c, &p.b, &route, &unknown).await);
+        let unknown = invoke_copy(&p.a, rand::random(), "no.such.payload", None);
+        junk.push(spool_sealed(&p.a, &p.b, &route, &unknown).await);
     }
     let paid = p.a.send(&p.b, 10).await;
     assert!(paid.success, "{:?}", paid.error_message);

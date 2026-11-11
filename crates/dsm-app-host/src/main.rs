@@ -147,6 +147,7 @@ fn main() -> Result<(), String> {
     // runtime, so they never run inside the host's.
     identity::start_sdk(&args)?;
     let host = identity::ensure_identity(&args)?;
+    identity::wait_published(&host)?;
     let relay_tls = tls::load_or_make(&args.data_dir, &args.relay_names)?;
     log::info!(
         "[host] on the pinned set; relay {} (certificate pin {})",

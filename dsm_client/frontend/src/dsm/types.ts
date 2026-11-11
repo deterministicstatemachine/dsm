@@ -2,7 +2,7 @@
 
 // Lightweight shared types for DSM UI flows and events
 import * as pb from '../proto/dsm_app_pb';
-import type { ContactPairing } from '../domain/types';
+import type { DomainRelationshipState, ContactPairing } from '../domain/types';
 import type { PersonProfile } from '../domain/types';
 
 /**
@@ -18,6 +18,7 @@ export interface BilateralRelationshipDTO {
   chainTip?: Uint8Array;            // 32 bytes
   bleAddress?: string;              // BLE MAC address for offline bilateral transfers
   pairing: ContactPairing;          // where BLE pairing stands, as Rust's pairing loop has it
+  relationship: DomainRelationshipState; // where the relationship stands (DSM Amendment A33)
   genesisVerifiedOnline: boolean;   // genesis hash verified via storage node
   sendStatus?: pb.RelationshipSendStatus;
   /** The details the wallet holds for the contact, when any were set. */

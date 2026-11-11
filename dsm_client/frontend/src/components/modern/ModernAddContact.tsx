@@ -40,7 +40,8 @@ export default function ModernAddContact(): React.JSX.Element {
   const read = useCallback((text: string) => {
     setProblem(null);
     setStep({ kind: 'reading' });
-    readContactCode(text.trim()).then(
+    // A phone keyboard capitalises the first letter typed; the scheme is a scheme, so its case is not the person's choice.
+    readContactCode(text.trim().replace(/^dsm:contact\/v3:/i, 'dsm:contact/v3:')).then(
       (card) => setStep({ kind: 'who', card, profile: profileFromCard(card) }),
       (e: unknown) => {
         setProblem(messageOf(e));
@@ -116,7 +117,7 @@ export default function ModernAddContact(): React.JSX.Element {
           </button>
           <div className="s-field" style={{ marginTop: 18 }}>
             <label className="s-label" htmlFor="s-paste">Or paste a code they sent you</label>
-            <input id="s-paste" className="s-input" placeholder="dsm:contact/v3:…" value={pasted} onChange={(e) => setPasted(e.target.value)} />
+            <input id="s-paste" className="s-input" placeholder="dsm:contact/v3:…" autoCapitalize="none" autoCorrect="off" value={pasted} onChange={(e) => setPasted(e.target.value)} />
           </div>
           <button type="button" className="s-btn s-btn-quiet" disabled={pasted.trim().length === 0 || step.kind === 'reading'} onClick={() => read(pasted)}>
             {step.kind === 'reading' ? 'Reading…' : 'Use this code'}

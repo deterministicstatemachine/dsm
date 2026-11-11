@@ -9,7 +9,7 @@ import {
   requestBlePermissions as bridgeRequestBlePermissions,
 } from './WebViewBridge';
 import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ContactCard } from './types';
-import type { ContactPairing, PersonProfile } from '../domain/types';
+import type { ContactPairing, DomainRelationshipState, PersonProfile } from '../domain/types';
 import { deviceFingerprint, visibleText } from '../domain/displayName';
 
 const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
@@ -18,6 +18,15 @@ const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
   [pb.ContactPairingPhase.SEARCHING]: 'searching',
   [pb.ContactPairingPhase.CONNECTED]: 'connected',
   [pb.ContactPairingPhase.RETRYING]: 'retrying',
+};
+
+/** Where a relationship stands, as the wire names it (DSM Amendment A33). */
+const RELATIONSHIP: Partial<Record<pb.RelationshipState, DomainRelationshipState>> = {
+  [pb.RelationshipState.OPENED]: 'opened',
+  [pb.RelationshipState.PROPOSED]: 'proposed',
+  [pb.RelationshipState.ESTABLISHED]: 'established',
+  [pb.RelationshipState.ENDING]: 'ending',
+  [pb.RelationshipState.ENDED]: 'ended',
 };
 
 /** A contact's alias as names are shown; one that is nothing but invisible characters is shown as the device's fingerprint. */
@@ -49,6 +58,10 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
   if (!pairing) {
     throw new Error(`STRICT: contacts.list answered a contact in a pairing phase the wire does not name (${c.pairing})`);
   }
+  const relationship = RELATIONSHIP[c.relationshipState];
+  if (!relationship) {
+    throw new Error(`STRICT: contacts.list answered a contact in a relationship state the wire does not name (${c.relationshipState})`);
+  }
   return {
     deviceId: c.deviceId,
     publicKey: c.signingPublicKey,
@@ -58,6 +71,7 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
     // The wire's empty string is "no address".
     bleAddress: c.bleAddress || undefined,
     pairing,
+    relationship,
     genesisVerifiedOnline: c.genesisVerifiedOnline,
     sendStatus: c.sendStatus,
     profile: c.profile ? profileOf(c.profile) : undefined,
@@ -219,6 +233,21 @@ export async function unpairContact(deviceIdB32: string): Promise<pb.ContactAddR
   if (env.payload.case === 'error') throw refusal('contacts.unpair', env.payload.value);
   if (env.payload.case !== 'contactAddResponse') {
     throw new Error(`STRICT: contacts.unpair answered ${env.payload.case}`);
+  }
+  return env.payload.value;
+}
+
+/**
+ * Ends the relationship with a contact (DSM Amendment A33): Rust makes the
+ * TERMINATE step on its chain, and nothing moves on it from then on. Answers
+ * the contact as it stands right after.
+ */
+export async function terminateContact(deviceIdB32: string): Promise<pb.ContactAddResponse> {
+  const req = new pb.ContactTerminateRequest({ deviceId: new Uint8Array(decodeBase32Crockford(deviceIdB32)) });
+  const env = decodeFramedEnvelopeV3(await routerInvokeBin('contacts.terminate', protoArg(req.toBinary())));
+  if (env.payload.case === 'error') throw refusal('contacts.terminate', env.payload.value);
+  if (env.payload.case !== 'contactAddResponse') {
+    throw new Error(`STRICT: contacts.terminate answered ${env.payload.case}`);
   }
   return env.payload.value;
 }

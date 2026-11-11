@@ -11,7 +11,7 @@ import type { DomainContact } from '../../../domain/types';
 
 function contact(alias: string, deviceId: string, pairing: DomainContact['pairing']): DomainContact {
   const genesisHash = `G-${alias}`;
-  return { alias, deviceId, genesisHash, pairing, genesisVerifiedOnline: genesisHash.length > 2, signingPublicKey: `K-${alias}` };
+  return { alias, deviceId, genesisHash, pairing, relationship: 'established', genesisVerifiedOnline: genesisHash.length > 2, signingPublicKey: `K-${alias}` };
 }
 
 describe('pairing on the People tab', () => {
