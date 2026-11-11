@@ -12,7 +12,8 @@ use super::relationship_write_authorization::WriteAuthorizationChecked;
 use crate::storage::client_db::{self, IssuedWriteGrant, OwnWriteAuthorization};
 use crate::test_support::two_device::{Pair, TestDevice};
 use dsm::core::relationship_write_grant::{
-    decode_write_grant_wire, verify_write_grant, GrantExpectation, WriteKeyOffer, WRITE_KEY_VARIANT,
+    decode_write_authorization_wire, decode_write_grant_wire, verify_write_authorization,
+    AuthorizationExpectation, WriteKeyOffer, WRITE_KEY_VARIANT,
 };
 use prost::Message;
 
@@ -66,10 +67,9 @@ async fn granted_both_ways(a: &TestDevice, b: &TestDevice) {
 /// AK and names exactly the instance, the two devices and the key.
 fn assert_grant_verifies(device: &TestDevice, peer: &TestDevice, own: &OwnWriteAuthorization) {
     let grant = own.grant.as_ref().expect("a grant is held");
-    let wire = decode_write_grant_wire(&grant.grant_wire).expect("the held grant's wire");
-    let checked = verify_write_grant(
-        &wire,
-        &GrantExpectation {
+    let checked = verify_write_authorization(
+        &grant.grant_wire,
+        &AuthorizationExpectation {
             relationship_instance_id: &own.relationship_instance_id,
             recipient_genesis: &peer.genesis,
             recipient_device_id: &peer.device_id,
@@ -78,8 +78,12 @@ fn assert_grant_verifies(device: &TestDevice, peer: &TestDevice, own: &OwnWriteA
             recipient_ak: &peer.ak_pk,
         },
     )
-    .expect("the grant verifies under the granter's AK");
-    assert_eq!(checked.grant_id(), grant.grant_id);
+    .expect("the authorization verifies under the granter's AK");
+    assert_eq!(checked.grant.grant_id(), grant.grant_id);
+    assert_ne!(
+        checked.lock.lock_public_key, peer.ak_pk,
+        "the lock is never the granter's AK"
+    );
 }
 
 /// Establishing a relationship gives each side a write key of its own toward
@@ -290,13 +294,17 @@ async fn an_offer_or_grant_for_another_device_is_refused() {
         c.router().take_in_write_grant(&grant.grant_wire),
         WriteAuthorizationChecked::Refused(_)
     ));
-    // B's grant, one byte changed in its signature, read by A: refused, and A
-    // keeps the grant it held.
-    let mut tampered = decode_write_grant_wire(&grant.grant_wire).expect("the grant");
+    // B's grant, one byte changed in the lock's signature, read by A:
+    // refused, and A keeps the grant it held.
+    let mut authorization =
+        decode_write_authorization_wire(&grant.grant_wire).expect("the authorization");
+    let mut tampered = decode_write_grant_wire(&authorization.grant).expect("the grant");
     tampered.grant_signature[64] ^= 0x01;
+    authorization.grant = tampered.encode_to_vec();
     p.a.enter();
     assert!(matches!(
-        p.a.router().take_in_write_grant(&tampered.encode_to_vec()),
+        p.a.router()
+            .take_in_write_grant(&authorization.encode_to_vec()),
         WriteAuthorizationChecked::Refused(_)
     ));
     assert_eq!(held(&p.a, &p.b).0, a_own);
@@ -304,4 +312,95 @@ async fn an_offer_or_grant_for_another_device_is_refused() {
     assert!(client_db::owed_write_authorizations()
         .expect("owed")
         .is_empty());
+}
+
+/// DSM Amendment A34, the write lock: a member refuses a write into an inbox
+/// under any key but the one the inbox's first write fixed there, and takes
+/// the inbox's own writer. A pays B; a delivery lands on a quorum of the
+/// set, and each member it reached fixed the inbox's key at that write. A
+/// stranger then writes to that inbox under a key of its own, well signed:
+/// every one of those members answers 403. B is still paid.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_write_into_an_inbox_under_another_key_is_refused_by_every_node() {
+    let p = Pair::boot(100, 0).await;
+    granted_both_ways(&p.a, &p.b).await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+
+    p.a.enter();
+    let route: String = {
+        let binding = client_db::get_connection().expect("conn");
+        let conn = binding.lock().expect("the store lock");
+        conn.query_row(
+            "SELECT o.routing_address FROM sender_outbox o JOIN sender_online_proposal p \
+             ON p.relationship_key = o.relationship_key AND p.commitment = o.commitment \
+             WHERE p.token_id != '' ORDER BY o.rowid DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("the payment's route")
+    };
+    let address = <[u8; 32]>::try_from(
+        crate::util::text_id::decode_base32_crockford(&route)
+            .expect("the route decodes")
+            .as_slice(),
+    )
+    .expect("a 32-byte route");
+    let stranger = dsm::crypto::sphincs::generate_keypair(WRITE_KEY_VARIANT).expect("a key");
+    let message_id: [u8; 16] = rand::random();
+    let write = dsm::core::relationship_write_grant::self_granted_spool_write(
+        &stranger,
+        &[0x5A; 32],
+        &address,
+        &message_id,
+        b"a stranger's bytes",
+    )
+    .expect("a signed write");
+    let mut holding = 0usize;
+    for node in &p.nodes.nodes {
+        let client = node.pool().get().await.expect("the member's database");
+        let fixed = client
+            .query_opt("SELECT 1 FROM spool_key WHERE device_id = $1", &[&route])
+            .await
+            .expect("the member's keys")
+            .is_some();
+        if !fixed {
+            continue;
+        }
+        holding += 1;
+        let member = crate::sdk::storage_node_sdk::member_client(&node.member_id, &node.endpoint)
+            .expect("a member client");
+        let answer = member
+            .post(format!("{}/api/v2/b0x/submit", node.endpoint))
+            .header("Content-Type", "application/octet-stream")
+            .header("x-dsm-recipient", route.as_str())
+            .header(
+                "x-dsm-message-id",
+                crate::util::text_id::encode_base32_crockford(&message_id),
+            )
+            .body(write.clone())
+            .send()
+            .await
+            .expect("the member answers");
+        assert_eq!(
+            answer.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{} took a write under another key",
+            node.endpoint
+        );
+    }
+    assert!(
+        holding >= crate::economic_fixtures::canonical_quorum(),
+        "the payment fixed the inbox's key on a quorum of members: {holding}"
+    );
+
+    for _ in 0..6 {
+        p.b.sync().await;
+        p.a.sync().await;
+        if p.b.era_balance() == 10 {
+            break;
+        }
+    }
+    assert_eq!(p.b.era_balance(), 10, "B took A's payment");
 }

@@ -941,7 +941,12 @@ async fn deliver_pending_finalization_checkpoints(
             }
         };
         match b0x
-            .submit_stored_envelope_with_retry(route, &checkpoint.submission_id, &retry)
+            .submit_stored_envelope_with_retry(
+                &proposal.counterparty_device_id,
+                route,
+                &checkpoint.submission_id,
+                &retry,
+            )
             .await
         {
             Ok(()) => {}

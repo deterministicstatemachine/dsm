@@ -215,7 +215,10 @@ mod tests {
     // +6 with a relationship's write grants (DSM Amendment A34): the instance,
     // the write key's seed, the offer's binding and possession targets, the
     // grant's id and its signing target.
-    const EXPECTED_TAG_COUNT: usize = 440;
+    // +5 with the write lock (DSM Amendment A34): the lock's seed, its AK
+    // binding, the first inbox's key seed, a write's signing target and the
+    // commitment of its envelope.
+    const EXPECTED_TAG_COUNT: usize = 445;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

@@ -25,9 +25,10 @@
 //! in any of it.
 
 use dsm::core::relationship_write_grant::{
-    decode_write_grant_wire, decode_write_key_offer_wire, derive_write_keypair,
-    relationship_instance_id, verify_write_grant, verify_write_grant_signature,
-    verify_write_key_offer, GrantExpectation, OfferExpectation, WriteGrant, WriteKeyOffer,
+    decode_write_authorization_wire, decode_write_key_offer_wire, decode_write_lock_wire,
+    derive_write_keypair, derive_write_lock_keypair, relationship_instance_id,
+    verify_write_authorization, verify_write_key_offer, write_authorization_wire,
+    AuthorizationExpectation, OfferExpectation, WriteGrant, WriteKeyOffer, WriteLock,
 };
 use dsm::types::error::DsmError;
 use prost::Message;
@@ -256,38 +257,73 @@ impl AppRouterImpl {
         }
     }
 
-    /// This device's grant for a verified offer, signed by its AK and
-    /// checked under it before it is returned.
+    /// This device's authorization of a verified offer's key: its write lock
+    /// over its inbox for the instance, bound by its AK to the instance,
+    /// itself and the sender, and the lock's grant of the key. Checked as the
+    /// sender will check it before it is returned.
     async fn issue_write_grant(&self, offer: &WriteKeyOffer) -> Result<HeldGrant, DsmError> {
         let genesis = self.core_sdk.local_genesis_hash().await?;
         let genesis: [u8; 32] = genesis.as_slice().try_into().map_err(|e| {
             DsmError::invalid_operation(format!("the local genesis is not 32 bytes: {e}"))
         })?;
-        let grant = WriteGrant::for_offer(offer, genesis);
-        let signature = self.wallet.sign_operation_bytes(&grant.signing_target())?;
-        let wire = grant.to_wire(signature);
+        let s_master = zeroize::Zeroizing::new(crate::init::current_smaster()?);
+        let lock_key = derive_write_lock_keypair(
+            &s_master,
+            &offer.relationship_instance_id,
+            &self.device_id_bytes,
+            &offer.sender_device_id,
+        )?;
+        let lock = WriteLock {
+            relationship_instance_id: offer.relationship_instance_id,
+            recipient_genesis: genesis,
+            recipient_device_id: self.device_id_bytes,
+            authorized_sender_device_id: offer.sender_device_id,
+            lock_public_key: lock_key.public_key.clone(),
+        };
+        let lock_wire = lock.to_wire(self.wallet.sign_operation_bytes(&lock.binding_target())?);
+        let grant = WriteGrant::of_key(
+            offer.relationship_instance_id,
+            offer.write_public_key.clone(),
+        );
+        let grant_wire = grant.to_wire(dsm::crypto::sphincs::sphincs_sign(
+            &lock_key.secret_key,
+            &grant.signing_target(),
+        )?);
+        let authorization = write_authorization_wire(&lock_wire, &grant_wire);
         let own_ak = crate::sdk::signing_authority::current_public_key()?;
-        verify_write_grant_signature(&wire, &own_ak)?;
+        verify_write_authorization(
+            &authorization,
+            &AuthorizationExpectation {
+                relationship_instance_id: &offer.relationship_instance_id,
+                recipient_genesis: &genesis,
+                recipient_device_id: &self.device_id_bytes,
+                sender_device_id: &offer.sender_device_id,
+                write_public_key: &offer.write_public_key,
+                recipient_ak: &own_ak,
+            },
+        )?;
         Ok(HeldGrant {
             grant_id: grant.grant_id(),
-            grant_wire: wire.encode_to_vec(),
+            grant_wire: authorization,
         })
     }
 
-    /// Take a counterparty's grant for this device's write key, when the
-    /// relationship is established here and the grant names exactly this
-    /// device's instance, key and the counterparty's own inbox, signed by the
-    /// counterparty's AK.
+    /// Take a counterparty's authorization of this device's write key, when
+    /// the relationship is established here: its AK bound its lock to this
+    /// device's instance, itself and this device, and the lock granted this
+    /// device's own write key.
     pub(crate) fn take_in_write_grant(&self, body: &[u8]) -> WriteAuthorizationChecked {
-        let wire = match decode_write_grant_wire(body) {
-            Ok(wire) => wire,
+        let lock = match decode_write_authorization_wire(body)
+            .and_then(|authorization| decode_write_lock_wire(&authorization.lock))
+        {
+            Ok(lock) => lock,
             Err(e) => return WriteAuthorizationChecked::Refused(e.to_string()),
         };
-        let granter = match device_32(&wire.recipient_device_id, "its recipient") {
+        let granter = match device_32(&lock.recipient_device_id, "its recipient") {
             Ok(granter) => granter,
             Err(refused) => return refused,
         };
-        if wire.authorized_sender_device_id.as_slice() != self.device_id_bytes.as_slice() {
+        if lock.authorized_sender_device_id.as_slice() != self.device_id_bytes.as_slice() {
             return WriteAuthorizationChecked::Refused("it authorizes another device".to_string());
         }
         let (contact, own) = match established_with(&granter) {
@@ -298,9 +334,9 @@ impl AppRouterImpl {
             Ok(genesis) => genesis,
             Err(refused) => return refused,
         };
-        let grant = match verify_write_grant(
-            &wire,
-            &GrantExpectation {
+        let verified = match verify_write_authorization(
+            body,
+            &AuthorizationExpectation {
                 relationship_instance_id: &own.relationship_instance_id,
                 recipient_genesis: &genesis,
                 recipient_device_id: &granter,
@@ -309,11 +345,11 @@ impl AppRouterImpl {
                 recipient_ak: &contact.public_key,
             },
         ) {
-            Ok(grant) => grant,
+            Ok(verified) => verified,
             Err(e) => return WriteAuthorizationChecked::Refused(e.to_string()),
         };
         let held = HeldGrant {
-            grant_id: grant.grant_id(),
+            grant_id: verified.grant.grant_id(),
             grant_wire: body.to_vec(),
         };
         match client_db::record_grant_received(&granter, &own.relationship_instance_id, &held) {
@@ -366,11 +402,20 @@ impl AppRouterImpl {
                     continue;
                 }
             };
-            let route = contact_relationship_tip(&contact).and_then(|tip| {
-                <[u8; 32]>::try_from(contact.genesis_hash.as_slice())
-                    .map(|genesis| (genesis, tip))
-                    .map_err(|e| format!("the contact's genesis: {e}"))
-            });
+            // Under the counterparty's lock once its grant is held; until
+            // then on the relationship's first inbox, under this device's own
+            // key there (DSM Amendment A34).
+            let route = match crate::sdk::spool_write::holds_grant(&counterparty) {
+                Ok(held) if held => contact_relationship_tip(&contact).and_then(|tip| {
+                    <[u8; 32]>::try_from(contact.genesis_hash.as_slice())
+                        .map(|genesis| (genesis, tip))
+                        .map_err(|e| format!("the contact's genesis: {e}"))
+                }),
+                Ok(_) => crate::sdk::spool_write::first_inbox(&counterparty)
+                    .map(|(first_tip, genesis, _)| (genesis, first_tip))
+                    .map_err(|e| format!("the first inbox: {e}")),
+                Err(e) => Err(format!("the write authorization: {e}")),
+            };
             let (genesis, tip) = match route {
                 Ok(route) => route,
                 Err(e) => {

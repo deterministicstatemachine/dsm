@@ -3871,24 +3871,55 @@ message RelationshipWriteKeyOfferV1 {
   bytes binding_signature        = 7 [(dsm_max_len)=65535];
 }
 
-// A recipient's grant of write authority over its inbox for one relationship
-// instance to one sender's write key (DSM Amendment A34). `grant_id` is
-// BLAKE3 under DSM/relationship-write-grant-id/v1 over fields 1-7; the
-// recipient's AK signs BLAKE3 under DSM/relationship-write-grant/v1 over
-// fields 1-8, in tag order. It authorizes writes to the recipient's inbox for
-// that relationship instance and nothing else: no step, no value, no other
-// relationship, no other namespace, no delegation. Method
-// `relationship.writeGrant.v1` on the relationship's route.
+// A grant of a relationship inbox to one writer's key (DSM Amendment A34),
+// signed by the relationship's write lock. It names no identity: the lock
+// and the key are public keys, the instance an opaque hash. `grant_id` is
+// BLAKE3 under DSM/relationship-write-grant-id/v1 over fields 1-4; the lock
+// signs BLAKE3 under DSM/relationship-write-grant/v1 over fields 1-5, in tag
+// order. A node checks it under the key an inbox's first write fixed.
 message RelationshipWriteGrantV1 {
   bytes version                     = 1 [(dsm_fixed_len)=4];  // big-endian 1
+  bytes relationship_instance_id    = 2 [(dsm_fixed_len)=32];
+  bytes authorized_write_public_key = 3 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256f
+  bytes permitted_scope             = 4 [(dsm_fixed_len)=4];  // big-endian 1: the relationship inbox
+  bytes grant_id                    = 5 [(dsm_fixed_len)=32];
+  bytes grant_signature             = 6 [(dsm_max_len)=65535]; // by the write lock
+}
+
+// A relationship's write lock, bound by the recipient's AK to the instance,
+// the recipient and the sender (DSM Amendment A34): what tells the other
+// wallet whose lock it is. Only the two wallets see it; a node never does.
+// The AK signs BLAKE3 under DSM/relationship-write-lock-binding/v1 over
+// fields 1-6, in tag order.
+message RelationshipWriteLockV1 {
+  bytes version                     = 1 [(dsm_fixed_len)=4];
   bytes relationship_instance_id    = 2 [(dsm_fixed_len)=32];
   bytes recipient_genesis           = 3 [(dsm_fixed_len)=32];
   bytes recipient_device_id         = 4 [(dsm_fixed_len)=32];
   bytes authorized_sender_device_id = 5 [(dsm_fixed_len)=32];
-  bytes authorized_write_public_key = 6 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256f
-  bytes permitted_scope             = 7 [(dsm_fixed_len)=4];  // big-endian 1: the relationship inbox
-  bytes grant_id                    = 8 [(dsm_fixed_len)=32];
-  bytes grant_signature             = 9 [(dsm_max_len)=65535];
+  bytes lock_public_key             = 6 [(dsm_fixed_len)=64];
+  bytes binding_signature           = 7 [(dsm_max_len)=65535]; // by the recipient's AK
+}
+
+// What a recipient sends the writer it grants (DSM Amendment A34): its lock,
+// bound by its AK, and the lock's grant of the writer's key. Method
+// `relationship.writeGrant.v1` on the relationship's route.
+message RelationshipWriteAuthorizationV1 {
+  bytes lock  = 1 [(dsm_max_len)=65535]; // RelationshipWriteLockV1
+  bytes grant = 2 [(dsm_max_len)=65535]; // RelationshipWriteGrantV1
+}
+
+// One write to an inbox address, as a storage node receives it (DSM
+// Amendment A34): the sealed envelope it stores, the inbox's key, the key's
+// grant of the writer's key, and the writer's signature over BLAKE3 under
+// DSM/spool-write/v1 of the address (32 bytes), the message id (16 bytes)
+// and BLAKE3 under DSM/spool-write-envelope/v1 of the envelope. The node
+// stores the envelope alone.
+message SpoolWriteV1 {
+  bytes envelope        = 1 [(dsm_max_len)=131072]; // the spool envelope cap
+  bytes lock_public_key = 2 [(dsm_fixed_len)=64];
+  bytes grant           = 3 [(dsm_max_len)=65535]; // RelationshipWriteGrantV1
+  bytes write_signature = 4 [(dsm_max_len)=65535];
 }
 
 message OnlineTransferSmartRequest {

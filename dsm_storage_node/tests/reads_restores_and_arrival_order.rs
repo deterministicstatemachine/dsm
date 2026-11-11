@@ -99,6 +99,7 @@ async fn reads_are_free() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let spool = text_id::encode_base32_crockford(&[0x73; 32]);
+    let (write, message_id) = common::signed_write(&spool, b"an envelope to read");
     let (status, _) = call(
         &app,
         "POST",
@@ -106,8 +107,9 @@ async fn reads_are_free() {
         &[
             ("content-type", "application/octet-stream"),
             ("x-dsm-recipient", spool.as_str()),
+            ("x-dsm-message-id", message_id.as_str()),
         ],
-        b"an envelope to read".to_vec(),
+        write,
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);

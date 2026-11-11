@@ -208,7 +208,7 @@ pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
 /// older, newer or unversioned database is refused, and is reprovisioned, not
 /// transformed. The schema version is its own axis — not the protocol version,
 /// and not the register incarnation, which names this node's register history.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// The DDL of [`SCHEMA_VERSION`], run once, on an empty database, in one
 /// transaction with the version row.
@@ -262,6 +262,14 @@ const SCHEMA_DDL: &str = r#"
     );
     CREATE UNIQUE INDEX idx_inbox_spool_device_seq ON inbox_spool (device_id, seq_num);
 
+    -- Each inbox address's key (DSM Amendment A34): the write lock's public
+    -- key the address's first write carried. Immutable: never replaced,
+    -- moved or removed. Every later write there must carry the same key.
+    CREATE TABLE spool_key (
+        device_id       TEXT PRIMARY KEY,
+        lock_public_key BYTEA NOT NULL
+    );
+
     -- The immutable object store, keyed by the content address addr(N, P);
     -- write-once: no UPDATE and no DELETE statement exists against it.
     CREATE TABLE immutable_objects (
@@ -290,7 +298,23 @@ const SCHEMA_DDL: &str = r#"
 
 /// A column as `information_schema.columns` reports it: name, `udt_name`,
 /// nullable.
-type ExpectedColumn = (&'static str, &'static str, bool);
+type ExpectedColumn = (&'static str, &'static str, Nullability);
+
+/// Whether a column admits NULL, as `information_schema` says `YES` or `NO`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nullability {
+    NotNull,
+    Nullable,
+}
+
+impl Nullability {
+    /// Whether NULL is admitted.
+    pub fn admits_null(self) -> bool {
+        matches!(self, Nullability::Nullable)
+    }
+}
+
+use Nullability::{NotNull, Nullable};
 
 /// The layout of [`SCHEMA_VERSION`]: every table with its columns in order,
 /// and every index. A database at this version holds exactly this — nothing
@@ -299,64 +323,74 @@ pub const SCHEMA_LAYOUT: &[(&str, &[ExpectedColumn])] = &[
     (
         "bytecommit_mirror",
         &[
-            ("member_id", "bytea", false),
-            ("cycle_index", "int8", false),
-            ("digest", "bytea", false),
-            ("commit_pb", "bytea", false),
+            ("member_id", "bytea", NotNull),
+            ("cycle_index", "int8", NotNull),
+            ("digest", "bytea", NotNull),
+            ("commit_pb", "bytea", NotNull),
         ],
     ),
     (
         "cells",
         &[
-            ("seq", "int8", false),
-            ("namespace", "bytea", false),
-            ("cell_key", "bytea", false),
-            ("value", "bytea", false),
-            ("arrival_index", "int8", false),
-            ("running_hash", "bytea", false),
-            ("committed_cycle", "int8", true),
+            ("seq", "int8", NotNull),
+            ("namespace", "bytea", NotNull),
+            ("cell_key", "bytea", NotNull),
+            ("value", "bytea", NotNull),
+            ("arrival_index", "int8", NotNull),
+            ("running_hash", "bytea", NotNull),
+            ("committed_cycle", "int8", Nullable),
         ],
     ),
     (
         "immutable_objects",
         &[
-            ("addr_b32", "text", false),
-            ("namespace", "bytea", false),
-            ("payload", "bytea", false),
+            ("addr_b32", "text", NotNull),
+            ("namespace", "bytea", NotNull),
+            ("payload", "bytea", NotNull),
         ],
     ),
     (
         "inbox_spool",
         &[
-            ("id", "int8", false),
-            ("device_id", "text", false),
-            ("envelope", "bytea", false),
-            ("seq_num", "int8", false),
+            ("id", "int8", NotNull),
+            ("device_id", "text", NotNull),
+            ("envelope", "bytea", NotNull),
+            ("seq_num", "int8", NotNull),
         ],
     ),
     (
         "index_entries",
         &[
-            ("seq", "int8", false),
-            ("locator", "bytea", false),
-            ("addr", "bytea", false),
+            ("seq", "int8", NotNull),
+            ("locator", "bytea", NotNull),
+            ("addr", "bytea", NotNull),
         ],
     ),
     (
         "own_bytecommits",
         &[
-            ("cycle_index", "int8", false),
-            ("digest", "bytea", false),
-            ("commit_pb", "bytea", false),
+            ("cycle_index", "int8", NotNull),
+            ("digest", "bytea", NotNull),
+            ("commit_pb", "bytea", NotNull),
         ],
     ),
     (
         "register_incarnation",
-        &[("only_row", "int2", false), ("incarnation", "bytea", false)],
+        &[
+            ("only_row", "int2", NotNull),
+            ("incarnation", "bytea", NotNull),
+        ],
     ),
     (
         "schema_version",
-        &[("only_row", "int2", false), ("version", "int4", false)],
+        &[("only_row", "int2", NotNull), ("version", "int4", NotNull)],
+    ),
+    (
+        "spool_key",
+        &[
+            ("device_id", "text", NotNull),
+            ("lock_public_key", "bytea", NotNull),
+        ],
     ),
 ];
 
@@ -376,6 +410,7 @@ pub const SCHEMA_INDEXES: &[&str] = &[
     "own_bytecommits_pkey",
     "register_incarnation_pkey",
     "schema_version_pkey",
+    "spool_key_pkey",
 ];
 
 /// Advisory-lock key serialising schema initialisation on one database.
@@ -471,7 +506,7 @@ async fn verify_schema_layout(client: &deadpool_postgres::Object) -> Result<()> 
                     table.to_string(),
                     column.to_string(),
                     udt.to_string(),
-                    *nullable,
+                    nullable.admits_null(),
                 )
             })
         })
@@ -607,16 +642,47 @@ pub async fn get_immutable_object(
 
 // ===================== b0x inbox spool =====================
 
-/// Append `envelope` to the spool under `device_id` at the next position,
-/// durably, refusing and deduplicating nothing (storage spec §8), and return
-/// that position.
-pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<i64> {
+/// What appending a verified write came to (DSM Amendment A34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockedAppend {
+    /// Appended at this sequence number.
+    Appended(i64),
+    /// The address's key is another one: nothing was written.
+    NotTheAddressKey,
+}
+
+/// Append `envelope` to the spool at `device_id` when `lock_public_key` is
+/// that address's key, in one transaction: the first write at an address
+/// fixes its key, and the key is never replaced. A write carrying another key
+/// writes nothing.
+pub async fn spool_insert_locked(
+    pool: &Pool,
+    device_id: &str,
+    lock_public_key: &[u8],
+    envelope: &[u8],
+) -> Result<LockedAppend> {
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
-    // Serialize seq_num assignment per spool key to avoid MAX+1 races.
+    // Serialize the key fix and seq_num assignment per spool key.
     tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&device_id])
         .await?;
-
+    tx.execute(
+        "INSERT INTO spool_key(device_id, lock_public_key) VALUES ($1, $2)
+         ON CONFLICT (device_id) DO NOTHING",
+        &[&device_id, &lock_public_key],
+    )
+    .await?;
+    let fixed: Vec<u8> = tx
+        .query_one(
+            "SELECT lock_public_key FROM spool_key WHERE device_id = $1",
+            &[&device_id],
+        )
+        .await?
+        .get(0);
+    if fixed.as_slice() != lock_public_key {
+        tx.rollback().await?;
+        return Ok(LockedAppend::NotTheAddressKey);
+    }
     let stmt = tx
         .prepare_cached(
             "INSERT INTO inbox_spool(device_id, envelope, seq_num)
@@ -629,7 +695,7 @@ pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Resu
         .await?;
     let seq_num: i64 = tx.query_one(&stmt, &[&device_id, &envelope]).await?.get(0);
     tx.commit().await?;
-    Ok(seq_num)
+    Ok(LockedAppend::Appended(seq_num))
 }
 
 /// Every envelope in a spool from a sequence number on, in order, limited.

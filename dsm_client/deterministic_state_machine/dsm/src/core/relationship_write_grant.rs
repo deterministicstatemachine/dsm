@@ -1,52 +1,71 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! A recipient's authorization of one sender's write key for one relationship
-//! (DSM Amendment A34).
+//! A relationship's write lock, its grants, and the proof every write to an
+//! inbox carries (DSM Amendment A34).
 //!
 //! Once a relationship is established, each device offers the other a write
-//! key of its own, for that relationship instance and that direction, and each
-//! device grants the other's key its inbox for that instance. A grant is the
-//! recipient's signature, under its AK, over exactly what it authorizes: one
-//! relationship instance, one recipient, one sender, one write key, the
-//! recipient's inbox for that relationship. It authorizes no step, moves no
-//! value, names no other relationship or namespace, and delegates nothing. No
-//! storage node takes part: the two devices make it, and anyone holding the
-//! recipient's AK can check it.
+//! key of its own, for that relationship instance and that direction. Each
+//! device also holds a **write lock** for its own inbox on the relationship: a
+//! key pair it derives for that relationship, never its AK. Its AK binds the
+//! lock to the instance, itself and the other device, which tells the other
+//! wallet whose lock it is; the lock then signs the **grant** of the other
+//! device's write key. A grant names no identity, only the instance (an opaque
+//! hash), the key and the scope, so the proof a write carries shows a storage
+//! node public keys alone.
 //!
-//! An offer carries two signatures over one body. The sender's AK binds the
-//! key to the instance and the two devices; the key itself proves its holder
-//! has the secret. An offered key that is the sender's AK is refused: a write
-//! key never reuses the root signing secret.
+//! A **write** to an inbox address carries the lock's public key, the grant,
+//! and the writer's signature over the address, the write's message id and the
+//! commitment of the envelope written. The first write stored at an address
+//! fixes its key; a node stores a later write there only when it carries that
+//! key, a grant that verifies under it and a write signature that verifies
+//! under the granted key ([`verify_spool_write`]). At a relationship's first
+//! inbox, before either side holds a lock for it, the writer fixes a key of
+//! its own ([`derive_first_inbox_keypair`]): its key there is lock and write
+//! key at once.
 //!
-//! Every field has a fixed length, so the concatenation each signature covers
-//! is canonical without a length prefix. The wire forms are strict protobuf:
-//! known tags only, each once, each its exact length, re-encoding to the same
-//! bytes.
+//! An offer carries two signatures over one body: the sender's AK binds the
+//! key, and the key proves possession. An offered key that is the sender's AK
+//! is refused. Every signed field has a fixed length, so each signed
+//! concatenation is canonical without a length prefix; the wire forms are
+//! strict protobuf: known tags only, each once, each its exact length,
+//! re-encoding to the same bytes.
 
 use crate::common::domain_tags::{
-    TAG_DSM_RELATIONSHIP_INSTANCE, TAG_DSM_RELATIONSHIP_WRITE_GRANT,
-    TAG_DSM_RELATIONSHIP_WRITE_GRANT_ID, TAG_DSM_RELATIONSHIP_WRITE_KEY,
-    TAG_DSM_RELATIONSHIP_WRITE_KEY_BINDING, TAG_DSM_RELATIONSHIP_WRITE_KEY_POSSESSION,
+    TAG_DSM_RELATIONSHIP_FIRST_INBOX_KEY, TAG_DSM_RELATIONSHIP_INSTANCE,
+    TAG_DSM_RELATIONSHIP_WRITE_GRANT, TAG_DSM_RELATIONSHIP_WRITE_GRANT_ID,
+    TAG_DSM_RELATIONSHIP_WRITE_KEY, TAG_DSM_RELATIONSHIP_WRITE_KEY_BINDING,
+    TAG_DSM_RELATIONSHIP_WRITE_KEY_POSSESSION, TAG_DSM_RELATIONSHIP_WRITE_LOCK,
+    TAG_DSM_RELATIONSHIP_WRITE_LOCK_BINDING, TAG_DSM_SPOOL_WRITE, TAG_DSM_SPOOL_WRITE_ENVELOPE,
 };
 use crate::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher, dsm_domain_hasher_keyed};
 use crate::crypto::sphincs::{
     generate_keypair_from_seed, public_key_bytes, sphincs_verify, SphincsKeyPair, SphincsVariant,
 };
 use crate::types::error::DsmError;
-use crate::types::proto::{RelationshipWriteGrantV1, RelationshipWriteKeyOfferV1};
+use crate::types::proto::{
+    RelationshipWriteAuthorizationV1, RelationshipWriteGrantV1, RelationshipWriteKeyOfferV1,
+    RelationshipWriteLockV1, SpoolWriteV1,
+};
 use crate::types::receipt_types::{validate_length_delimited_wire, FieldLimit};
 
-/// The one version of an offer and a grant.
+/// The one version of an offer, a lock and a grant.
 pub const WRITE_AUTHORIZATION_VERSION: u32 = 1;
 /// The one scope a grant names: the recipient's inbox for the relationship
 /// instance, at every address that relationship's tips route to.
 pub const SCOPE_RELATIONSHIP_INBOX: u32 = 1;
-/// A write key is a SPHINCS+ SPX256f key, the scheme every DSM device key uses.
+/// Write keys and locks are SPHINCS+ SPX256f keys, the scheme every DSM device
+/// key uses.
 pub const WRITE_KEY_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-/// Its public key's length, `PK.seed ‖ PK.root`.
+/// A public key's length, `PK.seed ‖ PK.root`.
 pub const WRITE_PUBLIC_KEY_LEN: usize = 64;
-/// The longest signature either object carries (SPX256f is 49,856 bytes).
+/// The longest signature any object carries (SPX256f is 49,856 bytes).
 const SIGNATURE_MAX_LEN: usize = 65_535;
+/// The longest envelope a write carries: the spool's envelope cap.
+pub const SPOOL_WRITE_ENVELOPE_MAX_LEN: usize = crate::spool::MAX_ENVELOPE_BYTES;
+/// An inbox address's length, decoded.
+pub const INBOX_ADDRESS_LEN: usize = 32;
+/// A spool message id's length.
+pub const MESSAGE_ID_LEN: usize = 16;
 
 /// The relationship instance an establishment opened: the relationship key
 /// and the tip its ESTABLISH step reached. Both devices compute it from what
@@ -62,28 +81,88 @@ pub fn relationship_instance_id(
     *h.finalize().as_bytes()
 }
 
+fn keypair_from(
+    tag: crate::crypto::domain::TaggedHashDomain<'static>,
+    s_master: &[u8; 32],
+    parts: &[&[u8; 32]],
+) -> Result<SphincsKeyPair, DsmError> {
+    let mut h = dsm_domain_hasher_keyed(tag, s_master);
+    for part in parts {
+        h.update(*part);
+    }
+    let seed = zeroize::Zeroizing::new(*h.finalize().as_bytes());
+    generate_keypair_from_seed(WRITE_KEY_VARIANT, &seed)
+}
+
 /// The write key `sender` writes to `recipient` with on `instance`: SPHINCS+
 /// key generation from `keyed-BLAKE3(Smaster, "DSM/relationship-write-key/v1"
 /// ‖ instance ‖ sender ‖ recipient)`. It comes back from the master seed
-/// alone, so nothing secret is stored, and it is one key per instance and per
-/// direction. The AK is derived under other contexts, so the write key never
-/// is the root signing key.
+/// alone, so nothing secret is stored, one per instance and direction. The AK
+/// is derived under other contexts, so it is never the root signing key.
 pub fn derive_write_keypair(
     s_master: &[u8; 32],
     relationship_instance_id: &[u8; 32],
     sender_device_id: &[u8; 32],
     recipient_device_id: &[u8; 32],
 ) -> Result<SphincsKeyPair, DsmError> {
-    let mut h = dsm_domain_hasher_keyed(TAG_DSM_RELATIONSHIP_WRITE_KEY, s_master);
-    h.update(relationship_instance_id);
-    h.update(sender_device_id);
-    h.update(recipient_device_id);
-    let seed = zeroize::Zeroizing::new(*h.finalize().as_bytes());
-    generate_keypair_from_seed(WRITE_KEY_VARIANT, &seed)
+    keypair_from(
+        TAG_DSM_RELATIONSHIP_WRITE_KEY,
+        s_master,
+        &[
+            relationship_instance_id,
+            sender_device_id,
+            recipient_device_id,
+        ],
+    )
 }
 
-/// Why an offer or a grant is not what it must be. Each refusal names one
-/// check; none is ever read as another.
+/// The write lock `recipient` holds over its inbox for `instance`, toward
+/// `sender`: SPHINCS+ key generation from `keyed-BLAKE3(Smaster,
+/// "DSM/relationship-write-lock/v1" ‖ instance ‖ recipient ‖ sender)`. One
+/// per relationship and direction, never the AK, and nothing secret stored.
+pub fn derive_write_lock_keypair(
+    s_master: &[u8; 32],
+    relationship_instance_id: &[u8; 32],
+    recipient_device_id: &[u8; 32],
+    sender_device_id: &[u8; 32],
+) -> Result<SphincsKeyPair, DsmError> {
+    keypair_from(
+        TAG_DSM_RELATIONSHIP_WRITE_LOCK,
+        s_master,
+        &[
+            relationship_instance_id,
+            recipient_device_id,
+            sender_device_id,
+        ],
+    )
+}
+
+/// The key `writer` fixes at `recipient`'s first inbox on the relationship
+/// `relationship_key` opened at `first_tip`, before either side holds a lock
+/// for it: SPHINCS+ key generation from `keyed-BLAKE3(Smaster,
+/// "DSM/relationship-first-inbox-key/v1" ‖ relationship key ‖ first tip ‖
+/// writer ‖ recipient)`. It is lock and write key at once.
+pub fn derive_first_inbox_keypair(
+    s_master: &[u8; 32],
+    relationship_key: &[u8; 32],
+    first_tip: &[u8; 32],
+    writer_device_id: &[u8; 32],
+    recipient_device_id: &[u8; 32],
+) -> Result<SphincsKeyPair, DsmError> {
+    keypair_from(
+        TAG_DSM_RELATIONSHIP_FIRST_INBOX_KEY,
+        s_master,
+        &[
+            relationship_key,
+            first_tip,
+            writer_device_id,
+            recipient_device_id,
+        ],
+    )
+}
+
+/// Why an offer, a lock, a grant or a write is not what it must be. Each
+/// refusal names one check; none is ever read as another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteAuthorizationRefusal {
     /// The bytes are not the strict wire form.
@@ -104,14 +183,20 @@ pub enum WriteAuthorizationRefusal {
     WrongWriteKey,
     /// The offered write key is the sender's AK.
     WriteKeyIsTheSendersAk,
+    /// The lock is the recipient's AK.
+    LockIsTheRecipientsAk,
     /// The grant's identifier is not the hash of its fields.
     GrantIdMismatch,
     /// The sender's AK did not sign the offer.
     BindingSignature,
     /// The write key did not sign the offer.
     PossessionSignature,
-    /// The recipient's AK did not sign the grant.
+    /// The recipient's AK did not bind the lock.
+    LockBindingSignature,
+    /// The lock did not sign the grant.
     GrantSignature,
+    /// The granted key did not sign the write.
+    WriteSignature,
     /// A signature could not be checked at all.
     Crypto(String),
 }
@@ -128,10 +213,13 @@ impl std::fmt::Display for WriteAuthorizationRefusal {
             Self::WrongRecipientGenesis => f.write_str("it names another recipient genesis"),
             Self::WrongWriteKey => f.write_str("it names another write key"),
             Self::WriteKeyIsTheSendersAk => f.write_str("the write key is the sender's AK"),
+            Self::LockIsTheRecipientsAk => f.write_str("the lock is the recipient's AK"),
             Self::GrantIdMismatch => f.write_str("the grant id is not the hash of its fields"),
             Self::BindingSignature => f.write_str("the sender's AK did not sign the offer"),
             Self::PossessionSignature => f.write_str("the write key did not sign the offer"),
-            Self::GrantSignature => f.write_str("the recipient's AK did not sign the grant"),
+            Self::LockBindingSignature => f.write_str("the recipient's AK did not bind the lock"),
+            Self::GrantSignature => f.write_str("the lock did not sign the grant"),
+            Self::WriteSignature => f.write_str("the granted key did not sign the write"),
             Self::Crypto(why) => write!(f, "a signature could not be checked: {why}"),
         }
     }
@@ -156,6 +244,27 @@ fn be_u32(bytes: &[u8]) -> Result<u32, WriteAuthorizationRefusal> {
         .map_err(|e| WriteAuthorizationRefusal::Wire(format!("{} bytes, not 4: {e}", bytes.len())))
 }
 
+fn check_version(bytes: &[u8]) -> Result<(), WriteAuthorizationRefusal> {
+    let version = be_u32(bytes)?;
+    if version == WRITE_AUTHORIZATION_VERSION {
+        Ok(())
+    } else {
+        Err(WriteAuthorizationRefusal::Version(version))
+    }
+}
+
+fn check_key_len(key: &[u8]) -> Result<(), WriteAuthorizationRefusal> {
+    if key.len() == public_key_bytes(WRITE_KEY_VARIANT) {
+        Ok(())
+    } else {
+        Err(WriteAuthorizationRefusal::Wire(format!(
+            "a key of {} bytes, not {}",
+            key.len(),
+            public_key_bytes(WRITE_KEY_VARIANT)
+        )))
+    }
+}
+
 fn verified(
     pk: &[u8],
     target: &[u8; 32],
@@ -170,6 +279,29 @@ fn verified(
         Err(refusal)
     }
 }
+
+fn strict<M: prost::Message + Default>(
+    bytes: &[u8],
+    wire: &str,
+    max_tag: u32,
+    limit: fn(u32) -> Option<FieldLimit>,
+) -> Result<M, WriteAuthorizationRefusal> {
+    validate_length_delimited_wire(bytes, wire, max_tag, limit, |tag| {
+        (1..=max_tag).contains(&tag)
+    })
+    .map_err(|e| WriteAuthorizationRefusal::Wire(e.to_string()))?;
+    let message = M::decode(bytes).map_err(|e| WriteAuthorizationRefusal::Wire(e.to_string()))?;
+    if message.encode_to_vec() != bytes {
+        return Err(WriteAuthorizationRefusal::Wire(format!(
+            "{wire}: non-canonical field ordering or encoding"
+        )));
+    }
+    Ok(message)
+}
+
+// ---------------------------------------------------------------------------
+// The offer of a write key.
+// ---------------------------------------------------------------------------
 
 /// A sender's offer of its write key for one relationship instance and one
 /// recipient, before its signatures.
@@ -241,23 +373,14 @@ pub fn verify_write_key_offer(
     wire: &RelationshipWriteKeyOfferV1,
     expected: &OfferExpectation<'_>,
 ) -> Result<WriteKeyOffer, WriteAuthorizationRefusal> {
-    let version = be_u32(&wire.version)?;
-    if version != WRITE_AUTHORIZATION_VERSION {
-        return Err(WriteAuthorizationRefusal::Version(version));
-    }
+    check_version(&wire.version)?;
+    check_key_len(&wire.write_public_key)?;
     let offer = WriteKeyOffer {
         relationship_instance_id: arr32(&wire.relationship_instance_id)?,
         sender_device_id: arr32(&wire.sender_device_id)?,
         recipient_device_id: arr32(&wire.recipient_device_id)?,
         write_public_key: wire.write_public_key.clone(),
     };
-    if offer.write_public_key.len() != public_key_bytes(WRITE_KEY_VARIANT) {
-        return Err(WriteAuthorizationRefusal::Wire(format!(
-            "write key is {} bytes, not {}",
-            offer.write_public_key.len(),
-            public_key_bytes(WRITE_KEY_VARIANT)
-        )));
-    }
     if &offer.relationship_instance_id != expected.relationship_instance_id {
         return Err(WriteAuthorizationRefusal::WrongInstance);
     }
@@ -285,41 +408,77 @@ pub fn verify_write_key_offer(
     Ok(offer)
 }
 
-/// A recipient's grant of its inbox for one relationship instance to one
-/// sender's write key, before its signature.
+// ---------------------------------------------------------------------------
+// The write lock.
+// ---------------------------------------------------------------------------
+
+/// A recipient's write lock over its inbox for one instance, toward one
+/// sender, before the AK's binding signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WriteGrant {
+pub struct WriteLock {
     pub relationship_instance_id: [u8; 32],
     pub recipient_genesis: [u8; 32],
     pub recipient_device_id: [u8; 32],
     pub authorized_sender_device_id: [u8; 32],
+    pub lock_public_key: Vec<u8>,
+}
+
+impl WriteLock {
+    /// What the recipient's AK signs: `version ‖ instance ‖ recipient genesis
+    /// ‖ recipient ‖ sender ‖ lock`, under the lock-binding domain.
+    pub fn binding_target(&self) -> [u8; 32] {
+        let mut body = Vec::with_capacity(4 + 4 * 32 + WRITE_PUBLIC_KEY_LEN);
+        body.extend_from_slice(&WRITE_AUTHORIZATION_VERSION.to_be_bytes());
+        body.extend_from_slice(&self.relationship_instance_id);
+        body.extend_from_slice(&self.recipient_genesis);
+        body.extend_from_slice(&self.recipient_device_id);
+        body.extend_from_slice(&self.authorized_sender_device_id);
+        body.extend_from_slice(&self.lock_public_key);
+        domain_hash_bytes(TAG_DSM_RELATIONSHIP_WRITE_LOCK_BINDING, &body)
+    }
+
+    /// The wire form with the AK's binding signature.
+    pub fn to_wire(&self, binding_signature: Vec<u8>) -> RelationshipWriteLockV1 {
+        RelationshipWriteLockV1 {
+            version: WRITE_AUTHORIZATION_VERSION.to_be_bytes().to_vec(),
+            relationship_instance_id: self.relationship_instance_id.to_vec(),
+            recipient_genesis: self.recipient_genesis.to_vec(),
+            recipient_device_id: self.recipient_device_id.to_vec(),
+            authorized_sender_device_id: self.authorized_sender_device_id.to_vec(),
+            lock_public_key: self.lock_public_key.clone(),
+            binding_signature,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The grant.
+// ---------------------------------------------------------------------------
+
+/// A write lock's grant of its inbox for one instance to one write key,
+/// before the lock's signature. It names no identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteGrant {
+    pub relationship_instance_id: [u8; 32],
     pub authorized_write_public_key: Vec<u8>,
     pub permitted_scope: u32,
 }
 
 impl WriteGrant {
-    /// The grant a recipient issues for an offer it verified, from its own
-    /// genesis.
-    pub fn for_offer(offer: &WriteKeyOffer, recipient_genesis: [u8; 32]) -> Self {
+    /// The grant of `write_public_key` for `relationship_instance_id`.
+    pub fn of_key(relationship_instance_id: [u8; 32], write_public_key: Vec<u8>) -> Self {
         WriteGrant {
-            relationship_instance_id: offer.relationship_instance_id,
-            recipient_genesis,
-            recipient_device_id: offer.recipient_device_id,
-            authorized_sender_device_id: offer.sender_device_id,
-            authorized_write_public_key: offer.write_public_key.clone(),
+            relationship_instance_id,
+            authorized_write_public_key: write_public_key,
             permitted_scope: SCOPE_RELATIONSHIP_INBOX,
         }
     }
 
-    /// `version ‖ instance ‖ recipient genesis ‖ recipient ‖ sender ‖ key ‖
-    /// scope`: the fields before the identifier, in tag order.
+    /// `version ‖ instance ‖ key ‖ scope`: the fields before the identifier.
     fn fields_before_id(&self) -> Vec<u8> {
-        let mut fields = Vec::with_capacity(4 + 4 * 32 + WRITE_PUBLIC_KEY_LEN + 4);
+        let mut fields = Vec::with_capacity(4 + 32 + WRITE_PUBLIC_KEY_LEN + 4);
         fields.extend_from_slice(&WRITE_AUTHORIZATION_VERSION.to_be_bytes());
         fields.extend_from_slice(&self.relationship_instance_id);
-        fields.extend_from_slice(&self.recipient_genesis);
-        fields.extend_from_slice(&self.recipient_device_id);
-        fields.extend_from_slice(&self.authorized_sender_device_id);
         fields.extend_from_slice(&self.authorized_write_public_key);
         fields.extend_from_slice(&self.permitted_scope.to_be_bytes());
         fields
@@ -334,74 +493,43 @@ impl WriteGrant {
         )
     }
 
-    /// What the recipient's AK signs: `BLAKE3("DSM/relationship-write-grant/v1"
-    /// ‖ canonical(WriteGrant))`, every field including the identifier.
+    /// What the lock signs: `BLAKE3("DSM/relationship-write-grant/v1" ‖
+    /// canonical(WriteGrant))`, every field including the identifier.
     pub fn signing_target(&self) -> [u8; 32] {
         let mut canonical = self.fields_before_id();
         canonical.extend_from_slice(&self.grant_id());
         domain_hash_bytes(TAG_DSM_RELATIONSHIP_WRITE_GRANT, &canonical)
     }
 
-    /// The wire form with the recipient's signature.
+    /// The wire form with the lock's signature.
     pub fn to_wire(&self, grant_signature: Vec<u8>) -> RelationshipWriteGrantV1 {
         RelationshipWriteGrantV1 {
             version: WRITE_AUTHORIZATION_VERSION.to_be_bytes().to_vec(),
             relationship_instance_id: self.relationship_instance_id.to_vec(),
-            recipient_genesis: self.recipient_genesis.to_vec(),
-            recipient_device_id: self.recipient_device_id.to_vec(),
-            authorized_sender_device_id: self.authorized_sender_device_id.to_vec(),
             authorized_write_public_key: self.authorized_write_public_key.clone(),
             permitted_scope: self.permitted_scope.to_be_bytes().to_vec(),
             grant_id: self.grant_id().to_vec(),
             grant_signature,
         }
     }
-
-    /// Whether this grant authorizes `sender`'s key `write_public_key` to
-    /// write to `recipient`'s inbox for `relationship_instance_id`. Nothing
-    /// else is ever authorized by it.
-    pub fn authorizes(
-        &self,
-        relationship_instance_id: &[u8; 32],
-        recipient_device_id: &[u8; 32],
-        sender_device_id: &[u8; 32],
-        write_public_key: &[u8],
-    ) -> bool {
-        self.permitted_scope == SCOPE_RELATIONSHIP_INBOX
-            && &self.relationship_instance_id == relationship_instance_id
-            && &self.recipient_device_id == recipient_device_id
-            && &self.authorized_sender_device_id == sender_device_id
-            && self.authorized_write_public_key.as_slice() == write_public_key
-    }
 }
 
-/// The check anyone holding the recipient's AK can make of a grant, with no
-/// expectation of what it names: version and scope, the identifier is the
-/// hash of the fields, and the recipient's AK signed it.
+/// The check anyone holding a lock's public key can make of a grant, a
+/// storage node included: version and scope, the identifier is the hash of
+/// the fields, and the lock signed it.
 pub fn verify_write_grant_signature(
     wire: &RelationshipWriteGrantV1,
-    recipient_ak: &[u8],
+    lock_public_key: &[u8],
 ) -> Result<WriteGrant, WriteAuthorizationRefusal> {
-    let version = be_u32(&wire.version)?;
-    if version != WRITE_AUTHORIZATION_VERSION {
-        return Err(WriteAuthorizationRefusal::Version(version));
-    }
+    check_version(&wire.version)?;
     let scope = be_u32(&wire.permitted_scope)?;
     if scope != SCOPE_RELATIONSHIP_INBOX {
         return Err(WriteAuthorizationRefusal::Scope(scope));
     }
-    if wire.authorized_write_public_key.len() != public_key_bytes(WRITE_KEY_VARIANT) {
-        return Err(WriteAuthorizationRefusal::Wire(format!(
-            "write key is {} bytes, not {}",
-            wire.authorized_write_public_key.len(),
-            public_key_bytes(WRITE_KEY_VARIANT)
-        )));
-    }
+    check_key_len(&wire.authorized_write_public_key)?;
+    check_key_len(lock_public_key)?;
     let grant = WriteGrant {
         relationship_instance_id: arr32(&wire.relationship_instance_id)?,
-        recipient_genesis: arr32(&wire.recipient_genesis)?,
-        recipient_device_id: arr32(&wire.recipient_device_id)?,
-        authorized_sender_device_id: arr32(&wire.authorized_sender_device_id)?,
         authorized_write_public_key: wire.authorized_write_public_key.clone(),
         permitted_scope: scope,
     };
@@ -409,7 +537,7 @@ pub fn verify_write_grant_signature(
         return Err(WriteAuthorizationRefusal::GrantIdMismatch);
     }
     verified(
-        recipient_ak,
+        lock_public_key,
         &grant.signing_target(),
         &wire.grant_signature,
         WriteAuthorizationRefusal::GrantSignature,
@@ -417,11 +545,15 @@ pub fn verify_write_grant_signature(
     Ok(grant)
 }
 
-/// What a sender holds a grant for its key to: its own relationship instance,
-/// the recipient's genesis and device as its contact record holds them, itself,
-/// its own write key, and the recipient's AK.
+// ---------------------------------------------------------------------------
+// The authorization a recipient sends: its lock, bound, and the lock's grant.
+// ---------------------------------------------------------------------------
+
+/// What a sender holds an authorization to: its own instance and write key,
+/// the recipient's genesis and device as its contact record holds them, and
+/// the recipient's AK.
 #[derive(Debug, Clone, Copy)]
-pub struct GrantExpectation<'a> {
+pub struct AuthorizationExpectation<'a> {
     pub relationship_instance_id: &'a [u8; 32],
     pub recipient_genesis: &'a [u8; 32],
     pub recipient_device_id: &'a [u8; 32],
@@ -430,31 +562,212 @@ pub struct GrantExpectation<'a> {
     pub recipient_ak: &'a [u8],
 }
 
-/// The sender's check of a grant for its key: everything
-/// [`verify_write_grant_signature`] checks, and it names exactly this
-/// instance, this recipient, this sender and this key.
-pub fn verify_write_grant(
-    wire: &RelationshipWriteGrantV1,
-    expected: &GrantExpectation<'_>,
-) -> Result<WriteGrant, WriteAuthorizationRefusal> {
-    let grant = verify_write_grant_signature(wire, expected.recipient_ak)?;
-    if &grant.relationship_instance_id != expected.relationship_instance_id {
+/// A verified authorization: the lock (whose it is was checked) and the grant
+/// it signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedAuthorization {
+    pub lock: WriteLock,
+    pub grant: WriteGrant,
+    /// The grant's exact wire bytes, which every write carries.
+    pub grant_wire: Vec<u8>,
+}
+
+/// The sender's check of an authorization: the recipient's AK bound the lock
+/// to exactly this instance, recipient and sender, and the lock is not that
+/// AK; the lock signed a grant of exactly this instance and this sender's
+/// write key.
+pub fn verify_write_authorization(
+    bytes: &[u8],
+    expected: &AuthorizationExpectation<'_>,
+) -> Result<VerifiedAuthorization, WriteAuthorizationRefusal> {
+    use prost::Message;
+    let authorization = decode_write_authorization_wire(bytes)?;
+    let lock_wire = decode_write_lock_wire(&authorization.lock)?;
+    let grant_wire = decode_write_grant_wire(&authorization.grant)?;
+    check_version(&lock_wire.version)?;
+    check_key_len(&lock_wire.lock_public_key)?;
+    let lock = WriteLock {
+        relationship_instance_id: arr32(&lock_wire.relationship_instance_id)?,
+        recipient_genesis: arr32(&lock_wire.recipient_genesis)?,
+        recipient_device_id: arr32(&lock_wire.recipient_device_id)?,
+        authorized_sender_device_id: arr32(&lock_wire.authorized_sender_device_id)?,
+        lock_public_key: lock_wire.lock_public_key.clone(),
+    };
+    if &lock.relationship_instance_id != expected.relationship_instance_id {
         return Err(WriteAuthorizationRefusal::WrongInstance);
     }
-    if &grant.recipient_genesis != expected.recipient_genesis {
+    if &lock.recipient_genesis != expected.recipient_genesis {
         return Err(WriteAuthorizationRefusal::WrongRecipientGenesis);
     }
-    if &grant.recipient_device_id != expected.recipient_device_id {
+    if &lock.recipient_device_id != expected.recipient_device_id {
         return Err(WriteAuthorizationRefusal::WrongRecipient);
     }
-    if &grant.authorized_sender_device_id != expected.sender_device_id {
+    if &lock.authorized_sender_device_id != expected.sender_device_id {
         return Err(WriteAuthorizationRefusal::WrongSender);
+    }
+    if lock.lock_public_key.as_slice() == expected.recipient_ak {
+        return Err(WriteAuthorizationRefusal::LockIsTheRecipientsAk);
+    }
+    verified(
+        expected.recipient_ak,
+        &lock.binding_target(),
+        &lock_wire.binding_signature,
+        WriteAuthorizationRefusal::LockBindingSignature,
+    )?;
+    let grant = verify_write_grant_signature(&grant_wire, &lock.lock_public_key)?;
+    if &grant.relationship_instance_id != expected.relationship_instance_id {
+        return Err(WriteAuthorizationRefusal::WrongInstance);
     }
     if grant.authorized_write_public_key.as_slice() != expected.write_public_key {
         return Err(WriteAuthorizationRefusal::WrongWriteKey);
     }
-    Ok(grant)
+    Ok(VerifiedAuthorization {
+        lock,
+        grant,
+        grant_wire: grant_wire.encode_to_vec(),
+    })
 }
+
+/// The authorization's wire bytes from a bound lock and its grant.
+pub fn write_authorization_wire(
+    lock: &RelationshipWriteLockV1,
+    grant: &RelationshipWriteGrantV1,
+) -> Vec<u8> {
+    use prost::Message;
+    RelationshipWriteAuthorizationV1 {
+        lock: lock.encode_to_vec(),
+        grant: grant.encode_to_vec(),
+    }
+    .encode_to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// One write to an inbox address.
+// ---------------------------------------------------------------------------
+
+/// The commitment of a written envelope's bytes.
+pub fn envelope_commitment(envelope: &[u8]) -> [u8; 32] {
+    domain_hash_bytes(TAG_DSM_SPOOL_WRITE_ENVELOPE, envelope)
+}
+
+/// What a writer's key signs for one write: the inbox address, the write's
+/// message id and the commitment of the envelope, under the spool-write
+/// domain. A copy of the signature fits no other address, id or bytes.
+pub fn spool_write_target(
+    address: &[u8; INBOX_ADDRESS_LEN],
+    message_id: &[u8; MESSAGE_ID_LEN],
+    envelope: &[u8],
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_SPOOL_WRITE);
+    h.update(address);
+    h.update(message_id);
+    h.update(&envelope_commitment(envelope));
+    *h.finalize().as_bytes()
+}
+
+/// A write as a storage node receives it.
+pub fn spool_write_wire(
+    envelope: Vec<u8>,
+    lock_public_key: Vec<u8>,
+    grant_wire: Vec<u8>,
+    write_signature: Vec<u8>,
+) -> SpoolWriteV1 {
+    SpoolWriteV1 {
+        envelope,
+        lock_public_key,
+        grant: grant_wire,
+        write_signature,
+    }
+}
+
+/// One write signed by `writer` under the grant `grant_wire` of the lock
+/// `lock_public_key`: the bytes a node receives.
+pub fn signed_spool_write(
+    writer: &SphincsKeyPair,
+    lock_public_key: &[u8],
+    grant_wire: Vec<u8>,
+    address: &[u8; INBOX_ADDRESS_LEN],
+    message_id: &[u8; MESSAGE_ID_LEN],
+    envelope: &[u8],
+) -> Result<Vec<u8>, DsmError> {
+    use prost::Message;
+    let signature = crate::crypto::sphincs::sphincs_sign(
+        &writer.secret_key,
+        &spool_write_target(address, message_id, envelope),
+    )?;
+    Ok(spool_write_wire(
+        envelope.to_vec(),
+        lock_public_key.to_vec(),
+        grant_wire,
+        signature,
+    )
+    .encode_to_vec())
+}
+
+/// One write under a key that is lock and write key at once: the key a
+/// writer fixes at a relationship's first inbox, granting itself for
+/// `relationship_instance_id`.
+pub fn self_granted_spool_write(
+    key: &SphincsKeyPair,
+    relationship_instance_id: &[u8; 32],
+    address: &[u8; INBOX_ADDRESS_LEN],
+    message_id: &[u8; MESSAGE_ID_LEN],
+    envelope: &[u8],
+) -> Result<Vec<u8>, DsmError> {
+    use prost::Message;
+    let grant = WriteGrant::of_key(*relationship_instance_id, key.public_key.clone());
+    let grant_wire = grant
+        .to_wire(crate::crypto::sphincs::sphincs_sign(
+            &key.secret_key,
+            &grant.signing_target(),
+        )?)
+        .encode_to_vec();
+    signed_spool_write(
+        key,
+        &key.public_key,
+        grant_wire,
+        address,
+        message_id,
+        envelope,
+    )
+}
+
+/// A write that verified: the key it carries (which the node compares with,
+/// or fixes as, the address's key) and the envelope it stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedSpoolWrite {
+    pub lock_public_key: Vec<u8>,
+    pub envelope: Vec<u8>,
+}
+
+/// The node's check of one write, for `address` under `message_id`: the
+/// write is strict wire, its grant verifies under the key it carries, and the
+/// granted key signed this address, this id and these bytes. Whether that key
+/// is the address's key is the caller's comparison with what the address's
+/// first write fixed. Nothing here names or reveals an identity.
+pub fn verify_spool_write(
+    bytes: &[u8],
+    address: &[u8; INBOX_ADDRESS_LEN],
+    message_id: &[u8; MESSAGE_ID_LEN],
+) -> Result<VerifiedSpoolWrite, WriteAuthorizationRefusal> {
+    let write = decode_spool_write_wire(bytes)?;
+    let grant_wire = decode_write_grant_wire(&write.grant)?;
+    let grant = verify_write_grant_signature(&grant_wire, &write.lock_public_key)?;
+    verified(
+        &grant.authorized_write_public_key,
+        &spool_write_target(address, message_id, &write.envelope),
+        &write.write_signature,
+        WriteAuthorizationRefusal::WriteSignature,
+    )?;
+    Ok(VerifiedSpoolWrite {
+        lock_public_key: write.lock_public_key,
+        envelope: write.envelope,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Strict wire decoders.
+// ---------------------------------------------------------------------------
 
 fn offer_field_limit(tag: u32) -> Option<FieldLimit> {
     match tag {
@@ -468,63 +781,82 @@ fn offer_field_limit(tag: u32) -> Option<FieldLimit> {
 
 fn grant_field_limit(tag: u32) -> Option<FieldLimit> {
     match tag {
-        1 | 7 => Some(FieldLimit::Fixed(4)),
-        2..=5 | 8 => Some(FieldLimit::Fixed(32)),
-        6 => Some(FieldLimit::Fixed(WRITE_PUBLIC_KEY_LEN)),
-        9 => Some(FieldLimit::Max(SIGNATURE_MAX_LEN)),
+        1 | 4 => Some(FieldLimit::Fixed(4)),
+        2 | 5 => Some(FieldLimit::Fixed(32)),
+        3 => Some(FieldLimit::Fixed(WRITE_PUBLIC_KEY_LEN)),
+        6 => Some(FieldLimit::Max(SIGNATURE_MAX_LEN)),
         _ => None,
     }
 }
 
-/// Strict decode of an offer: tags 1-7 only, each once, all present, each its
-/// exact or bounded length, re-encoding to the same bytes.
+fn lock_field_limit(tag: u32) -> Option<FieldLimit> {
+    match tag {
+        1 => Some(FieldLimit::Fixed(4)),
+        2..=5 => Some(FieldLimit::Fixed(32)),
+        6 => Some(FieldLimit::Fixed(WRITE_PUBLIC_KEY_LEN)),
+        7 => Some(FieldLimit::Max(SIGNATURE_MAX_LEN)),
+        _ => None,
+    }
+}
+
+fn authorization_field_limit(tag: u32) -> Option<FieldLimit> {
+    match tag {
+        1 | 2 => Some(FieldLimit::Max(SIGNATURE_MAX_LEN)),
+        _ => None,
+    }
+}
+
+fn spool_write_field_limit(tag: u32) -> Option<FieldLimit> {
+    match tag {
+        1 => Some(FieldLimit::Max(SPOOL_WRITE_ENVELOPE_MAX_LEN)),
+        2 => Some(FieldLimit::Fixed(WRITE_PUBLIC_KEY_LEN)),
+        3 | 4 => Some(FieldLimit::Max(SIGNATURE_MAX_LEN)),
+        _ => None,
+    }
+}
+
+/// Strict decode of an offer: tags 1-7 only, each once, all present.
 pub fn decode_write_key_offer_wire(
     bytes: &[u8],
 ) -> Result<RelationshipWriteKeyOfferV1, WriteAuthorizationRefusal> {
-    use prost::Message;
-    validate_length_delimited_wire(bytes, "write-key offer", 7, offer_field_limit, |tag| {
-        (1..=7).contains(&tag)
-    })
-    .map_err(|e| WriteAuthorizationRefusal::Wire(e.to_string()))?;
-    let offer = RelationshipWriteKeyOfferV1::decode(bytes)
-        .map_err(|e| WriteAuthorizationRefusal::Wire(e.to_string()))?;
-    if offer.encode_to_vec() != bytes {
-        return Err(WriteAuthorizationRefusal::Wire(
-            "non-canonical field ordering or encoding".to_string(),
-        ));
-    }
-    Ok(offer)
+    strict(bytes, "write-key offer", 7, offer_field_limit)
 }
 
-/// Strict decode of a grant: tags 1-9 only, each once, all present, each its
-/// exact or bounded length, re-encoding to the same bytes.
+/// Strict decode of a grant: tags 1-6 only, each once, all present.
 pub fn decode_write_grant_wire(
     bytes: &[u8],
 ) -> Result<RelationshipWriteGrantV1, WriteAuthorizationRefusal> {
-    use prost::Message;
-    validate_length_delimited_wire(bytes, "write grant", 9, grant_field_limit, |tag| {
-        (1..=9).contains(&tag)
-    })
-    .map_err(|e| WriteAuthorizationRefusal::Wire(e.to_string()))?;
-    let grant = RelationshipWriteGrantV1::decode(bytes)
-        .map_err(|e| WriteAuthorizationRefusal::Wire(e.to_string()))?;
-    if grant.encode_to_vec() != bytes {
-        return Err(WriteAuthorizationRefusal::Wire(
-            "non-canonical field ordering or encoding".to_string(),
-        ));
-    }
-    Ok(grant)
+    strict(bytes, "write grant", 6, grant_field_limit)
+}
+
+/// Strict decode of a write lock: tags 1-7 only, each once, all present.
+pub fn decode_write_lock_wire(
+    bytes: &[u8],
+) -> Result<RelationshipWriteLockV1, WriteAuthorizationRefusal> {
+    strict(bytes, "write lock", 7, lock_field_limit)
+}
+
+/// Strict decode of an authorization: tags 1-2 only, each once, both present.
+pub fn decode_write_authorization_wire(
+    bytes: &[u8],
+) -> Result<RelationshipWriteAuthorizationV1, WriteAuthorizationRefusal> {
+    strict(bytes, "write authorization", 2, authorization_field_limit)
+}
+
+/// Strict decode of a write: tags 1-4 only, each once, all present.
+pub fn decode_spool_write_wire(bytes: &[u8]) -> Result<SpoolWriteV1, WriteAuthorizationRefusal> {
+    strict(bytes, "spool write", 4, spool_write_field_limit)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::sphincs::{generate_keypair, sphincs_sign, SphincsKeyPair};
+    use crate::crypto::sphincs::{generate_keypair, sphincs_sign};
     use prost::Message;
 
     type Refusal = WriteAuthorizationRefusal;
 
-    /// A device as the grant sees it: its id, its genesis, its AK.
+    /// A device as the lock sees it: its id, its genesis, its AK.
     struct Device {
         id: [u8; 32],
         genesis: [u8; 32],
@@ -539,8 +871,11 @@ mod tests {
         })
     }
 
-    /// `sender`'s offer of `write_key` to `recipient` for `instance`, both
-    /// signatures made by the keys that must make them.
+    const INSTANCE: [u8; 32] = [0x5A; 32];
+    const ADDRESS: [u8; 32] = [0xAD; 32];
+    const MESSAGE_ID: [u8; 16] = [0x1D; 16];
+
+    /// `sender`'s offer of `write_key` to `recipient` for `instance`.
     fn offer(
         instance: [u8; 32],
         sender: &Device,
@@ -559,50 +894,71 @@ mod tests {
         Ok((offer, wire))
     }
 
-    /// `recipient`'s grant for `offer`, signed by `signer`.
-    fn grant(
-        offer: &WriteKeyOffer,
+    /// `recipient`'s authorization of `write_key` for `sender`: `lock`, bound
+    /// by `binder`, signing the grant as `grant_signer`.
+    fn authorization(
+        instance: [u8; 32],
         recipient: &Device,
-        signer: &SphincsKeyPair,
-    ) -> Result<RelationshipWriteGrantV1, DsmError> {
-        let grant = WriteGrant::for_offer(offer, recipient.genesis);
-        let signature = sphincs_sign(&signer.secret_key, &grant.signing_target())?;
-        Ok(grant.to_wire(signature))
-    }
-
-    fn offer_expectation<'a>(
-        instance: &'a [u8; 32],
-        sender: &'a Device,
-        recipient: &'a Device,
-    ) -> OfferExpectation<'a> {
-        OfferExpectation {
+        sender: &Device,
+        lock: &SphincsKeyPair,
+        binder: &SphincsKeyPair,
+        grant_signer: &SphincsKeyPair,
+        write_key: &[u8],
+    ) -> Result<Vec<u8>, DsmError> {
+        let bound = WriteLock {
             relationship_instance_id: instance,
-            sender_device_id: &sender.id,
-            recipient_device_id: &recipient.id,
-            sender_ak: &sender.ak.public_key,
-        }
+            recipient_genesis: recipient.genesis,
+            recipient_device_id: recipient.id,
+            authorized_sender_device_id: sender.id,
+            lock_public_key: lock.public_key.clone(),
+        };
+        let lock_wire = bound.to_wire(sphincs_sign(&binder.secret_key, &bound.binding_target())?);
+        let grant = WriteGrant::of_key(instance, write_key.to_vec());
+        let grant_wire = grant.to_wire(sphincs_sign(
+            &grant_signer.secret_key,
+            &grant.signing_target(),
+        )?);
+        Ok(write_authorization_wire(&lock_wire, &grant_wire))
     }
 
-    fn grant_expectation<'a>(
+    fn expect<'a>(
         instance: &'a [u8; 32],
-        sender: &'a Device,
         recipient: &'a Device,
-        write_key: &'a SphincsKeyPair,
-    ) -> GrantExpectation<'a> {
-        GrantExpectation {
+        sender: &'a Device,
+        write_key: &'a [u8],
+    ) -> AuthorizationExpectation<'a> {
+        AuthorizationExpectation {
             relationship_instance_id: instance,
             recipient_genesis: &recipient.genesis,
             recipient_device_id: &recipient.id,
             sender_device_id: &sender.id,
-            write_public_key: &write_key.public_key,
+            write_public_key: write_key,
             recipient_ak: &recipient.ak.public_key,
         }
     }
 
-    const INSTANCE: [u8; 32] = [0x5A; 32];
+    /// One write of `envelope` to `address` under `message_id`, carrying
+    /// `lock` and `grant_wire`, signed by `writer`.
+    fn write(
+        address: &[u8; 32],
+        message_id: &[u8; 16],
+        envelope: &[u8],
+        lock: &[u8],
+        grant_wire: Vec<u8>,
+        writer: &SphincsKeyPair,
+    ) -> Result<Vec<u8>, DsmError> {
+        let signature = sphincs_sign(
+            &writer.secret_key,
+            &spool_write_target(address, message_id, envelope),
+        )?;
+        Ok(
+            spool_write_wire(envelope.to_vec(), lock.to_vec(), grant_wire, signature)
+                .encode_to_vec(),
+        )
+    }
 
     #[test]
-    fn a_write_key_is_one_per_instance_and_direction_and_comes_back_from_the_master_seed(
+    fn keys_and_locks_are_one_per_instance_and_direction_and_come_back_from_the_master_seed(
     ) -> Result<(), DsmError> {
         let (s_a, s_b) = ([0xA5; 32], [0xB5; 32]);
         let (a, b) = ([0x0A; 32], [0x0B; 32]);
@@ -612,9 +968,10 @@ mod tests {
             (&ab.public_key, &ab.secret_key),
             (&again.public_key, &again.secret_key)
         );
-        let ba = derive_write_keypair(&s_b, &INSTANCE, &b, &a)?;
-        assert_ne!(ab.public_key, ba.public_key);
-        // The same master seed, the other direction or another instance.
+        assert_ne!(
+            ab.public_key,
+            derive_write_keypair(&s_b, &INSTANCE, &b, &a)?.public_key
+        );
         assert_ne!(
             ab.public_key,
             derive_write_keypair(&s_a, &INSTANCE, &b, &a)?.public_key
@@ -623,19 +980,19 @@ mod tests {
             ab.public_key,
             derive_write_keypair(&s_a, &[0x6B; 32], &a, &b)?.public_key
         );
-        // Another master seed.
-        assert_ne!(
-            ab.public_key,
-            derive_write_keypair(&s_b, &INSTANCE, &a, &b)?.public_key
-        );
-        assert_eq!(ab.public_key.len(), WRITE_PUBLIC_KEY_LEN);
+        // A's lock over its inbox toward B is neither A's write key toward B
+        // nor A's first-inbox key.
+        let lock = derive_write_lock_keypair(&s_a, &INSTANCE, &a, &b)?;
+        let first = derive_first_inbox_keypair(&s_a, &[0x11; 32], &[0x22; 32], &a, &b)?;
+        assert_ne!(lock.public_key, ab.public_key);
+        assert_ne!(first.public_key, ab.public_key);
+        assert_ne!(first.public_key, lock.public_key);
         Ok(())
     }
 
     #[test]
     fn an_instance_is_its_relationship_and_its_establishing_tip() {
-        let rel = [0x11; 32];
-        let tip = [0x22; 32];
+        let (rel, tip) = ([0x11; 32], [0x22; 32]);
         let id = relationship_instance_id(&rel, &tip);
         assert_eq!(id, relationship_instance_id(&rel, &tip));
         assert_ne!(id, relationship_instance_id(&rel, &[0x23; 32]));
@@ -643,301 +1000,248 @@ mod tests {
     }
 
     #[test]
-    fn a_recipients_grant_for_a_verified_offer_verifies() -> Result<(), DsmError> {
+    fn an_offer_binds_its_key_and_proves_possession() -> Result<(), DsmError> {
         let (a, b) = (device(0x0A)?, device(0x0B)?);
         let wk = generate_keypair(WRITE_KEY_VARIANT)?;
         let (sent, wire) = offer(INSTANCE, &a, &b, &wk)?;
-
-        let checked = verify_write_key_offer(&wire, &offer_expectation(&INSTANCE, &a, &b))?;
-        assert_eq!(checked, sent);
-
-        let granted = grant(&checked, &b, &b.ak)?;
-        let held = verify_write_grant(&granted, &grant_expectation(&INSTANCE, &a, &b, &wk))?;
-        assert!(held.authorizes(&INSTANCE, &b.id, &a.id, &wk.public_key));
-        assert_eq!(held.permitted_scope, SCOPE_RELATIONSHIP_INBOX);
-        Ok(())
-    }
-
-    #[test]
-    fn each_direction_has_its_own_key_and_its_own_grant() -> Result<(), DsmError> {
-        let (a, b) = (device(0x0A)?, device(0x0B)?);
-        let (wk_ab, wk_ba) = (
-            generate_keypair(WRITE_KEY_VARIANT)?,
-            generate_keypair(WRITE_KEY_VARIANT)?,
-        );
-        let (offer_ab, _) = offer(INSTANCE, &a, &b, &wk_ab)?;
-        let (offer_ba, _) = offer(INSTANCE, &b, &a, &wk_ba)?;
-        let grant_ab = grant(&offer_ab, &b, &b.ak)?;
-        let grant_ba = grant(&offer_ba, &a, &a.ak)?;
-
-        verify_write_grant(&grant_ab, &grant_expectation(&INSTANCE, &a, &b, &wk_ab))?;
-        verify_write_grant(&grant_ba, &grant_expectation(&INSTANCE, &b, &a, &wk_ba))?;
-        assert_ne!(grant_ab.grant_id, grant_ba.grant_id);
-        // B's grant to A is not A's grant to B: it is signed by B, for B's inbox.
+        let expected = OfferExpectation {
+            relationship_instance_id: &INSTANCE,
+            sender_device_id: &a.id,
+            recipient_device_id: &b.id,
+            sender_ak: &a.ak.public_key,
+        };
+        assert_eq!(verify_write_key_offer(&wire, &expected)?, sent);
+        // Possession signed by the AK, not the key.
+        let mut by_ak = wire.clone();
+        by_ak.possession_signature = sphincs_sign(&a.ak.secret_key, &sent.possession_target())?;
         assert_eq!(
-            verify_write_grant(&grant_ab, &grant_expectation(&INSTANCE, &b, &a, &wk_ab)),
-            Err(Refusal::GrantSignature)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn a_forged_recipient_signature_fails() -> Result<(), DsmError> {
-        let (a, b, mallory) = (device(0x0A)?, device(0x0B)?, device(0x0C)?);
-        let wk = generate_keypair(WRITE_KEY_VARIANT)?;
-        let (offer, _) = offer(INSTANCE, &a, &b, &wk)?;
-        let expected = grant_expectation(&INSTANCE, &a, &b, &wk);
-
-        // Signed by a key that is not B's AK.
-        let by_mallory = grant(&offer, &b, &mallory.ak)?;
-        assert_eq!(
-            verify_write_grant(&by_mallory, &expected),
-            Err(Refusal::GrantSignature)
-        );
-        // B's own signature, one bit flipped.
-        let mut flipped = grant(&offer, &b, &b.ak)?;
-        flipped.grant_signature[100] ^= 0x01;
-        assert_eq!(
-            verify_write_grant(&flipped, &expected),
-            Err(Refusal::GrantSignature)
-        );
-        // B's signature over a grant whose fields were changed after signing.
-        let mut widened = grant(&offer, &b, &b.ak)?;
-        widened.authorized_sender_device_id = mallory.id.to_vec();
-        assert_eq!(
-            verify_write_grant_signature(&widened, &b.ak.public_key),
-            Err(Refusal::GrantIdMismatch)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn an_unrelated_senders_key_fails() -> Result<(), DsmError> {
-        let (a, b, c) = (device(0x0A)?, device(0x0B)?, device(0x0C)?);
-        let (wk_a, wk_c) = (
-            generate_keypair(WRITE_KEY_VARIANT)?,
-            generate_keypair(WRITE_KEY_VARIANT)?,
-        );
-        let (offer_a, _) = offer(INSTANCE, &a, &b, &wk_a)?;
-        let granted = grant(&offer_a, &b, &b.ak)?;
-
-        // C's key under A's grant.
-        assert_eq!(
-            verify_write_grant(&granted, &grant_expectation(&INSTANCE, &a, &b, &wk_c)),
-            Err(Refusal::WrongWriteKey)
-        );
-        // C presenting A's grant as its own.
-        assert_eq!(
-            verify_write_grant(&granted, &grant_expectation(&INSTANCE, &c, &b, &wk_a)),
-            Err(Refusal::WrongSender)
-        );
-        let held = verify_write_grant_signature(&granted, &b.ak.public_key)?;
-        assert!(!held.authorizes(&INSTANCE, &b.id, &c.id, &wk_c.public_key));
-        assert!(!held.authorizes(&INSTANCE, &b.id, &a.id, &wk_c.public_key));
-
-        // An offer naming A but bound by C's AK is not A's.
-        let (_, c_as_a) = offer(INSTANCE, &c, &b, &wk_c)?;
-        let mut c_as_a = c_as_a;
-        c_as_a.sender_device_id = a.id.to_vec();
-        assert_eq!(
-            verify_write_key_offer(&c_as_a, &offer_expectation(&INSTANCE, &a, &b)),
-            Err(Refusal::BindingSignature)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn a_grant_for_another_recipient_fails() -> Result<(), DsmError> {
-        let (a, b, c) = (device(0x0A)?, device(0x0B)?, device(0x0C)?);
-        let wk = generate_keypair(WRITE_KEY_VARIANT)?;
-        let (to_b, _) = offer(INSTANCE, &a, &b, &wk)?;
-        let from_b = grant(&to_b, &b, &b.ak)?;
-
-        // B's grant read as C's: C's AK did not sign it.
-        assert_eq!(
-            verify_write_grant(&from_b, &grant_expectation(&INSTANCE, &a, &c, &wk)),
-            Err(Refusal::GrantSignature)
-        );
-        // B's grant does not authorize C's inbox.
-        let held = verify_write_grant_signature(&from_b, &b.ak.public_key)?;
-        assert!(!held.authorizes(&INSTANCE, &c.id, &a.id, &wk.public_key));
-
-        // An offer to B is not an offer to C.
-        let (_, offer_to_b) = offer(INSTANCE, &a, &b, &wk)?;
-        assert_eq!(
-            verify_write_key_offer(&offer_to_b, &offer_expectation(&INSTANCE, &a, &c)),
-            Err(Refusal::WrongRecipient)
-        );
-
-        // A grant naming C's device but signed by B's AK, read under B's AK
-        // with C expected, is refused for the recipient it names.
-        let mut for_c = WriteGrant::for_offer(&to_b, b.genesis);
-        for_c.recipient_device_id = c.id;
-        let signed = for_c.to_wire(sphincs_sign(&b.ak.secret_key, &for_c.signing_target())?);
-        let mut expect = grant_expectation(&INSTANCE, &a, &b, &wk);
-        expect.recipient_ak = &b.ak.public_key;
-        assert_eq!(
-            verify_write_grant(&signed, &expect),
-            Err(Refusal::WrongRecipient)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn a_grant_for_another_relationship_fails() -> Result<(), DsmError> {
-        let (a, b) = (device(0x0A)?, device(0x0B)?);
-        let wk = generate_keypair(WRITE_KEY_VARIANT)?;
-        let other: [u8; 32] = [0x6B; 32];
-        let (for_x, wire_x) = offer(INSTANCE, &a, &b, &wk)?;
-        let granted_x = grant(&for_x, &b, &b.ak)?;
-
-        assert_eq!(
-            verify_write_grant(&granted_x, &grant_expectation(&other, &a, &b, &wk)),
-            Err(Refusal::WrongInstance)
-        );
-        assert_eq!(
-            verify_write_key_offer(&wire_x, &offer_expectation(&other, &a, &b)),
-            Err(Refusal::WrongInstance)
-        );
-        let held = verify_write_grant_signature(&granted_x, &b.ak.public_key)?;
-        assert!(!held.authorizes(&other, &b.id, &a.id, &wk.public_key));
-        Ok(())
-    }
-
-    #[test]
-    fn a_grant_is_not_reused_across_instances_of_one_pair() -> Result<(), DsmError> {
-        // The same two devices, the same write key, a later instance of their
-        // relationship: the first instance's grant authorizes nothing in it.
-        let (a, b) = (device(0x0A)?, device(0x0B)?);
-        let wk = generate_keypair(WRITE_KEY_VARIANT)?;
-        let first: [u8; 32] = [0x01; 32];
-        let second: [u8; 32] = [0x02; 32];
-        let (closed, _) = offer(first, &a, &b, &wk)?;
-        let old_grant = grant(&closed, &b, &b.ak)?;
-
-        assert_eq!(
-            verify_write_grant(&old_grant, &grant_expectation(&second, &a, &b, &wk)),
-            Err(Refusal::WrongInstance)
-        );
-        let held = verify_write_grant_signature(&old_grant, &b.ak.public_key)?;
-        assert!(!held.authorizes(&second, &b.id, &a.id, &wk.public_key));
-
-        // Rewriting the instance breaks the identifier, and an identifier
-        // recomputed breaks B's signature.
-        let mut moved = old_grant.clone();
-        moved.relationship_instance_id = second.to_vec();
-        assert_eq!(
-            verify_write_grant_signature(&moved, &b.ak.public_key),
-            Err(Refusal::GrantIdMismatch)
-        );
-        let mut rehashed = WriteGrant::for_offer(&closed, b.genesis);
-        rehashed.relationship_instance_id = second;
-        let replayed = rehashed.to_wire(old_grant.grant_signature.clone());
-        assert_eq!(
-            verify_write_grant_signature(&replayed, &b.ak.public_key),
-            Err(Refusal::GrantSignature)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn possessing_a_key_without_the_recipients_grant_authorizes_nothing() -> Result<(), DsmError> {
-        let (a, b) = (device(0x0A)?, device(0x0B)?);
-        let wk = generate_keypair(WRITE_KEY_VARIANT)?;
-        let (sent, wire) = offer(INSTANCE, &a, &b, &wk)?;
-        // The offer proves possession, and is no grant.
-        verify_write_key_offer(&wire, &offer_expectation(&INSTANCE, &a, &b))?;
-
-        let expected = grant_expectation(&INSTANCE, &a, &b, &wk);
-        // A grant A signs for itself, with its write key or with its AK.
-        assert_eq!(
-            verify_write_grant(&grant(&sent, &b, &wk)?, &expected),
-            Err(Refusal::GrantSignature)
-        );
-        assert_eq!(
-            verify_write_grant(&grant(&sent, &b, &a.ak)?, &expected),
-            Err(Refusal::GrantSignature)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn an_offer_proves_possession_with_the_key_it_names() -> Result<(), DsmError> {
-        let (a, b) = (device(0x0A)?, device(0x0B)?);
-        let wk = generate_keypair(WRITE_KEY_VARIANT)?;
-        let (sent, mut wire) = offer(INSTANCE, &a, &b, &wk)?;
-        // The possession signature made by A's AK instead of the write key.
-        wire.possession_signature = sphincs_sign(&a.ak.secret_key, &sent.possession_target())?;
-        assert_eq!(
-            verify_write_key_offer(&wire, &offer_expectation(&INSTANCE, &a, &b)),
+            verify_write_key_offer(&by_ak, &expected),
             Err(Refusal::PossessionSignature)
         );
-        Ok(())
-    }
-
-    #[test]
-    fn a_write_key_is_never_the_senders_ak() -> Result<(), DsmError> {
-        let (a, b) = (device(0x0A)?, device(0x0B)?);
-        let (_, wire) = offer(INSTANCE, &a, &b, &a.ak)?;
+        // An offer bound by another device's AK.
+        let c = device(0x0C)?;
+        let (_, by_c) = offer(INSTANCE, &c, &b, &wk)?;
+        let mut by_c = by_c;
+        by_c.sender_device_id = a.id.to_vec();
         assert_eq!(
-            verify_write_key_offer(&wire, &offer_expectation(&INSTANCE, &a, &b)),
+            verify_write_key_offer(&by_c, &expected),
+            Err(Refusal::BindingSignature)
+        );
+        // The AK offered as a write key.
+        let (_, ak_offer) = offer(INSTANCE, &a, &b, &a.ak)?;
+        assert_eq!(
+            verify_write_key_offer(&ak_offer, &expected),
             Err(Refusal::WriteKeyIsTheSendersAk)
         );
         Ok(())
     }
 
     #[test]
-    fn issuing_the_same_grant_again_issues_the_same_bytes() -> Result<(), DsmError> {
+    fn a_recipients_authorization_verifies_and_names_no_identity_to_a_node() -> Result<(), DsmError>
+    {
         let (a, b) = (device(0x0A)?, device(0x0B)?);
+        let (wk, lock) = (
+            generate_keypair(WRITE_KEY_VARIANT)?,
+            generate_keypair(WRITE_KEY_VARIANT)?,
+        );
+        let bytes = authorization(INSTANCE, &b, &a, &lock, &b.ak, &lock, &wk.public_key)?;
+        let held = verify_write_authorization(&bytes, &expect(&INSTANCE, &b, &a, &wk.public_key))?;
+        assert_eq!(held.lock.lock_public_key, lock.public_key);
+        // The grant a node sees carries no genesis, device id or AK.
+        let grant = decode_write_grant_wire(&held.grant_wire).map_err(DsmError::from)?;
+        for secret in [&b.genesis[..], &b.id[..], &a.id[..], &b.ak.public_key[..]] {
+            assert!(
+                !grant
+                    .encode_to_vec()
+                    .windows(secret.len())
+                    .any(|w| w == secret),
+                "the grant carries an identity"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_forged_or_misdirected_authorization_fails() -> Result<(), DsmError> {
+        let (a, b, c) = (device(0x0A)?, device(0x0B)?, device(0x0C)?);
+        let (wk, lock) = (
+            generate_keypair(WRITE_KEY_VARIANT)?,
+            generate_keypair(WRITE_KEY_VARIANT)?,
+        );
+        let ok = expect(&INSTANCE, &b, &a, &wk.public_key);
+        // The lock bound by another device's AK.
+        let by_c = authorization(INSTANCE, &b, &a, &lock, &c.ak, &lock, &wk.public_key)?;
+        assert_eq!(
+            verify_write_authorization(&by_c, &ok),
+            Err(Refusal::LockBindingSignature)
+        );
+        // The grant signed by a key other than the bound lock: the sender's
+        // own key, a self-made grant.
+        let self_made = authorization(INSTANCE, &b, &a, &lock, &b.ak, &wk, &wk.public_key)?;
+        assert_eq!(
+            verify_write_authorization(&self_made, &ok),
+            Err(Refusal::GrantSignature)
+        );
+        // Another sender's key, another recipient, another instance.
+        let other_key = generate_keypair(WRITE_KEY_VARIANT)?;
+        let honest = authorization(INSTANCE, &b, &a, &lock, &b.ak, &lock, &wk.public_key)?;
+        assert_eq!(
+            verify_write_authorization(&honest, &expect(&INSTANCE, &b, &a, &other_key.public_key)),
+            Err(Refusal::WrongWriteKey)
+        );
+        assert_eq!(
+            verify_write_authorization(&honest, &expect(&INSTANCE, &b, &c, &wk.public_key)),
+            Err(Refusal::WrongSender)
+        );
+        assert_eq!(
+            verify_write_authorization(&honest, &expect(&INSTANCE, &c, &a, &wk.public_key)),
+            Err(Refusal::WrongRecipientGenesis)
+        );
+        assert_eq!(
+            verify_write_authorization(&honest, &expect(&[0x6B; 32], &b, &a, &wk.public_key)),
+            Err(Refusal::WrongInstance)
+        );
+        // The AK used as the lock.
+        let ak_lock = authorization(INSTANCE, &b, &a, &b.ak, &b.ak, &b.ak, &wk.public_key)?;
+        assert_eq!(
+            verify_write_authorization(&ak_lock, &ok),
+            Err(Refusal::LockIsTheRecipientsAk)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_grant_from_one_instance_is_not_reused_in_another() -> Result<(), DsmError> {
+        let lock = generate_keypair(WRITE_KEY_VARIANT)?;
         let wk = generate_keypair(WRITE_KEY_VARIANT)?;
-        let (sent, _) = offer(INSTANCE, &a, &b, &wk)?;
-        let once = grant(&sent, &b, &b.ak)?.encode_to_vec();
-        let twice = grant(&sent, &b, &b.ak)?.encode_to_vec();
-        assert_eq!(once, twice);
+        let old = WriteGrant::of_key([0x01; 32], wk.public_key.clone());
+        let signature = sphincs_sign(&lock.secret_key, &old.signing_target())?;
+        let mut moved = old.to_wire(signature.clone());
+        moved.relationship_instance_id = [0x02; 32].to_vec();
+        assert_eq!(
+            verify_write_grant_signature(&moved, &lock.public_key),
+            Err(Refusal::GrantIdMismatch)
+        );
+        let rehashed = WriteGrant::of_key([0x02; 32], wk.public_key.clone()).to_wire(signature);
+        assert_eq!(
+            verify_write_grant_signature(&rehashed, &lock.public_key),
+            Err(Refusal::GrantSignature)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn issuing_the_same_grant_again_issues_the_same_bytes() -> Result<(), DsmError> {
+        let lock = generate_keypair(WRITE_KEY_VARIANT)?;
+        let grant = WriteGrant::of_key(INSTANCE, vec![0x77; WRITE_PUBLIC_KEY_LEN]);
+        let once = grant.to_wire(sphincs_sign(&lock.secret_key, &grant.signing_target())?);
+        let twice = grant.to_wire(sphincs_sign(&lock.secret_key, &grant.signing_target())?);
+        assert_eq!(once.encode_to_vec(), twice.encode_to_vec());
+        Ok(())
+    }
+
+    #[test]
+    fn a_write_verifies_only_for_its_own_address_id_and_bytes() -> Result<(), DsmError> {
+        let lock = generate_keypair(WRITE_KEY_VARIANT)?;
+        let wk = generate_keypair(WRITE_KEY_VARIANT)?;
+        let grant = WriteGrant::of_key(INSTANCE, wk.public_key.clone());
+        let grant_wire = grant
+            .to_wire(sphincs_sign(&lock.secret_key, &grant.signing_target())?)
+            .encode_to_vec();
+        let bytes = write(
+            &ADDRESS,
+            &MESSAGE_ID,
+            b"sealed",
+            &lock.public_key,
+            grant_wire.clone(),
+            &wk,
+        )?;
+        let held = verify_spool_write(&bytes, &ADDRESS, &MESSAGE_ID)?;
+        assert_eq!(held.lock_public_key, lock.public_key);
+        assert_eq!(held.envelope, b"sealed".to_vec());
+        // The same write presented for another address or id.
+        assert_eq!(
+            verify_spool_write(&bytes, &[0xAE; 32], &MESSAGE_ID),
+            Err(Refusal::WriteSignature)
+        );
+        assert_eq!(
+            verify_spool_write(&bytes, &ADDRESS, &[0x1E; 16]),
+            Err(Refusal::WriteSignature)
+        );
+        // Its signature over other bytes.
+        let mut swapped = decode_spool_write_wire(&bytes).map_err(DsmError::from)?;
+        swapped.envelope = b"other".to_vec();
+        assert_eq!(
+            verify_spool_write(&swapped.encode_to_vec(), &ADDRESS, &MESSAGE_ID),
+            Err(Refusal::WriteSignature)
+        );
+        // Signed by a key the lock never granted.
+        let stranger = generate_keypair(WRITE_KEY_VARIANT)?;
+        let unsigned = write(
+            &ADDRESS,
+            &MESSAGE_ID,
+            b"sealed",
+            &lock.public_key,
+            grant_wire,
+            &stranger,
+        )?;
+        assert_eq!(
+            verify_spool_write(&unsigned, &ADDRESS, &MESSAGE_ID),
+            Err(Refusal::WriteSignature)
+        );
+        // A grant another lock signed, carried under this lock.
+        let other_lock = generate_keypair(WRITE_KEY_VARIANT)?;
+        let foreign = grant
+            .to_wire(sphincs_sign(
+                &other_lock.secret_key,
+                &grant.signing_target(),
+            )?)
+            .encode_to_vec();
+        let carried = write(
+            &ADDRESS,
+            &MESSAGE_ID,
+            b"sealed",
+            &lock.public_key,
+            foreign,
+            &wk,
+        )?;
+        assert_eq!(
+            verify_spool_write(&carried, &ADDRESS, &MESSAGE_ID),
+            Err(Refusal::GrantSignature)
+        );
         Ok(())
     }
 
     #[test]
     fn the_wire_forms_are_strict() -> Result<(), DsmError> {
-        let (a, b) = (device(0x0A)?, device(0x0B)?);
-        let wk = generate_keypair(WRITE_KEY_VARIANT)?;
-        let (sent, offer_wire) = offer(INSTANCE, &a, &b, &wk)?;
-        let grant_wire = grant(&sent, &b, &b.ak)?;
-
-        let offer_bytes = offer_wire.encode_to_vec();
-        assert_eq!(decode_write_key_offer_wire(&offer_bytes)?, offer_wire);
-        let grant_bytes = grant_wire.encode_to_vec();
-        assert_eq!(decode_write_grant_wire(&grant_bytes)?, grant_wire);
-
-        // An unknown field.
-        let mut extra = grant_bytes.clone();
-        extra.extend_from_slice(&[0x52, 0x01, 0x00]); // field 10, one byte
+        let lock = generate_keypair(WRITE_KEY_VARIANT)?;
+        let grant = WriteGrant::of_key(INSTANCE, lock.public_key.clone());
+        let grant_wire = grant.to_wire(sphincs_sign(&lock.secret_key, &grant.signing_target())?);
+        let bytes = grant_wire.encode_to_vec();
+        assert_eq!(decode_write_grant_wire(&bytes)?, grant_wire);
+        let mut extra = bytes.clone();
+        extra.extend_from_slice(&[0x3A, 0x01, 0x00]); // field 7, one byte
         assert!(matches!(
             decode_write_grant_wire(&extra),
             Err(Refusal::Wire(_))
         ));
-        // A field missing.
         let mut short = grant_wire.clone();
         short.grant_id.clear();
         assert!(matches!(
             decode_write_grant_wire(&short.encode_to_vec()),
             Err(Refusal::Wire(_))
         ));
-        // A field of the wrong length.
-        let mut long_key = offer_wire.clone();
-        long_key.write_public_key.push(0);
-        assert!(matches!(
-            decode_write_key_offer_wire(&long_key.encode_to_vec()),
-            Err(Refusal::Wire(_))
-        ));
-        // A scope other than the relationship inbox, even signed.
-        let mut wider = WriteGrant::for_offer(&sent, b.genesis);
+        let mut wider = grant.clone();
         wider.permitted_scope = 2;
-        let signed = wider.to_wire(sphincs_sign(&b.ak.secret_key, &wider.signing_target())?);
+        let signed = wider.to_wire(sphincs_sign(&lock.secret_key, &wider.signing_target())?);
         assert_eq!(
-            verify_write_grant_signature(&signed, &b.ak.public_key),
+            verify_write_grant_signature(&signed, &lock.public_key),
             Err(Refusal::Scope(2))
         );
+        assert!(matches!(
+            decode_spool_write_wire(b"\x0a\x01"),
+            Err(Refusal::Wire(_))
+        ));
         Ok(())
     }
 }

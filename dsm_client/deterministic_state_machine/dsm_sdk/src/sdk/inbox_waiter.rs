@@ -542,11 +542,29 @@ mod tests {
             "the wait was answered before anything landed"
         );
 
+        // A write under a key of the writer's own, the first at this address
+        // (DSM Amendment A34).
+        let writer =
+            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+                .expect("a writer's key");
+        let message_id = [0x7Bu8; 16];
+        let write = dsm::core::relationship_write_grant::self_granted_spool_write(
+            &writer,
+            &[0x5A; 32],
+            &[0x7Au8; 32],
+            &message_id,
+            &[0x0Au8, 0x01, 0x03],
+        )
+        .expect("a signed write");
         let submitted = client
             .post(format!("{}/api/v2/b0x/submit", member.endpoint))
             .header("Content-Type", "application/octet-stream")
             .header("x-dsm-recipient", address.as_str())
-            .body(vec![0x0Au8, 0x01, 0x03])
+            .header(
+                "x-dsm-message-id",
+                crate::util::text_id::encode_base32_crockford(&message_id),
+            )
+            .body(write)
             .send()
             .await
             .expect("the member takes the delivery");

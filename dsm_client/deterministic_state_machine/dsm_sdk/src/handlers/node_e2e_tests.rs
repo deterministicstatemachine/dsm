@@ -475,7 +475,7 @@ async fn spool_sealed(
         crate::sdk::storage_set::pinned_endpoints().expect("the pinned set"),
     )
     .expect("a spool client");
-    sdk.submit_stored_envelope(route, &id)
+    sdk.submit_stored_envelope(&to.device_id, route, &id)
         .await
         .expect("delivered to its quorum");
     dsm::crypto::spool_address::envelope_merge_key(inner)

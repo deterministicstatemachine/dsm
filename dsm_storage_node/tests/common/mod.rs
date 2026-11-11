@@ -264,3 +264,41 @@ pub fn served(state: std::sync::Arc<dsm_storage_node::AppState>) -> axum::Router
         },
     )
 }
+
+/// The key these tests write under: the first write at each test address
+/// fixes it there (DSM Amendment A34).
+pub fn write_key() -> &'static dsm::crypto::sphincs::SphincsKeyPair {
+    static KEY: std::sync::OnceLock<dsm::crypto::sphincs::SphincsKeyPair> =
+        std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        ok_or_panic(
+            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f),
+            "a test write key",
+        )
+    })
+}
+
+/// `envelope` as a write to the spool at `key` under [`write_key`], with a
+/// fresh message id: the request body and the `x-dsm-message-id` value.
+pub fn signed_write(key: &str, envelope: &[u8]) -> (Vec<u8>, String) {
+    let bytes = some_or_panic(
+        dsm::utils::text_id::decode_base32_crockford(key),
+        "a test spool key decodes",
+    );
+    let address: [u8; 32] = ok_or_panic(<[u8; 32]>::try_from(bytes.as_slice()), "32 bytes");
+    let message_id: [u8; 16] = rand::random();
+    let body = ok_or_panic(
+        dsm::core::relationship_write_grant::self_granted_spool_write(
+            write_key(),
+            &[0x5A; 32],
+            &address,
+            &message_id,
+            envelope,
+        ),
+        "a signed write",
+    );
+    (
+        body,
+        dsm::utils::text_id::encode_base32_crockford(&message_id),
+    )
+}

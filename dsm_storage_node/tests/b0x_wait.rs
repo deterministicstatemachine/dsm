@@ -40,13 +40,15 @@ fn spool_key(byte: u8) -> String {
 
 /// Submit `body` to the spool at `key`.
 async fn submit(app: &axum::Router, key: &str, body: &[u8]) {
+    let (write, message_id) = common::signed_write(key, body);
     let request = common::ok_or_panic(
         Request::builder()
             .method("POST")
             .uri("/api/v2/b0x/submit")
             .header("content-type", "application/octet-stream")
             .header("x-dsm-recipient", key)
-            .body(Body::from(body.to_vec())),
+            .header("x-dsm-message-id", message_id)
+            .body(Body::from(write)),
         "request",
     );
     let answer = common::ok_or_panic(app.clone().oneshot(request).await, "the app answers");

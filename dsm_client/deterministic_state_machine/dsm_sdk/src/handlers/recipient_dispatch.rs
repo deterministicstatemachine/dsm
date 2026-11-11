@@ -850,6 +850,21 @@ mod tests {
         (p, one)
     }
 
+    /// A member that holds `bytes` on `route` of its own accord: written into
+    /// its own database, past every check its protocol code makes, as a
+    /// faulty member's store can hold anything.
+    async fn member_holds(pool: &dsm_storage_node::db::DBPool, route: &str, bytes: &[u8]) {
+        let client = pool.get().await.expect("the member's database");
+        client
+            .execute(
+                "INSERT INTO inbox_spool(device_id, envelope, seq_num) VALUES ($1, $2, \
+                 COALESCE((SELECT MAX(seq_num) + 1 FROM inbox_spool WHERE device_id = $1), 1))",
+                &[&route, &bytes],
+            )
+            .await
+            .expect("the member holds the bytes");
+    }
+
     /// Rows in a staging table on the ENTERED device.
     fn rows(table: &str) -> i64 {
         let binding = client_db::get_connection().expect("conn");
@@ -960,6 +975,7 @@ mod tests {
         .expect("A's spool client");
         spool
             .submit_stored_envelope_with_retry(
+                &p.b.device_id,
                 route,
                 message_id,
                 &crate::sdk::b0x_sdk::B0xRetryConfig::default(),
@@ -2037,9 +2053,7 @@ mod tests {
                 &id,
                 format!("fresh junk {i}").into_bytes(),
             );
-            dsm_storage_node::db::spool_insert(member.pool(), &one.route, &junk)
-                .await
-                .expect("the first member spools its own junk");
+            member_holds(member.pool(), &one.route, &junk).await;
         }
         assert!(
             p.holders_of(&one.message_id).await >= 1,
@@ -2284,9 +2298,7 @@ mod tests {
                 )
                 .await
                 .expect("the member withholds the honest copy");
-            dsm_storage_node::db::spool_insert(member.pool(), route, sealed)
-                .await
-                .expect("the member spools the other copy");
+            member_holds(member.pool(), route, sealed).await;
         }
     }
 
@@ -2449,6 +2461,7 @@ mod tests {
         .expect("a spool client");
         spool
             .submit_stored_envelope_with_retry(
+                &to.device_id,
                 &route,
                 &id,
                 &crate::sdk::b0x_sdk::B0xRetryConfig::default(),

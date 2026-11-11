@@ -1439,6 +1439,7 @@ impl B0xSDK {
     ) -> Result<String, DsmError> {
         let sealed = seal_for(recipient_device, &built.message_id_b32, &built.bytes)?;
         self.deliver(
+            recipient_device,
             routing_key,
             &built.message_id_b32,
             &sealed,
@@ -1461,11 +1462,18 @@ impl B0xSDK {
     /// is still asked once the others are used up.
     async fn deliver(
         &self,
+        recipient: &[u8; 32],
         routing_key: &str,
         message_id_b32: &str,
         sealed: &[u8],
         retry_config: &B0xRetryConfig,
     ) -> Result<(), DsmError> {
+        // The write a member takes: the sealed bytes with the inbox's key, its
+        // grant and this device's signature (DSM Amendment A34). Built once,
+        // the same bytes to every member.
+        let write =
+            crate::sdk::spool_write::write_for(recipient, routing_key, message_id_b32, sealed)?;
+        let sealed = write.as_slice();
         let quorum = self.quorum_k;
         let total = self.storage_node_endpoints.len();
         if total < quorum {
@@ -1669,6 +1677,7 @@ impl B0xSDK {
         })?;
         let sealed = seal_for(recipient_device, &message_id_b32, &buf)?;
         self.deliver(
+            recipient_device,
             &routing_key,
             &message_id_b32,
             &sealed,
@@ -1999,8 +2008,14 @@ impl B0xSDK {
         // §16.4: the inbox key is always the explicit rotated address.
         let routing_key = params.routing_address.clone();
         let sealed = seal_for(&recipient, &message_id_b32, &buf)?;
-        self.deliver(&routing_key, &message_id_b32, &sealed, retry_config)
-            .await?;
+        self.deliver(
+            &recipient,
+            &routing_key,
+            &message_id_b32,
+            &sealed,
+            retry_config,
+        )
+        .await?;
         Ok(message_id_b32)
     }
 
@@ -2012,10 +2027,12 @@ impl B0xSDK {
     /// spool row.
     pub async fn submit_stored_envelope(
         &mut self,
+        recipient: &[u8; 32],
         routing_address: &str,
         message_id_b32: &str,
     ) -> Result<(), DsmError> {
         self.submit_stored_envelope_with_retry(
+            recipient,
             routing_address,
             message_id_b32,
             &B0xRetryConfig::default(),
@@ -2058,12 +2075,13 @@ impl B0xSDK {
     /// is what bounds the call — see `stored_envelope_deadline`.
     pub async fn submit_stored_envelope_with_retry(
         &mut self,
+        recipient: &[u8; 32],
         routing_address: &str,
         message_id_b32: &str,
         retry: &B0xRetryConfig,
     ) -> Result<(), DsmError> {
         let sealed = kept_seal(message_id_b32)?;
-        self.deliver(routing_address, message_id_b32, &sealed, retry)
+        self.deliver(recipient, routing_address, message_id_b32, &sealed, retry)
             .await
     }
 
@@ -2127,9 +2145,11 @@ impl B0xSDK {
             }
         }
         let this = &*self;
+        let recipient = crate::sdk::spool_write::counterparty_of(&outbox.relationship_key)?;
+        let recipient = &recipient;
         let deliver = |id: String| async move {
             let sealed = kept_seal(&id)?;
-            this.deliver(route, &id, &sealed, retry).await
+            this.deliver(recipient, route, &id, &sealed, retry).await
         };
         let (transfer, delivered) = futures::future::join(
             deliver(outbox.submission_id.clone()),
@@ -3150,8 +3170,27 @@ mod tests {
         }
         .encode_to_vec();
         let id = encode_base32_crockford(&message_id);
+        // A write under a key of the writer's own, the first at this route
+        // (DSM Amendment A34).
+        let writer =
+            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+                .expect("a writer's key");
+        let address: [u8; 32] = <[u8; 32]>::try_from(
+            crate::util::text_id::decode_base32_crockford(&route)
+                .expect("the route decodes")
+                .as_slice(),
+        )
+        .expect("the route is 32 bytes");
+        let write = dsm::core::relationship_write_grant::self_granted_spool_write(
+            &writer,
+            &[0x5A; 32],
+            &address,
+            &message_id,
+            &sealed,
+        )
+        .expect("a signed write");
         for endpoint in device.fleet.endpoints() {
-            sdk.submit_once(&endpoint, &sealed, &route, &id)
+            sdk.submit_once(&endpoint, &write, &route, &id)
                 .await
                 .expect("the node spools it");
         }
@@ -3432,7 +3471,7 @@ mod tests {
         };
         for attempt in 1..=2 {
             let err = sdk
-                .submit_stored_envelope_with_retry(&route, &id, &once)
+                .submit_stored_envelope_with_retry(&p.b.device_id, &route, &id, &once)
                 .await
                 .expect_err("q − 1 members cannot hold a delivery");
             assert!(
@@ -3442,7 +3481,7 @@ mod tests {
         }
 
         p.nodes.bring_up(&down).await;
-        sdk.submit_stored_envelope_with_retry(&route, &id, &once)
+        sdk.submit_stored_envelope_with_retry(&p.b.device_id, &route, &id, &once)
             .await
             .expect("with the members back, the same bytes reach the quorum");
     }
@@ -3483,7 +3522,12 @@ mod tests {
         .expect("B0xSDK");
         let delivered = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            sdk.submit_stored_envelope_with_retry(&route, &id, &B0xRetryConfig::default()),
+            sdk.submit_stored_envelope_with_retry(
+                &p.b.device_id,
+                &route,
+                &id,
+                &B0xRetryConfig::default(),
+            ),
         )
         .await;
         p.nodes.bring_up(&[first]).await;
