@@ -164,11 +164,18 @@ Change them here before the first burn, not after.
 ## Step 0 — check the board is blank (READ-ONLY)
 
 Name each board. Its secret and records live under `~/.dsm-anchor-secure-boot/boards/<name>/`.
+Every command also names the board's RP2350 chip id, as `picotool info -d` gives it in BOOTSEL (`chipid`,
+16 hexadecimal digits), and every picotool call goes to that chip alone: with two boards in BOOTSEL, nothing
+reaches the other. The first run records the chip id under the board's name, and a later run under that name
+for another chip stops.
 
 ```
-./provision-otp.sh --board <name> --check-blank
+./provision-otp.sh --board <name> --ser <chip id> --check-blank
 ```
-It refuses when any row this procedure writes already holds a value, with one exception it names: a secret
+It refuses when any row this procedure writes data into already holds a value, or when a lock row it burns
+holds a bit outside what it burns there. A lock row already holding some of those bits is fine and is named:
+on the boards read on 2026-11-11 the boot configuration and boot key pages' lock rows hold `0x040404`
+(Non-secure read-only), within the `0x151515` Step 9b burns. One exception it also names: a secret
 page an earlier procedure burned and locked exactly as Step 4 and Step 6 do (the lock row says so; the
 bootloader cannot read the rows of a locked page). Such a board keeps that secret,
 which production reads through the same rows (OTP is never rewritten, and the board holds its only copy):
@@ -209,24 +216,24 @@ request `NOT_UP`, naming what is missing (`secure boot is not enabled in OTP`).
 ## Step 4 — burn the board's secret  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --board <name> --gen-secret
-./provision-otp.sh --board <name> --write-secret            # DRY RUN: prints the command
-./provision-otp.sh --board <name> --write-secret --commit   # page 48
+./provision-otp.sh --board <name> --ser <chip id> --gen-secret
+./provision-otp.sh --board <name> --ser <chip id> --write-secret            # DRY RUN: prints the command
+./provision-otp.sh --board <name> --ser <chip id> --write-secret --commit   # page 48
 ```
 On a board whose secret page Step 0 found sealed, both refuse: it already holds its secret and goes on with it.
 
 ## Step 5 — burn the firmware digest  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --board <name> --write-digest
-./provision-otp.sh --board <name> --write-digest --commit   # page 46
+./provision-otp.sh --board <name> --ser <chip id> --write-digest
+./provision-otp.sh --board <name> --ser <chip id> --write-digest --commit   # page 46
 ```
 
 ## Step 6 — lock both pages  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --board <name> --lock-pages
-./provision-otp.sh --board <name> --lock-pages --commit
+./provision-otp.sh --board <name> --ser <chip id> --lock-pages
+./provision-otp.sh --board <name> --ser <chip id> --lock-pages --commit
 ```
 Secure firmware reads both; Non-secure reads neither; nothing writes either. The USB bootloader
 reads the digest and never the secret. With `--commit` this removes `host-secret.bin`: nothing reads it
@@ -236,8 +243,8 @@ page Step 0 found sealed, only the digest page is locked here; its secret page i
 ## Step 7 — burn the boot key's hash  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --board <name> --write-bootkey
-./provision-otp.sh --board <name> --write-bootkey --commit
+./provision-otp.sh --board <name> --ser <chip id> --write-bootkey
+./provision-otp.sh --board <name> --ser <chip id> --write-bootkey --commit
 ```
 `picotool otp load` reads back what it wrote and fails on a mismatch. Do not go on after a failure:
 a boot key with uncorrectable faults leaves a secure-boot board unbootable.
@@ -248,8 +255,8 @@ This step takes the hash from it and Step 8 burns the flags.
 ## Step 8 — lock down  ⚠️ IRREVERSIBLE, LAST
 
 ```
-./provision-otp.sh --board <name> --lockdown
-./provision-otp.sh --board <name> --lockdown --commit
+./provision-otp.sh --board <name> --ser <chip id> --lockdown
+./provision-otp.sh --board <name> --ser <chip id> --lockdown --commit
 ```
 This marks boot key 0 valid and keys 1-3 invalid, then sets `SECURE_BOOT_ENABLE` and
 `DEBUG_DISABLE`. The board now boots only images signed by the key, with debug off.
@@ -280,8 +287,8 @@ bound it yet. Stop and look if any line is not as stated.
 ## Step 9b — lock the boot pages  ⚠️ IRREVERSIBLE, AFTER THE FIRST BOOT
 
 ```
-./provision-otp.sh --board <name> --lock-boot-pages
-./provision-otp.sh --board <name> --lock-boot-pages --commit
+./provision-otp.sh --board <name> --ser <chip id> --lock-boot-pages
+./provision-otp.sh --board <name> --ser <chip id> --lock-boot-pages --commit
 ```
 Pages 1 and 2, the boot configuration and the boot key hashes, become read-only for everyone, and page 44,
 the rollback version, read-only for the USB bootloader. Not before Step 9: that first boot of the signed

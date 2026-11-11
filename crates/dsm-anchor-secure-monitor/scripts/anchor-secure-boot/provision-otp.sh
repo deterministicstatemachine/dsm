@@ -41,11 +41,12 @@ ROLLBACK_ROW=$(( 44 * 64 ))
 ROLLBACK_LOCK_ROW=$(( 0xf80 + 2 * 44 + 1 ))
 ROLLBACK_LOCK=$(lock_row_value "$LOCK_READ_WRITE" "$LOCK_READ_ONLY" "$LOCK_READ_ONLY")
 
-COMMIT=0; CMD=""; BOARD=""
+COMMIT=0; CMD=""; BOARD=""; SER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --commit) COMMIT=1 ;;
     --board) shift; BOARD="${1:-}" ;;
+    --ser) shift; SER="${1:-}" ;;
     --*) CMD="$1" ;;
     *) echo "ERROR: unexpected argument $1"; exit 2 ;;
   esac
@@ -53,22 +54,44 @@ while [ $# -gt 0 ]; do
 done
 
 usage() {
-  echo "usage: $0 --board <name> [--check-blank | --gen-secret | --write-secret | --write-digest |"
-  echo "                           --lock-pages | --write-bootkey | --lockdown |"
+  echo "usage: $0 --board <name> --ser <chip id> [--check-blank | --gen-secret | --write-secret |"
+  echo "                           --write-digest | --lock-pages | --write-bootkey | --lockdown |"
   echo "                           --lock-boot-pages] [--commit]"
+  echo "  <chip id> is the board's RP2350 chip id as BOOTSEL reports it (picotool info -d: chipid),"
+  echo "  16 hexadecimal digits. Every picotool call names it, so nothing reaches another board."
   exit 2
 }
 [ -n "$CMD" ] || usage
 [ -n "$BOARD" ] || { echo "ERROR: --board names the board: every board has its own secret"; usage; }
 case "$BOARD" in *[!A-Za-z0-9_-]*) echo "ERROR: a board name is letters, digits, - and _"; exit 2 ;; esac
+# The chip id as the USB bootloader gives it for its serial number: upper case, no 0x.
+SER="$(printf '%s' "$SER" | tr '[:lower:]' '[:upper:]')"
+SER="${SER#0X}"
+case "$SER" in
+  [0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]) ;;
+  *) echo "ERROR: --ser names the board's chip id, 16 hexadecimal digits"; usage ;;
+esac
 BOARD_DIR="$SECRET_DIR/boards/$BOARD"
 mkdir -p "$BOARD_DIR"
 chmod 700 "$SECRET_DIR" "$SECRET_DIR/boards" "$BOARD_DIR"
+# A board's name stands for one chip for good: the first run records its chip id, and any later run
+# under that name for another chip stops before it reads or writes anything.
+if [ -f "$BOARD_DIR/chip-id" ]; then
+  [ "$(cat "$BOARD_DIR/chip-id")" = "$SER" ] || {
+    echo "ERROR: board '$BOARD' is chip $(cat "$BOARD_DIR/chip-id"), not $SER"; exit 1; }
+else
+  printf '%s\n' "$SER" > "$BOARD_DIR/chip-id"
+fi
 SECRET_BIN="$BOARD_DIR/host-secret.bin"
 MU_BIN="$BUILD_DIR/mu-enrolled.bin"
 OTP_JSON="$BUILD_DIR/bootkey-otp.json"
 
-run() { if [ "$COMMIT" = 1 ]; then echo "+ $*"; "$@"; else echo "[dry-run] $*"; fi; }
+# picotool, always at this one board: the device selection goes last on every command.
+pt() { picotool "$@" --ser "$SER"; }
+run() { # pt <args>: printed as the picotool command it is
+  shift
+  if [ "$COMMIT" = 1 ]; then echo "+ picotool $* --ser $SER"; pt "$@"; else echo "[dry-run] picotool $* --ser $SER"; fi
+}
 # What the board's secret page holds, read fresh (READ-ONLY): `blank`, or `sealed` when an earlier
 # procedure burned a secret there and locked the page exactly as this one does. A board of the second
 # kind goes on with that secret, which production reads through the same rows: OTP is never rewritten,
@@ -80,7 +103,7 @@ secret_page() {
   local dump
   dump="$(mktemp)"
   trap 'rm -f "$dump"' RETURN
-  picotool otp dump -r --output "$dump" >/dev/null
+  pt otp dump -r --output "$dump" >/dev/null
   python3 - "$dump" "$SECRET_ROW" "$SECRET_LOCK_ROW" "$SECRET_LOCK" <<'PAGE'
 import struct, sys
 data = open(sys.argv[1], "rb").read()
@@ -101,8 +124,8 @@ PAGE
 }
 confirm() {
   [ "$COMMIT" = 1 ] || return 0
-  picotool info -d || true
-  read -r -p "IRREVERSIBLE OTP BURN on board '$BOARD'. Is that this board? Type YES to proceed: " x
+  pt info -d || true
+  read -r -p "IRREVERSIBLE OTP BURN on board '$BOARD', chip $SER. Is that this board? Type YES to proceed: " x
   [ "$x" = "YES" ] || { echo "aborted"; exit 1; }
 }
 need() { [ -f "$1" ] || { echo "ERROR: no $1 — $2"; exit 1; }; }
@@ -115,26 +138,41 @@ case "$CMD" in
     # on a page written and unlocked, and a locked page gives the bootloader nothing.
     page="$(secret_page)"
     dump="$BOARD_DIR/otp-before.bin"
-    picotool otp dump -r --output "$dump"
-    python3 - "$dump" "$SECRET_ROW" "$DIGEST_ROW" "$ROLLBACK_ROW" "$page" <<'PY'
+    pt otp dump -r --output "$dump"
+    python3 - "$dump" "$SECRET_ROW" "$DIGEST_ROW" "$ROLLBACK_ROW" "$page" \
+      "$SECRET_LOCK" "$DIGEST_LOCK" "$ROLLBACK_LOCK" "$BOOT_PAGES_LOCK" <<'PY'
 import struct, sys
 data = open(sys.argv[1], "rb").read()
 rows = [word & 0xffffff for (word,) in struct.iter_unpack("<I", data)]
 if len(rows) != 4096:
     sys.exit(f"ERROR: the dump holds {len(rows)} rows, not 4096")
 secret, digest, rollback, page = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+secret_lock, digest_lock, rollback_lock, boot_lock = (int(v, 16) for v in sys.argv[6:10])
+def lock0(page_no): return 0xf80 + 2 * page_no
+def lock1(page_no): return 0xf80 + 2 * page_no + 1
+# Rows this procedure writes data into: they must hold nothing.
 watched = {"digest": range(digest, digest + 16),
            "boot key 0": range(0x80, 0x90), "CRIT1": range(0x40, 0x48), "BOOT_FLAGS1": range(0x4b, 0x4e),
-           "digest page lock": range(0xf80 + 92, 0xf80 + 94),
-           "boot page locks": range(0xf80 + 2, 0xf80 + 6), "rollback version": range(rollback, rollback + 3),
-           "rollback page lock": range(0xf80 + 88, 0xf80 + 90), "BOOT_FLAGS0": range(0x48, 0x4b)}
+           "rollback version": range(rollback, rollback + 3), "BOOT_FLAGS0": range(0x48, 0x4b),
+           # The pages' access keys, which this procedure never sets.
+           "page locks' access keys": [lock0(1), lock0(2), lock0(44), lock0(46), lock0(48)]}
+# Lock rows this procedure burns, with what it burns: one may already hold bits, as long as each of
+# them is among those (OTP only sets bits, so such a row still takes the burn and ends as intended).
+locks = {"boot configuration page lock": (lock1(1), boot_lock), "boot key page lock": (lock1(2), boot_lock),
+         "rollback page lock": (lock1(44), rollback_lock), "digest page lock": (lock1(46), digest_lock)}
 if page == "blank":
     watched["sealed secret"] = range(secret, secret + 16)
-    watched["secret page lock"] = range(0xf80 + 96, 0xf80 + 98)
+    locks["secret page lock"] = (lock1(48), secret_lock)
 used = {name: [hex(r) for r in span if rows[r] != 0] for name, span in watched.items()}
 used = {name: found for name, found in used.items() if found}
+for name, (row, burned) in locks.items():
+    if rows[row] & ~burned & 0xffffff:
+        used[name] = [f"{hex(row)} holds {hex(rows[row])}, bits outside the {hex(burned)} this procedure burns"]
 if used:
     sys.exit(f"ERROR: this board is not blank where the procedure writes: {used}")
+for name, (row, burned) in locks.items():
+    if rows[row]:
+        print(f"{name} already holds {hex(rows[row])}, all of it within the {hex(burned)} this procedure burns there")
 if page == "sealed":
     print("blank where the procedure writes, except its sealed secret: an earlier procedure burned and "
           "locked it as this one does, so this board keeps it. Skip Step 4; Step 6 locks the digest page alone.")
@@ -157,20 +195,20 @@ PY
     need "$SECRET_BIN" "run --gen-secret for this board first"
     [ "$(secret_page)" = blank ] || { echo "ERROR: this board already holds its sealed secret, and goes on with it: nothing to write"; exit 1; }
     confirm
-    run picotool otp load -e -s "$SECRET_ROW" "$SECRET_BIN" -t bin ;;
+    run pt otp load -e -s "$SECRET_ROW" "$SECRET_BIN" -t bin ;;
   --write-digest)
     need "$MU_BIN" "run sign.sh --sign first"
     confirm
-    run picotool otp load -e -s "$DIGEST_ROW" "$MU_BIN" -t bin ;;
+    run pt otp load -e -s "$DIGEST_ROW" "$MU_BIN" -t bin ;;
   --lock-pages)
     page="$(secret_page)"
     confirm
     if [ "$page" = sealed ]; then
       echo "the secret page is already locked as this procedure locks it: only the digest page is locked"
     else
-      run picotool otp set -r "$SECRET_LOCK_ROW" "$SECRET_LOCK"
+      run pt otp set -r "$SECRET_LOCK_ROW" "$SECRET_LOCK"
     fi
-    run picotool otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK"
+    run pt otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK"
     # Nothing reads this copy again. It could restore no board, since the chip's key does not leave
     # the chip, and all it can still do is leak.
     if [ "$COMMIT" = 1 ]; then
@@ -187,7 +225,7 @@ import json, sys
 json.dump({"bootkey0": json.load(open(sys.argv[1]))["bootkey0"]}, open(sys.argv[2], "w"))
 PY
     confirm
-    run picotool otp load "$key_json" ;;
+    run pt otp load "$key_json" ;;
   --lockdown)
     # After this the board boots only images signed by the key, with debug off. Boot key slots 1-3
     # are marked invalid so no other key can be installed later. The USB bootloader stays on, which is
@@ -200,14 +238,14 @@ json.dump({"boot_flags1": {"key_valid": 1, "key_invalid": 14},
            "crit1": {"secure_boot_enable": 1, "debug_disable": 1}}, open(sys.argv[1], "w"))
 PY
     confirm
-    run picotool otp load "$lock_json" ;;
+    run pt otp load "$lock_json" ;;
   --lock-boot-pages)
     # DO LAST, after the board has booted its signed image once. That boot sets ROLLBACK_REQUIRED in
     # BOOT_FLAGS0, on page 1, and the bootrom cannot boot an image whose version it could not record.
     confirm
-    run picotool otp set -r "$BOOT_CONFIG_LOCK_ROW" "$BOOT_PAGES_LOCK"
-    run picotool otp set -r "$BOOT_KEYS_LOCK_ROW" "$BOOT_PAGES_LOCK"
-    run picotool otp set -r "$ROLLBACK_LOCK_ROW" "$ROLLBACK_LOCK" ;;
+    run pt otp set -r "$BOOT_CONFIG_LOCK_ROW" "$BOOT_PAGES_LOCK"
+    run pt otp set -r "$BOOT_KEYS_LOCK_ROW" "$BOOT_PAGES_LOCK"
+    run pt otp set -r "$ROLLBACK_LOCK_ROW" "$ROLLBACK_LOCK" ;;
   *)
     usage ;;
 esac
