@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # The developer path end to end, exactly as BUILDING_APPS.md and the
-# walkthrough videos show it, against real local storage nodes:
+# walkthrough videos show it, against real storage nodes: a local set, so CI
+# depends on no hosted node (a newcomer's `make app-dev` goes to the beta
+# network instead; scripts/first_run_check.sh proves that path):
 #
-#   make app-dev        your app's account (and the local set), funded
+#   make app-dev-local  your app's account on a set of your own (five local nodes), funded
 #   make dev-wallet     a player's wallet in the terminal, funded
 #   make dev-wallet2    a second player's, for the match
 #   make starter        the Connect starter app, here in the background
@@ -47,7 +49,7 @@ stop_all() {
 }
 trap stop_all EXIT
 
-make --no-print-directory app-dev
+make --no-print-directory app-dev-local
 make --no-print-directory dev-wallet
 make --no-print-directory dev-wallet2
 

@@ -184,7 +184,7 @@ fn sender_step_receipt(ak_pk: &[u8], op: &Operation, amount: u64) -> StitchedRec
         .unwrap()
         .new_device_state
         .with_pending_economic_admission(None)
-        .establish_relationship(DEV_RECIP)
+        .relationship_established_by_fixture(DEV_RECIP)
         .unwrap();
     let outcome = funded
         .advance(

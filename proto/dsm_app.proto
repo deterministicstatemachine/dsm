@@ -1794,6 +1794,30 @@ enum RelationshipSendBlockReason {
   RELATIONSHIP_SEND_BLOCK_REASON_PENDING_CATCHUP = 1;
   RELATIONSHIP_SEND_BLOCK_REASON_STATE_DIVERGENCE = 2;
   RELATIONSHIP_SEND_BLOCK_REASON_INTERNAL_ERROR = 3;
+  // The relationship is not established on both sides yet (DSM Amendment
+  // A33): this device's ESTABLISH step awaits the other side's add, or the
+  // other side's step has not arrived.
+  RELATIONSHIP_SEND_BLOCK_REASON_NOT_ESTABLISHED = 4;
+  // This device ended the relationship; the other side has not acknowledged yet.
+  RELATIONSHIP_SEND_BLOCK_REASON_ENDING = 5;
+  // The relationship has ended, for good.
+  RELATIONSHIP_SEND_BLOCK_REASON_ENDED = 6;
+}
+
+// Where a relationship stands on this device (DSM Amendment A33). Set by
+// Rust alone; the wallet shows it.
+enum RelationshipState {
+  RELATIONSHIP_STATE_UNSPECIFIED = 0;
+  // The contact is added; no establishment is on the chain yet.
+  RELATIONSHIP_STATE_OPENED = 1;
+  // This device made the ESTABLISH step and waits for the other side's add.
+  RELATIONSHIP_STATE_PROPOSED = 2;
+  // The countersigned ESTABLISH is held: value may move.
+  RELATIONSHIP_STATE_ESTABLISHED = 3;
+  // This device ended the relationship and waits for the acknowledgement.
+  RELATIONSHIP_STATE_ENDING = 4;
+  // A termination is on the chain: final.
+  RELATIONSHIP_STATE_ENDED = 5;
 }
 
 message RelationshipSendStatus {
@@ -3623,6 +3647,13 @@ message ContactUnpairRequest {
   bytes device_id = 1 [(dsm_fixed_len)=32];
 }
 
+// contacts.terminate: end the relationship with the contact (DSM Amendment
+// A33): this device makes the TERMINATE step on the relationship's chain and
+// nothing moves on it from then on. Answers the contact as it stands after.
+message ContactTerminateRequest {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+}
+
 message ContactManualAddRequest {
   string alias = 1;
   bytes  device_id = 2 [(dsm_fixed_len)=32];
@@ -3655,6 +3686,8 @@ message ContactAddResponse {
   ContactPairingPhase pairing = 14;
   // The contact's details as the wallet holds them; absent when none were set.
   ContactProfileV1 profile = 15;
+  // Where the relationship stands on this device (DSM Amendment A33).
+  RelationshipState relationship_state = 16;
 }
 
 // Where BLE pairing with a contact stands, as the SDK's pairing loop has it.
@@ -3819,6 +3852,78 @@ message RelationshipFinalizedV1 {
   bytes recipient_parent_tip_b = 6 [(dsm_fixed_len)=32]; // the recipient's pair from the delta
   bytes recipient_child_tip_b  = 7 [(dsm_fixed_len)=32];
   bytes signature_a            = 8 [(dsm_max_len)=65535]; // SPHINCS+ by the sender's per-step EK over the v1 target
+}
+
+// A sender's relationship write key, offered to the recipient once the
+// relationship is established on the sender (DSM Amendment A34). The body is
+// fields 1-5; the sender's AK signs it under DSM/relationship-write-key-binding/v1
+// (the key is the sender's, for this relationship instance and this recipient)
+// and the write key signs it under DSM/relationship-write-key-possession/v1
+// (its holder has the secret). The key is never the sender's AK. Method
+// `relationship.writeKeyOffer.v1` on the relationship's route.
+message RelationshipWriteKeyOfferV1 {
+  bytes version                  = 1 [(dsm_fixed_len)=4];  // big-endian 1
+  bytes relationship_instance_id = 2 [(dsm_fixed_len)=32];
+  bytes sender_device_id         = 3 [(dsm_fixed_len)=32];
+  bytes recipient_device_id      = 4 [(dsm_fixed_len)=32];
+  bytes write_public_key         = 5 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256f
+  bytes possession_signature     = 6 [(dsm_max_len)=65535];
+  bytes binding_signature        = 7 [(dsm_max_len)=65535];
+}
+
+// A grant of a relationship inbox to one writer's key (DSM Amendment A34),
+// signed by the relationship's write lock. It names no identity: the lock
+// and the key are public keys, the instance an opaque hash. `grant_id` is
+// BLAKE3 under DSM/relationship-write-grant-id/v1 over fields 1-4; the lock
+// signs BLAKE3 under DSM/relationship-write-grant/v1 over fields 1-5, in tag
+// order. A node checks it under the key an inbox's first write fixed.
+message RelationshipWriteGrantV1 {
+  bytes version                     = 1 [(dsm_fixed_len)=4];  // big-endian 1
+  bytes relationship_instance_id    = 2 [(dsm_fixed_len)=32];
+  bytes authorized_write_public_key = 3 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256f
+  bytes permitted_scope             = 4 [(dsm_fixed_len)=4];  // big-endian 1: the relationship inbox
+  bytes grant_id                    = 5 [(dsm_fixed_len)=32];
+  bytes grant_signature             = 6 [(dsm_max_len)=65535]; // by the write lock
+}
+
+// A relationship's write lock, bound by the recipient's AK to the instance,
+// the recipient and the sender (DSM Amendment A34): what tells the other
+// wallet whose lock it is. Only the two wallets see it; a node never does.
+// The AK signs BLAKE3 under DSM/relationship-write-lock-binding/v1 over
+// fields 1-6, in tag order.
+message RelationshipWriteLockV1 {
+  bytes version                     = 1 [(dsm_fixed_len)=4];
+  bytes relationship_instance_id    = 2 [(dsm_fixed_len)=32];
+  bytes recipient_genesis           = 3 [(dsm_fixed_len)=32];
+  bytes recipient_device_id         = 4 [(dsm_fixed_len)=32];
+  bytes authorized_sender_device_id = 5 [(dsm_fixed_len)=32];
+  bytes lock_public_key             = 6 [(dsm_fixed_len)=64];
+  bytes binding_signature           = 7 [(dsm_max_len)=65535]; // by the recipient's AK
+}
+
+// What a recipient sends the writer it grants (DSM Amendment A34): its lock,
+// bound by its AK, and the lock's grant of the writer's key. Method
+// `relationship.writeGrant.v1` on the relationship's route.
+message RelationshipWriteAuthorizationV1 {
+  bytes lock  = 1 [(dsm_max_len)=65535]; // RelationshipWriteLockV1
+  bytes grant = 2 [(dsm_max_len)=65535]; // RelationshipWriteGrantV1
+}
+
+// One write to an inbox address, as a storage node receives it (DSM
+// Amendment A34): the sealed envelope it stores, the inbox's key, the key's
+// grant of the writer's key, the writer's signature over BLAKE3 under
+// DSM/spool-write/v1 of the address (32 bytes), the message id (16 bytes)
+// and BLAKE3 under DSM/spool-write-envelope/v1 of the envelope, and the
+// inbox's route digest. The address is the route digest bound to the key
+// (every inbox after a relationship's first) or the digest's open address
+// (the first inbox, whose key its first write fixes). The node stores the
+// envelope alone.
+message SpoolWriteV1 {
+  bytes envelope        = 1 [(dsm_max_len)=131072]; // the spool envelope cap
+  bytes lock_public_key = 2 [(dsm_fixed_len)=64];
+  bytes grant           = 3 [(dsm_max_len)=65535]; // RelationshipWriteGrantV1
+  bytes write_signature = 4 [(dsm_max_len)=65535];
+  bytes route_digest    = 5 [(dsm_fixed_len)=32];
 }
 
 message OnlineTransferSmartRequest {

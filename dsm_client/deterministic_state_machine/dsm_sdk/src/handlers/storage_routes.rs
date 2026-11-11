@@ -40,12 +40,17 @@ fn ensure_received_history(
     use crate::storage::codecs::hash_blake3_bytes;
 
     let name = v.transfer_name();
+    // A relationship step (Amendment A33) moves nothing: the contact's state
+    // shows it, the history does not.
+    let Some(opened) = v.opened_terms() else {
+        return Ok(());
+    };
     if crate::storage::client_db::transaction_exists(&name)
         .map_err(|e| format!("{name}: history unreadable: {e}"))?
     {
         return Ok(());
     }
-    let terms = crate::handlers::recipient_accept::transfer_terms(&v.signed_op, &v.terms)?;
+    let terms = crate::handlers::recipient_accept::transfer_terms(&v.signed_op, opened)?;
     let mut meta: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
     // The operation the receipt's tip binds, so the history can check the
     // receipt again and read the figures from it — the token among them, as
@@ -57,7 +62,7 @@ fn ensure_received_history(
     );
     meta.insert(
         crate::storage::client_db::HISTORY_TERMS_KEY.to_string(),
-        v.terms.to_bytes(),
+        opened.to_bytes(),
     );
     let proof_data = v
         .receipt
@@ -398,100 +403,116 @@ async fn finalize_from_countersign_delta(
     // INDEPENDENTLY against the recipient's registered economic root — a
     // hostile recipient's private "admitted" flag is never trusted.
     // ====================================================================
-    if wire.recipient_economic_release_addr.is_empty() {
+    // A relationship's lifecycle step (Amendment A33) moves no value: its
+    // countersignature carries no release, and finalizes on the signature
+    // alone. A transfer's never does.
+    if proposal.is_lifecycle_step() {
+        if !wire.recipient_economic_release_addr.is_empty() {
+            let reason = "countersign delta of a relationship step carries a release".to_string();
+            log_refused_artifact(&short, &reason);
+            return CountersignOutcome::Rejected(reason);
+        }
+    } else if wire.recipient_economic_release_addr.is_empty() {
         let reason = "countersign delta carries no recipient economic release — bare sig_b \
                       cannot finalize the sender"
             .to_string();
         log_refused_artifact(&short, &reason);
         return CountersignOutcome::Rejected(reason);
     }
-    let Ok(release_addr) = <[u8; 32]>::try_from(wire.recipient_economic_release_addr.as_slice())
-    else {
-        let reason = "recipient economic release addr is not 32 bytes".to_string();
-        log_refused_artifact(&short, &reason);
-        return CountersignOutcome::Rejected(reason);
-    };
-    // Fetch the exact release bytes by content address (re-hash verified by
-    // the fetch boundary). Not-yet-published is an outage shape, not an
-    // attack: the recipient's post-admit publish may still be in flight.
-    let set = match crate::sdk::economic_admission_flow::committed_network_id()
-        .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
-    {
-        Ok(set) => set,
-        Err(e) => return CountersignOutcome::Unverifiable(format!("no pinned storage set: {e}")),
-    };
-    let release_bytes = match crate::sdk::storage_io::fetch_immutable(
-        &set,
-        dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
-        &release_addr,
-    )
-    .await
-    {
-        Ok(Some(b)) => b,
-        Ok(None) => {
-            log::warn!(
-                "[storage.sync] ADR 0003 countersign delta {short}..: release object not yet \
-                 fetchable — finalize deferred"
-            );
-            return CountersignOutcome::Unverifiable("release object not yet fetchable".into());
-        }
-        Err(e) => {
-            log::warn!(
-                "[storage.sync] ADR 0003 countersign delta {short}..: release fetch failed \
-                 ({e}) — finalize deferred"
-            );
-            return CountersignOutcome::Unverifiable(format!("release fetch: {e}"));
-        }
-    };
-    let release = match dsm::economic::release::verify_recipient_economic_release(
-        &release_bytes,
-        &recipient_ak_pk,
-    ) {
-        Ok(f) => f,
-        Err(e) => {
-            let reason = format!("recipient economic release refused: {e}");
+    if !proposal.is_lifecycle_step() {
+        let Ok(release_addr) =
+            <[u8; 32]>::try_from(wire.recipient_economic_release_addr.as_slice())
+        else {
+            let reason = "recipient economic release addr is not 32 bytes".to_string();
             log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
-        }
-    };
-    if release.receipt_commitment != commitment
-        || release.recipient_devid != proposal.counterparty_device_id
-    {
-        let reason = "recipient economic release is bound to a different transition or recipient"
-            .to_string();
-        log_refused_artifact(&short, &reason);
-        return CountersignOutcome::Rejected(reason);
-    }
-    // The release's genesis must be the PINNED contact identity — otherwise a
-    // hostile recipient could point the register check at an accomplice's
-    // cell under a different genesis.
-    match crate::storage::client_db::get_contact_by_device_id(&proposal.counterparty_device_id) {
-        Ok(Some(c)) if c.genesis_hash.as_slice() == release.recipient_genesis.as_slice() => {}
-        Ok(Some(..)) | Ok(None) => {
+        };
+        // Fetch the exact release bytes by content address (re-hash verified by
+        // the fetch boundary). Not-yet-published is an outage shape, not an
+        // attack: the recipient's post-admit publish may still be in flight.
+        let set = match crate::sdk::economic_admission_flow::committed_network_id()
+            .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+        {
+            Ok(set) => set,
+            Err(e) => {
+                return CountersignOutcome::Unverifiable(format!("no pinned storage set: {e}"))
+            }
+        };
+        let release_bytes = match crate::sdk::storage_io::fetch_immutable(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
+            &release_addr,
+        )
+        .await
+        {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                log::warn!(
+                    "[storage.sync] ADR 0003 countersign delta {short}..: release object not yet \
+                 fetchable — finalize deferred"
+                );
+                return CountersignOutcome::Unverifiable("release object not yet fetchable".into());
+            }
+            Err(e) => {
+                log::warn!(
+                    "[storage.sync] ADR 0003 countersign delta {short}..: release fetch failed \
+                 ({e}) — finalize deferred"
+                );
+                return CountersignOutcome::Unverifiable(format!("release fetch: {e}"));
+            }
+        };
+        let release = match dsm::economic::release::verify_recipient_economic_release(
+            &release_bytes,
+            &recipient_ak_pk,
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                let reason = format!("recipient economic release refused: {e}");
+                log_refused_artifact(&short, &reason);
+                return CountersignOutcome::Rejected(reason);
+            }
+        };
+        if release.receipt_commitment != commitment
+            || release.recipient_devid != proposal.counterparty_device_id
+        {
             let reason =
-                "recipient economic release names a genesis that is not the pinned contact's"
+                "recipient economic release is bound to a different transition or recipient"
                     .to_string();
             log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
-        Err(e) => {
-            return CountersignOutcome::Unverifiable(format!("contact lookup failed: {e}"));
+        // The release's genesis must be the PINNED contact identity — otherwise a
+        // hostile recipient could point the register check at an accomplice's
+        // cell under a different genesis.
+        match crate::storage::client_db::get_contact_by_device_id(&proposal.counterparty_device_id)
+        {
+            Ok(Some(c)) if c.genesis_hash.as_slice() == release.recipient_genesis.as_slice() => {}
+            Ok(Some(..)) | Ok(None) => {
+                let reason =
+                    "recipient economic release names a genesis that is not the pinned contact's"
+                        .to_string();
+                log_refused_artifact(&short, &reason);
+                return CountersignOutcome::Rejected(reason);
+            }
+            Err(e) => {
+                return CountersignOutcome::Unverifiable(format!("contact lookup failed: {e}"));
+            }
         }
-    }
-    match crate::sdk::economic_admission_flow::verify_release_against_register(&release).await {
-        Ok(()) => {}
-        Err(crate::sdk::economic_admission_flow::ReleaseRegisterCheck::Unavailable(m)) => {
-            // An outage is never an attack: gate retained, retried next poll.
-            log::warn!(
-                "[storage.sync] ADR 0003 countersign delta {short}..: release register read \
+        match crate::sdk::economic_admission_flow::verify_release_against_register(&release).await {
+            Ok(()) => {}
+            Err(crate::sdk::economic_admission_flow::ReleaseRegisterCheck::Unavailable(m)) => {
+                // An outage is never an attack: gate retained, retried next poll.
+                log::warn!(
+                    "[storage.sync] ADR 0003 countersign delta {short}..: release register read \
                  unavailable ({m}) — finalize deferred"
-            );
-            return CountersignOutcome::Unverifiable(format!("release register read: {m}"));
-        }
-        Err(crate::sdk::economic_admission_flow::ReleaseRegisterCheck::Mismatch(m)) => {
-            let reason = format!("release does not match the registered economic root: {m}");
-            log_refused_artifact(&short, &reason);
-            return CountersignOutcome::Rejected(reason);
+                );
+                return CountersignOutcome::Unverifiable(format!("release register read: {m}"));
+            }
+            Err(crate::sdk::economic_admission_flow::ReleaseRegisterCheck::Mismatch(m)) => {
+                let reason = format!("release does not match the registered economic root: {m}");
+                log_refused_artifact(&short, &reason);
+                return CountersignOutcome::Rejected(reason);
+            }
         }
     }
 
@@ -697,6 +718,19 @@ async fn finalize_from_countersign_delta(
                  gate retained until the checkpoint reaches quorum)",
                 proposal.tx_id
             );
+            // A relationship step's countersignature is the other side's
+            // signature on it (Amendment A33): the relationship is established,
+            // or ended, on both sides from here.
+            if proposal.is_lifecycle_step() {
+                if let Err(e) = crate::handlers::relationship_lifecycle::record_step_countersigned(
+                    &proposal.counterparty_device_id,
+                ) {
+                    log::error!(
+                        "[storage.sync] the relationship step finalized but its state did not \
+                         move: {e}"
+                    );
+                }
+            }
             // The retired §5.4 sweep emitted this on tip advance; the tip now
             // advances here, so the refresh belongs here.
             emit_authoritative_wallet_refresh();
@@ -787,11 +821,12 @@ fn build_relationship_finalized_artifact(
             Ok(None) => return Err("no contact for the recipient".to_string()),
             Err(e) => return Err(format!("recipient contact lookup: {e}")),
         };
-    let route = dsm::crypto::spool_address::inbox_address(
-        &recipient_genesis,
+    let route = crate::sdk::spool_write::counterparty_inbox_address(
         &proposal.counterparty_device_id,
+        &recipient_genesis,
         &proposal.projection_target,
-    );
+    )
+    .map_err(|e| format!("the certificate's route: {e}"))?;
     let local_genesis: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
         .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
         .ok_or_else(|| "local genesis unavailable".to_string())?;
@@ -907,7 +942,12 @@ async fn deliver_pending_finalization_checkpoints(
             }
         };
         match b0x
-            .submit_stored_envelope_with_retry(route, &checkpoint.submission_id, &retry)
+            .submit_stored_envelope_with_retry(
+                &proposal.counterparty_device_id,
+                route,
+                &checkpoint.submission_id,
+                &retry,
+            )
             .await
         {
             Ok(()) => {}
@@ -1002,13 +1042,32 @@ async fn deliver_pending_acceptance_replies(
         // rows, so a row carries its release by construction. A row without one
         // is a local defect — the sender refuses a bare delta — and stays
         // unmarked and visible rather than going out with an empty release.
-        let Some(release_bytes) = reply.release_bytes.as_deref() else {
-            log::error!(
-                "[storage.sync] §16.6 reply for commitment {}.. has no post-admission release — \
-                 local defect, left unmarked",
-                crate::util::text_id::encode_base32_crockford(&reply.commitment[..4]),
-            );
-            continue;
+        // A relationship step's reply (Amendment A33) carries no release:
+        // the step moved nothing, and the sender finalizes on sig_b alone.
+        let release_bytes: &[u8] = if reply.moves_value {
+            match reply.release_bytes.as_deref() {
+                Some(release) => release,
+                None => {
+                    log::error!(
+                        "[storage.sync] §16.6 reply for commitment {}.. has no post-admission \
+                         release — local defect, left unmarked",
+                        crate::util::text_id::encode_base32_crockford(&reply.commitment[..4]),
+                    );
+                    continue;
+                }
+            }
+        } else {
+            match reply.release_bytes.as_deref() {
+                None => &[],
+                Some(_) => {
+                    log::error!(
+                        "[storage.sync] §16.6 reply for commitment {}.. is a relationship \
+                         step's and holds a release — local defect, left unmarked",
+                        crate::util::text_id::encode_base32_crockford(&reply.commitment[..4]),
+                    );
+                    continue;
+                }
+            }
         };
 
         // NOTE: the envelope is built from `dsm::types::proto`, which is a SEPARATE
@@ -1282,7 +1341,7 @@ impl AppRouterImpl {
         Vec<crate::storage::client_db::recipient_staging::StagedPair>,
         Vec<String>,
     ) {
-        use crate::handlers::recipient_accept::{accept_bound_pair, verified_pair};
+        use crate::handlers::recipient_accept::{accept_bound_pair, verified_pair, VerifiedStep};
         use crate::handlers::recipient_receipt as rr;
         use crate::storage::client_db::recipient_staging::{self, PairState, StagedPair};
 
@@ -1372,6 +1431,21 @@ impl AppRouterImpl {
                 &self_device,
             );
 
+            // A relationship's lifecycle step (Amendment A33) is applied
+            // with nothing economic: no policy, no prevalidation, no
+            // admission, no release. Accepted, it is converged and answered
+            // as a transfer is.
+            if pair.state == PairState::Bound {
+                if let Some(step) = v.lifecycle_step() {
+                    match self.complete_lifecycle_pair(&v, step).await {
+                        Ok(stored) => pair = stored,
+                        Err(e) => {
+                            failures.push(format!("relationship step {name}: {e}"));
+                            continue;
+                        }
+                    }
+                }
+            }
             if pair.state == PairState::Bound {
                 // FINALITY BARRIER — reordering hold. A next-generation transfer
                 // may be TRANSPORTED before this device has processed the
@@ -1637,10 +1711,13 @@ impl AppRouterImpl {
                     let tx_id = crate::types::identifiers::TransactionId::new(v.transfer_name());
                     let receipt = &v.receipt;
                     let op_id = v.pair.op_id;
+                    let VerifiedStep::Transfer(terms) = &v.step else {
+                        return Err("a relationship step is not applied as a transfer".to_string());
+                    };
                     core_sdk
                         .apply_incoming_transfer_staged(
                             v.signed_op.clone(),
-                            &v.terms,
+                            terms,
                             &tx_id,
                             &sender_b32_for_apply,
                             &v.canonical_operation_bytes,
@@ -2443,6 +2520,7 @@ impl AppRouterImpl {
         let mut taken = CopiesTaken::default();
         let mut resyncs_answered = std::collections::BTreeSet::<[u8; 32]>::new();
         let mut boundary_notices = Vec::new();
+        let mut write_authorizations = Vec::new();
         let mut pulled = 0usize;
         // Routes read to full coverage, routes read partially, and routes no
         // member answered for. Only the first kind says "nothing more there".
@@ -2566,6 +2644,12 @@ impl AppRouterImpl {
                         .into_iter()
                         .map(|notice| (tagged.address.clone(), notice)),
                 );
+                write_authorizations.extend(
+                    route_sdk
+                        .take_write_authorizations()
+                        .into_iter()
+                        .map(|message| (tagged.address.clone(), message)),
+                );
 
                 let (polled, read_on) = match retrieved {
                     Ok(outcome) => {
@@ -2613,7 +2697,11 @@ impl AppRouterImpl {
                     // operation it verifies itself. A request whose body is not
                     // what its method names never will be: passed over by its
                     // content, so it is not charged to this route's budget again.
-                    if entry.kind != crate::sdk::b0x_sdk::B0xEntryKind::Transfer {
+                    if !matches!(
+                        entry.kind,
+                        crate::sdk::b0x_sdk::B0xEntryKind::Transfer
+                            | crate::sdk::b0x_sdk::B0xEntryKind::LifecycleStep
+                    ) {
                         taken.pass_over(&tagged.address, &entry.copy_key);
                         continue;
                     }
@@ -2680,6 +2768,13 @@ impl AppRouterImpl {
         self.complete_split_transfers(&mut b0x_sdk, &mut report)
             .await;
 
+        // A relationship's write keys and grants (DSM Amendment A34), read
+        // after the steps: an ESTABLISH applied or finalized in this sync has
+        // made its instance, so the offer or grant read with it is answered
+        // in the same pass.
+        self.take_in_write_authorizations(write_authorizations, &mut report)
+            .await;
+
         // Payments received offline wait in the offline balance for their unload
         // (`wallet.unloadReceived`, owner 2026-11-07): the sync moves none of them.
 
@@ -2734,6 +2829,57 @@ impl AppRouterImpl {
             ));
         }
         Ok(report)
+    }
+
+    /// The write-key offers and write grants this sync read (DSM Amendment
+    /// A34). One answered or recorded is passed over by its content; one not
+    /// yet answerable, on a relationship not established here, is left on
+    /// its route and read again; one that never will be is passed over.
+    async fn take_in_write_authorizations(
+        &self,
+        messages: Vec<(String, crate::sdk::b0x_sdk::WriteAuthorizationMessage)>,
+        report: &mut StorageSyncReport,
+    ) {
+        use crate::handlers::relationship_write_authorization::WriteAuthorizationChecked;
+        let mut passed_over: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (address, message) in messages {
+            let checked =
+                if message.method == crate::sdk::b0x_sdk::RELATIONSHIP_WRITE_KEY_OFFER_METHOD {
+                    self.take_in_write_key_offer(&message.body).await
+                } else {
+                    self.take_in_write_grant(&message.body)
+                };
+            match checked {
+                WriteAuthorizationChecked::Done => passed_over
+                    .entry(address)
+                    .or_default()
+                    .push(message.copy_key),
+                // Not yet, and nothing wrong: read again on the next sync.
+                WriteAuthorizationChecked::NotEstablished(why) => {
+                    log::info!("[storage.sync] {} not answered yet: {why}", message.method);
+                }
+                WriteAuthorizationChecked::Refused(why) => {
+                    report
+                        .errors
+                        .push(format!("{} refused: {why}; passed over", message.method));
+                    passed_over
+                        .entry(address)
+                        .or_default()
+                        .push(message.copy_key);
+                }
+            }
+        }
+        for (route, copy_keys) in passed_over {
+            if let Err(e) =
+                crate::storage::client_db::b0x_consumed::record_passed_over(&route, &copy_keys)
+            {
+                report.errors.push(format!(
+                    "pass over copies on {}..: {e}",
+                    short_route(&route)
+                ));
+            }
+        }
     }
 
     /// §16.6 sender finalization from the countersign deltas this poll
@@ -2887,6 +3033,12 @@ impl AppRouterImpl {
         // boundaries, a failed delivery and a contact added since alike.
         report.errors.extend(
             self.tell_contacts_of_offline_boundaries(storage_endpoints)
+                .await,
+        );
+        // DSM Amendment A34: the offers and grants this device froze and has
+        // not delivered.
+        report.errors.extend(
+            self.deliver_owed_write_authorizations(storage_endpoints, None)
                 .await,
         );
         match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {

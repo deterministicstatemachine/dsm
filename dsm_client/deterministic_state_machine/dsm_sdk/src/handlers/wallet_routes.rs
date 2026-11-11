@@ -2386,6 +2386,12 @@ mod send_offline_tests {
             previous_chain_tip: None,
         })
         .expect("store the contact");
+        // Value moves only on an established relationship (DSM Amendment A33).
+        crate::storage::client_db::set_relationship_state(
+            &peer,
+            crate::storage::client_db::RelationshipState::Established,
+        )
+        .expect("establish the relationship");
         assert_eq!(
             crate::bluetooth::peer_address::counterparty_address(&peer).expect("contacts read"),
             None,

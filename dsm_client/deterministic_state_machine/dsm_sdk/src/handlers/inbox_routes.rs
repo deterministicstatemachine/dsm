@@ -157,7 +157,8 @@ impl AppRouterImpl {
                 let mut inbox_items: Vec<generated::InboxItem> = Vec::new();
                 for (e, freshness) in &all_items {
                     let (preview, sender_id) = match &e.kind {
-                        crate::sdk::b0x_sdk::B0xEntryKind::Transfer => {
+                        crate::sdk::b0x_sdk::B0xEntryKind::Transfer
+                        | crate::sdk::b0x_sdk::B0xEntryKind::LifecycleStep => {
                             use crate::handlers::recipient_dispatch::{
                                 recognize_transfer, TransferRecognition,
                             };
@@ -170,32 +171,48 @@ impl AppRouterImpl {
                                     let sender = crate::util::text_id::encode_base32_crockford(
                                         &recognized.staged.sender,
                                     );
-                                    let terms = &recognized.terms;
-                                    // The token the signed operation commits to,
-                                    // named and in its own decimals when this
-                                    // device holds its policy; otherwise the
-                                    // exact base units of that commit, and why.
-                                    // The ticker in the terms is the sender's
-                                    // word and is not shown.
-                                    let amount = match super::wallet_routes::token_of_commit(
-                                        &terms.policy_commit,
-                                    ) {
-                                        Ok((ticker, decimals)) => format!(
+                                    match recognized.transfer_terms() {
+                                        // A relationship step (Amendment A33) moves nothing.
+                                        None => {
+                                            let what = match recognized.step {
+                                            crate::handlers::recipient_dispatch::RecognizedStep::Lifecycle(
+                                                dsm::core::relationship_lifecycle::LifecycleStep::Establish { .. },
+                                            ) => "establishes the relationship",
+                                            _ => "ends the relationship",
+                                        };
+                                            (format!("From: {sender} {what}"), Some(sender))
+                                        }
+                                        Some(terms) => {
+                                            // The token the signed operation commits to,
+                                            // named and in its own decimals when this
+                                            // device holds its policy; otherwise the
+                                            // exact base units of that commit, and why.
+                                            // The ticker in the terms is the sender's
+                                            // word and is not shown.
+                                            let amount = match super::wallet_routes::token_of_commit(
+                                                &terms.policy_commit,
+                                            ) {
+                                                Ok((ticker, decimals)) => format!(
                                             "{} {ticker}",
                                             super::wallet_routes::format_base_units_for_display(
                                                 terms.amount,
                                                 decimals
                                             ),
                                         ),
-                                        Err(e) => format!(
-                                            "{} base units of {} ({e})",
-                                            terms.amount,
-                                            crate::util::text_id::encode_base32_crockford(
-                                                &terms.policy_commit
+                                                Err(e) => format!(
+                                                    "{} base units of {} ({e})",
+                                                    terms.amount,
+                                                    crate::util::text_id::encode_base32_crockford(
+                                                        &terms.policy_commit
+                                                    )
+                                                ),
+                                            };
+                                            (
+                                                format!("From: {sender} Amount: {amount}"),
+                                                Some(sender),
                                             )
-                                        ),
-                                    };
-                                    (format!("From: {sender} Amount: {amount}"), Some(sender))
+                                        }
+                                    }
                                 }
                             }
                         }

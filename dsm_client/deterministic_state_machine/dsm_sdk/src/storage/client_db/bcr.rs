@@ -94,7 +94,10 @@ const REL_CHAIN_STATE_VERSION: u8 = 0x03;
 // allocation leaves are gone from `extra_leaves`. Breaking bump, NO back-compat reader.
 // v0x09 adds each offline account's received amounts after its allocations: what its board
 // received offline, beside what it loaded (owner, 2026-11-07). Breaking bump, NO back-compat reader.
-const DEVICE_STATE_VERSION: u8 = 0x09;
+// v0x0A adds the per-tip relationship lifecycle byte after `value_capability` (DSM Amendment
+// A33: opened at `h_0`, established by the ESTABLISH step, ended by a TERMINATE). Breaking
+// bump, NO back-compat reader: a head without it cannot say whether value may move.
+const DEVICE_STATE_VERSION: u8 = 0x0A;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -266,6 +269,8 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         out.extend_from_slice(&tip.counterparty_devid);
         // Canonical value-capability (R4): 1=Yes, 2=No, 3=Unknown. Always explicit.
         out.push(tip.value_capability.commit_tag());
+        // v0x0A: where the relationship stands (A33): 1=Opened, 2=Established, 3=Ended.
+        out.push(tip.lifecycle.to_wire());
 
         // v0x06: the tip's entropy, length-prefixed. Empty is legal and means a
         // digest-only tip (a recovery restore) whose next advance falls
@@ -384,6 +389,11 @@ pub fn decode_device_state(
         let vc_byte = read_u8(&mut cursor).map_err(|e| anyhow!("tip value_capability: {e}"))?;
         let value_capability = ValueCapability::from_wire(vc_byte as i32)
             .ok_or_else(|| anyhow!("tip value_capability invalid byte: {vc_byte}"))?;
+        // v0x0A: the lifecycle, fail-closed as the capability is.
+        let lifecycle_byte = read_u8(&mut cursor).map_err(|e| anyhow!("tip lifecycle: {e}"))?;
+        let lifecycle =
+            dsm::core::relationship_lifecycle::RelationshipLifecycle::from_wire(lifecycle_byte)
+                .ok_or_else(|| anyhow!("tip lifecycle invalid byte: {lifecycle_byte}"))?;
         let tip_entropy = read_vec(&mut cursor).map_err(|e| anyhow!("tip entropy: {e}"))?;
         tips_in_order.push((
             rk,
@@ -392,6 +402,7 @@ pub fn decode_device_state(
                 counterparty_devid: cp_devid,
                 tip_entropy,
                 value_capability,
+                lifecycle,
             },
         ));
     }
@@ -888,10 +899,11 @@ mod tests {
             counterparty_devid: device_id,
             tip_entropy: adopted.new_chain_state.entropy.clone(),
             value_capability: ValueCapability::Unknown,
+            lifecycle: dsm::core::relationship_lifecycle::RelationshipLifecycle::Established,
         };
         let device = adopted
             .new_device_state
-            .establish_relationship(counterparty)
+            .relationship_established_by_fixture(counterparty)
             .expect("the relationship is established before its first step");
         // The PR4 credit gate: a credit-direction Transfer advances only
         // with a matching Prepared DsmBacked admission attached — the honest
@@ -939,6 +951,7 @@ mod tests {
             counterparty_devid: counterparty,
             tip_entropy: rel.entropy.clone(),
             value_capability: ValueCapability::Unknown,
+            lifecycle: dsm::core::relationship_lifecycle::RelationshipLifecycle::Established,
         };
         let tips_in_order: Vec<([u8; 32], RelChainTip)> = tips
             .iter()
@@ -1098,8 +1111,8 @@ mod tests {
         // instead of a puzzling off-by-four in an unrelated test.
         const TRAILING_COUNT_SECTIONS: usize = 2;
         const TRAILING: usize = TRAILING_COUNT_SECTIONS * 4;
-        // v0x06: the tip tail is value_capability(1) + entropy length prefix(4).
-        const TIP_TAIL: usize = 1 + 4;
+        // v0x0A: the tip tail is value_capability(1) + lifecycle(1) + entropy length prefix(4).
+        const TIP_TAIL: usize = 1 + 1 + 4;
 
         let (_, _rel_key, head) = head_with_state_less_tip();
         let bytes = encode_device_state(&head);
@@ -1110,7 +1123,7 @@ mod tests {
             "every trailing section count should be 0"
         );
         assert!(
-            bytes[vc + 1..vc + 1 + 4].iter().all(|b| *b == 0),
+            bytes[vc + 2..vc + 2 + 4].iter().all(|b| *b == 0),
             "entropy length should be 0 for an entropy-less tip"
         );
         assert_eq!(bytes[vc], 3, "value_capability should be Unknown(3)");
@@ -1169,6 +1182,7 @@ mod tests {
                 counterparty_devid: counterparty,
                 tip_entropy: Vec::new(),
                 value_capability: ValueCapability::Unknown,
+                lifecycle: dsm::core::relationship_lifecycle::RelationshipLifecycle::Established,
             },
         )];
         let stored_root =

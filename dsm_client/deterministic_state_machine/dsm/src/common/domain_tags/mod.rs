@@ -212,7 +212,15 @@ mod tests {
     // 2026-10-29: "both settle"): `DSM/relationship-join/v1`.
     // +2 with what an offline account holds received (owner, 2026-11-07: an
     // offline payment needs a board on both sides): its key and its value.
-    const EXPECTED_TAG_COUNT: usize = 434;
+    // +6 with a relationship's write grants (DSM Amendment A34): the instance,
+    // the write key's seed, the offer's binding and possession targets, the
+    // grant's id and its signing target.
+    // +5 with the write lock (DSM Amendment A34): the lock's seed, its AK
+    // binding, the first inbox's key seed, a write's signing target and the
+    // commitment of its envelope.
+    // +2 with lock-bound inbox addresses (DSM Amendment A34): the route
+    // digest and the locked address.
+    const EXPECTED_TAG_COUNT: usize = 447;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

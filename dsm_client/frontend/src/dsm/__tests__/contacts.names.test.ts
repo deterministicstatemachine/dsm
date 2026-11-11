@@ -28,6 +28,7 @@ function contactAnswer(alias: string, deviceId: Uint8Array<ArrayBuffer>): pb.Con
     genesisHash: new pb.Hash32({ v: id(0x20) }),
     signingPublicKey: new Uint8Array(64).fill(0x30),
     pairing: pb.ContactPairingPhase.IDLE,
+    relationshipState: pb.RelationshipState.ESTABLISHED,
   });
 }
 

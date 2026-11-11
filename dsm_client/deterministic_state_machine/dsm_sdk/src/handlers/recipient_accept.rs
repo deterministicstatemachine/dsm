@@ -36,9 +36,10 @@ pub struct VerifiedTransfer {
     /// The ONLY trusted operation: re-derived from the staged canonical bytes
     /// and SIG A under the sender's stored key.
     pub signed_op: Operation,
-    /// The terms that open `signed_op`'s commitment, re-opened from the
-    /// staged bytes.
-    pub terms: dsm::types::operations::TransferTerms,
+    /// What the step is: a transfer with the terms that open `signed_op`'s
+    /// commitment, re-opened from the staged bytes; or a relationship's
+    /// lifecycle step (Amendment A33).
+    pub step: VerifiedStep,
     /// The exact signed bytes `signed_op` was bound from.
     pub canonical_operation_bytes: Vec<u8>,
     pub signature: Vec<u8>,
@@ -47,12 +48,35 @@ pub struct VerifiedTransfer {
     pub evidence_bytes: Vec<u8>,
 }
 
+/// What a verified step is.
+#[derive(Debug, Clone)]
+pub enum VerifiedStep {
+    Transfer(dsm::types::operations::TransferTerms),
+    Lifecycle(dsm::core::relationship_lifecycle::LifecycleStep),
+}
+
 impl VerifiedTransfer {
     /// The accepted transfer's name: the submission id an honest sender
     /// derives from the receipt commitment, recomputed here, never read off
     /// the spool.
     pub fn transfer_name(&self) -> String {
         dsm::crypto::spool_address::submission_id(&self.pair.commitment)
+    }
+
+    /// The transfer's opened terms, when the step is a transfer.
+    pub fn opened_terms(&self) -> Option<&dsm::types::operations::TransferTerms> {
+        match &self.step {
+            VerifiedStep::Transfer(terms) => Some(terms),
+            VerifiedStep::Lifecycle(_) => None,
+        }
+    }
+
+    /// The lifecycle step, when the step is one.
+    pub fn lifecycle_step(&self) -> Option<dsm::core::relationship_lifecycle::LifecycleStep> {
+        match &self.step {
+            VerifiedStep::Lifecycle(step) => Some(*step),
+            VerifiedStep::Transfer(_) => None,
+        }
     }
 }
 
@@ -137,15 +161,29 @@ pub fn verified_pair(pair: &StagedPair) -> Result<VerifiedTransfer, String> {
         return Err("the pair's halves were verified under different senders".to_string());
     }
     let signed_op = super::recipient_dispatch::signed_operation_of(&transfer)?;
-    let terms = super::recipient_dispatch::open_terms(&transfer.terms, &signed_op)
-        .map_err(|e| format!("the staged transfer's terms: {e}"))?;
+    let step = match &signed_op {
+        Operation::Transfer { .. } => VerifiedStep::Transfer(
+            super::recipient_dispatch::open_terms(&transfer.terms, &signed_op)
+                .map_err(|e| format!("the staged transfer's terms: {e}"))?,
+        ),
+        other => match dsm::core::relationship_lifecycle::lifecycle_step_of(other) {
+            Ok(Some(step)) => VerifiedStep::Lifecycle(step),
+            Ok(None) => {
+                return Err(format!(
+                    "the staged operation is a {}, not a transfer or a relationship step",
+                    other.get_operation_type()
+                ))
+            }
+            Err(e) => return Err(format!("the staged relationship step: {e}")),
+        },
+    };
     let receipt = StitchedReceiptV2::from_canonical_protobuf(&receipt_row.evidence_bytes)
         .map_err(|e| format!("the staged receipt no longer decodes: {e}"))?;
     Ok(VerifiedTransfer {
         pair: *pair,
         sender: transfer.sender,
         signed_op,
-        terms,
+        step,
         canonical_operation_bytes: transfer.canonical_operation_bytes,
         signature: transfer.signature,
         receipt,

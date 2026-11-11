@@ -355,6 +355,9 @@ enum ReadStop {
 pub enum B0xEntryKind {
     /// An online transfer request.
     Transfer,
+    /// A relationship's lifecycle step (DSM Amendment A33): an ESTABLISH or
+    /// a TERMINATE, carried as a transfer request is.
+    LifecycleStep,
     /// A request whose body is not what its invoke method names, and why.
     /// Listed as unverified; nothing is taken from it.
     Unrecognized { reason: String },
@@ -467,6 +470,8 @@ pub struct B0xSDK {
     pending_cert_resync: Vec<CertResyncMessage>,
     /// Offline boundary notices decoded on retrieve.
     pending_offline_boundary_notices: Vec<OfflineBoundaryNotice>,
+    /// Write-key offers and write grants decoded on retrieve.
+    pending_write_authorizations: Vec<WriteAuthorizationMessage>,
 }
 
 /// One cert-resync control message as a retrieve read it: its method, its
@@ -491,6 +496,16 @@ pub struct OfflineBoundaryNotice {
     pub copy_key: String,
 }
 
+/// One write-key offer or write grant as a retrieve read it (DSM Amendment
+/// A34): its method, its body, and the content key of the copy it came in.
+/// The body proves itself by its signatures; nothing else here is authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteAuthorizationMessage {
+    pub method: String,
+    pub body: Vec<u8>,
+    pub copy_key: String,
+}
+
 /// Explicit invoke method that marks an offline boundary notice: a payer telling
 /// a contact the economic position of a load or unload (DSM Amendment A30).
 pub(crate) const OFFLINE_BOUNDARY_NOTICE_METHOD: &str = "wallet.offlineBoundaryNotice";
@@ -509,6 +524,53 @@ pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
 /// Explicit invoke method of a `RelationshipFinalizedV1` finality certificate
 /// (finality barrier). Same discipline: discriminated by this string alone.
 pub(crate) const RELATIONSHIP_FINALIZED_METHOD: &str = "relationship.finalized.v1";
+
+/// The invoke method of an online transfer: the one step that moves value.
+pub(crate) const WALLET_SEND_METHOD: &str = "wallet.send";
+/// The invoke methods of a relationship's lifecycle steps (DSM Amendment
+/// A33): the ESTABLISH both sides sign, and either side's TERMINATE. The
+/// request is an `OnlineTransferRequest` carrying the signed operation and
+/// nothing else: no terms, no economic locators.
+pub(crate) const RELATIONSHIP_ESTABLISH_METHOD: &str = "relationship.establish.v1";
+pub(crate) const RELATIONSHIP_TERMINATE_METHOD: &str = "relationship.terminate.v1";
+/// Explicit invoke methods of a relationship's write authorizations (DSM
+/// Amendment A34): a device's offer of its write key, and a device's grant of
+/// its inbox to the other's key. Each body is the strict wire form Core
+/// decodes; nothing in the envelope around it is read as authority.
+pub(crate) const RELATIONSHIP_WRITE_KEY_OFFER_METHOD: &str = "relationship.writeKeyOffer.v1";
+pub(crate) const RELATIONSHIP_WRITE_GRANT_METHOD: &str = "relationship.writeGrant.v1";
+
+/// The invoke method a signed operation travels under.
+pub(crate) fn step_method(op: &Operation) -> Result<&'static str, DsmError> {
+    use dsm::core::relationship_lifecycle::{lifecycle_step_of, LifecycleStep};
+    match op {
+        Operation::Transfer { .. } => Ok(WALLET_SEND_METHOD),
+        other => match lifecycle_step_of(other)? {
+            Some(LifecycleStep::Establish { .. }) => Ok(RELATIONSHIP_ESTABLISH_METHOD),
+            Some(LifecycleStep::Terminate { .. }) => Ok(RELATIONSHIP_TERMINATE_METHOD),
+            None => Err(DsmError::invalid_operation(format!(
+                "a {} is not a step a device spools",
+                other.get_operation_type()
+            ))),
+        },
+    }
+}
+
+/// The device a spooled step is addressed to, from its signed operation.
+pub(crate) fn step_recipient(op: &Operation) -> Result<Vec<u8>, DsmError> {
+    use dsm::core::relationship_lifecycle::{lifecycle_step_of, LifecycleStep};
+    match op {
+        Operation::Transfer { to_device_id, .. } => Ok(to_device_id.clone()),
+        other => match lifecycle_step_of(other)? {
+            Some(LifecycleStep::Establish { counterparty, .. }) => Ok(counterparty.to_vec()),
+            Some(LifecycleStep::Terminate { to, .. }) => Ok(to.to_vec()),
+            None => Err(DsmError::invalid_operation(format!(
+                "a {} names no recipient",
+                other.get_operation_type()
+            ))),
+        },
+    }
+}
 
 /// One finality certificate as it came off the wire: the node message id it
 /// is ACKed under, the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`),
@@ -863,6 +925,7 @@ impl B0xSDK {
             pending_evidence_artifacts: Vec::new(),
             pending_cert_resync: Vec::new(),
             pending_offline_boundary_notices: Vec::new(),
+            pending_write_authorizations: Vec::new(),
         };
 
         Ok(sdk)
@@ -1114,6 +1177,32 @@ impl B0xSDK {
         std::mem::take(&mut self.pending_offline_boundary_notices)
     }
 
+    /// Decode a write-key offer or a write grant from a spooled envelope,
+    /// discriminated on the EXPLICIT invoke method, never trial-decoded: its
+    /// method and its body.
+    fn decode_write_authorization(env: &dsm::types::proto::Envelope) -> Option<(String, Vec<u8>)> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        tx.ops.iter().find_map(|op| {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                return None;
+            };
+            if invoke.method != RELATIONSHIP_WRITE_KEY_OFFER_METHOD
+                && invoke.method != RELATIONSHIP_WRITE_GRANT_METHOD
+            {
+                return None;
+            }
+            Some((invoke.method.clone(), invoke.args.as_ref()?.body.clone()))
+        })
+    }
+
+    /// Drain the write-key offers and write grants decoded by the most recent
+    /// retrieve.
+    pub fn take_write_authorizations(&mut self) -> Vec<WriteAuthorizationMessage> {
+        std::mem::take(&mut self.pending_write_authorizations)
+    }
+
     /// Deliver the recipient's countersigned acceptance receipt BACK to the
     /// original sender, so the sender can finalize on cryptographic proof rather
     /// than on storage-node message deletion (which is best-effort GC only).
@@ -1322,11 +1411,11 @@ impl B0xSDK {
         b_pair: ([u8; 32], [u8; 32]),
         release_bytes: &[u8],
     ) -> Result<String, DsmError> {
-        let routing_key = dsm::crypto::spool_address::inbox_address(
-            sender_genesis,
+        let routing_key = crate::sdk::spool_write::counterparty_inbox_address(
             sender_device_id,
+            sender_genesis,
             sender_projection_tip,
-        );
+        )?;
         let local_genesis = self.resolve_local_genesis().await?;
         let built = self.build_countersign_reply_envelope(
             &local_genesis,
@@ -1350,6 +1439,7 @@ impl B0xSDK {
     ) -> Result<String, DsmError> {
         let sealed = seal_for(recipient_device, &built.message_id_b32, &built.bytes)?;
         self.deliver(
+            recipient_device,
             routing_key,
             &built.message_id_b32,
             &sealed,
@@ -1372,11 +1462,18 @@ impl B0xSDK {
     /// is still asked once the others are used up.
     async fn deliver(
         &self,
+        recipient: &[u8; 32],
         routing_key: &str,
         message_id_b32: &str,
         sealed: &[u8],
         retry_config: &B0xRetryConfig,
     ) -> Result<(), DsmError> {
+        // The write a member takes: the sealed bytes with the inbox's key, its
+        // grant and this device's signature (DSM Amendment A34). Built once,
+        // the same bytes to every member.
+        let write =
+            crate::sdk::spool_write::write_for(recipient, routing_key, message_id_b32, sealed)?;
+        let sealed = write.as_slice();
         let quorum = self.quorum_k;
         let total = self.storage_node_endpoints.len();
         if total < quorum {
@@ -1517,11 +1614,11 @@ impl B0xSDK {
         recipient_tip: &[u8; 32],
     ) -> Result<String, DsmError> {
         use prost::Message as _;
-        let routing_key = dsm::crypto::spool_address::inbox_address(
-            recipient_genesis,
+        let routing_key = crate::sdk::spool_write::counterparty_inbox_address(
             recipient_device,
+            recipient_genesis,
             recipient_tip,
-        );
+        )?;
 
         // Deterministic transport id from method + route + a digest of the body.
         let message_id_bytes =
@@ -1580,6 +1677,7 @@ impl B0xSDK {
         })?;
         let sealed = seal_for(recipient_device, &message_id_b32, &buf)?;
         self.deliver(
+            recipient_device,
             &routing_key,
             &message_id_b32,
             &sealed,
@@ -1785,13 +1883,8 @@ impl B0xSDK {
             .ok_or_else(|| {
                 DsmError::internal("device_id base32 decode failed", None::<std::io::Error>)
             })?;
-        let Operation::Transfer { to_device_id, .. } = &params.transaction else {
-            return Err(DsmError::internal(
-                "submit_to_b0x: expected Operation::Transfer",
-                None::<std::io::Error>,
-            ));
-        };
-        let to_device_id_bytes = to_device_id.clone();
+        let to_device_id_bytes = step_recipient(&params.transaction)?;
+        let method = step_method(&params.transaction)?;
 
         // The signed operation and the terms it commits to, and nothing that
         // restates either: the recipient reads the recipient, amount and asset
@@ -1815,7 +1908,7 @@ impl B0xSDK {
         // for the contact — a key carried here would be a key nothing reads.
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: "wallet.send".to_string(),
+            method: method.to_string(),
             args: Some(arg_pack),
             cosigners: vec![],
             evidence: None,
@@ -1915,8 +2008,14 @@ impl B0xSDK {
         // §16.4: the inbox key is always the explicit rotated address.
         let routing_key = params.routing_address.clone();
         let sealed = seal_for(&recipient, &message_id_b32, &buf)?;
-        self.deliver(&routing_key, &message_id_b32, &sealed, retry_config)
-            .await?;
+        self.deliver(
+            &recipient,
+            &routing_key,
+            &message_id_b32,
+            &sealed,
+            retry_config,
+        )
+        .await?;
         Ok(message_id_b32)
     }
 
@@ -1928,10 +2027,12 @@ impl B0xSDK {
     /// spool row.
     pub async fn submit_stored_envelope(
         &mut self,
+        recipient: &[u8; 32],
         routing_address: &str,
         message_id_b32: &str,
     ) -> Result<(), DsmError> {
         self.submit_stored_envelope_with_retry(
+            recipient,
             routing_address,
             message_id_b32,
             &B0xRetryConfig::default(),
@@ -1974,12 +2075,13 @@ impl B0xSDK {
     /// is what bounds the call — see `stored_envelope_deadline`.
     pub async fn submit_stored_envelope_with_retry(
         &mut self,
+        recipient: &[u8; 32],
         routing_address: &str,
         message_id_b32: &str,
         retry: &B0xRetryConfig,
     ) -> Result<(), DsmError> {
         let sealed = kept_seal(message_id_b32)?;
-        self.deliver(routing_address, message_id_b32, &sealed, retry)
+        self.deliver(recipient, routing_address, message_id_b32, &sealed, retry)
             .await
     }
 
@@ -2043,9 +2145,11 @@ impl B0xSDK {
             }
         }
         let this = &*self;
+        let recipient = crate::sdk::spool_write::counterparty_of(&outbox.relationship_key)?;
+        let recipient = &recipient;
         let deliver = |id: String| async move {
             let sealed = kept_seal(&id)?;
-            this.deliver(route, &id, &sealed, retry).await
+            this.deliver(recipient, route, &id, &sealed, retry).await
         };
         let (transfer, delivered) = futures::future::join(
             deliver(outbox.submission_id.clone()),
@@ -2257,11 +2361,25 @@ impl B0xSDK {
                     ));
                 }
             }
-            _ => {
-                return Err(DsmError::internal(
-                    "only Transfer operations are supported for b0x submission",
-                    None::<std::io::Error>,
-                ));
+            other => {
+                // A relationship's lifecycle step (Amendment A33) travels as a
+                // transfer does, with no terms: it moves nothing.
+                match dsm::core::relationship_lifecycle::lifecycle_step_of(other)? {
+                    Some(_) => {
+                        if !params.transfer_terms.is_empty() {
+                            return Err(DsmError::internal(
+                                "a relationship step carries no terms",
+                                None::<std::io::Error>,
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(DsmError::internal(
+                            "only transfers and relationship steps are spooled",
+                            None::<std::io::Error>,
+                        ));
+                    }
+                }
             }
         }
 
@@ -2637,6 +2755,19 @@ impl B0xSDK {
             // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
             // (never a trial-decode) and buffered for the sender-finalization path;
             // dropping it here is what would strand a countersigned receipt.
+            if let Some((method, body)) = Self::decode_write_authorization(&env) {
+                info!(
+                    "📬 relationship write authorization method={method} body={}B",
+                    body.len()
+                );
+                self.pending_write_authorizations
+                    .push(WriteAuthorizationMessage {
+                        method,
+                        body,
+                        copy_key,
+                    });
+                continue;
+            }
             if let Some((sender, body)) = Self::decode_offline_boundary_notice(&env) {
                 info!("📬 offline boundary notice body={}B", body.len());
                 self.pending_offline_boundary_notices
@@ -2773,9 +2904,13 @@ impl B0xSDK {
             let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
                 continue;
             };
-            if invoke.method != "wallet.send" {
-                continue;
-            }
+            let kind = match invoke.method.as_str() {
+                WALLET_SEND_METHOD => B0xEntryKind::Transfer,
+                RELATIONSHIP_ESTABLISH_METHOD | RELATIONSHIP_TERMINATE_METHOD => {
+                    B0xEntryKind::LifecycleStep
+                }
+                _ => continue,
+            };
             let Some(arg_pack) = &invoke.args else {
                 // A transfer with no request is listed as what it is, never
                 // dropped.
@@ -2785,7 +2920,7 @@ impl B0xSDK {
                     inbox_key: String::new(),
                     sender_device_id: sender_dev,
                     kind: B0xEntryKind::Unrecognized {
-                        reason: "the wallet.send invoke carries no request".to_string(),
+                        reason: format!("the {} invoke carries no request", invoke.method),
                     },
                     transfer_wire_bytes: Vec::new(),
                     copy_key: copy_key.to_string(),
@@ -2799,7 +2934,7 @@ impl B0xSDK {
                 transaction_id: tid,
                 inbox_key: String::new(),
                 sender_device_id: sender_dev,
-                kind: B0xEntryKind::Transfer,
+                kind,
                 transfer_wire_bytes: arg_pack.body.clone(),
                 copy_key: copy_key.to_string(),
             });
@@ -2997,7 +3132,10 @@ mod tests {
             device.fleet.endpoints(),
         )
         .expect("the device's spool client");
-        let route = encode_base32_crockford(&rand::random::<[u8; 32]>());
+        // An open inbox address (DSM Amendment A34): a write proves it from
+        // its route digest.
+        let route_digest: [u8; 32] = rand::random();
+        let route = dsm::crypto::spool_address::open_inbox_address(&route_digest);
         for endpoint in device.fleet.endpoints() {
             assert_eq!(
                 b0x_consumed::read_position(&route, &endpoint).expect("the position"),
@@ -3035,8 +3173,23 @@ mod tests {
         }
         .encode_to_vec();
         let id = encode_base32_crockford(&message_id);
+        // A write under a key of the writer's own, the first at this route
+        // (DSM Amendment A34).
+        let writer =
+            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+                .expect("a writer's key");
+        let address = dsm::crypto::spool_address::open_inbox_address_bytes(&route_digest);
+        let write = dsm::core::relationship_write_grant::self_granted_spool_write(
+            &writer,
+            &[0x5A; 32],
+            &route_digest,
+            &address,
+            &message_id,
+            &sealed,
+        )
+        .expect("a signed write");
         for endpoint in device.fleet.endpoints() {
-            sdk.submit_once(&endpoint, &sealed, &route, &id)
+            sdk.submit_once(&endpoint, &write, &route, &id)
                 .await
                 .expect("the node spools it");
         }
@@ -3317,7 +3470,7 @@ mod tests {
         };
         for attempt in 1..=2 {
             let err = sdk
-                .submit_stored_envelope_with_retry(&route, &id, &once)
+                .submit_stored_envelope_with_retry(&p.b.device_id, &route, &id, &once)
                 .await
                 .expect_err("q − 1 members cannot hold a delivery");
             assert!(
@@ -3327,7 +3480,7 @@ mod tests {
         }
 
         p.nodes.bring_up(&down).await;
-        sdk.submit_stored_envelope_with_retry(&route, &id, &once)
+        sdk.submit_stored_envelope_with_retry(&p.b.device_id, &route, &id, &once)
             .await
             .expect("with the members back, the same bytes reach the quorum");
     }
@@ -3368,7 +3521,12 @@ mod tests {
         .expect("B0xSDK");
         let delivered = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            sdk.submit_stored_envelope_with_retry(&route, &id, &B0xRetryConfig::default()),
+            sdk.submit_stored_envelope_with_retry(
+                &p.b.device_id,
+                &route,
+                &id,
+                &B0xRetryConfig::default(),
+            ),
         )
         .await;
         p.nodes.bring_up(&[first]).await;

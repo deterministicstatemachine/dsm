@@ -146,7 +146,7 @@ reset() {
     down
     build
     "$DEV_NET_BIN" drop --pg "$PG_URL"
-    rm -rf "$NET"
+    rm -rf "$NET" "$REPO/.dsm-dev/set"
     echo "[dev-net] forgot the set; the next up prepares a new one"
 }
 

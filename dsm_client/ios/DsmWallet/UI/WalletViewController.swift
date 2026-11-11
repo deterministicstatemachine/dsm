@@ -29,6 +29,12 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
     private var pendingConnectLink: ConnectLink?
     /// The connect link that opened the wallet, until the player answers it.
     private var connectLinkOpened: String?
+    /// The system's grant of background time while Rust still has work for a
+    /// connected application or a contact's send. iOS has no service to keep,
+    /// but it does give an app that asks a bounded stretch after it leaves the
+    /// screen, and that is the stretch in which a game's request gets answered
+    /// instead of waiting for the wallet to be opened again.
+    private var backgroundWork: UIBackgroundTaskIdentifier = .invalid
     private var contactPicker: PhoneContacts?
     private let background = DispatchQueue(label: "com.dsm.wallet.host", qos: .userInitiated)
 
@@ -233,6 +239,7 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
     /// on the iPad: every publish said foreground 0 and pairing never ran).
     func sceneDidBecomeActive(_ scene: UIScene) {
         WalletViewController.active = self
+        releaseBackgroundWork()
         SessionFacts.shared.appForeground = scene.activationState == .foregroundActive
         SessionFacts.shared.publish("resume")
         if SessionFacts.shared.qrRoundTrip == .resumePending {
@@ -262,8 +269,29 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
         // answer is informational here, since iOS has no service to keep.
         let keepAlive = DsmSdk.onAppBackgrounded()
         DsmLog.info(tag, "backgrounded: Rust answered keep-alive=\(keepAlive)")
+        if keepAlive != 0 { holdBackgroundWork() }
         // Bluetooth only while the app is open: the radio stops with the screen.
         BleCoordinator.shared.radioToBackground()
+    }
+
+    // MARK: Background work
+
+    /// Ask the system for the time it allows after leaving the screen, so the
+    /// inbox poller and the connect listener keep answering until it ends or
+    /// the app is back in front. Ended on expiry as the system requires.
+    private func holdBackgroundWork() {
+        guard backgroundWork == .invalid else { return }
+        backgroundWork = UIApplication.shared.beginBackgroundTask(withName: "dsm.connect.pending") { [weak self] in
+            self?.releaseBackgroundWork(expired: true)
+        }
+        DsmLog.info(tag, "background work held: \(Int(UIApplication.shared.backgroundTimeRemaining.rounded())) s allowed")
+    }
+
+    private func releaseBackgroundWork(expired: Bool = false) {
+        guard backgroundWork != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundWork)
+        backgroundWork = .invalid
+        if expired { DsmLog.info(tag, "background work expired: the system paused the wallet") }
     }
 
     // MARK: Guards

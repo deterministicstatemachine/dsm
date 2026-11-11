@@ -67,7 +67,7 @@ help: ## Show this help
 # ---------------------------------------------------------------------------
 
 .PHONY: doctor
-doctor: ## Check local prerequisites and repo state without changing files
+doctor: ## Check local prerequisites and repo state without changing files; fails when a prerequisite is missing
 	@echo "==> DSM doctor"
 	@PINNED_RUST="$$(sed -n 's/^channel = \"\([^\"]*\)\".*/\1/p' "$(RUST_TOOLCHAIN_FILE)" | head -1)"; \
 	command -v cargo >/dev/null 2>&1 && echo "    cargo: $$(cargo --version)" || echo "    MISSING: cargo (install from https://rustup.rs)"; \
@@ -99,6 +99,9 @@ doctor: ## Check local prerequisites and repo state without changing files
 	elif [ -n "$$ANDROID_NDK_ROOT" ]; then \
 		NDK="$$ANDROID_NDK_ROOT"; \
 		NDK_SOURCE="ANDROID_NDK_ROOT"; \
+	elif [ -f "$(CARGO_CONFIG)" ]; then \
+		NDK="$$(sed -n 's/^ANDROID_NDK_ROOT = { value = \"\([^\"]*\)\",.*/\1/p' "$(CARGO_CONFIG)" | head -1)"; \
+		NDK_SOURCE="make setup ($(notdir $(CARGO_CONFIG)))"; \
 	fi; \
 	if [ -n "$$NDK" ]; then \
 		if [ -d "$$NDK" ]; then \
@@ -134,10 +137,12 @@ doctor: ## Check local prerequisites and repo state without changing files
 	else \
 		echo "    android sdk: not configured (make setup will try to detect it)"; \
 	fi
-	@if [ -d "$(FRONTEND_DIR)/node_modules" ]; then \
-		echo "    frontend deps: present"; \
-	else \
+	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ]; then \
 		echo "    frontend deps: missing (run make setup)"; \
+	elif [ "$(FRONTEND_DIR)/package-lock.json" -nt "$(FRONTEND_DIR)/node_modules/.package-lock.json" ]; then \
+		echo "    frontend deps: stale (package-lock.json changed since they were installed; run make setup)"; \
+	else \
+		echo "    frontend deps: present"; \
 	fi
 	@CURRENT_NDK="$${ANDROID_NDK_HOME:-$$ANDROID_NDK_ROOT}"; \
 	if [ -f "$(CARGO_CONFIG)" ]; then \
@@ -155,6 +160,15 @@ doctor: ## Check local prerequisites and repo state without changing files
 	else \
 		echo "    android cargo config: missing (run make setup)"; \
 	fi
+	@missing=""; \
+	for tool in cargo rustc rustfmt cargo-clippy protoc node npm; do \
+		command -v "$$tool" >/dev/null 2>&1 || missing="$$missing $$tool"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "==> MISSING:$$missing (QUICKSTART.md, Prerequisites)"; \
+		exit 1; \
+	fi; \
+	echo "==> every prerequisite is here"
 
 .PHONY: android-sdk-config
 android-sdk-config: ## Detect Android SDK and write ignored local.properties for Gradle
@@ -223,14 +237,14 @@ setup: ## First-time developer setup: check deps, auto-configure Android, instal
 		echo "    Configured NDK root: $$NDK"; \
 		echo "    Configured NDK host tag: $$HOST_TAG"; \
 	fi
-	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ]; then \
-		echo "==> Installing frontend dependencies..."; \
+	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ] || [ "$(FRONTEND_DIR)/package-lock.json" -nt "$(FRONTEND_DIR)/node_modules/.package-lock.json" ]; then \
+		echo "==> Installing frontend dependencies (npm ci: the lockfile is newer than what is installed, or nothing is)..."; \
 		cd $(FRONTEND_DIR) && \
 			[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
 			nvm use --silent 2>/dev/null || true; \
 			npm ci; \
 	else \
-		echo "    Frontend dependencies already installed — skipping npm ci"; \
+		echo "    Frontend dependencies match package-lock.json — skipping npm ci"; \
 	fi
 	@echo "==> Setup complete."
 
@@ -588,8 +602,13 @@ clients: ## Build the TypeScript client and generate the Python client's types f
 	protoc -I $(REPO_ROOT)/proto --python_out=$(PY_CLIENT_DIR)/dsm_app_client/generated $(REPO_ROOT)/proto/dsm_app.proto
 
 .PHONY: app-dev
-app-dev: clients ## Start your app's own DSM account on the local set (nodes too) and fund it
+app-dev: clients ## Your app's own DSM account on the beta network, funded: nothing to run but it (on your local set, if you made one)
 	@bash scripts/app_dev.sh up app
+	@$(DSM_APP) fund
+
+.PHONY: app-dev-local
+app-dev-local: clients ## The same, on a storage set of your own: five local nodes (needs PostgreSQL; make dev-reset first if accounts exist)
+	@bash scripts/app_dev.sh up app local
 	@$(DSM_APP) fund
 
 .PHONY: app-dev-down
@@ -597,7 +616,7 @@ app-dev-down: ## Stop your app's account
 	@bash scripts/app_dev.sh down app
 
 .PHONY: dev-wallet
-dev-wallet: clients ## Start a player's wallet in the terminal (a second account) and fund it
+dev-wallet: clients ## A player's wallet in the terminal (a second account, on your app's set), funded
 	@bash scripts/app_dev.sh up wallet
 	@$(DSM_WALLET) fund
 
@@ -606,7 +625,7 @@ dev-wallet-down: ## Stop the terminal wallet
 	@bash scripts/app_dev.sh down wallet
 
 .PHONY: dev-wallet2
-dev-wallet2: clients ## Start a second player's wallet in the terminal (for matches) and fund it
+dev-wallet2: clients ## A second player's wallet in the terminal (for matches), funded
 	@bash scripts/app_dev.sh up wallet2
 	@DSM_WALLET_NAME=wallet2 $(DSM_WALLET) fund
 
@@ -636,7 +655,7 @@ starter: clients ## Run the Connect starter app on http://127.0.0.1:3000 (after 
 	cd $(STARTER_DIR) && npm ci --no-audit --no-fund && npm run build && npm start
 
 .PHONY: phones-local
-phones-local: ## Point the wallet on every adb device and booted iOS Simulator at the local set
+phones-local: ## Point the wallet on every adb device and booted iOS Simulator at your local set (app-dev-local only)
 	@bash scripts/phones_local.sh point
 
 .PHONY: phones-connect
@@ -657,6 +676,10 @@ dev-down: ## Stop the terminal wallets, your app's account and the local nodes
 	@bash scripts/app_dev.sh down wallet
 	@bash scripts/app_dev.sh down app
 	@bash scripts/dev_net.sh down
+
+.PHONY: dev-reset
+dev-reset: ## Forget the accounts made on this machine (and your local set, if they were on it); the next app-dev starts fresh
+	@bash scripts/app_dev.sh reset
 
 # ---------------------------------------------------------------------------
 # PROTO / CODEGEN

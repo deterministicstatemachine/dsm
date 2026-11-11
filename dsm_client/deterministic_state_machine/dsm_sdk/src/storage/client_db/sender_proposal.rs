@@ -66,6 +66,16 @@ pub struct SenderOnlineProposal {
     pub status: String,
 }
 
+impl SenderOnlineProposal {
+    /// Whether this proposal is a relationship's lifecycle step (DSM
+    /// Amendment A33) rather than a transfer. A transfer names the token it
+    /// moves (`send_transfer_op_staged` refuses an empty one); a lifecycle
+    /// step moves no token and names none.
+    pub fn is_lifecycle_step(&self) -> bool {
+        self.token_id.is_empty()
+    }
+}
+
 const COLS: &str = "relationship_key, canonical_parent, canonical_child, projection_parent, \
      projection_target, commitment, operation_digest, nonce_hash, message_id, tx_id, \
      counterparty_device_id, amount, token_id, status";

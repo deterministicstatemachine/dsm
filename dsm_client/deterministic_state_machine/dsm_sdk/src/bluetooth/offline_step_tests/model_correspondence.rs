@@ -46,8 +46,8 @@ impl World {
             device.boot(&fleet).await;
         }
         for (i, j) in relationships {
-            devices[*i].add_contact(&devices[*j]).await;
-            devices[*j].add_contact(&devices[*i]).await;
+            devices[*i].add_and_establish(&devices[*j]).await;
+            devices[*j].add_and_establish(&devices[*i]).await;
         }
         for device in &devices {
             device.fund_admitted(100).await;
