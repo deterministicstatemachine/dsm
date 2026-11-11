@@ -1,9 +1,13 @@
 name: Guide
 
 # The developer guide (guide/): written pages, built with mdBook and published
-# on GitHub Pages. A pull request that touches it builds it; a push to main
-# that touches it builds it and publishes it. Publishing needs the
-# repository's Pages source set to "GitHub Actions" (Settings, Pages).
+# on GitHub Pages. Every command the pages show is checked against what the
+# repo has (guide/check_commands.py): the Makefile's targets, the app's and
+# the terminal wallet's commands, and the walkthrough tapes CI runs. So a
+# change to any of those runs it too, and a pull request that would leave a
+# page showing a command that no longer exists fails here. A push to main
+# builds the guide and publishes it. Publishing needs the repository's Pages
+# source set to "GitHub Actions" (Settings, Pages).
 
 on:
   push:
@@ -11,10 +15,18 @@ on:
     paths:
       - 'guide/**'
       - '.github/workflows/guide.yml'
+      - 'Makefile'
+      - 'clients/typescript/src/app-cli.ts'
+      - 'clients/typescript/src/dev-wallet.ts'
+      - 'tools/walkthrough/tapes/**'
   pull_request:
     paths:
       - 'guide/**'
       - '.github/workflows/guide.yml'
+      - 'Makefile'
+      - 'clients/typescript/src/app-cli.ts'
+      - 'clients/typescript/src/dev-wallet.ts'
+      - 'tools/walkthrough/tapes/**'
   workflow_dispatch:
 
 permissions:
@@ -40,6 +52,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Every command the pages show is one the repo has
+        run: python3 guide/check_commands.py
 
       - name: Install mdBook
         run: |
