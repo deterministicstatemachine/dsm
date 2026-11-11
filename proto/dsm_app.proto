@@ -3911,15 +3911,19 @@ message RelationshipWriteAuthorizationV1 {
 
 // One write to an inbox address, as a storage node receives it (DSM
 // Amendment A34): the sealed envelope it stores, the inbox's key, the key's
-// grant of the writer's key, and the writer's signature over BLAKE3 under
+// grant of the writer's key, the writer's signature over BLAKE3 under
 // DSM/spool-write/v1 of the address (32 bytes), the message id (16 bytes)
-// and BLAKE3 under DSM/spool-write-envelope/v1 of the envelope. The node
-// stores the envelope alone.
+// and BLAKE3 under DSM/spool-write-envelope/v1 of the envelope, and the
+// inbox's route digest. The address is the route digest bound to the key
+// (every inbox after a relationship's first) or the digest's open address
+// (the first inbox, whose key its first write fixes). The node stores the
+// envelope alone.
 message SpoolWriteV1 {
   bytes envelope        = 1 [(dsm_max_len)=131072]; // the spool envelope cap
   bytes lock_public_key = 2 [(dsm_fixed_len)=64];
   bytes grant           = 3 [(dsm_max_len)=65535]; // RelationshipWriteGrantV1
   bytes write_signature = 4 [(dsm_max_len)=65535];
+  bytes route_digest    = 5 [(dsm_fixed_len)=32];
 }
 
 message OnlineTransferSmartRequest {

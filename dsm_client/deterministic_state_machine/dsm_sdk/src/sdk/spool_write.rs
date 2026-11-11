@@ -41,6 +41,100 @@ fn this_device() -> Result<([u8; 32], [u8; 32]), DsmError> {
     ))
 }
 
+/// The public key of a lock inside an authorization's wire bytes.
+fn lock_of(authorization_wire: &[u8]) -> Result<Vec<u8>, DsmError> {
+    let authorization = decode_write_authorization_wire(authorization_wire)?;
+    Ok(decode_write_lock_wire(&authorization.lock)?.lock_public_key)
+}
+
+/// The inbox address `recipient` reads and `writer` writes, at the
+/// relationship's tip `tip` (DSM Amendment A34): the open address of its
+/// route at the relationship's first tip, and the route bound to the
+/// recipient's lock at every later tip. One of the two is this device. The
+/// lock is the one this device issued (as the recipient) or holds (as the
+/// writer); `None` while it is not known here, when nothing can be at that
+/// address yet. An address this device writes to is remembered with its
+/// route, so a write can prove it.
+pub(crate) fn inbox_address_of(
+    recipient: (&[u8; 32], &[u8; 32]),
+    writer: (&[u8; 32], &[u8; 32]),
+    tip: &[u8; 32],
+    this_device_is: Side,
+) -> Result<Option<String>, DsmError> {
+    let ((recipient_device, recipient_genesis), (writer_device, writer_genesis)) =
+        (recipient, writer);
+    let route =
+        dsm::crypto::spool_address::inbox_route_digest(recipient_genesis, recipient_device, tip);
+    let first_tip = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+        recipient_device,
+        recipient_genesis,
+        writer_device,
+        writer_genesis,
+    );
+    let lock = if tip == &first_tip {
+        None
+    } else {
+        let authorization = match this_device_is {
+            Side::Recipient => client_db::issued_write_grant(writer_device)
+                .map_err(|e| DsmError::invalid_operation(format!("the grant issued: {e}")))?
+                .map(|issued| issued.grant.grant_wire),
+            Side::Writer => client_db::own_write_authorization(recipient_device)
+                .map_err(|e| DsmError::invalid_operation(format!("the write authorization: {e}")))?
+                .and_then(|own| own.grant)
+                .map(|held| held.grant_wire),
+        };
+        match authorization {
+            Some(wire) => Some(lock_of(&wire)?),
+            None => return Ok(None),
+        }
+    };
+    let address = match &lock {
+        Some(lock) => dsm::crypto::spool_address::locked_inbox_address(&route, lock),
+        None => dsm::crypto::spool_address::open_inbox_address(&route),
+    };
+    if this_device_is == Side::Writer {
+        client_db::record_inbox_route(
+            &address,
+            &client_db::InboxRoute {
+                route_digest: route,
+                lock_public_key: lock,
+            },
+        )
+        .map_err(|e| DsmError::invalid_operation(format!("recording the inbox route: {e}")))?;
+    }
+    Ok(Some(address))
+}
+
+/// Which side of an inbox this device is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Side {
+    /// It reads the inbox.
+    Recipient,
+    /// It writes to the inbox.
+    Writer,
+}
+
+/// The address of `recipient`'s inbox for this device's writes at `tip`, or
+/// an error naming why it cannot be written yet.
+pub(crate) fn counterparty_inbox_address(
+    recipient: &[u8; 32],
+    recipient_genesis: &[u8; 32],
+    tip: &[u8; 32],
+) -> Result<String, DsmError> {
+    let (device, genesis) = this_device()?;
+    inbox_address_of(
+        (recipient, recipient_genesis),
+        (&device, &genesis),
+        tip,
+        Side::Writer,
+    )?
+    .ok_or_else(|| {
+        DsmError::invalid_operation(
+            "the recipient's write grant is not held yet: it is read on the next sync",
+        )
+    })
+}
+
 /// The tip `recipient`'s relationship with this device opened at, and the
 /// address of `recipient`'s first inbox on it.
 pub(crate) fn first_inbox(recipient: &[u8; 32]) -> Result<([u8; 32], [u8; 32], String), DsmError> {
@@ -56,8 +150,7 @@ pub(crate) fn first_inbox(recipient: &[u8; 32]) -> Result<([u8; 32], [u8; 32], S
         recipient,
         &recipient_genesis,
     );
-    let address =
-        dsm::crypto::spool_address::inbox_address(&recipient_genesis, recipient, &first_tip);
+    let address = counterparty_inbox_address(recipient, &recipient_genesis, &first_tip)?;
     Ok((first_tip, recipient_genesis, address))
 }
 
@@ -70,7 +163,9 @@ pub(crate) fn holds_grant(recipient: &[u8; 32]) -> Result<bool, DsmError> {
 
 /// The write this device sends for `envelope` to `recipient`'s inbox at
 /// `routing_key` under `message_id_b32`: the request body a storage node
-/// takes.
+/// takes. The address is one this device derived ([`inbox_address_of`]):
+/// a locked inbox is written under the recipient's lock and grant, the
+/// relationship's first inbox under this device's own first-inbox key.
 pub(crate) fn write_for(
     recipient: &[u8; 32],
     routing_key: &str,
@@ -79,12 +174,17 @@ pub(crate) fn write_for(
 ) -> Result<Vec<u8>, DsmError> {
     let address: [u8; 32] = decode_fixed(routing_key, "the inbox address")?;
     let message_id: [u8; 16] = decode_fixed(message_id_b32, "the message id")?;
+    let route = client_db::inbox_route(routing_key)
+        .map_err(|e| DsmError::invalid_operation(format!("the inbox route: {e}")))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation("the inbox address was not derived on this device")
+        })?;
     let (device, _) = this_device()?;
     let s_master = zeroize::Zeroizing::new(crate::init::current_smaster()?);
     let relationship_key =
         dsm::core::bilateral_transaction_manager::compute_smt_key(&device, recipient);
-    let (first_tip, _, first_address) = first_inbox(recipient)?;
-    if routing_key == first_address {
+    let Some(lock) = route.lock_public_key else {
+        let (first_tip, _, _) = first_inbox(recipient)?;
         let key = derive_first_inbox_keypair(
             &s_master,
             &relationship_key,
@@ -95,11 +195,12 @@ pub(crate) fn write_for(
         return self_granted_spool_write(
             &key,
             &relationship_instance_id(&relationship_key, &first_tip),
+            &route.route_digest,
             &address,
             &message_id,
             envelope,
         );
-    }
+    };
     let own = client_db::own_write_authorization(recipient)
         .map_err(|e| DsmError::invalid_operation(format!("the write authorization: {e}")))?
         .ok_or_else(|| {
@@ -113,13 +214,13 @@ pub(crate) fn write_for(
         )
     })?;
     let authorization = decode_write_authorization_wire(&held.grant_wire)?;
-    let lock = decode_write_lock_wire(&authorization.lock)?;
     let write_key =
         derive_write_keypair(&s_master, &own.relationship_instance_id, &device, recipient)?;
     signed_spool_write(
         &write_key,
-        &lock.lock_public_key,
+        &lock,
         authorization.grant,
+        &route.route_digest,
         &address,
         &message_id,
         envelope,

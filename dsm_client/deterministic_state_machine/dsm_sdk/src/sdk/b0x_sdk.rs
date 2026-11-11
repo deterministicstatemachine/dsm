@@ -1411,11 +1411,11 @@ impl B0xSDK {
         b_pair: ([u8; 32], [u8; 32]),
         release_bytes: &[u8],
     ) -> Result<String, DsmError> {
-        let routing_key = dsm::crypto::spool_address::inbox_address(
-            sender_genesis,
+        let routing_key = crate::sdk::spool_write::counterparty_inbox_address(
             sender_device_id,
+            sender_genesis,
             sender_projection_tip,
-        );
+        )?;
         let local_genesis = self.resolve_local_genesis().await?;
         let built = self.build_countersign_reply_envelope(
             &local_genesis,
@@ -1614,11 +1614,11 @@ impl B0xSDK {
         recipient_tip: &[u8; 32],
     ) -> Result<String, DsmError> {
         use prost::Message as _;
-        let routing_key = dsm::crypto::spool_address::inbox_address(
-            recipient_genesis,
+        let routing_key = crate::sdk::spool_write::counterparty_inbox_address(
             recipient_device,
+            recipient_genesis,
             recipient_tip,
-        );
+        )?;
 
         // Deterministic transport id from method + route + a digest of the body.
         let message_id_bytes =
@@ -3132,7 +3132,10 @@ mod tests {
             device.fleet.endpoints(),
         )
         .expect("the device's spool client");
-        let route = encode_base32_crockford(&rand::random::<[u8; 32]>());
+        // An open inbox address (DSM Amendment A34): a write proves it from
+        // its route digest.
+        let route_digest: [u8; 32] = rand::random();
+        let route = dsm::crypto::spool_address::open_inbox_address(&route_digest);
         for endpoint in device.fleet.endpoints() {
             assert_eq!(
                 b0x_consumed::read_position(&route, &endpoint).expect("the position"),
@@ -3175,15 +3178,11 @@ mod tests {
         let writer =
             dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
                 .expect("a writer's key");
-        let address: [u8; 32] = <[u8; 32]>::try_from(
-            crate::util::text_id::decode_base32_crockford(&route)
-                .expect("the route decodes")
-                .as_slice(),
-        )
-        .expect("the route is 32 bytes");
+        let address = dsm::crypto::spool_address::open_inbox_address_bytes(&route_digest);
         let write = dsm::core::relationship_write_grant::self_granted_spool_write(
             &writer,
             &[0x5A; 32],
+            &route_digest,
             &address,
             &message_id,
             &sealed,

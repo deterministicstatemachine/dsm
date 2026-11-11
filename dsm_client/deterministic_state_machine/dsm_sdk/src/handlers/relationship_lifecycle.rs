@@ -317,11 +317,11 @@ impl AppRouterImpl {
                 token_id: String::new(),
                 status: client_db::PROPOSAL_PROPOSED.to_string(),
             };
-            let routing_address = dsm::crypto::spool_address::inbox_address(
-                &counterparty_genesis,
+            let routing_address = crate::sdk::spool_write::counterparty_inbox_address(
                 &counterparty,
+                &counterparty_genesis,
                 &chain_tip_arr,
-            );
+            )?;
             let evidence_digest = dsm::crypto::spool_address::ArtifactRole::EvidenceA
                 .content_digest(&receipt_commit_bytes);
             let params = crate::sdk::b0x_sdk::B0xSubmissionParams {

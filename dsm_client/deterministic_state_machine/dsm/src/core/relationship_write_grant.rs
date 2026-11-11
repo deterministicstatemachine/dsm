@@ -197,6 +197,9 @@ pub enum WriteAuthorizationRefusal {
     GrantSignature,
     /// The granted key did not sign the write.
     WriteSignature,
+    /// The address is neither the route digest bound to the key nor the
+    /// digest's open address.
+    WrongAddress,
     /// A signature could not be checked at all.
     Crypto(String),
 }
@@ -220,6 +223,9 @@ impl std::fmt::Display for WriteAuthorizationRefusal {
             Self::LockBindingSignature => f.write_str("the recipient's AK did not bind the lock"),
             Self::GrantSignature => f.write_str("the lock did not sign the grant"),
             Self::WriteSignature => f.write_str("the granted key did not sign the write"),
+            Self::WrongAddress => {
+                f.write_str("the address is not the route bound to the key, nor its open address")
+            }
             Self::Crypto(why) => write!(f, "a signature could not be checked: {why}"),
         }
     }
@@ -671,12 +677,14 @@ pub fn spool_write_wire(
     lock_public_key: Vec<u8>,
     grant_wire: Vec<u8>,
     write_signature: Vec<u8>,
+    route_digest: [u8; 32],
 ) -> SpoolWriteV1 {
     SpoolWriteV1 {
         envelope,
         lock_public_key,
         grant: grant_wire,
         write_signature,
+        route_digest: route_digest.to_vec(),
     }
 }
 
@@ -686,6 +694,7 @@ pub fn signed_spool_write(
     writer: &SphincsKeyPair,
     lock_public_key: &[u8],
     grant_wire: Vec<u8>,
+    route_digest: &[u8; 32],
     address: &[u8; INBOX_ADDRESS_LEN],
     message_id: &[u8; MESSAGE_ID_LEN],
     envelope: &[u8],
@@ -700,6 +709,7 @@ pub fn signed_spool_write(
         lock_public_key.to_vec(),
         grant_wire,
         signature,
+        *route_digest,
     )
     .encode_to_vec())
 }
@@ -710,6 +720,7 @@ pub fn signed_spool_write(
 pub fn self_granted_spool_write(
     key: &SphincsKeyPair,
     relationship_instance_id: &[u8; 32],
+    route_digest: &[u8; 32],
     address: &[u8; INBOX_ADDRESS_LEN],
     message_id: &[u8; MESSAGE_ID_LEN],
     envelope: &[u8],
@@ -726,6 +737,7 @@ pub fn self_granted_spool_write(
         key,
         &key.public_key,
         grant_wire,
+        route_digest,
         address,
         message_id,
         envelope,
@@ -738,19 +750,47 @@ pub fn self_granted_spool_write(
 pub struct VerifiedSpoolWrite {
     pub lock_public_key: Vec<u8>,
     pub envelope: Vec<u8>,
+    /// Which kind of inbox address the write proved it is for.
+    pub inbox: InboxKind,
+}
+
+/// The two kinds of inbox address (DSM Amendment A34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxKind {
+    /// The address is the route digest bound to the key the write carries:
+    /// the key is the address's own, by derivation. Every inbox of a
+    /// relationship after its first.
+    Locked,
+    /// The address is the route digest's open address: a relationship's
+    /// first inbox, whose key its first write fixes.
+    Open,
 }
 
 /// The node's check of one write, for `address` under `message_id`: the
-/// write is strict wire, its grant verifies under the key it carries, and the
-/// granted key signed this address, this id and these bytes. Whether that key
-/// is the address's key is the caller's comparison with what the address's
-/// first write fixed. Nothing here names or reveals an identity.
+/// write is strict wire; the address is the write's route digest bound to the
+/// key it carries ([`InboxKind::Locked`]: the key is the address's by
+/// derivation) or the digest's open address ([`InboxKind::Open`]: the key is
+/// the caller's comparison with what the address's first write fixed); the
+/// grant verifies under the key, and the granted key signed this address,
+/// this id and these bytes. Nothing here names or reveals an identity.
 pub fn verify_spool_write(
     bytes: &[u8],
     address: &[u8; INBOX_ADDRESS_LEN],
     message_id: &[u8; MESSAGE_ID_LEN],
 ) -> Result<VerifiedSpoolWrite, WriteAuthorizationRefusal> {
     let write = decode_spool_write_wire(bytes)?;
+    let route_digest = arr32(&write.route_digest)?;
+    let inbox = if crate::crypto::spool_address::locked_inbox_address_bytes(
+        &route_digest,
+        &write.lock_public_key,
+    ) == *address
+    {
+        InboxKind::Locked
+    } else if crate::crypto::spool_address::open_inbox_address_bytes(&route_digest) == *address {
+        InboxKind::Open
+    } else {
+        return Err(WriteAuthorizationRefusal::WrongAddress);
+    };
     let grant_wire = decode_write_grant_wire(&write.grant)?;
     let grant = verify_write_grant_signature(&grant_wire, &write.lock_public_key)?;
     verified(
@@ -762,6 +802,7 @@ pub fn verify_spool_write(
     Ok(VerifiedSpoolWrite {
         lock_public_key: write.lock_public_key,
         envelope: write.envelope,
+        inbox,
     })
 }
 
@@ -811,6 +852,7 @@ fn spool_write_field_limit(tag: u32) -> Option<FieldLimit> {
         1 => Some(FieldLimit::Max(SPOOL_WRITE_ENVELOPE_MAX_LEN)),
         2 => Some(FieldLimit::Fixed(WRITE_PUBLIC_KEY_LEN)),
         3 | 4 => Some(FieldLimit::Max(SIGNATURE_MAX_LEN)),
+        5 => Some(FieldLimit::Fixed(INBOX_ADDRESS_LEN)),
         _ => None,
     }
 }
@@ -843,9 +885,9 @@ pub fn decode_write_authorization_wire(
     strict(bytes, "write authorization", 2, authorization_field_limit)
 }
 
-/// Strict decode of a write: tags 1-4 only, each once, all present.
+/// Strict decode of a write: tags 1-5 only, each once, all present.
 pub fn decode_spool_write_wire(bytes: &[u8]) -> Result<SpoolWriteV1, WriteAuthorizationRefusal> {
-    strict(bytes, "spool write", 4, spool_write_field_limit)
+    strict(bytes, "spool write", 5, spool_write_field_limit)
 }
 
 #[cfg(test)]
@@ -872,7 +914,7 @@ mod tests {
     }
 
     const INSTANCE: [u8; 32] = [0x5A; 32];
-    const ADDRESS: [u8; 32] = [0xAD; 32];
+    const ROUTE: [u8; 32] = [0xAD; 32];
     const MESSAGE_ID: [u8; 16] = [0x1D; 16];
 
     /// `sender`'s offer of `write_key` to `recipient` for `instance`.
@@ -937,24 +979,22 @@ mod tests {
         }
     }
 
-    /// One write of `envelope` to `address` under `message_id`, carrying
-    /// `lock` and `grant_wire`, signed by `writer`.
+    /// One write of `envelope` to the address of `route` under `message_id`,
+    /// carrying `lock` and `grant_wire`, signed by `writer`; the address is
+    /// `route` bound to `lock`.
     fn write(
-        address: &[u8; 32],
+        route: &[u8; 32],
         message_id: &[u8; 16],
         envelope: &[u8],
         lock: &[u8],
         grant_wire: Vec<u8>,
         writer: &SphincsKeyPair,
-    ) -> Result<Vec<u8>, DsmError> {
-        let signature = sphincs_sign(
-            &writer.secret_key,
-            &spool_write_target(address, message_id, envelope),
+    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+        let address = crate::crypto::spool_address::locked_inbox_address_bytes(route, lock);
+        let bytes = signed_spool_write(
+            writer, lock, grant_wire, route, &address, message_id, envelope,
         )?;
-        Ok(
-            spool_write_wire(envelope.to_vec(), lock.to_vec(), grant_wire, signature)
-                .encode_to_vec(),
-        )
+        Ok((bytes, address))
     }
 
     #[test]
@@ -1148,45 +1188,46 @@ mod tests {
         let grant_wire = grant
             .to_wire(sphincs_sign(&lock.secret_key, &grant.signing_target())?)
             .encode_to_vec();
-        let bytes = write(
-            &ADDRESS,
+        let (bytes, address) = write(
+            &ROUTE,
             &MESSAGE_ID,
             b"sealed",
             &lock.public_key,
             grant_wire.clone(),
             &wk,
         )?;
-        let held = verify_spool_write(&bytes, &ADDRESS, &MESSAGE_ID)?;
+        let held = verify_spool_write(&bytes, &address, &MESSAGE_ID)?;
         assert_eq!(held.lock_public_key, lock.public_key);
         assert_eq!(held.envelope, b"sealed".to_vec());
-        // The same write presented for another address or id.
+        assert_eq!(held.inbox, InboxKind::Locked);
+        // The same write presented at another address, or under another id.
         assert_eq!(
             verify_spool_write(&bytes, &[0xAE; 32], &MESSAGE_ID),
-            Err(Refusal::WriteSignature)
+            Err(Refusal::WrongAddress)
         );
         assert_eq!(
-            verify_spool_write(&bytes, &ADDRESS, &[0x1E; 16]),
+            verify_spool_write(&bytes, &address, &[0x1E; 16]),
             Err(Refusal::WriteSignature)
         );
         // Its signature over other bytes.
         let mut swapped = decode_spool_write_wire(&bytes).map_err(DsmError::from)?;
         swapped.envelope = b"other".to_vec();
         assert_eq!(
-            verify_spool_write(&swapped.encode_to_vec(), &ADDRESS, &MESSAGE_ID),
+            verify_spool_write(&swapped.encode_to_vec(), &address, &MESSAGE_ID),
             Err(Refusal::WriteSignature)
         );
         // Signed by a key the lock never granted.
         let stranger = generate_keypair(WRITE_KEY_VARIANT)?;
-        let unsigned = write(
-            &ADDRESS,
+        let (unsigned, _) = write(
+            &ROUTE,
             &MESSAGE_ID,
             b"sealed",
             &lock.public_key,
-            grant_wire,
+            grant_wire.clone(),
             &stranger,
         )?;
         assert_eq!(
-            verify_spool_write(&unsigned, &ADDRESS, &MESSAGE_ID),
+            verify_spool_write(&unsigned, &address, &MESSAGE_ID),
             Err(Refusal::WriteSignature)
         );
         // A grant another lock signed, carried under this lock.
@@ -1197,8 +1238,8 @@ mod tests {
                 &grant.signing_target(),
             )?)
             .encode_to_vec();
-        let carried = write(
-            &ADDRESS,
+        let (carried, _) = write(
+            &ROUTE,
             &MESSAGE_ID,
             b"sealed",
             &lock.public_key,
@@ -1206,8 +1247,36 @@ mod tests {
             &wk,
         )?;
         assert_eq!(
-            verify_spool_write(&carried, &ADDRESS, &MESSAGE_ID),
+            verify_spool_write(&carried, &address, &MESSAGE_ID),
             Err(Refusal::GrantSignature)
+        );
+        Ok(())
+    }
+
+    /// A locked address is its route bound to the recipient's lock: a
+    /// stranger's own lock, however well it grants and signs, yields another
+    /// address, so its write is refused at this one, by derivation alone. A
+    /// write presenting the route's open address never fits a locked one.
+    #[test]
+    fn a_locked_address_takes_only_its_own_lock() -> Result<(), DsmError> {
+        let lock = generate_keypair(WRITE_KEY_VARIANT)?;
+        let locked =
+            crate::crypto::spool_address::locked_inbox_address_bytes(&ROUTE, &lock.public_key);
+        let stranger = generate_keypair(WRITE_KEY_VARIANT)?;
+        let own =
+            self_granted_spool_write(&stranger, &INSTANCE, &ROUTE, &locked, &MESSAGE_ID, b"junk")?;
+        assert_eq!(
+            verify_spool_write(&own, &locked, &MESSAGE_ID),
+            Err(Refusal::WrongAddress)
+        );
+        // The open address of the same route takes a self-granted key: the
+        // relationship's first inbox.
+        let open = crate::crypto::spool_address::open_inbox_address_bytes(&ROUTE);
+        let first =
+            self_granted_spool_write(&stranger, &INSTANCE, &ROUTE, &open, &MESSAGE_ID, b"first")?;
+        assert_eq!(
+            verify_spool_write(&first, &open, &MESSAGE_ID)?.inbox,
+            InboxKind::Open
         );
         Ok(())
     }

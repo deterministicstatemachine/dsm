@@ -262,9 +262,10 @@ const SCHEMA_DDL: &str = r#"
     );
     CREATE UNIQUE INDEX idx_inbox_spool_device_seq ON inbox_spool (device_id, seq_num);
 
-    -- Each inbox address's key (DSM Amendment A34): the write lock's public
-    -- key the address's first write carried. Immutable: never replaced,
-    -- moved or removed. Every later write there must carry the same key.
+    -- Each open inbox address's key (DSM Amendment A34): the key a
+    -- relationship's first inbox's first write carried. Immutable: never
+    -- replaced, moved or removed. A locked inbox's key is its own by
+    -- derivation and is not kept here.
     CREATE TABLE spool_key (
         device_id       TEXT PRIMARY KEY,
         lock_public_key BYTEA NOT NULL
@@ -641,6 +642,28 @@ pub async fn get_immutable_object(
 }
 
 // ===================== b0x inbox spool =====================
+
+/// Append `envelope` to a locked inbox's spool at `device_id`, whose key is
+/// its own by derivation (DSM Amendment A34): no key to fix or compare.
+pub async fn spool_append(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<LockedAppend> {
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&device_id])
+        .await?;
+    let stmt = tx
+        .prepare_cached(
+            "INSERT INTO inbox_spool(device_id, envelope, seq_num)
+             VALUES ($1, $2, COALESCE(
+               (SELECT MAX(seq_num) + 1 FROM inbox_spool WHERE device_id = $1),
+               1
+             ))
+             RETURNING seq_num",
+        )
+        .await?;
+    let seq_num: i64 = tx.query_one(&stmt, &[&device_id, &envelope]).await?.get(0);
+    tx.commit().await?;
+    Ok(LockedAppend::Appended(seq_num))
+}
 
 /// What appending a verified write came to (DSM Amendment A34).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

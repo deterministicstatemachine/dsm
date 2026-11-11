@@ -278,9 +278,31 @@ pub fn write_key() -> &'static dsm::crypto::sphincs::SphincsKeyPair {
     })
 }
 
-/// `envelope` as a write to the spool at `key` under [`write_key`], with a
-/// fresh message id: the request body and the `x-dsm-message-id` value.
+/// The route each address [`locked_spool`] made was derived from.
+fn routes() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, [u8; 32]>> {
+    static ROUTES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, [u8; 32]>>,
+    > = std::sync::OnceLock::new();
+    ok_or_panic(
+        ROUTES.get_or_init(Default::default).lock(),
+        "the test routes",
+    )
+}
+
+/// The locked inbox address of the route `[byte; 32]` under [`write_key`]:
+/// an address a write under that key can prove (DSM Amendment A34).
+pub fn locked_spool(byte: u8) -> String {
+    let route = [byte; 32];
+    let address = dsm::crypto::spool_address::locked_inbox_address(&route, &write_key().public_key);
+    routes().insert(address.clone(), route);
+    address
+}
+
+/// `envelope` as a write to `key`, an address [`locked_spool`] made, under
+/// [`write_key`], with a fresh message id: the request body and the
+/// `x-dsm-message-id` value.
 pub fn signed_write(key: &str, envelope: &[u8]) -> (Vec<u8>, String) {
+    let route = *some_or_panic(routes().get(key), "an address locked_spool made");
     let bytes = some_or_panic(
         dsm::utils::text_id::decode_base32_crockford(key),
         "a test spool key decodes",
@@ -291,6 +313,7 @@ pub fn signed_write(key: &str, envelope: &[u8]) -> (Vec<u8>, String) {
         dsm::core::relationship_write_grant::self_granted_spool_write(
             write_key(),
             &[0x5A; 32],
+            &route,
             &address,
             &message_id,
             envelope,

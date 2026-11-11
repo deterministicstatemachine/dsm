@@ -151,7 +151,11 @@ fn established_with(
         }
     };
     match client_db::relationship_state(counterparty) {
-        Ok(RelationshipState::Established) => {}
+        // Established here, or this device's own ESTABLISH in flight: its
+        // chain already holds the step, and the instance it opened is the one
+        // this device's own row records. The maker must take the other side's
+        // grant before it can finalize: its certificate goes to a locked inbox.
+        Ok(RelationshipState::Established | RelationshipState::Proposed) => {}
         Ok(state) if state.is_over() => {
             return Err(WriteAuthorizationChecked::Refused(
                 "the relationship has ended".to_string(),

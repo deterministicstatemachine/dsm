@@ -821,11 +821,12 @@ fn build_relationship_finalized_artifact(
             Ok(None) => return Err("no contact for the recipient".to_string()),
             Err(e) => return Err(format!("recipient contact lookup: {e}")),
         };
-    let route = dsm::crypto::spool_address::inbox_address(
-        &recipient_genesis,
+    let route = crate::sdk::spool_write::counterparty_inbox_address(
         &proposal.counterparty_device_id,
+        &recipient_genesis,
         &proposal.projection_target,
-    );
+    )
+    .map_err(|e| format!("the certificate's route: {e}"))?;
     let local_genesis: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
         .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
         .ok_or_else(|| "local genesis unavailable".to_string())?;

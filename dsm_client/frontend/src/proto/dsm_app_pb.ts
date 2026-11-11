@@ -24100,10 +24100,13 @@ export class RelationshipWriteAuthorizationV1 extends Message<RelationshipWriteA
 /**
  * One write to an inbox address, as a storage node receives it (DSM
  * Amendment A34): the sealed envelope it stores, the inbox's key, the key's
- * grant of the writer's key, and the writer's signature over BLAKE3 under
+ * grant of the writer's key, the writer's signature over BLAKE3 under
  * DSM/spool-write/v1 of the address (32 bytes), the message id (16 bytes)
- * and BLAKE3 under DSM/spool-write-envelope/v1 of the envelope. The node
- * stores the envelope alone.
+ * and BLAKE3 under DSM/spool-write-envelope/v1 of the envelope, and the
+ * inbox's route digest. The address is the route digest bound to the key
+ * (every inbox after a relationship's first) or the digest's open address
+ * (the first inbox, whose key its first write fixes). The node stores the
+ * envelope alone.
  *
  * @generated from message dsm.SpoolWriteV1
  */
@@ -24132,6 +24135,11 @@ export class SpoolWriteV1 extends Message<SpoolWriteV1> {
    */
   writeSignature = new Uint8Array(0);
 
+  /**
+   * @generated from field: bytes route_digest = 5;
+   */
+  routeDigest = new Uint8Array(0);
+
   constructor(data?: PartialMessage<SpoolWriteV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -24144,6 +24152,7 @@ export class SpoolWriteV1 extends Message<SpoolWriteV1> {
     { no: 2, name: "lock_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "grant", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "write_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "route_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SpoolWriteV1 {

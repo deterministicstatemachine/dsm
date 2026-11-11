@@ -1148,8 +1148,7 @@ mod tests {
             Some(paid_from.as_slice()),
             "the tip A paid from is B's previous tip with A"
         );
-        let previous_route =
-            dsm::crypto::spool_address::inbox_address(&p.b.genesis, &p.b.device_id, &paid_from);
+        let previous_route = p.b.inbox_from(&p.a, &paid_from);
         assert_eq!(
             previous_route, one.route,
             "the honest payment arrived on that route"
@@ -1413,7 +1412,7 @@ mod tests {
                 .expect("C's relationship tip with A")
         };
         let before = tip(&c);
-        let route = dsm::crypto::spool_address::inbox_address(&c.genesis, &c.device_id, &before);
+        let route = c.inbox_from(&p.a, &before);
 
         c.enter();
         let receipt = ingested(ingest_evidence_half(

@@ -254,11 +254,13 @@ fn require_protobuf(headers: &HeaderMap) -> Result<(), StatusCode> {
 /// Append a write to the spool named by `x-dsm-recipient` (Base32 Crockford
 /// of 32 bytes: an inbox address), under the message id `x-dsm-message-id`
 /// (Base32 Crockford of 16 bytes). The body is a `SpoolWriteV1`: the sealed
-/// envelope, the inbox's key, that key's grant of the writer's key, and the
-/// writer's signature over the address, the id and the envelope (DSM
-/// Amendment A34). The node checks the signatures, never opens the envelope,
-/// and stores the envelope alone. The first write at an address fixes its
-/// key; a write carrying another key is refused. The check is the same on
+/// envelope, the inbox's key, that key's grant of the writer's key, the
+/// writer's signature over the address, the id and the envelope, and the
+/// inbox's route digest (DSM Amendment A34). The address must be the route
+/// bound to the key (a locked inbox: the key is its own) or the route's open
+/// address (a relationship's first inbox: the key its first write fixed). The
+/// node checks the signatures, never opens the envelope, and stores the
+/// envelope alone. The check is the same on
 /// every node and leaves it no choice: `204 No Content` once the envelope is
 /// durably appended, `403 Forbidden` for a write that fails it.
 async fn submit_b0x_envelope(
@@ -283,15 +285,25 @@ async fn submit_b0x_envelope(
                 StatusCode::FORBIDDEN
             })?;
 
-    let appended = crate::db::spool_insert_locked(
-        &app.db_pool,
-        &recipient_spool_key,
-        &write.lock_public_key,
-        &write.envelope,
-    )
-    .await
+    // A locked inbox's key is its own by derivation: the write proved the
+    // address is its route bound to that key. An open inbox (a
+    // relationship's first) takes the key its first write fixed.
+    let appended = match write.inbox {
+        dsm::core::relationship_write_grant::InboxKind::Locked => {
+            crate::db::spool_append(&app.db_pool, &recipient_spool_key, &write.envelope).await
+        }
+        dsm::core::relationship_write_grant::InboxKind::Open => {
+            crate::db::spool_insert_locked(
+                &app.db_pool,
+                &recipient_spool_key,
+                &write.lock_public_key,
+                &write.envelope,
+            )
+            .await
+        }
+    }
     .map_err(|e| {
-        log::error!("b0x submit: spool_insert_locked failed: {e:?}");
+        log::error!("b0x submit: the append failed: {e:?}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     match appended {
@@ -544,18 +556,50 @@ mod tests {
         })
     }
 
-    /// `envelope` written to `recipient` under `key`, with a fresh message
-    /// id: the request body and the id.
+    /// The route digest each test inbox address was derived from.
+    fn routes() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, [u8; 32]>> {
+        static ROUTES: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<String, [u8; 32]>>,
+        > = std::sync::OnceLock::new();
+        ROUTES
+            .get_or_init(Default::default)
+            .lock()
+            .expect("the test routes")
+    }
+
+    /// A fresh locked inbox address: a unique route bound to the test key.
+    fn test_inbox(tag: u8) -> String {
+        let route = crate::db::test_store::unique_key(tag);
+        let address =
+            dsm::crypto::spool_address::locked_inbox_address(&route, &test_key().public_key);
+        routes().insert(address.clone(), route);
+        address
+    }
+
+    /// A fresh open inbox address: a relationship's first inbox.
+    fn test_open_inbox(tag: u8) -> String {
+        let route = crate::db::test_store::unique_key(tag);
+        let address = dsm::crypto::spool_address::open_inbox_address(&route);
+        routes().insert(address.clone(), route);
+        address
+    }
+
+    /// `envelope` written to `recipient` (an address [`test_inbox`] or
+    /// [`test_open_inbox`] made, in any spelling) under `key`, granting
+    /// itself, with a fresh message id: the request body and the id.
     fn signed(
         recipient: &str,
         envelope: &[u8],
         key: &dsm::crypto::sphincs::SphincsKeyPair,
     ) -> (Vec<u8>, String) {
-        let address = super::spool_key_bytes(recipient).expect("a test address decodes");
+        let canonical = super::canonical_spool_key(recipient).expect("a test address");
+        let route = *routes().get(&canonical).expect("a test address's route");
+        let address = super::spool_key_bytes(&canonical).expect("a test address decodes");
         let message_id: [u8; 16] = rand::random();
         let body = dsm::core::relationship_write_grant::self_granted_spool_write(
             key,
             &[0x5A; 32],
+            &route,
             &address,
             &message_id,
             envelope,
@@ -597,13 +641,38 @@ mod tests {
         submit_write(app, recipient, content_type, body, &message_id).await
     }
 
-    /// DSM Amendment A34: the first write at an address fixes its key. A
-    /// write there under another key is refused and stores nothing, however
-    /// well it is signed; a write under the fixed key is taken.
+    /// DSM Amendment A34: a locked inbox takes only its own lock, by
+    /// derivation, whatever arrives first. A stranger's well-signed write
+    /// under its own key is refused even as the first write there, and
+    /// nothing is fixed: the inbox's own key is taken afterwards.
+    #[tokio::test]
+    async fn a_locked_inbox_takes_only_its_own_lock_even_from_the_first_write() {
+        let app = spool().await;
+        let spool_key = test_inbox(0x6D);
+        let stranger =
+            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+                .expect("a stranger's key");
+        let (body, id) = signed(&spool_key, b"the stranger writes first", &stranger);
+        assert_eq!(
+            submit_write(&app, &spool_key, "application/octet-stream", body, &id).await,
+            HttpStatus::FORBIDDEN
+        );
+        let own = sealed_envelope().outer.encode_to_vec();
+        assert_eq!(
+            submit(&app, &spool_key, "application/octet-stream", own.clone()).await,
+            HttpStatus::NO_CONTENT
+        );
+        assert_eq!(spooled(&app, &spool_key).await, vec![own]);
+    }
+
+    /// DSM Amendment A34: the first write at a relationship's first inbox
+    /// (an open address) fixes its key. A write there under another key is
+    /// refused and stores nothing, however well it is signed; a write under
+    /// the fixed key is taken.
     #[tokio::test]
     async fn the_first_write_fixes_an_addresss_key_and_another_key_is_refused() {
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x6A);
+        let spool_key = test_open_inbox(0x6A);
         let first = sealed_envelope().outer.encode_to_vec();
         assert_eq!(
             submit(&app, &spool_key, "application/octet-stream", first.clone()).await,
@@ -631,8 +700,8 @@ mod tests {
     #[tokio::test]
     async fn a_write_that_does_not_verify_stores_nothing() {
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x6B);
-        let other_key = crate::db::test_store::unique_name(0x6C);
+        let spool_key = test_open_inbox(0x6B);
+        let other_key = test_inbox(0x6C);
         let envelope = sealed_envelope().outer.encode_to_vec();
         let (_, id) = signed(&spool_key, &envelope, test_key());
         assert_eq!(
@@ -726,7 +795,7 @@ mod tests {
     async fn a_submitted_envelope_is_read_back_from_its_spool() {
         use dsm::types::proto::envelope::Payload;
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x61);
+        let spool_key = test_inbox(0x61);
         let sent = sealed_envelope();
         let body = sent.outer.encode_to_vec();
         assert_eq!(
@@ -777,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn an_envelope_reusing_a_message_id_is_kept_after_the_first() {
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x65);
+        let spool_key = test_inbox(0x65);
         let first = sealed_envelope();
         let mut second = sealed_envelope();
         second.outer.message_id = first.outer.message_id.clone();
@@ -789,7 +858,7 @@ mod tests {
                 HttpStatus::NO_CONTENT
             );
         }
-        let other_key = crate::db::test_store::unique_name(0x66);
+        let other_key = test_inbox(0x66);
         assert_eq!(
             submit(&app, &other_key, "application/octet-stream", first.clone()).await,
             HttpStatus::NO_CONTENT
@@ -809,7 +878,7 @@ mod tests {
     #[tokio::test]
     async fn bytes_the_node_cannot_read_are_kept_and_returned_unopened() {
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x63);
+        let spool_key = test_inbox(0x63);
         let mut short_id = sealed_envelope();
         short_id.outer.message_id.truncate(15);
         let short_id = short_id.outer.encode_to_vec();
@@ -850,7 +919,7 @@ mod tests {
     #[tokio::test]
     async fn a_spool_reads_the_same_from_any_position_however_often_it_is_read() {
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x67);
+        let spool_key = test_inbox(0x67);
         let page_len = usize::try_from(MAX_BATCH_RETRIEVE).expect("a page length");
         let sent: Vec<Vec<u8>> = (0..page_len + 3)
             .map(|_| sealed_envelope().outer.encode_to_vec())
@@ -913,7 +982,7 @@ mod tests {
     #[tokio::test]
     async fn a_device_acknowledging_what_it_read_changes_nothing() {
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x68);
+        let spool_key = test_inbox(0x68);
         let sent = sealed_envelope();
         let body = sent.outer.encode_to_vec();
         assert_eq!(
@@ -974,7 +1043,7 @@ mod tests {
     #[tokio::test]
     async fn a_message_sent_under_another_spelling_of_its_key_reaches_its_spool() {
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x62);
+        let spool_key = test_inbox(0x62);
         let spelled = spool_key.to_ascii_lowercase();
         assert_ne!(spelled, spool_key, "the key has letters to spell otherwise");
         let body = sealed_envelope().outer.encode_to_vec();
@@ -989,7 +1058,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_spool_answers_no_content() {
         let app = spool().await;
-        let (status, bytes) = retrieve(&app, &crate::db::test_store::unique_name(0x62), 0).await;
+        let (status, bytes) = retrieve(&app, &test_inbox(0x62), 0).await;
         assert_eq!(status, HttpStatus::NO_CONTENT);
         assert!(bytes.is_empty());
     }
@@ -997,7 +1066,7 @@ mod tests {
     #[tokio::test]
     async fn v2_b0x_submit_rejects_wrong_content_type() {
         let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x64);
+        let spool_key = test_inbox(0x64);
         assert_eq!(
             submit(
                 &app,

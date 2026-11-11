@@ -35,7 +35,7 @@ async fn node(store: &str, wait_bound: Duration) -> axum::Router {
 }
 
 fn spool_key(byte: u8) -> String {
-    dsm::utils::text_id::encode_base32_crockford(&[byte; 32])
+    common::locked_spool(byte)
 }
 
 /// Submit `body` to the spool at `key`.

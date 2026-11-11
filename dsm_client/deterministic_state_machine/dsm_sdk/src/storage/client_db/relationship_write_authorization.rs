@@ -374,3 +374,46 @@ pub fn mark_write_authorization_delivered(
         Ok(())
     })
 }
+
+/// An inbox address's route digest and, for a locked inbox, the recipient's
+/// lock it is bound to (DSM Amendment A34).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboxRoute {
+    pub route_digest: [u8; 32],
+    pub lock_public_key: Option<Vec<u8>>,
+}
+
+/// Remember how `address` was derived. The same address is always the same
+/// derivation, so recording it again changes nothing.
+pub fn record_inbox_route(address: &str, route: &InboxRoute) -> Result<()> {
+    lock_conn(|conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO inbox_route(address, route_digest, lock_public_key) \
+             VALUES (?1, ?2, ?3)",
+            params![
+                address,
+                route.route_digest.as_slice(),
+                route.lock_public_key
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// How `address` was derived, if this device derived it.
+pub fn inbox_route(address: &str) -> Result<Option<InboxRoute>> {
+    lock_conn(|conn| {
+        conn.query_row(
+            "SELECT route_digest, lock_public_key FROM inbox_route WHERE address = ?1",
+            params![address],
+            |r| {
+                Ok(InboxRoute {
+                    route_digest: column_32(r, 0)?,
+                    lock_public_key: r.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+}

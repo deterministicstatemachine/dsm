@@ -622,8 +622,10 @@ fn get_database_path() -> Result<PathBuf> {
 /// is refused at open. 45 adds `contact_relationship`, where each relationship
 /// stands (DSM Amendment A33); a database made at 44 is refused at open. 46
 /// adds `relationship_write_authorization`, each relationship's write keys and
-/// grants (DSM Amendment A34); a database made at 45 is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 46;
+/// grants (DSM Amendment A34); a database made at 45 is refused at open. 47
+/// adds `inbox_route`, the route digest and lock of each inbox address this
+/// device writes to (DSM Amendment A34); a database made at 46 is refused.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 47;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1206,6 +1208,16 @@ fn create_schema(conn: &Connection) -> Result<()> {
             grant_id                 BLOB CHECK (grant_id IS NULL OR length(grant_id) = 32),
             grant_wire               BLOB,
             PRIMARY KEY (counterparty_device_id, direction)
+        );
+
+        -- Each inbox address this device writes to (DSM Amendment A34): the
+        -- route digest it was derived from, and the recipient's lock it is
+        -- bound to (NULL for a relationship's first inbox, the open address
+        -- of its route). A write proves its address from these.
+        CREATE TABLE IF NOT EXISTS inbox_route(
+            address          TEXT PRIMARY KEY,
+            route_digest     BLOB NOT NULL CHECK (length(route_digest) = 32),
+            lock_public_key  BLOB
         );
 
         -- Storage-node auth tokens are gone with writer authorization

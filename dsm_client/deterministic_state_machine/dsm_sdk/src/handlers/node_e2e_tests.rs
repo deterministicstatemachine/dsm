@@ -466,6 +466,19 @@ async fn spool_sealed(
     inner: &dsm::types::proto::Envelope,
 ) -> String {
     from.enter();
+    // The writer derives the route itself, from its own view of the
+    // relationship (DSM Amendment A34): it is the route the recipient reads.
+    let contact = crate::storage::client_db::get_contact_by_device_id(&to.device_id)
+        .expect("the writer's contacts")
+        .expect("the writer holds the recipient");
+    let tip = crate::handlers::app_router_impl::contact_relationship_tip(&contact)
+        .expect("the writer's tip with the recipient");
+    assert_eq!(
+        crate::sdk::spool_write::counterparty_inbox_address(&to.device_id, &to.genesis, &tip)
+            .expect("the writer's route"),
+        route,
+        "both sides derive the one route"
+    );
     let id = crate::util::text_id::encode_base32_crockford(&inner.message_id);
     crate::sdk::b0x_sdk::seal_for(&to.device_id, &id, &inner.encode_to_vec())
         .expect("sealed to the recipient");
@@ -510,7 +523,7 @@ fn route_with(b: &TestDevice, contact: &TestDevice) -> String {
         .expect("a contact of B's");
     let tip = crate::handlers::app_router_impl::contact_relationship_tip(record)
         .expect("a relationship tip");
-    dsm::crypto::spool_address::inbox_address(&b.genesis, &b.device_id, &tip)
+    b.inbox_from(contact, &tip)
 }
 
 /// Pre-audit item 11, the owner's ruling (2026-10-01): each inbox route has
@@ -565,7 +578,16 @@ async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through(
         .find(|k| {
             let tip = crate::handlers::app_router_impl::contact_relationship_tip(k)
                 .expect("a relationship tip");
-            dsm::crypto::spool_address::inbox_address(&p.b.genesis, &p.b.device_id, &tip) == junked
+            let writer: [u8; 32] = k.device_id.as_slice().try_into().expect("a device id");
+            let writer_genesis: [u8; 32] = k.genesis_hash.as_slice().try_into().expect("a genesis");
+            crate::sdk::spool_write::inbox_address_of(
+                (&p.b.device_id, &p.b.genesis),
+                (&writer, &writer_genesis),
+                &tip,
+                crate::sdk::spool_write::Side::Recipient,
+            )
+            .expect("the inbox address")
+                == Some(junked.clone())
         })
         .expect("the route read first is a contact's");
     let (junker, payer) = if first_read.device_id == p.a.device_id.to_vec() {

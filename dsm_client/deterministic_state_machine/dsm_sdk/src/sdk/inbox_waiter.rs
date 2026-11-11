@@ -524,7 +524,9 @@ mod tests {
         let client =
             crate::sdk::storage_node_sdk::member_client(&member.member_id, &member.endpoint)
                 .expect("a member client");
-        let address = crate::util::text_id::encode_base32_crockford(&[0x7Au8; 32]);
+        // An open inbox address (DSM Amendment A34): a write proves it from
+        // its route digest.
+        let address = dsm::crypto::spool_address::open_inbox_address(&[0x7Au8; 32]);
 
         let waiting = {
             let (client, endpoint, marks) = (
@@ -552,6 +554,7 @@ mod tests {
             &writer,
             &[0x5A; 32],
             &[0x7Au8; 32],
+            &dsm::crypto::spool_address::open_inbox_address_bytes(&[0x7Au8; 32]),
             &message_id,
             &[0x0Au8, 0x01, 0x03],
         )

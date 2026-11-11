@@ -929,9 +929,8 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
     let a_contact = client_db::get_contact_by_device_id(&p.a.device_id)
         .expect("B's contacts")
         .expect("B holds A as a contact");
-    let route = dsm::crypto::spool_address::inbox_address(
-        &p.b.genesis,
-        &p.b.device_id,
+    let route = p.b.inbox_from(
+        &p.a,
         &crate::handlers::app_router_impl::contact_relationship_tip(&a_contact)
             .expect("B's relationship tip with A"),
     );
@@ -1167,9 +1166,8 @@ async fn a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders
     let a_contact = client_db::get_contact_by_device_id(&p.a.device_id)
         .expect("B's contacts")
         .expect("B holds A as a contact");
-    let route = dsm::crypto::spool_address::inbox_address(
-        &p.b.genesis,
-        &p.b.device_id,
+    let route = p.b.inbox_from(
+        &p.a,
         &crate::handlers::app_router_impl::contact_relationship_tip(&a_contact)
             .expect("B's relationship tip with A"),
     );

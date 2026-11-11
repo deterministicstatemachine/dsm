@@ -1513,11 +1513,13 @@ impl AppRouterImpl {
                 chain_tip_arr == [0u8; 32],
             );
 
-            let routing_address = dsm::crypto::spool_address::inbox_address(
-                &recipient_genesis_raw,
+            // DSM Amendment A34: the relationship's first inbox, or the route
+            // bound to the recipient's lock this device holds the grant of.
+            let routing_address = crate::sdk::spool_write::counterparty_inbox_address(
                 &to_device_id,
+                &recipient_genesis_raw,
                 &chain_tip_arr,
-            );
+            )?;
             log::info!(
                 "[wallet.send] §16.4 Computed rotated b0x routing address: {}",
                 &routing_address[..16.min(routing_address.len())]
@@ -2296,17 +2298,38 @@ pub(crate) fn collect_tagged_inbox_addresses(
     local_device_id: [u8; 32],
     contacts: &[crate::storage::client_db::ContactRecord],
 ) -> Result<Vec<TaggedInboxAddress>, String> {
-    let address_for = |tip: &[u8; 32]| {
-        dsm::crypto::spool_address::inbox_address(&local_genesis, &local_device_id, tip)
-    };
     let mut addresses = Vec::with_capacity(contacts.len() * 2);
 
     for contact in contacts {
+        let writer: [u8; 32] = contact
+            .device_id
+            .as_slice()
+            .try_into()
+            .map_err(|e| format!("contact {}'s device id: {e}", contact.alias))?;
+        let writer_genesis: [u8; 32] = contact
+            .genesis_hash
+            .as_slice()
+            .try_into()
+            .map_err(|e| format!("contact {}'s genesis: {e}", contact.alias))?;
+        // DSM Amendment A34: the relationship's first inbox, or the route bound
+        // to this device's own lock; an address whose lock this device has not
+        // issued yet holds nothing to read.
+        let address_for = |tip: &[u8; 32]| {
+            crate::sdk::spool_write::inbox_address_of(
+                (&local_device_id, &local_genesis),
+                (&writer, &writer_genesis),
+                tip,
+                crate::sdk::spool_write::Side::Recipient,
+            )
+            .map_err(|e| format!("contact {}'s inbox address: {e}", contact.alias))
+        };
         let current_tip = contact_relationship_tip(contact)?;
-        addresses.push(TaggedInboxAddress {
-            address: address_for(&current_tip),
-            freshness: RouteFreshness::Current,
-        });
+        if let Some(address) = address_for(&current_tip)? {
+            addresses.push(TaggedInboxAddress {
+                address,
+                freshness: RouteFreshness::Current,
+            });
+        }
 
         if let Some(prev_tip_bytes) = contact.previous_chain_tip.as_deref() {
             let prev_tip: [u8; 32] = prev_tip_bytes.try_into().map_err(|_| {
@@ -2317,10 +2340,12 @@ pub(crate) fn collect_tagged_inbox_addresses(
                 )
             })?;
             if prev_tip != current_tip {
-                addresses.push(TaggedInboxAddress {
-                    address: address_for(&prev_tip),
-                    freshness: RouteFreshness::PreviousTip,
-                });
+                if let Some(address) = address_for(&prev_tip)? {
+                    addresses.push(TaggedInboxAddress {
+                        address,
+                        freshness: RouteFreshness::PreviousTip,
+                    });
+                }
             }
         }
 
@@ -2335,10 +2360,12 @@ pub(crate) fn collect_tagged_inbox_addresses(
                 )
             })?;
             if next_tip != current_tip {
-                addresses.push(TaggedInboxAddress {
-                    address: address_for(&next_tip),
-                    freshness: RouteFreshness::Current,
-                });
+                if let Some(address) = address_for(&next_tip)? {
+                    addresses.push(TaggedInboxAddress {
+                        address,
+                        freshness: RouteFreshness::Current,
+                    });
+                }
             }
         }
     }
@@ -3060,7 +3087,14 @@ mod tests {
         init_test_db();
         let genesis = [0x66u8; 32];
         let device = [0x77u8; 32];
-        let stored_tip = [0x5Au8; 32];
+        // The relationship's first tip: its first inbox is the open address
+        // of its route (DSM Amendment A34).
+        let stored_tip = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+            &device,
+            &genesis,
+            &[0x88u8; 32],
+            &[0x99u8; 32],
+        );
 
         let contact = ContactRecord {
             contact_id: "c_test".to_string(),
@@ -3080,7 +3114,9 @@ mod tests {
         };
 
         let addresses = inbox_addresses(genesis, device, &[contact]);
-        let expected = dsm::crypto::spool_address::inbox_address(&genesis, &device, &stored_tip);
+        let expected = dsm::crypto::spool_address::open_inbox_address(
+            &dsm::crypto::spool_address::inbox_route_digest(&genesis, &device, &stored_tip),
+        );
 
         assert_eq!(addresses, vec![expected]);
     }
@@ -3233,8 +3269,13 @@ mod tests {
         };
 
         let recipient_addresses = inbox_addresses(bob_genesis, bob_device, &[alice_as_bob_contact]);
-        let sender_route =
-            dsm::crypto::spool_address::inbox_address(&bob_genesis, &bob_device, &initial_tip);
+        let sender_route = dsm::crypto::spool_address::open_inbox_address(
+            &dsm::crypto::spool_address::inbox_route_digest(
+                &bob_genesis,
+                &bob_device,
+                &initial_tip,
+            ),
+        );
 
         assert!(
             recipient_addresses.contains(&sender_route),
@@ -3347,6 +3388,12 @@ mod tests {
         init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
+        let first_tip = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+            &device,
+            &genesis,
+            &[0xEEu8; 32],
+            &[0xFFu8; 32],
+        );
 
         let contact = ContactRecord {
             contact_id: "c_projection".to_string(),
@@ -3362,10 +3409,19 @@ mod tests {
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            previous_chain_tip: Some([0xDDu8; 32].to_vec()),
+            previous_chain_tip: Some(first_tip.to_vec()),
         };
 
+        // The previous tip is the relationship's first: its open inbox is read.
+        // The current tip's inbox is bound to the lock this device issues its
+        // contact (DSM Amendment A34); none issued, nothing can be there yet,
+        // and it is not read.
         let strings = inbox_addresses(genesis, device, &[contact]);
-        assert_eq!(strings.len(), 2);
+        assert_eq!(
+            strings,
+            vec![dsm::crypto::spool_address::open_inbox_address(
+                &dsm::crypto::spool_address::inbox_route_digest(&genesis, &device, &first_tip),
+            )]
+        );
     }
 }

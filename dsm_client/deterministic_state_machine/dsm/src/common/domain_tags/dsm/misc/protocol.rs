@@ -191,6 +191,13 @@ pub const TAG_DSM_RELATIONSHIP_INSTANCE: TaggedHashDomain<'static> =
 /// (DSM Amendment A34).
 pub const TAG_DSM_RELATIONSHIP_WRITE_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-write-key/v1");
+/// An inbox's route digest: the recipient's genesis, device and tip, each
+/// hashed on its own axis (DSM Amendment A34).
+pub const TAG_DSM_B0X_ROUTE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-route/v1");
+/// A locked inbox address: a route digest bound to the recipient's write
+/// lock (DSM Amendment A34).
+pub const TAG_DSM_B0X_LOCKED: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-locked/v1");
 /// The seed of a relationship's write lock, keyed by the recipient's master
 /// seed (DSM Amendment A34).
 pub const TAG_DSM_RELATIONSHIP_WRITE_LOCK: TaggedHashDomain<'static> =

@@ -267,6 +267,22 @@ impl TestDevice {
         );
     }
 
+    /// This device's inbox for `writer`'s writes at the relationship's tip
+    /// `tip` (DSM Amendment A34): the first inbox's open address, or the route
+    /// bound to the lock this device issued `writer`. Leaves this device
+    /// entered.
+    pub fn inbox_from(&self, writer: &TestDevice, tip: &[u8; 32]) -> String {
+        self.enter();
+        crate::sdk::spool_write::inbox_address_of(
+            (&self.device_id, &self.genesis),
+            (&writer.device_id, &writer.genesis),
+            tip,
+            crate::sdk::spool_write::Side::Recipient,
+        )
+        .expect("the inbox address")
+        .expect("this device issued the writer its lock")
+    }
+
     /// This device's per-step EK chain head secret on its relationship with
     /// `peer`: the key its next step's EK is certified by. After the
     /// relationship's ESTABLISH step it is never the AK (DSM Amendment A33).

@@ -58,7 +58,7 @@ type HeldBody = futures::channel::mpsc::Sender<Result<Bytes, std::io::Error>>;
 /// back for as long as it is kept, and the write it is meant to carry.
 fn held_submission() -> (HeldBody, Request<Body>, Vec<u8>) {
     let (sender, body) = futures::channel::mpsc::channel(1);
-    let recipient = dsm::utils::text_id::encode_base32_crockford(&[0x5Au8; 32]);
+    let recipient = common::locked_spool(0x5A);
     let (write, message_id) = common::signed_write(&recipient, b"a held envelope");
     let request = common::ok_or_panic(
         Request::builder()
@@ -611,7 +611,7 @@ fn a_response_nobody_reads_ends_its_connection_once_its_write_stalls() {
     common::runtime().block_on(async {
         let app = node("rl_write_stall", limits(256, Duration::from_secs(60))).await;
         // A spool holding a full retrieve batch of large envelopes.
-        let spool = dsm::utils::text_id::encode_base32_crockford(&[0x5Cu8; 32]);
+        let spool = common::locked_spool(0x5C);
         let envelope = vec![0xE5u8; 120 * 1024];
         for _ in 0..dsm::spool::MAX_BATCH_RETRIEVE {
             let (write, message_id) = common::signed_write(&spool, &envelope);

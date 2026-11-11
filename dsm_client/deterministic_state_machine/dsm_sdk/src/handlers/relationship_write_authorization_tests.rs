@@ -314,12 +314,11 @@ async fn an_offer_or_grant_for_another_device_is_refused() {
         .is_empty());
 }
 
-/// DSM Amendment A34, the write lock: a member refuses a write into an inbox
-/// under any key but the one the inbox's first write fixed there, and takes
-/// the inbox's own writer. A pays B; a delivery lands on a quorum of the
-/// set, and each member it reached fixed the inbox's key at that write. A
-/// stranger then writes to that inbox under a key of its own, well signed:
-/// every one of those members answers 403. B is still paid.
+/// DSM Amendment A34, the write lock: every node refuses a write into an
+/// inbox under any key but the recipient's lock, by derivation alone. A pays
+/// B; a stranger who somehow learned the route A's payment took writes to
+/// that inbox under a key of its own, well signed: every member answers 403,
+/// the ones A's delivery never reached included. B is still paid.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_write_into_an_inbox_under_another_key_is_refused_by_every_node() {
@@ -341,6 +340,13 @@ async fn a_write_into_an_inbox_under_another_key_is_refused_by_every_node() {
         )
         .expect("the payment's route")
     };
+    let derived = client_db::inbox_route(&route)
+        .expect("the route store")
+        .expect("A derived the route");
+    assert!(
+        derived.lock_public_key.is_some(),
+        "the payment's inbox is bound to B's lock"
+    );
     let address = <[u8; 32]>::try_from(
         crate::util::text_id::decode_base32_crockford(&route)
             .expect("the route decodes")
@@ -352,23 +358,13 @@ async fn a_write_into_an_inbox_under_another_key_is_refused_by_every_node() {
     let write = dsm::core::relationship_write_grant::self_granted_spool_write(
         &stranger,
         &[0x5A; 32],
+        &derived.route_digest,
         &address,
         &message_id,
         b"a stranger's bytes",
     )
     .expect("a signed write");
-    let mut holding = 0usize;
     for node in &p.nodes.nodes {
-        let client = node.pool().get().await.expect("the member's database");
-        let fixed = client
-            .query_opt("SELECT 1 FROM spool_key WHERE device_id = $1", &[&route])
-            .await
-            .expect("the member's keys")
-            .is_some();
-        if !fixed {
-            continue;
-        }
-        holding += 1;
         let member = crate::sdk::storage_node_sdk::member_client(&node.member_id, &node.endpoint)
             .expect("a member client");
         let answer = member
@@ -390,10 +386,6 @@ async fn a_write_into_an_inbox_under_another_key_is_refused_by_every_node() {
             node.endpoint
         );
     }
-    assert!(
-        holding >= crate::economic_fixtures::canonical_quorum(),
-        "the payment fixed the inbox's key on a quorum of members: {holding}"
-    );
 
     for _ in 0..6 {
         p.b.sync().await;
