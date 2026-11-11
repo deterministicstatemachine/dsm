@@ -1,0 +1,312 @@
+/* The DSM look for the guide: the Modern wallet's palette
+   (dsm_client/frontend/src/styles/modern.css). Dark: black, white, fuchsia
+   #ff1f6d, gold #ffd21f. Light: white, near-black, fuchsia #e8135a, gold
+   #ffc400 and deep gold #b98900. mdBook's own themes are recoloured, so every
+   choice in the theme menu stays on the palette. */
+
+:root {
+    /* Wide enough for the terminal screenshots to read at a glance. */
+    --content-max-width: 880px;
+}
+
+.coal, .navy, .ayu {
+    --bg: #0a0a0a;
+    --fg: #ededed;
+
+    --sidebar-bg: #111111;
+    --sidebar-fg: #a3a3a3;
+    --sidebar-non-existant: #5c5c5c;
+    --sidebar-active: #ff1f6d;
+    --sidebar-spacer: #2a2a2a;
+    --sidebar-header-border-color: #ff1f6d;
+
+    --scrollbar: #3a3a3a;
+
+    --icons: #a3a3a3;
+    --icons-hover: #ffffff;
+
+    --links: #ff1f6d;
+
+    --inline-code-color: #ffd21f;
+
+    --theme-popup-bg: #161616;
+    --theme-popup-border: #2a2a2a;
+    --theme-hover: #222222;
+
+    --quote-bg: #161616;
+    --quote-border: #2a2a2a;
+
+    --warning-border: #ffd21f;
+
+    --table-border-color: #2a2a2a;
+    --table-header-bg: #222222;
+    --table-alternate-bg: #121212;
+
+    --searchbar-border-color: #2a2a2a;
+    --searchbar-bg: #161616;
+    --searchbar-fg: #ffffff;
+    --searchbar-shadow-color: #ff1f6d;
+    --searchresults-header-fg: #a3a3a3;
+    --searchresults-border-color: #2a2a2a;
+    --searchresults-li-bg: #161616;
+    --search-mark-bg: #ff1f6d;
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(68%) sepia(0%) saturate(0%) brightness(95%);
+    --copy-button-filter-hover: invert(27%) sepia(96%) saturate(4370%) hue-rotate(332deg) brightness(101%) contrast(104%);
+
+    --footnote-highlight: #ff1f6d;
+    --overlay-bg: rgba(0, 0, 0, 0.55);
+
+    --blockquote-note-color: #a3a3a3;
+    --blockquote-tip-color: #ffd21f;
+    --blockquote-important-color: #ff1f6d;
+    --blockquote-warning-color: #ffd21f;
+    --blockquote-caution-color: #ff1f6d;
+
+    --dsm-surface: #161616;
+    --dsm-line: #2a2a2a;
+    --dsm-muted: #a3a3a3;
+    --dsm-accent: #ff1f6d;
+    --dsm-gold: #ffd21f;
+}
+
+.light, .rust, html:not(.js) {
+    --bg: #ffffff;
+    --fg: #0f0f0f;
+
+    --sidebar-bg: #fffbea;
+    --sidebar-fg: #2b2b2b;
+    --sidebar-non-existant: #9a9a9a;
+    --sidebar-active: #e8135a;
+    --sidebar-spacer: #efe4c2;
+    --sidebar-header-border-color: #e8135a;
+
+    --scrollbar: #c9c9c9;
+
+    --icons: #5f5f5f;
+    --icons-hover: #0f0f0f;
+
+    --links: #e8135a;
+
+    --inline-code-color: #8a6400;
+
+    --theme-popup-bg: #ffffff;
+    --theme-popup-border: #efe4c2;
+    --theme-hover: #fff4c4;
+
+    --quote-bg: #fffbea;
+    --quote-border: #efe4c2;
+
+    --warning-border: #ffc400;
+
+    --table-border-color: #efe4c2;
+    --table-header-bg: #fff4c4;
+    --table-alternate-bg: #fffdf5;
+
+    --searchbar-border-color: #efe4c2;
+    --searchbar-bg: #ffffff;
+    --searchbar-fg: #0f0f0f;
+    --searchbar-shadow-color: #ffc400;
+    --searchresults-header-fg: #5f5f5f;
+    --searchresults-border-color: #efe4c2;
+    --searchresults-li-bg: #fffbea;
+    --search-mark-bg: #ffd84a;
+
+    --color-scheme: light;
+
+    --copy-button-filter: invert(38%) sepia(0%) saturate(0%) brightness(95%);
+    --copy-button-filter-hover: invert(17%) sepia(92%) saturate(5000%) hue-rotate(330deg) brightness(92%) contrast(101%);
+
+    --footnote-highlight: #e8135a;
+    --overlay-bg: rgba(0, 0, 0, 0.25);
+
+    --blockquote-note-color: #5f5f5f;
+    --blockquote-tip-color: #b98900;
+    --blockquote-important-color: #e8135a;
+    --blockquote-warning-color: #b98900;
+    --blockquote-caution-color: #e8135a;
+
+    --dsm-surface: #fffbea;
+    --dsm-line: #efe4c2;
+    --dsm-muted: #5f5f5f;
+    --dsm-accent: #e8135a;
+    --dsm-gold: #b98900;
+}
+
+/* Code: dark panels in the dark themes, warm ones in the light; tokens in the
+   palette's own colours. */
+.coal pre, .navy pre, .ayu pre,
+.coal pre > .hljs, .navy pre > .hljs, .ayu pre > .hljs {
+    background: #161616;
+    color: #ededed;
+}
+.coal :not(pre):not(a) > .hljs, .navy :not(pre):not(a) > .hljs, .ayu :not(pre):not(a) > .hljs {
+    background: #161616;
+    color: var(--inline-code-color);
+}
+.coal .hljs-keyword, .navy .hljs-keyword, .ayu .hljs-keyword,
+.coal .hljs-built_in, .navy .hljs-built_in, .ayu .hljs-built_in,
+.coal .hljs-selector-tag, .navy .hljs-selector-tag, .ayu .hljs-selector-tag,
+.coal .hljs-type, .navy .hljs-type, .ayu .hljs-type {
+    color: #ff1f6d;
+}
+.coal .hljs-string, .navy .hljs-string, .ayu .hljs-string,
+.coal .hljs-number, .navy .hljs-number, .ayu .hljs-number,
+.coal .hljs-literal, .navy .hljs-literal, .ayu .hljs-literal,
+.coal .hljs-attr, .navy .hljs-attr, .ayu .hljs-attr,
+.coal .hljs-symbol, .navy .hljs-symbol, .ayu .hljs-symbol {
+    color: #ffd21f;
+}
+.coal .hljs-comment, .navy .hljs-comment, .ayu .hljs-comment,
+.coal .hljs-quote, .navy .hljs-quote, .ayu .hljs-quote,
+.coal .hljs-meta, .navy .hljs-meta, .ayu .hljs-meta {
+    color: #8c8c8c;
+    font-style: italic;
+}
+.coal .hljs-title, .navy .hljs-title, .ayu .hljs-title,
+.coal .hljs-function, .navy .hljs-function, .ayu .hljs-function,
+.coal .hljs-variable, .navy .hljs-variable, .ayu .hljs-variable,
+.coal .hljs-params, .navy .hljs-params, .ayu .hljs-params,
+.coal .hljs-property, .navy .hljs-property, .ayu .hljs-property {
+    color: #ffffff;
+}
+
+.light pre, .rust pre,
+.light pre > .hljs, .rust pre > .hljs {
+    background: #fffbea;
+    color: #0f0f0f;
+}
+.light :not(pre):not(a) > .hljs, .rust :not(pre):not(a) > .hljs {
+    background: #fff4c4;
+    color: var(--inline-code-color);
+}
+.light .hljs-keyword, .rust .hljs-keyword,
+.light .hljs-built_in, .rust .hljs-built_in,
+.light .hljs-selector-tag, .rust .hljs-selector-tag,
+.light .hljs-type, .rust .hljs-type {
+    color: #c80f4d;
+}
+.light .hljs-string, .rust .hljs-string,
+.light .hljs-number, .rust .hljs-number,
+.light .hljs-literal, .rust .hljs-literal,
+.light .hljs-attr, .rust .hljs-attr,
+.light .hljs-symbol, .rust .hljs-symbol {
+    color: #8a6400;
+}
+.light .hljs-comment, .rust .hljs-comment,
+.light .hljs-quote, .rust .hljs-quote,
+.light .hljs-meta, .rust .hljs-meta {
+    color: #6f6f6f;
+    font-style: italic;
+}
+.light .hljs-title, .rust .hljs-title,
+.light .hljs-function, .rust .hljs-function,
+.light .hljs-variable, .rust .hljs-variable,
+.light .hljs-params, .rust .hljs-params,
+.light .hljs-property, .rust .hljs-property {
+    color: #0f0f0f;
+}
+
+pre {
+    border: 1px solid var(--dsm-line);
+    border-radius: 10px;
+}
+
+/* Headings: the slides' rule under each page title. */
+.content main > h1:first-of-type,
+.content main > h1 {
+    padding-bottom: 0.35em;
+    border-bottom: 3px solid transparent;
+    border-image: linear-gradient(90deg, var(--dsm-accent), var(--dsm-gold)) 1;
+}
+
+/* The wordmark on the first page: white DSM over the fuchsia line over the
+   gold name. It is white, so it always sits on black. */
+.dsm-hero {
+    background: #0a0a0a;
+    border: 1px solid #2a2a2a;
+    border-radius: 14px;
+    padding: 28px 24px;
+    margin: 0 0 1.5em;
+    text-align: center;
+}
+.dsm-hero img {
+    max-width: min(420px, 100%);
+    height: auto;
+}
+
+/* Phone screenshots, side by side, wrapping on a narrow window. */
+.shots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin: 1em 0 1.5em;
+}
+.shots figure {
+    margin: 0;
+    flex: 0 1 210px;
+    max-width: 210px;
+}
+.shots img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 14px;
+    border: 1px solid var(--dsm-line);
+}
+.shots figcaption {
+    margin-top: 6px;
+    font-size: 0.85em;
+    line-height: 1.35;
+    color: var(--dsm-muted);
+}
+
+/* Terminal screenshots: full width, framed like a code block. */
+.term {
+    margin: 1em 0 1.5em;
+}
+.term img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 10px;
+    border: 1px solid var(--dsm-line);
+    background: #000000;
+}
+.term figcaption {
+    margin-top: 6px;
+    font-size: 0.85em;
+    color: var(--dsm-muted);
+}
+
+/* A row of boxes and arrows, like the slides' diagrams. */
+.flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 8px;
+    margin: 1em 0 1.5em;
+}
+.flow span {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 10px 14px;
+    border: 1px solid var(--dsm-line);
+    border-radius: 10px;
+    background: var(--dsm-surface);
+    font-size: 0.9em;
+    line-height: 1.3;
+}
+.flow span.here {
+    border-color: var(--dsm-accent);
+}
+.flow i {
+    display: flex;
+    align-items: center;
+    font-style: normal;
+    color: var(--dsm-gold);
+}
