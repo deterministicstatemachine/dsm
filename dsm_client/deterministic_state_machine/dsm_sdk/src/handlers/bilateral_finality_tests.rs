@@ -24,13 +24,19 @@ use dsm::types::proto as generated;
 use prost::Message;
 use serial_test::serial;
 
-/// `SELECT COUNT(*) FROM {table} WHERE relationship_key = ?` on the ENTERED
-/// device's database.
+/// The rows of `table` for `rel` on the ENTERED device's database that
+/// belong to steps moving value: a lifecycle step's rows are not counted.
 fn rows_for_relationship(table: &str, rel: &[u8; 32]) -> i64 {
     let binding = cdb::get_connection().expect("conn");
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    // A relationship's lifecycle steps (DSM Amendment A33) are journaled as
+    // moving no value; the counts here are of the steps that move value.
     conn.query_row(
-        &format!("SELECT COUNT(*) FROM {table} WHERE relationship_key = ?1"),
+        &format!(
+            "SELECT COUNT(*) FROM {table} t WHERE t.relationship_key = ?1 AND NOT EXISTS \
+             (SELECT 1 FROM acceptance_fold_journal j WHERE j.relationship_key = \
+             t.relationship_key AND j.parent_tip = t.parent_tip AND j.moves_value = 0)"
+        ),
         rusqlite::params![rel.as_slice()],
         |r| r.get::<_, i64>(0),
     )
@@ -44,7 +50,9 @@ fn proposal_statuses(rel: &[u8; 32]) -> Vec<String> {
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn
         .prepare(
-            "SELECT status FROM sender_online_proposal WHERE relationship_key = ?1 ORDER BY rowid",
+            // A lifecycle step's proposal names no token (DSM Amendment A33).
+            "SELECT status FROM sender_online_proposal WHERE relationship_key = ?1 \
+             AND token_id != '' ORDER BY rowid",
         )
         .expect("prepare");
     stmt.query_map(rusqlite::params![rel.as_slice()], |r| r.get::<_, String>(0))
@@ -61,7 +69,7 @@ fn proposal_children(rel: &[u8; 32]) -> Vec<[u8; 32]> {
     let mut stmt = conn
         .prepare(
             "SELECT canonical_child FROM sender_online_proposal WHERE relationship_key = ?1 \
-             ORDER BY rowid",
+             AND token_id != '' ORDER BY rowid",
         )
         .expect("prepare");
     stmt.query_map(rusqlite::params![rel.as_slice()], |r| {
@@ -80,8 +88,12 @@ fn applied_signed_parents(rel: &[u8; 32]) -> Vec<[u8; 32]> {
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn
         .prepare(
-            "SELECT parent_tip FROM canonical_apply_identity WHERE relationship_key = ?1 \
-             ORDER BY rowid",
+            // The transfers' applies: a lifecycle step (DSM Amendment A33) is
+            // journaled as moving no value.
+            "SELECT t.parent_tip FROM canonical_apply_identity t WHERE t.relationship_key = ?1 \
+             AND NOT EXISTS (SELECT 1 FROM acceptance_fold_journal j WHERE \
+             j.relationship_key = t.relationship_key AND j.parent_tip = t.parent_tip \
+             AND j.moves_value = 0) ORDER BY t.rowid",
         )
         .expect("prepare");
     stmt.query_map(rusqlite::params![rel.as_slice()], |r| {
@@ -98,7 +110,14 @@ fn outbox_statuses(rel: &[u8; 32]) -> Vec<String> {
     let binding = cdb::get_connection().expect("conn");
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn
-        .prepare("SELECT status FROM sender_outbox WHERE relationship_key = ?1 ORDER BY rowid")
+        // A lifecycle step's outbox row (DSM Amendment A33) is its proposal's,
+        // which names no token: only the transfers' rows are counted.
+        .prepare(
+            "SELECT o.status FROM sender_outbox o WHERE o.relationship_key = ?1 AND NOT \
+             EXISTS (SELECT 1 FROM sender_online_proposal p WHERE p.relationship_key = \
+             o.relationship_key AND p.commitment = o.commitment AND p.token_id = '') \
+             ORDER BY o.rowid",
+        )
         .expect("prepare");
     stmt.query_map(rusqlite::params![rel.as_slice()], |r| r.get::<_, String>(0))
         .expect("query")

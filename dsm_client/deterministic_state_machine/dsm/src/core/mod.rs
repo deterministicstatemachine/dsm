@@ -32,6 +32,7 @@ pub mod contact_manager;
 pub mod error;
 pub mod identity;
 pub mod relationship_lifecycle;
+pub mod relationship_write_grant;
 // security module deleted: bilateral_control (BilateralControlResistance +
 // DecentralizedStorage trait + heuristic pattern detectors) was a §29 attack-
 // probability suspicious-pattern detector built around &[State] walks. Under

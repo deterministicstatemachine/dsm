@@ -1474,9 +1474,12 @@ mod tests {
             honest.devid_a,
             "the harness's A is seed 0x0A"
         );
-        // As A's wallet signs a wallet.send receipt: the relationship's
-        // first per-step EK, certified by A's AK, answering the commitment
-        // bound to itself.
+        // As A's wallet signs a wallet.send receipt: a per-step EK certified
+        // by A's chain head on the relationship (after the ESTABLISH step,
+        // never its AK: DSM Amendment A33), answering the commitment bound to
+        // itself.
+        let a_head = p.a.chain_head_sk(&p.b);
+        p.b.enter();
         let signed_by_a = |mut r: StitchedReceiptV2| -> Vec<u8> {
             let commitment = r.compute_commitment().expect("the commitment");
             let target = compute_receipt_challenge_response_target(&commitment, &commitment);
@@ -1486,7 +1489,7 @@ mod tests {
                 &r.transition_entropy,
             )
             .expect("the step's C_pre");
-            let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
+            let answer = a.answer_after(&b, &r.parent_tip, &c_pre, &target, &a_head);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
             r.add_sig_a(answer.sig);
@@ -1936,6 +1939,10 @@ mod tests {
         let honest =
             StitchedReceiptV2::from_canonical_protobuf(&one.evidence_bytes).expect("the receipt");
         let (a, b) = (Party::from_seed(0x0A), Party::from_seed(0x0B));
+        // A's step is certified by A's chain head, not its AK, after the
+        // ESTABLISH step (DSM Amendment A33).
+        let a_head = p.a.chain_head_sk(&p.b);
+        p.b.enter();
         let signed_by_a = |mut r: StitchedReceiptV2| -> Vec<u8> {
             let commitment = r.compute_commitment().expect("the commitment");
             let target = compute_receipt_challenge_response_target(&commitment, &commitment);
@@ -1945,7 +1952,7 @@ mod tests {
                 &r.transition_entropy,
             )
             .expect("the step's C_pre");
-            let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
+            let answer = a.answer_after(&b, &r.parent_tip, &c_pre, &target, &a_head);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
             r.add_sig_a(answer.sig);

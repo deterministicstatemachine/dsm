@@ -2514,6 +2514,7 @@ impl AppRouterImpl {
         let mut taken = CopiesTaken::default();
         let mut resyncs_answered = std::collections::BTreeSet::<[u8; 32]>::new();
         let mut boundary_notices = Vec::new();
+        let mut write_authorizations = Vec::new();
         let mut pulled = 0usize;
         // Routes read to full coverage, routes read partially, and routes no
         // member answered for. Only the first kind says "nothing more there".
@@ -2637,6 +2638,12 @@ impl AppRouterImpl {
                         .into_iter()
                         .map(|notice| (tagged.address.clone(), notice)),
                 );
+                write_authorizations.extend(
+                    route_sdk
+                        .take_write_authorizations()
+                        .into_iter()
+                        .map(|message| (tagged.address.clone(), message)),
+                );
 
                 let (polled, read_on) = match retrieved {
                     Ok(outcome) => {
@@ -2755,6 +2762,13 @@ impl AppRouterImpl {
         self.complete_split_transfers(&mut b0x_sdk, &mut report)
             .await;
 
+        // A relationship's write keys and grants (DSM Amendment A34), read
+        // after the steps: an ESTABLISH applied or finalized in this sync has
+        // made its instance, so the offer or grant read with it is answered
+        // in the same pass.
+        self.take_in_write_authorizations(write_authorizations, &mut report)
+            .await;
+
         // Payments received offline wait in the offline balance for their unload
         // (`wallet.unloadReceived`, owner 2026-11-07): the sync moves none of them.
 
@@ -2809,6 +2823,57 @@ impl AppRouterImpl {
             ));
         }
         Ok(report)
+    }
+
+    /// The write-key offers and write grants this sync read (DSM Amendment
+    /// A34). One answered or recorded is passed over by its content; one not
+    /// yet answerable, on a relationship not established here, is left on
+    /// its route and read again; one that never will be is passed over.
+    async fn take_in_write_authorizations(
+        &self,
+        messages: Vec<(String, crate::sdk::b0x_sdk::WriteAuthorizationMessage)>,
+        report: &mut StorageSyncReport,
+    ) {
+        use crate::handlers::relationship_write_authorization::WriteAuthorizationChecked;
+        let mut passed_over: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (address, message) in messages {
+            let checked =
+                if message.method == crate::sdk::b0x_sdk::RELATIONSHIP_WRITE_KEY_OFFER_METHOD {
+                    self.take_in_write_key_offer(&message.body).await
+                } else {
+                    self.take_in_write_grant(&message.body)
+                };
+            match checked {
+                WriteAuthorizationChecked::Done => passed_over
+                    .entry(address)
+                    .or_default()
+                    .push(message.copy_key),
+                // Not yet, and nothing wrong: read again on the next sync.
+                WriteAuthorizationChecked::NotEstablished(why) => {
+                    log::info!("[storage.sync] {} not answered yet: {why}", message.method);
+                }
+                WriteAuthorizationChecked::Refused(why) => {
+                    report
+                        .errors
+                        .push(format!("{} refused: {why}; passed over", message.method));
+                    passed_over
+                        .entry(address)
+                        .or_default()
+                        .push(message.copy_key);
+                }
+            }
+        }
+        for (route, copy_keys) in passed_over {
+            if let Err(e) =
+                crate::storage::client_db::b0x_consumed::record_passed_over(&route, &copy_keys)
+            {
+                report.errors.push(format!(
+                    "pass over copies on {}..: {e}",
+                    short_route(&route)
+                ));
+            }
+        }
     }
 
     /// §16.6 sender finalization from the countersign deltas this poll
@@ -2962,6 +3027,12 @@ impl AppRouterImpl {
         // boundaries, a failed delivery and a contact added since alike.
         report.errors.extend(
             self.tell_contacts_of_offline_boundaries(storage_endpoints)
+                .await,
+        );
+        // DSM Amendment A34: the offers and grants this device froze and has
+        // not delivered.
+        report.errors.extend(
+            self.deliver_owed_write_authorizations(storage_endpoints, None)
                 .await,
         );
         match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {

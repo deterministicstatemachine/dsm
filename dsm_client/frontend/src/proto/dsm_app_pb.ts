@@ -23799,6 +23799,191 @@ export class RelationshipFinalizedV1 extends Message<RelationshipFinalizedV1> {
 }
 
 /**
+ * A sender's relationship write key, offered to the recipient once the
+ * relationship is established on the sender (DSM Amendment A34). The body is
+ * fields 1-5; the sender's AK signs it under DSM/relationship-write-key-binding/v1
+ * (the key is the sender's, for this relationship instance and this recipient)
+ * and the write key signs it under DSM/relationship-write-key-possession/v1
+ * (its holder has the secret). The key is never the sender's AK. Method
+ * `relationship.writeKeyOffer.v1` on the relationship's route.
+ *
+ * @generated from message dsm.RelationshipWriteKeyOfferV1
+ */
+export class RelationshipWriteKeyOfferV1 extends Message<RelationshipWriteKeyOfferV1> {
+  /**
+   * big-endian 1
+   *
+   * @generated from field: bytes version = 1;
+   */
+  version = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes relationship_instance_id = 2;
+   */
+  relationshipInstanceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes sender_device_id = 3;
+   */
+  senderDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_device_id = 4;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ SPX256f
+   *
+   * @generated from field: bytes write_public_key = 5;
+   */
+  writePublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes possession_signature = 6;
+   */
+  possessionSignature = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes binding_signature = 7;
+   */
+  bindingSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RelationshipWriteKeyOfferV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RelationshipWriteKeyOfferV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "version", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "relationship_instance_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "sender_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "write_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "possession_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "binding_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RelationshipWriteKeyOfferV1 {
+    return new RelationshipWriteKeyOfferV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RelationshipWriteKeyOfferV1 {
+    return new RelationshipWriteKeyOfferV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RelationshipWriteKeyOfferV1 {
+    return new RelationshipWriteKeyOfferV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RelationshipWriteKeyOfferV1 | PlainMessage<RelationshipWriteKeyOfferV1> | undefined, b: RelationshipWriteKeyOfferV1 | PlainMessage<RelationshipWriteKeyOfferV1> | undefined): boolean {
+    return proto3.util.equals(RelationshipWriteKeyOfferV1, a, b);
+  }
+}
+
+/**
+ * A recipient's grant of write authority over its inbox for one relationship
+ * instance to one sender's write key (DSM Amendment A34). `grant_id` is
+ * BLAKE3 under DSM/relationship-write-grant-id/v1 over fields 1-7; the
+ * recipient's AK signs BLAKE3 under DSM/relationship-write-grant/v1 over
+ * fields 1-8, in tag order. It authorizes writes to the recipient's inbox for
+ * that relationship instance and nothing else: no step, no value, no other
+ * relationship, no other namespace, no delegation. Method
+ * `relationship.writeGrant.v1` on the relationship's route.
+ *
+ * @generated from message dsm.RelationshipWriteGrantV1
+ */
+export class RelationshipWriteGrantV1 extends Message<RelationshipWriteGrantV1> {
+  /**
+   * big-endian 1
+   *
+   * @generated from field: bytes version = 1;
+   */
+  version = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes relationship_instance_id = 2;
+   */
+  relationshipInstanceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_genesis = 3;
+   */
+  recipientGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_device_id = 4;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes authorized_sender_device_id = 5;
+   */
+  authorizedSenderDeviceId = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ SPX256f
+   *
+   * @generated from field: bytes authorized_write_public_key = 6;
+   */
+  authorizedWritePublicKey = new Uint8Array(0);
+
+  /**
+   * big-endian 1: the relationship inbox
+   *
+   * @generated from field: bytes permitted_scope = 7;
+   */
+  permittedScope = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes grant_id = 8;
+   */
+  grantId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes grant_signature = 9;
+   */
+  grantSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RelationshipWriteGrantV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RelationshipWriteGrantV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "version", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "relationship_instance_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "recipient_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "authorized_sender_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "authorized_write_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "permitted_scope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "grant_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "grant_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RelationshipWriteGrantV1 {
+    return new RelationshipWriteGrantV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RelationshipWriteGrantV1 {
+    return new RelationshipWriteGrantV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RelationshipWriteGrantV1 {
+    return new RelationshipWriteGrantV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RelationshipWriteGrantV1 | PlainMessage<RelationshipWriteGrantV1> | undefined, b: RelationshipWriteGrantV1 | PlainMessage<RelationshipWriteGrantV1> | undefined): boolean {
+    return proto3.util.equals(RelationshipWriteGrantV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.OnlineTransferSmartRequest
  */
 export class OnlineTransferSmartRequest extends Message<OnlineTransferSmartRequest> {

@@ -470,6 +470,8 @@ pub struct B0xSDK {
     pending_cert_resync: Vec<CertResyncMessage>,
     /// Offline boundary notices decoded on retrieve.
     pending_offline_boundary_notices: Vec<OfflineBoundaryNotice>,
+    /// Write-key offers and write grants decoded on retrieve.
+    pending_write_authorizations: Vec<WriteAuthorizationMessage>,
 }
 
 /// One cert-resync control message as a retrieve read it: its method, its
@@ -490,6 +492,16 @@ pub struct CertResyncMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfflineBoundaryNotice {
     pub sender: Vec<u8>,
+    pub body: Vec<u8>,
+    pub copy_key: String,
+}
+
+/// One write-key offer or write grant as a retrieve read it (DSM Amendment
+/// A34): its method, its body, and the content key of the copy it came in.
+/// The body proves itself by its signatures; nothing else here is authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteAuthorizationMessage {
+    pub method: String,
     pub body: Vec<u8>,
     pub copy_key: String,
 }
@@ -521,6 +533,12 @@ pub(crate) const WALLET_SEND_METHOD: &str = "wallet.send";
 /// nothing else: no terms, no economic locators.
 pub(crate) const RELATIONSHIP_ESTABLISH_METHOD: &str = "relationship.establish.v1";
 pub(crate) const RELATIONSHIP_TERMINATE_METHOD: &str = "relationship.terminate.v1";
+/// Explicit invoke methods of a relationship's write authorizations (DSM
+/// Amendment A34): a device's offer of its write key, and a device's grant of
+/// its inbox to the other's key. Each body is the strict wire form Core
+/// decodes; nothing in the envelope around it is read as authority.
+pub(crate) const RELATIONSHIP_WRITE_KEY_OFFER_METHOD: &str = "relationship.writeKeyOffer.v1";
+pub(crate) const RELATIONSHIP_WRITE_GRANT_METHOD: &str = "relationship.writeGrant.v1";
 
 /// The invoke method a signed operation travels under.
 pub(crate) fn step_method(op: &Operation) -> Result<&'static str, DsmError> {
@@ -907,6 +925,7 @@ impl B0xSDK {
             pending_evidence_artifacts: Vec::new(),
             pending_cert_resync: Vec::new(),
             pending_offline_boundary_notices: Vec::new(),
+            pending_write_authorizations: Vec::new(),
         };
 
         Ok(sdk)
@@ -1156,6 +1175,32 @@ impl B0xSDK {
     /// Drain offline boundary notices decoded by the most recent retrieve.
     pub fn take_offline_boundary_notices(&mut self) -> Vec<OfflineBoundaryNotice> {
         std::mem::take(&mut self.pending_offline_boundary_notices)
+    }
+
+    /// Decode a write-key offer or a write grant from a spooled envelope,
+    /// discriminated on the EXPLICIT invoke method, never trial-decoded: its
+    /// method and its body.
+    fn decode_write_authorization(env: &dsm::types::proto::Envelope) -> Option<(String, Vec<u8>)> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        tx.ops.iter().find_map(|op| {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                return None;
+            };
+            if invoke.method != RELATIONSHIP_WRITE_KEY_OFFER_METHOD
+                && invoke.method != RELATIONSHIP_WRITE_GRANT_METHOD
+            {
+                return None;
+            }
+            Some((invoke.method.clone(), invoke.args.as_ref()?.body.clone()))
+        })
+    }
+
+    /// Drain the write-key offers and write grants decoded by the most recent
+    /// retrieve.
+    pub fn take_write_authorizations(&mut self) -> Vec<WriteAuthorizationMessage> {
+        std::mem::take(&mut self.pending_write_authorizations)
     }
 
     /// Deliver the recipient's countersigned acceptance receipt BACK to the
@@ -2690,6 +2735,19 @@ impl B0xSDK {
             // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
             // (never a trial-decode) and buffered for the sender-finalization path;
             // dropping it here is what would strand a countersigned receipt.
+            if let Some((method, body)) = Self::decode_write_authorization(&env) {
+                info!(
+                    "📬 relationship write authorization method={method} body={}B",
+                    body.len()
+                );
+                self.pending_write_authorizations
+                    .push(WriteAuthorizationMessage {
+                        method,
+                        body,
+                        copy_key,
+                    });
+                continue;
+            }
             if let Some((sender, body)) = Self::decode_offline_boundary_notice(&env) {
                 info!("📬 offline boundary notice body={}B", body.len());
                 self.pending_offline_boundary_notices

@@ -69,6 +69,9 @@ struct LifecycleArtifacts {
     ek_material: super::app_router_impl::PendingEkMaterial,
     extra_artifacts: Vec<client_db::SenderOutboxArtifact>,
     state_while_pending: RelationshipState,
+    /// An ESTABLISH's offer of this device's write key for the instance the
+    /// step opens (DSM Amendment A34), frozen with the step.
+    own_offer: Option<super::relationship_write_authorization::FrozenOffer>,
 }
 
 impl AppRouterImpl {
@@ -259,6 +262,20 @@ impl AppRouterImpl {
                 &transition_entropy,
                 &receipt_sigma,
             );
+            // The instance an ESTABLISH opens is the tip it reaches: this
+            // device's write key for it is offered with the step.
+            let own_offer = match step {
+                StepToMake::Establish => {
+                    Some(super::relationship_write_authorization::build_own_offer(
+                        &self.wallet,
+                        &from_device_id,
+                        &counterparty,
+                        &rel_key,
+                        &new_chain_tip,
+                    )?)
+                }
+                StepToMake::Terminate => None,
+            };
             let local_device_tree_commitment =
                 crate::sdk::app_state::AppState::get_device_tree_commitment().ok_or_else(|| {
                     DsmError::invalid_operation("this device holds no Device Tree commitment")
@@ -376,6 +393,7 @@ impl AppRouterImpl {
                 ek_material,
                 extra_artifacts: vec![evidence_artifact],
                 state_while_pending,
+                own_offer,
             })
         };
         let staged = self
@@ -415,6 +433,9 @@ impl AppRouterImpl {
                             None::<std::io::Error>,
                         )
                     })?;
+                    if let Some(offer) = &artifacts.own_offer {
+                        offer.freeze_with_conn(tx, &counterparty)?;
+                    }
                     Ok(())
                 },
                 None,
@@ -453,7 +474,7 @@ impl AppRouterImpl {
         let mut b0x = crate::sdk::b0x_sdk::B0xSDK::new(
             crate::util::text_id::encode_base32_crockford(&from_device_id),
             self.core_sdk.clone(),
-            storage_endpoints,
+            storage_endpoints.clone(),
         )
         .map_err(|e| format!("spool client: {e}"))?;
         let retry = crate::sdk::b0x_sdk::B0xRetryConfig::default();
@@ -477,6 +498,14 @@ impl AppRouterImpl {
                     &submission_id,
                 ) {
                     log::error!("[relationship.step] proposal message-id bind failed: {e}");
+                }
+                // The write-key offer an ESTABLISH froze goes with it; one not
+                // delivered now stays owed for the next sync.
+                for e in self
+                    .deliver_owed_write_authorizations(&storage_endpoints, Some(counterparty))
+                    .await
+                {
+                    log::warn!("[relationship.step] write-key offer: {e}");
                 }
                 crate::sdk::inbox_poller::resume_poller();
                 Ok(())
@@ -559,6 +588,9 @@ impl AppRouterImpl {
             .ok_or_else(|| "no device head".to_string())?;
         let core_sdk = self.core_sdk.clone();
         let state_after = state_after_applying(step);
+        // The set this step's key-chain objects are published to.
+        let ek_step_set = crate::sdk::economic_admission_flow::ble_ek_step_set_id()
+            .map_err(|e| format!("the storage set for the step's key-chain objects: {e}"))?;
 
         let rel_lock = rr::relationship_lock(&rel_key);
         let _rel_guard = rel_lock.lock_owned().await;
@@ -590,11 +622,28 @@ impl AppRouterImpl {
                     &sigma_sym,
                 )
             };
+            // Applying the other side's ESTABLISH opens the instance at the
+            // tip it reaches: this device's own write key for it is offered
+            // from here, frozen with the apply (DSM Amendment A34).
+            let own_offer = match step {
+                LifecycleStep::Establish { .. } => Some(
+                    super::relationship_write_authorization::build_own_offer(
+                        &self.wallet,
+                        &self_device,
+                        &sender,
+                        &rel_key,
+                        &projection_target,
+                    )
+                    .map_err(|e| format!("this device's write-key offer: {e}"))?,
+                ),
+                LifecycleStep::Terminate { .. } => None,
+            };
             let tx_id = crate::types::identifiers::TransactionId::new(v.transfer_name());
             let receipt = &v.receipt;
             let op_id = v.pair.op_id;
-            let ek_rows: std::cell::RefCell<Option<Vec<([u8; 32], [u8; 32], Vec<u8>)>>> =
-                std::cell::RefCell::new(None);
+            let ek_rows: std::cell::RefCell<
+                Option<Vec<crate::sdk::economic_admission_flow::LifecycleEkStep>>,
+            > = std::cell::RefCell::new(None);
             core_sdk
                 .apply_incoming_lifecycle_step_staged(
                     crate::sdk::core_sdk::IncomingLifecycleStep {
@@ -625,7 +674,7 @@ impl AppRouterImpl {
                         *ek_rows.borrow_mut() = Some(rows);
                         Ok(b_art)
                     },
-                    |tx, _outcome, artifacts| {
+                    |tx, outcome, artifacts| {
                         let internal = |what: &str, e: anyhow::Error| {
                             DsmError::internal(
                                 format!("in-tx {what} failed: {e}"),
@@ -650,16 +699,22 @@ impl AppRouterImpl {
                                 None::<std::convert::Infallible>,
                             )
                         })?;
-                        for (signer, addr, pk) in rows.iter() {
-                            client_db::economic_lineage::append_ek_step_with_conn(
-                                tx, &rel_key, signer, addr, pk,
-                            )
-                            .map_err(|e| internal("EK step append", e))?;
-                        }
+                        // Recorded and published as a transfer's are: the next
+                        // step's object names these as its predecessors.
+                        crate::sdk::economic_admission_flow::record_lifecycle_ek_steps_in_tx(
+                            tx,
+                            &ek_step_set,
+                            &outcome.new_device_state.root(),
+                            &rel_key,
+                            rows,
+                        )?;
                         recipient_staging::mark_pair_accepted_with_conn(tx, &op_id)
                             .map_err(|e| internal("pair acceptance", e))?;
                         client_db::set_relationship_state_with_conn(tx, &sender, state_after)
                             .map_err(|e| internal("relationship state write", e))?;
+                        if let Some(offer) = &own_offer {
+                            offer.freeze_with_conn(tx, &sender)?;
+                        }
                         Ok(())
                     },
                 )

@@ -734,10 +734,11 @@ async fn a_non_transferable_token_refuses_its_transfer() {
     p.b.enter();
     let rel_key =
         dsm::core::bilateral_transaction_manager::compute_smt_key(&p.b.device_id, &p.a.device_id);
-    let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-        &p.b.device_id,
-        &p.a.device_id,
-    );
+    // The sender's head B pinned: the step A's chain reached at the
+    // relationship's ESTABLISH (DSM Amendment A33), no longer its first tip.
+    let parent = client_db::pinned_counterparty_a_head(&rel_key)
+        .expect("B's pinned head for A")
+        .expect("B pinned A's head at the establishment");
     let entropy = dsm::crypto::blake3::domain_hash_bytes(
         dsm::common::domain_tags::TAG_DSM_TEST_TIP,
         &canonical,
@@ -906,7 +907,10 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
         &outcome.transition_entropy(),
     )
     .expect("the step's C_pre");
-    let answer = a.answer(&b, &receipt.parent_tip, &c_pre, &target);
+    // Certified by A's chain head, not its AK: after the ESTABLISH step, no
+    // step is the relationship's first (DSM Amendment A33).
+    let a_head = p.a.chain_head_sk(&p.b);
+    let answer = a.answer_after(&b, &receipt.parent_tip, &c_pre, &target, &a_head);
     receipt.set_ek_pk_a(answer.ek_pk);
     receipt.set_ek_cert_a(answer.ek_cert);
     receipt.add_sig_a(answer.sig);

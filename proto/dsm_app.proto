@@ -3854,6 +3854,43 @@ message RelationshipFinalizedV1 {
   bytes signature_a            = 8 [(dsm_max_len)=65535]; // SPHINCS+ by the sender's per-step EK over the v1 target
 }
 
+// A sender's relationship write key, offered to the recipient once the
+// relationship is established on the sender (DSM Amendment A34). The body is
+// fields 1-5; the sender's AK signs it under DSM/relationship-write-key-binding/v1
+// (the key is the sender's, for this relationship instance and this recipient)
+// and the write key signs it under DSM/relationship-write-key-possession/v1
+// (its holder has the secret). The key is never the sender's AK. Method
+// `relationship.writeKeyOffer.v1` on the relationship's route.
+message RelationshipWriteKeyOfferV1 {
+  bytes version                  = 1 [(dsm_fixed_len)=4];  // big-endian 1
+  bytes relationship_instance_id = 2 [(dsm_fixed_len)=32];
+  bytes sender_device_id         = 3 [(dsm_fixed_len)=32];
+  bytes recipient_device_id      = 4 [(dsm_fixed_len)=32];
+  bytes write_public_key         = 5 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256f
+  bytes possession_signature     = 6 [(dsm_max_len)=65535];
+  bytes binding_signature        = 7 [(dsm_max_len)=65535];
+}
+
+// A recipient's grant of write authority over its inbox for one relationship
+// instance to one sender's write key (DSM Amendment A34). `grant_id` is
+// BLAKE3 under DSM/relationship-write-grant-id/v1 over fields 1-7; the
+// recipient's AK signs BLAKE3 under DSM/relationship-write-grant/v1 over
+// fields 1-8, in tag order. It authorizes writes to the recipient's inbox for
+// that relationship instance and nothing else: no step, no value, no other
+// relationship, no other namespace, no delegation. Method
+// `relationship.writeGrant.v1` on the relationship's route.
+message RelationshipWriteGrantV1 {
+  bytes version                     = 1 [(dsm_fixed_len)=4];  // big-endian 1
+  bytes relationship_instance_id    = 2 [(dsm_fixed_len)=32];
+  bytes recipient_genesis           = 3 [(dsm_fixed_len)=32];
+  bytes recipient_device_id         = 4 [(dsm_fixed_len)=32];
+  bytes authorized_sender_device_id = 5 [(dsm_fixed_len)=32];
+  bytes authorized_write_public_key = 6 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256f
+  bytes permitted_scope             = 7 [(dsm_fixed_len)=4];  // big-endian 1: the relationship inbox
+  bytes grant_id                    = 8 [(dsm_fixed_len)=32];
+  bytes grant_signature             = 9 [(dsm_max_len)=65535];
+}
+
 message OnlineTransferSmartRequest {
   // The recipient was once named by alias or Base32 text. An alias is a label
   // two contacts can share, so a send named by one could pay the wrong contact

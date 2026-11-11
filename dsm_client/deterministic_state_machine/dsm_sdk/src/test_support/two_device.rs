@@ -267,6 +267,17 @@ impl TestDevice {
         );
     }
 
+    /// This device's per-step EK chain head secret on its relationship with
+    /// `peer`: the key its next step's EK is certified by. After the
+    /// relationship's ESTABLISH step it is never the AK (DSM Amendment A33).
+    pub fn chain_head_sk(&self, peer: &TestDevice) -> Vec<u8> {
+        self.enter();
+        let wrap = crate::init::current_chain_head_at_rest_key().expect("the at-rest key");
+        crate::storage::client_db::load_local_chain_head_sk(&self.rel_key_with(peer), &wrap)
+            .expect("the chain head")
+            .expect("an established relationship has a chain head")
+    }
+
     /// Symmetric relationship key with `peer` (the same value from either side).
     pub fn rel_key_with(&self, peer: &TestDevice) -> [u8; 32] {
         dsm::core::bilateral_transaction_manager::compute_smt_key(&self.device_id, &peer.device_id)

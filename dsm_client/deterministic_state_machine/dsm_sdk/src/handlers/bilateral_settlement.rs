@@ -386,7 +386,9 @@ mod tests {
         let counterparty = [0x32u8; 32];
         let held = [0x70u8; 32];
         store_peer(counterparty, [0x33u8; 32], vec![0x41; 64], held);
-        core.establish_relationship(counterparty)
+        // A step that is no lifecycle step moves only on an established
+        // relationship (DSM Amendment A33).
+        core.relationship_established_by_fixture(counterparty)
             .expect("establish the relationship");
         let before = core.device_head().expect("head").root();
 

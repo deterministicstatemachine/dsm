@@ -536,19 +536,29 @@ async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through(
     p.b.add_and_establish(&c).await;
     c.fund_admitted(100).await;
 
-    // B's routes, in the order a sync reads them (sorted by address): one per
-    // contact. The junk goes on the route read first, and the contact on the
+    // B's current routes, in the order a sync reads them (sorted by
+    // address): one per contact. Each contact's establishment (DSM Amendment
+    // A33) also left B its previous-tip route, which holds no payment. The
+    // junk goes on the current route read first, and the contact on the
     // other route pays, so the old global budget is spent before the payment
     // is reached.
     p.b.enter();
     let contacts = crate::storage::client_db::get_all_contacts().expect("B's contacts");
-    let routes = crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
+    let routes: Vec<_> = crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
         p.b.genesis,
         p.b.device_id,
         &contacts,
     )
-    .expect("B's routes");
-    assert_eq!(routes.len(), 2, "one route per contact");
+    .expect("B's routes")
+    .into_iter()
+    .filter(|route| {
+        matches!(
+            route.freshness,
+            crate::handlers::app_router_impl::RouteFreshness::Current
+        )
+    })
+    .collect();
+    assert_eq!(routes.len(), 2, "one current route per contact");
     let junked = routes[0].address.clone();
     let first_read = contacts
         .iter()

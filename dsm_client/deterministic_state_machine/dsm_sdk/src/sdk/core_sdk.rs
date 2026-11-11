@@ -1853,6 +1853,35 @@ impl CoreSDK {
         Ok(())
     }
 
+    /// For tests: the relationship with `counterparty_devid` established on
+    /// this device alone, its leaf at `h_0` and its ESTABLISH step applied
+    /// (`DeviceState::relationship_established_by_fixture`), persisted before
+    /// it is installed as [`Self::establish_relationship`] persists. Production
+    /// establishes through the step both devices sign (DSM Amendment A33).
+    #[cfg(test)]
+    pub(crate) fn relationship_established_by_fixture(
+        &self,
+        counterparty_devid: [u8; 32],
+    ) -> Result<(), DsmError> {
+        let mut sm = self.state_machine.lock();
+        let next = sm
+            .device_head()
+            .ok_or_else(|| {
+                DsmError::state_machine(
+                    "relationship_established_by_fixture: DeviceState not initialized",
+                )
+            })?
+            .relationship_established_by_fixture(counterparty_devid)?;
+        crate::storage::client_db::update_bcr_device_head(&next).map_err(|e| {
+            DsmError::storage(
+                format!("relationship_established_by_fixture: persist device head failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        sm.set_device_head(next);
+        Ok(())
+    }
+
     /// Where the relationship with `counterparty_devid` stands on this
     /// device's chain (DSM Amendment A33), or `None` when this device holds
     /// no leaf for it.

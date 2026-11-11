@@ -2386,16 +2386,27 @@ pub(crate) fn ek_step_objects(
     })
 }
 
-/// The step-chain rows a lifecycle step's acceptance records (Amendment
-/// A33), in chain order: the sender's step, this device's own send in flight
-/// when the step crossed it, and this device's countersignature. The same
-/// rows a transfer's admission records, with no bundle to publish.
+/// One `EkCertStepV1` a lifecycle step's acceptance records and publishes:
+/// its signer, its address, the EK it names and its exact bytes.
+pub(crate) struct LifecycleEkStep {
+    pub signer: [u8; 32],
+    pub addr: [u8; 32],
+    pub ek_pk: Vec<u8>,
+    pub step_bytes: Vec<u8>,
+}
+
+/// The step objects a lifecycle step's acceptance records (Amendment A33),
+/// in chain order: the sender's step, this device's own send in flight when
+/// the step crossed it, and this device's countersignature. The same objects
+/// a transfer's admission records and publishes, with no bundle: a later
+/// step's object names one of these as its predecessor, so a verifier must
+/// be able to read them from the set.
 pub(crate) fn lifecycle_ek_step_rows(
     rel_key: &[u8; 32],
     peer_devid: &[u8; 32],
     devid: &[u8; 32],
     b_artifacts: &crate::handlers::recipient_receipt::GeneratedBArtifacts,
-) -> Result<Vec<([u8; 32], [u8; 32], Vec<u8>)>, DsmError> {
+) -> Result<Vec<LifecycleEkStep>, DsmError> {
     let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
         &b_artifacts.receipt_bytes,
     )
@@ -2419,14 +2430,66 @@ pub(crate) fn lifecycle_ek_step_rows(
             let ek_pk = dsm::types::proto::EkCertStepV1::decode(step.as_slice())
                 .map_err(|e| storage_err("the send in flight's step object", e))?
                 .ek_pk;
-            Some((*devid, addr, ek_pk))
+            Some(LifecycleEkStep {
+                signer: *devid,
+                addr,
+                ek_pk,
+                step_bytes: step.clone(),
+            })
         }
         None => None,
     };
-    let mut rows = vec![(*peer_devid, objects.a_step_addr, receipt.ek_pk_a.clone())];
+    let mut rows = vec![LifecycleEkStep {
+        signer: *peer_devid,
+        addr: objects.a_step_addr,
+        ek_pk: receipt.ek_pk_a.clone(),
+        step_bytes: objects.a_step_bytes,
+    }];
     rows.extend(own_send_row);
-    rows.push((*devid, objects.b_step_addr, b.ek_pk_b.clone()));
+    rows.push(LifecycleEkStep {
+        signer: *devid,
+        addr: objects.b_step_addr,
+        ek_pk: b.ek_pk_b.clone(),
+        step_bytes: objects.b_step_bytes,
+    });
     Ok(rows)
+}
+
+/// Record a lifecycle step's `EkCertStepV1` objects inside `tx`, the
+/// transaction its acceptance commits in: each signer-chain row appended,
+/// and the exact step bytes frozen as publication debt bound to the head
+/// root the step produced, for the republish sweep to put to `set_id`, as a
+/// transfer's admission and a Bluetooth step freeze theirs.
+pub(crate) fn record_lifecycle_ek_steps_in_tx(
+    tx: &rusqlite::Connection,
+    set_id: &[u8; 32],
+    bound_root: &[u8; 32],
+    rel_key: &[u8; 32],
+    steps: &[LifecycleEkStep],
+) -> Result<(), DsmError> {
+    for step in steps {
+        economic_lineage::append_ek_step_with_conn(
+            tx,
+            rel_key,
+            &step.signer,
+            &step.addr,
+            &step.ek_pk,
+        )
+        .map_err(|e| storage_err("ek step append", e))?;
+        crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
+            tx,
+            set_id,
+            &crate::sdk::economic_registers::immutable_object_key(
+                dsm::common::domain_tags::TAG_DSM_EK_CERT_STEP,
+                &step.step_bytes,
+            ),
+            &step.step_bytes,
+            bound_root,
+            "ek-cert-step",
+        )
+        .map_err(|e| storage_err("ek step freeze", e))?;
+    }
+    Ok(())
 }
 
 /// Build the recipient's admission from the exact prepared successor — SYNC,

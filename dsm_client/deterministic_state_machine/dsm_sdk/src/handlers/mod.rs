@@ -74,6 +74,9 @@ pub mod relationship_lifecycle;
 #[cfg(test)]
 mod relationship_lifecycle_tests;
 pub mod relationship_status;
+pub mod relationship_write_authorization;
+#[cfg(test)]
+mod relationship_write_authorization_tests;
 pub mod response_helpers;
 #[cfg(test)]
 mod sender_admission_tests;
