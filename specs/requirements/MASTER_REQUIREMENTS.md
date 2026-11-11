@@ -14,10 +14,10 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `8b6877b01bd13a328df7bd582a392dcc54caa2e5` | 4533 |
+| `specs/DSM_High_Level_Explainer.md` | `a8db1d3e42242f42ec270918b61c17022ebe58ed` | 4533 |
 | `specs/SoFi_Settlement_Specification.md` | `2f4aeca7089c85a9388ace3658b9cf4b23e572c0` | 3131 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `1ec78c75d1e03741072a0dad86f98d415cb2276d` | 647 |
+| `specs/DSM_Storage_Node_Specification.md` | `b5c030c6588a7b63bf693d6ddf86de4e54c53696` | 647 |
 
 Storage node pin updated 2026-11-10 again for A34's write lock (owner, the same day: the first write fixes an inbox's key, immutable; addresses unchanged): §8's new rule rewritten in place, same lines; MR-STOR-0159 restated. Before that, 2026-11-10, for DSM Amendment A34 (a relationship's inbox opens to the keys its recipient granted; the owner said yes twice on 2026-11-10 to every node checking each write's key against the recipient's grant): §8's rule that the node never checks the writer is replaced in place by the new rule, on the same lines, so every line citation reads as before. MR-STOR-0159 added; MR-STOR-0041 and MR-STOR-0110 superseded in part. Before that, 2026-11-08, for the owner's decision of 2026-11-05 (each operator's own certificate), quoted in the specification: a storage set has no shared CA, and each member is pinned to its own operator's CA. No requirement row names a storage CA, so every row reads as written.
 
