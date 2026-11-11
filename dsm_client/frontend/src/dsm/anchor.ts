@@ -146,7 +146,8 @@ export async function getAnchorStatus(): Promise<AnchorStatus> {
 /** One step of a board's one-time setup for production, as Rust reports it. */
 export interface BoardSetupStep {
   kind: pb.AnchorBoardStepKind;
-  state: 'done' | 'next' | 'later';
+  /** `blocked`: the board's bootloader cannot write what is left, and `refused` says why. */
+  state: 'done' | 'next' | 'later' | 'blocked';
   /** It burns OTP: it can never be undone. */
   permanent: boolean;
   name: string;
@@ -179,8 +180,12 @@ const stateOf = (state: pb.AnchorBoardStepState): BoardSetupStep['state'] => {
       return 'done';
     case pb.AnchorBoardStepState.NEXT:
       return 'next';
-    default:
+    case pb.AnchorBoardStepState.LATER:
       return 'later';
+    case pb.AnchorBoardStepState.BLOCKED:
+      return 'blocked';
+    default:
+      throw new Error(`a board step state this app does not know: ${state}`);
   }
 };
 

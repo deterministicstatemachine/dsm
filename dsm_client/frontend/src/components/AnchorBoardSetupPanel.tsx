@@ -14,7 +14,13 @@ type Stage = 'idle' | 'reading' | 'read' | 'confirming' | 'stepping';
 
 const reason = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-const mark = (step: BoardSetupStep) => (step.state === 'done' ? 'DONE' : step.state === 'next' ? 'NEXT' : 'LATER');
+const MARKS: Record<BoardSetupStep['state'], string> = {
+  done: 'DONE',
+  next: 'NEXT',
+  later: 'LATER',
+  blocked: 'BLOCKED',
+};
+const mark = (step: BoardSetupStep) => MARKS[step.state];
 
 export default function AnchorBoardSetupPanel() {
   const [board, setBoard] = useState<BoardSetup | null>(null);

@@ -2272,6 +2272,7 @@ enum AnchorBoardStepState {
   ANCHOR_BOARD_STEP_STATE_DONE        = 1;
   ANCHOR_BOARD_STEP_STATE_NEXT        = 2;
   ANCHOR_BOARD_STEP_STATE_LATER       = 3;
+  ANCHOR_BOARD_STEP_STATE_BLOCKED     = 4; // the board's bootloader cannot write what is left: `refused` says why
 }
 
 message AnchorBoardStep {

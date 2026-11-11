@@ -164,6 +164,23 @@ describe('a board set up from the phone', () => {
     expect(sent[0].step?.step).toBe(K.CHECK_CHANGED_IMAGE);
   });
 
+  it('offers nothing when the board\'s bootloader cannot finish the procedure, and says why', async () => {
+    const blocked = boardWith(K.LOCK_DIGEST, []);
+    blocked.steps.forEach((step) => {
+      if (step.state === S.NEXT) step.state = S.BLOCKED;
+    });
+    blocked.refused =
+      "this board's bootloader cannot write every row the procedure has left to burn, so the procedure cannot be finished from BOOTSEL and nothing more is burned: LockDigestPage writes row 0xfdd, which this bootrom guards by page 63, the page it sits in";
+    const asked = hostAnswering(blocked, blocked);
+    render(<AnchorBoardSetupPanel />);
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => expect(screen.getByTestId('anchor-board-steps')).toHaveTextContent('BLOCKED: Lock the digest page'));
+    expect(screen.getByText(/cannot be finished from BOOTSEL/)).toBeInTheDocument();
+    expect(screen.queryByText('Next step…')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('anchor-board-check')).not.toBeInTheDocument();
+    expect(asked.filter((a) => a.route === 'anchor.board.step')).toHaveLength(0);
+  });
+
   it('does not offer the check while the board is not at its first boot', async () => {
     hostAnswering(boardWith(K.WRITE_DIGEST, []), boardWith(K.WRITE_DIGEST, []));
     render(<AnchorBoardSetupPanel />);

@@ -4,7 +4,7 @@
 
 use crate::bootrom_model::{BootromModel, LastBoot};
 use crate::otp_burn::{
-    burn, check_blank, load_image, lock1, next, Burn, Hash32, Next, OtpReading, SecretPage,
+    burn, check_blank, load_image, lock0, lock1, next, Burn, Hash32, Next, OtpReading, SecretPage,
     Standing, BOOT_PAGES_LOCK, CRIT1_ROW, DIGEST_LOCK, DIGEST_ROW, ROLLBACK_LOCK, SECRET_LOCK,
     SECRET_ROW,
 };
@@ -616,4 +616,192 @@ fn the_changed_image_check_waits_for_the_lockdown() {
     );
     assert_eq!(held(&board).flash, before, "nothing was written");
     assert_eq!(held(&board).rebooted, 0);
+}
+
+// ---- What the board's bootloader may write, as its bootrom guards it (the yellow board, 11-11) ----
+
+use crate::otp_burn::{
+    bootloader_may_write, lock_row_value, Bootrom, Guard, INACCESSIBLE, READ_ONLY, READ_WRITE,
+};
+
+/// A board whose page 63 the bootloader may read and not write: its lock row's bootloader field
+/// read-only. On an A2 bootrom that bars every lock row page 63 holds, the digest page's among them.
+fn page_63_closed_to_bootloader_writes(mut model: BootromModel) -> BootromModel {
+    model.raw[usize::from(lock1(63))] = lock_row_value(READ_WRITE, READ_WRITE, READ_ONLY);
+    model
+}
+
+/// The release's digest in its sixteen rows, as a board burned to Step 5 holds it.
+fn digest_burned(model: &mut BootromModel, release: &Release) {
+    for (i, pair) in release.digest.chunks_exact(2).enumerate() {
+        let value = u16::from_le_bytes([pair[0], pair[1]]);
+        model.ecc[usize::from(DIGEST_ROW) + i] = Some(value);
+        model.raw[usize::from(DIGEST_ROW) + i] = u32::from(value) | 0x3f << 16;
+    }
+}
+
+#[test]
+fn the_bootroms_header_names_its_stepping_and_its_guard() {
+    let mut pb = Picoboot::connect(BootromModel::sealed_board()).expect("connect");
+    let a2 = Bootrom::read(&mut pb).expect("an RP2350's bootrom");
+    assert_eq!(a2.guard, Guard::PageItSitsIn);
+    assert_eq!(
+        a2.guarding_page(lock1(46)),
+        63,
+        "the digest page's lock row sits in page 63"
+    );
+    assert_eq!(a2.guarding_page(lock1(1)), 62);
+    assert_eq!(a2.guarding_page(DIGEST_ROW), 46);
+
+    let mut model = BootromModel::sealed_board();
+    model.bootrom_version = 4;
+    let mut pb = Picoboot::connect(model).expect("connect");
+    let a4 = Bootrom::read(&mut pb).expect("an RP2350's bootrom");
+    assert_eq!(a4.guard, Guard::PageItLocks);
+    assert_eq!(a4.guarding_page(lock1(46)), 46, "the page the row locks");
+    assert_eq!(a4.guarding_page(lock0(44)), 44);
+    assert_eq!(a4.guarding_page(lock1(63)), 63);
+
+    let mut model = BootromModel::sealed_board();
+    model.bootrom_version = 7;
+    let mut pb = Picoboot::connect(model).expect("connect");
+    let unknown = Bootrom::read(&mut pb).expect_err("a stepping whose rule is not known");
+    assert!(unknown.contains("version byte is 7"), "{unknown}");
+}
+
+#[test]
+fn an_a2_board_whose_bootloader_cannot_write_a_lock_row_is_not_started() {
+    use pb::AnchorBoardStepKind as K;
+    use pb::AnchorBoardStepState as S;
+    let (setup, board) = phone_with(page_63_closed_to_bootloader_writes(
+        BootromModel::sealed_board(),
+    ));
+    let answer = setup.read();
+    assert!(
+        answer.refused.contains("cannot be finished from BOOTSEL")
+            && answer.refused.contains("LockDigestPage writes row 0xfdd")
+            && answer.refused.contains("page 63, the page it sits in")
+            && answer.refused.contains("LockBootPages writes row 0xfd9"),
+        "{}",
+        answer.refused
+    );
+    assert_eq!(
+        state_of(&answer, K::LoadImage),
+        S::Blocked,
+        "nothing is offered"
+    );
+    assert!(!answer.steps.iter().any(|s| s.state == S::Next as i32));
+    assert!(
+        answer.found.iter().any(
+            |f| f.contains("page 63's lock rows") && f.contains("may read it and not write it")
+        ),
+        "{:?}",
+        answer.found
+    );
+
+    let flash = held(&board).flash.clone();
+    let raw = held(&board).raw.clone();
+    let commands = held(&board).commands.len();
+    for kind in [K::LoadImage, K::WriteDigest] {
+        let refused = setup.step(&step(kind, CHIP));
+        assert!(
+            refused.refused.starts_with("nothing was written"),
+            "{kind:?}: {}",
+            refused.refused
+        );
+    }
+    let model = held(&board);
+    assert_eq!(model.flash, flash, "the flash is as it was");
+    assert_eq!(model.raw, raw, "no OTP row changed");
+    assert!(
+        !model.commands[commands..]
+            .iter()
+            .any(|c| *c == 0x0d || *c == 0x05),
+        "no OTP or flash write was sent"
+    );
+}
+
+#[test]
+fn the_same_locks_on_an_a4_bootrom_guard_each_lock_row_by_its_own_page() {
+    let release = release();
+    let mut model = page_63_closed_to_bootloader_writes(BootromModel::blank_board());
+    model.bootrom_version = 4;
+    let mut pb = Picoboot::connect(model).expect("connect");
+    let otp = OtpReading::read(&mut pb).expect("read");
+    let a4 = Bootrom::read(&mut pb).expect("bootrom");
+    let left =
+        crate::otp_burn::burns_left(&Standing::read(&mut pb, &otp).expect("standing"), &release)
+            .expect("burns left");
+    assert_eq!(left.len(), 6, "every burn, the secret first");
+    bootloader_may_write(&otp, a4, &left).expect("each lock row by the page it locks: all open");
+    load_image(&mut pb, &release).expect("Step 3");
+    for step in [
+        Burn::SealSecret,
+        Burn::WriteDigest,
+        Burn::LockDigestPage,
+        Burn::WriteBootKey,
+        Burn::Lockdown,
+    ] {
+        burn(&mut pb, &release, step, || Ok(SECRET)).expect("the step burns and reads back");
+    }
+    assert_eq!(pb_model(&mut pb).raw[usize::from(lock1(46))], DIGEST_LOCK);
+}
+
+#[test]
+fn a_board_burned_to_its_digest_stops_where_its_bootloader_cannot_go_on() {
+    use pb::AnchorBoardStepKind as K;
+    use pb::AnchorBoardStepState as S;
+    let release = release();
+    // The yellow board as it stood after Step 5 on 2026-11-11: the signed image in flash, the digest
+    // burned, and its A2 bootrom refusing the digest page's lock row.
+    let mut model = page_63_closed_to_bootloader_writes(BootromModel::sealed_board());
+    digest_burned(&mut model, &release);
+    model.flash[..padded(&release).len()].copy_from_slice(&padded(&release));
+    let (setup, board) = phone_with(model);
+    let answer = setup.read();
+    assert_eq!(state_of(&answer, K::WriteDigest), S::Done);
+    assert_eq!(state_of(&answer, K::LockDigest), S::Blocked);
+    assert!(
+        answer.refused.contains("LockDigestPage writes row 0xfdd"),
+        "{}",
+        answer.refused
+    );
+
+    let raw = held(&board).raw.clone();
+    let commands = held(&board).commands.len();
+    let refused = setup.step(&step(K::LockDigest, CHIP));
+    assert!(
+        refused.refused.starts_with("nothing was written"),
+        "{}",
+        refused.refused
+    );
+    let mut pb = Picoboot::connect(OnUsb(board.clone())).expect("connect");
+    let direct = burn(&mut pb, &release, Burn::LockDigestPage, || Ok(SECRET))
+        .expect_err("the burn checks its own rows before it writes one");
+    assert!(direct.contains("page 63"), "{direct}");
+    let model = held(&board);
+    assert_eq!(model.raw, raw, "no OTP row changed");
+    assert!(
+        !model.commands[commands..].iter().any(|c| *c == 0x0d),
+        "no OTP write was sent"
+    );
+}
+
+#[test]
+fn a_secret_page_closed_to_the_bootloader_is_closed_on_every_bootrom() {
+    // The sealed page's lock bars the bootloader from reading the page on either rule: the
+    // procedure reads the secret's state from its lock row, never its rows.
+    assert_eq!(
+        SECRET_LOCK,
+        lock_row_value(READ_ONLY, INACCESSIBLE, INACCESSIBLE)
+    );
+    let mut pb = Picoboot::connect(BootromModel::sealed_board()).expect("connect");
+    let refused = pb.otp_read_raw(SECRET_ROW, 1);
+    assert_eq!(
+        refused,
+        Err(BootselError::Refused {
+            command: 0x8c,
+            status: crate::picoboot::NOT_PERMITTED
+        })
+    );
 }

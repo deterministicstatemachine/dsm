@@ -787,6 +787,13 @@ export enum AnchorBoardStepState {
    * @generated from enum value: ANCHOR_BOARD_STEP_STATE_LATER = 3;
    */
   LATER = 3,
+
+  /**
+   * the board's bootloader cannot write what is left: `refused` says why
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_STATE_BLOCKED = 4;
+   */
+  BLOCKED = 4,
 }
 // Retrieve enum metadata with: proto3.getEnumType(AnchorBoardStepState)
 proto3.util.setEnumType(AnchorBoardStepState, "dsm.AnchorBoardStepState", [
@@ -794,6 +801,7 @@ proto3.util.setEnumType(AnchorBoardStepState, "dsm.AnchorBoardStepState", [
   { no: 1, name: "ANCHOR_BOARD_STEP_STATE_DONE" },
   { no: 2, name: "ANCHOR_BOARD_STEP_STATE_NEXT" },
   { no: 3, name: "ANCHOR_BOARD_STEP_STATE_LATER" },
+  { no: 4, name: "ANCHOR_BOARD_STEP_STATE_BLOCKED" },
 ]);
 
 /**

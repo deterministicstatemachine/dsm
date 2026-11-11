@@ -64,9 +64,10 @@ pub const fn lock1(page: u16) -> u16 {
     0xf80 + 2 * page + 1
 }
 
-const READ_WRITE: u32 = 0;
-const READ_ONLY: u32 = 1;
-const INACCESSIBLE: u32 = 3;
+/// A lock field's values: 0x1 bars writes and 0x2 reads.
+pub const READ_WRITE: u32 = 0;
+pub const READ_ONLY: u32 = 1;
+pub const INACCESSIBLE: u32 = 3;
 
 /// A `PAGEn_LOCK1` value: `LOCK_S` in bits 0-1, `LOCK_NS` in bits 2-3, `LOCK_BL` in bits 4-5, the byte
 /// three times over for the row's majority vote. Built from its fields, never written out.
@@ -83,6 +84,155 @@ pub const DIGEST_LOCK: u32 = lock_row_value(READ_ONLY, INACCESSIBLE, READ_ONLY);
 pub const BOOT_PAGES_LOCK: u32 = lock_row_value(READ_ONLY, READ_ONLY, READ_ONLY);
 /// The rollback version: the bootrom, running Secure, goes on writing it; the bootloader may not.
 pub const ROLLBACK_LOCK: u32 = lock_row_value(READ_WRITE, READ_ONLY, READ_ONLY);
+
+/// Where the bootrom names itself in ROM: `'M'`, `'u'`, the RP2350's `2`, then the version byte, "the
+/// value 2 for A2 silicon, 3 for A3 silicon, and 4 for A4 silicon" (RP2350 datasheet). The bootloader
+/// serves ROM reads below its secure gateway; picotool reads the same header.
+pub const BOOTROM_HEADER: u32 = 0x10;
+const RP2350_BOOTROM: [u8; 3] = [b'M', b'u', 2];
+
+/// Which page's lock the bootloader applies to an OTP row, by the bootrom's own rule
+/// (`s_varm_api_hx_otp_access` in `pico-bootrom-rp2350`), which changed between steppings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Guard {
+    /// The A2 bootrom: every row by the page it sits in, a lock row in pages 62-63 included. A lock
+    /// row there can be written only while page 62 or 63 itself can.
+    PageItSitsIn,
+    /// The A3 and A4 bootroms: a lock row by the page it locks, every other row by its own page.
+    PageItLocks,
+}
+
+/// The board's bootrom, read from its ROM: its version byte and the guard rule it keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bootrom {
+    pub version: u8,
+    pub guard: Guard,
+}
+
+impl Bootrom {
+    pub fn read<L: BootselLink>(pb: &mut Picoboot<L>) -> Result<Self, String> {
+        let header = pb.read(BOOTROM_HEADER, 4).map_err(|e| e.to_string())?;
+        let [m, u, family, version] = header.as_slice() else {
+            return Err(format!(
+                "the bootrom's header read back {} bytes, not 4",
+                header.len()
+            ));
+        };
+        if [*m, *u, *family] != RP2350_BOOTROM {
+            return Err("the board's ROM does not name itself an RP2350's bootrom".to_string());
+        }
+        let guard = match version {
+            2 => Guard::PageItSitsIn,
+            3 | 4 => Guard::PageItLocks,
+            other => {
+                let known = "the A2, A3 and A4 bootroms";
+                return Err(format!(
+                    "the bootrom's version byte is {other}: which page guards a lock row is known \
+                     for {known} only"
+                ));
+            }
+        };
+        Ok(Self {
+            version: *version,
+            guard,
+        })
+    }
+
+    /// The page whose lock the bootloader applies to `row`.
+    #[must_use]
+    pub fn guarding_page(self, row: u16) -> u16 {
+        let page = row / PAGE_ROWS;
+        match self.guard {
+            Guard::PageItLocks if page >= 62 => (row - lock0(0)) / 2,
+            Guard::PageItLocks | Guard::PageItSitsIn => page,
+        }
+    }
+
+    /// What this bootrom's rule is, as the person reads it.
+    #[must_use]
+    pub fn words(self) -> String {
+        match self.guard {
+            Guard::PageItSitsIn => format!(
+                "this board's bootrom is A{} (its version byte): it guards a page's lock row by \
+                 the page the row sits in, 62 or 63",
+                self.version
+            ),
+            Guard::PageItLocks => format!(
+                "this board's bootrom is A{} (its version byte): it guards a page's lock row by \
+                 the page the row locks",
+                self.version
+            ),
+        }
+    }
+}
+
+/// Each bit as most of a lock row's three bytes hold it: how OTP keeps a lock, so that its bits can
+/// be set one at a time.
+fn by_majority(row: u32) -> u32 {
+    let (a, b, c) = (row & 0xff, (row >> 8) & 0xff, (row >> 16) & 0xff);
+    (a & b) | (b & c) | (a & c)
+}
+
+/// `KEY_W` (bits 0-2) and `KEY_R` (bits 3-5) of `PAGEn_LOCK0`: an access key registered for the page.
+const ACCESS_KEYS: u32 = 0x3f;
+
+/// What a page's locks leave the bootloader, as the bootrom sets them on entering BOOTSEL: the page's
+/// Secure lock advanced by its bootloader lock (`s_otp_advance_bl_to_s_value`), bit 0 barring writes
+/// and bit 1 reads. A page with an access key registered takes no write from the bootloader, which
+/// holds no key.
+pub struct BootloaderAccess {
+    pub page: u16,
+    lock: u32,
+    keys: u32,
+}
+
+impl BootloaderAccess {
+    pub fn of(otp: &OtpReading, page: u16) -> Result<Self, String> {
+        let row = |r: u16| {
+            otp.row(r).ok_or_else(|| {
+                format!("page {page}'s lock row {r:#05x} cannot be read through the bootloader")
+            })
+        };
+        Ok(Self {
+            page,
+            lock: row(lock1(page))?,
+            keys: row(lock0(page))?,
+        })
+    }
+
+    fn held(&self) -> u32 {
+        let lock = by_majority(self.lock);
+        (lock & 0x3) | ((lock >> 4) & 0x3)
+    }
+
+    #[must_use]
+    pub fn may_write(&self) -> bool {
+        self.held() & 0x1 == 0 && by_majority(self.keys) & ACCESS_KEYS == 0
+    }
+
+    /// The page's lock rows and what they leave the bootloader.
+    #[must_use]
+    pub fn words(&self) -> String {
+        let reach = if by_majority(self.keys) & ACCESS_KEYS != 0 {
+            "an access key is registered for it: the bootloader may not write it"
+        } else {
+            match self.held() {
+                0 => "the bootloader may read and write it",
+                1 => "the bootloader may read it and not write it",
+                2 => "the bootloader may write it and not read it",
+                _neither => "the bootloader may not read or write it",
+            }
+        };
+        format!(
+            "page {}'s lock rows {:#05x} and {:#05x} hold {:#x} and {:#x}: {reach}",
+            self.page,
+            lock0(self.page),
+            lock1(self.page),
+            self.keys,
+            self.lock
+        )
+    }
+}
 
 /// The OTP as the bootloader shows it: each row's 24 raw bits, or nothing where a lock keeps the
 /// row from the bootloader.
@@ -456,6 +606,85 @@ pub fn next(standing: &Standing, release: &Release) -> Result<Next, String> {
     Ok(Next::Done)
 }
 
+/// The burns in the runbook's order.
+const BURNS: [Burn; 6] = [
+    Burn::SealSecret,
+    Burn::WriteDigest,
+    Burn::LockDigestPage,
+    Burn::WriteBootKey,
+    Burn::Lockdown,
+    Burn::LockBootPages,
+];
+
+/// The burns a board standing so still needs, in order: none once every one is done.
+pub fn burns_left(standing: &Standing, release: &Release) -> Result<Vec<Burn>, String> {
+    Ok(match next(standing, release)? {
+        Next::Burn(first) => BURNS.iter().copied().skip_while(|b| *b != first).collect(),
+        Next::Boot => vec![Burn::LockBootPages],
+        Next::Done => Vec::new(),
+    })
+}
+
+/// The OTP rows a burn writes.
+fn rows_written(burn: Burn) -> Vec<u16> {
+    match burn {
+        Burn::SealSecret => (SECRET_ROW..SECRET_ROW + HASH_ROWS)
+            .chain([lock1(48)])
+            .collect(),
+        Burn::WriteDigest => (DIGEST_ROW..DIGEST_ROW + HASH_ROWS).collect(),
+        Burn::LockDigestPage => vec![lock1(46)],
+        Burn::WriteBootKey => (BOOTKEY0_ROW..BOOTKEY0_ROW + HASH_ROWS).collect(),
+        Burn::Lockdown => (BOOT_FLAGS1_ROW..BOOT_FLAGS1_ROW + FLAG_COPIES)
+            .chain(CRIT1_ROW..CRIT1_ROW + CRIT1_COPIES)
+            .collect(),
+        Burn::LockBootPages => vec![lock1(1), lock1(2), lock1(44)],
+    }
+}
+
+/// Every row `burns` write is one this board's bootloader may write, page by page as its bootrom
+/// guards them. Checked for every burn left before the first of them runs, so no procedure starts
+/// that cannot be finished from BOOTSEL, and for each burn's own rows before it writes one, so no
+/// step stops part-written. Found on the yellow board, 2026-11-11: its A2 bootrom refused the digest
+/// page's lock row, which sits in page 63, after the digest itself was burned.
+pub fn bootloader_may_write(
+    otp: &OtpReading,
+    bootrom: Bootrom,
+    burns: &[Burn],
+) -> Result<(), String> {
+    let mut barred = Vec::new();
+    for burn in burns {
+        let mut seen: Vec<u16> = Vec::new();
+        for row in rows_written(*burn) {
+            let page = bootrom.guarding_page(row);
+            if seen.contains(&page) {
+                continue;
+            }
+            seen.push(page);
+            let access = BootloaderAccess::of(otp, page)?;
+            if !access.may_write() {
+                let by = if page == row / PAGE_ROWS {
+                    "the page it sits in"
+                } else {
+                    "the page it locks"
+                };
+                barred.push(format!(
+                    "{burn:?} writes row {row:#05x}, which this bootrom guards by page {page}, {by}; \
+                     {}",
+                    access.words()
+                ));
+            }
+        }
+    }
+    if barred.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "this board's bootloader cannot write every row the procedure has left to burn, so the \
+         procedure cannot be finished from BOOTSEL and nothing more is burned: {}",
+        barred.join("; ")
+    ))
+}
+
 /// What a burn wrote and read back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Burned {
@@ -554,6 +783,7 @@ pub fn burn<L: BootselLink>(
             ))
         }
     }
+    bootloader_may_write(&otp, Bootrom::read(pb)?, &[step])?;
     let rows = match step {
         Burn::SealSecret => {
             check_blank(&otp)?;

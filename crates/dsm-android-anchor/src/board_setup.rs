@@ -10,7 +10,9 @@
 
 use dsm::types::proto as pb;
 
-use crate::otp_burn::{self, Burn, Next, OnBoard, OtpReading, SecretPage, Standing};
+use crate::otp_burn::{
+    self, BootloaderAccess, Bootrom, Burn, Next, OnBoard, OtpReading, SecretPage, Standing,
+};
 use crate::picoboot::{BootselLink, Picoboot};
 use crate::release::Release;
 
@@ -99,17 +101,31 @@ fn is_chip_id(chip_id: &str) -> bool {
     chip_id.len() == 16 && chip_id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// A board read: where it stands, and the step it needs next (none once every step is done).
+/// A board read: where it stands, the step it needs next (none once every step is done), and why
+/// the procedure cannot go on from BOOTSEL, if it cannot.
 struct Read {
     standing: Standing,
     next: Option<Kind>,
     found: Vec<String>,
+    blocked: Option<String>,
 }
 
+/// The lock pages, 62 and 63: an A2 bootrom guards every page's lock row by one of them.
+const LOCK_PAGES: [u16; 2] = [62, 63];
+
 fn read_board<L: BootselLink>(boot: &mut Picoboot<L>, release: &Release) -> Result<Read, String> {
+    let bootrom = Bootrom::read(boot)?;
     let otp = OtpReading::read(boot).map_err(|e| e.to_string())?;
     let standing = Standing::read(boot, &otp)?;
-    let mut found = Vec::new();
+    let mut found = vec![bootrom.words()];
+    for page in LOCK_PAGES {
+        found.push(BootloaderAccess::of(&otp, page)?.words());
+    }
+    // Every burn left, checked before any of them runs: a procedure this bootloader cannot finish
+    // is not started, and one it cannot go on with stops where it stands.
+    let blocked =
+        otp_burn::bootloader_may_write(&otp, bootrom, &otp_burn::burns_left(&standing, release)?)
+            .err();
     if standing.secret == SecretPage::Sealed && standing.digest == otp_burn::Hash32::Blank {
         found.push(
             "the board's secret is sealed by an earlier procedure: it keeps that secret"
@@ -142,12 +158,18 @@ fn read_board<L: BootselLink>(boot: &mut Picoboot<L>, release: &Release) -> Resu
         standing,
         next,
         found,
+        blocked,
     })
 }
 
 /// Each step's state: done before the next, the next, later after it. A secret sealed by an earlier
-/// procedure is done whatever comes next.
+/// procedure is done whatever comes next. The next step of a procedure this board's bootloader
+/// cannot finish is blocked, and none is offered.
 fn steps(read: &Read) -> Vec<pb::AnchorBoardStep> {
+    let at_next = match &read.blocked {
+        Some(_why) => State::Blocked,
+        None => State::Next,
+    };
     let next_at = read
         .next
         .and_then(|next| ORDER.iter().position(|k| *k == next));
@@ -161,7 +183,7 @@ fn steps(read: &Read) -> Vec<pb::AnchorBoardStep> {
                 }
                 None => State::Done,
                 Some(at) if i < at => State::Done,
-                Some(at) if i == at => State::Next,
+                Some(at) if i == at => at_next,
                 Some(_later) => State::Later,
             };
             pb::AnchorBoardStep {
@@ -204,12 +226,18 @@ impl<P: BoardPort> BoardSetup<P> {
             ..Default::default()
         };
         match read_board(boot, release) {
-            Ok(read) => pb::AnchorBoardResponse {
-                steps: steps(&read),
-                done: read.next.is_none(),
-                found: read.found,
-                ..base
-            },
+            Ok(read) => {
+                let mut answer = pb::AnchorBoardResponse {
+                    steps: steps(&read),
+                    done: read.next.is_none(),
+                    found: read.found,
+                    ..base
+                };
+                if let Some(why) = read.blocked {
+                    answer.refused = why;
+                }
+                answer
+            }
             Err(why) => pb::AnchorBoardResponse {
                 refused: why,
                 ..base
@@ -418,6 +446,13 @@ impl<P: BoardPort> dsm_sdk::bridge::AnchorBoardSetup for BoardSetup<P> {
             return answer;
         };
         let due = match read_board(&mut boot, &release) {
+            Ok(Read {
+                blocked: Some(why), ..
+            }) => {
+                let mut answer = self.answer(&mut boot, &chip_id, &release);
+                answer.refused = format!("nothing was written: {why}");
+                return answer;
+            }
             Ok(read) => read.next,
             Err(why) => {
                 let mut answer = self.answer(&mut boot, &chip_id, &release);

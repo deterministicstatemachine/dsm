@@ -312,7 +312,7 @@ impl<L: BootselLink> Picoboot<L> {
             .map(|_none| ())
     }
 
-    /// Read `len` bytes of flash or RAM at `addr`.
+    /// Read `len` bytes of flash, RAM, or the ROM below the bootloader's secure gateway at `addr`.
     pub fn read(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, BootselError> {
         let size = usize::try_from(len)
             .map_err(|_too_long| BootselError::Link("a read longer than memory".to_string()))?;

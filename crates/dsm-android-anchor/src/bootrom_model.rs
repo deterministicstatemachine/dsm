@@ -2,18 +2,27 @@
 //! A model of the RP2350 bootloader for the burn procedure's tests: it takes the real PICOBOOT
 //! command bytes and keeps OTP's own rules. A raw row's bits only ever set, and a write that would
 //! clear one is refused (`PICOBOOT_UNSUPPORTED_MODIFICATION`). A row written with error correction
-//! takes no second write. A page whose `LOCK_BL` bars the bootloader answers
-//! `PICOBOOT_NOT_PERMITTED`, as the boards in hand answer for their sealed secret page. Flash is
-//! erased by sector and written by page, and a reboot into a signed image records its rollback
-//! version, as the bootrom's first boot of one does.
+//! takes no second write. Each row is guarded as the bootrom guards it (`s_varm_api_hx_otp_access`,
+//! `pico-bootrom-rp2350`): by the soft lock of its page, a lock row's page being the one it sits in on
+//! an A2 bootrom and the one it locks on A3 and A4. The soft locks are set once, on entering BOOTSEL,
+//! from each page's Secure lock advanced by its bootloader lock; a refused read or write answers
+//! `PICOBOOT_NOT_PERMITTED`, as the boards in hand answer for their sealed secret page. Flash is erased
+//! by sector and written by page, and a reboot into a signed image records its rollback version, as
+//! the bootrom's first boot of one does.
 
-use crate::otp_burn::{lock1, BOOT_FLAGS0_ROW, PAGE_ROWS, ROLLBACK_ROW, ROWS};
+use crate::otp_burn::{
+    lock0, lock1, BOOTROM_HEADER, BOOT_FLAGS0_ROW, PAGES, PAGE_ROWS, ROLLBACK_ROW, ROWS,
+};
 use crate::picoboot::{BootselLink, COMMAND_BYTES, MAGIC, NOT_PERMITTED, RAW_ROW_MASK};
 use crate::release::FLASH_BASE;
 
 const UNSUPPORTED_MODIFICATION: u32 = 17;
 const INVALID_ADDRESS: u32 = 4;
 const BAD_ALIGNMENT: u32 = 5;
+const INVALID_STATE: u32 = 9;
+/// A soft lock's bits: 0x1 bars writes, 0x2 reads.
+const WRITE_BARRED: u32 = 0x1;
+const READ_BARRED: u32 = 0x2;
 const FLASH_BYTES: usize = 4 * 1024 * 1024;
 const ROLLBACK_REQUIRED: u32 = 1 << 11;
 
@@ -59,6 +68,11 @@ pub struct BootromModel {
     pub signed_image: Option<Vec<u8>>,
     /// How the last reboot went.
     pub last_boot: LastBoot,
+    /// The bootrom's version byte: 2 on the boards in hand (A2), 3 or 4 on later steppings.
+    pub bootrom_version: u8,
+    /// Each page's soft lock for the bootloader, set on entering BOOTSEL: bit 0 bars writes, bit 1
+    /// reads. Unset until the board's first command after it comes up in BOOTSEL.
+    soft_locks: Option<Vec<u32>>,
 }
 
 /// How a reboot went.
@@ -99,19 +113,49 @@ impl BootromModel {
             rebooted: 0,
             signed_image: None,
             last_boot: LastBoot::NotYet,
+            bootrom_version: 2,
+            soft_locks: None,
         }
     }
 
-    /// The bootloader may read this row unless its page's `LOCK_BL` (bits 4-5 of `PAGEn_LOCK1`) is
-    /// "inaccessible". The lock rows' own pages are always readable.
-    fn bootloader_reads(&self, row: u16) -> Result<(), u32> {
+    /// The soft locks the bootrom sets on entering BOOTSEL: a page's Secure lock (`LOCK_S`, bits 0-1
+    /// of `PAGEn_LOCK1`) advanced by its bootloader lock (`LOCK_BL`, bits 4-5), each by the majority of
+    /// the row's three bytes; a page with an access key registered (`PAGEn_LOCK0` bits 0-5) takes no
+    /// write.
+    fn enter_bootsel(&mut self) {
+        let majority = |row: u32| {
+            let (a, b, c) = (row & 0xff, (row >> 8) & 0xff, (row >> 16) & 0xff);
+            (a & b) | (b & c) | (a & c)
+        };
+        self.soft_locks = Some(
+            (0..PAGES)
+                .map(|page| {
+                    let lock = majority(self.raw[usize::from(lock1(page))]);
+                    let keyed = majority(self.raw[usize::from(lock0(page))]) & 0x3f != 0;
+                    (lock & 0x3) | ((lock >> 4) & 0x3) | u32::from(keyed)
+                })
+                .collect(),
+        );
+    }
+
+    /// The page whose soft lock guards `row`, as this bootrom guards it.
+    fn guarding_page(&self, row: u16) -> u16 {
         let page = row / PAGE_ROWS;
-        if page >= 62 {
-            return Ok(());
+        if self.bootrom_version >= 3 && page >= 62 {
+            (row - lock0(0)) / 2
+        } else {
+            page
         }
-        match (self.raw[usize::from(lock1(page))] >> 4) & 0x3 {
-            0x3 => Err(NOT_PERMITTED),
-            _readable => Ok(()),
+    }
+
+    /// The bootloader may touch `row` unless its guarding page's soft lock bars it: `bar` is 0x1 for a
+    /// write and 0x2 for a read.
+    fn bootloader_may(&self, row: u16, bar: u32) -> Result<(), u32> {
+        let page = usize::from(self.guarding_page(row));
+        match &self.soft_locks {
+            Some(locks) if locks[page] & bar != 0 => Err(NOT_PERMITTED),
+            Some(_open) => Ok(()),
+            None => Err(INVALID_STATE),
         }
     }
 
@@ -128,6 +172,9 @@ impl BootromModel {
         }
         let id = cmd[8];
         self.commands.push(id);
+        if self.soft_locks.is_none() {
+            self.enter_bootsel();
+        }
         let len = u32::from_le_bytes([cmd[12], cmd[13], cmd[14], cmd[15]]) as usize;
         let mut args = [0u8; 16];
         args.copy_from_slice(&cmd[16..32]);
@@ -136,6 +183,11 @@ impl BootromModel {
             0x8c => self.otp_read(&args, len),
             0x84 => {
                 let addr = u32::from_le_bytes([args[0], args[1], args[2], args[3]]);
+                if addr == BOOTROM_HEADER && len == 4 {
+                    self.in_answer = vec![b'M', b'u', 2, self.bootrom_version];
+                    self.pending = Pending::InData { len };
+                    return;
+                }
                 match flash_offset(addr, len) {
                     Some(at) => {
                         self.in_answer = self.flash[at..at + len].to_vec();
@@ -161,6 +213,9 @@ impl BootromModel {
             0x0a => {
                 self.rebooted += 1;
                 self.boot_signed_image();
+                // The board leaves BOOTSEL; it comes back to it, refused or replugged, with its soft
+                // locks set again from what OTP then holds.
+                self.soft_locks = None;
                 self.pending = Pending::AckIn;
             }
             _ => self.refuse(1),
@@ -196,7 +251,7 @@ impl BootromModel {
             if r >= ROWS {
                 return self.refuse(INVALID_ADDRESS);
             }
-            if let Err(status) = self.bootloader_reads(r) {
+            if let Err(status) = self.bootloader_may(r, READ_BARRED) {
                 return self.refuse(status);
             }
             if ecc {
@@ -228,9 +283,14 @@ impl BootromModel {
                 if data.len() != rows * row_bytes {
                     return self.refuse(3);
                 }
+                // Row by row, as the bootrom checks them: a write may stop part-way at a row its
+                // guarding page bars.
                 if args[4] != 0 {
-                    for (i, word) in data.chunks_exact(2).enumerate() {
-                        let r = usize::from(row) + i;
+                    for (at, word) in (row..).zip(data.chunks_exact(2)) {
+                        let r = usize::from(at);
+                        if let Err(status) = self.bootloader_may(at, WRITE_BARRED) {
+                            return self.refuse(status);
+                        }
                         if self.raw[r] != 0 {
                             return self.refuse(UNSUPPORTED_MODIFICATION);
                         }
@@ -239,8 +299,11 @@ impl BootromModel {
                         self.raw[r] = u32::from(value) | if value == 0 { 0 } else { ECC_MARKER };
                     }
                 } else {
-                    for (i, word) in data.chunks_exact(4).enumerate() {
-                        let r = usize::from(row) + i;
+                    for (at, word) in (row..).zip(data.chunks_exact(4)) {
+                        let r = usize::from(at);
+                        if let Err(status) = self.bootloader_may(at, WRITE_BARRED) {
+                            return self.refuse(status);
+                        }
                         let value =
                             u32::from_le_bytes([word[0], word[1], word[2], word[3]]) & RAW_ROW_MASK;
                         if self.raw[r] & !value != 0 {
