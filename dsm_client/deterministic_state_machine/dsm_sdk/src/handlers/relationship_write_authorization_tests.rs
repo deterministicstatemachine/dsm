@@ -396,3 +396,106 @@ async fn a_write_into_an_inbox_under_another_key_is_refused_by_every_node() {
     }
     assert_eq!(p.b.era_balance(), 10, "B took A's payment");
 }
+
+/// DSM Amendment A34: a grant ends with its relationship. A and B grant each
+/// other, then B ends the relationship and A acknowledges (A33). A still
+/// holds B's grant and the nodes still take its writes at B's inbox, by
+/// derivation; but B reads none of that relationship's inboxes any more, so
+/// what A writes there reaches no one.
+///
+/// MUTATION CONTROL: reading an ended relationship's inboxes as a live one's
+/// (`reads_nothing_more_from` passing nothing over) turns this red: B's poll
+/// set holds the route and its sync reads A's write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_ended_relationship_s_grant_reaches_no_one() {
+    use crate::storage::client_db::RelationshipState;
+    use dsm::types::proto as pb;
+
+    let p = Pair::boot(100, 0).await;
+    granted_both_ways(&p.a, &p.b).await;
+    p.b.enter();
+    let ended =
+        p.b.invoke(
+            "contacts.terminate",
+            &pb::ContactTerminateRequest {
+                device_id: p.a.device_id.to_vec(),
+            },
+        )
+        .await;
+    assert!(ended.success, "{:?}", ended.error_message);
+    for _ in 0..6 {
+        p.a.sync().await;
+        p.b.sync().await;
+        if p.a.relationship_state(&p.b) == RelationshipState::Ended
+            && p.b.relationship_state(&p.a) == RelationshipState::Ended
+        {
+            break;
+        }
+    }
+    assert_eq!(p.a.relationship_state(&p.b), RelationshipState::Ended);
+    assert_eq!(p.b.relationship_state(&p.a), RelationshipState::Ended);
+    // The termination's own messages are all read.
+    p.a.sync().await;
+    p.b.sync().await;
+
+    // A writes to B's inbox under the grant it still holds.
+    p.a.enter();
+    let (own, _) = held(&p.a, &p.b);
+    assert!(own.grant.is_some(), "A still holds B's grant");
+    let contact = client_db::get_contact_by_device_id(&p.b.device_id)
+        .expect("A's contacts")
+        .expect("A holds B");
+    let tip = crate::handlers::app_router_impl::contact_relationship_tip(&contact)
+        .expect("A's tip with B");
+    let route =
+        crate::sdk::spool_write::counterparty_inbox_address(&p.b.device_id, &p.b.genesis, &tip)
+            .expect("A's route to B");
+    let message_id: [u8; 16] = rand::random();
+    let id = crate::util::text_id::encode_base32_crockford(&message_id);
+    let inner = pb::Envelope {
+        version: 3,
+        headers: Some(pb::Headers {
+            device_id: p.a.device_id.to_vec(),
+            genesis_hash: p.a.genesis.to_vec(),
+        }),
+        message_id: message_id.to_vec(),
+        payload: Some(pb::envelope::Payload::UniversalTx(pb::UniversalTx {
+            ops: vec![pb::UniversalOp {
+                kind: Some(pb::universal_op::Kind::Invoke(pb::Invoke {
+                    method: "wallet.send".to_string(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })),
+    };
+    crate::sdk::b0x_sdk::seal_for(&p.b.device_id, &id, &inner.encode_to_vec())
+        .expect("sealed to B");
+    let mut spool = crate::sdk::b0x_sdk::B0xSDK::new(
+        crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+        p.a.router().core_sdk.clone(),
+        crate::sdk::storage_set::pinned_endpoints().expect("the pinned set"),
+    )
+    .expect("a spool client");
+    spool
+        .submit_stored_envelope(&p.b.device_id, &route, &id)
+        .await
+        .expect("the nodes take a write under the grant");
+
+    p.b.enter();
+    let polled = crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
+        p.b.genesis,
+        p.b.device_id,
+        &client_db::get_all_contacts().expect("B's contacts"),
+    )
+    .expect("B's routes");
+    assert!(
+        polled.iter().all(|tagged| tagged.address != route),
+        "B still reads the ended relationship's inbox"
+    );
+    let after = p.b.sync().await;
+    assert!(after.success, "{:?}", after.errors);
+    assert_eq!(after.pulled, 0, "B read A's write: {after:?}");
+}

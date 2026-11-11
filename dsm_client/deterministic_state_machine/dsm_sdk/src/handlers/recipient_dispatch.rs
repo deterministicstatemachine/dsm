@@ -2451,6 +2451,19 @@ mod tests {
         }
         let copy_key = dsm::crypto::spool_address::envelope_merge_key(&inner);
         from.enter();
+        // The writer derives the route itself, from its own view of the
+        // relationship (DSM Amendment A34): it is the route the recipient reads.
+        let contact = client_db::get_contact_by_device_id(&to.device_id)
+            .expect("the writer's contacts")
+            .expect("the writer holds the recipient");
+        let tip = crate::handlers::app_router_impl::contact_relationship_tip(&contact)
+            .expect("the writer's tip with the recipient");
+        assert_eq!(
+            crate::sdk::spool_write::counterparty_inbox_address(&to.device_id, &to.genesis, &tip)
+                .expect("the writer's route"),
+            route,
+            "both sides derive the one route"
+        );
         crate::sdk::b0x_sdk::seal_for(&to.device_id, &id, &inner.encode_to_vec()).expect("seal");
         let mut spool = crate::sdk::b0x_sdk::B0xSDK::new(
             crate::util::text_id::encode_base32_crockford(&from.device_id),

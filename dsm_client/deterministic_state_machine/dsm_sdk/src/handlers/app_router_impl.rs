@@ -2284,7 +2284,41 @@ pub(crate) struct TaggedInboxAddress {
     pub freshness: RouteFreshness,
 }
 
+/// Whether this device reads nothing more from `counterparty` (DSM Amendment
+/// A34): their relationship has ended (A33), this device awaits no
+/// finalization on it, and no step of its own on it awaits the other side.
+/// The last message an ended relationship carries is the acknowledgement of
+/// its TERMINATE or a finalization still owed, and each is awaited until it
+/// arrives.
+fn reads_nothing_more_from(
+    local_device_id: &[u8; 32],
+    counterparty: &[u8; 32],
+) -> Result<bool, String> {
+    let state = crate::storage::client_db::relationship_state(counterparty)
+        .map_err(|e| format!("the relationship's state: {e}"))?;
+    let ended = state == crate::storage::client_db::RelationshipState::Ended;
+    Ok(ended && nothing_awaited_on(local_device_id, counterparty)?)
+}
+
+/// Whether nothing on this device's relationship with `counterparty` is
+/// awaited: no finalization owed to this device, no step of its own waiting
+/// on the other side.
+fn nothing_awaited_on(local_device_id: &[u8; 32], counterparty: &[u8; 32]) -> Result<bool, String> {
+    let relationship_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(local_device_id, counterparty);
+    let awaits_finalization =
+        crate::storage::client_db::relationship_awaits_peer_finalization(&relationship_key)
+            .map_err(|e| format!("the relationship's finalizations: {e}"))?;
+    let own_step_pending = crate::storage::client_db::get_pending_online_outbox(counterparty)
+        .map_err(|e| format!("pending online outbox unreadable: {e}"))?
+        .is_some();
+    Ok(!(awaits_finalization || own_step_pending))
+}
+
 /// Collect per-contact B0x addresses tagged with route freshness.
+///
+/// A relationship that has ended with nothing on it awaited is not read at
+/// all ([`reads_nothing_more_from`]).
 ///
 /// Per contact: the current tip's address (`Current`), the previous tip's
 /// (`PreviousTip`) when one is stored and differs, and the pending online
@@ -2311,6 +2345,13 @@ pub(crate) fn collect_tagged_inbox_addresses(
             .as_slice()
             .try_into()
             .map_err(|e| format!("contact {}'s genesis: {e}", contact.alias))?;
+        // DSM Amendment A34: a grant ends with its relationship. Once the
+        // relationship has ended (A33) and nothing on it is still awaited,
+        // none of its inboxes is read, so the grant this device issued reaches
+        // no one: whatever its holder writes from then on is never taken in.
+        if reads_nothing_more_from(&local_device_id, &writer)? {
+            continue;
+        }
         // DSM Amendment A34: the relationship's first inbox, or the route bound
         // to this device's own lock; an address whose lock this device has not
         // issued yet holds nothing to read.
@@ -3056,11 +3097,20 @@ mod tests {
     }
 
     /// The addresses `collect_tagged_inbox_addresses` names, in its order.
+    /// Store each contact as adding one does, so it has the relationship row
+    /// every polled contact has.
+    fn stored(contacts: &[ContactRecord]) {
+        for contact in contacts {
+            crate::storage::client_db::store_contact(contact).expect("store the contact");
+        }
+    }
+
     fn inbox_addresses(
         genesis: [u8; 32],
         device: [u8; 32],
         contacts: &[ContactRecord],
     ) -> Vec<String> {
+        stored(contacts);
         collect_tagged_inbox_addresses(genesis, device, contacts)
             .expect("inbox routes")
             .into_iter()
@@ -3289,6 +3339,9 @@ mod tests {
         init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
+        // Every inbox after the relationship's first is bound to the lock this
+        // device issued the contact (DSM Amendment A34).
+        crate::test_support::grants::issue_grant_to((&device, &genesis), &[0xEEu8; 32]);
         let current_tip = [0xCCu8; 32];
         let previous_tip = [0xDDu8; 32];
 
@@ -3309,6 +3362,7 @@ mod tests {
             previous_chain_tip: Some(previous_tip.to_vec()),
         };
 
+        stored(std::slice::from_ref(&contact));
         let tagged =
             collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 2);
@@ -3327,6 +3381,9 @@ mod tests {
         init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
+        // Every inbox after the relationship's first is bound to the lock this
+        // device issued the contact (DSM Amendment A34).
+        crate::test_support::grants::issue_grant_to((&device, &genesis), &[0xEEu8; 32]);
         let tip = [0xCCu8; 32];
 
         let contact = ContactRecord {
@@ -3346,6 +3403,7 @@ mod tests {
             previous_chain_tip: Some(tip.to_vec()), // same as current
         };
 
+        stored(std::slice::from_ref(&contact));
         let tagged =
             collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 1);
@@ -3358,6 +3416,9 @@ mod tests {
         init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
+        // Every inbox after the relationship's first is bound to the lock this
+        // device issued the contact (DSM Amendment A34).
+        crate::test_support::grants::issue_grant_to((&device, &genesis), &[0xEEu8; 32]);
 
         let contact = ContactRecord {
             contact_id: "c_null".to_string(),
@@ -3376,6 +3437,7 @@ mod tests {
             previous_chain_tip: None,
         };
 
+        stored(std::slice::from_ref(&contact));
         let tagged =
             collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 1);

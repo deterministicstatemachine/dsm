@@ -39,7 +39,9 @@ use crate::tla_trace_replay::{
 /// 96 with the successor cells' `SofiSuccessorCells/copy-rule`. 95 since the
 /// offline door carries only the offline-bearer transfer (MR-DSM-0219): no step
 /// of the code commits on its ack, and `OfflineFinality/commit-on-ack` is gone.
-pub const EXPECTED_STANDARD_SPECS: usize = 103;
+/// 107 with DSM Amendment A34's write check: `WriteLock` and its
+/// `unbound-lock`, `first-key-not-held` and `granted-write-reachable` configs.
+pub const EXPECTED_STANDARD_SPECS: usize = 107;
 
 /// The TLC simulation trace a spec replays in Rust. No trace is replayed into
 /// the code: a model's code-level checks are its linked implementation traces
@@ -533,6 +535,47 @@ impl TlaRunner {
                 "DSM.tla",
                 "DSM_SendBeforeEstablishment.cfg",
                 "NoValueBeforeEstablishment",
+            ),
+            // ── A relationship's inbox takes only its recipient's grants ─────
+            // DSM Amendment A34: every node runs one check on every write. A
+            // lock-bound inbox takes a write only under its lock's grant, by
+            // derivation alone; a first inbox holds the key its first write
+            // fixed, and the key never moves. Rust twin: `verify_spool_write`
+            // and the node's `spool_insert_locked`; Lean twin:
+            // lean4/DSMRelationshipWriteLock.lean. Finite by construction.
+            TlaSpec {
+                label: "WriteLock".into(),
+                spec_file: "DSM_WriteLock.tla".into(),
+                config_file: "DSM_WriteLock.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "LockedHoldsOnlyGranted".into(),
+                    "FirstInboxOneKey".into(),
+                    "NodesAgreeAtLocked".into(),
+                ],
+                properties: vec!["FixedKeyNeverMoves".into()],
+                linked_implementation_traces: vec![],
+                trace_replay: TraceReplay::None,
+                expect_violation: None,
+                exhaustive: exhaustive_by_construction("DSM_WriteLock.tla"),
+            },
+            expect_violation(
+                "WriteLock/unbound-lock",
+                "DSM_WriteLock.tla",
+                "DSM_WriteLock_UnboundLock.cfg",
+                "LockedHoldsOnlyGranted",
+            ),
+            expect_violation(
+                "WriteLock/first-key-not-held",
+                "DSM_WriteLock.tla",
+                "DSM_WriteLock_FirstKeyNotHeld.cfg",
+                "FirstInboxOneKey",
+            ),
+            expect_violation(
+                "WriteLock/granted-write-reachable",
+                "DSM_WriteLock.tla",
+                "DSM_WriteLock_GrantedWriteReachable.cfg",
+                "GrantedWriteReachable",
             ),
             expect_violation(
                 "DSM/recipient-skips-admission-and-pin",
@@ -1545,6 +1588,7 @@ fn exhaustive_by_construction(spec_file: &str) -> bool {
         || spec_file == "DSM_OfflineFinality.tla"
         || spec_file == "DSM_ReceiptWriteSet.tla"
         || spec_file == "DSM_BilateralLiveness.tla"
+        || spec_file == "DSM_WriteLock.tla"
 }
 
 /// A falsification config whose named finding is a `[][P]_vars` action

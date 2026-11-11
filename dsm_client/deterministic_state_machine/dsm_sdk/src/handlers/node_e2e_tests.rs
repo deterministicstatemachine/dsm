@@ -634,18 +634,14 @@ async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through(
 }
 
 /// Pre-audit item 11: a copy is passed over by its content, never by the id it
-/// is spooled under. Anyone can spool a copy under another message's id, and
-/// the node keeps both (storage spec §8). Passing junk over by id would hide
+/// is spooled under. A writer can spool a copy under another message's id,
+/// and the node keeps both (storage spec §8). Passing junk over by id would hide
 /// every copy under that id for good, an honest one included, which is the
 /// shadowing `envelope_merge_key` closed for the merge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
     let p = Pair::boot(100, 0).await;
-    // C, a third party: C holds B's keys to seal to; B does not know C.
-    let mut c = TestDevice::create("C", 0x0C);
-    c.boot(&p.fleet).await;
-    c.add_contact(&p.b).await;
     let route = route_with(&p.b, &p.a);
     let id: [u8; 16] = rand::random();
 
@@ -660,12 +656,26 @@ async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
     assert!(first.success, "{:?}", first.errors);
     assert_eq!(first.pulled, 1, "the junk was read: {first:?}");
 
-    // Another copy under the same id, other content, from another device.
+    // Another copy under the same id, other content. Only the relationship's
+    // writer reaches its inbox (DSM Amendment A34), so it is A's own. A's
+    // wallet seals one payload per id and keeps it (`b0x_sealed`); a writer
+    // that does not, a modified wallet, can put a second one under the id,
+    // and that writer is the one this test needs.
+    p.a.enter();
+    {
+        let binding = crate::storage::client_db::get_connection().expect("A's store");
+        let conn = binding.lock().expect("A's store is not poisoned");
+        conn.execute(
+            "DELETE FROM b0x_sealed WHERE message_id = ?1",
+            [crate::util::text_id::encode_base32_crockford(&id)],
+        )
+        .expect("A forgets its first seal");
+    }
     let other = spool_sealed(
-        &c,
+        &p.a,
         &p.b,
         &route,
-        &invoke_copy(&c, id, "wallet.send", Some(vec![0xFF])),
+        &invoke_copy(&p.a, id, "wallet.send", Some(vec![0xFF])),
     )
     .await;
     assert_ne!(other, junk, "two copies, one id");
@@ -687,9 +697,10 @@ async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
 /// the sender's path refuses and leaves) holds the read position where it is.
 /// On the old code every read started there and read at most its page cap, so
 /// what lay more than a cap behind it was never read, junk passed over or not.
-/// A third party puts one such copy on B's route with A, a cap's worth of
-/// copies that open to none of the spooled payloads behind it, and A then
-/// pays B.
+/// A puts one such copy on its route to B, a cap's worth of copies that open
+/// to none of the spooled payloads behind it, and then pays B. Only the
+/// relationship's writer reaches its inbox (DSM Amendment A34), so the junk
+/// is A's own.
 ///
 /// - The first sync stops at the cap before the payment, names the route
 ///   `more_pending`, and passes over the junk it read.
@@ -700,25 +711,21 @@ async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
 #[serial]
 async fn a_copy_that_waits_hides_nothing_more_than_a_page_cap_behind_it() {
     let p = Pair::boot(100, 0).await;
-    // C, a third party: C holds B's keys to seal to; B does not know C.
-    let mut c = TestDevice::create("C", 0x0C);
-    c.boot(&p.fleet).await;
-    c.add_contact(&p.b).await;
     let route = route_with(&p.b, &p.a);
 
     let pin = invoke_copy(
-        &c,
+        &p.a,
         rand::random(),
         crate::sdk::b0x_sdk::RECEIPT_COUNTERSIGN_B_METHOD,
         Some(vec![0xFF]),
     );
-    spool_sealed(&c, &p.b, &route, &pin).await;
+    spool_sealed(&p.a, &p.b, &route, &pin).await;
     // One page past the cap (64 entries a page, 16 pages a read).
     let cap = 16 * 64;
     let mut junk = Vec::with_capacity(cap + 64);
     for _ in 0..cap + 64 {
-        let unknown = invoke_copy(&c, rand::random(), "no.such.payload", None);
-        junk.push(spool_sealed(&c, &p.b, &route, &unknown).await);
+        let unknown = invoke_copy(&p.a, rand::random(), "no.such.payload", None);
+        junk.push(spool_sealed(&p.a, &p.b, &route, &unknown).await);
     }
     let paid = p.a.send(&p.b, 10).await;
     assert!(paid.success, "{:?}", paid.error_message);

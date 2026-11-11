@@ -991,9 +991,10 @@ async fn r9_the_barrier_is_relationship_local() {
     let p = Pair::boot(1_000, 500).await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
+    // Value moves only on an established relationship (DSM Amendment A33).
     for (x, y) in [(&p.a, &c), (&p.b, &c)] {
-        x.add_contact(y).await;
-        y.add_contact(x).await;
+        x.add_and_establish(y).await;
+        y.add_and_establish(x).await;
     }
     let c_sync = c.sync().await;
     assert!(c_sync.success, "{:?}", c_sync.errors);
