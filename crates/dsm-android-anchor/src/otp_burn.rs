@@ -626,11 +626,13 @@ pub enum OnBoard {
 }
 
 /// The board's flash, read back over the release's image. A link failure is an error, never a
-/// difference.
+/// difference. Execute-in-place is left first, as picotool leaves it before every flash read: in
+/// BOOTSEL a read through it does not give the flash's bytes.
 pub fn image_on_board<L: BootselLink>(
     pb: &mut Picoboot<L>,
     release: &Release,
 ) -> Result<OnBoard, String> {
+    pb.exit_xip().map_err(|e| e.to_string())?;
     let image = padded_image(release);
     for (i, chunk) in image.chunks(SECTOR).enumerate() {
         let offset = u32::try_from(i * SECTOR).map_err(|_far| "an image larger than flash")?;
