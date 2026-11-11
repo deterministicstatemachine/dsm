@@ -126,7 +126,7 @@ const offer = await app.offer({
 console.log(offer.code);                        // show it as a QR code
 
 // 2. Once a wallet connected:
-const [player] = await app.connections();
+const player = (await app.connections()).find((c) => c.connected);
 const paid = await app.wait(await app.request(player, ask.send("ERA", "0.05", "a sword")));
 if (paid.fact === "received") {
   const sword = await app.issue({ symbol: "SWORD", name: "Sword", supply: "1" });
@@ -155,7 +155,7 @@ app = local_app()
 offer = app.offer("My Game", [grant.send("ERA", "0.10", "1.00"), grant.owns(["ERA"]), grant.accept()])
 print(offer.code)
 
-player = app.connections()[0]
+player = next(c for c in app.connections() if c.connected)
 paid = app.wait(app.request(player, ask.send("ERA", "0.05", "a sword")))
 if paid.fact == "received":
     sword = app.issue("SWORD", "Sword", "1")
