@@ -29,14 +29,15 @@ use crate::appliance::{
 use crate::enrollment::{ChipBirth, Provisioning};
 use crate::proto::{arr32, pb, ProtoError};
 use crate::root_advance::{OfflineRelease, Transition};
-use crate::tropic::{PartitionSig, Tropic};
+use crate::tropic::{PartitionSig, Tropic, TropicError};
 
 /// Why the durable record could not be written or read.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StoreError {
-    /// The store did not take the write or answer the read: no power, or the bus failed.
-    Unavailable,
-    /// The store's device took the command and refused it.
+    /// The chip the store lives in did not take the write or answer the read, for the reason it
+    /// gives: its link failed, or it refused the command.
+    Chip(TropicError),
+    /// The store will not do it: a try of a record over the record it holds.
     Refused,
     /// The store holds written slots that form no complete record.
     Corrupt,

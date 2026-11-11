@@ -21,13 +21,16 @@ use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OwnedTransition, Transition,
 };
-use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{ChipLink, PartitionError, PartitionSig, Tropic, TropicError};
 use ed25519_dalek::{Signer, SigningKey};
 
 const H0: u32 = 64;
 /// The policy every anchor here is enrolled under.
 const POLICY: [u8; 32] = [0x0C; 32];
 const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX128f;
+/// The chip with the supply off, as its driver reports it: a chip with no power never reports itself
+/// ready.
+const NO_POWER: TropicError = TropicError::Comm(ChipLink::Busy);
 
 /// The board's one supply.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,12 +108,12 @@ impl Board {
     fn write_starts(&self) -> Result<(), StoreError> {
         let mut s = self.supply();
         if s.power == Power::Off {
-            return Err(StoreError::Unavailable);
+            return Err(StoreError::Chip(NO_POWER));
         }
         s.writes += 1;
         if s.cut == Cut::AtWrite(s.writes) {
             s.power = Power::Off;
-            return Err(StoreError::Unavailable);
+            return Err(StoreError::Chip(NO_POWER));
         }
         Ok(())
     }
@@ -126,7 +129,7 @@ impl Board {
     fn powered(&self) -> Result<(), TropicError> {
         match self.power() {
             Power::On => Ok(()),
-            Power::Off => Err(TropicError::Comm),
+            Power::Off => Err(NO_POWER),
         }
     }
 }
@@ -222,7 +225,7 @@ impl RMemory {
     fn on_the_supply(&self) -> Result<(), StoreError> {
         match self.board.power() {
             Power::On => Ok(()),
-            Power::Off => Err(StoreError::Unavailable),
+            Power::Off => Err(StoreError::Chip(NO_POWER)),
         }
     }
 }
@@ -238,7 +241,7 @@ impl ActiveStore for RMemory {
     fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
         match self.board.power() {
             Power::On => Ok(self.slot.borrow().clone()),
-            Power::Off => Err(StoreError::Unavailable),
+            Power::Off => Err(StoreError::Chip(NO_POWER)),
         }
     }
 
@@ -649,7 +652,7 @@ fn a_cut_after_the_counter_moved_completes_the_commit_at_boot_without_moving_it_
     anchor.board.cut(Cut::AtWrite(2));
     let cut = d.commit();
     assert!(
-        matches!(cut, Err(DurableError::Store(StoreError::Unavailable))),
+        matches!(cut, Err(DurableError::Store(StoreError::Chip(NO_POWER)))),
         "the counter-committed record did not land: {cut:?}"
     );
     assert_eq!(anchor.chip_counter(), H0 - 1, "the counter moved");
@@ -691,7 +694,7 @@ fn a_cut_while_prepared_resets_at_boot_with_the_counter_unmoved() {
     anchor.board.cut(Cut::AtWrite(1));
     let cut = d.commit();
     assert!(
-        matches!(cut, Err(DurableError::Store(StoreError::Unavailable))),
+        matches!(cut, Err(DurableError::Store(StoreError::Chip(NO_POWER)))),
         "the candidate's record did not land: {cut:?}"
     );
     assert_eq!(anchor.stored().status, Status::Prepared);
@@ -720,7 +723,10 @@ fn a_change_whose_record_did_not_land_is_undone() {
     anchor.board.cut(Cut::AtWrite(1));
     let refused = prepare(&mut d).map(|t| t.next_root);
     assert!(
-        matches!(refused, Err(DurableError::Store(StoreError::Unavailable))),
+        matches!(
+            refused,
+            Err(DurableError::Store(StoreError::Chip(NO_POWER)))
+        ),
         "{refused:?}"
     );
     assert_eq!(
@@ -1782,7 +1788,7 @@ fn an_open_challenge_and_a_committed_receive_survive_a_power_cut() {
     receiver.board.cut(Cut::AtWrite(2));
     let cut = b.commit();
     assert!(
-        matches!(cut, Err(DurableError::Store(StoreError::Unavailable))),
+        matches!(cut, Err(DurableError::Store(StoreError::Chip(NO_POWER)))),
         "the counter-committed record does not land: {cut:?}"
     );
     drop(b);

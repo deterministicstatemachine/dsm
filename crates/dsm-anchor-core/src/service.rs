@@ -238,12 +238,42 @@ pub(crate) fn fail(op: i32, code: u32) -> pb::ApplianceResponse {
     }
 }
 
+/// A refused operation as the wire carries it: its code, and what the code alone does not say. A
+/// locked board has no debug port, so the detail is all that says which fault stopped it.
+pub struct Refusal {
+    code: u32,
+    detail: alloc::string::String,
+}
+
+impl From<ApplianceError> for Refusal {
+    fn from(e: ApplianceError) -> Self {
+        Self {
+            detail: alloc::format!("{e:?}"),
+            code: appliance_code(e),
+        }
+    }
+}
+
+impl From<DurableError> for Refusal {
+    fn from(e: DurableError) -> Self {
+        Self {
+            detail: alloc::format!("{e:?}"),
+            code: durable_code(e),
+        }
+    }
+}
+
+/// The answer to a refused operation: its code and its detail.
+fn refused(op: i32, refusal: Refusal) -> pb::ApplianceResponse {
+    pb::ApplianceResponse {
+        detail: refusal.detail,
+        ..fail(op, refusal.code)
+    }
+}
+
 /// A refusal of an appliance operation with its cause: what the code alone does not say.
 pub(crate) fn appliance_refusal(op: i32, e: ApplianceError) -> pb::ApplianceResponse {
-    pb::ApplianceResponse {
-        detail: alloc::format!("{e:?}"),
-        ..fail(op, appliance_code(e))
-    }
+    refused(op, Refusal::from(e))
 }
 
 /// A refusal frame from outside the anchor: the firmware's own gates, and an anchor that did not come
@@ -255,8 +285,8 @@ pub fn refusal(op: i32, code: u32, detail: &str) -> Vec<u8> {
     })
 }
 
-/// An appliance the wire drives: each operation, its failure as the wire code, and the appliance
-/// to read for a status.
+/// An appliance the wire drives: each operation, its failure as the wire's code and detail, and the
+/// appliance to read for a status.
 pub trait Served {
     type T: Tropic;
     type P: PartitionSig;
@@ -267,15 +297,15 @@ pub trait Served {
         receiver_challenge: &[u8; 32],
         sender_device_root_before: &[u8; 32],
         sender_device_root_after: &[u8; 32],
-    ) -> Result<(), u32>;
+    ) -> Result<(), Refusal>;
     /// The owner's authorization of the next prepare ([`Appliance::authorize`]).
-    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), u32>;
-    fn commit(&mut self) -> Result<(), u32>;
-    fn emit(&mut self) -> Result<pb::OfflineRelease, u32>;
-    fn finalize(&mut self) -> Result<[u8; 32], u32>;
-    fn cancel(&mut self) -> Result<(), u32>;
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), Refusal>;
+    fn commit(&mut self) -> Result<(), Refusal>;
+    fn emit(&mut self) -> Result<pb::OfflineRelease, Refusal>;
+    fn finalize(&mut self) -> Result<[u8; 32], Refusal>;
+    fn cancel(&mut self) -> Result<(), Refusal>;
     fn recover(&mut self) -> RecoverOutcome;
-    fn draw_challenge(&mut self) -> Result<[u8; 32], ApplianceError>;
+    fn draw_challenge(&mut self) -> Result<[u8; 32], Refusal>;
     fn check_payment(
         &mut self,
         t: &Transition,
@@ -296,31 +326,31 @@ impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
         rc: &[u8; 32],
         before: &[u8; 32],
         after: &[u8; 32],
-    ) -> Result<(), u32> {
-        Appliance::prepare(self, t, rc, before, after).map_err(appliance_code)
+    ) -> Result<(), Refusal> {
+        Appliance::prepare(self, t, rc, before, after).map_err(Refusal::from)
     }
-    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), u32> {
-        Appliance::authorize(self, digest, signature).map_err(appliance_code)
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), Refusal> {
+        Appliance::authorize(self, digest, signature).map_err(Refusal::from)
     }
-    fn commit(&mut self) -> Result<(), u32> {
-        Appliance::commit(self).map_err(appliance_code)
+    fn commit(&mut self) -> Result<(), Refusal> {
+        Appliance::commit(self).map_err(Refusal::from)
     }
-    fn emit(&mut self) -> Result<pb::OfflineRelease, u32> {
+    fn emit(&mut self) -> Result<pb::OfflineRelease, Refusal> {
         Appliance::emit(self)
             .map(|rel| rel.to_pb())
-            .map_err(appliance_code)
+            .map_err(Refusal::from)
     }
-    fn finalize(&mut self) -> Result<[u8; 32], u32> {
-        Appliance::finalize(self).map_err(appliance_code)
+    fn finalize(&mut self) -> Result<[u8; 32], Refusal> {
+        Appliance::finalize(self).map_err(Refusal::from)
     }
-    fn cancel(&mut self) -> Result<(), u32> {
-        Appliance::cancel(self).map_err(appliance_code)
+    fn cancel(&mut self) -> Result<(), Refusal> {
+        Appliance::cancel(self).map_err(Refusal::from)
     }
     fn recover(&mut self) -> RecoverOutcome {
         Appliance::recover(self)
     }
-    fn draw_challenge(&mut self) -> Result<[u8; 32], ApplianceError> {
-        Appliance::draw_challenge(self)
+    fn draw_challenge(&mut self) -> Result<[u8; 32], Refusal> {
+        Appliance::draw_challenge(self).map_err(Refusal::from)
     }
     fn check_payment(
         &mut self,
@@ -344,35 +374,33 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Served for DurableAppliance<T, 
         rc: &[u8; 32],
         before: &[u8; 32],
         after: &[u8; 32],
-    ) -> Result<(), u32> {
-        DurableAppliance::prepare(self, t, rc, before, after).map_err(durable_code)
+    ) -> Result<(), Refusal> {
+        DurableAppliance::prepare(self, t, rc, before, after).map_err(Refusal::from)
     }
-    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), u32> {
-        DurableAppliance::authorize(self, digest, signature).map_err(durable_code)
+    fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), Refusal> {
+        DurableAppliance::authorize(self, digest, signature).map_err(Refusal::from)
     }
-    fn commit(&mut self) -> Result<(), u32> {
-        DurableAppliance::commit(self).map_err(durable_code)
+    fn commit(&mut self) -> Result<(), Refusal> {
+        DurableAppliance::commit(self).map_err(Refusal::from)
     }
-    fn emit(&mut self) -> Result<pb::OfflineRelease, u32> {
+    fn emit(&mut self) -> Result<pb::OfflineRelease, Refusal> {
         DurableAppliance::emit(self)
             .map(|rel| rel.to_pb())
-            .map_err(appliance_code)
+            .map_err(Refusal::from)
     }
-    fn finalize(&mut self) -> Result<[u8; 32], u32> {
-        DurableAppliance::finalize(self).map_err(durable_code)
+    fn finalize(&mut self) -> Result<[u8; 32], Refusal> {
+        DurableAppliance::finalize(self).map_err(Refusal::from)
     }
-    fn cancel(&mut self) -> Result<(), u32> {
-        DurableAppliance::cancel(self).map_err(durable_code)
+    fn cancel(&mut self) -> Result<(), Refusal> {
+        DurableAppliance::cancel(self).map_err(Refusal::from)
     }
     fn recover(&mut self) -> RecoverOutcome {
         DurableAppliance::recover(self)
     }
-    fn draw_challenge(&mut self) -> Result<[u8; 32], ApplianceError> {
-        DurableAppliance::draw_challenge(self).map_err(|e| match e {
-            DurableError::Appliance(a) => a,
-            // The challenge was not written, so none is open: a receive under it is refused.
-            _ => ApplianceError::NoOpenChallenge,
-        })
+    /// A challenge the store did not take is not open, so a receive under it is refused; the draw
+    /// says why it was not taken.
+    fn draw_challenge(&mut self) -> Result<[u8; 32], Refusal> {
+        DurableAppliance::draw_challenge(self).map_err(Refusal::from)
     }
     fn check_payment(
         &mut self,
@@ -460,7 +488,7 @@ pub fn dispatch<A: Served>(
             };
             match app.prepare(&owned.as_transition(), &rc, &r_before, &r_after) {
                 Ok(()) => ok(op),
-                Err(code) => fail(op, code),
+                Err(refusal) => refused(op, refusal),
             }
         }
         Ok(pb::Op::Authorize) => {
@@ -473,12 +501,12 @@ pub fn dispatch<A: Served>(
             };
             match app.authorize(&digest, signature) {
                 Ok(()) => ok(op),
-                Err(code) => fail(op, code),
+                Err(refusal) => refused(op, refusal),
             }
         }
         Ok(pb::Op::Commit) => match app.commit() {
             Ok(()) => ok(op),
-            Err(code) => fail(op, code),
+            Err(refusal) => refused(op, refusal),
         },
         Ok(pb::Op::Emit) => match app.emit() {
             Ok(rel) => pb::ApplianceResponse {
@@ -486,7 +514,7 @@ pub fn dispatch<A: Served>(
                 release: Some(rel),
                 ..base(op)
             },
-            Err(code) => fail(op, code),
+            Err(refusal) => refused(op, refusal),
         },
         Ok(pb::Op::Finalize) => match app.finalize() {
             Ok(h) => pb::ApplianceResponse {
@@ -494,7 +522,7 @@ pub fn dispatch<A: Served>(
                 active_root: h.to_vec(),
                 ..base(op)
             },
-            Err(code) => fail(op, code),
+            Err(refusal) => refused(op, refusal),
         },
         Ok(pb::Op::Status) => status(op, app.view()),
         Ok(pb::Op::Recover) => {
@@ -507,14 +535,14 @@ pub fn dispatch<A: Served>(
         }
         Ok(pb::Op::Cancel) => match app.cancel() {
             Ok(()) => ok(op),
-            Err(code) => fail(op, code),
+            Err(refusal) => refused(op, refusal),
         },
         Ok(pb::Op::Challenge) => match app.draw_challenge() {
             Ok(challenge) => pb::ApplianceResponse {
                 receiver_challenge: challenge.to_vec(),
                 ..ok(op)
             },
-            Err(e) => appliance_refusal(op, e),
+            Err(refusal) => refused(op, refusal),
         },
         Ok(pb::Op::CheckPayment) => check_payment_request(app, req),
         // An appliance exists only once its anchor is provisioned, and an anchor is provisioned

@@ -22,7 +22,7 @@ use anchor_core::identify::{ChipReading, ChipSurvey};
 use anchor_core::proto::{decode_frame, pb};
 use anchor_core::rmem::{LayoutError, SlotMemory, SlottedStore};
 use anchor_core::service::{err, refusal, MAX_FRAME_LEN};
-use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{ChipRefusal, PartitionError, PartitionSig, Tropic, TropicError};
 use anchor_core::util::zeroize;
 use dsm_sphincs::SphincsVariant;
 use embedded_hal::digital::OutputPin;
@@ -425,7 +425,9 @@ where
         .counter_at_birth(ENROLL_H0)
         .map_err(BringUpFailure::Enroll)?;
     if live > ENROLL_H0 {
-        return Err(BringUpFailure::Enroll(TropicError::Refused));
+        return Err(BringUpFailure::Enroll(TropicError::Refused(
+            ChipRefusal::CounterPastBirth,
+        )));
     }
     let chip_pk = session
         .borrow_mut()

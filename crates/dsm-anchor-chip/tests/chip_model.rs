@@ -17,7 +17,7 @@ use anchor_core::hash::{h, kdf};
 use anchor_core::proto::pb;
 use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
 use anchor_core::service::err;
-use anchor_core::tropic::{ChipSig, HostSig, PartitionSig, TropicError};
+use anchor_core::tropic::{ChipRefusal, ChipSig, HostSig, PartitionSig, TropicError};
 use anchor_core::try_run::TRIAL_PERMANENT;
 use control::Part;
 use support::{
@@ -626,7 +626,9 @@ fn a_chip_holding_another_boards_key_is_refused_before_anything_is_written() {
     match model.boot() {
         Ok(_anchor) => panic!("a chip holding another board's key came up to be provisioned"),
         Err(anchor_chip::bring_up::BringUpFailure::Enroll(
-            anchor_core::tropic::TropicError::Refused,
+            anchor_core::tropic::TropicError::Refused(
+                anchor_core::tropic::ChipRefusal::BoardSlotHoldsAnotherKey,
+            ),
         )) => {}
         Err(e) => panic!("refused for another reason: {e:?}"),
     }
@@ -1069,7 +1071,7 @@ fn a_record_wiped_from_a_caged_chip_never_makes_it_installable_again() {
     drop(session);
     match model.boot() {
         Ok(_anchor) => panic!("a caged chip with no record came up to be installed"),
-        Err(BringUpFailure::Enroll(TropicError::Refused)) => {}
+        Err(BringUpFailure::Enroll(TropicError::Refused(ChipRefusal::AccessRulesNotWritable))) => {}
         Err(e) => panic!("refused for another reason: {e:?}"),
     }
     assert_birth_closed(&model);
