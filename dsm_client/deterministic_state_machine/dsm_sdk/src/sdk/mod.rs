@@ -72,6 +72,7 @@ pub mod device_directory;
 pub(crate) mod final_reads;
 pub mod route_seats;
 pub mod sofi_flow;
+pub mod spool_write; // the write a device sends for each envelope it spools (DSM Amendment A34)
 pub mod storage_io;
 pub mod storage_node_sdk;
 pub mod storage_set; // canonical storage-set identity + catalog (the anchor chooses the set; config resolves it)

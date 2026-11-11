@@ -59,6 +59,7 @@ function makeContact(overrides: Record<string, any> = {}) {
     genesisHash: new Uint8Array(32).fill(0x02),
     publicKey: new Uint8Array(64).fill(0x03),
     genesisVerifiedOnline: true,
+    relationship: 'established',
     ...overrides,
   };
 }
@@ -127,6 +128,7 @@ describe('ContactsStore', () => {
         genesisVerifiedOnline: true,
         bleAddress: undefined,
         chainTip: undefined,
+        relationship: 'established',
         sendReady: undefined,
         sendCheckState: undefined,
         sendBlockReason: undefined,

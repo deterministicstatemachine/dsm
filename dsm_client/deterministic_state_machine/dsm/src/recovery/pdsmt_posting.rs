@@ -799,7 +799,7 @@ mod tests {
         let c_yes = [0xC1; 32];
         let rk_yes = compute_smt_key(&owner, &c_yes);
         let dev = dev
-            .establish_relationship(c_yes)
+            .relationship_established_by_fixture(c_yes)
             .expect("establish")
             .advance(
                 rk_yes,
@@ -825,7 +825,7 @@ mod tests {
         let c_no = [0xC2; 32];
         let rk_no = compute_smt_key(&owner, &c_no);
         let dev = dev
-            .establish_relationship(c_no)
+            .relationship_established_by_fixture(c_no)
             .expect("establish")
             .advance(
                 rk_no,

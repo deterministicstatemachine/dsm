@@ -127,6 +127,10 @@ pub fn store_contact(contact: &ContactRecord) -> Result<()> {
         ],
     )?;
 
+    // The relationship opens with the contact (Amendment A33); a contact
+    // stored again keeps where its relationship stands.
+    super::relationship_lifecycle::open_relationship_with_conn(&conn, &contact.device_id)?;
+
     // Persist the canonical single-device R_G alongside the contact record.
     let mut devid = [0u8; 32];
     devid.copy_from_slice(&contact.device_id);
@@ -785,7 +789,7 @@ pub(crate) fn store_contact_record_for_tests(device_id: [u8; 32], alias: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use serial_test::serial;
     use std::collections::HashMap;
@@ -796,7 +800,10 @@ mod tests {
         crate::storage::client_db::init_database().expect("init db");
     }
 
-    pub(super) fn make_contact(device_id: [u8; 32], alias: &str) -> ContactRecord {
+    pub(in crate::storage::client_db) fn make_contact(
+        device_id: [u8; 32],
+        alias: &str,
+    ) -> ContactRecord {
         ContactRecord {
             contact_id: format!("cid-{alias}"),
             device_id: device_id.to_vec(),

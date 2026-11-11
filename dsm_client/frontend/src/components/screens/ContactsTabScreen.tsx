@@ -15,6 +15,7 @@ import { useDpadNav } from '../../hooks/useDpadNav';
 import { Disclosure, Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
 import { pairingLineFor, pairingStage } from '../../domain/pairing';
+import { canEnd, relationshipLineFor } from '../../domain/relationship';
 
 interface Props { onNavigate?: (screen: string) => void; eraTokenSrc?: string }
 
@@ -36,7 +37,21 @@ const ContactsTabScreen: React.FC<Props> = () => {
     } catch {}
     return 'list';
   });
-  const { contacts, refreshContacts, unpairContact, isLoading: contextLoading } = useContacts();
+  const { contacts, refreshContacts, unpairContact, terminateContact, isLoading: contextLoading } = useContacts();
+  // The contact whose ending is under way, and the last ending Rust refused.
+  const [endingContact, setEndingContact] = useState<string | null>(null);
+  const [endRefused, setEndRefused] = useState<{ deviceId: string; message: string } | null>(null);
+  const endRelationship = useCallback((deviceId: string) => {
+    setEndingContact(deviceId);
+    setEndRefused(null);
+    terminateContact(deviceId).then(
+      () => setEndingContact(null),
+      (e: unknown) => {
+        setEndingContact(null);
+        setEndRefused({ deviceId, message: e instanceof Error ? e.message : String(e) });
+      },
+    );
+  }, [terminateContact]);
   // The contact whose unpair is under way, and the last unpair Rust refused.
   const [unpairing, setUnpairing] = useState<string | null>(null);
   const [unpairRefused, setUnpairRefused] = useState<{ deviceId: string; message: string } | null>(null);
@@ -311,6 +326,10 @@ const ContactsTabScreen: React.FC<Props> = () => {
                             <span className="sb-kv__k">Verified</span>
                             <span className="sb-kv__v">{c.genesisVerifiedOnline ? 'YES' : 'NO'}</span>
                           </div>
+                          <div className="sb-kv">
+                            <span className="sb-kv__k">Relationship</span>
+                            <span className="sb-kv__v">{relationshipLineFor(c)}</span>
+                          </div>
 
                           <button
                             type="button"
@@ -323,6 +342,20 @@ const ContactsTabScreen: React.FC<Props> = () => {
                           </button>
                           {unpairRefused?.deviceId === c.deviceId && (
                             <Notice kind="error">{unpairRefused.message}</Notice>
+                          )}
+                          {canEnd(c) && (
+                            <button
+                              type="button"
+                              className="sb-btn"
+                              style={{ marginTop: 8, width: '100%' }}
+                              disabled={endingContact === c.deviceId}
+                              onClick={() => endRelationship(c.deviceId)}
+                            >
+                              {endingContact === c.deviceId ? 'Ending…' : 'End relationship'}
+                            </button>
+                          )}
+                          {endRefused?.deviceId === c.deviceId && (
+                            <Notice kind="error">{endRefused.message}</Notice>
                           )}
 
                           <Disclosure summary={`Stitched receipts (${contactTxs.length})`} className="sb-details--plain">

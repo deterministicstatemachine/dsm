@@ -51,6 +51,8 @@ pub mod publication;
 pub mod recipient_receipt_fold;
 pub mod recipient_staging;
 pub mod recovery;
+pub mod relationship_lifecycle;
+pub mod relationship_write_authorization;
 pub mod route_writes;
 pub mod sender_outbox;
 pub mod sender_proposal;
@@ -82,6 +84,8 @@ pub use sender_proposal::*;
 pub use contacts::*;
 pub use counterparty_canonical_heads::*;
 pub use genesis::*;
+pub use relationship_lifecycle::*;
+pub use relationship_write_authorization::*;
 pub use manifold_seeds::*;
 pub use nonces::*;
 pub use online_outbox::*;
@@ -615,8 +619,13 @@ fn get_database_path() -> Result<PathBuf> {
 /// `bilateral_sessions` keeps a receive's account move (`receive_*`) while the
 /// receiver's board commits it, and `offline_acknowledgement` keeps each step's
 /// acknowledgement, the receiver board's receive commit. A database made at 43
-/// is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 44;
+/// is refused at open. 45 adds `contact_relationship`, where each relationship
+/// stands (DSM Amendment A33); a database made at 44 is refused at open. 46
+/// adds `relationship_write_authorization`, each relationship's write keys and
+/// grants (DSM Amendment A34); a database made at 45 is refused at open. 47
+/// adds `inbox_route`, the route digest and lock of each inbox address this
+/// device writes to (DSM Amendment A34); a database made at 46 is refused.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 47;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1170,6 +1179,47 @@ fn create_schema(conn: &Connection) -> Result<()> {
             chain_tip_commitment        BLOB
         );
 
+        -- Where each relationship stands on this device (DSM Amendment A33):
+        -- opened when the contact is added, proposed while this device's
+        -- ESTABLISH awaits the countersignature, established once held, ending
+        -- while this device's TERMINATE awaits its acknowledgement, ended for
+        -- good. Written by store_contact and the lifecycle steps alone.
+        CREATE TABLE IF NOT EXISTS contact_relationship(
+            device_id   BLOB PRIMARY KEY,
+            state       TEXT NOT NULL CHECK (state IN (
+                'opened', 'proposed', 'established', 'ending', 'ended'
+            ))
+        );
+
+        -- A relationship's write authorizations (DSM Amendment A34), one row
+        -- per counterparty and direction. 'outbound': this device's own write
+        -- key toward the counterparty (no secret: it comes back from the
+        -- master seed), its frozen offer in `message`, the counterparty's
+        -- verified grant in `grant_wire`. 'inbound': the counterparty's key and
+        -- the grant this device issued it, in `message`. Written by an
+        -- establishment and by verified offers and grants alone.
+        CREATE TABLE IF NOT EXISTS relationship_write_authorization(
+            counterparty_device_id   BLOB NOT NULL CHECK (length(counterparty_device_id) = 32),
+            relationship_instance_id BLOB NOT NULL CHECK (length(relationship_instance_id) = 32),
+            direction                TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
+            write_public_key         BLOB NOT NULL,
+            message                  BLOB NOT NULL,
+            delivered                INTEGER NOT NULL DEFAULT 0 CHECK (delivered IN (0, 1)),
+            grant_id                 BLOB CHECK (grant_id IS NULL OR length(grant_id) = 32),
+            grant_wire               BLOB,
+            PRIMARY KEY (counterparty_device_id, direction)
+        );
+
+        -- Each inbox address this device writes to (DSM Amendment A34): the
+        -- route digest it was derived from, and the recipient's lock it is
+        -- bound to (NULL for a relationship's first inbox, the open address
+        -- of its route). A write proves its address from these.
+        CREATE TABLE IF NOT EXISTS inbox_route(
+            address          TEXT PRIMARY KEY,
+            route_digest     BLOB NOT NULL CHECK (length(route_digest) = 32),
+            lock_public_key  BLOB
+        );
+
         -- Storage-node auth tokens are gone with writer authorization
         -- (storage spec §4); an older database drops its table here.
         DROP TABLE IF EXISTS auth_tokens;
@@ -1415,6 +1465,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- in the SAME accept transaction (3.5b PR4). The B->A reply
             -- carries THIS; bare sig_b cannot finalize the sender.
             release_bytes                BLOB,
+            -- 1 for a transfer, whose reply needs the release; 0 for a
+            -- relationship step (DSM Amendment A33), whose reply carries none.
+            moves_value                  INTEGER NOT NULL CHECK (moves_value IN (0, 1)),
             -- Finality barrier (recipient gate): 1 once the SENDER's verified
             -- RelationshipFinalizedV1 for this transition landed. Only the
             -- certificate handler flips it. While any non-rejected row on a
@@ -2382,6 +2435,9 @@ mod tests {
         let deferred_tip = [0x72u8; 32];
 
         seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", canonical_tip);
+        // A healthy relationship is an established one (DSM Amendment A33).
+        set_relationship_state(&device_id, RelationshipState::Established)
+            .expect("establish the relationship");
         record_observed_remote_chain_tip(
             &device_id,
             &deferred_tip,
@@ -2411,6 +2467,9 @@ mod tests {
         let peer_claim_tip = [0x73u8; 32];
 
         seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", canonical_tip);
+        // Established, so the block is the peer claim's (DSM Amendment A33).
+        set_relationship_state(&device_id, RelationshipState::Established)
+            .expect("establish the relationship");
         record_observed_remote_chain_tip(
             &device_id,
             &peer_claim_tip,

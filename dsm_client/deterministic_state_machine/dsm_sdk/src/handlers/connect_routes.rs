@@ -473,9 +473,15 @@ fn payment_waits(app: &[u8; 32]) -> Option<String> {
         generated::RelationshipSendBlockReason::try_from(status.send_block_reason),
     ) {
         (ready, _) if ready => None,
-        (_, Ok(generated::RelationshipSendBlockReason::PendingCatchup)) => {
-            Some(super::relationship_status::status_message(&status))
-        }
+        // Catching up, or the relationship's establishment (Amendment A33)
+        // still under way: the payment waits for it.
+        (
+            _,
+            Ok(
+                generated::RelationshipSendBlockReason::PendingCatchup
+                | generated::RelationshipSendBlockReason::NotEstablished,
+            ),
+        ) => Some(super::relationship_status::status_message(&status)),
         _ => None,
     }
 }

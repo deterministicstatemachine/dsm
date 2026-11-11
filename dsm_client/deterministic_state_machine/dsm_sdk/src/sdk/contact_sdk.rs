@@ -221,6 +221,19 @@ pub fn contact_add_response(
         // Where pairing stands is the contact list's to state (`contacts.list`),
         // from the pairing loop's sessions; an add reply states none.
         pairing: pb::ContactPairingPhase::Unspecified as i32,
+        // Where the relationship stands (Amendment A33), as this device
+        // records it; a contact with no row is one not stored, and says so.
+        relationship_state: match crate::storage::client_db::relationship_state(&contact.device_id)
+        {
+            Ok(state) => state.to_wire(),
+            Err(e) => {
+                log::error!(
+                    "[contacts] the relationship state of {} is unreadable: {e}",
+                    crate::util::text_id::encode_base32_crockford(&contact.device_id[..4])
+                );
+                pb::RelationshipState::Unspecified as i32
+            }
+        },
         // The details the wallet holds for the contact are its row's; the
         // routes that read the row set them (`contacts.list`, `contacts.setProfile`).
         profile: None,

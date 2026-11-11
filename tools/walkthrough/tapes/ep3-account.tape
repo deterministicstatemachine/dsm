@@ -1,16 +1,20 @@
 # Episode 3: give your app its own DSM account.
-Output ep3-account.mp4
+Output docs/walkthrough/clips/ep3-account.mp4
 Source tools/walkthrough/tapes/_settings.tape
 
 Type "make app-dev"
 Enter
-Sleep 30s
+Wait
+Sleep 3s
 Type "make app ARGS=id"
 Enter
+Wait
 Sleep 3s
 Type "make app ARGS=owned"
 Enter
+Wait
 Sleep 3s
 Type "make app ARGS=activity"
 Enter
-Sleep 4s
+Wait
+Sleep 5s

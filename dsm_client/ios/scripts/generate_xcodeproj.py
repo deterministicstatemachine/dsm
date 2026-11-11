@@ -110,7 +110,7 @@ def main():
     # The build refuses what scripts/real_code_guard.py forbids under dsm_client/ios.
     guard_phase = oid("phase", "guard", APP)
     guard_script = (
-        'cd "$SRCROOT/../.." && python3 scripts/real_code_guard.py --scope dsm_client/ios'
+        'cd "$SRCROOT/../.." && python3 scripts/real_code_guard.py'
     )
     add(guard_phase, "{isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); "
                      "inputPaths = (); name = \"Real-code guard\"; outputPaths = (); runOnlyForDeploymentPostprocessing = 0; "

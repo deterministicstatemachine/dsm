@@ -1974,7 +1974,9 @@ mod tests {
             "a step on a relationship the device never established is refused"
         );
 
-        let established = head.establish_relationship(devid_b).expect("establish");
+        let established = head
+            .relationship_established_by_fixture(devid_b)
+            .expect("establish");
         let outcome = established
             .advance(rel_key, devid_b, state_step(), &[], None)
             .expect("the first step");
@@ -1984,7 +1986,13 @@ mod tests {
             established.root(),
             "the first step's pre-state root is the root the device committed"
         );
-        assert_eq!(outcome.relationship_pair().0, h0);
+        // The step after the ESTABLISH starts from the tip the establishment
+        // reached, not from h_0 (DSM Amendment A33).
+        let established_tip = established
+            .chain_tip(&rel_key)
+            .expect("the established relationship's tip");
+        assert_ne!(established_tip, h0, "the ESTABLISH step moved the tip");
+        assert_eq!(outcome.relationship_pair().0, established_tip);
 
         let receipt =
             build_bilateral_receipt(devid_a, devid_b, &outcome, None, &device_tree_commitment)

@@ -10,6 +10,7 @@ import { contactsStore } from '../../stores/contactsStore';
 import { pickPhoneContact } from '../../dsm/WebViewBridge/phoneContacts';
 import type { PersonProfile } from '../../domain/types';
 import { pairingLineFor } from '../../domain/pairing';
+import { canEnd, canSendTo, relationshipLineFor } from '../../domain/relationship';
 import { Avatar, Icon, PageTitle, personName } from './parts';
 import { modernNav } from './modernNav';
 import { loadImageFile } from '../../utils/imageCrop';
@@ -29,6 +30,8 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
   const [draft, setDraft] = useState<PersonProfile | null>(null);
   const [said, setSaid] = useState<string | null>(null);
   const [framing, setFraming] = useState<{ image: HTMLImageElement; release: () => void } | null>(null);
+  // `asking` while the page asks the person to confirm ending the relationship; null otherwise.
+  const [ending, setEnding] = useState<'asking' | null>(null);
   const inputId = useId();
   const setPhoto = useContactPhoto(deviceId);
 
@@ -88,6 +91,17 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
     );
   };
 
+  // The relationship ends on this device's chain the moment Rust makes the
+  // step (DSM Amendment A33); the other side acknowledges when it reads it.
+  const end = () => {
+    setEnding(null);
+    setSaid('Ending…');
+    contactsStore.terminate(contact.deviceId).then(
+      () => setSaid('Ended. Nothing moves between you from here on.'),
+      (e: unknown) => setSaid(messageOf(e)),
+    );
+  };
+
   const link = () => {
     pickPhoneContact().then(
       (picked) => {
@@ -130,21 +144,20 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
         <div className="s-row-title" style={{ marginTop: 10 }}>{name}</div>
         {held.email.length > 0 ? <div className="s-row-sub">{held.email}</div> : null}
         {held.phone.length > 0 ? <div className="s-row-sub">{held.phone}</div> : null}
-        <div className="s-row-sub" style={{ marginTop: 6 }}>
-          {pairingLineFor(contact) ?? 'Not paired over Bluetooth yet: it pairs on its own when you are both nearby with the app open.'}
-        </div>
+        <div className="s-row-sub" style={{ marginTop: 6 }}>{relationshipLineFor(contact)}</div>
+        {canSendTo(contact) ? (
+          <div className="s-row-sub" style={{ marginTop: 6 }}>
+            {pairingLineFor(contact) ?? 'Not paired over Bluetooth yet: it pairs on its own when you are both nearby with the app open.'}
+          </div>
+        ) : null}
       </section>
       <div className="s-stack">
-        <button type="button" className="s-btn s-btn-primary" onClick={() => modernNav.open({ kind: 'send', to: contact.deviceId })}>
-          <Icon name="send" /> Send to {name.split(' ')[0]}
-        </button>
-        {draft === null ? (
-          <>
-            <button type="button" className="s-btn s-btn-quiet" onClick={() => setDraft(held)}>Edit details</button>
-            <button type="button" className="s-btn s-btn-quiet" onClick={link}><Icon name="people" /> Link a phone contact</button>
-            <button type="button" className="s-btn s-btn-quiet" onClick={unpair}>Unpair and pair again</button>
-          </>
-        ) : (
+        {canSendTo(contact) ? (
+          <button type="button" className="s-btn s-btn-primary" onClick={() => modernNav.open({ kind: 'send', to: contact.deviceId })}>
+            <Icon name="send" /> Send to {name.split(' ')[0]}
+          </button>
+        ) : null}
+        {draft !== null ? (
           <section className="s-card" aria-label="Edit details">
             {(['name', 'email', 'phone'] as const).map((field) => (
               <div key={field} className="s-field">
@@ -161,6 +174,27 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
             <div className="s-stack">
               <button type="button" className="s-btn s-btn-primary" onClick={() => save(draft)}>Save</button>
               <button type="button" className="s-btn s-btn-quiet" onClick={() => setDraft(null)}>Cancel</button>
+            </div>
+          </section>
+        ) : ending === null ? (
+          <>
+            <button type="button" className="s-btn s-btn-quiet" onClick={() => setDraft(held)}>Edit details</button>
+            <button type="button" className="s-btn s-btn-quiet" onClick={link}><Icon name="people" /> Link a phone contact</button>
+            {canSendTo(contact) ? (
+              <button type="button" className="s-btn s-btn-quiet" onClick={unpair}>Unpair and pair again</button>
+            ) : null}
+            {canEnd(contact) ? (
+              <button type="button" className="s-btn s-btn-quiet" onClick={() => setEnding('asking')}>End relationship</button>
+            ) : null}
+          </>
+        ) : (
+          <section className="s-card" aria-label="End relationship">
+            <p className="s-hint">
+              End your relationship with {name}? Neither of you can send the other money again on this wallet.
+            </p>
+            <div className="s-stack">
+              <button type="button" className="s-btn s-btn-primary" onClick={end}>End relationship</button>
+              <button type="button" className="s-btn s-btn-quiet" onClick={() => setEnding(null)}>Keep it</button>
             </div>
           </section>
         )}

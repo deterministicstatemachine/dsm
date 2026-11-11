@@ -12,7 +12,19 @@ export type DomainRelationshipSendCheckState = 'checking' | 'ready' | 'blocked';
 export type DomainRelationshipSendBlockReason =
   | 'pending_catchup'
   | 'state_divergence'
-  | 'internal_error';
+  | 'internal_error'
+  | 'not_established'
+  | 'ending'
+  | 'ended';
+
+/**
+ * Where a relationship stands on this device (DSM Amendment A33): opened
+ * when the contact is added, proposed while this device's establishment
+ * waits for the other side's add, established once both sides signed it,
+ * ending while this device's termination waits for the acknowledgement,
+ * ended for good. Rust alone sets it; the wallet shows it.
+ */
+export type DomainRelationshipState = 'opened' | 'proposed' | 'established' | 'ending' | 'ended';
 
 export type DomainRelationshipSendStatus = {
   sendReady: boolean;
@@ -47,6 +59,8 @@ export type DomainContact = {
   chainTip?: string;
   bleAddress?: string;
   pairing: ContactPairing;
+  /** Where the relationship stands (DSM Amendment A33). */
+  relationship: DomainRelationshipState;
   genesisVerifiedOnline: boolean;
   signingPublicKey: string;  // base32 Crockford encoded
   sendReady?: boolean;

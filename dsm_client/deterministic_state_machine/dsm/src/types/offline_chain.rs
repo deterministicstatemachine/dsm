@@ -941,7 +941,10 @@ pub(crate) mod fixture {
                 &to,
             );
             if !self.related.contains(&to) {
-                self.head = self.head.establish_relationship(to).expect("establish");
+                self.head = self
+                    .head
+                    .relationship_established_by_fixture(to)
+                    .expect("establish");
                 self.related.push(to);
             }
             self.head.advance(
@@ -982,7 +985,10 @@ pub(crate) mod fixture {
                 &to,
             );
             if !self.related.contains(&to) {
-                self.head = self.head.establish_relationship(to).expect("establish");
+                self.head = self
+                    .head
+                    .relationship_established_by_fixture(to)
+                    .expect("establish");
                 self.related.push(to);
             }
             let operation = bearer_op(to, self.token, &self.token_policy, amount);
@@ -1183,7 +1189,7 @@ mod tests {
 
         let payer = Payer::loaded_with(0x54, 40, 0);
         let receiver = crate::types::device_state::tests::fresh_device(0xB0)
-            .establish_relationship(payer.head.devid())
+            .relationship_established_by_fixture(payer.head.devid())
             .expect("related");
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
             &receiver.devid(),

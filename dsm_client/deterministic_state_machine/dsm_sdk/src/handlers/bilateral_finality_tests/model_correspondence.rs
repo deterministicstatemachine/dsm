@@ -594,18 +594,47 @@ impl Run {
             &p.a.device_id,
             &p.b.device_id,
         );
-        let model = observe(&p, &rel, &genesis);
-        // Init: each space starts at its own seed, the same on both devices —
-        // the projection at the relationship's first tip, both lineages and
-        // both pins at the genesis seed.
-        let first = model.side[0].chain;
+        // The relationship's ESTABLISH (DSM Amendment A33; `Establish` in the
+        // model) settles fully, its finality certificate included, before the
+        // trace starts.
+        let mut model = observe(&p, &rel, &genesis);
+        for _ in 0..4 {
+            if model.at_rest() {
+                break;
+            }
+            p.a.sync().await;
+            p.b.sync().await;
+            model = observe(&p, &rel, &genesis);
+        }
+        // Init, the model's state after `Establish`: both projections at the
+        // one tip the establishment reached, the relationship's first tip
+        // before it; each lineage moved past the genesis seed by its own side
+        // of the step, and each pin at the other's lineage head.
+        let chain = model.side[0].chain;
+        let prev = model.side[0].prev;
+        assert!(
+            prev.is_some() && prev != Some(chain),
+            "Init: the establishment moved the projection from its first tip"
+        );
         for side in &model.side {
             assert_eq!(
-                (side.chain, side.prev, side.local, side.lin, side.pin),
-                (first, None, first, genesis, genesis),
-                "Init: both projections at one first tip, lineages and pins at the genesis seed"
+                (side.chain, side.prev, side.local),
+                (chain, prev, chain),
+                "Init: both projections at the tip the establishment reached"
+            );
+            assert_ne!(
+                side.lin, genesis,
+                "Init: each lineage moved past the genesis seed"
             );
         }
+        assert_eq!(
+            model.side[0].pin, model.side[1].lin,
+            "Init: A pins B's head"
+        );
+        assert_eq!(
+            model.side[1].pin, model.side[0].lin,
+            "Init: B pins A's head"
+        );
         assert!(model.at_rest(), "Init: nothing in flight");
         Self {
             p,

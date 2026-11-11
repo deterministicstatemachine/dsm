@@ -67,7 +67,8 @@ function freshState(): PracticeState {
         deviceId: PRACTICE_CONTACT_DEVICE_ID,
         genesisHash: practiceId('PRACT1CEA11CEGENES1S'),
         signingPublicKey: practiceId('PRACT1CEA11CEKEY'),
-        // Practice contacts are never paired over BLE.
+        // Practice contacts are never paired over BLE, and their relationship stands established.
+        relationship: 'established',
         pairing: 'idle',
         genesisVerifiedOnline: true,
         sendReady: true,
@@ -297,6 +298,7 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void,
         genesisHash: encodeBase32Crockford(input.genesisHash),
         signingPublicKey: encodeBase32Crockford(input.signingPublicKey),
         pairing: 'idle',
+        relationship: 'established',
         genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',

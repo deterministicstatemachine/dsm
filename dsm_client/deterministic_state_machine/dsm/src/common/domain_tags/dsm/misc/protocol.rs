@@ -183,6 +183,56 @@ pub const TAG_DSM_RELATIONSHIP_FINALIZED: TaggedHashDomain<'static> =
 /// like the evidence tags above).
 pub const TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-finalized-artifact/v1");
+/// One relationship instance: the relationship key and the tip its ESTABLISH
+/// step reached (DSM Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_INSTANCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-instance/v1");
+/// The seed of a device's relationship write key, keyed by its master seed
+/// (DSM Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_WRITE_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-write-key/v1");
+/// An inbox's route digest: the recipient's genesis, device and tip, each
+/// hashed on its own axis (DSM Amendment A34).
+pub const TAG_DSM_B0X_ROUTE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-route/v1");
+/// A locked inbox address: a route digest bound to the recipient's write
+/// lock (DSM Amendment A34).
+pub const TAG_DSM_B0X_LOCKED: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-locked/v1");
+/// The seed of a relationship's write lock, keyed by the recipient's master
+/// seed (DSM Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_WRITE_LOCK: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-write-lock/v1");
+/// What a recipient's AK signs to bind its write lock to one relationship
+/// instance, itself and the sender (DSM Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_WRITE_LOCK_BINDING: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-write-lock-binding/v1");
+/// The seed of the key a writer fixes at a relationship's first inbox, keyed
+/// by its master seed (DSM Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_FIRST_INBOX_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-first-inbox-key/v1");
+/// What a writer's key signs for one write to an inbox address (DSM
+/// Amendment A34).
+pub const TAG_DSM_SPOOL_WRITE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/spool-write/v1");
+/// The commitment of a written envelope's bytes (DSM Amendment A34).
+pub const TAG_DSM_SPOOL_WRITE_ENVELOPE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/spool-write-envelope/v1");
+/// What a sender's AK signs to bind its relationship write key to one
+/// relationship instance and one recipient (DSM Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_WRITE_KEY_BINDING: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-write-key-binding/v1");
+/// What a relationship write key signs to prove its holder has the secret
+/// (DSM Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_WRITE_KEY_POSSESSION: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-write-key-possession/v1");
+/// A write grant's identifier: its fields before the identifier (DSM
+/// Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_WRITE_GRANT_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-write-grant-id/v1");
+/// What a recipient's AK signs to grant a sender's write key its inbox for
+/// one relationship instance (DSM Amendment A34).
+pub const TAG_DSM_RELATIONSHIP_WRITE_GRANT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-write-grant/v1");
 /// The restart statement both AKs of a relationship sign to continue one
 /// device's per-step EK cert chain from the exact step it names, at the
 /// agreed accepted tip (cert resync, DSM Amendment A20).

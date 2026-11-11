@@ -54,21 +54,23 @@ fn bounds(max_open: usize) -> dsm_storage_node::ConnectionBounds {
 /// The sending half of a request body that arrives only when it is dropped.
 type HeldBody = futures::channel::mpsc::Sender<Result<Bytes, std::io::Error>>;
 
-/// A spool submission whose body has not arrived, and the sender that holds
-/// it back for as long as it is kept.
-fn held_submission() -> (HeldBody, Request<Body>) {
+/// A spool submission whose body has not arrived, the sender that holds it
+/// back for as long as it is kept, and the write it is meant to carry.
+fn held_submission() -> (HeldBody, Request<Body>, Vec<u8>) {
     let (sender, body) = futures::channel::mpsc::channel(1);
-    let recipient = dsm::utils::text_id::encode_base32_crockford(&[0x5Au8; 32]);
+    let recipient = common::locked_spool(0x5A);
+    let (write, message_id) = common::signed_write(&recipient, b"a held envelope");
     let request = common::ok_or_panic(
         Request::builder()
             .method("POST")
             .uri("/api/v2/b0x/submit")
             .header("content-type", "application/octet-stream")
             .header("x-dsm-recipient", recipient)
+            .header("x-dsm-message-id", message_id)
             .body(Body::from_stream(body)),
         "request",
     );
-    (sender, request)
+    (sender, request, write)
 }
 
 fn health() -> Request<Body> {
@@ -89,7 +91,7 @@ fn health() -> Request<Body> {
 fn one_count_of_requests_in_flight_holds_across_every_route() {
     common::runtime().block_on(async {
         let app = node("rl_one_count", limits(1, Duration::from_secs(60))).await;
-        let (sender, held) = held_submission();
+        let (mut sender, held, write) = held_submission();
         let holder = tokio::spawn(app.clone().oneshot(held));
         // The held request takes the one slot and waits for its body.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -100,6 +102,11 @@ fn one_count_of_requests_in_flight_holds_across_every_route() {
             "a request on another route was served while the node's one slot was held"
         );
 
+        // The held body arrives whole: a write the node takes.
+        common::ok_or_panic(
+            futures::SinkExt::send(&mut sender, Ok(Bytes::from(write))).await,
+            "the held body",
+        );
         drop(sender);
         let answered = match tokio::time::timeout(Duration::from_secs(10), waiting).await {
             Ok(joined) => common::ok_or_panic(common::ok_or_panic(joined, "task"), "answer"),
@@ -118,7 +125,7 @@ fn one_count_of_requests_in_flight_holds_across_every_route() {
 fn a_request_whose_body_never_arrives_is_answered_408() {
     common::runtime().block_on(async {
         let app = node("rl_timeout", limits(256, Duration::from_secs(1))).await;
-        let (sender, held) = held_submission();
+        let (sender, held, _) = held_submission();
         let answer = match tokio::time::timeout(Duration::from_secs(10), app.oneshot(held)).await {
             Ok(answer) => common::ok_or_panic(answer, "the app answers"),
             Err(elapsed) => panic!("a request whose body never arrived held the node: {elapsed}"),
@@ -296,7 +303,7 @@ fn a_body_that_stops_arriving_is_cut_off_before_the_request_time() {
     use futures::SinkExt;
     common::runtime().block_on(async {
         let app = node("rl_body_idle", limits(256, Duration::from_secs(600))).await;
-        let (mut sender, held) = held_submission();
+        let (mut sender, held, _) = held_submission();
         common::ok_or_panic(
             sender
                 .send(Ok(Bytes::from_static(b"the first bytes")))
@@ -604,16 +611,18 @@ fn a_response_nobody_reads_ends_its_connection_once_its_write_stalls() {
     common::runtime().block_on(async {
         let app = node("rl_write_stall", limits(256, Duration::from_secs(60))).await;
         // A spool holding a full retrieve batch of large envelopes.
-        let spool = dsm::utils::text_id::encode_base32_crockford(&[0x5Cu8; 32]);
+        let spool = common::locked_spool(0x5C);
         let envelope = vec![0xE5u8; 120 * 1024];
         for _ in 0..dsm::spool::MAX_BATCH_RETRIEVE {
+            let (write, message_id) = common::signed_write(&spool, &envelope);
             let submit = common::ok_or_panic(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v2/b0x/submit")
                     .header("content-type", "application/octet-stream")
                     .header("x-dsm-recipient", spool.as_str())
-                    .body(Body::from(envelope.clone())),
+                    .header("x-dsm-message-id", message_id)
+                    .body(Body::from(write)),
                 "request",
             );
             let answer = common::ok_or_panic(app.clone().oneshot(submit).await, "submit");
@@ -670,7 +679,7 @@ fn a_body_that_trickles_in_is_cut_off_once_its_grace_has_passed() {
     use futures::SinkExt;
     common::runtime().block_on(async {
         let app = node("rl_body_rate", limits(256, Duration::from_secs(600))).await;
-        let (mut sender, held) = held_submission();
+        let (mut sender, held, _) = held_submission();
         let trickle = tokio::spawn(async move {
             loop {
                 if let Err(closed) = sender.send(Ok(Bytes::from_static(b"x"))).await {

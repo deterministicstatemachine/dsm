@@ -133,6 +133,7 @@ pub(crate) mod test_support {
     // 2026-09-23, 2026-09-24).
     pub mod appliance;
     pub mod arrivals;
+    pub mod grants;
     pub mod nodes;
     mod nodes_tests;
     pub mod one_device;

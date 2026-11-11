@@ -258,10 +258,10 @@ async fn three_parties() -> (Pair, TestDevice) {
     let p = Pair::boot(100, 0).await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
-    c.add_contact(&p.b).await;
-    p.b.add_contact(&c).await;
-    c.add_contact(&p.a).await;
-    p.a.add_contact(&c).await;
+    c.add_and_establish(&p.b).await;
+    p.b.add_and_establish(&c).await;
+    c.add_and_establish(&p.a).await;
+    p.a.add_and_establish(&c).await;
     (p, c)
 }
 

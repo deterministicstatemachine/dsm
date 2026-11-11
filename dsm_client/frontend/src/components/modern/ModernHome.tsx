@@ -42,6 +42,9 @@ export default function ModernHome(): React.JSX.Element {
   const [claim, setClaim] = useState<{ state: 'idle' | 'claiming' } | { state: 'refused'; message: string }>({ state: 'idle' });
 
   // A new wallet holds nothing: its first ERA is the network's welcome claim.
+  // Rust lists ERA at zero from the first day, so "holds nothing" is a zero
+  // balance with no payment ever made or taken, not a missing row.
+  const welcome = !wallet.isLoading && (main === null || (main.baseUnits === 0n && wallet.transactions.length === 0));
   const claimWelcome = () => {
     setClaim({ state: 'claiming' });
     dsmClient.claimFaucet().then(
@@ -69,14 +72,16 @@ export default function ModernHome(): React.JSX.Element {
         ) : wallet.isLoading ? (
           <div className="s-balance-amount">…</div>
         ) : (
+          <div className="s-balance-amount" style={{ fontSize: 28 }}>No money yet</div>
+        )}
+        {welcome ? (
           <>
-            <div className="s-balance-amount" style={{ fontSize: 28 }}>No money yet</div>
             <button type="button" className="s-btn s-btn-small s-btn-primary" style={{ marginTop: 12 }} disabled={claim.state === 'claiming'} onClick={claimWelcome}>
               {claim.state === 'claiming' ? 'Getting it…' : 'Get your welcome ERA'}
             </button>
             {claim.state === 'refused' ? <div className="s-balance-other">{claim.message}</div> : null}
           </>
-        )}
+        ) : null}
       </section>
 
       <div className="s-actions">

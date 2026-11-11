@@ -37,7 +37,7 @@ Windows contributors can do normal development natively. Use WSL2 when you need 
 
 The wallet ships configured for the network's beta storage set: the five pinned members `dsm-node-1` to `dsm-node-5`, their endpoints, register incarnations and CA in [`dsm_client/frontend/public/dsm_env_config.toml`](dsm_client/frontend/public/dsm_env_config.toml). A test pins that file to the set the code commits to. With outbound internet access, the app reaches them over HTTPS; no local PostgreSQL or local node is needed.
 
-To develop without depending on any hosted node, run your own storage set on this machine: `make nodes-up` (see [Optional: Local Storage Nodes](#optional-local-storage-nodes)).
+An app you plug into DSM gets its account on the same set (`make app-dev`, [Plug an App Into DSM](#plug-an-app-into-dsm)). To develop without depending on any hosted node, run your own storage set on this machine: `make nodes-up`, or `make app-dev-local` (see [Optional: Local Storage Nodes](#optional-local-storage-nodes)).
 
 ## Prerequisites
 
@@ -52,7 +52,7 @@ Linux (Ubuntu/Debian; Ubuntu's own `nodejs` package is older than the Node.js 20
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential git curl protobuf-compiler openjdk-17-jdk
+sudo apt install -y build-essential git curl protobuf-compiler openjdk-17-jdk python3-venv
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
@@ -64,24 +64,8 @@ All platforms:
 - `cargo-ndk` if you want Android native builds
 - Set `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`) before `make android`, `make android-libs`, or `make install`
 - Xcode (macOS) and `cbindgen` (`cargo install cbindgen`) if you want the iOS app
-- PostgreSQL if you want local storage nodes (`make nodes-up`) or to plug an app into DSM (`make app-dev`), below
-
-### PostgreSQL, for local storage nodes
-
-The local set keeps each node's data on a PostgreSQL server on this machine, reached as your own login. Python 3.10+ and a virtual environment are for the Python client ([BUILDING_APPS.md](BUILDING_APPS.md)).
-
-macOS (Homebrew's server already has a role named after your login, and takes it on localhost):
-
-```bash
-brew install postgresql@17 && brew services start postgresql@17
-```
-
-Linux (the server takes your login over its socket once it has a role of that name; `python3-venv` for the Python client):
-
-```bash
-sudo apt install -y postgresql python3-venv && sudo service postgresql start
-sudo -u postgres createuser -s "$(id -un)"
-```
+- Python 3.10+ with `venv` (above on Ubuntu; macOS has it) if you want the Python client ([BUILDING_APPS.md](BUILDING_APPS.md))
+- PostgreSQL only if you want storage nodes of your own (`make nodes-up`, `make app-dev-local`): [Optional: Local Storage Nodes](#optional-local-storage-nodes). Plugging an app into DSM (`make app-dev`) needs neither it nor a node.
 
 Windows:
 
@@ -172,13 +156,13 @@ The Makefile then mirrors the built `.so` files into `dsm_client/deterministic_s
 
 ## iOS
 
-On macOS with Xcode:
+On macOS with Xcode: build the Rust SDK for iOS (device and Simulator) as an xcframework, copy the React bundle into the app, build the app for the arm64 iOS Simulator, then install and launch it on the booted Simulator.
 
 ```bash
-make ios-libs          # the Rust SDK for iOS (device + Simulator) as an xcframework
-make ios-frontend      # the React bundle, copied into the app
-make ios-simulator     # build the app for the arm64 iOS Simulator
-make ios-simulator-run # install and launch it on the booted Simulator
+make ios-libs
+make ios-frontend
+make ios-simulator
+make ios-simulator-run
 ```
 
 For a real iPhone or iPad, `make ios-device IOS_TEAM=<your Apple team id>` builds it signed by Xcode's automatic provisioning. The iOS app runs the same Rust SDK and the same React screens as Android.
@@ -193,32 +177,71 @@ Code: `dsm_client/deterministic_state_machine/dsm/src/bitcoin/`, `dsm/src/vault/
 
 Your own storage set on this machine: the network's pinned members (`dsm-node-1` to `dsm-node-5`) as five local nodes, each the production storage node binary on its own PostgreSQL database, serving TLS from a CA of the set's own.
 
+The set keeps each node's data on a PostgreSQL server on this machine, reached as your own login.
+
+macOS (Homebrew's server already has a role named after your login, and takes it on localhost):
+
 ```bash
-make nodes-up      # prepare the set the first time, then start every node (ports 8080-8084)
-make nodes-status  # every node's health, over verified TLS
-make nodes-down    # stop the nodes
-make nodes-reset   # stop them, drop their databases, forget the set and the accounts made on it
+brew install postgresql@17 && brew services start postgresql@17
+```
+
+Linux (the server takes your login over its socket once it has a role of that name):
+
+```bash
+sudo apt install -y postgresql && sudo service postgresql start
+sudo -u postgres createuser -s "$(id -un)"
+```
+
+Start the set (the first time, this prepares it; its nodes listen on ports 8080 to 8084), then check every node's health, over verified TLS:
+
+```bash
+make nodes-up
+make nodes-status
+```
+
+Stop the nodes:
+
+```bash
+make nodes-down
+```
+
+Stop them, drop their databases, and forget the set and the accounts made on it:
+
+```bash
+make nodes-reset
 ```
 
 PostgreSQL must run with `fsync=on` and `full_page_writes=on` (the defaults). The set is reached as `DSM_DEV_PG_URL`; by default, your login's role on the server at localhost, over Debian/Ubuntu's socket where there is one (`postgresql://<login>@/postgres?host=/var/run/postgresql&sslmode=disable`), else TCP port 5432 (`postgresql://<login>@localhost:5432/postgres?sslmode=disable`). Everything the set needs lives under `.dsm-dev/net/`, including the client config wallets use (`dsm_env_config.toml`, trusting `dev-ca.pem`).
 
-Point the wallets on your phones at it (debug builds only):
+Point the wallets on your phones at it (debug builds only): every adb device, through `adb reverse`, and every booted iOS Simulator.
 
 ```bash
-make phones-local  # every adb device (via adb reverse) and every booted iOS Simulator
+make phones-local
 ```
 
 A wallet that already made its identity on another storage set keeps it there: clear the app's data first (Android: `adb shell pm clear com.dsm.wallet`, then grant its Bluetooth permissions again; iOS: delete the app and run `make ios-simulator-run`). The same holds after `make nodes-reset`: it makes a new set with a new CA, so clear the wallets and run `make phones-local` again, or they refuse every node (`invalid peer certificate`).
 
 ## Plug an App Into DSM
 
-Your app stays what it is and gets its own DSM account; players connect their wallets to it. Sign-in, payments, items, trades and matches, with no Kotlin, Swift or Rust. Start here:
+Your app stays what it is and gets its own DSM account; players connect their wallets to it. Sign-in, payments, items, trades and matches, with no Kotlin, Swift or Rust. Start here, with your app's account on the beta network, funded (nothing of the network runs on your machine):
 
 ```bash
-make app-dev       # your app's account on your local set (starts the set too)
-make starter       # the Connect starter app on http://127.0.0.1:3000
-make dev-wallet    # a player's wallet in the terminal, to test without a phone
+make app-dev
 ```
+
+The Connect starter app, on http://127.0.0.1:3000. It keeps running:
+
+```bash
+make starter
+```
+
+In a second terminal, a player's wallet, to test without a phone:
+
+```bash
+make dev-wallet
+```
+
+`make app-dev-local` is the same on a storage set of your own (above); `make dev-reset` forgets this machine's accounts before you change sets.
 
 The whole guide, with the TypeScript and Python clients, is [BUILDING_APPS.md](BUILDING_APPS.md).
 

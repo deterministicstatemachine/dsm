@@ -377,24 +377,22 @@ class Device:
             time.sleep(0.5)
         raise DriverError(f"[{self.name}] never saw {text!r} within {timeout:.0f}s")
 
-    # ── acting: real OS touch injection ────────────────────────────────────
+    # ── acting: a press through the WebView's own input queue ─────────────
     #
-    # CSS pixels are not screen pixels. `adb input` works in device pixels, so
-    # every located point is scaled by the page's own devicePixelRatio and
-    # offset by the WebView's position on screen. Both are read from the page
-    # rather than assumed, because a wrong scale silently taps the wrong
-    # control and still "succeeds".
-    def _viewport(self) -> tuple[float, float, float]:
-        v = self.eval_js(
-            "({ r: window.devicePixelRatio,"
-            "   x: window.screenX ?? 0,"
-            "   y: (window.outerHeight - window.innerHeight) })"
-        )
-        return float(v["r"]), float(v["x"]), float(v["y"])
-
-    def _to_device_px(self, pt: dict[str, float]) -> tuple[int, int]:
-        ratio, _ox, _oy = self._viewport()
-        return int(round(pt["x"] * ratio)), int(round(pt["y"] * ratio))
+    # A located point is in CSS pixels. The press is dispatched to the page at
+    # that point with Input.dispatchMouseEvent, which the renderer hit-tests
+    # exactly as it does a finger's touch: whatever is drawn on top at that
+    # point gets the press, so a covered, off-screen or unrendered control is
+    # still missed. (An earlier version scaled the point by devicePixelRatio
+    # and sent `adb shell input tap`; it left out the WebView's own offset
+    # under the status bar, ~100 screen pixels on the A16, so a short button
+    # such as the look chooser's 38px OK was never hit while tall ones were.)
+    def _press(self, pt: dict[str, float]) -> None:
+        for kind in ("mousePressed", "mouseReleased"):
+            self.cdp(
+                "Input.dispatchMouseEvent",
+                {"type": kind, "x": pt["x"], "y": pt["y"], "button": "left", "clickCount": 1},
+            )
 
     def dismiss_keyboard(self) -> None:
         """Close the soft keyboard if it is up.
@@ -415,11 +413,11 @@ class Device:
             time.sleep(0.6)
 
     def tap(self, text: str, *, timeout: float = 45.0, exact: bool = False) -> None:
-        """Press a control the user can see, with a real touch event.
+        """Press a control the user can see, at the point where it is drawn.
 
-        `adb shell input tap` goes through the same input pipeline as a finger,
-        so nothing here can succeed on a control that is off-screen, covered,
-        or not actually rendered.
+        The press goes to the page's input queue at that point, and the
+        renderer decides what is there, so nothing here can succeed on a
+        control that is off-screen, covered, or not actually rendered.
         """
         self.dismiss_keyboard()
         self.wait_for(text, timeout=timeout, exact=exact)
@@ -427,15 +425,14 @@ class Device:
         pt = self._settled_point()
         if not pt:
             raise DriverError(f"[{self.name}] {text!r} vanished before it could be pressed")
-        x, y = self._to_device_px(pt)
-        self.shell(f"input tap {x} {y}")
+        self._press(pt)
         time.sleep(0.6)
 
     def type_into(self, placeholder: str, value: str) -> None:
-        """Focus a field by tapping it, then type character-by-character.
+        """Focus a field by pressing it, then type character-by-character.
 
-        Input.insertText goes through the same path as the soft keyboard, so
-        React's onChange fires exactly as it would for a person. Setting .value
+        `adb shell input text` is the soft keyboard's own path, so React's
+        onChange fires exactly as it would for a person. Setting .value
         directly would bypass React's synthetic event and is precisely the
         shortcut this driver refuses to take.
         """
@@ -462,8 +459,7 @@ class Device:
             raise DriverError(f"[{self.name}] no input with placeholder {placeholder!r}")
         time.sleep(0.35)  # let the scroll settle, then measure where it landed
         pt = self._settled_point() or pt
-        x, y = self._to_device_px(pt)
-        self.shell(f"input tap {x} {y}")
+        self._press(pt)
         time.sleep(0.8)
         # `input text` is the soft keyboard's own path, so React's onChange
         # fires exactly as it would for a person typing.

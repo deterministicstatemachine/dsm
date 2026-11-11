@@ -17,6 +17,7 @@ describe('domain mappers', () => {
       genesisVerifiedOnline: true,
       bleAddress,
       pairing: bleAddress ? 'paired' as const : 'idle' as const,
+      relationship: 'established' as const,
     });
 
     // The address is Rust's: the contact carries it as Rust holds it, and none

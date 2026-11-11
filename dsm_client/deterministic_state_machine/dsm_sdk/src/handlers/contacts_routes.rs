@@ -34,10 +34,14 @@ impl AppRouterImpl {
                 && existing.public_key == resolved.entry.body.ak_public_key
             {
                 // A contact whose relationship an earlier attempt did not
-                // establish is established now.
+                // establish is established now, and its first step begins
+                // (Amendment A33).
                 if let Err(e) = self.core_sdk.establish_relationship(device_id) {
                     return Err(format!("contacts.add: establishing the relationship: {e}"));
                 }
+                self.begin_establishment(device_id)
+                    .await
+                    .map_err(|e| format!("contacts.add: {e}"))?;
                 return Ok(contact_add_response(&existing));
             }
             log::warn!(
@@ -66,10 +70,14 @@ impl AppRouterImpl {
             Err(e) => return Err(format!("Add contact failed: {e}")),
         };
         // The relationship exists from here: its leaf enters this device's
-        // tree at h_0, before any step on it (§26).
+        // tree at h_0, before any step on it (§26). Its first step, the
+        // establishment both sides sign, begins now (Amendment A33).
         if let Err(e) = self.core_sdk.establish_relationship(device_id) {
             return Err(format!("contacts.add: establishing the relationship: {e}"));
         }
+        self.begin_establishment(device_id)
+            .await
+            .map_err(|e| format!("contacts.add: {e}"))?;
 
         #[cfg(feature = "bluetooth")]
         {
@@ -301,6 +309,33 @@ impl AppRouterImpl {
                 ) as i32;
                 pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(reply))
             }
+            // End the relationship (Amendment A33): the TERMINATE step on its
+            // chain. Answers the contact as it stands after.
+            "contacts.terminate" => {
+                let req = match decode_proto_arg::<generated::ContactTerminateRequest>(
+                    &i.args,
+                    "contacts.terminate",
+                ) {
+                    Ok(req) => req,
+                    Err(e) => return err(e),
+                };
+                let device_id = match <[u8; 32]>::try_from(req.device_id.as_slice()) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return err(format!("contacts.terminate: a device id is 32 bytes: {e}"))
+                    }
+                };
+                let Some(contact) = self.contact_manager.get_verified_contact(device_id).await
+                else {
+                    return err("contacts.terminate: the contact is not held in memory".into());
+                };
+                if let Err(e) = self.terminate_relationship(device_id).await {
+                    return err(format!("contacts.terminate: {e}"));
+                }
+                pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(
+                    contact_add_response(&contact),
+                ))
+            }
             "contacts.setOwnProfile" => {
                 let profile = match decode_proto_arg::<generated::ContactProfileV1>(
                     &i.args,
@@ -432,6 +467,7 @@ mod tests {
             signing_public_key: vec![0x88; 64],
             send_status: None,
             pairing: generated::ContactPairingPhase::Paired as i32,
+            relationship_state: generated::RelationshipState::Unspecified as i32,
             profile: Some(generated::ContactProfileV1 {
                 display_name: "Carol Diaz".into(),
                 email: "carol@example.com".into(),

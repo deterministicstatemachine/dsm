@@ -121,6 +121,9 @@ pub fn journal_row(
         projection_target_tip: projection_pair.1,
         applied_parent_tip_b: artifacts.applied_parent_tip_b,
         applied_child_tip_b: artifacts.applied_child_tip_b,
+        // A transfer's journal carries its release; a relationship step's
+        // (Amendment A33) carries none and moves nothing.
+        moves_value: release_bytes.is_some(),
         release_bytes,
         peer_finalized: false,
         status: STATUS_PREPARED.to_string(),
