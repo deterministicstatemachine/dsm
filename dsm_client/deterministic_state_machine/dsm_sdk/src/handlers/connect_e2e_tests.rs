@@ -2007,7 +2007,7 @@ async fn a_read_of_requests_for_no_session_is_refused() {
         unknown
             .error_message
             .as_deref()
-            .is_some_and(|why| why.contains("no such session")),
+            .is_some_and(|why| why.contains("no such connection")),
         "{:?}",
         unknown.error_message
     );
@@ -2193,7 +2193,7 @@ async fn only_the_sessions_wallet_reads_its_requests() {
         refused
             .error_message
             .as_deref()
-            .is_some_and(|why| why.contains("does not open the session's read commitment")),
+            .is_some_and(|why| why.contains("does not open the connection's read commitment")),
         "a read with another secret: {:?}",
         refused.error_message
     );
@@ -2215,7 +2215,7 @@ async fn only_the_sessions_wallet_reads_its_requests() {
         after_end
             .error_message
             .as_deref()
-            .is_some_and(|why| why.contains("the session's wallet ended it")),
+            .is_some_and(|why| why.contains("the connection's wallet ended it")),
         "a read after the wallet ended the session: {:?}",
         after_end.error_message
     );

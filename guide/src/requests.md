@@ -11,7 +11,7 @@ Every request has two answers, and only one is evidence:
 | **outcome** | the wallet's word: `carried_out`, `awaiting_approval`, `declined`, `failed` | what to show the player while you wait |
 | **fact** | what your own account established: `received`, `owns`, `signed`, `staked`, `collected` | deciding anything: delivering the item, logging the player in, crediting the sale |
 
-`received` means your account has taken up a transfer the wallet sent. `owns` means a proof of the wallet's holdings verified. `signed` means a signature checked. Code against the fact: the outcome tells you what the wallet said, and the fact tells you what happened.
+`received` means your account has taken up a transfer the wallet sent. `owns` means a proof of what the wallet owns verified. `signed` means a signature checked. Code against the fact: the outcome tells you what the wallet said, and the fact tells you what happened.
 
 The commands below use the terminal wallet from the [last page](connect.md). Each request gets a number on its connection, and `result` reads what became of it.
 
@@ -20,7 +20,7 @@ The commands below use the terminal wallet from the [last page](connect.md). Eac
 >
 > ```text
 > answered: no  outcome: unanswered
-> fact: none  no transfer this account accepted pays it yet; an answer saying paid grants nothing
+> fact: none  no transfer this account accepted answers it yet; an answer saying sent grants nothing
 > ```
 >
 > Run it again a little later. The wallet also answers a connection's requests in order, so a request that waits for the player holds up the ones after it.
@@ -77,7 +77,7 @@ make dev-wallet-pending
 ```
 
 ```text
-RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG 2  My Game: Pay 0.20 ERA for dsm-app send
+RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG 2  My Game: Send 0.20 ERA for dsm-app send
   why it waits: 0.20 ERA is above the 0.10 ERA the grant allows per request
 ```
 
@@ -88,7 +88,7 @@ make wallet ARGS="approve $S 2"
 ```
 
 ```text
-CARRIED_OUT: My Game: Pay 0.20 ERA for dsm-app send, carried out.
+CARRIED_OUT: My Game: Send 0.20 ERA for dsm-app send, carried out.
 ```
 
 Approving too early fails with `request 2 is not waiting`; list pending again first. About ten seconds later:
@@ -105,10 +105,10 @@ fact: received  the transfer is accepted onto this account's relationship with t
 The same fact, one more step. On a phone, the request waits under **Waiting**, with the reason:
 
 <div class="shots">
-<figure><img src="images/android-over-cap.webp" width="210" alt="Android: My Game asks to be paid 0.20 ERA, outside what you approved, with Decline and Approve"><figcaption>Outside the grant: the player decides.</figcaption></figure>
-<figure><img src="images/android-carried-out.webp" width="210" alt="Android: My Game: Pay 0.20 ERA, carried out"><figcaption>Approved and carried out.</figcaption></figure>
+<figure><img src="images/android-over-cap.webp" width="210" alt="Android: My Game asks for 0.20 ERA, outside what you approved, with Decline and Approve"><figcaption>Outside the grant: the player decides.</figcaption></figure>
+<figure><img src="images/android-carried-out.webp" width="210" alt="Android: My Game's request for 0.20 ERA, carried out"><figcaption>Approved and carried out.</figcaption></figure>
 <figure><img src="images/ios-over-cap.webp" width="210" alt="iOS: the same request over the cap, waiting"><figcaption>The same on iOS.</figcaption></figure>
-<figure><img src="images/ios-carried-out.webp" width="210" alt="iOS: My Game: Pay 0.20 ERA, carried out"><figcaption>Carried out.</figcaption></figure>
+<figure><img src="images/ios-carried-out.webp" width="210" alt="iOS: My Game's request for 0.20 ERA, carried out"><figcaption>Carried out.</figcaption></figure>
 </div>
 
 ## 4. Prove what it owns
@@ -217,7 +217,7 @@ make app ARGS="give $(make -s wallet ARGS=id) SHIELD 1"
 sent
 ```
 
-The transfer is final once sent; the wallet takes it up within seconds. Until then its holdings show the shield at 0:
+The transfer is final once sent; the wallet takes it up within seconds. Until then what it owns shows the shield at 0:
 
 ```bash
 make wallet ARGS=owned
@@ -241,8 +241,8 @@ make wallet ARGS="disconnect $S"
 
 ```text
 connection RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG  My Game  DISCONNECTED
-  grants: Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-  grants: Prove your holdings of ERA and of objects this app issued
+  grants: Send this app: up to 0.10 ERA a time, 1.00 ERA in all
+  grants: Prove what you own of ERA and of objects this app issued
   grants: Receive objects this app issues
   grants: See which of your contacts are here: their DSM IDs, not their names
   grants: Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all

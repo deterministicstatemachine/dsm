@@ -30,7 +30,7 @@ The wallet answers a connection's requests in order: a request that waits for th
 | Fact, your account's evidence | |
 |---|---|
 | `received` | your account took up a transfer the wallet sent |
-| `owns` | a proof of the wallet's holdings verified |
+| `owns` | a proof of what the wallet owns verified |
 | `signed` | a signature over the asked words checked |
 | `staked` | the wallet's stake is held under the match's terms |
 | `collected` | the match's verdict paid the wallet |

@@ -454,8 +454,8 @@ export function practiceRoutes(book: PracticeBook): (method: string, args: Uint8
     const each = await entered(play, PRACTICE_APP_PER_REQUEST);
     const all = await walletAmount({ decimals: each.decimals }, { baseUnits: each.baseUnits * BigInt(3) });
     return [
-      `Pay this app: up to ${each.displayAmount} PLAY a time, ${all.displayAmount} PLAY in all`,
-      'Prove your holdings of PLAY',
+      `Send this app: up to ${each.displayAmount} PLAY a time, ${all.displayAmount} PLAY in all`,
+      'Prove what you own of PLAY',
     ];
   }
 
@@ -529,7 +529,7 @@ export function practiceRoutes(book: PracticeBook): (method: string, args: Uint8
         sessionId: s.sessionId,
         seq: p.seq,
         displayName: PRACTICE_APP_NAME,
-        summary: `Pay ${p.amount.displayAmount} PLAY for a bigger box`,
+        summary: `Send ${p.amount.displayAmount} PLAY for a bigger box`,
         reason: `${p.amount.displayAmount} PLAY is above the ${PRACTICE_APP_PER_REQUEST} PLAY the grant allows per request`,
       }))),
     }),
@@ -545,7 +545,7 @@ export function practiceRoutes(book: PracticeBook): (method: string, args: Uint8
     if (!play) return refused('connect.respond: the practice wallet holds no PLAY');
     return book.inTurn(async () => {
       s.pending = s.pending.filter((p) => p.seq !== req.seq);
-      const summary = `Pay ${waiting.amount.displayAmount} PLAY for a bigger box`;
+      const summary = `Send ${waiting.amount.displayAmount} PLAY for a bigger box`;
       let outcome = pb.ConnectOutcome.DECLINED;
       if (req.decision === pb.ConnectDecision.APPROVE) {
         await adjust(play, -waiting.amount.baseUnits);

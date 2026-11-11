@@ -84,36 +84,53 @@ fn args_body<M: Message + Default>(args: &[u8]) -> Result<M, prost::DecodeError>
     M::decode(pb::ArgPack::decode(args)?.body.as_slice())
 }
 
+/// An amount a request names, as people read it: in the object's own units
+/// when this account knows the object, in its smallest units otherwise.
+fn amount_of(policy_commit: &[u8], amount: u64) -> String {
+    match <[u8; 32]>::try_from(policy_commit) {
+        Ok(commit) => dsm_sdk::sdk::connect::wallet::amount_text(&commit, amount),
+        Err(..) => format!("{amount} smallest units of {}", short(policy_commit)),
+    }
+}
+
+/// A request's memo after what it asks, or nothing when it carries none.
+fn memo_note(memo: &str) -> String {
+    match memo.trim() {
+        "" => String::new(),
+        memo => format!(" ({memo})"),
+    }
+}
+
 /// What a call asked, as the host renders it.
 pub fn describe_call(method: &str, args: &[u8]) -> String {
     match method {
         "token.create" => match args_body::<pb::TokenCreateRequest>(args) {
             Ok(r) => format!(
-                "create token {} \u{201c}{}\u{201d}: supply {}, {} decimals",
+                "issue {} \u{201c}{}\u{201d}: supply {}, {} decimals",
                 r.ticker, r.alias, r.genesis_supply_entered, r.decimals
             ),
-            Err(e) => format!("create a token: unreadable arguments ({e})"),
+            Err(e) => format!("issue an object: unreadable arguments ({e})"),
         },
         "faucet.claim" => "claim ERA from the network's faucet".into(),
         "wallet.sendSmart" => match args_body::<pb::OnlineTransferSmartRequest>(args) {
             Ok(r) => format!(
-                "send {} {} to {}",
+                "give {} {} to {}",
                 r.amount,
                 r.token_id,
                 short(&r.recipient_device_id)
             ),
-            Err(e) => format!("send a transfer: unreadable arguments ({e})"),
+            Err(e) => format!("give an object: unreadable arguments ({e})"),
         },
         "sofi.createVault" => match args_body::<pb::SofiCreateVaultRequest>(args) {
             Ok(r) => format!(
-                "open a SoFi vault {}/{} with reserves {}/{} at {} bps",
+                "open a vault {}/{} with reserves {}/{} at {} bps",
                 short(&r.token_a_policy_commit),
                 short(&r.token_b_policy_commit),
                 r.reserve_a_entered,
                 r.reserve_b_entered,
                 r.fee_bps
             ),
-            Err(e) => format!("open a SoFi vault: unreadable arguments ({e})"),
+            Err(e) => format!("open a vault: unreadable arguments ({e})"),
         },
         "connect.app.offer" => match args_body::<pb::ConnectAppOfferRequestV1>(args) {
             Ok(r) => format!("offer \u{201c}{}\u{201d} to wallets", r.display_name),
@@ -125,22 +142,25 @@ pub fn describe_call(method: &str, args: &[u8]) -> String {
                     format!("ask the wallet to accept object {}", short(&k.anchor))
                 }
                 Some(pb::connect_app_request_intent_v1::Kind::Pay(k)) => format!(
-                    "ask the wallet to pay {} of {} ({})",
-                    k.amount,
-                    short(&k.policy_commit),
-                    k.memo
+                    "ask the wallet to send {}{}",
+                    amount_of(&k.policy_commit, k.amount),
+                    memo_note(&k.memo)
                 ),
-                Some(pb::connect_app_request_intent_v1::Kind::Quote(k)) => {
-                    format!("ask the wallet for a SoFi quote of {}", k.amount_in)
-                }
+                Some(pb::connect_app_request_intent_v1::Kind::Quote(k)) => format!(
+                    "ask the wallet to price {}",
+                    amount_of(&k.token_in, k.amount_in)
+                ),
                 Some(pb::connect_app_request_intent_v1::Kind::Swap(k)) => format!(
-                    "ask the wallet to swap {} for at least {}",
-                    k.amount_in, k.min_amount_out
+                    "ask the wallet to trade {} for at least {}",
+                    amount_of(&k.token_in, k.amount_in),
+                    amount_of(&k.token_out, k.min_amount_out)
                 ),
-                Some(pb::connect_app_request_intent_v1::Kind::Holdings(k)) => format!(
-                    "ask the wallet to prove holdings of {} tokens",
-                    k.policy_commits.len()
-                ),
+                Some(pb::connect_app_request_intent_v1::Kind::Holdings(k)) => {
+                    match k.policy_commits.len() {
+                        1 => "ask the wallet to prove what it owns of one object".to_string(),
+                        n => format!("ask the wallet to prove what it owns of {n} objects"),
+                    }
+                }
                 Some(pb::connect_app_request_intent_v1::Kind::Sign(k)) => {
                     format!("ask the wallet to sign: {}", k.statement)
                 }
@@ -148,16 +168,15 @@ pub fn describe_call(method: &str, args: &[u8]) -> String {
                     "ask the wallet which of its contacts are here".to_string()
                 }
                 Some(pb::connect_app_request_intent_v1::Kind::EscrowLock(k)) => format!(
-                    "ask the wallet to lock {} of {} as side {} against {} ({})",
-                    k.amount,
-                    short(&k.policy_commit),
+                    "ask the wallet to lock {} as side {} against {}{}",
+                    amount_of(&k.policy_commit, k.amount),
                     match k.side {
                         1 => "A",
                         2 => "B",
                         _ => "?",
                     },
                     short(&k.opponent_device_id),
-                    k.memo
+                    memo_note(&k.memo)
                 ),
                 Some(pb::connect_app_request_intent_v1::Kind::EscrowRelease(k)) => format!(
                     "ask the wallet to collect a match result from {}",
@@ -172,17 +191,15 @@ pub fn describe_call(method: &str, args: &[u8]) -> String {
                     short(&k.match_nonce)
                 ),
                 Some(pb::connect_app_request_intent_v1::Kind::DuelLock(k)) => format!(
-                    "ask the wallet to stake {} of {} as side {} in a computed match against {} \
-                     ({})",
-                    k.amount,
-                    short(&k.policy_commit),
+                    "ask the wallet to stake {} as side {} in a computed match against {}{}",
+                    amount_of(&k.policy_commit, k.amount),
                     match k.side {
                         1 => "A",
                         2 => "B",
                         _ => "?",
                     },
                     short(&k.opponent_device_id),
-                    k.memo
+                    memo_note(&k.memo)
                 ),
                 Some(pb::connect_app_request_intent_v1::Kind::DuelReady(k)) => {
                     format!("ask the wallet to ready for match {}", short(&k.match_cell))
@@ -262,7 +279,11 @@ pub fn describe_answer(response: &pb::IngressResponse) -> Result<String, String>
             format!("{} vault(s) of this account", r.vaults.len())
         }
         Some(pb::envelope::Payload::TokenCreateResponse(r)) => {
-            format!("token {} anchored at {}", r.ticker, short(&r.policy_anchor))
+            format!(
+                "object {} anchored at {}",
+                r.ticker,
+                short(&r.policy_anchor)
+            )
         }
         Some(pb::envelope::Payload::EscrowVerdictResponse(r)) => format!(
             "the verdict cell {} holds {}",
@@ -288,13 +309,17 @@ pub fn describe_answer(response: &pb::IngressResponse) -> Result<String, String>
                 }
                 pb::connect_reply_v1::Reply::Request(r) => format!("request #{} signed", r.seq),
                 pb::connect_reply_v1::Reply::Session(s) => {
-                    format!("session {} with {}", short(&s.session_id), s.display_name)
+                    format!(
+                        "connection {} with {}",
+                        short(&s.session_id),
+                        s.display_name
+                    )
                 }
                 pb::connect_reply_v1::Reply::Status(s) => format!(
                     "{}: {}",
                     match pb::ConnectFact::try_from(s.fact) {
-                        Ok(pb::ConnectFact::Paid) => "PAID",
-                        Ok(pb::ConnectFact::Holdings) => "HOLDINGS PROVEN",
+                        Ok(pb::ConnectFact::Paid) => "RECEIVED",
+                        Ok(pb::ConnectFact::Holdings) => "OWNS",
                         Ok(pb::ConnectFact::Signed) => "SIGNED",
                         Ok(pb::ConnectFact::EscrowLocked) => "STAKE LOCKED",
                         Ok(pb::ConnectFact::EscrowReleased) => "RESULT COLLECTED",
@@ -438,5 +463,118 @@ impl Record {
                 dsm::crypto::sphincs::SphincsVariant::SPX256f,
             ) as u32,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pb::connect_app_request_intent_v1::Kind;
+
+    /// What `connect.app.request` records for a request of `kind`.
+    fn asked(kind: Kind) -> String {
+        let body = pb::ConnectAppRequestIntentV1 {
+            session_id: vec![7; 32],
+            kind: Some(kind),
+        }
+        .encode_to_vec();
+        let args = pb::ArgPack {
+            schema_hash: None,
+            codec: pb::Codec::Proto as i32,
+            body,
+        };
+        describe_call("connect.app.request", &args.encode_to_vec())
+    }
+
+    /// What a call answered with `reply`, as the record shows it.
+    fn answered(reply: pb::connect_reply_v1::Reply) -> Result<String, String> {
+        let envelope = pb::Envelope {
+            version: 3,
+            payload: Some(pb::envelope::Payload::ConnectReply(pb::ConnectReplyV1 {
+                reply: Some(reply),
+            })),
+            ..Default::default()
+        };
+        let mut bytes = vec![0x03];
+        bytes.extend(envelope.encode_to_vec());
+        describe_answer(&pb::IngressResponse {
+            result: Some(pb::ingress_response::Result::OkBytes(bytes)),
+        })
+    }
+
+    /// The record speaks as the clients do: `send`, `price`, `trade`, what a
+    /// wallet owns, connections; an amount in the object's own units, or in
+    /// its smallest units when the object cannot be named; no memo where a
+    /// request carries none.
+    #[test]
+    fn the_record_reads_in_the_clients_words_and_each_objects_own_units() {
+        let era = dsm::core::token::token_state_manager::builtin_policy_commit_for_token("ERA")
+            .expect("ERA is built in")
+            .to_vec();
+        let send = |amount, memo: &str| {
+            asked(Kind::Pay(pb::ConnectPayV1 {
+                policy_commit: era.clone(),
+                amount,
+                memo: memo.into(),
+            }))
+        };
+        assert_eq!(send(20, ""), "ask the wallet to send 0.20 ERA");
+        assert_eq!(
+            send(5, "a capsule"),
+            "ask the wallet to send 0.05 ERA (a capsule)"
+        );
+        assert_eq!(
+            asked(Kind::Quote(pb::ConnectQuoteV1 {
+                token_in: era.clone(),
+                token_out: vec![9; 32],
+                amount_in: 150,
+                vault_witnesses: Vec::new(),
+            })),
+            "ask the wallet to price 1.50 ERA"
+        );
+        // Not a 32-byte id: no object is named, so the smallest units show.
+        assert_eq!(
+            asked(Kind::Swap(pb::ConnectSwapV1 {
+                token_in: era.clone(),
+                token_out: vec![9; 5],
+                amount_in: 150,
+                min_amount_out: 4510,
+                vault_witnesses: Vec::new(),
+            })),
+            format!(
+                "ask the wallet to trade 1.50 ERA for at least 4510 smallest units of {}",
+                short(&[9; 5])
+            )
+        );
+        assert_eq!(
+            asked(Kind::Holdings(pb::ConnectHoldingsV1 {
+                policy_commits: vec![era.clone()],
+            })),
+            "ask the wallet to prove what it owns of one object"
+        );
+        assert_eq!(
+            asked(Kind::Holdings(pb::ConnectHoldingsV1 {
+                policy_commits: vec![era.clone(), vec![9; 32]],
+            })),
+            "ask the wallet to prove what it owns of 2 objects"
+        );
+        assert_eq!(
+            answered(pb::connect_reply_v1::Reply::Session(pb::ConnectSessionV1 {
+                session_id: vec![1; 32],
+                display_name: "My Game".into(),
+                ..Default::default()
+            })),
+            Ok(format!("connection {} with My Game", short(&[1; 32])))
+        );
+        assert_eq!(
+            answered(pb::connect_reply_v1::Reply::Status(
+                pb::ConnectAppStatusV1 {
+                    fact: pb::ConnectFact::Holdings as i32,
+                    fact_detail: "proven at the wallet's position 4".into(),
+                    ..Default::default()
+                }
+            )),
+            Ok("OWNS: proven at the wallet's position 4".to_string())
+        );
     }
 }

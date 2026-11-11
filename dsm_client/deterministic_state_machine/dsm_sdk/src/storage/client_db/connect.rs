@@ -132,7 +132,7 @@ fn status_of(text: &str) -> rusqlite::Result<SessionStatus> {
         other => Err(rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Text,
-            format!("session status {other:?}").into(),
+            format!("connection state {other:?}").into(),
         )),
     }
 }
@@ -877,7 +877,7 @@ pub fn app_insert_session(s: &AppSession) -> Result<()> {
         .optional()?;
     match held {
         Some(accept) if accept == s.accept => return Ok(()),
-        Some(..) => return Err(anyhow!("this session holds another accept")),
+        Some(..) => return Err(anyhow!("this connection holds another accept")),
         None => {}
     }
     tx.execute(
@@ -912,7 +912,7 @@ pub fn app_disconnect(session_id: &[u8; 32]) -> Result<()> {
         params![session_id.as_slice(), DISCONNECTED],
     )?;
     if changed != 1 {
-        return Err(anyhow!("no such session"));
+        return Err(anyhow!("no such connection"));
     }
     Ok(())
 }
@@ -983,7 +983,7 @@ pub fn app_append_request(
             |r| r.get(0),
         )
         .optional()?;
-    let next = next.ok_or_else(|| anyhow!("no such session"))?;
+    let next = next.ok_or_else(|| anyhow!("no such connection"))?;
     let seq =
         u64::try_from(next).map_err(|e| anyhow!("a negative sequence number is stored: {e}"))?;
     let request = make(seq).map_err(|e| anyhow!(e))?;
@@ -1047,7 +1047,7 @@ pub fn app_store_response(session_id: &[u8; 32], seq: u64, response: &[u8]) -> R
         )
         .optional()?;
     match held {
-        None => return Err(anyhow!("no request {seq} in this session")),
+        None => return Err(anyhow!("no request {seq} on this connection")),
         Some(Some(stored)) if stored == response => return Ok(()),
         Some(Some(..)) => return Err(anyhow!("request {seq} already has another answer")),
         Some(None) => {}
@@ -1072,7 +1072,7 @@ pub fn app_replace_response(session_id: &[u8; 32], seq: u64, response: &[u8]) ->
         params![session_id.as_slice(), i64_of(seq)?, response],
     )?;
     if changed != 1 {
-        return Err(anyhow!("no request {seq} in this session"));
+        return Err(anyhow!("no request {seq} on this connection"));
     }
     Ok(())
 }

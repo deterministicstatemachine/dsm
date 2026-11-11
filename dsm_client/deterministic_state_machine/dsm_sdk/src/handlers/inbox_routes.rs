@@ -200,7 +200,7 @@ impl AppRouterImpl {
                                             ),
                                         ),
                                                 Err(e) => format!(
-                                                    "{} base units of {} ({e})",
+                                                    "{} smallest units of {} ({e})",
                                                     terms.amount,
                                                     crate::util::text_id::encode_base32_crockford(
                                                         &terms.policy_commit
