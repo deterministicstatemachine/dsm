@@ -161,6 +161,37 @@ Change them here before the first burn, not after.
   secret regardless.
 - **The glitch detectors stay off,** because their effect on a working board has not been measured.
 
+## From the phone: the procedure for everyone
+
+Owner, 2026-11-11: "Not everyone has a Mac. It has to be doable from the phone." The wallet does
+Steps 3 to 9b itself, through the board's own USB bootloader, with the board plugged into the phone
+in BOOTSEL. It speaks the bootloader's protocol as picotool does and applies `provision-otp.sh`'s
+checks row for row (`crates/dsm-android-anchor`: `picoboot`, `otp_burn`, `board_setup`). Signing
+(Steps 1 and 2) stays the vendor's one-time step on a computer, with the owner's passphrase; the
+phone carries only its public outputs.
+
+1. **The release into the app**, once per signing, before the APK is built:
+   `scripts/anchor-release-into-app.sh` copies `signed.elf`, `ns_app.bin`, `mu-enrolled.bin` and
+   the boot key's hash into the app's assets. Before writing anything the phone checks that the
+   digest is the firmware's own measurement of the Non-secure app and that the image holds that app.
+2. **Plug the board into the phone with BOOTSEL held.** Appliance → Production setup → Read the board.
+   The panel names the chip, lists the steps below in order, marks each done, next or later from
+   the board's own OTP (never from anything the phone remembers), and shows what Step 0's check
+   found.
+3. **Each step is the board's next or it is refused**, and runs only on the board whose chip id the
+   person types back (its last four characters). Every write is read back before the step is done.
+4. **After "Start the signed image once"** the board leaves BOOTSEL and records its rollback version.
+   Once it has started, unplug it, hold BOOTSEL, and plug it in again for the last step: the phone
+   locks the boot pages only once `ROLLBACK_REQUIRED` is set.
+5. **Then plug it in normally** and install it from the wallet that will keep it (Step 10).
+
+What the phone does differently: a blank secret page is written and locked in one step (Steps 4 and
+the secret half of 6), so no page stands written and unlocked between steps, and every write is
+read back, the rows picotool's JSON load writes included. Not yet on the phone: Step 9's check that
+an unsigned image is refused.
+
+The commands below are the same procedure from a computer with picotool.
+
 ## Step 0 — check the board is blank (READ-ONLY)
 
 Name each board. Its secret and records live under `~/.dsm-anchor-secure-boot/boards/<name>/`.

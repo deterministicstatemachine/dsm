@@ -342,6 +342,19 @@ fn copies_agree(otp: &OtpReading, first: u16, copies: u16) -> Result<u32, String
     }
 }
 
+/// A row the bootrom writes and reads by majority (RBIT-3): each bit as most of its copies hold it.
+fn majority(otp: &OtpReading, first: u16, copies: u16) -> Result<u32, String> {
+    let values = otp.rows_in(first, copies)?;
+    Ok((0..24).fold(0u32, |value, bit| {
+        let set = values.iter().filter(|v| **v & (1 << bit) != 0).count();
+        if set * 2 > values.len() {
+            value | (1 << bit)
+        } else {
+            value
+        }
+    }))
+}
+
 /// A lock row holds every bit the procedure burns there.
 fn lock_holds(otp: &OtpReading, row: u16, burned: u32) -> Result<bool, String> {
     let value = otp
@@ -353,7 +366,9 @@ fn lock_holds(otp: &OtpReading, row: u16, burned: u32) -> Result<bool, String> {
 impl Standing {
     pub fn read<L: BootselLink>(pb: &mut Picoboot<L>, otp: &OtpReading) -> Result<Self, String> {
         let crit1 = copies_agree(otp, CRIT1_ROW, CRIT1_COPIES)?;
-        let flags0 = copies_agree(otp, BOOT_FLAGS0_ROW, FLAG_COPIES)?;
+        // `BOOT_FLAGS0` is the bootrom's to write (its first signed boot sets `ROLLBACK_REQUIRED`), and
+        // it reads the row by majority; so does this.
+        let flags0 = majority(otp, BOOT_FLAGS0_ROW, FLAG_COPIES)?;
         let rollback = otp.rows_in(ROLLBACK_ROW, ROLLBACK_ROWS)?;
         Ok(Self {
             secret: secret_page(otp)?,

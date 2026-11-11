@@ -503,3 +503,21 @@ fn the_wallet_takes_a_board_in_hand_through_every_step() {
         .iter()
         .all(|s| s.state == pb::AnchorBoardStepState::Done as i32));
 }
+
+#[test]
+fn the_rollback_flag_counts_as_the_bootrom_reads_it_by_majority() {
+    let mut model = BootromModel::sealed_board();
+    model.raw[crate::otp_burn::ROLLBACK_ROW as usize] = 0x1;
+    model.raw[0x48] = 1 << 11;
+    model.raw[0x49] = 1 << 11;
+    let mut pb = Picoboot::connect(model).expect("connect");
+    assert!(standing(&mut pb).rollback_recorded, "two of three copies");
+    let mut model = BootromModel::sealed_board();
+    model.raw[crate::otp_burn::ROLLBACK_ROW as usize] = 0x1;
+    model.raw[0x48] = 1 << 11;
+    let mut pb = Picoboot::connect(model).expect("connect");
+    assert!(
+        !standing(&mut pb).rollback_recorded,
+        "one copy of three is not the flag"
+    );
+}
