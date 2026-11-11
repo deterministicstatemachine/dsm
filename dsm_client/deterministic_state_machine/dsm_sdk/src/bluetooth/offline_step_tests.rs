@@ -1380,7 +1380,9 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     assert!(!ended.connected, "{}", ended.status);
     assert!(ended.awaiting_install, "{}", ended.status);
     assert!(
-        ended.status.contains("the trial on this anchor ended"),
+        ended
+            .status
+            .contains("the trial anchor this wallet had stopped answering"),
         "{}",
         ended.status
     );
@@ -1399,7 +1401,7 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     assert!(
         again
             .status
-            .contains("what that account held is gone: 19.93 ERA"),
+            .contains("What that account held is gone: 19.93 ERA"),
         "{}",
         again.status
     );

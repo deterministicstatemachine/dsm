@@ -2450,8 +2450,8 @@ impl CoreSDK {
         let mut snap = self.anchor_appliance_status();
         if !lost.is_empty() {
             snap.status = format!(
-                "{} The earlier trial on it ended at its last boot and its account is closed; what \
-                 that account held is gone: {}.",
+                "{} This wallet's earlier trial account is closed: a trial ends when its board \
+                 restarts or another anchor is installed here. What that account held is gone: {}.",
                 snap.status,
                 lost_words(&lost)
             );
@@ -2460,9 +2460,10 @@ impl CoreSDK {
     }
 
     /// A device has one anchor. An offline account under a bundle other than the one being
-    /// installed followed an earlier birth of it: a trial cleared at its board's next boot, so the
-    /// anchor came back born again, under a new bundle, at its origin, and the account that
-    /// followed the trial stands where its last payment left it. That account is lost with the
+    /// installed followed an earlier trial install: this anchor's, cleared at its board's next boot
+    /// so that it came back born again under a new bundle at its origin, or another board's,
+    /// installed here before this one. Either way the account that followed the trial stands where
+    /// its last payment left it. That account is lost with the
     /// trial (owner, 2026-11-08): every such account is closed and what it held is returned, so the
     /// wallet can say it. An anchor installed for good is never born again, so nothing of its own
     /// is ever closed here; only what a trial before it left.
@@ -3083,8 +3084,8 @@ fn pin_after_a_lost_answer(
 enum Attachment {
     /// None was ever attached: a board connected now is new to this wallet.
     Never,
-    /// One was attached and stopped answering: a board connected now and unprovisioned is a trial
-    /// that ended at its last boot.
+    /// One was attached and stopped answering: its trial ended, at its board's restart or with the
+    /// board taken away, and a board connected now and unprovisioned is offered its own install.
     Lost,
 }
 
@@ -3098,8 +3099,9 @@ fn unattached_status(why: &str, attachment: Attachment) -> AnchorStatusSnapshot 
     let status = if !awaiting_install {
         format!("no anchor appliance connected: {why}")
     } else if attachment == Attachment::Lost {
-        "the trial on this anchor ended at its last boot: what was loaded on it and not unloaded \
-         before then is gone. Its try-run and install are offered again."
+        "the trial anchor this wallet had stopped answering: a trial ends when its board restarts, \
+         and what was loaded on it and not unloaded before then is gone. The board connected now is \
+         offered its try-run and install."
             .to_string()
     } else {
         "a new anchor is connected. Nothing about it is permanent yet.".to_string()
