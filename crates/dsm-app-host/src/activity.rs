@@ -507,9 +507,9 @@ mod tests {
     /// its smallest units when the object cannot be named; no memo where a
     /// request carries none.
     #[test]
-    fn the_record_reads_in_the_clients_words_and_each_objects_own_units() {
+    fn the_record_reads_in_the_clients_words_and_each_objects_own_units() -> Result<(), String> {
         let era = dsm::core::token::token_state_manager::builtin_policy_commit_for_token("ERA")
-            .expect("ERA is built in")
+            .ok_or_else(|| "ERA is not built in".to_string())?
             .to_vec();
         let send = |amount, memo: &str| {
             asked(Kind::Pay(pb::ConnectPayV1 {
@@ -576,5 +576,6 @@ mod tests {
             )),
             Ok("OWNS: proven at the wallet's position 4".to_string())
         );
+        Ok(())
     }
 }
