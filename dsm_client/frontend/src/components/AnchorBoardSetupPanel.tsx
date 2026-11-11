@@ -123,11 +123,11 @@ export default function AnchorBoardSetupPanel() {
       )}
       <div className="sb-actions" style={{ margin: 0 }}>
         <button type="button" className="sb-btn" disabled={working} onClick={read}>
-          {stage === 'reading' ? 'Reading…' : board ? 'Read the board again' : 'Read the board'}
+          {stage === 'reading' ? 'Reading…' : board ? 'Read again' : 'Read board'}
         </button>
         {next && board?.connected && stage === 'read' && (
           <button type="button" className="sb-btn" onClick={() => setStage('confirming')}>
-            {next.name}…
+            Next step…
           </button>
         )}
         {next && (stage === 'confirming' || stage === 'stepping') && (
@@ -137,7 +137,7 @@ export default function AnchorBoardSetupPanel() {
             disabled={working || !confirmed}
             onClick={run}
           >
-            {stage === 'stepping' ? 'Working…' : next.permanent ? 'Yes, burn it' : 'Yes, go on'}
+            {stage === 'stepping' ? 'Working…' : next.permanent ? 'Burn it' : 'Go on'}
           </button>
         )}
       </div>

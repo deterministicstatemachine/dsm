@@ -102,7 +102,7 @@ describe('a board set up from the phone', () => {
   it('reads the board and shows its chip, its steps and what the check found', async () => {
     hostAnswering(boardWith(K.LOAD_IMAGE, []), boardWith(K.WRITE_DIGEST, []));
     render(<AnchorBoardSetupPanel />);
-    fireEvent.click(screen.getByText('Read the board'));
+    fireEvent.click(screen.getByText('Read board'));
     await waitFor(() => expect(screen.getByTestId('anchor-board-chip')).toHaveTextContent(CHIP));
     const steps = screen.getByTestId('anchor-board-steps');
     expect(steps).toHaveTextContent('NEXT: Load the signed image into flash');
@@ -117,10 +117,10 @@ describe('a board set up from the phone', () => {
       boardWith(K.WRITE_DIGEST, ['flash: the signed image, 254840 bytes, read back whole']),
     );
     render(<AnchorBoardSetupPanel />);
-    fireEvent.click(screen.getByText('Read the board'));
-    await waitFor(() => screen.getByText('Load the signed image into flash…'));
-    fireEvent.click(screen.getByText('Load the signed image into flash…'));
-    const go = screen.getByText('Yes, go on');
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => screen.getByText('Next step…'));
+    fireEvent.click(screen.getByText('Next step…'));
+    const go = screen.getByText('Go on');
     expect(go).toBeDisabled();
     fireEvent.change(screen.getByTestId('anchor-board-confirm'), { target: { value: '6f81' } });
     expect(go).toBeDisabled();
@@ -137,10 +137,10 @@ describe('a board set up from the phone', () => {
   it('names a permanent step as one that can never be undone', async () => {
     hostAnswering(boardWith(K.WRITE_DIGEST, []), boardWith(K.LOCK_DIGEST, []));
     render(<AnchorBoardSetupPanel />);
-    fireEvent.click(screen.getByText('Read the board'));
-    await waitFor(() => screen.getByText('Burn the firmware digest…'));
-    fireEvent.click(screen.getByText('Burn the firmware digest…'));
-    expect(screen.getByText(/can never be undone/)).toBeInTheDocument();
-    expect(screen.getByText('Yes, burn it')).toBeDisabled();
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => screen.getByText('Next step…'));
+    fireEvent.click(screen.getByText('Next step…'));
+    expect(screen.getByText(/Burn the firmware digest can never be undone/)).toBeInTheDocument();
+    expect(screen.getByText('Burn it')).toBeDisabled();
   });
 });
