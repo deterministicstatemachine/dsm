@@ -438,6 +438,43 @@ pub fn anchor_appliance_factory() -> Option<AnchorApplianceFactory> {
     ANCHOR_APPLIANCE_FACTORY.read().ok()?.clone()
 }
 
+/// A board's one-time setup for production from the phone alone, through the board's own USB
+/// bootloader while it is in BOOTSEL (owner, 2026-11-11: "Not everyone has a Mac. It has to be doable
+/// from the phone"). The device layer installs it. Every call reads the board fresh: what it holds is
+/// never remembered by the phone, so a step cut short is found where it stopped.
+pub trait AnchorBoardSetup: Send + Sync {
+    /// The board in BOOTSEL and where its setup stands. Writes nothing.
+    fn read(&self) -> dsm::types::proto::AnchorBoardResponse;
+    /// The board's next step, run only on the board whose chip id the person typed back.
+    fn step(
+        &self,
+        request: &dsm::types::proto::AnchorBoardStepRequest,
+    ) -> dsm::types::proto::AnchorBoardResponse;
+}
+
+static ANCHOR_BOARD_SETUP: Lazy<RwLock<Option<Arc<dyn AnchorBoardSetup>>>> =
+    Lazy::new(|| RwLock::new(None));
+
+/// Install the phone's board setup (its USB link to a board's bootloader and the release it carries).
+/// A lock left poisoned by a panic still holds a whole `Option`, which this replaces.
+pub fn install_anchor_board_setup(setup: Arc<dyn AnchorBoardSetup>) {
+    let mut held = match ANCHOR_BOARD_SETUP.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *held = Some(setup);
+    log::info!("[SDK] AnchorBoardSetup installed (a board's burns from the phone)");
+}
+
+/// The installed board setup, if this device has one. A poisoned lock still holds what was installed.
+#[must_use]
+pub fn anchor_board_setup() -> Option<Arc<dyn AnchorBoardSetup>> {
+    match ANCHOR_BOARD_SETUP.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = APP_ROUTER.write() {

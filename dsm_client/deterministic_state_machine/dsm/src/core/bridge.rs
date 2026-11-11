@@ -557,6 +557,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         | Some(gp::envelope::Payload::AnchorStatusResponse(_))
         // SDK-owned `anchor.tryRun` query response.
         | Some(gp::envelope::Payload::AnchorTryRunResponse(_))
+        // SDK-owned `anchor.board.*` response: a board's one-time setup from the phone.
+        | Some(gp::envelope::Payload::AnchorBoardResponse(_))
         // Offline-cash load/unload — SDK-owned `wallet.loadOffline`/`unloadOffline` response.
         | Some(gp::envelope::Payload::OfflineCashResponse(_))
         | Some(gp::envelope::Payload::TokenPolicyListResponse(_))

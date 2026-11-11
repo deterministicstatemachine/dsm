@@ -2248,6 +2248,55 @@ message AnchorTryRunResponse {
   bool              trial     = 5;
 }
 
+// A board's one-time setup for production, from the phone alone (owner, 2026-11-11: "Not everyone
+// has a Mac. It has to be doable from the phone"): the phone drives the board's own USB bootloader
+// while the board is in BOOTSEL. The steps, in the runbook's order.
+enum AnchorBoardStepKind {
+  ANCHOR_BOARD_STEP_KIND_UNSPECIFIED     = 0;
+  ANCHOR_BOARD_STEP_KIND_LOAD_IMAGE      = 1; // Step 3: the signed image into flash (flash, not OTP)
+  ANCHOR_BOARD_STEP_KIND_SEAL_SECRET     = 2; // Step 4 with its page's lock, on a board whose page is blank
+  ANCHOR_BOARD_STEP_KIND_WRITE_DIGEST    = 3; // Step 5: the Non-secure app's digest
+  ANCHOR_BOARD_STEP_KIND_LOCK_DIGEST     = 4; // Step 6: the digest page locked
+  ANCHOR_BOARD_STEP_KIND_WRITE_BOOT_KEY  = 5; // Step 7: the boot key's hash
+  ANCHOR_BOARD_STEP_KIND_LOCKDOWN        = 6; // Step 8: secure boot on, debug off
+  ANCHOR_BOARD_STEP_KIND_BOOT            = 7; // Step 9: reboot into the signed image, once
+  ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES = 8; // Step 9b: the boot pages locked, back in BOOTSEL
+}
+
+enum AnchorBoardStepState {
+  ANCHOR_BOARD_STEP_STATE_UNSPECIFIED = 0;
+  ANCHOR_BOARD_STEP_STATE_DONE        = 1;
+  ANCHOR_BOARD_STEP_STATE_NEXT        = 2;
+  ANCHOR_BOARD_STEP_STATE_LATER       = 3;
+}
+
+message AnchorBoardStep {
+  AnchorBoardStepKind  kind      = 1;
+  AnchorBoardStepState state     = 2;
+  bool                 permanent = 3; // it burns OTP: it can never be undone
+  string               name      = 4; // what it does, as the person reads it
+}
+
+// `anchor.board.read`, and the answer to every `anchor.board.step`: the board in BOOTSEL as its own
+// bootloader shows it, read fresh from its OTP every time, and where its setup stands.
+message AnchorBoardResponse {
+  bool   board_connected = 1;  // a board in BOOTSEL is on USB and the phone may use it
+  string chip_id         = 2;  // its RP2350 chip id, 16 hexadecimal digits, as its bootloader names it
+  string release         = 3;  // the production release this app carries, or why it carries none
+  repeated AnchorBoardStep steps = 4;
+  string refused         = 5;  // why the setup cannot go on, or why the last step stopped
+  repeated string found  = 6;  // what the read-only check found beyond blank (lock rows already set)
+  repeated string written = 7; // the last step's rows, each confirmed by its read-back
+  bool   done            = 8;  // every step is done: the board goes on to its install
+}
+
+// `anchor.board.step`: run the board's next step. The person types back the chip id the board read
+// named, so a step only ever reaches the board they are looking at.
+message AnchorBoardStepRequest {
+  AnchorBoardStepKind step    = 1;
+  string              chip_id = 2;
+}
+
 // ── Offline-cash (two-regime money model) ──────────────────────────────────
 // Deliberately load online balance into a device-bound offline-bearer allocation
 // ("cash in hand"), spend it offline, reconcile it back. Request bodies ride
@@ -2876,6 +2925,8 @@ message Envelope {
     // Offline-bearer anchor status (signal (c)) — read-only `anchor.status` diagnostics.
     AnchorStatusResponse              anchor_status_response           = 112;
     AnchorTryRunResponse              anchor_try_run_response          = 141;
+    // A board's one-time setup from the phone, through its own bootloader (`anchor.board.*`).
+    AnchorBoardResponse               anchor_board_response            = 143;
 
     // Offline-cash load/unload (two-regime money model): device-bound allocation balance.
     OfflineCashResponse               offline_cash_response            = 113;
