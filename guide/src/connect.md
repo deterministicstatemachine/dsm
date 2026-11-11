@@ -16,9 +16,9 @@ const offer = await app.offer({
 console.log(offer.code);
 ```
 
-Amounts are in the object's own units: `"0.10"` is a tenth of an ERA. On this page you make the offer from the command line instead, and connect a wallet to it.
+Amounts are in the object's own units: `"0.10"` is a tenth of an ERA. This page makes offers two ways: on the starter's page, and from the command line.
 
-## 1. The starter (optional)
+## 1. The starter: your app as a page
 
 The starter is a web app plugged into DSM, and the place to build your app from pieces. It runs in the foreground, so give it a terminal of its own:
 
@@ -26,15 +26,24 @@ The starter is a web app plugged into DSM, and the place to build your app from 
 make starter
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The page is a builder, with three kinds of pieces, in the order an app uses them:
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000).
+
+<figure class="term"><a href="images/starter-top.webp"><img src="images/starter-top.webp" alt="The Connect Starter page: its account's identity, what the page is, and a switch between TypeScript and Python"></a><figcaption>The top of the page: your account's identity, and the switch that shows every piece's code in TypeScript or in Python.</figcaption></figure>
+
+The page is a builder, with three kinds of pieces, in the order an app uses them:
 
 1. **Objects your app issues**: a coin, points, an item (supply 1 is a one-of-a-kind), a ticket; and a shop, a vault that sells one object for another.
 2. **What the wallet lets your app do**: the offer. Tick the grants (send, owns, accept, contacts, match, trade), set each cap, and press **Show the connect code**.
 3. **Ask a connected wallet**: send, prove what it owns, sign in, sign a statement, accept or receive an object, price or make a trade through your shop, stake on a match, decide it, collect.
 
-Under every piece is the exact code it is, in TypeScript or Python, with a Copy button. The page never makes that code up: it asks the starter's server, which runs one mapping from piece to client call both to show the code and to make the call. Set the pieces up the way your app needs them, press the button to see it happen, then paste the code into your own app.
+Under every piece is the exact code it is, with a **Copy** button. The page never makes that code up: it asks the starter's server, which runs one mapping from piece to client call both to show the code and to make the call. Set the pieces up the way your app needs them, press the button to see it happen, then paste the code into your own app.
 
-**Show the connect code** makes the offer: a code starting `dsm:connect/v1:`, and its QR. Every step below works with the starter's code as well as with the one the command line makes.
+<div class="shots">
+<figure style="flex-basis:330px;max-width:330px"><a href="images/starter-offer.webp"><img src="images/starter-offer.webp" alt="The offer piece: the app's name, the grants with their caps, the Show the connect code button, and the offer's code under it"></a><figcaption>The offer: tick the grants, set the caps. The code under it changes with them.</figcaption></figure>
+<figure style="flex-basis:300px;max-width:300px"><a href="images/starter-connect-code.webp"><img src="images/starter-connect-code.webp" alt="The connect code as a QR code, a link to open it in the wallet on the same device, and the code as text"></a><figcaption><b>Show the connect code</b>: a QR for a phone, a link for a wallet on the same device, and the code as text.</figcaption></figure>
+</div>
+
+To connect the terminal wallet below to the page's code instead of the command line's, copy the code under the QR and run `make dev-wallet-connect CODE=` followed by it.
 
 ## 2. A wallet in the terminal
 
@@ -44,9 +53,20 @@ To test without a phone, start a player's wallet in the terminal:
 make dev-wallet
 ```
 
-It is a second account, made the same way `make app-dev` made yours, on the same network, and funded from the faucet. It prints the same lines as `make app-dev`, as `[app-dev] wallet account running`, with its ingress on port 8788 and its relay on 8444.
+It is a second account, made the same way `make app-dev` made yours, on the same network, and funded from the faucet:
 
-## 3. Make the offer
+```text
+[app-dev] wallet account running
+  storage set:    the beta network (hosted; …/dsm_client/frontend/public/dsm_env_config.toml)
+  ingress:        http://127.0.0.1:8788   (your server calls this)
+  ingress secret: …/.dsm-dev/wallet/ingress/ingress-token
+  relay:          https://127.0.0.1:8444   (wallets reach this)
+  recovery:       …/.dsm-dev/wallet/data/RECOVERY_MNEMONIC
+  log:            …/.dsm-dev/wallet/host.log
+funded: claimed 100.00 ERA (economic position 1)
+```
+
+## 3. Make the offer from the command line
 
 ```bash
 CODE=$(make -s app ARGS="offer 'My Game' ERA 0.10 1.00")
@@ -60,7 +80,11 @@ The code is now in `$CODE`:
 echo $CODE
 ```
 
-It is `dsm:connect/v1:` followed by about two hundred characters. It is long because it carries the relay's address and its certificate pin: the wallet fetches the offer itself, over TLS pinned to that certificate.
+```text
+dsm:connect/v1:18B6GX3ME1SKMBSF64S3EBHG5RR2WC9T70T38CRJ41QXQJEH1V239MWMG2Q6RPQ5SJ4RD3XP78QK4KMD5G86Z5SCMB2MY6H0TPTDHBBYF15C78D78Z8ACYG4C5HQ0A6TAVSEY614C1D27CXRNWGG
+```
+
+It is long because it carries the relay's address and its certificate pin: the wallet fetches the offer itself, over TLS pinned to that certificate.
 
 ## 4. Connect the terminal wallet
 
@@ -68,16 +92,27 @@ It is `dsm:connect/v1:` followed by about two hundred characters. It is long bec
 make dev-wallet-connect CODE="$CODE"
 ```
 
-The wallet fetches the offer, checks it, and prints what My Game asks for, one line per grant:
+The wallet fetches the offer, checks it, and prints what My Game asks for. The terminal wallet is your test wallet, so it approves on its own, and prints the connection: its id, the app, `CONNECTED`, and the grants it now holds.
 
-- Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-- Prove your holdings of ERA and of objects this app issued
-- Receive objects this app issues
-- See which of your contacts are here: their DSM IDs, not their names
-- Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
-- Up to 64 requests that spend nothing; after them, each waits for you
+```text
+My Game (account 0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80) asks to:
+  - Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
+  - Prove your holdings of ERA and of objects this app issued
+  - Receive objects this app issues
+  - See which of your contacts are here: their DSM IDs, not their names
+  - Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
+  - Up to 64 requests that spend nothing; after them, each waits for you
+approved:
+connection RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG  My Game  CONNECTED
+  grants: Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
+  grants: Prove your holdings of ERA and of objects this app issued
+  grants: Receive objects this app issues
+  grants: See which of your contacts are here: their DSM IDs, not their names
+  grants: Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
+  grants: 0 of 64 requests that spend nothing used
+```
 
-The terminal wallet is your test wallet, so it approves on its own, and prints the connection: its id, `My Game`, `CONNECTED`, and the grants it now holds. A player on a phone reads the same list and decides.
+A player on a phone reads the same list and decides.
 
 ## 5. See it from your app's side
 
@@ -85,9 +120,13 @@ The terminal wallet is your test wallet, so it approves on its own, and prints t
 make app ARGS=connections
 ```
 
-<figure class="term"><a href="images/term-connections.webp"><img src="images/term-connections.webp" alt="make app ARGS=connections prints one line: the connection id, the wallet's identity, CONNECTED"></a><figcaption>One line per wallet: the connection's id, the wallet's identity, and CONNECTED.</figcaption></figure>
+```text
+connection RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG  wallet HA62NJZ06ZY8C79HKM39AGTC3CMX9348RJH30GZTHA00BCSP0KV0  CONNECTED
+```
 
-The connection's id is what every request on the next page names.
+One line per wallet: the connection's id, the wallet's identity, and whether it is connected. The connection's id is what every request on the next page names. The starter lists the same, with what each connection may do:
+
+<figure class="term"><a href="images/starter-connected.webp"><img src="images/starter-connected.webp" alt="The starter's Connected wallets: each connection, the wallet's identity, its grants, and whether it is connected"></a><figcaption>Connected wallets on the starter, after the next pages' steps too, so it lists several: the ones a wallet disconnected stay listed, with what they allowed.</figcaption></figure>
 
 ## 6. On a phone
 
@@ -123,5 +162,17 @@ These phones were recorded before the command line's `offer` asked to see contac
 - No keys moved, and nothing was taken on the relay's word.
 
 A wallet connects to an app once. To connect it again, it disconnects first (the [next page](requests.md) ends with that), or a second wallet connects: `make dev-wallet2`, then `make wallet2 ARGS="connect $CODE"`.
+
+## The whole page, as one script
+
+With `make app-dev` running, this makes the terminal wallet, the offer and the connection:
+
+```bash
+make dev-wallet
+CODE=$(make -s app ARGS="offer 'My Game' ERA 0.10 1.00")
+echo $CODE
+make dev-wallet-connect CODE="$CODE"
+make app ARGS=connections
+```
 
 Next: [Ask the wallet for things](requests.md).

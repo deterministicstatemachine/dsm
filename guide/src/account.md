@@ -16,9 +16,11 @@ This builds the TypeScript client, generates the Python client's types from `pro
 
 The first launch creates the account. It writes a recovery mnemonic once to the data directory, readable by you alone, and makes the account the way a phone does. The host waits until the network holds the account's directory entry, and only then opens its ingress. Then the account is funded from the network's faucet.
 
-The last lines it prints:
+The end of what it prints, from a run on the beta network:
 
 ```text
+[app-dev] building dsm-app-host (release)
+    Finished `release` profile [optimized] target(s) in 1m 06s
 [app-dev] app account running
   storage set:    the beta network (hosted; …/dsm_client/frontend/public/dsm_env_config.toml)
   ingress:        http://127.0.0.1:8787   (your server calls this)
@@ -41,7 +43,7 @@ funded: claimed 100.00 ERA (economic position 1)
 > [!WARNING]
 > Back up the recovery mnemonic like a wallet's, because that is what it is. Whoever can read the data directory controls the account.
 
-`make app-dev` returns once the account is running; the host keeps running in the background. `make app-dev-down` stops it, and `make dev-down` stops it and the terminal wallets.
+`make app-dev` returns once the account is running; the host keeps running in the background. `make app-dev-down` stops it, and `make dev-down` stops it and the terminal wallets. Run `make app-dev` again whenever you like: it builds what changed, keeps the same account, and claims nothing more from the faucet once the account holds ERA (it says `already holds` and the amount).
 
 ## 2. Look at it
 
@@ -51,11 +53,22 @@ The app's command line talks to the account through the same ingress your code w
 make app ARGS=id
 ```
 
-`owned` prints what it holds:
+```text
+0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80
+```
+
+`owned` prints what it holds: a hundred ERA from the faucet, and nothing of dBTC yet.
 
 ```bash
 make app ARGS=owned
 ```
+
+```text
+ERA                100.00   currency NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0
+dBTC           0.00000000   currency 0EJ2PSRS2YQR8BR77P3WZ92SV12VJT7XP6NWP0SH5P8MWD81C8H0
+```
+
+Each line is an object: its symbol, the amount in its own units, its kind, and its id.
 
 `activity` is the account's own record of every call made through the ingress:
 
@@ -63,9 +76,12 @@ make app ARGS=owned
 make app ARGS=activity
 ```
 
-<figure class="term"><a href="images/term-app-account.webp"><img src="images/term-app-account.webp" alt="make app ARGS=id prints the account's identity; owned prints 100.00 ERA and 0.00000000 dBTC; activity prints the faucet claim"></a><figcaption>A hundred ERA from the faucet, nothing of dBTC yet, and the faucet claim in the activity.</figcaption></figure>
+```text
+account 0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80
+1  ROUTE  faucet.claim  claim ERA from the network's faucet  -> claimed 100.00 ERA (economic position 1)
+```
 
-Your app can read the activity too, from any point. That is how it learns what happened without trusting anyone's say-so.
+Your app can read the activity too, from any point. That is how it learns what happened without trusting anyone's say-so. Your identity and ids will differ from these; everything else reads the same.
 
 ## 3. The ingress
 
@@ -101,7 +117,7 @@ app = local_app()
 print(app.connections())
 ```
 
-Each prints an empty list. Nothing is connected yet. [Write it into your app](clients.md) shows how to install each client; to try the Python one now, from the repo:
+Each prints an empty list: nothing is connected yet. [Write it into your app](clients.md) runs whole programs. To try the Python client now, from the repo:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
@@ -109,6 +125,15 @@ pip install -e clients/python
 python3 clients/python/examples/account_status.py
 ```
 
-`account_status.py` prints your account at a glance: its identity, what it owns, every connected wallet, and the latest activity.
+`account_status.py` prints your account at a glance: its identity, what it owns, every connected wallet with what it may do, and the latest activity.
+
+## The whole page, as one script
+
+```bash
+make app-dev
+make app ARGS=id
+make app ARGS=owned
+make app ARGS=activity
+```
 
 Next: [Make an offer, connect a wallet](connect.md).

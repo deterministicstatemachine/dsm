@@ -13,7 +13,17 @@ Every request has two answers, and only one is evidence:
 
 `received` means your account has taken up a transfer the wallet sent. `owns` means a proof of the wallet's holdings verified. `signed` means a signature checked. Code against the fact: the outcome tells you what the wallet said, and the fact tells you what happened.
 
-The commands below use the terminal wallet from the [last page](connect.md). Each request gets a number on its connection, and `result` reads what became of it. The wallet answers within moments, so give it a few seconds before you ask for the result.
+The commands below use the terminal wallet from the [last page](connect.md). Each request gets a number on its connection, and `result` reads what became of it.
+
+> [!NOTE]
+> On the beta network a request takes from a few seconds to about half a minute to settle: the wallet and your account each write to the storage nodes over the internet. Until it settles, `result` says so:
+>
+> ```text
+> answered: no  outcome: unanswered
+> fact: none  no transfer this account accepted pays it yet; an answer saying paid grants nothing
+> ```
+>
+> Run it again a little later. The wallet also answers a connection's requests in order, so a request that waits for the player holds up the ones after it.
 
 ## 1. Find the connection
 
@@ -31,7 +41,11 @@ Ask the wallet to send your account five hundredths of an ERA:
 make app ARGS="send $S ERA 0.05"
 ```
 
-It prints `request 1`. A moment later:
+```text
+request 1
+```
+
+Once it settles:
 
 ```bash
 make app ARGS="result $S 1"
@@ -52,23 +66,43 @@ Now 0.20 ERA, twice the cap per request:
 make app ARGS="send $S ERA 0.20"
 ```
 
+```text
+request 2
+```
+
 The wallet does not carry it out. It waits for the player, and says why:
 
 ```bash
 make dev-wallet-pending
 ```
 
-The request shows with `why it waits: 0.20 ERA is above the 0.10 ERA the grant allows per request`. The player approves it, here in the terminal, or on the phone:
+```text
+RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG 2  My Game: Pay 0.20 ERA for dsm-app send
+  why it waits: 0.20 ERA is above the 0.10 ERA the grant allows per request
+```
+
+If it says `nothing waiting`, the request has not reached the wallet yet: give it a moment. The player approves it, here in the terminal, or on the phone:
 
 ```bash
 make wallet ARGS="approve $S 2"
 ```
 
+```text
+CARRIED_OUT: My Game: Pay 0.20 ERA for dsm-app send, carried out.
+```
+
+Approving too early fails with `request 2 is not waiting`; list pending again first. About ten seconds later:
+
 ```bash
 make app ARGS="result $S 2"
 ```
 
-The fact is `received` again: the same fact, one more step.
+```text
+answered: yes  outcome: carried_out
+fact: received  the transfer is accepted onto this account's relationship with the wallet
+```
+
+The same fact, one more step. On a phone, the request waits under **Waiting**, with the reason:
 
 <div class="shots">
 <figure><img src="images/android-over-cap.webp" width="210" alt="Android: My Game asks to be paid 0.20 ERA, outside what you approved, with Decline and Approve"><figcaption>Outside the grant: the player decides.</figcaption></figure>
@@ -85,6 +119,10 @@ The fact is `received` again: the same fact, one more step.
 make app ARGS="owns $S ERA"
 ```
 
+```text
+request 3
+```
+
 ```bash
 make app ARGS="result $S 3"
 ```
@@ -92,11 +130,10 @@ make app ARGS="result $S 3"
 ```text
 answered: yes  outcome: carried_out
 fact: owns  proven at the wallet's position 3, whose next cell is still open
+  owns 9975 of NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0
 ```
 
-The next line gives the amount, in the object's smallest units: `owns 9975` of ERA, which is 99.75 ERA after the two sends.
-
-<figure class="term"><a href="images/term-requests-inside-and-over.webp"><img src="images/term-requests-inside-and-over.webp" alt="The terminal: the send inside the grant, the send over the cap waiting and approved, and the proof of what the wallet owns"></a><figcaption>Steps 2 to 4 in one run. The recording pauses with <code>sleep</code> before each result.</figcaption></figure>
+The amount is in the object's smallest units, and the long id is ERA's: 9975 is 99.75 ERA after the two sends.
 
 ## 5. Sign in
 
@@ -106,16 +143,29 @@ The next line gives the amount, in the object's smallest units: `owns 9975` of E
 make app ARGS="login $S"
 ```
 
-It prints `request 4: waits for the player to approve it on the device`. Pending shows the exact words to be signed:
+```text
+request 4: waits for the player to approve it on the device
+```
+
+Pending shows the exact words to be signed:
 
 ```bash
 make dev-wallet-pending
+```
+
+```text
+RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG 4  My Game: Sign this: "Sign in to dsm-app (3a6b4e28-b931-4116-b53a-b1681d5aa7b3)"
+  why it waits: only you can sign this, so it always waits for you
 ```
 
 The player approves:
 
 ```bash
 make wallet ARGS="approve $S 4"
+```
+
+```text
+CARRIED_OUT: My Game: Sign this: "Sign in to dsm-app (3a6b4e28-b931-4116-b53a-b1681d5aa7b3)", carried out.
 ```
 
 ```bash
@@ -125,7 +175,7 @@ make app ARGS="result $S 4"
 ```text
 answered: yes  outcome: carried_out
 fact: signed  the wallet signed these words after they were approved on its device: proof of its key, not of who pressed
-  signed: Sign in to dsm-app (2e12c4b7-e371-4122-bbe3-ced5574387b7)
+  signed: Sign in to dsm-app (3a6b4e28-b931-4116-b53a-b1681d5aa7b3)
 ```
 
 Your app compares the signed words with what it asked. That is a password, an authenticator code and a security key in one request, with nothing for you to store but the nonce.
@@ -143,10 +193,18 @@ Your app issues an object: SHIELD, a one-of-a-kind item, supply 1. Your account 
 make app ARGS="issue SHIELD shield 1"
 ```
 
+```text
+issued SHIELD (unique, supply 1): C46M962T804B5XND8P2ASG4QK2VCB7SCGE5RNWRA4ST4112EK400
+```
+
 A wallet receives only what it has taken up itself, so your app asks it to accept the object:
 
 ```bash
 make app ARGS="accept $S SHIELD"
+```
+
+```text
+request 5
 ```
 
 Give it a few seconds, then give it the shield:
@@ -155,13 +213,25 @@ Give it a few seconds, then give it the shield:
 make app ARGS="give $(make -s wallet ARGS=id) SHIELD 1"
 ```
 
+```text
+sent
+```
+
+The transfer is final once sent; the wallet takes it up within seconds. Until then its holdings show the shield at 0:
+
 ```bash
 make wallet ARGS=owned
 ```
 
-The wallet owns 99.75 ERA and one SHIELD. The item is the player's now. They can send it on in the wallet, and your app still sees who holds it with `owns`.
+```text
+ERA                 99.75   currency NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0
+SHIELD                  1   unique   C46M962T804B5XND8P2ASG4QK2VCB7SCGE5RNWRA4ST4112EK400
+dBTC           0.00000000   currency 0EJ2PSRS2YQR8BR77P3WZ92SV12VJT7XP6NWP0SH5P8MWD81C8H0
+```
 
-<figure class="term"><a href="images/term-requests-login-and-give.webp"><img src="images/term-requests-login-and-give.webp" alt="The terminal: the sign-in waiting, approved and signed; SHIELD issued, accepted and given; the wallet owning 99.75 ERA and one SHIELD"></a><figcaption>Steps 5 and 6 in one run.</figcaption></figure>
+The item is the player's now. They can send it on in the wallet, and your app still sees who holds it with `owns`.
+
+SHIELD's supply is 1, so it can be given once. Run this page again on the same account and `issue` answers with the same SHIELD, but `give` fails: the account no longer holds it (`balance underflow on debit (insufficient funds)`).
 
 ## 7. Disconnect
 
@@ -169,7 +239,34 @@ The wallet owns 99.75 ERA and one SHIELD. The item is the player's now. They can
 make wallet ARGS="disconnect $S"
 ```
 
-The grant ends, and the connection shows `DISCONNECTED` on your side. A wallet that wants to connect again does it with a new offer.
+```text
+connection RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG  My Game  DISCONNECTED
+  grants: Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
+  grants: Prove your holdings of ERA and of objects this app issued
+  grants: Receive objects this app issues
+  grants: See which of your contacts are here: their DSM IDs, not their names
+  grants: Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
+  grants: 2 of 64 requests that spend nothing used
+  used:   0.05 of 2.00 ERA
+```
+
+The grant ends, and the connection shows `DISCONNECTED` on your side too. `used` counts what went through the grant: the 0.05. The 0.20 the player approved by hand is not in it. A wallet that wants to connect again does it with a new offer.
+
+## The same, on the starter's page
+
+Everything above is a piece on the starter's page. Pick the wallet, pick what to ask, and the code under it is the call; **Ask** makes it:
+
+<figure class="term"><a href="images/starter-ask-send.webp"><img src="images/starter-ask-send.webp" alt="Ask a connected wallet: the wallet's connection, send your app an object, ERA, 0.05, the Ask button, and the TypeScript code for the request"></a><figcaption>Asking for 0.05 ERA. The code is the whole call, with the connection filled in.</figcaption></figure>
+
+<figure class="term"><a href="images/starter-ask-login.webp"><img src="images/starter-ask-login.webp" alt="Ask a connected wallet: sign in, with the TypeScript code that makes a nonce, asks, waits and checks the signed words"></a><figcaption>A sign-in: the code keeps the nonce and checks the signed words against it.</figcaption></figure>
+
+The page keeps a table of what it asked. Here: a send inside the grant, one over it (the player approved it in the terminal), and a sign-in, each with the wallet's answer and the fact your account established:
+
+<figure class="term"><a href="images/starter-requests.webp"><img src="images/starter-requests.webp" alt="Requests made: 1 send 0.05 ERA received, 2 send 0.20 ERA received after waiting for approval, 3 sign in signed"></a><figcaption>The facts are the evidence: <code>received</code>, <code>received</code>, <code>signed</code>.</figcaption></figure>
+
+And the account's activity, read from the ingress: every call your app made, and every time the wallet fetched its requests or answered one through the relay:
+
+<figure class="term"><a href="images/starter-activity.webp"><img src="images/starter-activity.webp" alt="Account activity: offers, requests, the wallet fetching its requests and answering them through the relay"></a><figcaption>The relay's part is kept and labelled for what it is: a signed notification that establishes nothing.</figcaption></figure>
 
 ## What to keep from this page
 
@@ -177,6 +274,37 @@ The grant ends, and the connection shows `DISCONNECTED` on your side. A wallet t
 - Show players what you asked for and what they approved.
 - Trust nothing the relay says. Your account already checked.
 
-That is the whole developer path: a code, a connection, requests, facts.
+## The whole page, as one script
+
+With the terminal wallet connected from the last page, this runs every step above, waiting for each request to settle before reading it, and approving as the player:
+
+```bash
+S=$(make -s app ARGS=connections | awk -v w="$(make -s wallet ARGS=id)" '$4==w && $NF=="CONNECTED"{print $2}')
+make app ARGS="send $S ERA 0.05"
+until make app ARGS="result $S 1" | grep -q "^fact: received"; do sleep 3; done
+make app ARGS="result $S 1"
+make app ARGS="send $S ERA 0.20"
+until make dev-wallet-pending | grep -q "why it waits"; do sleep 3; done
+make dev-wallet-pending
+make wallet ARGS="approve $S 2"
+until make app ARGS="result $S 2" | grep -q "^fact: received"; do sleep 3; done
+make app ARGS="result $S 2"
+make app ARGS="owns $S ERA"
+until make app ARGS="result $S 3" | grep -q "^fact: owns"; do sleep 3; done
+make app ARGS="result $S 3"
+make app ARGS="login $S"
+until make dev-wallet-pending | grep -q "Sign this"; do sleep 3; done
+make dev-wallet-pending
+make wallet ARGS="approve $S 4"
+until make app ARGS="result $S 4" | grep -q "^fact: signed"; do sleep 3; done
+make app ARGS="result $S 4"
+make app ARGS="issue SHIELD shield 1"
+make app ARGS="accept $S SHIELD"
+until make app ARGS="result $S 5" | grep -q "^answered: yes"; do sleep 3; done
+make app ARGS="give $(make -s wallet ARGS=id) SHIELD 1"
+until make wallet ARGS=owned | grep -Eq "^SHIELD +1 "; do sleep 3; done
+make wallet ARGS=owned
+make wallet ARGS="disconnect $S"
+```
 
 Next: [Write it into your app](clients.md).

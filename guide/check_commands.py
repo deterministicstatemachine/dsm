@@ -12,23 +12,28 @@ For each ```bash block in guide/src/*.md:
     (clients/typescript/src/app-cli.ts), and every `make wallet ARGS=<command>`
     or `make wallet2 ARGS=<command>` one of the terminal wallet's
     (clients/typescript/src/dev-wallet.ts);
-  - every line that drives the app or a wallet (an `ARGS=` or `CODE=` line, or
-    one that sets S, S2, A, B, CODE or CODE2) appears word for word in a
-    walkthrough tape (tools/walkthrough/tapes). CI's developer-path job runs
-    every command the tapes type, so such a line has run as written. A line
-    that opens a code on phones (`make phones-...`) is the one exception: no
-    phone is attached to CI.
+  - every call that drives the app or a wallet (`make ... ARGS=...` or
+    `make ... CODE=...`, on its own, inside `$(...)`, or in a loop that waits
+    for it) appears word for word in a walkthrough tape
+    (tools/walkthrough/tapes). CI's developer-path job runs every command the
+    tapes type, so such a call has run as written. A call that opens a code on
+    phones (`make phones-...`) is the one exception: no phone is attached to CI.
+
+And the guide's whole programs (guide/examples) are valid as written:
+`node --check` for the JavaScript, a compile for the Python.
 
 usage: python3 guide/check_commands.py [repo-root]
 """
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 
 ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parent.parent)
 
-DRIVES = re.compile(r"(ARGS=|CODE=|^(S|S2|A|B|CODE|CODE2)=)")
+# A make call that carries ARGS= or CODE=: its whole value, quoted or not.
+DRIVING_CALL = re.compile(r"""\bmake (?:-s )?[A-Za-z0-9_.-]+ (?:ARGS|CODE)=(?:"[^"]*"|'[^']*'|[^\s|)]+)""")
 
 
 def main() -> int:
@@ -59,15 +64,36 @@ def main() -> int:
                 for command in re.findall(r"\bmake (?:-s )?wallet2? ARGS=[\"']?([a-z]+)", line):
                     if command not in wallet_commands:
                         problems.append(f"{where}\n    the terminal wallet has no {command!r}")
-                if DRIVES.search(line) and not line.startswith("make phones-") and line not in tapes:
-                    problems.append(f"{where}\n    not typed by any walkthrough tape, so CI has never run it")
+                for call in DRIVING_CALL.findall(line):
+                    if not call.startswith("make phones-") and call not in tapes:
+                        problems.append(f"{where}\n    {call!r} is typed by no walkthrough tape, so CI has never run it")
+
+    examples = ROOT / "guide/examples"
+    programs = 0
+    for program in sorted(examples.rglob("*.mjs")):
+        if "node_modules" in program.parts:
+            continue
+        programs += 1
+        node = shutil.which("node")
+        if node is None:
+            problems.append(f"{program.name}: no node here to check it with")
+            continue
+        checked = subprocess.run([node, "--check", str(program)], capture_output=True, text=True)
+        if checked.returncode != 0:
+            problems.append(f"{program.name}: {checked.stderr.strip()}")
+    for program in sorted(examples.rglob("*.py")):
+        programs += 1
+        try:
+            compile(program.read_text(), str(program), "exec")
+        except SyntaxError as e:
+            problems.append(f"{program.name}: line {e.lineno}: {e.msg}")
 
     if problems:
-        print(f"guide: {len(problems)} problem(s) in {blocks} command blocks", file=sys.stderr)
+        print(f"guide: {len(problems)} problem(s) in {blocks} command blocks and {programs} programs", file=sys.stderr)
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 1
-    print(f"guide: all {blocks} command blocks are commands the repo has")
+    print(f"guide: all {blocks} command blocks are commands the repo has, and its {programs} programs are valid")
     return 0
 
 

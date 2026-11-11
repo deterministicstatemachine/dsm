@@ -19,6 +19,20 @@ This guide walks the whole path, a page at a time. Every command on these pages 
 
 Then, when you want them: [shops, matches and contacts](advanced.md), [running your app's account in production](production.md), and [a storage set of your own](own-storage-set.md).
 
+## Where this takes you
+
+By the fifth page your app has shown a code, a wallet has connected to it, and your app has asked it for things:
+
+<div class="shots">
+<figure style="flex-basis:250px;max-width:250px"><img src="images/starter-connect-code.webp" alt="The starter's connect code: a QR, a link, and the code as text"><figcaption>Your app shows a code.</figcaption></figure>
+<figure><img src="images/android-connect-preview.webp" width="210" alt="Android: My Game asks to connect, with what it asks for and the caps"><figcaption>The player sees what it asks for, and approves.</figcaption></figure>
+<figure><img src="images/android-sign-in.webp" width="210" alt="Android: a sign-in waiting for the player"><figcaption>A sign-in, approved on the phone.</figcaption></figure>
+</div>
+
+<figure class="term"><a href="images/starter-requests.webp"><img src="images/starter-requests.webp" alt="The starter's requests: two payments received and a sign-in signed"></a><figcaption>And your own account established the facts: two payments received, one sign-in signed.</figcaption></figure>
+
+Each page ends with all of its commands as one script, and [Write it into your app](clients.md) has the whole app as one program, in JavaScript and in Python, to copy and run.
+
 ## What DSM is, for an app builder
 
 - Each party keeps its own state. Your app has an account, each player has a wallet.

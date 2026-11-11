@@ -3,11 +3,12 @@ name: Guide
 # The developer guide (guide/): written pages, built with mdBook and published
 # on GitHub Pages. Every command the pages show is checked against what the
 # repo has (guide/check_commands.py): the Makefile's targets, the app's and
-# the terminal wallet's commands, and the walkthrough tapes CI runs. So a
-# change to any of those runs it too, and a pull request that would leave a
-# page showing a command that no longer exists fails here. A push to main
-# builds the guide and publishes it. Publishing needs the repository's Pages
-# source set to "GitHub Actions" (Settings, Pages).
+# the terminal wallet's commands, and the walkthrough tapes CI runs. The pages
+# also include the Python examples. So a change to any of those runs it too,
+# and a pull request that would leave a page showing a command that no longer
+# exists fails here. A push to main builds the guide and publishes it.
+# Publishing needs the repository's Pages source set to "GitHub Actions"
+# (Settings, Pages).
 
 on:
   push:
@@ -19,6 +20,7 @@ on:
       - 'clients/typescript/src/app-cli.ts'
       - 'clients/typescript/src/dev-wallet.ts'
       - 'tools/walkthrough/tapes/**'
+      - 'clients/python/examples/**'
   pull_request:
     paths:
       - 'guide/**'
@@ -27,6 +29,7 @@ on:
       - 'clients/typescript/src/app-cli.ts'
       - 'clients/typescript/src/dev-wallet.ts'
       - 'tools/walkthrough/tapes/**'
+      - 'clients/python/examples/**'
   workflow_dispatch:
 
 permissions:

@@ -1,0 +1,8 @@
+{
+  "name": "my-game",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "dsm-app-client": "file:../../../clients/typescript"
+  }
+}

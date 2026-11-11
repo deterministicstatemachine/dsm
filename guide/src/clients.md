@@ -1,98 +1,133 @@
 # Write it into your app
 
-Everything the command line did, your app does with a client: TypeScript for Node.js 20 or later, Python 3.10 or later. Both are generated from the same schema and use the same words: `offer`, `connections`, `request`, `result`, `wait`; `issue`, `give`; `owned`, `owns`. Requests are built with `ask.*`, and what an offer asks for with `grant.*`.
+Everything the command line did, your app does with a client: JavaScript or TypeScript on Node.js 20 or later, or Python 3.10 or later. Both are generated from the same schema and use the same words: `offer`, `connections`, `request`, `result`, `wait`; `issue`, `give`; `owned`, `owns`. Requests are built with `ask.*`, and what an offer asks for with `grant.*`.
 
 Your app needs a server side, even a small one, because the account's secret must never reach a browser page. The [starter](https://github.com/deterministicstatemachine/dsm/tree/main/examples/connect-starter) is one server file, and a page.
 
-## TypeScript
+This page has the whole of an app, twice: the same program in JavaScript and in Python. Each makes an offer, waits for a wallet to connect to it, takes a payment, gives the player 100 gems of its own coin, and signs the player in. Copy either one whole. Both ran, as written, against an account on the beta network, and their output is below them.
 
-The client lives in [`clients/typescript`](https://github.com/deterministicstatemachine/dsm/tree/main/clients/typescript). `make app-dev` built it; on its own:
+## The whole program, in JavaScript
 
-```bash
-make clients
-```
-
-Your app depends on it by path, the way the starter does in its `package.json`:
+Two files: [`guide/examples/my-game/package.json`](https://github.com/deterministicstatemachine/dsm/blob/main/guide/examples/my-game/package.json), which depends on the client in your clone of the repo,
 
 ```json
-"dependencies": {
-  "dsm-app-client": "file:../../clients/typescript"
-}
+{{#include ../examples/my-game/package.json}}
 ```
 
-The path is from your app's folder to `clients/typescript` in your clone of the repo.
+and [`guide/examples/my-game/my-game.mjs`](https://github.com/deterministicstatemachine/dsm/blob/main/guide/examples/my-game/my-game.mjs):
 
-The whole path, in one program: an offer, a payment, an item, a sign-in.
-
-```ts
-import { localAccount, grant, ask } from "dsm-app-client";
-
-const app = await localAccount("app");
-
-// 1. A connect code. Amounts are in the object's own units: 0.10 ERA.
-const offer = await app.offer({
-  name: "My Game",
-  grants: [grant.send("ERA", "0.10", "1.00"), grant.owns(["ERA"]), grant.accept()],
-});
-console.log(offer.code);
-
-// 2. Once a wallet connected:
-const [player] = await app.connections();
-const paid = await app.wait(await app.request(player, ask.send("ERA", "0.05", "a sword")));
-if (paid.fact === "received") {
-  const sword = await app.issue({ symbol: "SWORD", name: "Sword", supply: "1" });
-  await app.wait(await app.request(player, ask.accept(sword)), { until: "answered" });
-  await app.give(player, sword, "1");
-}
-
-// 3. Sign in: the player approves the words on the device.
-const login = await app.wait(await app.request(player, ask.login("My Game")));
-if (login.fact === "signed") console.log(`${player.peer} signed in`);
+```js
+{{#include ../examples/my-game/my-game.mjs}}
 ```
 
-`localAccount("app")` finds the account `make app-dev` runs. On a server of your own, open it from the ingress's address and the secret file the host writes: `new AppAccount(await Ingress.fromSecretFile(url, secretFile))`.
+It is plain JavaScript, so `node` runs it with no build step, and it is valid TypeScript too. With `make app-dev` running, from the repo:
 
-## Python
+```bash
+cd guide/examples/my-game
+npm install
+node my-game.mjs
+```
 
-The client lives in [`clients/python`](https://github.com/deterministicstatemachine/dsm/tree/main/clients/python). `make clients` (which `make app-dev` runs) generates its protobuf types. Install it into a virtual environment:
+It prints a connect code and waits. In a second terminal, connect a wallet to it: `make dev-wallet-connect CODE=` followed by the code, or scan it on a phone. (A wallet connects to an app once: if the terminal wallet is still connected from the earlier pages, `make wallet ARGS="disconnect $S"` first, or connect a second one with `make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`.) When the program asks for the sign-in, approve it as on the last page: `make dev-wallet-pending` shows the connection and the request's number, and `make wallet ARGS="approve <connection> <number>"` approves it.
+
+What it printed:
+
+```text
+connect code: dsm:connect/v1:18B6GX3ME1SKMBSF64S3EBHG5RR2WC9T70T38CRJ41QXQJEH1V239MWMG2Q6RPQ5SJ4RD3XP78QK4KMD5G86Z5SCMB2MY6H0B03M69RKFDWBCDNTWZR7KEK2HJ0Y9JYVD945TPAJW7719A4HNYWG
+waiting for a wallet to connect to it...
+wallet EKJMVVEGD8KFQNP2DP8XJ0QFNSZTV5V7MHZKQZ0N7097WPG8ZPV0 connected
+payment: outcome carried_out, fact received
+gave 100 GEMS
+sign-in asked: approve it on the device
+sign-in: outcome carried_out, fact signed
+signed: Sign in to My Game (a45c78b0-3774-466d-aee8-98cbdf2b9b49)
+```
+
+The wallet then owned the 100 GEMS:
+
+```text
+ERA                 98.95   currency NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0
+GEMS                  100   currency 4K53KPP5HCKG2NK0CRM8H888R3YYT7ACQ00BB7S6C5VVEQFNR670
+dBTC           0.00000000   currency 0EJ2PSRS2YQR8BR77P3WZ92SV12VJT7XP6NWP0SH5P8MWD81C8H0
+```
+
+## The same program, in Python
+
+[`guide/examples/my_game.py`](https://github.com/deterministicstatemachine/dsm/blob/main/guide/examples/my_game.py):
+
+```python
+{{#include ../examples/my_game.py}}
+```
+
+The Python client goes into a virtual environment. `make app-dev` already generated its protobuf types. From the repo:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e clients/python
+python3 guide/examples/my_game.py
 ```
 
-The same path:
+Connect a wallet to the code it prints, and approve the sign-in, as above. What it printed:
+
+```text
+connect code: dsm:connect/v1:18B6GX3ME1SKMBSF64S3EBHG5RR2WC9T70T38CRJ41QXQJEH1V239MWMG2Q6RPQ5SJ4RD3XP78QK4KMD5G86Z5SCMB2MY6H0V8KS5P8628JH2QR3BJ8Y97KTTFCQPFZ9NYH3AQN6PQZZP8XKEANG
+waiting for a wallet to connect to it...
+wallet HA62NJZ06ZY8C79HKM39AGTC3CMX9348RJH30GZTHA00BCSP0KV0 connected
+payment: outcome carried_out, fact received
+gave 100 GEMS
+sign-in asked: approve it on the device
+sign-in: outcome carried_out, fact signed
+signed: Sign in to My Game (ef80f587-b7e4-4041-9088-d2b554da1071)
+```
+
+This run came after the JavaScript one, on the same account: issuing GEMS a second time answered with the same coin, and the account gave from what it still held.
+
+## Your account at a glance
+
+The repo has two more Python programs: [`first_payment.py`](https://github.com/deterministicstatemachine/dsm/blob/main/clients/python/examples/first_payment.py), a connect code and one payment received (the newcomer check, `make first-run`, runs it on a clean Ubuntu), and [`account_status.py`](https://github.com/deterministicstatemachine/dsm/blob/main/clients/python/examples/account_status.py):
 
 ```python
-from dsm_app_client import local_app, grant, ask
-
-app = local_app()
-offer = app.offer("My Game", [grant.send("ERA", "0.10", "1.00"), grant.owns(["ERA"]), grant.accept()])
-print(offer.code)
-
-player = app.connections()[0]
-paid = app.wait(app.request(player, ask.send("ERA", "0.05", "a sword")))
-if paid.fact == "received":
-    sword = app.issue("SWORD", "Sword", "1")
-    app.wait(app.request(player, ask.accept(sword)), until="answered")
-    app.give(player, sword, "1")
+{{#include ../../clients/python/examples/account_status.py}}
 ```
-
-`local_app()` finds the account `make app-dev` runs. On a server of your own: `AppAccount(Ingress.from_secret_file(url, secret_file))`.
-
-### Your first payment, in Python
-
-[`first_payment.py`](https://github.com/deterministicstatemachine/dsm/blob/main/clients/python/examples/first_payment.py) is that path as a program. It prints a connect code, waits for a wallet to connect to it, asks for 0.05 ERA and prints the fact:
 
 ```bash
-python3 clients/python/examples/first_payment.py
+python3 clients/python/examples/account_status.py
 ```
 
-While it waits, connect a wallet to the code it prints: in a second terminal, `make dev-wallet-connect CODE=<the code>`, or open it on a phone.
+On the account from these pages, it began:
 
-A wallet connects to an app once. If the terminal wallet is still connected to your account, from the earlier pages, it disconnects first (`make wallet ARGS="disconnect $S"`), or a second wallet connects: `make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`.
+```text
+account 0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80
+  ERA                 60.60   currency
+  GEMS               999800   currency
+  GOLD            999000.00   currency
+  SHIELD                  0   unique
+  dBTC           0.00000000   currency
+6 connection(s) with wallets
+  connection 46E4R16XC06YC0YBK8H4P5EWCQ2J22Q4B1A4N16E4BA3J6WWN0Q0  wallet HA62NJZ06ZY8C79HKM39AGTC3CMX9348RJH30GZTHA00BCSP0KV0  disconnected
+    may: Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
+    may: Prove your holdings of ERA and of objects this app issued
+    may: Receive objects this app issues
+    may: Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
+```
 
-This is the program the newcomer check (`make first-run`) runs on a clean Ubuntu, after the starter's page has done the same in TypeScript: each to a wallet connected and its own payment received.
+and went on with every other connection, and the latest activity.
+
+## Every piece, in either language
+
+On the starter's page, the switch at the top shows every piece's code in Python instead of TypeScript. Here are the offer and the sign-in:
+
+<div class="shots">
+<figure style="flex-basis:330px;max-width:330px"><a href="images/starter-offer-python.webp"><img src="images/starter-offer-python.webp" alt="The starter's offer piece with its code in Python"></a><figcaption>The offer, in Python.</figcaption></figure>
+</div>
+
+<figure class="term"><a href="images/starter-ask-login-python.webp"><img src="images/starter-ask-login-python.webp" alt="The starter's sign-in piece with its code in Python: a nonce, the request, the wait, and the check of the signed words"></a><figcaption>The sign-in, in Python: the code keeps the nonce and checks the signed words against <code>login_statement</code>.</figcaption></figure>
+
+## In your own app
+
+**JavaScript or TypeScript.** Depend on the client by path, as `package.json` above does; the path is from your app's folder to `clients/typescript` in your clone. `localAccount("app")` finds the account `make app-dev` runs by looking for the repo's `.dsm-dev` folder above the folder you run in. From anywhere else, name it: `DSM_DEV_DIR=/path/to/your/clone/.dsm-dev`. On a server of your own, open the account from the ingress's address and the secret file the host writes: `new AppAccount(await Ingress.fromSecretFile(url, secretFile))`.
+
+**Python.** `pip install -e` the `clients/python` folder of your clone into your app's virtual environment. `local_app()` finds the account the same way, and `DSM_DEV_DIR` names it from anywhere else. On a server of your own: `AppAccount(Ingress.from_secret_file(url, secret_file))`.
 
 ## Any other language
 
@@ -100,6 +135,6 @@ Generate types from [`proto/dsm_app.proto`](https://github.com/deterministicstat
 
 ## Objects
 
-Everything an account can hold is an **object**: ERA, a sword, a ticket, a coin you issued. A currency is an object counted in units; an item is an object of which exactly one exists. You name an object by its symbol (`"ERA"`, `"SWORD"`) or by its id, and amounts in its own units (`"0.10"`, `"1"`); your account converts them, in both directions, so no client carries the unit rule. `issue` makes a new object, your account then holds its whole supply, and `give` hands some to a wallet that has accepted it.
+Everything an account can hold is an **object**: ERA, a sword, a ticket, a coin you issued. A currency is an object counted in units; an item is an object of which exactly one exists. You name an object by its symbol (`"ERA"`, `"GEMS"`) or by its id, and amounts in its own units (`"0.10"`, `"100"`); your account converts them, in both directions, so no client carries the unit rule. `issue` makes a new object, and your account then holds its whole supply. Issued again with the same terms, it answers with the same object. `give` hands some to a wallet that has accepted it.
 
 Next, when you want it: [Shops, matches and contacts](advanced.md).

@@ -16,6 +16,8 @@ What an offer asks the player to let your app do without asking again:
 
 `ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that spend nothing are free up to the offer's `freeRequests` (64 unless the offer says otherwise); past that, each waits for the player.
 
+The wallet answers a connection's requests in order: a request that waits for the player holds up every later one on that connection. On the beta network a request settles in a few seconds to about half a minute; `wait` (in the clients) polls until it has.
+
 ## Outcomes and facts
 
 | Outcome, the wallet's word | |
