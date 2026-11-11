@@ -4,26 +4,57 @@
 
 DSM is a state and identity layer in which every participant verifies state transitions directly, at the edge, with no global consensus, no validator ordering, no sequencer, and no wall clock. State lives in relationship-local hash chains anchored in a per-device sparse Merkle tree. Identity is device-bound and mnemonic-rooted. Every hash is domain-separated BLAKE3 and every signature is SPHINCS+. A transition is accepted because it is hash-adjacent to the state it consumes and satisfies the committed rules, not because anyone voted on it.
 
-DSM is not a blockchain, a rollup, or a payment-channel network. Storage nodes hold bytes and never decide anything. The three product surfaces built on the primitive are **Sovereign Finance (SoFi)**, an on-device AMM market with no counterparty and no operator; the **offline anchor appliance**, a hardware identity for offline bearer transfer of any DSM asset, built on an RP2350 and a TROPIC01 secure element; and **dBTC**, Bitcoin-backed DSM state whose withdrawal is a consumption of live DSM state rather than a custodian's decision.
+DSM is not a blockchain, a rollup, or a payment-channel network. Storage nodes hold bytes and never decide anything. Applications plug into DSM: an app keeps its own server and logic, gets a DSM account of its own, and its users connect their wallets to it ([Apps plugged into DSM](#apps-plugged-into-dsm)). DSM's own three product surfaces are **Sovereign Finance (SoFi)**, an on-device AMM market with no counterparty and no operator; the **offline anchor appliance**, a hardware identity for offline bearer transfer of any DSM asset, built on an RP2350 and a TROPIC01 secure element; and **dBTC**, Bitcoin-backed DSM state whose withdrawal is a consumption of live DSM state rather than a custodian's decision.
 
-This README is the map for release `v0.1.0-beta.4`. Every claim below carries one of four status tags: **proven on hardware** (exercised end to end on real devices, phones and the anchor appliance, against the live fleet), **checked in CI** (models and proofs that run in the pipeline), **fenced** (code present, refused by a named guard), or **core-only** (implemented in the core crate, not wired to a route).
+This README is the map for release `v0.1.0-beta.4`. Every claim below carries one of four status tags: **proven on real devices** (exercised end to end on real Android phones, and for the offline protocol on the anchor appliance, against the live fleet), **checked in CI** (models and proofs that run in the pipeline), **fenced** (code present, refused by a named guard), or **core-only** (implemented in the core crate, not wired to a route).
 
 ## Contents
 
-1. [Beta testers](#beta-testers)
-2. [Who this README is for](#who-this-readme-is-for)
-3. [Status board](#status-board)
-4. [Workspace map](#workspace-map)
-5. [Protocol pillars](#protocol-pillars)
-6. [Sovereign Finance (SoFi)](#sovereign-finance-sofi)
-7. [dBTC](#dbtc)
-8. [Offline protocol](#offline-protocol)
-9. [Android app and frontend](#android-app-and-frontend)
-10. [Storage nodes and the beta fleet](#storage-nodes-and-the-beta-fleet)
-11. [Formal verification](#formal-verification)
-12. [Development workflow](#development-workflow)
-13. [Documentation index](#documentation-index)
-14. [License](#license)
+1. [Apps plugged into DSM](#apps-plugged-into-dsm)
+2. [Plug your app into DSM](#plug-your-app-into-dsm)
+3. [Beta testers](#beta-testers)
+4. [Who this README is for](#who-this-readme-is-for)
+5. [Status board](#status-board)
+6. [Workspace map](#workspace-map)
+7. [Protocol pillars](#protocol-pillars)
+8. [Sovereign Finance (SoFi)](#sovereign-finance-sofi)
+9. [dBTC](#dbtc)
+10. [Offline protocol](#offline-protocol)
+11. [Wallet apps and frontend](#wallet-apps-and-frontend)
+12. [Storage nodes and the beta fleet](#storage-nodes-and-the-beta-fleet)
+13. [Formal verification](#formal-verification)
+14. [Development workflow](#development-workflow)
+15. [Documentation index](#documentation-index)
+16. [License](#license)
+
+## Apps plugged into DSM
+
+These apps are already plugged into DSM: [Irrefutable Labs' repositories](https://github.com/orgs/Irrefutable-Labs/repositories). Each keeps its own server and its own logic, has a DSM account of its own, and its users connect their DSM wallets to it. [The guide's page on them](https://deterministicstatemachine.github.io/dsm/apps.html) has more screenshots and how each one uses DSM.
+
+<table>
+<tr>
+<td width="290"><a href="https://github.com/Irrefutable-Labs/wildstate-dsm"><img src="guide/src/images/apps/wildstate.webp" alt="Wildstate's camp, with the game's DSM panel open" width="280"></a></td>
+<td><b><a href="https://github.com/Irrefutable-Labs/wildstate-dsm">Wildstate</a></b>: a creature-collecting game for Android. Its coin, WILD, and every creature a player catches are objects in the player's own wallet, not rows in the game's database. The shop is paid through the wallet, the market trades through a vault, and a staked arena match is decided by a pinned program, not a referee: each wallet locks its own stake and the winner takes both.</td>
+</tr>
+<tr>
+<td width="290"><a href="https://github.com/Irrefutable-Labs/openboxes-dsm/pull/1"><img src="guide/src/images/apps/openboxes.webp" alt="OpenBoxes for DSM" width="280"></a></td>
+<td><b><a href="https://github.com/Irrefutable-Labs/openboxes-dsm/pull/1">OpenBoxes for DSM</a></b>: OpenBoxes, the open-source warehouse and inventory system healthcare facilities run, with DSM holding authority over custody. Each warehouse is a DSM account; a stock change stands only when DSM has recorded it; staff sign in by approving on their wallet, not with a password; and a carrier takes custody of a shipment, and hands it over at the door, on a phone. In review as pull request #1.</td>
+</tr>
+<tr>
+<td width="290"><a href="https://github.com/Irrefutable-Labs/cbfpy-dsm/tree/main/dsm"><img src="guide/src/images/apps/cbfpy-console.webp" alt="CBFpy for DSM: the console, with every refused candidate and its reason" width="280"></a></td>
+<td><b><a href="https://github.com/Irrefutable-Labs/cbfpy-dsm/tree/main/dsm">CBFpy for DSM</a></b>: an AI with a body proposes its next step, and deterministic rules decide which proposal may become a real step on a DSM chain: it may not harm a protected animal, and anything it has not seen counts as occupied. Every step and every act is signed, and anyone can audit the chain from public keys alone. It runs in a simulated world and enforces the rules it is given; it does not understand ethics.</td>
+</tr>
+</table>
+
+## Plug your app into DSM
+
+Your app stays what it is, in the language you already use. It gets its own DSM account; your users connect their DSM wallets to it, and your app asks a wallet for what it needs: a payment, a proof of what it owns, a sign-in, an item. You write no Kotlin, Swift or Rust, and you hold no user's keys, passwords or card numbers.
+
+- **[The guide](https://deterministicstatemachine.github.io/dsm/)**: the whole path as written pages, with screenshots and every command in a block you can copy. Its source is [guide/](guide/).
+- [BUILDING_APPS.md](BUILDING_APPS.md): the same path on one page.
+- The [TypeScript](clients/typescript/) and [Python](clients/python/) clients, and the [Connect starter](examples/connect-starter/): a page where you build an app from pieces, with the code under each.
+
+`make app-dev` gives your app its own account on the beta network, funded.
 
 ## Beta testers
 
@@ -42,7 +73,8 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 
 ## Who this README is for
 
-- **Wallet and beta tester:** [Beta testers](#beta-testers), then the [Android app](#android-app-and-frontend) section.
+- **Wallet and beta tester:** [Beta testers](#beta-testers), then [Wallet apps](#wallet-apps-and-frontend).
+- **App developer:** [Plug your app into DSM](#plug-your-app-into-dsm), then [the guide](https://deterministicstatemachine.github.io/dsm/).
 - **Protocol reader (SoFi, dBTC, identity):** [Protocol pillars](#protocol-pillars), [Sovereign Finance](#sovereign-finance-sofi), [dBTC](#dbtc).
 - **Firmware and hardware:** [Offline protocol](#offline-protocol) and `crates/`.
 - **Contributor:** [Development workflow](#development-workflow), then [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -51,12 +83,13 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 
 | Surface | Status | Evidence |
 |---|---|---|
-| Identity and genesis (mnemonic-rooted, self-attested, published to the fleet) | proven on hardware | 4 devices wiped and re-created against the live fleet 2026-09-13, each identity accepted by all 5 nodes |
-| Bilateral transfers, offline cash load/unload | proven on hardware | two-device end-to-end 2026-08-24; byte-identical state on both sides |
-| SoFi: DLV markets, routing, routed unlock, reconcile, close, receipts | proven on hardware | full lifecycle on 4 phones 2026-09-13, see [Sovereign Finance](#sovereign-finance-sofi) |
-| Token surface: create, mint, burn, adopt, policy; faucet | proven on hardware | same run; capped issuance stays fenced in beta |
-| Storage fleet: 5 nodes, quorum 3 of 5, write-once registers | proven on hardware | the live fleet every run above wrote to; `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members |
-| Offline protocol: appliance core, verifier, SPHINCS+, RP2350 firmware, TrustZone monitor, TROPIC01 | proven on hardware | the three-signature release produced on the RP2350 + TROPIC01 appliance and accepted on the phone; silicon proof log in [docs/bench-proofs/](docs/bench-proofs/) |
+| Identity and genesis (mnemonic-rooted, self-attested, published to the fleet) | proven on real devices | 4 Android phones wiped and re-created against the live fleet 2026-09-13, each identity accepted by all 5 nodes |
+| Bilateral transfers, offline cash load/unload | proven on real devices | two Android phones end to end 2026-08-24; byte-identical state on both sides |
+| SoFi: DLV markets, routing, routed unlock, reconcile, close, receipts | proven on real devices | full lifecycle on 4 Android phones 2026-09-13, see [Sovereign Finance](#sovereign-finance-sofi) |
+| Token surface: create, mint, burn, adopt, policy; faucet | proven on real devices | same run; capped issuance stays fenced in beta |
+| DSM Connect: an app's own account; wallets connect under a grant; send, owns, login, accept and give, trade, match | checked in CI | the `Developer path` job runs each of these end to end on a local storage set; [the guide](https://deterministicstatemachine.github.io/dsm/) shows each command's output from a run on the beta fleet with terminal wallets, 2026-11-11 |
+| Storage fleet: 5 nodes, quorum 3 of 5, write-once registers | proven on real devices | the live fleet every run above wrote to; `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members |
+| Offline protocol: appliance core, verifier, SPHINCS+, RP2350 firmware, TrustZone monitor, TROPIC01 | proven on real devices | the three-signature release produced on the RP2350 + TROPIC01 appliance and accepted on an Android phone; silicon proof log in [docs/bench-proofs/](docs/bench-proofs/) |
 | dBTC: origin admission, burn-gated withdrawal, successor vaults | being replaced; not functional | the code stays in the tree as material for its replacement, and nothing in this release runs it; see [dBTC](#dbtc) |
 | Token emissions (DJTE) | core-only | schedule and ticket selection in `dsm/src/emissions`; the faucet consumes tickets |
 | Formal models: TLA+, Lean 4, vertical validation | checked in CI | `formal-validation` and `lean` CI jobs; see [Formal verification](#formal-verification) |
@@ -66,19 +99,30 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 ```
 dsm/
 ├── dsm_client/deterministic_state_machine/
-│   ├── dsm/            core: state machine, crypto, bilateral, dlv, economic, ccb, vault, emissions   (member)
-│   └── dsm_sdk/        SDK and route handlers: identity, tokens, dlv.*, route.*, storage, faucet, bitcoin   (member)
+│   ├── dsm/            core: state machine, crypto, bilateral, dlv, economic, ccb, vault, emissions, connect   (member)
+│   └── dsm_sdk/        SDK and route handlers: identity, tokens, dlv.*, route.*, connect.*, storage, faucet, bitcoin   (member)
 ├── dsm_storage_node/   index-only persistence over PostgreSQL; write-once registers; Terraform + deploy   (member, excluded from the Rust board)
 ├── dsm_client/android/ Kotlin container: WebView + JNI bridge, BLE, USB anchor transport
+├── dsm_client/ios/     Swift container for the same SDK and screens
 ├── dsm_client/frontend/ React wallet UI, pure rendering over the Envelope v3 bridge
+├── clients/            TypeScript and Python clients for an app's own DSM account
+├── examples/connect-starter/   the Connect starter: build an app from pieces, with the code under each
+├── guide/              the developer guide (mdBook), published at deterministicstatemachine.github.io/dsm
 ├── crates/
+│   ├── dsm-app-host/             an app's own DSM account: the Connect relay a wallet reaches, and a local protobuf ingress   (member)
+│   ├── dsm-dev-net/              a developer's own storage set on one machine   (member)
+│   ├── dsm-receipt-service/      emails a plain receipt that a wallet's device signed   (member)
+│   ├── wildstate-duel/           Wildstate's duel program, the rules a staked match is decided by; its WebAssembly build is wildstate-duel-wasm/   (member)
 │   ├── dsm-anchor-core/          hardware-free appliance core: root-advance message, three-signature release, prepare/commit/emit/finalize   (member)
 │   ├── dsm-sphincs/              no_std BLAKE3-keyed SPHINCS+, byte-compatible with the core, shared with firmware   (member)
+│   ├── dsm-anchor-chip/          the anchor's TROPIC01 session and bring-up, free of the RP2350   (excluded: its tests need Tropic Square's chip model)
 │   ├── dsm-anchor-secure-monitor/ TrustZone-M Secure world: TROPIC01, partition key, counter, seal, the single NSC gateway   (excluded: thumbv8m-only)
 │   ├── dsm-anchor-nonsecure-app/ TrustZone-M Non-secure world: USB-CDC, protobuf, transport   (excluded: thumbv8m-only)
 │   ├── dsm-anchor-bench/         used-chip bench harness, non-mutating proofs only   (excluded: native serial dependency)
-│   └── dsm-android-anchor/       on-device glue that installs the USB appliance into the SDK bridge   (excluded: built only by cargo-ndk)
-├── tools/vertical_validation/    implementation traces, adversarial runs, KATs, formal report
+│   ├── dsm-android-anchor/       on-device glue that installs the USB appliance into the SDK bridge   (excluded: built only by cargo-ndk)
+│   └── hardware/offline-anchor/  the appliance's assembly blueprint: wiring, enclosure, 3D-printed case
+├── tools/vertical_validation/    implementation traces, adversarial runs, KATs, formal report   (member)
+├── tools/requirement_map/        the call graph and the seals that lock each requirement finding to it   (member)
 ├── tla/                TLA+ specs and TLC configs
 ├── lean4/              Lean 4 proofs
 ├── proto/              dsm_app.proto, the only wire format
@@ -189,11 +233,13 @@ Offline bearer transfer needs one thing software cannot provide: a way to tell a
 
 **The phone's link.** `dsm-android-anchor` installs the USB appliance into the SDK bridge seam on the phone. The appliance provisions itself: the phone sends its device's identity once, the monitor binds the anchor to it and closes the chip to a second birth, and no raw SPI reaches the chip from the phone.
 
+**Both sides hold a board.** The receiver's board takes part in an offline payment too. It draws a challenge for the payment from its own random sources, checks the payer's transition and both of the payer's hardware signatures against it, and commits the receive, which uses the challenge up, so a payment is received once. What arrives offline is kept in the receiver's offline account apart from what it loaded, and goes online only when the receiver unloads it. This runs on Android; the iOS app has no board link yet and refuses offline transfers.
+
 **Proven on hardware.** The appliance runs on the RP2350 Pico 2 W with the TROPIC01 secure element: the Secure monitor boots from Secure SRAM, the chip signature and the partition-sealed host signature are produced on the board, and the release is accepted on the phone. The used-chip bench harness (`dsm-anchor-bench`) reruns the non-mutating adoption and prepare/cancel proofs against an already-used chip without moving the counter; the silicon proof log is in [docs/bench-proofs/](docs/bench-proofs/). The TLA+ model `DSM_OfflineAnchorSingleAppliance.tla` covers the single-appliance case.
 
-## Android app and frontend
+## Wallet apps and frontend
 
-The wallet is a four-layer stack and no layer skips another: **React frontend → Kotlin container → JNI/SDK (Rust) → core (Rust)**. The frontend is pure rendering; every rule lives in Rust, and the Kotlin layer carries bytes. The container loads `libdsm_sdk.so` (built with cargo-ndk for every ABI and staged by the Gradle `refreshDsmJniLibs` task), serves the React bundle from the APK's assets through a WebView asset loader, and bridges UI and SDK over a binary MessagePort channel carrying Envelope v3 protobuf bytes. The USB anchor appliance is attached through the same bridge seam.
+The Android wallet is a four-layer stack and no layer skips another: **React frontend → Kotlin container → JNI/SDK (Rust) → core (Rust)**. The frontend is pure rendering; every rule lives in Rust, and the Kotlin layer carries bytes. The container loads `libdsm_sdk.so` (built with cargo-ndk for every ABI and staged by the Gradle `refreshDsmJniLibs` task), serves the React bundle from the APK's assets through a WebView asset loader, and bridges UI and SDK over a binary MessagePort channel carrying Envelope v3 protobuf bytes. The USB anchor appliance is attached through the same bridge seam.
 
 | Command | What it does |
 |---|---|
@@ -203,20 +249,22 @@ The wallet is a four-layer stack and no layer skips another: **React frontend �
 
 Release APKs are signed by the maintainer; CI does not sign or upload them. Code: [dsm_client/android/](dsm_client/android/), the bridge in [SinglePathWebViewBridge.kt](dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/SinglePathWebViewBridge.kt), and [dsm_client/frontend/](dsm_client/frontend/).
 
+**iOS.** The iOS app runs the same Rust SDK and the same React screens in a Swift container, [dsm_client/ios/](dsm_client/ios/). On macOS with Xcode, `make ios-libs`, `make ios-frontend`, `make ios-simulator` and `make ios-simulator-run` build it and run it in the Simulator; `make ios-device IOS_TEAM=<your Apple team id>` builds it for an iPhone or iPad. It has no board link yet, so offline transfers are Android's for now.
+
 ## Storage nodes and the beta fleet
 
 A storage node is index-only persistence: it stores and serves bytes, keeps write-once registers, and never signs, validates, or interprets protocol rules. The beta fleet is five nodes on OVHcloud (Beauharnois) with a quorum of three. The client pins the five members and the quorum in `dsm/src/economic/register.rs` under the `dsm-testnet` network id; the same register profile drives the delivery fan-out, so a message is delivered to exactly the quorum's worth of members. The app ships configured for this fleet.
 
 - Local development nodes: `make nodes-up`, `make nodes-down`, `make nodes-status`, `make nodes-reset` (PostgreSQL required): the pinned members as five local nodes, prepared by [crates/dsm-dev-net/](crates/dsm-dev-net/). Code: [dsm_storage_node/](dsm_storage_node/).
-- Plugging an app into DSM: your app's own account on the beta fleet (`make app-dev`; nothing of the network runs on your machine) or on a local set (`make app-dev-local`), the TypeScript and Python clients, a starter app and terminal wallets. Guide: [BUILDING_APPS.md](BUILDING_APPS.md).
+- Plugging an app into DSM: your app's own account on the beta fleet (`make app-dev`; nothing of the network runs on your machine) or on a local set (`make app-dev-local`), the TypeScript and Python clients, a starter app and terminal wallets. See [the guide](https://deterministicstatemachine.github.io/dsm/) and [BUILDING_APPS.md](BUILDING_APPS.md).
 - Operators: Terraform and deployment scripts under `dsm_storage_node/`; the release workflow ships a Linux x86_64 binary with its SHA-256.
 - Beta admission: none. A new account publishes its directory entry and claims the faucet on its own (`make app-dev` does exactly that, 2026-11-09: a fresh account funded on the fleet in seconds); the fleet keeps no per-device allowance.
 
 ## Formal verification
 
 - **TLA+** (`tla/`): `DSM.tla` and the protocol core, bilateral liveness, Tripwire, non-interference, offline finality, the single-appliance offline anchor, economic-register observation, SoFi v8 successor cells and fulfillment (with falsification and non-vacuity configs), and the dBTC abstract, concrete, and trust-reduction models, each with TLC configs. Claims are indexed in [PROOF_CLAIMS.md](tla/PROOF_CLAIMS.md); run with `tla/run_tlc.sh`.
-- **Lean 4** (`lean4/`, toolchain `v4.23.0`): 21 modules covering the core theorem set, and the SPHINCS+ refinement in `lean4/Sphincs/`, with no `sorry`; the `lean` CI job builds them on every run. A sorry-free build is a build, not a witness; the frame theorems carry their own witnesses and mutation checks.
-- **Vertical validation** (`tools/vertical_validation`): `tla-check`, `proof-check`, `property-tests`, `implementation-traces` (transfer chain, signature rejection, fork divergence against the real state machine), `adversarial`, `crypto-kat`, `bilateral-throughput`, `benchmark`, `formal-report`, and `full`. The `formal-validation` CI job runs it.
+- **Lean 4** (`lean4/`, toolchain `v4.23.0`): 21 modules covering the core theorem set, and the SPHINCS+ refinement in `lean4/Sphincs/`, with no `sorry`. Whenever a change touches the formal layer, the `Lean 4 proofs` job kernel-checks them, audits every theorem's axioms against a committed ledger, and cross-checks the SPHINCS+ construction and DSM's signing wrappers against the Rust. A sorry-free build is a build, not a witness; the frame theorems carry their own witnesses and mutation checks.
+- **Vertical validation** (`tools/vertical_validation`): `tla-check`, `proof-check`, `property-tests`, `implementation-traces` (transfer chain, signature rejection, fork divergence against the real state machine), `adversarial`, `crypto-kat`, `bilateral-throughput`, `benchmark`, `formal-report`, and `full`. The `Formal Validation` job runs it when CI is started by hand.
 - **Production safety scan** (`ci/production_safety_checks.sh`): the ban list (wall clock, JSON in protocol paths, hex, envelope version) enforced as a CI gate.
 
 ## Development workflow
@@ -241,20 +289,22 @@ On Windows use `.\scripts\dev.ps1` for the Rust workspace and frontend, and WSL2
 | Android APK build / install | yes | yes | WSL2 |
 | Anchor firmware (`crates/dsm-anchor-secure-monitor` + `crates/dsm-anchor-nonsecure-app`, TrustZone images) | yes | yes | WSL2 |
 
-**The board.** The exact CI test command, run from `dsm_client/deterministic_state_machine/`:
+**The board.** The full test command a release runs ([release.yml](.github/workflows/release.yml)), from the repository root, before the storage node's own suite:
 
 ```bash
 cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
 ```
 
-It runs in `--release` because the shipped profile is what is gated and the crypto property tests scale their case counts up outside debug. `cargo test --lib` is not a board: it never compiles the integration suites. Locally, run the targeted suites for the module you changed, mutation-test any gate you touched, and let CI run the board.
+It runs in `--release` because the shipped profile is what is gated and the crypto property tests scale their case counts up outside debug. `cargo test --lib` is not a board: it never compiles the integration suites. Locally, run the targeted suites for the module you changed, mutation-test any gate you touched, and let CI run the rest.
 
-**CI shape.** On every pull request: `rust-gates` (fmt, clippy, safety scan), `rust-test` as a three-way matrix (`dsm`, `dsm_sdk`, `workspace-rest`), `storage-node-postgres`, `formal-validation`, `frontend`, `android-unit-tests`, `embedded` (firmware crates), `lean`, `spdx`, `sbom`, and `docker`. On every push to `main` the exhaustive `rust-board` runs the single command above unchanged. Coverage runs on pushes to `main` and nightly and reports to Codecov. Markdown-only changes are path-ignored. Workflows: [.github/workflows/](.github/workflows/).
+**CI shape.** A pull request runs only the layers its change touches: [ci/select_layers.py](ci/select_layers.py) maps each changed file through [ci/layers.toml](ci/layers.toml). A change to CI itself, or to a path the map does not know, runs everything; Markdown alone runs no layer. The jobs: `Rust gates` (fmt, clippy, the safety scan), `Rust tests` for `dsm` and `workspace-rest`, the `dsm_sdk` suite in eight shards, `Storage Node (Postgres)`, `Developer path` (an app on DSM, end to end), `Frontend`, `Android Unit Tests`, `Android Instrumented Tests`, `Embedded` (the firmware crates), `Lean 4 proofs`, `SBOM` and `Docker`; `Real-code guard`, `Acceptance lock` and `SPDX headers` run every time. A push to `main` runs the layers its own diff touches, never the whole set. `Conformance evidence` and `Formal Validation` run when CI is started by hand, and a release runs the board. CodeQL runs on every push and pull request; the guide is checked and published by its own workflow; Coverage and the code map run by hand. Workflows: [.github/workflows/](.github/workflows/).
 
 **Repository rules.** One branch, one topic, descriptive names (`fix/`, `feat/`, `docs/`, `chore/`). No `TODO` markers. No legacy fallbacks beside new code. Every security gate ships with a mutation test that turns a named test red when the gate is removed. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) for reporting vulnerabilities privately.
 
 ## Documentation index
 
+- [The developer guide](https://deterministicstatemachine.github.io/dsm/) — plug your app into DSM, page by page, with screenshots and copy-paste commands; source in [guide/](guide/)
+- [Apps plugged into DSM](https://github.com/orgs/Irrefutable-Labs/repositories) — Wildstate, OpenBoxes for DSM, CBFpy for DSM
 - Where the code lives — core [dsm/src/](dsm_client/deterministic_state_machine/dsm/src/) (`core`, `bilateral`, `dlv`, `economic`, `ccb`, `vault`, `bitcoin`, `emissions`, `crypto`), SDK routes [dsm_sdk/src/handlers/](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/), storage node [dsm_storage_node/](dsm_storage_node/), appliance [crates/](crates/), Android [dsm_client/android/](dsm_client/android/), frontend [dsm_client/frontend/](dsm_client/frontend/)
 - [Bench proofs](docs/bench-proofs/) — the silicon proof log
 - [Quickstart](QUICKSTART.md), [Plug your app into DSM](BUILDING_APPS.md), [Beta roadmap](BETA_ROADMAP.md), [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md), [Support](SUPPORT.md), [Changelog](CHANGELOG.md)

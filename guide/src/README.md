@@ -33,6 +33,8 @@ By the fifth page your app has shown a code, a wallet has connected to it, and y
 
 Each page ends with all of its commands as one script, and [Write it into your app](clients.md) has the whole app as one program, in JavaScript and in Python, to copy and run.
 
+Apps already plugged into DSM, a game, a warehouse system and a prototype AI with a body, are on [Apps plugged into DSM](apps.md), with screenshots of each.
+
 ## What DSM is, for an app builder
 
 - Each party keeps its own state. Your app has an account, each player has a wallet.
