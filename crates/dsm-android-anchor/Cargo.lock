@@ -953,6 +953,7 @@ dependencies = [
  "dsm_sdk",
  "getrandom 0.4.3",
  "jni",
+ "libc",
  "log",
 ]
 

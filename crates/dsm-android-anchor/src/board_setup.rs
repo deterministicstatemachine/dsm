@@ -498,12 +498,56 @@ pub mod jni_port {
                 .map_err(|_short| format!("a status of {} bytes, not 16", status.len()))
         }
 
+        /// picotool's `picoboot_reset`: each endpoint that reports a halt cleared as libusb clears it,
+        /// then the interface reset.
         fn reset(&mut self) -> Result<(), String> {
-            match call_int("bootselReset")? {
+            let halted = with_unified(|env, cls| {
+                let res = env
+                    .call_static_method(cls, "bootselHaltedEndpoints", "()[I", &[])
+                    .map_err(|e| format!("call bootselHaltedEndpoints: {e}"))?;
+                let obj = res
+                    .l()
+                    .map_err(|e| format!("bootselHaltedEndpoints: {e}"))?;
+                if obj.is_null() {
+                    return Ok(None);
+                }
+                let array = jni::objects::JIntArray::from(obj);
+                let len = env.get_array_length(&array).map_err(|e| e.to_string())?;
+                let mut addresses = vec![0i32; usize::try_from(len).map_err(|e| e.to_string())?];
+                env.get_int_array_region(&array, 0, &mut addresses)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(addresses))
+            })?
+            .ok_or_else(last_error)?;
+            if !halted.is_empty() {
+                let fd = call_int("bootselFileDescriptor")?;
+                for endpoint in halted {
+                    clear_halt(fd, endpoint)?;
+                }
+            }
+            match call_int("bootselInterfaceReset")? {
                 0 => Ok(()),
                 _failed => Err(last_error()),
             }
         }
+    }
+
+    /// `USBDEVFS_CLEAR_HALT` (`_IOR('U', 21, unsigned int)`): the device's halt cleared and the host's
+    /// endpoint state with it, its data toggle included, as libusb's Linux backend clears a halt.
+    const USBDEVFS_CLEAR_HALT: u32 = 0x8004_5515;
+
+    fn clear_halt(fd: i32, endpoint: i32) -> Result<(), String> {
+        let mut address = libc::c_uint::try_from(endpoint).map_err(|e| e.to_string())?;
+        // SAFETY: `fd` is the usbfs descriptor Android opened for this connection, live while the
+        // link is; the ioctl reads one `unsigned int`, the endpoint address, from `address`.
+        let rc = unsafe { libc::ioctl(fd, USBDEVFS_CLEAR_HALT as _, &mut address) };
+        if rc < 0 {
+            return Err(format!(
+                "clearing the halt of endpoint {endpoint:#04x}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
     }
 
     /// One file of the release the app carries, from its assets.

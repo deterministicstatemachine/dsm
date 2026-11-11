@@ -219,6 +219,9 @@ impl<L: BootselLink> Picoboot<L> {
             .command_status()
             .map(|s| u32::from_le_bytes([s[4], s[5], s[6], s[7]]));
         let reset = self.link.reset();
+        log::warn!(
+            "[picoboot] command {id:#04x} did not complete ({why}); status {status:?}, reset {reset:?}"
+        );
         match (status, reset) {
             (Ok(code), Ok(())) if code != 0 => BootselError::Refused {
                 command: id,

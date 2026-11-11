@@ -34,12 +34,9 @@ object BootselUsb {
     /** bmRequestType: vendor, to the interface, host to device / device to host. */
     private const val VENDOR_INTERFACE_OUT = 0x41
     private const val VENDOR_INTERFACE_IN = 0xC1
-    /** Standard requests on an endpoint: GET_STATUS reads its halt, CLEAR_FEATURE(HALT) clears it. */
+    /** A standard request on an endpoint: GET_STATUS reads its halt. */
     private const val STANDARD_ENDPOINT_IN = 0x82
-    private const val STANDARD_ENDPOINT_OUT = 0x02
     private const val GET_STATUS = 0x00
-    private const val CLEAR_FEATURE = 0x01
-    private const val ENDPOINT_HALT = 0x00
 
     /** picotool's bulk timeout; an OTP write or a flash erase answers within it. */
     private const val BULK_TIMEOUT_MS = 10_000
@@ -211,23 +208,32 @@ object BootselUsb {
     private const val HALTED = 0x01
 
     /**
-     * Clear each endpoint's halt where it reports one, then `PICOBOOT_IF_RESET` the interface, as
-     * picotool's `picoboot_reset` does: 0, or -1.
+     * The addresses of the PICOBOOT endpoints that report a halt, or null when a status cannot be
+     * read. Clearing one is Rust's: through `USBDEVFS_CLEAR_HALT` on [fileDescriptor], as libusb
+     * clears a halt, which resets the host's data toggle with the device's. A halt cleared by a
+     * plain control request leaves the host's toggle behind, and the next transfer is lost.
      */
     @Synchronized
-    fun reset(): Int {
-        val conn = connection ?: run { fail("no board is open"); return -1 }
-        val intf = iface ?: run { fail("no board is open"); return -1 }
+    fun haltedEndpoints(): IntArray? {
+        val conn = connection ?: run { fail("no board is open"); return null }
+        val halted = mutableListOf<Int>()
         for (ep in listOfNotNull(epIn, epOut)) {
             val status = endpointStatus(conn, ep)
-                ?: run { fail("the status of endpoint ${ep.address} could not be read"); return -1 }
-            if (status and HALTED != 0) {
-                val cleared = conn.controlTransfer(
-                    STANDARD_ENDPOINT_OUT, CLEAR_FEATURE, ENDPOINT_HALT, ep.address, null, 0, CONTROL_TIMEOUT_MS
-                )
-                if (cleared < 0) { fail("the halt of endpoint ${ep.address} would not clear"); return -1 }
-            }
+                ?: run { fail("the status of endpoint ${ep.address} could not be read"); return null }
+            if (status and HALTED != 0) halted.add(ep.address)
         }
+        return halted.toIntArray()
+    }
+
+    /** The open connection's usbfs file descriptor, or -1. */
+    @Synchronized
+    fun fileDescriptor(): Int = connection?.fileDescriptor ?: run { fail("no board is open"); -1 }
+
+    /** `PICOBOOT_IF_RESET` the interface, as picotool's `picoboot_reset` ends: 0, or -1. */
+    @Synchronized
+    fun interfaceReset(): Int {
+        val conn = connection ?: run { fail("no board is open"); return -1 }
+        val intf = iface ?: run { fail("no board is open"); return -1 }
         val done = conn.controlTransfer(VENDOR_INTERFACE_OUT, PICOBOOT_IF_RESET, 0, intf.id, null, 0, CONTROL_TIMEOUT_MS)
         if (done < 0) {
             fail("the PICOBOOT interface would not reset")
