@@ -107,6 +107,7 @@ jobs:
 
       - name: Install CI system deps
         run: |
+          bash ci/runner_dns.sh
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler ripgrep jq
 
@@ -158,6 +159,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Resolve Ubuntu's package servers
+        run: bash ci/runner_dns.sh
+
       - name: The newcomer's first run
         run: make first-run
 
@@ -191,6 +195,7 @@ jobs:
 
       - name: Install build deps
         run: |
+          bash ci/runner_dns.sh
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
@@ -310,6 +315,7 @@ jobs:
 
       - name: Install SBOM tooling
         run: |
+          bash ci/runner_dns.sh
           sudo apt-get update
           sudo apt-get install -y jq protobuf-compiler
           cargo install cargo-cyclonedx --quiet --locked --version 0.5.9
