@@ -40,8 +40,8 @@ const app = await localAccount("app");
 const offer = await app.offer({ name: "My Game", grants: [grant.send("ERA", "0.10", "1.00")] });
 console.log(offer.code); // show it as a QR code
 
-// Once a wallet has connected to it:
-const [player] = await app.connections();
+// Once a wallet has connected to it (the whole program waits for one):
+const player = (await app.connections()).find((c) => c.connected);
 const paid = await app.wait(await app.request(player, ask.send("ERA", "0.05", "100 gems")));
 if (paid.fact === "received") {
   // Your own account took up the transfer: hand over the gems.
@@ -56,7 +56,7 @@ Apps already plugged into DSM, a game, a warehouse system and a prototype AI wit
 
 - Each party keeps its own state. Your app has an account, each player has a wallet.
 - There is no global ledger to wait on, no validators and no fee market. Storage nodes keep an index of where everyone's state is, and decide nothing.
-- You plug in. You deploy nothing anywhere.
+- You plug in. You don't deploy storage nodes or run any part of the DSM network: your app runs its own DSM account beside your existing server.
 
 ## Your app is an account
 
