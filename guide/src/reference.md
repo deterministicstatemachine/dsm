@@ -14,7 +14,7 @@ What an offer asks the player to let your app do without asking again:
 | `match(caps)` | take stakes in matches your app referees, within caps | `ask.match.stake`, `decide`, `ask.match.collect` |
 | `duel(programs, caps)` | take stakes in matches a pinned program decides | `ask.duel.*` |
 
-`ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that spend nothing are free up to the offer's `freeRequests` (64 unless the offer says otherwise); past that, each waits for the player.
+`ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that move nothing run without asking, up to the offer's `freeRequests` (64 unless the offer says otherwise); past that, each waits for the player. A payment inside the grant's caps keeps running past that count until one fails; from then on, every request waits for the player.
 
 The wallet answers a connection's requests in order: a request that waits for the player holds up every later one on that connection. On the beta network a request settles in a few seconds to about half a minute; `wait` (in the clients) polls until it has.
 
