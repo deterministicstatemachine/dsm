@@ -20,7 +20,15 @@
 // `.clippy.toml` disallows them).
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
+pub mod board_setup;
+#[cfg(test)]
+mod bootrom_model;
 pub mod install;
+pub mod otp_burn;
+#[cfg(test)]
+mod otp_burn_tests;
+pub mod picoboot;
+pub mod release;
 pub mod usb_appliance;
 pub mod usb_pico;
 pub use usb_appliance::UsbAnchorAppliance;

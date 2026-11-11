@@ -947,9 +947,11 @@ dependencies = [
 name = "dsm-android-anchor"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "dsm",
  "dsm-anchor-core",
  "dsm_sdk",
+ "getrandom 0.4.3",
  "jni",
  "log",
 ]

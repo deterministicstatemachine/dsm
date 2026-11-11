@@ -31,6 +31,12 @@ pub fn install_anchor_transport() {
     log::info!(
         "[anchor-install] USB anchor appliance factory installed (offline release and receive = physical chip)"
     );
+    // A board's one-time setup from the phone, through its own bootloader (owner, 2026-11-11).
+    // Installing it opens nothing: each read and step opens the board's link and closes it.
+    dsm_sdk::bridge::install_anchor_board_setup(Arc::new(crate::board_setup::BoardSetup::new(
+        crate::board_setup::jni_port::JniBoardPort,
+    )));
+    log::info!("[anchor-install] board setup installed (a board's burns from the phone)");
 }
 
 /// JNI trigger: install the sender anchor transport. Returns `true` on success. Absent from the

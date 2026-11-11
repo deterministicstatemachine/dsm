@@ -142,3 +142,85 @@ export async function getAnchorStatus(): Promise<AnchorStatus> {
 
   return statusOf(resp);
 }
+
+/** One step of a board's one-time setup for production, as Rust reports it. */
+export interface BoardSetupStep {
+  kind: pb.AnchorBoardStepKind;
+  state: 'done' | 'next' | 'later';
+  /** It burns OTP: it can never be undone. */
+  permanent: boolean;
+  name: string;
+}
+
+/**
+ * A board in BOOTSEL as its own bootloader shows it, read fresh, and where its setup stands. The
+ * phone drives the board's bootloader itself: nothing but the phone is needed (owner, 2026-11-11).
+ */
+export interface BoardSetup {
+  connected: boolean;
+  /** The board's RP2350 chip id, as its bootloader names itself. */
+  chipId: string;
+  /** The production release this app carries, or why it carries none. */
+  release: string;
+  steps: BoardSetupStep[];
+  /** Why the setup cannot go on, or why the last step stopped. */
+  refused: string;
+  /** What the read-only check found beyond blank. */
+  found: string[];
+  /** The last step's rows, each confirmed by its read-back. */
+  written: string[];
+  /** Every step is done: the board goes on to its install. */
+  done: boolean;
+}
+
+const stateOf = (state: pb.AnchorBoardStepState): BoardSetupStep['state'] => {
+  switch (state) {
+    case pb.AnchorBoardStepState.DONE:
+      return 'done';
+    case pb.AnchorBoardStepState.NEXT:
+      return 'next';
+    default:
+      return 'later';
+  }
+};
+
+function boardSetupOf(bytes: Uint8Array, route: string): BoardSetup {
+  const env = decodeFramedEnvelopeV3(bytes);
+  if (env.payload.case === 'error') {
+    throw new Error(env.payload.value.message || `${route} failed`);
+  }
+  if (env.payload.case !== 'anchorBoardResponse') {
+    throw new Error(`${route}: unexpected payload ${env.payload.case}`);
+  }
+  const resp = env.payload.value;
+  return {
+    connected: resp.boardConnected,
+    chipId: resp.chipId,
+    release: resp.release,
+    steps: resp.steps.map((step) => ({
+      kind: step.kind,
+      state: stateOf(step.state),
+      permanent: step.permanent,
+      name: step.name,
+    })),
+    refused: resp.refused,
+    found: [...resp.found],
+    written: [...resp.written],
+    done: resp.done,
+  };
+}
+
+/** Read the board in BOOTSEL and where its setup stands (`anchor.board.read`). Writes nothing. */
+export async function readBoardSetup(): Promise<BoardSetup> {
+  return boardSetupOf(await routerQueryBin('anchor.board.read', NO_ARGS()), 'anchor.board.read');
+}
+
+/**
+ * Run the board's next step (`anchor.board.step`) on the board whose chip id is given: Rust runs it
+ * only if it is that board's next step, and only on that board.
+ */
+export async function stepBoardSetup(kind: pb.AnchorBoardStepKind, chipId: string): Promise<BoardSetup> {
+  const request = new pb.AnchorBoardStepRequest({ step: kind, chipId });
+  const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(request.toBinary()) });
+  return boardSetupOf(await routerInvokeBin('anchor.board.step', new Uint8Array(arg.toBinary())), 'anchor.board.step');
+}

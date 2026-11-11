@@ -26,6 +26,7 @@ class DsmInitProvider : ContentProvider() {
             // Cache the app context for the Phone->Pico USB transport (Path-B relay). Cheap + safe:
             // it only opens the Pico lazily on the first counter read, and accepts no value by itself.
             context?.let { com.dsm.wallet.bridge.LocalPicoUsb.init(it) }
+            context?.let { com.dsm.wallet.bridge.BootselUsb.init(it) }
 
             // The phone's anchor appliance, for both sides of an offline payment (owner,
             // 2026-11-07: an offline payment needs a board on both sides): register its USB

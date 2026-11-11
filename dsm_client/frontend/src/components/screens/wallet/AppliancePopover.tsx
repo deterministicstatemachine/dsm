@@ -9,6 +9,7 @@ import React, { useEffect, useRef } from 'react';
 import { Notice } from '../../common/ScreenFrame';
 import { useBackButton } from '../../../hooks/useBackButton';
 import AnchorInstallPanel from '../../AnchorInstallPanel';
+import AnchorBoardSetupPanel from '../../AnchorBoardSetupPanel';
 import { applianceConnected, applianceStateText, type ApplianceRead } from '../../applianceRead';
 import type { AnchorStatus } from '../../../dsm/anchor';
 
@@ -78,6 +79,7 @@ export function AppliancePopover({ read, busy, onConnect, onInstalled, onClose }
             <AnchorInstallPanel onInstalled={onInstalled} />
           )}
           {read.kind === 'error' && <Notice kind="error">{read.message}</Notice>}
+          <AnchorBoardSetupPanel />
         </div>
         <div className="sb-actions" style={{ margin: 0 }}>
           <button type="button" className="sb-btn" onClick={onClose}>Close</button>
