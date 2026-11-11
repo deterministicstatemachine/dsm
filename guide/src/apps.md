@@ -10,7 +10,20 @@ These apps are plugged into DSM today. Each kept its own server and its own logi
 
 ## Wildstate
 
-Wildstate is a creature-collecting game for Android: walk the camp, catch creatures in the tall grass, battle trainers, buy capsules, trade at the market, and fight other players in the arena. Walking, encounters, battles and dialogue run on the game's own server and never touch DSM. What a player owns lives in their DSM wallet:
+Wildstate is a creature-collecting game for Android: walk the camp, catch creatures in the tall grass, battle trainers, buy capsules, trade at the market, and fight other players in the arena. Walking, encounters, battles and dialogue run on the game's own server and never touch DSM. What a player owns lives in their DSM wallet.
+
+<div class="shots">
+<figure style="flex-basis:420px;max-width:420px"><a href="images/apps/wildstate-connect.webp"><img src="images/apps/wildstate-connect.webp" alt="Wildstate's connect screen: OPEN DSM WALLET, a QR code, and the list of what the game asks the wallet for"></a><figcaption>The game shows its code and lists what it asks the wallet for.</figcaption></figure>
+<figure style="flex-basis:420px;max-width:420px"><a href="images/apps/wildstate.webp"><img src="images/apps/wildstate.webp" alt="The camp after connecting: the bar shows 4 capsules and 70 WILD"></a><figcaption>The camp. The 70 WILD on the bar is what the wallet proved it owns.</figcaption></figure>
+</div>
+
+<div class="shots">
+<figure style="flex-basis:330px;max-width:330px"><a href="images/apps/wildstate-capture.webp"><img src="images/apps/wildstate-capture.webp" alt="A wild Mossling at 12 of 40 HP, caught: Mossling joined your collection"></a><figcaption>A Mossling caught. The game's account issued it as an object, one of one, and gave it to the wallet.</figcaption></figure>
+<figure style="flex-basis:150px;max-width:150px"><a href="images/apps/wildstate-shop.webp"><img src="images/apps/wildstate-shop.webp" alt="Bramble's trading post: a capture capsule for 3 WILD, and your wallet sent 3 WILD"></a><figcaption>A capsule, granted once the wallet's 3 WILD arrived.</figcaption></figure>
+<figure style="flex-basis:330px;max-width:330px"><a href="images/apps/wildstate-market.webp"><img src="images/apps/wildstate-market.webp" alt="The market: the game's 5 vaults, what the wallet proved it owns, and a trade done"></a><figcaption>A trade at the market: 1.00 ERA for 49 WILD, through the game's vaults.</figcaption></figure>
+</div>
+
+In the game:
 
 - **WILD, the game's coin**, is an object the game's account issued, with a fixed supply. The game pays players in it: a starting amount when they connect, and a bounty for each trainer beaten.
 - **Every creature** is an object of which exactly one exists, issued by the game's account at the capture. It names the game as its issuer, its species and its capture number; its HP, XP and charges are game data kept against it.
@@ -20,11 +33,24 @@ Wildstate is a creature-collecting game for Android: walk the camp, catch creatu
 - **The arena's staked matches** are decided by a pinned program, not by a referee. Each wallet locks its own stake, and the winner takes both. The program is [`wildstate-duel`](https://github.com/deterministicstatemachine/dsm/tree/main/crates/wildstate-duel), in this repository.
 - Pressing **DSM** in the game shows one timeline: what ran on the game server, and every call the game's account made on DSM.
 
+<figure class="term"><a href="images/apps/wildstate-dsm.webp"><img src="images/apps/wildstate-dsm.webp" alt="The DSM overlay over the camp: for request 20, what DSM established, with the account's position, economic root and device tree"></a><figcaption>Press <b>DSM</b>: for a payment (request #20), what the game's own account established, with its position, economic root and device tree.</figcaption></figure>
+
 The game connects the way [Make an offer, connect a wallet](connect.md) does: it shows a code, and the player opens it in their wallet and approves what the game asks for. Its integration is described in [docs/dsm-integration.md](https://github.com/Irrefutable-Labs/wildstate-dsm/blob/master/docs/dsm-integration.md); the game is [Irrefutable-Labs/wildstate-dsm](https://github.com/Irrefutable-Labs/wildstate-dsm).
+
+These screenshots are from a run on 2026-11-11 with the game on DSM's current code, a new game account on the beta network, and DSM's terminal wallet as the player. The wallet connected, got its starting coin, bought capsules, was given the creature it caught, proved what it owns, and traded at the market. That update is [pull request #23](https://github.com/Irrefutable-Labs/wildstate-dsm/pull/23).
 
 ## OpenBoxes for DSM
 
-[OpenBoxes](https://openboxes.com) is an open-source warehouse and inventory system, first written to track emergency medical supplies in Haiti after the 2010 earthquake and now run by healthcare facilities around the world. OpenBoxes for DSM keeps OpenBoxes' books, and gives DSM the authority over custody at a DSM warehouse:
+[OpenBoxes](https://openboxes.com) is an open-source warehouse and inventory system, first written to track emergency medical supplies in Haiti after the 2010 earthquake and now run by healthcare facilities around the world. OpenBoxes for DSM keeps OpenBoxes' books, and gives DSM the authority over custody at a DSM warehouse.
+
+<div class="shots">
+<figure style="flex-basis:300px;max-width:300px"><a href="images/apps/openboxes-sign-in.webp"><img src="images/apps/openboxes-sign-in.webp" alt="OpenBoxes sign-in: a username, Ask my phone, and the code the wallet must show"></a><figcaption>No password. The person approves the sign-in in their wallet, which must show this browser's code.</figcaption></figure>
+<figure style="flex-basis:300px;max-width:300px"><a href="images/apps/openboxes.webp"><img src="images/apps/openboxes.webp" alt="The door screen: shipment 938PDP, 120 units of amoxicillin, with the carrier"></a><figcaption>At the door: 120 boxes with the carrier, who holds 120 custody units in their wallet.</figcaption></figure>
+</div>
+
+<figure class="term"><a href="images/apps/openboxes-refused.webp"><img src="images/apps/openboxes-refused.webp" alt="Lakeside's receive screen: 130 counted, and the refusal: DSM moved 120"></a><figcaption>Lakeside counts 130 and is refused: DSM moved 120, and the books cannot take in what the account has no custody of. It received the 120.</figcaption></figure>
+
+In the app:
 
 - **Each warehouse is a DSM account.** A stock change there (a receipt, a transfer, a shipment) stands only when DSM has recorded the matching transition. Otherwise the write fails.
 - **The books follow DSM.** A reconciliation reads DSM's state, finds any gap, and corrects it with a new entry, never by editing history.
@@ -32,7 +58,13 @@ The game connects the way [Make an offer, connect a wallet](connect.md) does: it
 - **Seats** are held in vaults, assigned and returned on DSM, and a revoked seat stays revoked.
 - **The carrier leg.** Handing a shipment to a carrier sends the organization's custody units to the carrier's wallet. At the destination's door the carrier hands them over on a phone screen, the destination takes them in, and receiving is admitted only up to what DSM moved.
 
-It is in review as [pull request #1](https://github.com/Irrefutable-Labs/openboxes-dsm/pull/1) on [Irrefutable-Labs/openboxes-dsm](https://github.com/Irrefutable-Labs/openboxes-dsm). The pull request records the whole demo walked on the beta fleet with two phones: 500 boxes released, 120 shipped and handed to a carrier, handed over and taken in at the door, a seat revoked and returned, and a 40-box gap found, signed and corrected.
+<figure class="term"><a href="images/apps/openboxes-seats.webp"><img src="images/apps/openboxes-seats.webp" alt="Levels of access and seats: the warehouse manager level is an object with a cap of 5, and seat 1 is locked in a vault naming its holder"></a><figcaption>Seats. The warehouse manager level is an object with a cap of 5; seat #1 is locked in a vault naming its holder, and only the owner's wallet can revoke it. On the right, each DSM record the organization's account signed.</figcaption></figure>
+
+<figure class="term"><a href="images/apps/openboxes-custody.webp"><img src="images/apps/openboxes-custody.webp" alt="The authority record and custody on record: each entry signed by the organization's account; Lakeside proved it holds 120 of the shipment"></a><figcaption>The authority record, each entry signed by the organization's account and read back from the storage nodes. Below it, custody on record: Northgate asked Lakeside's account to prove what it holds of the shipment, and got 120, with no access to Lakeside's systems.</figcaption></figure>
+
+<figure class="term"><a href="images/apps/openboxes-books.webp"><img src="images/apps/openboxes-books.webp" alt="DSM and the books: a gap of 40 found by the reconciler and corrected by the owner, both findings signed"></a><figcaption>DSM and the books. A hand edit to the database added 40 boxes; the reconciler found the gap against DSM and signed it, and the owner corrected it forward with a new entry. Both findings stay.</figcaption></figure>
+
+It is in review as [pull request #1](https://github.com/Irrefutable-Labs/openboxes-dsm/pull/1) on [Irrefutable-Labs/openboxes-dsm](https://github.com/Irrefutable-Labs/openboxes-dsm). On 2026-11-11 its whole demo ran on DSM's current code, on the beta network, with terminal wallets standing in for the phones: all 13 steps passed, from the owner's claim and the sign-ins to the seat revoked, the carrier's hand-over, the count refused, the proof of 120 and the gap corrected. Its 253 unit tests and 26 integration tests pass. These screenshots are from that run.
 
 ## CBFpy for DSM
 

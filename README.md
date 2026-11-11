@@ -33,11 +33,11 @@ These apps are already plugged into DSM: [Irrefutable Labs' repositories](https:
 
 <table>
 <tr>
-<td width="290"><a href="https://github.com/Irrefutable-Labs/wildstate-dsm"><img src="guide/src/images/apps/wildstate.webp" alt="Wildstate's camp, with the game's DSM panel open" width="280"></a></td>
+<td width="290"><a href="https://github.com/Irrefutable-Labs/wildstate-dsm"><img src="guide/src/images/apps/wildstate.webp" alt="Wildstate's camp: the bar shows the capsules and the WILD the wallet proved it owns" width="280"></a></td>
 <td><b><a href="https://github.com/Irrefutable-Labs/wildstate-dsm">Wildstate</a></b>: a creature-collecting game for Android. Its coin, WILD, and every creature a player catches are objects in the player's own wallet, not rows in the game's database. The shop is paid through the wallet, the market trades through a vault, and a staked arena match is decided by a pinned program, not a referee: each wallet locks its own stake and the winner takes both.</td>
 </tr>
 <tr>
-<td width="290"><a href="https://github.com/Irrefutable-Labs/openboxes-dsm/pull/1"><img src="guide/src/images/apps/openboxes.webp" alt="OpenBoxes for DSM" width="280"></a></td>
+<td width="290"><a href="https://github.com/Irrefutable-Labs/openboxes-dsm/pull/1"><img src="guide/src/images/apps/openboxes.webp" alt="OpenBoxes for DSM's door screen: a shipment of 120 boxes with the carrier" width="280"></a></td>
 <td><b><a href="https://github.com/Irrefutable-Labs/openboxes-dsm/pull/1">OpenBoxes for DSM</a></b>: OpenBoxes, the open-source warehouse and inventory system healthcare facilities run, with DSM holding authority over custody. Each warehouse is a DSM account; a stock change stands only when DSM has recorded it; staff sign in by approving on their wallet, not with a password; and a carrier takes custody of a shipment, and hands it over at the door, on a phone. In review as pull request #1.</td>
 </tr>
 <tr>
