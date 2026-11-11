@@ -63,7 +63,7 @@ jobs:
 
       - name: Install coverage deps
         run: |
-          bash ci/runner_dns.sh
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler ripgrep
 

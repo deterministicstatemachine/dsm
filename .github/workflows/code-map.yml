@@ -67,7 +67,7 @@ jobs:
 
       - name: Install CI system deps
         run: |
-          bash ci/runner_dns.sh
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
@@ -283,7 +283,7 @@ jobs:
 
       - name: Install CI system deps
         run: |
-          bash ci/runner_dns.sh
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
