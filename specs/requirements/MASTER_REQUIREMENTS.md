@@ -17,7 +17,9 @@ Every extraction in this round is taken against exactly these bytes:
 | `specs/DSM_High_Level_Explainer.md` | `bc1afdb311b0886dd08a9af8c213e4b0aa99622e` | 4529 |
 | `specs/SoFi_Settlement_Specification.md` | `2f4aeca7089c85a9388ace3658b9cf4b23e572c0` | 3131 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `118d8afac5beff4e404fb0eaaf0e6ede3f764f8e` | 647 |
+| `specs/DSM_Storage_Node_Specification.md` | `20622e14cc96549a10f09a291a40827437202847` | 649 |
+
+Storage node pin updated 2026-11-11 for the owner's decision of 2026-11-10 (storage-node hardware), quoted in the specification: the 2026-10-28 text's bar on hardware binding at admission and on hardware attestation by storage nodes is removed, since nodes will run on the anchor appliance with their own firmware, and nodes still hold no protocol authority (§1 and §2 stand). No requirement row quotes or cites the removed sentences, which sat on line 447, so every row reads as written. The edit added two lines in place, so older line citations into the storage specification past line 447 are off by two.
 
 Storage node pin updated 2026-11-08 for the owner's decision of 2026-11-05 (each operator's own certificate), quoted in the specification: a storage set has no shared CA, and each member is pinned to its own operator's CA. No requirement row names a storage CA, so every row reads as written.
 
