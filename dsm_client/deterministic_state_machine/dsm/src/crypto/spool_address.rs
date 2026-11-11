@@ -509,9 +509,10 @@ mod tests {
     /// prove ids cannot collide. The id is 16 bytes truncated from a 32-byte
     /// digest, so collision is a 128-bit possibility: cryptographically
     /// negligible, not impossible. Correctness therefore cannot rest on
-    /// uniqueness alone, because the node resolves `UNIQUE(message_id)` with
-    /// `ON CONFLICT DO NOTHING` -- a colliding id is accepted silently rather
-    /// than rejected. The SDK's content check
+    /// uniqueness alone: the node keeps every write (storage spec §8) and a
+    /// recipient takes one message per id, so a colliding id is spooled beside
+    /// the first, never refused, and only one of the two is ever taken. The
+    /// SDK's content check
     /// (`sender_outbox::tests::same_artifact_id_with_different_bytes_fails_closed`)
     /// is what makes that safe: same id + different bytes must fail, not
     /// disappear.

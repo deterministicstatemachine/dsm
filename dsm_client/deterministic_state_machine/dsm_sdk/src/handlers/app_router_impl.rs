@@ -1902,8 +1902,9 @@ impl AppRouterImpl {
         //
         // So the debit, proposal, gate, pending EK head and outbox row all
         // STAY. The row moves to `submission_uncertain` and the reconciliation
-        // sweep resubmits the byte-identical stored envelope; the node's
-        // UNIQUE(message_id) makes that idempotent.
+        // sweep resubmits the byte-identical stored envelope. The node keeps
+        // both copies (it deduplicates nothing, storage spec §8); the recipient
+        // takes the message once, by the id it recorded as consumed.
         // =====================================================================
         // Both status writes below are compare-and-set FROM `submitting`. While
         // this call was on the wire the recipient may already have accepted and
@@ -1944,7 +1945,7 @@ impl AppRouterImpl {
         ) {
             log::error!(
                 "[wallet.send] delivered, but could not record submitted; the row stays \
-                 submitting and the sweep resubmits it (the node deduplicates): {e}"
+                 submitting and the sweep resubmits it (the recipient takes it once): {e}"
             );
         }
 
