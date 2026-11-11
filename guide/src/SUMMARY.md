@@ -16,6 +16,7 @@
 - [Shops, matches and contacts](advanced.md)
 - [Run your app's account in production](production.md)
 - [A storage set of your own](own-storage-set.md)
+- [Apps plugged into DSM](apps.md)
 
 # Reference
 
