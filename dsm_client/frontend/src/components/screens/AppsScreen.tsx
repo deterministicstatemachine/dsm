@@ -304,7 +304,7 @@ export default function AppsScreen(): React.JSX.Element {
           <p>Connect a Web2 app, such as a game, to this wallet. The app keeps running as it always does; what you own in it lives here, in this wallet.</p>
           <p><b>Connect</b>: scan the code the app shows. You see exactly what it asks for before you approve. Once approved, it can ask this wallet for those things without you switching back to the phone.</p>
           <p>Anything outside what you approved waits in <b>Waiting</b> for you to approve or decline. Disconnecting ends the grant.</p>
-          <p>An app never holds your keys. Every payment, trade or object goes through this wallet, checked exactly as if you made it yourself.</p>
+          <p>An app never holds your keys. Everything you send, trade or receive goes through this wallet, checked exactly as if you did it yourself.</p>
         </InfoTip>
       )}
       actions={(

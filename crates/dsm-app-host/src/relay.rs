@@ -449,7 +449,7 @@ async fn accept(Extract(state): Extract<State>, body: Bytes) -> Response {
                 "relay: accept",
                 format!("{} accepted the offer", s.display_name),
                 Ok(format!(
-                    "session {}: its card resolved on the pinned set; it is a contact, the relationship is established",
+                    "connection {}: its card resolved on the pinned set; it is a contact, the relationship is established",
                     short(&s.session_id)
                 )),
             );
@@ -480,7 +480,7 @@ async fn requests(Extract(state): Extract<State>, body: Bytes) -> Response {
     };
     let session = match <[u8; 32]>::try_from(query.session_id.as_slice()) {
         Ok(s) => s,
-        Err(e) => return refused(StatusCode::BAD_REQUEST, format!("the session: {e}")),
+        Err(e) => return refused(StatusCode::BAD_REQUEST, format!("the connection: {e}")),
     };
     let after = query.after;
     // The account checks the read secret; the relay passes it on unread.
@@ -502,7 +502,7 @@ async fn requests(Extract(state): Extract<State>, body: Bytes) -> Response {
                     state.record.relay(
                         "relay: requests",
                         format!(
-                            "the wallet of session {} fetched its requests",
+                            "the wallet of connection {} fetched its requests",
                             short(&session)
                         ),
                         Ok(format!(

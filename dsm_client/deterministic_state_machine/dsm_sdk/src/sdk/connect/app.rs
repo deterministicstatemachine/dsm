@@ -147,7 +147,7 @@ pub fn verify_response(
 ) -> Result<generated::AppResponseBodyV1, String> {
     let body: generated::AppResponseBodyV1 = canonical(&response.body, "the answer")?;
     if body.session_id.as_slice() != session.session_id.as_slice() {
-        return Err("the answer is another session's".into());
+        return Err("the answer is another connection's".into());
     }
     verify(
         Signed::Response,

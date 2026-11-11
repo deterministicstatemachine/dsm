@@ -96,16 +96,16 @@ The wallet fetches the offer, checks it, and prints what My Game asks for. The t
 
 ```text
 My Game (account 0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80) asks to:
-  - Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-  - Prove your holdings of ERA and of objects this app issued
+  - Send this app: up to 0.10 ERA a time, 1.00 ERA in all
+  - Prove what you own of ERA and of objects this app issued
   - Receive objects this app issues
   - See which of your contacts are here: their DSM IDs, not their names
   - Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
   - Up to 64 requests that spend nothing; after them, each waits for you
 approved:
 connection RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG  My Game  CONNECTED
-  grants: Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-  grants: Prove your holdings of ERA and of objects this app issued
+  grants: Send this app: up to 0.10 ERA a time, 1.00 ERA in all
+  grants: Prove what you own of ERA and of objects this app issued
   grants: Receive objects this app issues
   grants: See which of your contacts are here: their DSM IDs, not their names
   grants: Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all

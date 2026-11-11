@@ -62,21 +62,21 @@ make dev-wallet-connect CODE="$CODE"
 
 ```text
 My Game (account 0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80) asks to:
-  - Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-  - Prove your holdings of ERA and of objects this app issued
+  - Send this app: up to 0.10 ERA a time, 1.00 ERA in all
+  - Prove what you own of ERA and of objects this app issued
   - Receive objects this app issues
   - See which of your contacts are here: their DSM IDs, not their names
   - Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
-  - Swap ERA for 89S6HVVW through SoFi: up to 1.00 ERA a time, 5.00 ERA in all
+  - Trade between ERA and 89S6HVVW: up to 1.00 ERA a time, 5.00 ERA in all
   - Up to 64 requests that spend nothing; after them, each waits for you
 approved:
 connection 97MSN2P9S07FVAFFBPNGW2GRPBAJQM3113MJG03V60MTAP4HBWW0  My Game  CONNECTED
-  grants: Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-  grants: Prove your holdings of ERA and of objects this app issued
+  grants: Send this app: up to 0.10 ERA a time, 1.00 ERA in all
+  grants: Prove what you own of ERA and of objects this app issued
   grants: Receive objects this app issues
   grants: See which of your contacts are here: their DSM IDs, not their names
   grants: Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
-  grants: Swap ERA for 89S6HVVW through SoFi: up to 1.00 ERA a time, 5.00 ERA in all
+  grants: Trade between ERA and 89S6HVVW: up to 1.00 ERA a time, 5.00 ERA in all
   grants: 0 of 64 requests that spend nothing used
 ```
 
@@ -104,7 +104,7 @@ make app ARGS="result $S 1"
 
 ```text
 answered: yes  outcome: carried_out
-fact: none  a quote is information and carries no authority
+fact: none  a price is information and carries no authority
   price: 50 in, 4748 out (smallest units, 1 hop)
 ```
 
@@ -131,7 +131,7 @@ make app ARGS="result $S 4"
 
 ```text
 answered: yes  outcome: carried_out
-fact: none  a trade shows through this account's own vault (sofi.vaults) or a later holdings proof; the answer is a notification
+fact: none  a trade shows through this account's own vault (sofi.vaults) or a later proof of what it owns; the answer is a notification
 ```
 
 The wallet's answer is a notification. The evidence of a trade is in your own vault, and in what the wallet owns:

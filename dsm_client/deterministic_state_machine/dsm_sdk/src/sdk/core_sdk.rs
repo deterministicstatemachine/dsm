@@ -3134,7 +3134,7 @@ fn lost_words(lost: &BTreeMap<[u8; 32], u64>) -> String {
                     crate::handlers::wallet_routes::format_base_units_for_display(*units, decimals)
                 ),
                 Err(why) => format!(
-                    "{units} base units of {} ({why})",
+                    "{units} smallest units of {} ({why})",
                     crate::util::text_id::encode_base32_crockford(asset)
                 ),
             }

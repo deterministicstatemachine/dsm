@@ -178,7 +178,7 @@ pub struct NotTheSessionsReader;
 
 impl core::fmt::Display for NotTheSessionsReader {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("the read secret does not open the session's read commitment")
+        f.write_str("the read secret does not open the connection's read commitment")
     }
 }
 

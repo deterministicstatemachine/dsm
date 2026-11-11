@@ -505,13 +505,13 @@ pub async fn check_teams(
     .await
     .map_err(|refusal| match refusal {
         crate::sdk::connect::holdings::Refusal::Invalid(why) => {
-            format!("the opponent's holdings proof is invalid: {why}")
+            format!("the opponent's proof of what it owns is invalid: {why}")
         }
         crate::sdk::connect::holdings::Refusal::NotCurrent(why) => {
-            format!("the opponent's holdings proof is no longer current ({why}); ask again")
+            format!("the opponent's proof of what it owns is no longer current ({why}); ask again")
         }
         crate::sdk::connect::holdings::Refusal::Incomplete(why) => {
-            format!("the opponent's holdings are not decided yet ({why}); ask again")
+            format!("what the opponent owns is not decided yet ({why}); ask again")
         }
     })?;
     for anchor in &their_anchors {

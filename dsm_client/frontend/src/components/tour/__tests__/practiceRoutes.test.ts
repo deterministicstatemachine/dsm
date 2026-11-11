@@ -88,7 +88,7 @@ describe('the practice wallet carries out the routes the tour walks through', ()
 
   it('connects the practice app, puts what the grant does not cover in waiting, and disconnects', async () => {
     const offer = await connect.preview(PRACTICE_CONNECT_CODE);
-    expect(offer.scopeLines).toEqual(['Pay this app: up to 5 PLAY a time, 15 PLAY in all', 'Prove your holdings of PLAY']);
+    expect(offer.scopeLines).toEqual(['Send this app: up to 5 PLAY a time, 15 PLAY in all', 'Prove what you own of PLAY']);
     const session = await connect.approve(offer.offerDigest);
     expect(session.connected).toBeTruthy();
     const [waiting] = await connect.pending();

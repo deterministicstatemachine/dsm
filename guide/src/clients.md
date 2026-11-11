@@ -105,8 +105,8 @@ account 0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80
   dBTC           0.00000000   currency
 6 connection(s) with wallets
   connection 46E4R16XC06YC0YBK8H4P5EWCQ2J22Q4B1A4N16E4BA3J6WWN0Q0  wallet HA62NJZ06ZY8C79HKM39AGTC3CMX9348RJH30GZTHA00BCSP0KV0  disconnected
-    may: Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-    may: Prove your holdings of ERA and of objects this app issued
+    may: Send this app: up to 0.10 ERA a time, 1.00 ERA in all
+    may: Prove what you own of ERA and of objects this app issued
     may: Receive objects this app issues
     may: Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
 ```

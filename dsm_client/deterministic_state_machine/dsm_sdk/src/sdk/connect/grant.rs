@@ -33,6 +33,22 @@ pub enum ScopeKind {
     Contacts,
 }
 
+impl ScopeKind {
+    /// The kind as the clients name a grant (`grant.send`, `grant.owns`, …),
+    /// for the words a developer or a player reads.
+    pub fn word(self) -> &'static str {
+        match self {
+            ScopeKind::AcceptIssued => "accept",
+            ScopeKind::Pay => "send",
+            ScopeKind::Swap => "trade",
+            ScopeKind::Holdings => "owns",
+            ScopeKind::Escrow => "match",
+            ScopeKind::Duel => "duel",
+            ScopeKind::Contacts => "contacts",
+        }
+    }
+}
+
 /// A cap on one token, in its base units.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cap {
@@ -105,17 +121,17 @@ pub fn scopes_from_wire(wire: &[generated::ConnectScopeV1]) -> Result<Vec<Scope>
         let kind = kind_from_wire(w.kind)?;
         let mut policy_commits = Vec::with_capacity(w.policy_commits.len());
         for c in &w.policy_commits {
-            let c = d32(c, "a scope's token")?;
+            let c = d32(c, "a scope's object")?;
             if policy_commits.contains(&c) {
-                return Err("a scope names one token twice".into());
+                return Err("a scope names one object twice".into());
             }
             policy_commits.push(c);
         }
         let mut caps: Vec<Cap> = Vec::with_capacity(w.caps.len());
         for c in &w.caps {
-            let policy_commit = d32(&c.policy_commit, "a cap's token")?;
+            let policy_commit = d32(&c.policy_commit, "a cap's object")?;
             if caps.iter().any(|k| k.policy_commit == policy_commit) {
-                return Err("a scope caps one token twice".into());
+                return Err("a scope caps one object twice".into());
             }
             if c.per_request == 0 || c.per_request > c.total {
                 return Err("a cap needs 0 < per request ≤ total".into());
@@ -146,30 +162,30 @@ pub fn scopes_from_wire(wire: &[generated::ConnectScopeV1]) -> Result<Vec<Scope>
         match kind {
             ScopeKind::AcceptIssued => {
                 if !scope.policy_commits.is_empty() || !scope.caps.is_empty() {
-                    return Err("an accept-issued scope names no tokens and no caps".into());
+                    return Err("an accept scope names no objects and no caps".into());
                 }
             }
             ScopeKind::Holdings => {
                 if !scope.caps.is_empty() {
-                    return Err("a holdings scope spends nothing".into());
+                    return Err("an owns scope spends nothing".into());
                 }
             }
             ScopeKind::Contacts => {
                 if !scope.policy_commits.is_empty() || !scope.caps.is_empty() {
-                    return Err("a contacts scope names no tokens and no caps".into());
+                    return Err("a contacts scope names no objects and no caps".into());
                 }
             }
             ScopeKind::Pay => {
                 if !scope.policy_commits.is_empty() || scope.caps.is_empty() {
                     return Err(
-                        "a pay scope caps the tokens it may pay, and names no others".into(),
+                        "a send scope caps the objects it may send, and names no others".into(),
                     );
                 }
             }
             ScopeKind::Escrow => {
                 if !scope.policy_commits.is_empty() || scope.caps.is_empty() {
                     return Err(
-                        "an escrow scope caps the tokens it may lock, and names no others".into(),
+                        "a match scope caps the objects it may lock, and names no others".into(),
                     );
                 }
             }
@@ -179,7 +195,7 @@ pub fn scopes_from_wire(wire: &[generated::ConnectScopeV1]) -> Result<Vec<Scope>
                     || scope.programs.is_empty()
                 {
                     return Err(
-                        "a duel scope caps the tokens it may stake and names the programs its \
+                        "a duel scope caps the objects it may stake and names the programs its \
                          matches are decided by"
                             .into(),
                     );
@@ -187,14 +203,14 @@ pub fn scopes_from_wire(wire: &[generated::ConnectScopeV1]) -> Result<Vec<Scope>
             }
             ScopeKind::Swap => {
                 if scope.policy_commits.len() != 2 || scope.caps.is_empty() {
-                    return Err("a swap scope names its pair and caps what it may spend".into());
+                    return Err("a trade scope names its pair and caps what it may spend".into());
                 }
                 if scope
                     .caps
                     .iter()
                     .any(|c| !scope.policy_commits.contains(&c.policy_commit))
                 {
-                    return Err("a swap scope caps only the tokens of its pair".into());
+                    return Err("a trade scope caps only the objects of its pair".into());
                 }
             }
         }
@@ -239,8 +255,8 @@ pub fn narrows(asked: &[Scope], granted: &[Scope]) -> Result<(), String> {
             .find(|a| a.kind == g.kind && (g.kind != ScopeKind::Swap || a.pair() == g.pair()))
             .ok_or_else(|| {
                 format!(
-                    "the grant covers {:?}, which the offer did not ask for",
-                    g.kind
+                    "the grant covers {}, which the offer did not ask for",
+                    g.kind.word()
                 )
             })?;
         if g.kind != ScopeKind::Swap
@@ -249,24 +265,27 @@ pub fn narrows(asked: &[Scope], granted: &[Scope]) -> Result<(), String> {
                 .any(|c| !a.policy_commits.contains(c))
         {
             return Err(format!(
-                "the {:?} grant names a token the offer did not",
-                g.kind
+                "the {} grant names an object the offer did not",
+                g.kind.word()
             ));
         }
         if g.programs.iter().any(|p| !a.programs.contains(p)) {
             return Err(format!(
-                "the {:?} grant names a program the offer did not",
-                g.kind
+                "the {} grant names a program the offer did not",
+                g.kind.word()
             ));
         }
         for cap in &g.caps {
-            let asked_cap = a
-                .cap(&cap.policy_commit)
-                .ok_or_else(|| format!("the {:?} grant caps a token the offer did not", g.kind))?;
+            let asked_cap = a.cap(&cap.policy_commit).ok_or_else(|| {
+                format!(
+                    "the {} grant caps an object the offer did not",
+                    g.kind.word()
+                )
+            })?;
             if cap.per_request > asked_cap.per_request || cap.total > asked_cap.total {
                 return Err(format!(
-                    "the {:?} grant is wider than the offer asked",
-                    g.kind
+                    "the {} grant is wider than the offer asked",
+                    g.kind.word()
                 ));
             }
         }
@@ -488,7 +507,7 @@ fn duel_lock_from_wire(r: &generated::ConnectDuelLockV1) -> Result<DuelLock, Str
         setup: r.setup.clone(),
         program,
         side,
-        policy_commit: d32(&r.policy_commit, "the stake's token")?,
+        policy_commit: d32(&r.policy_commit, "the stake's object")?,
         amount: r.amount,
         opponent_genesis: d32(&r.opponent_genesis, "the opponent's genesis")?,
         opponent_device_id: d32(&r.opponent_device_id, "the opponent's device id")?,
@@ -576,7 +595,7 @@ fn escrow_lock_from_wire(r: &generated::ConnectEscrowLockV1) -> Result<EscrowLoc
     };
     Ok(EscrowLock {
         external: r.external.clone(),
-        policy_commit: d32(&r.policy_commit, "the stake's token")?,
+        policy_commit: d32(&r.policy_commit, "the stake's object")?,
         amount: r.amount,
         side,
         opponent,
@@ -612,9 +631,9 @@ const MAX_STATEMENT_BYTES: usize = 512;
 pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, String> {
     use generated::app_request_body_v1::Kind;
     let pair = |a: &[u8], b: &[u8]| -> Result<([u8; 32], [u8; 32]), String> {
-        let (a, b) = (d32(a, "token in")?, d32(b, "token out")?);
+        let (a, b) = (d32(a, "object in")?, d32(b, "object out")?);
         if a == b {
-            return Err("a swap's two tokens must differ".into());
+            return Err("a trade's two objects must differ".into());
         }
         Ok((a, b))
     };
@@ -629,7 +648,7 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
             anchor: d32(&r.anchor, "the anchor")?,
         }),
         Some(Kind::Pay(r)) => Ok(Request::Pay {
-            policy_commit: d32(&r.policy_commit, "the token")?,
+            policy_commit: d32(&r.policy_commit, "the object")?,
             amount: positive(r.amount)?,
             memo: r.memo.clone(),
         }),
@@ -655,14 +674,14 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
         Some(Kind::Holdings(r)) => {
             let mut policy_commits = Vec::with_capacity(r.policy_commits.len());
             for c in &r.policy_commits {
-                let c = d32(c, "a token")?;
+                let c = d32(c, "an object")?;
                 if policy_commits.contains(&c) {
-                    return Err("a holdings request names one token twice".into());
+                    return Err("an owns request names one object twice".into());
                 }
                 policy_commits.push(c);
             }
             if policy_commits.is_empty() {
-                return Err("a holdings request names no token".into());
+                return Err("an owns request names no object".into());
             }
             Ok(Request::Holdings { policy_commits })
         }
@@ -729,7 +748,7 @@ pub enum Decision {
 
 fn within(scope: &Scope, token: &[u8; 32], amount: u64, spent: u64) -> Decision {
     let Some(cap) = scope.cap(token) else {
-        return Decision::Outside("the grant does not let it spend this token".into());
+        return Decision::Outside("the grant does not let it spend this object".into());
     };
     let shown = |n: u64| super::wallet::amount_text(token, n);
     if amount > cap.per_request {
@@ -784,7 +803,9 @@ pub fn decide(
             ..
         } => match of_kind(ScopeKind::Pay).next() {
             Some(scope) => within(scope, policy_commit, *amount, spent(policy_commit)),
-            None => Decision::Outside("the grant does not let it ask for payments".into()),
+            None => {
+                Decision::Outside("the grant does not let it ask you to send it anything".into())
+            }
         },
         Request::Quote {
             token_in,
@@ -810,12 +831,12 @@ pub fn decide(
                     .find(|c| !scope.policy_commits.contains(c) && !issued_by_app.contains(*c))
                 {
                     Some(..) => Decision::Outside(
-                        "it asks about a token the grant does not let it see".into(),
+                        "it asks about an object the grant does not let it see".into(),
                     ),
                     None => Decision::InScope { spend: None },
                 }
             }
-            None => Decision::Outside("the grant does not let it see holdings".into()),
+            None => Decision::Outside("the grant does not let it see what you own".into()),
         },
         Request::EscrowLock(lock) => match of_kind(ScopeKind::Escrow).next() {
             Some(scope) => within(
