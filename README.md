@@ -195,11 +195,11 @@ Offline bearer transfer needs one thing software cannot provide: a way to tell a
 
 The wallet is a four-layer stack and no layer skips another: **React frontend → Kotlin container → JNI/SDK (Rust) → core (Rust)**. The frontend is pure rendering; every rule lives in Rust, and the Kotlin layer carries bytes. The container loads `libdsm_sdk.so` (built with cargo-ndk for every ABI and staged by the Gradle `refreshDsmJniLibs` task), serves the React bundle from the APK's assets through a WebView asset loader, and bridges UI and SDK over a binary MessagePort channel carrying Envelope v3 protobuf bytes. The USB anchor appliance is attached through the same bridge seam.
 
-```bash
-make android        # rebuild JNI libs, rebuild and copy the frontend bundle, clean Gradle assemble
-make android-libs   # only refresh the native libraries
-make install        # build and install a debug APK on a connected device
-```
+| Command | What it does |
+|---|---|
+| `make android` | Rebuilds the JNI libraries, rebuilds and copies in the frontend bundle, then runs a clean Gradle assemble |
+| `make android-libs` | Refreshes only the native libraries |
+| `make install` | Builds a debug APK and installs it on a connected device |
 
 Release APKs are signed by the maintainer; CI does not sign or upload them. Code: [dsm_client/android/](dsm_client/android/), the bridge in [SinglePathWebViewBridge.kt](dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/SinglePathWebViewBridge.kt), and [dsm_client/frontend/](dsm_client/frontend/).
 
@@ -215,21 +215,21 @@ A storage node is index-only persistence: it stores and serves bytes, keeps writ
 ## Formal verification
 
 - **TLA+** (`tla/`): `DSM.tla` and the protocol core, bilateral liveness, Tripwire, non-interference, offline finality, the single-appliance offline anchor, economic-register observation, SoFi v8 successor cells and fulfillment (with falsification and non-vacuity configs), and the dBTC abstract, concrete, and trust-reduction models, each with TLC configs. Claims are indexed in [PROOF_CLAIMS.md](tla/PROOF_CLAIMS.md); run with `tla/run_tlc.sh`.
-- **Lean 4** (`lean4/`, toolchain `v4.23.0`): 26 files covering the core theorem set with no `sorry`; the `lean` CI job builds them on every run. A sorry-free build is a build, not a witness; the frame theorems carry their own witnesses and mutation checks.
+- **Lean 4** (`lean4/`, toolchain `v4.23.0`): 21 modules covering the core theorem set, and the SPHINCS+ refinement in `lean4/Sphincs/`, with no `sorry`; the `lean` CI job builds them on every run. A sorry-free build is a build, not a witness; the frame theorems carry their own witnesses and mutation checks.
 - **Vertical validation** (`tools/vertical_validation`): `tla-check`, `proof-check`, `property-tests`, `implementation-traces` (transfer chain, signature rejection, fork divergence against the real state machine), `adversarial`, `crypto-kat`, `bilateral-throughput`, `benchmark`, `formal-report`, and `full`. The `formal-validation` CI job runs it.
 - **Production safety scan** (`ci/production_safety_checks.sh`): the ban list (wall clock, JSON in protocol paths, hex, envelope version) enforced as a CI gate.
 
 ## Development workflow
 
-```bash
-make help       # every target
-make menu       # interactive
-make doctor     # toolchain check
-make build      # Rust workspace
-make frontend   # React bundle
-make typecheck  # onboarding smoke check
-make lint       # fmt --check + clippy --all-targets, the second half of any green claim
-```
+| Command | What it does |
+|---|---|
+| `make help` | Lists every target |
+| `make menu` | An interactive menu of the common targets |
+| `make doctor` | Checks the toolchain |
+| `make build` | Builds the Rust workspace |
+| `make frontend` | Builds the React bundle |
+| `make typecheck` | The onboarding smoke check |
+| `make lint` | `fmt --check` and `clippy --all-targets`: the second half of any green claim |
 
 On Windows use `.\scripts\dev.ps1` for the Rust workspace and frontend, and WSL2 for Android builds and the shell helpers.
 

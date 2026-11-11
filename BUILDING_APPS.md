@@ -63,9 +63,16 @@ Your app needs a server side, even a small one, because the account's secret mus
 
 You need what [QUICKSTART.md](QUICKSTART.md)'s prerequisites list (Rust, Node.js 20+, protoc) and outbound HTTPS. Nothing of the network runs on your machine: your app's account joins the beta network, the hosted storage set every wallet ships configured for, and the faucet funds it.
 
+Your app's account on the beta network, funded:
+
 ```bash
-make app-dev       # your app's account on the beta network, funded
-make starter       # the starter app: open http://127.0.0.1:3000
+make app-dev
+```
+
+Then the starter app. It keeps running: open http://127.0.0.1:3000, and use a second terminal for the commands below.
+
+```bash
+make starter
 ```
 
 The starter's page is a builder. It has three kinds of pieces, in the order an app uses them:
@@ -76,17 +83,22 @@ The starter's page is a builder. It has three kinds of pieces, in the order an a
 
 Under every piece is the exact code it is, in TypeScript or Python, with a Copy button. The page never makes up that code: it asks the starter's server, which runs one mapping from piece to client call ([src/pieces.ts](examples/connect-starter/src/pieces.ts)) both to show the code and to make the call. Set the pieces up the way your app needs them, press the button to see it happen, then paste the code into your own app.
 
-Press **Show the connect code**. Then connect a wallet. With no phone:
+Press **Show the connect code**. Then connect a wallet. With no phone, make a player's wallet in the terminal, funded:
 
 ```bash
-make dev-wallet                                  # a player's wallet in the terminal, funded
-make dev-wallet-connect CODE=dsm:connect/v1:...  # the code the starter shows
+make dev-wallet
 ```
 
-With phones (debug builds of the wallet), which are on the beta network as installed:
+and connect it with the code the starter shows, pasted in place of `dsm:connect/v1:...`:
 
 ```bash
-make phones-connect CODE=dsm:connect/v1:...      # open the code in each wallet (adb devices and booted iOS Simulators)
+make dev-wallet-connect CODE=dsm:connect/v1:...
+```
+
+With phones (debug builds of the wallet), which are on the beta network as installed, open the code in each wallet: every adb device and every booted iOS Simulator.
+
+```bash
+make phones-connect CODE=dsm:connect/v1:...
 ```
 
 Back in the starter, the wallet appears under **Connected wallets**. Under **Ask a connected wallet**, ask it to send 0.05 ERA and watch the fact become `received`. Ask for 0.20, over the per-request cap, and it waits for the player: `make dev-wallet-pending`, then `make wallet ARGS="approve <connection> <seq>"` (or approve it on the phone). Ask it to **sign in** and approve that the same way: the fact is `signed`.
@@ -154,7 +166,13 @@ if paid.fact == "received":
 [clients/python/examples/first_payment.py](clients/python/examples/first_payment.py) is this, as a program: it prints the connect code, waits for a wallet to connect to it, asks for 0.05 ERA and prints the fact.
 
 ```bash
-python3 clients/python/examples/first_payment.py              # then: make dev-wallet-connect CODE=<the code it prints>
+python3 clients/python/examples/first_payment.py
+```
+
+Then, in a second terminal, connect a wallet to the code it prints:
+
+```bash
+make dev-wallet-connect CODE=dsm:connect/v1:...
 ```
 
 A wallet connects to an app once. If the terminal wallet is already connected to your account (through the starter, say), it disconnects first (`make wallet ARGS="disconnect <connection>"`), or a second wallet connects: `make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`.
@@ -181,7 +199,7 @@ What an offer asks the player to let your app do without asking again:
 | `match(caps)` | take stakes in matches your app referees, within caps | `ask.match.stake`, `decide`, `ask.match.collect` |
 | `duel(programs, caps)` | take stakes in matches a pinned program decides | `ask.duel.*` |
 
-`ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that spend nothing are free up to the offer's `freeRequests` (default 64); past that each is refused.
+`ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that move nothing run without asking, up to the offer's `freeRequests` (default 64). Past that, each one waits for the player on the device, and holds every later request behind it. A payment inside the grant's caps keeps running past that count until one fails; from then on, every request waits for the player.
 
 ## Matches
 

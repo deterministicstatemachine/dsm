@@ -571,8 +571,8 @@ jobs:
   # app's own account and a player's terminal wallet (dsm-app-host), the
   # TypeScript and Python clients, the Connect starter app and its check
   # (connect, pay inside and over the grant, holdings, disconnect). Then every
-  # command the walkthrough videos type (tools/walkthrough/tapes), in order:
-  # a step that breaks fails here before a video shows it.
+  # command the walkthrough tapes type (tools/walkthrough/tapes), in order:
+  # a step that breaks fails here before a developer meets it.
   # --------------------------------------------------------------------------
   developer-path:
     name: Developer path (app on DSM, end to end)
@@ -618,7 +618,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/py"
           "$RUNNER_TEMP/py/bin/pip" install --quiet "protobuf~=5.29"
 
-      - name: Every make target the walkthrough types is documented
+      - name: Every make target the walkthrough tapes type is documented
         run: python3 tools/walkthrough/check_tapes.py
 
       - name: The developer path, end to end
@@ -627,7 +627,7 @@ jobs:
           DEVELOPER_PATH_KEEP: "1"
         run: make developer-path
 
-      - name: Every command the walkthrough videos type
+      - name: Every command the walkthrough tapes type
         run: python3 tools/walkthrough/check_tapes.py --run
 
       - name: Stop the developer environment
