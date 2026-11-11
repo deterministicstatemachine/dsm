@@ -143,4 +143,32 @@ describe('a board set up from the phone', () => {
     expect(screen.getByText(/Burn the firmware digest can never be undone/)).toBeInTheDocument();
     expect(screen.getByText('Burn it')).toBeDisabled();
   });
+
+  it('offers the changed-image check only before the first boot, and sends it once typed back', async () => {
+    const asked = hostAnswering(
+      boardWith(K.BOOT, []),
+      boardWith(K.BOOT, ['a changed image was refused: the board found no image it may run and came back in BOOTSEL']),
+    );
+    render(<AnchorBoardSetupPanel />);
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => screen.getByTestId('anchor-board-check'));
+    fireEvent.click(screen.getByTestId('anchor-board-check'));
+    expect(screen.getByText(/must come back in BOOTSEL/)).toBeInTheDocument();
+    const go = screen.getByText('Go on');
+    expect(go).toBeDisabled();
+    fireEvent.change(screen.getByTestId('anchor-board-confirm'), { target: { value: '3C8E' } });
+    fireEvent.click(go);
+    await waitFor(() => expect(screen.getByTestId('anchor-board-written')).toHaveTextContent('was refused'));
+    const sent = asked.filter((a) => a.route === 'anchor.board.step');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].step?.step).toBe(K.CHECK_CHANGED_IMAGE);
+  });
+
+  it('does not offer the check while the board is not at its first boot', async () => {
+    hostAnswering(boardWith(K.WRITE_DIGEST, []), boardWith(K.WRITE_DIGEST, []));
+    render(<AnchorBoardSetupPanel />);
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => screen.getByText('Next step…'));
+    expect(screen.queryByTestId('anchor-board-check')).not.toBeInTheDocument();
+  });
 });

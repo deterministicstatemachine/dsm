@@ -740,6 +740,15 @@ export enum AnchorBoardStepKind {
    * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES = 8;
    */
   LOCK_BOOT_PAGES = 8,
+
+  /**
+   * Step 9's check, after the lockdown and before the first boot: the release's image with one byte
+   * of its code changed is loaded and booted, the board must come back in BOOTSEL, and the signed
+   * image is loaded back. Not a burn, and never listed among the steps.
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE = 9;
+   */
+  CHECK_CHANGED_IMAGE = 9,
 }
 // Retrieve enum metadata with: proto3.getEnumType(AnchorBoardStepKind)
 proto3.util.setEnumType(AnchorBoardStepKind, "dsm.AnchorBoardStepKind", [
@@ -752,6 +761,7 @@ proto3.util.setEnumType(AnchorBoardStepKind, "dsm.AnchorBoardStepKind", [
   { no: 6, name: "ANCHOR_BOARD_STEP_KIND_LOCKDOWN" },
   { no: 7, name: "ANCHOR_BOARD_STEP_KIND_BOOT" },
   { no: 8, name: "ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES" },
+  { no: 9, name: "ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE" },
 ]);
 
 /**

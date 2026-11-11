@@ -54,6 +54,21 @@ pub struct BootromModel {
     /// Commands seen, by id: what the tests check was or was not sent.
     pub commands: Vec<u8>,
     pub rebooted: u32,
+    /// The image signed with the boot key, as flash holds it: with secure boot on, the bootrom runs
+    /// it and refuses anything else. `None`: this board's bootrom runs whatever flash holds.
+    pub signed_image: Option<Vec<u8>>,
+    /// How the last reboot went.
+    pub last_boot: LastBoot,
+}
+
+/// How a reboot went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LastBoot {
+    NotYet,
+    /// No image it may run: it came back in BOOTSEL.
+    Refused,
+    /// It ran the image in flash.
+    Ran,
 }
 
 impl BootromModel {
@@ -82,6 +97,8 @@ impl BootromModel {
             stall: None,
             commands: Vec::new(),
             rebooted: 0,
+            signed_image: None,
+            last_boot: LastBoot::NotYet,
         }
     }
 
@@ -150,10 +167,19 @@ impl BootromModel {
         }
     }
 
-    /// The bootrom's first boot of a signed image with secure boot on: it records the rollback
-    /// version and sets `ROLLBACK_REQUIRED`.
+    /// A reboot. With secure boot on, an image other than the signed one is refused and the board
+    /// comes back in BOOTSEL; the signed image's first boot records its rollback version and sets
+    /// `ROLLBACK_REQUIRED`.
     fn boot_signed_image(&mut self) {
-        if self.raw[0x40] & 1 != 0 {
+        let secure = self.raw[0x40] & 1 != 0;
+        self.last_boot = match &self.signed_image {
+            Some(signed) if secure && self.flash[..signed.len()] != signed[..] => LastBoot::Refused,
+            _runs => LastBoot::Ran,
+        };
+        if self.last_boot == LastBoot::Refused {
+            return;
+        }
+        if secure {
             self.raw[usize::from(ROLLBACK_ROW)] |= 0x1;
             for copy in 0..3 {
                 self.raw[usize::from(BOOT_FLAGS0_ROW) + copy] |= ROLLBACK_REQUIRED;

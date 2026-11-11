@@ -598,10 +598,8 @@ fn padded_image(release: &Release) -> Vec<u8> {
     image
 }
 
-/// Step 3: the signed image into flash, then read back whole. Flash, not OTP: it can be loaded again
-/// at any time before the lockdown, and after it only a signed image boots.
-pub fn load_image<L: BootselLink>(pb: &mut Picoboot<L>, release: &Release) -> Result<(), String> {
-    let image = padded_image(release);
+/// Bytes into flash from its first byte, erased first in whole sectors, then read back whole.
+fn write_flash<L: BootselLink>(pb: &mut Picoboot<L>, image: &[u8]) -> Result<(), String> {
     let erase = u32::try_from(image.len().div_ceil(SECTOR) * SECTOR)
         .map_err(|_too_long| "an image larger than flash".to_string())?;
     pb.exclusive().map_err(|e| e.to_string())?;
@@ -613,7 +611,55 @@ pub fn load_image<L: BootselLink>(pb: &mut Picoboot<L>, release: &Release) -> Re
         pb.write(FLASH_BASE + offset, chunk)
             .map_err(|e| e.to_string())?;
     }
-    require_image(pb, release)
+    match first_difference(pb, image)? {
+        None => Ok(()),
+        Some(at) => Err(format!(
+            "the flash reads back other than written at {at:#010x}: stop, and do not go on"
+        )),
+    }
+}
+
+/// Step 3: the signed image into flash, then read back whole. Flash, not OTP: it can be loaded again
+/// at any time, and after the lockdown only a signed image boots.
+pub fn load_image<L: BootselLink>(pb: &mut Picoboot<L>, release: &Release) -> Result<(), String> {
+    write_flash(pb, &padded_image(release))
+}
+
+/// Where the changed image differs from the release's: one byte inside the code, which the signature
+/// covers, well past the image's first block, which the bootrom must still find to judge the image.
+const CHANGED_AT: usize = 0x1000;
+
+/// The release's image with one byte of its code changed: an image not as signed.
+fn changed_image(release: &Release) -> Result<Vec<u8>, String> {
+    let mut image = padded_image(release);
+    let byte = image
+        .get_mut(CHANGED_AT)
+        .ok_or("the image is too short to change a byte of its code")?;
+    *byte ^= 0xff;
+    Ok(image)
+}
+
+/// Step 9's check, after the lockdown and before the first boot: an image not as signed loaded and
+/// booted. A board whose secure boot is in force refuses it, finds no image it may run, and comes
+/// back in BOOTSEL; the caller sees which way the board came back, and loads the signed image again
+/// ([`load_image`]). Flash only: what it changes is undone by that load.
+pub fn boot_changed_image<L: BootselLink>(
+    pb: &mut Picoboot<L>,
+    release: &Release,
+) -> Result<(), String> {
+    let otp = OtpReading::read(pb).map_err(|e| e.to_string())?;
+    let standing = Standing::read(pb, &otp)?;
+    match next(&standing, release)? {
+        Next::Boot => {}
+        due => {
+            return Err(format!(
+                "the changed-image check comes after the lockdown and before the first boot: this \
+                 board needs {due:?}"
+            ))
+        }
+    }
+    write_flash(pb, &changed_image(release)?)?;
+    pb.reboot_normal().map_err(|e| e.to_string())
 }
 
 /// What the board's flash holds, against the release's image.
@@ -625,15 +671,14 @@ pub enum OnBoard {
     Differs { at: u32 },
 }
 
-/// The board's flash, read back over the release's image. A link failure is an error, never a
-/// difference. Execute-in-place is left first, as picotool leaves it before every flash read: in
-/// BOOTSEL a read through it does not give the flash's bytes.
-pub fn image_on_board<L: BootselLink>(
+/// The board's flash read back over `image`: the address of the first sector that differs, if one
+/// does. A link failure is an error, never a difference. Execute-in-place is left first, as picotool
+/// leaves it before every flash read: in BOOTSEL a read through it does not give the flash's bytes.
+fn first_difference<L: BootselLink>(
     pb: &mut Picoboot<L>,
-    release: &Release,
-) -> Result<OnBoard, String> {
+    image: &[u8],
+) -> Result<Option<u32>, String> {
     pb.exit_xip().map_err(|e| e.to_string())?;
-    let image = padded_image(release);
     for (i, chunk) in image.chunks(SECTOR).enumerate() {
         let offset = u32::try_from(i * SECTOR).map_err(|_far| "an image larger than flash")?;
         let len = u32::try_from(chunk.len()).map_err(|_long| "a chunk larger than flash")?;
@@ -641,12 +686,21 @@ pub fn image_on_board<L: BootselLink>(
             .read(FLASH_BASE + offset, len)
             .map_err(|e| e.to_string())?;
         if back.as_slice() != chunk {
-            return Ok(OnBoard::Differs {
-                at: FLASH_BASE + offset,
-            });
+            return Ok(Some(FLASH_BASE + offset));
         }
     }
-    Ok(OnBoard::Release)
+    Ok(None)
+}
+
+/// The board's flash, read back over the release's image.
+pub fn image_on_board<L: BootselLink>(
+    pb: &mut Picoboot<L>,
+    release: &Release,
+) -> Result<OnBoard, String> {
+    Ok(match first_difference(pb, &padded_image(release))? {
+        None => OnBoard::Release,
+        Some(at) => OnBoard::Differs { at },
+    })
 }
 
 /// The release's image must be in the board's flash before what depends on it.

@@ -38,6 +38,16 @@ object BootselUsb {
     private const val STANDARD_ENDPOINT_IN = 0x82
     private const val GET_STATUS = 0x00
 
+    /**
+     * Waits while a rebooting board leaves USB and comes back, counted in polls of the device list
+     * [RETURN_POLL_MS] apart, never read off a clock: up to ~10 s to leave, ~20 s to come back, and
+     * ~60 s for the person to let DSM use it again.
+     */
+    private const val RETURN_POLL_MS = 250L
+    private const val LEAVE_POLLS = 40
+    private const val COME_BACK_POLLS = 80
+    private const val PERMISSION_POLLS = 240
+
     /** picotool's bulk timeout; an OTP write or a flash erase answers within it. */
     private const val BULK_TIMEOUT_MS = 10_000
     private const val CONTROL_TIMEOUT_MS = 1_000
@@ -63,11 +73,75 @@ object BootselUsb {
         return why
     }
 
+    private fun isBootsel(device: UsbDevice): Boolean =
+        device.vendorId == RP2350_BOOT_VENDOR_ID && device.productId == RP2350_BOOT_PRODUCT_ID
+
+    private fun askPermission(ctx: Context, usb: UsbManager, device: UsbDevice) {
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val pi = PendingIntent.getBroadcast(
+            ctx, 0, Intent(USB_PERMISSION_ACTION).setPackage(ctx.packageName), flags
+        )
+        usb.requestPermission(device, pi)
+    }
+
+    /**
+     * After a reboot: wait for the board with [serial] to leave USB and come back. 0 when it is back
+     * in BOOTSEL and Android lets DSM use it; 1 when it came back as the DSM Anchor, having run the
+     * image in its flash; -1 when it did neither in time, with [lastError] saying which wait ran out.
+     */
+    @Synchronized
+    fun waitForReturn(serial: String): Int {
+        close()
+        val ctx = appContext ?: run { fail("BootselUsb.init(context) was not called"); return -1 }
+        val usb = ctx.getSystemService(Context.USB_SERVICE) as? UsbManager
+            ?: run { fail("this phone has no USB host service"); return -1 }
+        var polls = 0
+        while (usb.deviceList.values.any { isBootsel(it) }) {
+            polls += 1
+            if (polls > LEAVE_POLLS) {
+                fail("the board never left USB: it did not reboot")
+                return -1
+            }
+            Thread.sleep(RETURN_POLL_MS)
+        }
+        polls = 0
+        while (polls < COME_BACK_POLLS) {
+            val devices = usb.deviceList.values
+            if (devices.any { LocalPicoUsb.isDsmAnchor(it.vendorId, it.productId) }) return 1
+            val back = devices.firstOrNull { isBootsel(it) }
+            if (back != null) return permittedAgain(ctx, usb, back, serial)
+            polls += 1
+            Thread.sleep(RETURN_POLL_MS)
+        }
+        fail("the board did not come back on USB")
+        return -1
+    }
+
+    /** The board back in BOOTSEL, once Android lets DSM use it again: 0, or -1. */
+    private fun permittedAgain(ctx: Context, usb: UsbManager, device: UsbDevice, serial: String): Int {
+        if (!usb.hasPermission(device)) {
+            askPermission(ctx, usb, device)
+            var polls = 0
+            while (!usb.hasPermission(device)) {
+                polls += 1
+                if (polls > PERMISSION_POLLS) {
+                    fail("Android has not let DSM use the board since it came back: tap Allow, then read it again")
+                    return -1
+                }
+                Thread.sleep(RETURN_POLL_MS)
+            }
+        }
+        val back = device.serialNumber?.uppercase()
+        if (back != serial.uppercase()) {
+            fail("another board came back: $back")
+            return -1
+        }
+        return 0
+    }
+
     /** The one RP2350 in BOOTSEL on USB. */
     private fun bootselBoard(usb: UsbManager): UsbDevice? {
-        val boards = usb.deviceList.values.filter {
-            it.vendorId == RP2350_BOOT_VENDOR_ID && it.productId == RP2350_BOOT_PRODUCT_ID
-        }
+        val boards = usb.deviceList.values.filter { isBootsel(it) }
         if (boards.size > 1) {
             fail("${boards.size} boards are in BOOTSEL on USB: plug in only the one to set up")
             return null
@@ -91,11 +165,7 @@ object BootselUsb {
             ?: run { fail("this phone has no USB host service"); return null }
         val device = bootselBoard(usb) ?: return null
         if (!usb.hasPermission(device)) {
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            val pi = PendingIntent.getBroadcast(
-                ctx, 0, Intent(USB_PERMISSION_ACTION).setPackage(ctx.packageName), flags
-            )
-            usb.requestPermission(device, pi)
+            askPermission(ctx, usb, device)
             fail("Android has not let DSM use the board yet: tap Allow when it asks, then read the board again")
             return null
         }

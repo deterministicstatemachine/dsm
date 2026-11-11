@@ -2261,6 +2261,10 @@ enum AnchorBoardStepKind {
   ANCHOR_BOARD_STEP_KIND_LOCKDOWN        = 6; // Step 8: secure boot on, debug off
   ANCHOR_BOARD_STEP_KIND_BOOT            = 7; // Step 9: reboot into the signed image, once
   ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES = 8; // Step 9b: the boot pages locked, back in BOOTSEL
+  // Step 9's check, after the lockdown and before the first boot: the release's image with one byte
+  // of its code changed is loaded and booted, the board must come back in BOOTSEL, and the signed
+  // image is loaded back. Not a burn, and never listed among the steps.
+  ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE = 9;
 }
 
 enum AnchorBoardStepState {

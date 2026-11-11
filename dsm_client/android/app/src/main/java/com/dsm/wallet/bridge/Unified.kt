@@ -87,6 +87,7 @@ object Unified {
     @Keep @JvmStatic fun bootselHaltedEndpoints(): IntArray? = BootselUsb.haltedEndpoints()
     @Keep @JvmStatic fun bootselFileDescriptor(): Int = BootselUsb.fileDescriptor()
     @Keep @JvmStatic fun bootselInterfaceReset(): Int = BootselUsb.interfaceReset()
+    @Keep @JvmStatic fun bootselWaitForReturn(serial: String): Int = BootselUsb.waitForReturn(serial)
     @Keep @JvmStatic fun bootselClose(): Int = BootselUsb.close()
     // The production release the app carries (the signing's public outputs, from its assets).
     @Keep @JvmStatic fun anchorReleaseFile(path: String): ByteArray? = BootselUsb.releaseFile(path)

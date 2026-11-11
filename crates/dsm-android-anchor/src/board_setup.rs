@@ -28,6 +28,17 @@ pub trait BoardPort: Send + Sync {
     fn release(&self) -> Result<Release, String>;
     /// 32 bytes from the phone's random source, for a blank board's secret.
     fn secret(&self) -> Result<[u8; 32], String>;
+    /// After a reboot: wait for the board to leave USB and come back, and say how it came back.
+    fn wait_for_return(&self, chip_id: &str) -> Result<Returned, String>;
+}
+
+/// How a board came back after a reboot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Returned {
+    /// In BOOTSEL, with the same chip id: it found no image it may run.
+    Bootsel,
+    /// As the DSM Anchor: it ran the image in its flash.
+    AsAnchor,
 }
 
 /// The steps in the runbook's order.
@@ -52,6 +63,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Lockdown => "Lock down: secure boot on, debug off",
         Kind::Boot => "Start the signed image once",
         Kind::LockBootPages => "Lock the boot pages",
+        Kind::CheckChangedImage => "Check that a changed image is refused",
         Kind::Unspecified => "no step",
     }
 }
@@ -106,7 +118,12 @@ fn read_board<L: BootselLink>(boot: &mut Picoboot<L>, release: &Release) -> Resu
     }
     let next = match otp_burn::next(&standing, release)? {
         Next::Done => None,
-        Next::Boot => Some(Kind::Boot),
+        // The first boot runs what flash holds: the signed image, or it is loaded again first (after
+        // the changed-image check, flash may hold the changed one).
+        Next::Boot => match otp_burn::image_on_board(boot, release)? {
+            OnBoard::Release => Some(Kind::Boot),
+            OnBoard::Differs { .. } => Some(Kind::LoadImage),
+        },
         Next::Burn(burn) => {
             // Step 3 comes before the first burn on a board: the image goes into flash first.
             let first = matches!(burn, Burn::SealSecret | Burn::WriteDigest);
@@ -200,6 +217,86 @@ impl<P: BoardPort> BoardSetup<P> {
         }
     }
 
+    /// Step 9's check: the release's image with one code byte changed, loaded and booted. The board
+    /// must come back in BOOTSEL; then the signed image is loaded back and read back whole. A board
+    /// that comes back as the anchor ran an image not as signed: its secure boot is not in force.
+    fn check_changed_image(
+        &self,
+        mut boot: Picoboot<P::Link>,
+        chip_id: &str,
+        release: &Release,
+    ) -> pb::AnchorBoardResponse {
+        let gone = pb::AnchorBoardResponse {
+            chip_id: chip_id.to_string(),
+            release: release_words(release),
+            ..Default::default()
+        };
+        if let Err(why) = otp_burn::boot_changed_image(&mut boot, release) {
+            let mut answer = self.answer(&mut boot, chip_id, release);
+            answer.refused = why;
+            return answer;
+        }
+        // The board is rebooting: its link goes with it.
+        drop(boot);
+        match self.port.wait_for_return(chip_id) {
+            Err(why) => pb::AnchorBoardResponse {
+                refused: format!("the board did not come back after the changed image: {why}"),
+                ..gone
+            },
+            Ok(Returned::AsAnchor) => pb::AnchorBoardResponse {
+                refused: "the board RAN an image not as signed: its secure boot is not in force. \
+                          Stop: do not start it, lock its boot pages or install it"
+                    .to_string(),
+                ..gone
+            },
+            Ok(Returned::Bootsel) => {
+                let reopened = self.port.open().and_then(|(link, id)| {
+                    if id == chip_id {
+                        Picoboot::connect(link).map_err(|e| e.to_string())
+                    } else {
+                        Err(format!("another board came back: {id}"))
+                    }
+                });
+                let mut boot = match reopened {
+                    Ok(boot) => boot,
+                    Err(why) => {
+                        return pb::AnchorBoardResponse {
+                            refused: format!(
+                                "the changed image was refused and the board came back in BOOTSEL, \
+                                 but it could not be opened again: {why}. Read it again, and load \
+                                 the signed image back"
+                            ),
+                            ..gone
+                        }
+                    }
+                };
+                match otp_burn::load_image(&mut boot, release) {
+                    Ok(()) => {
+                        let mut answer = self.answer(&mut boot, chip_id, release);
+                        answer.written = vec![
+                            "a changed image was refused: the board found no image it may run and \
+                             came back in BOOTSEL"
+                                .to_string(),
+                            format!(
+                                "flash: the signed image again, {} bytes, read back whole",
+                                release.image.len()
+                            ),
+                        ];
+                        answer
+                    }
+                    Err(why) => {
+                        let mut answer = self.answer(&mut boot, chip_id, release);
+                        answer.refused = format!(
+                            "the changed image was refused, and loading the signed image back \
+                             failed: {why}"
+                        );
+                        answer
+                    }
+                }
+            }
+        }
+    }
+
     fn run(
         &self,
         boot: &mut Picoboot<P::Link>,
@@ -230,6 +327,10 @@ impl<P: BoardPort> BoardSetup<P> {
                 ]
             }),
             Kind::LockBootPages => burn(Burn::LockBootPages, boot),
+            // It reboots the board and waits for it to come back: `check_changed_image` runs it.
+            Kind::CheckChangedImage => Err(
+                "the changed-image check runs on its own, across the board's reboot".to_string(),
+            ),
             Kind::Unspecified => Err("no step was named".to_string()),
         }
     }
@@ -324,6 +425,16 @@ impl<P: BoardPort> dsm_sdk::bridge::AnchorBoardSetup for BoardSetup<P> {
                 return answer;
             }
         };
+        if step == Kind::CheckChangedImage {
+            if due != Some(Kind::Boot) {
+                let mut answer = self.answer(&mut boot, &chip_id, &release);
+                answer.refused = "the changed-image check comes after the lockdown and before the \
+                                  first boot; nothing was written"
+                    .to_string();
+                return answer;
+            }
+            return self.check_changed_image(boot, &chip_id, &release);
+        }
         if due != Some(step) {
             let mut answer = self.answer(&mut boot, &chip_id, &release);
             answer.refused = format!(
@@ -589,6 +700,26 @@ pub mod jni_port {
         }
 
         /// Filled from the phone's random source into memory never initialised to anything else.
+        fn wait_for_return(&self, chip_id: &str) -> Result<super::Returned, String> {
+            let returned = with_unified(|env, cls| {
+                let jid = env.new_string(chip_id).map_err(|e| e.to_string())?;
+                let jobj = JObject::from(jid);
+                env.call_static_method(
+                    cls,
+                    "bootselWaitForReturn",
+                    "(Ljava/lang/String;)I",
+                    &[JValue::Object(&jobj)],
+                )
+                .and_then(|v| v.i())
+                .map_err(|e| format!("call bootselWaitForReturn: {e}"))
+            })?;
+            match returned {
+                0 => Ok(super::Returned::Bootsel),
+                1 => Ok(super::Returned::AsAnchor),
+                _neither => Err(last_error()),
+            }
+        }
+
         fn secret(&self) -> Result<[u8; 32], String> {
             let mut fresh = [core::mem::MaybeUninit::<u8>::uninit(); 32];
             let drawn = getrandom::fill_uninit(&mut fresh)

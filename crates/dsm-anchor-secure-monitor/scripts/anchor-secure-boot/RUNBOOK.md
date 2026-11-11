@@ -180,15 +180,21 @@ phone carries only its public outputs.
    found.
 3. **Each step is the board's next or it is refused**, and runs only on the board whose chip id the
    person types back (its last four characters). Every write is read back before the step is done.
-4. **After "Start the signed image once"** the board leaves BOOTSEL and records its rollback version.
+4. **Before the first boot, Check…** (offered only once the lockdown is done and the first boot is
+   next): the phone loads the signed image with one byte of its code changed and starts the board.
+   A board whose secure boot is in force finds no image it may run and comes back in BOOTSEL (tap
+   Allow when Android asks again); the phone then loads the signed image back and reads it back. A
+   board that comes back as the DSM Anchor ran an image not as signed: stop there. This is Step 9's
+   unsigned-image check, made on a changed copy of the very image the board will run.
+5. **After "Start the signed image once"** the board leaves BOOTSEL and records its rollback version.
    Once it has started, unplug it, hold BOOTSEL, and plug it in again for the last step: the phone
    locks the boot pages only once `ROLLBACK_REQUIRED` is set.
-5. **Then plug it in normally** and install it from the wallet that will keep it (Step 10).
+6. **Then plug it in normally** and install it from the wallet that will keep it (Step 10).
 
 What the phone does differently: a blank secret page is written and locked in one step (Steps 4 and
-the secret half of 6), so no page stands written and unlocked between steps, and every write is
-read back, the rows picotool's JSON load writes included. Not yet on the phone: Step 9's check that
-an unsigned image is refused.
+the secret half of 6), so no page stands written and unlocked between steps; every write is read
+back, the rows picotool's JSON load writes included; and Step 9's refused-image check is made before
+the first boot, on a changed copy of the signed image.
 
 The commands below are the same procedure from a computer with picotool.
 

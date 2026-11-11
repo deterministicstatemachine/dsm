@@ -2,7 +2,7 @@
 //! The burn procedure against a model of the board's bootloader that keeps OTP's rules
 //! ([`crate::bootrom_model`]): the boards in hand as they stood on 2026-11-11, burned from the phone.
 
-use crate::bootrom_model::BootromModel;
+use crate::bootrom_model::{BootromModel, LastBoot};
 use crate::otp_burn::{
     burn, check_blank, load_image, lock1, next, Burn, Hash32, Next, OtpReading, SecretPage,
     Standing, BOOT_PAGES_LOCK, CRIT1_ROW, DIGEST_LOCK, DIGEST_ROW, ROLLBACK_LOCK, SECRET_LOCK,
@@ -322,7 +322,7 @@ fn the_image_on_the_board_is_read_back_whole() {
 
 // ---- The board setup the wallet drives (`anchor.board.read` / `anchor.board.step`) ----
 
-use crate::board_setup::{BoardPort, BoardSetup};
+use crate::board_setup::{BoardPort, BoardSetup, Returned};
 use crate::picoboot::BootselLink;
 use dsm::types::proto as pb;
 use dsm_sdk::bridge::AnchorBoardSetup;
@@ -373,6 +373,13 @@ impl BoardPort for Phone {
     }
     fn secret(&self) -> Result<[u8; 32], String> {
         Ok(SECRET)
+    }
+    fn wait_for_return(&self, _chip_id: &str) -> Result<Returned, String> {
+        match held(&self.board.0).last_boot {
+            LastBoot::Refused => Ok(Returned::Bootsel),
+            LastBoot::Ran => Ok(Returned::AsAnchor),
+            LastBoot::NotYet => Err("the board never rebooted".to_string()),
+        }
     }
 }
 
@@ -520,4 +527,93 @@ fn the_rollback_flag_counts_as_the_bootrom_reads_it_by_majority() {
         !standing(&mut pb).rollback_recorded,
         "one copy of three is not the flag"
     );
+}
+
+/// The release's image as flash holds it: padded with zeros to whole pages.
+fn padded(release: &Release) -> Vec<u8> {
+    let mut image = release.image.clone();
+    image.resize(image.len().div_ceil(256) * 256, 0);
+    image
+}
+
+/// A board in hand taken through its burns to the lockdown, its bootrom judging images by `signed`.
+fn locked_down(signed: Option<Vec<u8>>) -> (BoardSetup<Phone>, Arc<Mutex<BootromModel>>) {
+    use pb::AnchorBoardStepKind as K;
+    let mut model = BootromModel::sealed_board();
+    model.signed_image = signed;
+    let (setup, board) = phone_with(model);
+    for kind in [
+        K::LoadImage,
+        K::WriteDigest,
+        K::LockDigest,
+        K::WriteBootKey,
+        K::Lockdown,
+    ] {
+        let answer = setup.step(&step(kind, CHIP));
+        assert_eq!(answer.refused, "", "{kind:?}: {answer:?}");
+    }
+    (setup, board)
+}
+
+#[test]
+fn a_changed_image_is_refused_and_the_signed_one_is_loaded_back() {
+    use pb::AnchorBoardStepKind as K;
+    let release = release();
+    let (setup, board) = locked_down(Some(padded(&release)));
+    let checked = setup.step(&step(K::CheckChangedImage, CHIP));
+    assert_eq!(checked.refused, "", "{checked:?}");
+    assert!(
+        checked.written[0].contains("was refused"),
+        "{:?}",
+        checked.written
+    );
+    {
+        let model = held(&board);
+        assert_eq!(model.last_boot, LastBoot::Refused);
+        assert_eq!(
+            model.flash[..padded(&release).len()],
+            padded(&release)[..],
+            "the signed image is back"
+        );
+    }
+    assert_eq!(
+        state_of(&checked, K::Boot),
+        pb::AnchorBoardStepState::Next,
+        "the first boot is next"
+    );
+    let booted = setup.step(&step(K::Boot, CHIP));
+    assert_eq!(booted.refused, "", "{booted:?}");
+    assert_eq!(held(&board).last_boot, LastBoot::Ran);
+}
+
+#[test]
+fn a_board_that_runs_a_changed_image_is_stopped() {
+    use pb::AnchorBoardStepKind as K;
+    // This bootrom runs whatever flash holds: secure boot is not in force.
+    let (setup, _board) = locked_down(None);
+    let checked = setup.step(&step(K::CheckChangedImage, CHIP));
+    assert!(
+        checked.refused.contains("RAN an image not as signed"),
+        "{}",
+        checked.refused
+    );
+}
+
+#[test]
+fn the_changed_image_check_waits_for_the_lockdown() {
+    use pb::AnchorBoardStepKind as K;
+    let release = release();
+    let mut model = BootromModel::sealed_board();
+    model.signed_image = Some(padded(&release));
+    let (setup, board) = phone_with(model);
+    assert_eq!(setup.step(&step(K::LoadImage, CHIP)).refused, "");
+    let before = held(&board).flash.clone();
+    let early = setup.step(&step(K::CheckChangedImage, CHIP));
+    assert!(
+        early.refused.contains("comes after the lockdown"),
+        "{}",
+        early.refused
+    );
+    assert_eq!(held(&board).flash, before, "nothing was written");
+    assert_eq!(held(&board).rebooted, 0);
 }
