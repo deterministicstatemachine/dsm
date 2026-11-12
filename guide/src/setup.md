@@ -1,95 +1,115 @@
 # Set up your machine
 
-The tools are the usual ones: Git, a C toolchain, protobuf's compiler, Node.js 20 or later, Python 3 for the Python client, and Rust. A JDK 17 is for building the Android wallet. PostgreSQL is not on the list: you need it only if you later run storage nodes of your own.
+Plugging an app in needs Node.js 20 or later, Python 3 if you use the Python client, and `curl`. No Rust, no protobuf compiler, and no copy of the DSM repo: DSM's tools come prebuilt from a release, for Linux (x86-64 and ARM64) and macOS (Apple silicon and Intel). On Windows, use WSL2 with Ubuntu and follow the Ubuntu lines. PostgreSQL is not on the list either: you need it only if you later run storage nodes of your own.
 
 ## 1. Install the prerequisites
 
-**macOS**, with [Homebrew](https://brew.sh). The second line, the JDK, is only for building the Android wallet.
+**macOS**, with [Homebrew](https://brew.sh). macOS already has Python 3 with `venv`, and `curl`.
 
 ```bash
-brew install git protobuf node
-brew install --cask temurin@17
+brew install node
 ```
 
-macOS already has Python 3 with `venv`.
-
-**Ubuntu or Debian.** Ubuntu's own `nodejs` package is older than the Node.js 20 this repo needs, so Node comes from NodeSource:
+**Ubuntu or Debian.** Ubuntu's own `nodejs` package is older than the Node.js 20 the tools need, so Node comes from NodeSource:
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential git curl protobuf-compiler openjdk-17-jdk python3-venv
+sudo apt install -y curl ca-certificates python3-venv
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
 
 These four lines are the ones the newcomer check (`make first-run`) runs on a clean Ubuntu before it follows this path to a payment received.
 
-## 2. Install Rust
+## 2. Install DSM's tools
 
-Rust comes from [rustup](https://rustup.rs):
+Download the release's install script, then run it:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.4/install.sh
+sh install.sh
 ```
 
-Then open a new terminal, or load it into this one:
+It downloads the release's `SHA256SUMS`, then the app host built for your machine and the developer archive, and checks each against `SHA256SUMS` before it unpacks anything. A file that is missing from it or does not match stops the install, and nothing is changed. Then it installs into `~/.local`:
 
-```bash
-. "$HOME/.cargo/env"
+- `dsm-app-host`: your app's own DSM account.
+- `dsm-app`: your app's account from the terminal.
+- `dsm-dev-wallet`: a player's wallet in the terminal, to test with no phone.
+- `dsm-connect-starter`: the starter app, a page to build your app from.
+- The TypeScript and Python clients, as packages you install into your app, under `~/.local/share/dsm/clients`.
+
+What it printed on a Mac:
+
+```text
+DSM 0.1.0-beta.4 for macos-arm64, from …
+  verified  dsm-app-host-0.1.0-beta.4-macos-arm64.tar.gz  sha256 bfaebcc172e33f0a519bd4e50d42968bb7d67cee2a73eed78712a62c9af4f3eb
+  verified  dsm-developer-0.1.0-beta.4.tar.gz  sha256 7ecc867880f1c6feeb82d7b1f48d7c840a58bb6bcfb6593e26360a3afe2cf40e
+
+installed:
+  ~/.local/bin/dsm-app-host        dsm-app-host 0.1.0-beta.4
+  ~/.local/bin/dsm-app
+  ~/.local/bin/dsm-dev-wallet
+  ~/.local/bin/dsm-connect-starter
+  the clients, to install into your app:
+    ~/.local/share/dsm/clients/dsm-app-client-0.1.0-beta.4.tgz
+    ~/.local/share/dsm/clients/dsm_app_client-0.1.0b4-py3-none-any.whl
+note: ~/.local/bin is not on your PATH; add it (and the same line to your shell's profile):
+  export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The repo pins the Rust version it builds with (`1.98.0`, in `rust-toolchain.toml`). rustup installs it the first time you build in the repo.
+`…` is where it downloaded from, and the checksums are that build's; yours name the release's. To check the script itself before you run it, read it: it is short, and it is [`scripts/install.sh`](https://github.com/deterministicstatemachine/dsm/blob/main/scripts/install.sh) in the repo.
 
-## 3. Get the code
+## 3. Put the tools on your PATH
+
+If the install said `~/.local/bin` is not on your PATH, add it to this terminal, and the same line to your shell's profile (`~/.zshrc` on macOS, `~/.bashrc` on Ubuntu):
 
 ```bash
-git clone https://github.com/deterministicstatemachine/dsm.git
-cd dsm
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then check:
+
+```bash
+dsm-app-host --version
+```
+
+```text
+dsm-app-host 0.1.0-beta.4
+```
+
+## 4. A folder for your app
+
+Your app's account lives in the folder you start it from, so start from your app's own folder. To follow this guide, make one:
+
+```bash
+mkdir my-app && cd my-app
 ```
 
 Every command from here on runs in this folder.
 
-## 4. Check the machine
+## Building from source instead
+
+To work on DSM itself, build the wallet ([next page](wallet.md)), or run storage nodes of your own ([A storage set of your own](own-storage-set.md)), clone the repo and build it. That needs a C toolchain, Git, protobuf's compiler and Rust as well; a JDK 17 is for the Android wallet.
 
 ```bash
+git clone https://github.com/deterministicstatemachine/dsm.git
+cd dsm
 make doctor
 ```
 
-Doctor reads every tool the build needs and says what it found. It changes nothing on your machine. If a tool the build needs is missing, the line says `MISSING` and doctor fails. Tools you need only for the wallet's builds (`adb`, `java`, `cargo-ndk`) are marked optional until you build it.
+[QUICKSTART.md](https://github.com/deterministicstatemachine/dsm/blob/main/QUICKSTART.md) lists the prerequisites. `make doctor` reads every tool the build needs and says what it found; it changes nothing on your machine. From the repo, the make targets run the same programs as the installed commands, built from your checkout:
 
-It prints something like this. Yours will differ:
+| Installed | From the repo |
+|---|---|
+| `dsm-app up`, `dsm-app down` | `make app-dev`, `make app-dev-down` |
+| `dsm-app <command>` | `make app ARGS="<command>"` |
+| `dsm-dev-wallet up` | `make dev-wallet` |
+| `dsm-dev-wallet <command>` | `make wallet ARGS="<command>"` |
+| `DSM_WALLET_NAME=wallet2 dsm-dev-wallet up` | `make dev-wallet2` |
+| `DSM_WALLET_NAME=wallet2 dsm-dev-wallet <command>` | `make wallet2 ARGS="<command>"` |
+| `dsm-connect-starter` | `make starter` |
+| the clients' packages | `clients/typescript`, `clients/python` |
 
-```text
-==> DSM doctor
-    cargo: cargo 1.98.0 (797e8a9bc 2026-08-05)
-    rustc: rustc 1.98.0 (88d9e12ae 2026-08-18)
-    rust toolchain pin: 1.98.0 (rust-toolchain.toml)
-    rustfmt: installed
-    clippy: installed
-    protoc: libprotoc 33.4
-    node: v20.19.5
-    npm: 10.8.2
-    bash: version 5 (OK)
-    adb: available
-    psql: available
-    java: openjdk version "24" 2025-03-18
-    cargo-ndk: cargo-ndk 4.1.2
-    …
-    frontend deps: stale (package-lock.json changed since they were installed; run make setup)
-    …
-==> every prerequisite is here
-```
-
-The lines marked `…` are the Android NDK's, with paths on the machine that recorded this. `frontend deps: stale` is about the wallet's own web code, below.
-
-## 5. For the wallet's builds only
-
-Plugging an app in needs nothing more. To build the wallet yourself ([next page](wallet.md)), install its web code's dependencies, and with the Android NDK set up, its Android build config:
-
-```bash
-make setup
-```
-
-`make setup` works before any Android tooling is installed; it writes the Android config only when `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`) is set.
+The repo's accounts live in its own `.dsm-dev` folder, so run those from the repo's root.
 
 Next: [The wallet on Android and iOS](wallet.md), or skip straight to [your app's own DSM account](account.md).

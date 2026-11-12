@@ -38,10 +38,13 @@ The wallet answers a connection's requests in order: a request that waits for th
 
 ## The app's command line
 
-`make app ARGS="..."` drives your app's account; `make app ARGS=help` lists the commands. Amounts are in the object's own units.
+`dsm-app <command>` drives your app's account; `dsm-app help` lists the commands. From the repo, `make app ARGS="<command>"` runs the same. Amounts are in the object's own units.
 
 | Command | What it does |
 |---|---|
+| `up` | start your app's account on the beta network (a new one the first time, in `.dsm-dev` in this folder) and fund it; it keeps running in the background |
+| `down` | stop it |
+| `status` | whether it is running, and where |
 | `id` | this account's identity |
 | `fund` | ERA from the faucet, unless the account holds some |
 | `owned` | what it owns |
@@ -66,14 +69,27 @@ The wallet answers a connection's requests in order: a request that waits for th
 
 ## The terminal wallets
 
-`make wallet ARGS="..."` drives the wallet `make dev-wallet` runs, and `make wallet2 ARGS="..."` the one `make dev-wallet2` runs: `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`. `make wallet ARGS=help` lists them.
+`dsm-dev-wallet <command>` drives a player's wallet in the terminal: `up`, `down`, `status`, `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`. With `DSM_WALLET_NAME=wallet2` in front, it drives a second one, for matches. `dsm-dev-wallet help` lists them. From the repo, `make wallet ARGS="..."` and `make wallet2 ARGS="..."` run the same.
 
-## The make targets
+## What the install puts on your machine
+
+| | What it is |
+|---|---|
+| `dsm-app-host` | your app's own DSM account; `--help` lists its flags, `--network beta` joins the beta network |
+| `dsm-app`, `dsm-dev-wallet` | the commands above |
+| `dsm-connect-starter` | the starter app, on http://127.0.0.1:3000; run it in your app's folder |
+| `~/.local/share/dsm/clients/` | the TypeScript client's package (`npm install` it) and the Python client's wheel (`pip install` it) |
+| `~/.local/share/dsm/examples/` | `first_payment.py` and `account_status.py` |
+
+`install.sh` checks every download against the release's `SHA256SUMS` before it unpacks anything. `DSM_PREFIX` installs somewhere other than `~/.local`.
+
+## The make targets, from the repo
 
 | Target | What it does |
 |---|---|
 | `make doctor` | check the machine's prerequisites, changing nothing |
-| `make clients` | build the TypeScript client and generate the Python client's types |
+| `make clients` | build the TypeScript client (both clients' protobuf types are committed) |
+| `make client-types` | regenerate both clients' protobuf types after a change to `proto/dsm_app.proto` |
 | `make app-dev` | your app's own DSM account on the beta network, funded |
 | `make app-dev-local` | the same, on a storage set of your own |
 | `make app-dev-down` | stop your app's account |
@@ -86,7 +102,7 @@ The wallet answers a connection's requests in order: a request that waits for th
 | `make dev-down` | stop the terminal wallets, your app's account and the local nodes |
 | `make dev-reset` | forget the accounts made on this machine, and your local set if they were on it |
 | `make developer-path` | the whole developer path end to end, as CI runs it |
-| `make first-run` | a newcomer's first run on a clean Ubuntu, from the docs alone, to a payment received |
+| `make first-run` | a newcomer's first run on a clean Ubuntu with no clone and no Rust: the release's files installed with `install.sh`, the docs alone, to a payment received |
 
 ## Routes
 

@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 // dsm-app: your application's account from the terminal, through the same
-// client your code uses. `make app-dev` runs the account.
+// client your code uses. `dsm-app up` runs the account with an installed
+// dsm-app-host; from the DSM repo, `make app-dev` does.
 //
+//   dsm-app up                                   start your app's account on the beta network (a new one the
+//                                                first time) and fund it; it keeps running in the background
+//   dsm-app down                                 stop it
+//   dsm-app status                               whether it is running, and where
 //   dsm-app id                                   this account's identity
 //   dsm-app fund                                 ERA from the development set's faucet, unless it holds some
 //   dsm-app owned                                what it owns
@@ -48,13 +53,14 @@
 
 import { encodeB32 } from "./b32.js";
 import { pb } from "./index.js";
+import { down, status, up } from "./dev-host.js";
 import { localAccount } from "./local.js";
 import { ask, grant } from "./requests.js";
-import type { Decision } from "./account.js";
+import type { AppAccount, Decision } from "./account.js";
 import type { Result } from "./results.js";
 
 const USAGE =
-    "usage: dsm-app id | fund | owned | issue <SYMBOL> <name> <supply> [decimals] | give <wallet> <object> <amount> |\n" +
+    "usage: dsm-app up | down | status | id | fund | owned | issue <SYMBOL> <name> <supply> [decimals] | give <wallet> <object> <amount> |\n" +
       "       offer <name> <object> <per-request> <total> [coin] | connections | send <connection> <object> <amount> |\n" +
       "       owns <connection> <object> | accept <connection> <object> | login <connection> | contacts <connection> |\n" +
       "       vault <a> <reserve-a> <b> <reserve-b> | vaults | price <connection> <from> <to> <amount> |\n" +
@@ -98,32 +104,51 @@ function decision(text: string): Decision {
   return text;
 }
 
+/** ERA from the faucet, unless the account holds some. */
+async function fund(app: AppAccount): Promise<void> {
+  const era = await app.owns("ERA").catch(() => undefined);
+  if (era !== undefined && era.amount > 0n) {
+    console.log(`already holds ${era.display} ERA`);
+    return;
+  }
+  for (let attempt = 1; attempt <= 120; attempt++) {
+    const claim = await app.fund();
+    if (claim.funded) {
+      console.log(`funded: ${claim.message}`);
+      return;
+    }
+    if (attempt === 1) console.log(`waiting for the faucet: ${claim.message}`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error("the faucet did not fund this account within a minute");
+}
+
 async function main(args: string[]): Promise<void> {
-  const app = await localAccount("app");
   switch (args[0]) {
+    case undefined:
+      usage();
     case "help":
       console.log(USAGE);
       return;
+    case "up":
+      await up("dsm-app", "app");
+      await fund(await localAccount("app"));
+      return;
+    case "down":
+      await down("dsm-app", "app");
+      return;
+    case "status":
+      await status("dsm-app", "app");
+      return;
+  }
+  const app = await localAccount("app");
+  switch (args[0]) {
     case "id":
       console.log(await app.id());
       return;
-    case "fund": {
-      const era = await app.owns("ERA").catch(() => undefined);
-      if (era !== undefined && era.amount > 0n) {
-        console.log(`already holds ${era.display} ERA`);
-        return;
-      }
-      for (let attempt = 1; attempt <= 120; attempt++) {
-        const claim = await app.fund();
-        if (claim.funded) {
-          console.log(`funded: ${claim.message}`);
-          return;
-        }
-        if (attempt === 1) console.log(`waiting for the faucet: ${claim.message}`);
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      throw new Error("the faucet did not fund this account within a minute");
-    }
+    case "fund":
+      await fund(app);
+      return;
     case "owned":
       for (const o of await app.owned()) {
         console.log(`${o.object.symbol.padEnd(8)} ${o.display.padStart(16)}   ${o.object.kind.padEnd(8)} ${o.object.id}`);

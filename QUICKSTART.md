@@ -223,27 +223,28 @@ A wallet that already made its identity on another storage set keeps it there: c
 
 ## Plug an App Into DSM
 
-Your app stays what it is and gets its own DSM account; players connect their wallets to it. Sign-in, payments, items, trades and matches, with no Kotlin, Swift or Rust. Start here, with your app's account on the beta network, funded (nothing of the network runs on your machine):
+Your app stays what it is and gets its own DSM account; players connect their wallets to it. Sign-in, payments, items, trades and matches, with no Kotlin, Swift or Rust. Plugging an app in needs none of this page's prerequisites but Node.js 20+ (and Python 3 for the Python client), and no clone: DSM's tools come prebuilt from a release, every download checked against its `SHA256SUMS`.
 
 ```bash
-make app-dev
+curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.4/install.sh
+sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The Connect starter app, on http://127.0.0.1:3000. It keeps running:
+Then, in your app's folder, its account on the beta network, funded (nothing of the network runs on your machine), the starter app on http://127.0.0.1:3000, and in a second terminal a player's wallet, to test without a phone:
 
 ```bash
-make starter
+dsm-app up
+dsm-connect-starter
 ```
-
-In a second terminal, a player's wallet, to test without a phone:
 
 ```bash
-make dev-wallet
+dsm-dev-wallet up
 ```
 
-`make app-dev-local` is the same on a storage set of your own (above); `make dev-reset` forgets this machine's accounts before you change sets.
+From this clone, the make targets run the same programs built from source: `make app-dev`, `make starter`, `make dev-wallet`. `make app-dev-local` is the same on a storage set of your own (above); `make dev-reset` forgets this machine's accounts before you change sets.
 
-The whole guide, with the TypeScript and Python clients, is [BUILDING_APPS.md](BUILDING_APPS.md).
+The whole guide, with the TypeScript and Python clients, is [BUILDING_APPS.md](BUILDING_APPS.md), and as pages at https://deterministicstatemachine.github.io/dsm/.
 
 ## Troubleshooting
 

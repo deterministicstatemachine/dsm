@@ -28,7 +28,7 @@ The commands below use the terminal wallet from the [last page](connect.md). Eac
 ## 1. Find the connection
 
 ```bash
-S=$(make -s app ARGS=connections | awk -v w="$(make -s wallet ARGS=id)" '$4==w && $NF=="CONNECTED"{print $2}')
+S=$(dsm-app connections | awk -v w="$(dsm-dev-wallet id)" '$4==w && $NF=="CONNECTED"{print $2}')
 ```
 
 This puts the terminal wallet's connection id in `$S`: the line of `connections` whose wallet is your terminal wallet, and is connected.
@@ -38,7 +38,7 @@ This puts the terminal wallet's connection id in `$S`: the line of `connections`
 Ask the wallet to send your account five hundredths of an ERA:
 
 ```bash
-make app ARGS="send $S ERA 0.05"
+dsm-app send $S ERA 0.05
 ```
 
 ```text
@@ -48,7 +48,7 @@ request 1
 Once it settles:
 
 ```bash
-make app ARGS="result $S 1"
+dsm-app result $S 1
 ```
 
 ```text
@@ -63,7 +63,7 @@ No prompt on the phone: 0.05 is inside the cap the player approved.
 Now 0.20 ERA, twice the cap per request:
 
 ```bash
-make app ARGS="send $S ERA 0.20"
+dsm-app send $S ERA 0.20
 ```
 
 ```text
@@ -73,7 +73,7 @@ request 2
 The wallet does not carry it out. It waits for the player, and says why:
 
 ```bash
-make dev-wallet-pending
+dsm-dev-wallet pending
 ```
 
 ```text
@@ -84,7 +84,7 @@ RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG 2  My Game: Send 0.20 ERA f
 If it says `nothing waiting`, the request has not reached the wallet yet: give it a moment. The player approves it, here in the terminal, or on the phone:
 
 ```bash
-make wallet ARGS="approve $S 2"
+dsm-dev-wallet approve $S 2
 ```
 
 ```text
@@ -94,7 +94,7 @@ CARRIED_OUT: My Game: Send 0.20 ERA for dsm-app send, carried out.
 Approving too early fails with `request 2 is not waiting`; list pending again first. About ten seconds later:
 
 ```bash
-make app ARGS="result $S 2"
+dsm-app result $S 2
 ```
 
 ```text
@@ -116,7 +116,7 @@ The same fact, one more step. On a phone, the request waits under **Waiting**, w
 `owns` asks the wallet to prove what it holds of an object. The wallet builds a proof at its current position, and your account verifies it, not the wallet's say-so:
 
 ```bash
-make app ARGS="owns $S ERA"
+dsm-app owns $S ERA
 ```
 
 ```text
@@ -124,7 +124,7 @@ request 3
 ```
 
 ```bash
-make app ARGS="result $S 3"
+dsm-app result $S 3
 ```
 
 ```text
@@ -140,7 +140,7 @@ The amount is in the object's smallest units, and the long id is ERA's: 9975 is 
 `login` is a sign-in. Your app makes a nonce and asks the wallet to sign "Sign in to", your app's name, and the nonce. It always waits for the player, because only they can sign:
 
 ```bash
-make app ARGS="login $S"
+dsm-app login $S
 ```
 
 ```text
@@ -150,7 +150,7 @@ request 4: waits for the player to approve it on the device
 Pending shows the exact words to be signed:
 
 ```bash
-make dev-wallet-pending
+dsm-dev-wallet pending
 ```
 
 ```text
@@ -161,7 +161,7 @@ RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG 4  My Game: Sign this: "Sig
 The player approves:
 
 ```bash
-make wallet ARGS="approve $S 4"
+dsm-dev-wallet approve $S 4
 ```
 
 ```text
@@ -169,7 +169,7 @@ CARRIED_OUT: My Game: Sign this: "Sign in to dsm-app (3a6b4e28-b931-4116-b53a-b1
 ```
 
 ```bash
-make app ARGS="result $S 4"
+dsm-app result $S 4
 ```
 
 ```text
@@ -190,7 +190,7 @@ Your app compares the signed words with what it asked. That is a password, an au
 Your app issues an object: SHIELD, a one-of-a-kind item, supply 1. Your account holds it:
 
 ```bash
-make app ARGS="issue SHIELD shield 1"
+dsm-app issue SHIELD shield 1
 ```
 
 ```text
@@ -200,7 +200,7 @@ issued SHIELD (unique, supply 1): C46M962T804B5XND8P2ASG4QK2VCB7SCGE5RNWRA4ST411
 A wallet receives only what it has taken up itself, so your app asks it to accept the object:
 
 ```bash
-make app ARGS="accept $S SHIELD"
+dsm-app accept $S SHIELD
 ```
 
 ```text
@@ -210,7 +210,7 @@ request 5
 Give it a few seconds, then give it the shield:
 
 ```bash
-make app ARGS="give $(make -s wallet ARGS=id) SHIELD 1"
+dsm-app give $(dsm-dev-wallet id) SHIELD 1
 ```
 
 ```text
@@ -220,7 +220,7 @@ sent
 The transfer is final once sent; the wallet takes it up within seconds. Until then what it owns shows the shield at 0:
 
 ```bash
-make wallet ARGS=owned
+dsm-dev-wallet owned
 ```
 
 ```text
@@ -236,7 +236,7 @@ SHIELD's supply is 1, so it can be given once. Run this page again on the same a
 ## 7. Disconnect
 
 ```bash
-make wallet ARGS="disconnect $S"
+dsm-dev-wallet disconnect $S
 ```
 
 ```text
@@ -279,32 +279,32 @@ And the account's activity, read from the ingress: every call your app made, and
 With the terminal wallet connected from the last page, this runs every step above, waiting for each request to settle before reading it, and approving as the player:
 
 ```bash
-S=$(make -s app ARGS=connections | awk -v w="$(make -s wallet ARGS=id)" '$4==w && $NF=="CONNECTED"{print $2}')
-make app ARGS="send $S ERA 0.05"
-until make app ARGS="result $S 1" | grep -q "^fact: received"; do sleep 3; done
-make app ARGS="result $S 1"
-make app ARGS="send $S ERA 0.20"
-until make dev-wallet-pending | grep -q "why it waits"; do sleep 3; done
-make dev-wallet-pending
-make wallet ARGS="approve $S 2"
-until make app ARGS="result $S 2" | grep -q "^fact: received"; do sleep 3; done
-make app ARGS="result $S 2"
-make app ARGS="owns $S ERA"
-until make app ARGS="result $S 3" | grep -q "^fact: owns"; do sleep 3; done
-make app ARGS="result $S 3"
-make app ARGS="login $S"
-until make dev-wallet-pending | grep -q "Sign this"; do sleep 3; done
-make dev-wallet-pending
-make wallet ARGS="approve $S 4"
-until make app ARGS="result $S 4" | grep -q "^fact: signed"; do sleep 3; done
-make app ARGS="result $S 4"
-make app ARGS="issue SHIELD shield 1"
-make app ARGS="accept $S SHIELD"
-until make app ARGS="result $S 5" | grep -q "^answered: yes"; do sleep 3; done
-make app ARGS="give $(make -s wallet ARGS=id) SHIELD 1"
-until make wallet ARGS=owned | grep -Eq "^SHIELD +1 "; do sleep 3; done
-make wallet ARGS=owned
-make wallet ARGS="disconnect $S"
+S=$(dsm-app connections | awk -v w="$(dsm-dev-wallet id)" '$4==w && $NF=="CONNECTED"{print $2}')
+dsm-app send $S ERA 0.05
+until dsm-app result $S 1 | grep -q "^fact: received"; do sleep 3; done
+dsm-app result $S 1
+dsm-app send $S ERA 0.20
+until dsm-dev-wallet pending | grep -q "why it waits"; do sleep 3; done
+dsm-dev-wallet pending
+dsm-dev-wallet approve $S 2
+until dsm-app result $S 2 | grep -q "^fact: received"; do sleep 3; done
+dsm-app result $S 2
+dsm-app owns $S ERA
+until dsm-app result $S 3 | grep -q "^fact: owns"; do sleep 3; done
+dsm-app result $S 3
+dsm-app login $S
+until dsm-dev-wallet pending | grep -q "Sign this"; do sleep 3; done
+dsm-dev-wallet pending
+dsm-dev-wallet approve $S 4
+until dsm-app result $S 4 | grep -q "^fact: signed"; do sleep 3; done
+dsm-app result $S 4
+dsm-app issue SHIELD shield 1
+dsm-app accept $S SHIELD
+until dsm-app result $S 5 | grep -q "^answered: yes"; do sleep 3; done
+dsm-app give $(dsm-dev-wallet id) SHIELD 1
+until dsm-dev-wallet owned | grep -Eq "^SHIELD +1 "; do sleep 3; done
+dsm-dev-wallet owned
+dsm-dev-wallet disconnect $S
 ```
 
 Next: [Write it into your app](clients.md).
