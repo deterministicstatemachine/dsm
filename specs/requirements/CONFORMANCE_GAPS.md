@@ -7608,7 +7608,7 @@ The owner, 2026-11-10, asked whether anything checks a write before it reaches t
 
 **Rows.** MR-DSM-0367 added, Met. MR-DSM-0073, MR-STOR-0037 and MR-STOR-0145 name the current items; no status changed. One matrix row added and the A34 rows gain the model. Totals: DSM rows 361 → 362, Met 233 → 234; all rows 1097 → 1098, Met 709 → 710.
 
-### 6.158 The read-through of 2026-11-12: what a client can make a node hold, what a screen says of a send, and what a release hands its installer
+### 6.159 The read-through of 2026-11-12: what a client can make a node hold, what a screen says of a send, and what a release hands its installer
 
 A read-through of main at 1705ee076 by subsystem (storage node, wallet apps, SDK and Core, release and install; the hardware anchor's findings are fixed on its own branch). Nothing here touches acceptance (DSM Amendment A14). Every item was found by reading; none was demonstrated as an attack.
 
