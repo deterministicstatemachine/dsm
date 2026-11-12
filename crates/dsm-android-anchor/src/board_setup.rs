@@ -8,6 +8,8 @@
 //! a board swapped between the read and the step is refused. Every write is read back before the
 //! step is said to be done.
 
+use anchor_core::proto::pb as wire;
+use anchor_core::service::err;
 use dsm::types::proto as pb;
 
 use crate::otp_burn::{
@@ -15,12 +17,13 @@ use crate::otp_burn::{
 };
 use crate::picoboot::{BootselLink, Picoboot};
 use crate::release::Release;
+use crate::usb_appliance::{answer_to, request_frame};
 
 use pb::AnchorBoardStepKind as Kind;
 use pb::AnchorBoardStepState as State;
 
-/// What the setup needs of the phone: the board's USB link, the release the app carries, and the
-/// phone's own random source.
+/// What the setup needs of the phone: the board's USB link, the release and the images the app
+/// carries, the phone's own random source, and the board's link once it runs as the DSM Anchor.
 pub trait BoardPort: Send + Sync {
     type Link: BootselLink;
     /// The board in BOOTSEL: its link, and its chip id as its bootloader names itself (its USB serial
@@ -28,13 +31,86 @@ pub trait BoardPort: Send + Sync {
     fn open(&self) -> Result<(Self::Link, String), String>;
     /// The production release this app carries.
     fn release(&self) -> Result<Release, String>;
-    /// The lock image this app carries (`dsm-anchor-lock-pages`), its flash bytes from flash's first
-    /// byte: for a board whose bootloader may not write the page locks its Secure code may.
-    fn lock_image(&self) -> Result<Vec<u8>, String>;
+    /// An image this app carries besides the release, its flash bytes from flash's first byte.
+    fn image(&self, image: Carried) -> Result<Vec<u8>, String>;
     /// 32 bytes from the phone's random source, for a blank board's secret.
     fn secret(&self) -> Result<[u8; 32], String>;
     /// After a reboot: wait for the board to leave USB and come back, and say how it came back.
     fn wait_for_return(&self, chip_id: &str) -> Result<Returned, String>;
+    /// One request to the board running as the DSM Anchor, once Android lets the app use it: the
+    /// request's frame out (`LE32(len) ++ ApplianceRequest`), its answer's body back.
+    fn anchor_exchange(&self, frame: Vec<u8>) -> Result<Vec<u8>, String>;
+}
+
+/// The images this app carries besides the release, each put in its assets by
+/// `scripts/anchor-release-into-app.sh`. None is signed: each runs only before the lockdown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Carried {
+    /// `dsm-anchor-lock-pages`: for a board whose bootloader may not write the page locks its Secure
+    /// code may.
+    LockPages,
+    /// The secure monitor built with `prepare_chip`: a test part's PTRNG configured, for good.
+    PrepareChip,
+    /// The secure monitor built with `bench_self_enroll`: the try-run on this very board.
+    Trial,
+}
+
+impl Carried {
+    /// Its file among the release's assets.
+    pub fn file(self) -> &'static str {
+        match self {
+            Self::LockPages => "lock-pages.elf",
+            Self::PrepareChip => "prepare-chip.elf",
+            Self::Trial => "trial.elf",
+        }
+    }
+
+    fn words(self) -> &'static str {
+        match self {
+            Self::LockPages => "the lock image",
+            Self::PrepareChip => "the prepare image",
+            Self::Trial => "the trial image",
+        }
+    }
+}
+
+/// The images a board takes before its first burn, each a step of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BeforeTheDigest {
+    PrepareChip,
+    Trial,
+}
+
+impl BeforeTheDigest {
+    fn of(kind: Kind) -> Option<Self> {
+        match kind {
+            Kind::PrepareChip => Some(Self::PrepareChip),
+            Kind::TrialImage => Some(Self::Trial),
+            _other => None,
+        }
+    }
+
+    fn carried(self) -> Carried {
+        match self {
+            Self::PrepareChip => Carried::PrepareChip,
+            Self::Trial => Carried::Trial,
+        }
+    }
+
+    /// What the person does once the board has answered.
+    fn then(self) -> &'static str {
+        match self {
+            Self::PrepareChip => {
+                "Unplug the board, hold BOOTSEL, plug it in again and read it, then start the trial \
+                 image: its try-run says whether the chip now tests its PTRNG"
+            }
+            Self::Trial => {
+                "Its try-run is next, from this phone: tap Check again, then Try the install, and go \
+                 on only if every step says OK. Then unplug the board, hold BOOTSEL, plug it in again \
+                 and read it"
+            }
+        }
+    }
 }
 
 /// How a board came back after a reboot.
@@ -78,14 +154,30 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::LockBootPages => "Lock the boot pages",
         Kind::CheckChangedImage => "Check that a changed image is refused",
         Kind::LockPages => "Lock the digest and rollback pages, from a one-time image",
+        Kind::PrepareChip => "Prepare the chip: its random-number self-test on, for good",
+        Kind::TrialImage => "Start the trial image, for the try-run",
         Kind::Unspecified => "no step",
     }
 }
 
-/// Loading flash can be done again; every other step writes OTP, the first boot included (it records
-/// the image's rollback version).
+/// Whether a step can never be undone. Flash can be loaded again, so loading an image, the trial
+/// image included, and the changed-image check can; every other step writes OTP, the first boot
+/// included (it records the image's rollback version), and the prepare image writes the chip.
 fn permanent(kind: Kind) -> bool {
-    kind != Kind::LoadImage
+    !matches!(
+        kind,
+        Kind::LoadImage | Kind::TrialImage | Kind::CheckChangedImage | Kind::Unspecified
+    )
+}
+
+/// An action the board takes now besides its next step, as the person is offered it.
+fn offered_step(kind: Kind) -> pb::AnchorBoardStep {
+    pb::AnchorBoardStep {
+        kind: kind as i32,
+        state: State::Next as i32,
+        permanent: permanent(kind),
+        name: kind_name(kind).to_string(),
+    }
 }
 
 fn burn_kind(burn: Burn) -> Kind {
@@ -113,8 +205,8 @@ fn is_chip_id(chip_id: &str) -> bool {
     chip_id.len() == 16 && chip_id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// A board read: where it stands, the step it needs next (none once every step is done), and why
-/// the procedure cannot go on from BOOTSEL, if it cannot.
+/// A board read: where it stands, the step it needs next (none once every step is done), what it
+/// takes besides, and why the procedure cannot go on from BOOTSEL, if it cannot.
 struct Read {
     standing: Standing,
     next: Option<Kind>,
@@ -123,6 +215,10 @@ struct Read {
     /// This board's bootloader may not write a page lock the lock image sets: its procedure goes
     /// through the lock image, after the digest.
     via_lock_image: bool,
+    /// What it takes now besides its next step: the prepare and the trial image while its digest is
+    /// blank and it is not locked down, the changed-image check while its first boot is next. None on
+    /// a board the procedure cannot finish.
+    offered: Vec<Kind>,
 }
 
 /// The lock pages, 62 and 63: an A2 bootrom guards every page's lock row by one of them.
@@ -198,12 +294,22 @@ fn read_board<L: BootselLink>(
             }
         }
     };
+    let mut offered = Vec::new();
+    if blocked.is_none() {
+        if standing.digest == otp_burn::Hash32::Blank && !standing.locked_down {
+            offered.extend([Kind::PrepareChip, Kind::TrialImage]);
+        }
+        if next == Some(Kind::Boot) {
+            offered.push(Kind::CheckChangedImage);
+        }
+    }
     Ok(Read {
         standing,
         next,
         found,
         blocked,
         via_lock_image,
+        offered,
     })
 }
 
@@ -242,6 +348,35 @@ fn steps(read: &Read) -> Vec<pb::AnchorBoardStep> {
         .collect()
 }
 
+/// What the board said when asked how it stands. The prepare image answers every request as an
+/// anchor that did not come up, with how preparing the chip went: the trial image's try-run after it
+/// is what proves the chip took the change. The trial image comes up as an anchor with nothing
+/// installed. Any other answer is not that image's, and stops the step.
+fn heard(image: BeforeTheDigest, status: &wire::ApplianceResponse) -> Result<String, String> {
+    let words = image.carried().words();
+    if status.ok {
+        return Err(format!(
+            "the board answers as an installed anchor, which {words} never is"
+        ));
+    }
+    match (image, status.error) {
+        (BeforeTheDigest::PrepareChip, err::NOT_UP) => {
+            Ok(format!("the prepare image says: {}", status.detail))
+        }
+        (BeforeTheDigest::Trial, err::NOT_PROVISIONED) => {
+            Ok("the trial image is up, with nothing installed on it".to_string())
+        }
+        (BeforeTheDigest::Trial, err::NOT_UP) => Err(format!(
+            "the trial image did not come up: {}",
+            status.detail
+        )),
+        (_either, code) => Err(format!(
+            "the board answered error {code} ({}), which is not {words}'s answer",
+            status.detail
+        )),
+    }
+}
+
 fn release_words(release: &Release) -> String {
     format!(
         "the production release this app carries: a signed image of {} bytes",
@@ -271,11 +406,16 @@ impl<P: BoardPort> BoardSetup<P> {
             release: release_words(release),
             ..Default::default()
         };
-        match read_board(boot, release, &self.port.lock_image()) {
+        match read_board(boot, release, &self.port.image(Carried::LockPages)) {
             Ok(read) => {
                 let mut answer = pb::AnchorBoardResponse {
                     steps: steps(&read),
                     done: read.next.is_none(),
+                    offered: read
+                        .offered
+                        .iter()
+                        .map(|kind| offered_step(*kind))
+                        .collect(),
                     found: read.found,
                     ..base
                 };
@@ -386,7 +526,7 @@ impl<P: BoardPort> BoardSetup<P> {
         };
         let started = self
             .port
-            .lock_image()
+            .image(Carried::LockPages)
             .and_then(|image| otp_burn::boot_lock_image(&mut boot, release, &image));
         if let Err(why) = started {
             let mut answer = self.answer(&mut boot, chip_id, release);
@@ -446,6 +586,94 @@ impl<P: BoardPort> BoardSetup<P> {
         }
     }
 
+    /// The prepare or the trial image's step: the image loaded, read back whole and started, and the
+    /// board, back as the DSM Anchor, asked how it stands. Out of BOOTSEL after it, the board has
+    /// nothing to read: the person puts it back in BOOTSEL for what comes next.
+    fn start_before_the_digest(
+        &self,
+        mut boot: Picoboot<P::Link>,
+        chip_id: &str,
+        release: &Release,
+        image: BeforeTheDigest,
+    ) -> pb::AnchorBoardResponse {
+        let carried = image.carried();
+        let bytes = match self.port.image(carried) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                let mut answer = self.answer(&mut boot, chip_id, release);
+                answer.refused = format!("this app does not carry {}: {why}", carried.words());
+                return answer;
+            }
+        };
+        if let Err(why) = otp_burn::boot_before_the_digest(&mut boot, &bytes) {
+            let mut answer = self.answer(&mut boot, chip_id, release);
+            answer.refused = why;
+            return answer;
+        }
+        // The board is restarting: its link goes with it.
+        drop(boot);
+        let mut answer = pb::AnchorBoardResponse {
+            chip_id: chip_id.to_string(),
+            release: release_words(release),
+            written: vec![format!(
+                "flash: {}, {} bytes, read back whole, and the board started it",
+                carried.words(),
+                bytes.len()
+            )],
+            ..Default::default()
+        };
+        match self.port.wait_for_return(chip_id) {
+            Err(why) => {
+                answer.refused = format!(
+                    "the board did not come back after {}: {why}. Unplug it, hold BOOTSEL, plug it \
+                     in again, and read it",
+                    carried.words()
+                );
+            }
+            Ok(Returned::Bootsel) => {
+                answer.refused = format!(
+                    "the board came back in BOOTSEL: it did not run {}. Read it again",
+                    carried.words()
+                );
+            }
+            Ok(Returned::AsAnchor) => match self.status_of_the_anchor() {
+                Ok(status) => match heard(image, &status) {
+                    Ok(said) => {
+                        answer.written.push(said);
+                        answer.written.push(image.then().to_string());
+                    }
+                    Err(why) => answer.refused = why,
+                },
+                Err(why) => {
+                    answer.refused = format!(
+                        "the board came back running {}, and its answer did not come: {why}",
+                        carried.words()
+                    );
+                }
+            },
+        }
+        answer
+    }
+
+    /// `OP_STATUS` to the board running as the DSM Anchor: its answer, refused or not. A link the app
+    /// held to the board before it restarted fails once and is opened again, so the request goes out
+    /// at most twice.
+    fn status_of_the_anchor(&self) -> Result<wire::ApplianceResponse, String> {
+        let request = wire::ApplianceRequest {
+            op: wire::Op::Status as i32,
+            ..Default::default()
+        };
+        let frame = request_frame(&request, &[]);
+        let first = match self.port.anchor_exchange(frame.clone()) {
+            Ok(body) => return answer_to(request.op, &body),
+            Err(why) => why,
+        };
+        match self.port.anchor_exchange(frame) {
+            Ok(body) => answer_to(request.op, &body),
+            Err(again) => Err(format!("{first}; asked again: {again}")),
+        }
+    }
+
     /// The board back in BOOTSEL after a reboot: its link opened again, and the same chip.
     fn reopen(&self, chip_id: &str) -> Result<Picoboot<P::Link>, String> {
         let (link, id) = self.port.open()?;
@@ -492,6 +720,11 @@ impl<P: BoardPort> BoardSetup<P> {
             // So does the lock image's step: `lock_pages` runs it.
             Kind::LockPages => Err(
                 "the lock image's step runs on its own, across the board's reboot".to_string(),
+            ),
+            // And the images before the first burn: `start_before_the_digest` runs them.
+            Kind::PrepareChip | Kind::TrialImage => Err(
+                "an image before the first burn runs on its own, across the board's restart"
+                    .to_string(),
             ),
             Kind::Unspecified => Err("no step was named".to_string()),
         }
@@ -579,23 +812,24 @@ impl<P: BoardPort> dsm_sdk::bridge::AnchorBoardSetup for BoardSetup<P> {
             answer.refused = format!("step {} is not one this app knows", request.step);
             return answer;
         };
-        let due = match read_board(&mut boot, &release, &self.port.lock_image()) {
-            Ok(Read {
-                blocked: Some(why), ..
-            }) => {
-                let mut answer = self.answer(&mut boot, &chip_id, &release);
-                answer.refused = format!("nothing was written: {why}");
-                return answer;
-            }
-            Ok(read) => read.next,
-            Err(why) => {
-                let mut answer = self.answer(&mut boot, &chip_id, &release);
-                answer.refused = why;
-                return answer;
-            }
-        };
+        let (due, offered) =
+            match read_board(&mut boot, &release, &self.port.image(Carried::LockPages)) {
+                Ok(Read {
+                    blocked: Some(why), ..
+                }) => {
+                    let mut answer = self.answer(&mut boot, &chip_id, &release);
+                    answer.refused = format!("nothing was written: {why}");
+                    return answer;
+                }
+                Ok(read) => (read.next, read.offered),
+                Err(why) => {
+                    let mut answer = self.answer(&mut boot, &chip_id, &release);
+                    answer.refused = why;
+                    return answer;
+                }
+            };
         if step == Kind::CheckChangedImage {
-            if due != Some(Kind::Boot) {
+            if !offered.contains(&step) {
                 let mut answer = self.answer(&mut boot, &chip_id, &release);
                 answer.refused = "the changed-image check comes after the lockdown and before the \
                                   first boot; nothing was written"
@@ -603,6 +837,18 @@ impl<P: BoardPort> dsm_sdk::bridge::AnchorBoardSetup for BoardSetup<P> {
                 return answer;
             }
             return self.check_changed_image(boot, &chip_id, &release);
+        }
+        if let Some(image) = BeforeTheDigest::of(step) {
+            if !offered.contains(&step) {
+                let mut answer = self.answer(&mut boot, &chip_id, &release);
+                answer.refused = format!(
+                    "{} runs only while the board's firmware digest is not burned and it is not \
+                     locked down, on a board the procedure can finish; nothing was written",
+                    kind_name(step)
+                );
+                return answer;
+            }
+            return self.start_before_the_digest(boot, &chip_id, &release, image);
         }
         if step == Kind::LockPages {
             if due != Some(Kind::LockPages) {
@@ -879,10 +1125,19 @@ pub mod jni_port {
             )
         }
 
-        /// The lock image, built from `crates/dsm-anchor-lock-pages` into the app's assets by
-        /// `scripts/anchor-release-into-app.sh`.
-        fn lock_image(&self) -> Result<Vec<u8>, String> {
-            crate::release::flatten_elf(&release_file("lock-pages.elf")?)
+        /// An image `scripts/anchor-release-into-app.sh` built into the app's assets.
+        fn image(&self, image: super::Carried) -> Result<Vec<u8>, String> {
+            crate::release::flatten_elf(&release_file(image.file())?)
+        }
+
+        /// One request over the wallet's own link to the board as the DSM Anchor
+        /// (`Unified.picoUsbTransceive`), once Android lets DSM use it (`Unified.anchorPermitted`,
+        /// which asks once and waits for the person's Allow).
+        fn anchor_exchange(&self, frame: Vec<u8>) -> Result<Vec<u8>, String> {
+            match call_int("anchorPermitted")? {
+                0 => crate::usb_pico::jni_usb_transceive(frame).map_err(|e| e.to_string()),
+                _refused => Err(last_error()),
+            }
         }
 
         fn wait_for_return(&self, chip_id: &str) -> Result<super::Returned, String> {

@@ -57,22 +57,31 @@ fn exchange_with_tail(
     req: pb::ApplianceRequest,
     tail: &[u8],
 ) -> Result<pb::ApplianceResponse, DsmError> {
-    let op = req.op;
-    let mut body = encode_request(&req);
+    let resp_body = usb(request_frame(&req, tail))?;
+    answer_to(req.op, &resp_body).map_err(DsmError::invalid_operation)
+}
+
+/// A request as the wire carries it: `LE32(len) ++ ApplianceRequest`, with `tail` after its message.
+pub(crate) fn request_frame(req: &pb::ApplianceRequest, tail: &[u8]) -> Vec<u8> {
+    let mut body = encode_request(req);
     body.extend_from_slice(tail);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
-    let resp_body = usb(frame)?;
-    let resp = decode_response(&resp_body).map_err(|e| {
-        DsmError::invalid_operation(format!("anchor appliance: decode response: {e:?}"))
-    })?;
+    frame
+}
+
+/// The answer to op `op` that `body` holds, refused or not. An answer to another op is a stream out
+/// of step, never this op's answer: an undecodable frame's refusal alone carries no op.
+pub(crate) fn answer_to(op: i32, body: &[u8]) -> Result<pb::ApplianceResponse, String> {
+    let resp =
+        decode_response(body).map_err(|e| format!("anchor appliance: decode response: {e:?}"))?;
     if resp.op == op || (resp.op == pb::Op::Unspecified as i32 && !resp.ok) {
         return Ok(resp);
     }
-    Err(DsmError::invalid_operation(format!(
+    Err(format!(
         "anchor appliance: op {op} was answered as op {} (the stream is out of step)",
         resp.op
-    )))
+    ))
 }
 
 /// One appliance op that must succeed: fail closed unless the chip reported `ok`. Free function so

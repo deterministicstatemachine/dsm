@@ -2263,7 +2263,7 @@ enum AnchorBoardStepKind {
   ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES = 8; // Step 9b: the boot pages locked, back in BOOTSEL
   // Step 9's check, after the lockdown and before the first boot: the release's image with one byte
   // of its code changed is loaded and booted, the board must come back in BOOTSEL, and the signed
-  // image is loaded back. Not a burn, and never listed among the steps.
+  // image is loaded back. Not a burn, and never listed among the steps: `offered` names it then.
   ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE = 9;
   // Steps 6 and 9b's page locks on a board whose bootloader may not write them (an RP2350 A2 with page
   // 63 closed to it): the lock image (crates/dsm-anchor-lock-pages) is loaded and started after the
@@ -2271,6 +2271,20 @@ enum AnchorBoardStepKind {
   // back in BOOTSEL; the rows are read back and the signed image loaded again. Listed in place of Step
   // 6 on such a board.
   ANCHOR_BOARD_STEP_KIND_LOCK_PAGES = 10;
+  // Before the board's first burn (its firmware digest blank, its lockdown not done), an image the app
+  // carries is loaded into flash and started; the board comes back as the DSM Anchor and is asked how
+  // it stands, and its answer is reported. Flash only, on the board: Step 3 loads the signed image over
+  // it. Neither image is signed, and neither is listed among the steps: `offered` names them while they
+  // may run. The owner's message, 2026-11-12: "The entire appliance setup must work from an Android
+  // phone, without a Mac or any other computer."
+  //
+  // The prepare image (the secure monitor built with `prepare_chip`): on a test part whose PTRNG Tropic
+  // Square left unconfigured, it clears CFG_START_UP[RNGTEST_DIS], for good, and erases any key the chip
+  // made before; it answers every request with how that went. Permanent on the chip.
+  ANCHOR_BOARD_STEP_KIND_PREPARE_CHIP = 11;
+  // The trial image (the secure monitor built with `bench_self_enroll`): an anchor that installs
+  // nothing permanent, for the try-run on this very board from the wallet (`anchor.tryRun`).
+  ANCHOR_BOARD_STEP_KIND_TRIAL_IMAGE = 12;
 }
 
 enum AnchorBoardStepState {
@@ -2297,8 +2311,14 @@ message AnchorBoardResponse {
   repeated AnchorBoardStep steps = 4;
   string refused         = 5;  // why the setup cannot go on, or why the last step stopped
   repeated string found  = 6;  // what the read-only check found beyond blank (lock rows already set)
-  repeated string written = 7; // the last step's rows, each confirmed by its read-back
+  // What the last step did: each row and byte it wrote, confirmed by its read-back, and what the board
+  // answered after it.
+  repeated string written = 7;
   bool   done            = 8;  // every step is done: the board goes on to its install
+  // What the board takes now besides its next step, each on its own and each with its name and whether
+  // it can be undone (its state NEXT): the prepare and the trial image before its first burn, and the
+  // changed-image check before its first boot.
+  repeated AnchorBoardStep offered = 9;
 }
 
 // `anchor.board.step`: run the board's next step. The person types back the chip id the board read

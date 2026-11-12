@@ -816,6 +816,70 @@ jobs:
   # live fleet; they compile here and are excluded by runner argument. The app
   # loads libdsm_sdk.so, so the SDK library is built first for every packaged ABI.
   # --------------------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # The phone's anchor glue (crates/dsm-android-anchor), the library the APK
+  # ships: excluded from the root workspace with its own Cargo.lock, so
+  # `cargo test --workspace` never sees it, and the Android jobs build the plain
+  # dsm_sdk library (`make android-libs`). Nothing else compiles it. Its host
+  # tests are the board setup's procedure against a model of the RP2350
+  # bootloader that keeps OTP's rules, the images it starts before the first
+  # burn included, and the USB appliance client; the Android build compiles
+  # what only an Android target has, the JNI port to Kotlin.
+  # --------------------------------------------------------------------------
+  phone-anchor:
+    name: Phone anchor glue (host tests, Android build)
+    needs: [select]
+    if: needs.select.outputs.jni_android == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/dsm-android-anchor
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+        with:
+          targets: aarch64-linux-android
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: crates/dsm-android-anchor
+
+      - name: Install CI system deps
+        # The dsm build script compiles the protocol with prost, which needs
+        # protoc, as in every other Rust job.
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: dsm-android-anchor tests (host)
+        run: |
+          cargo test --release --locked --lib
+          cargo fmt --check
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked --version 4.1.2
+
+      - name: Accept SDK licenses (NDK download)
+        working-directory: .
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Install the NDK version Gradle pins
+        working-directory: .
+        run: |
+          NDK_VERSION="$(sed -n 's/.*ndkVersion = "\([^"]*\)".*/\1/p' dsm_client/android/app/build.gradle.kts | head -1)"
+          test -n "$NDK_VERSION"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          test -d "$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: dsm-android-anchor builds for Android (arm64-v8a, as it ships)
+        run: |
+          DSM_PROTO_ROOT="$GITHUB_WORKSPACE/proto" cargo ndk -t arm64-v8a --platform 23 \
+            build --release --locked --features on_device_installs
+
   android-instrumented-tests:
     name: Android Instrumented Tests (managed device)
     needs: [select]

@@ -322,8 +322,9 @@ fn the_image_on_the_board_is_read_back_whole() {
 
 // ---- The board setup the wallet drives (`anchor.board.read` / `anchor.board.step`) ----
 
-use crate::board_setup::{BoardPort, BoardSetup, Returned};
+use crate::board_setup::{BoardPort, BoardSetup, Carried, Returned};
 use crate::picoboot::BootselLink;
+use anchor_core::service::err;
 use dsm::types::proto as pb;
 use dsm_sdk::bridge::AnchorBoardSetup;
 use std::sync::{Arc, Mutex};
@@ -361,16 +362,38 @@ impl BootselLink for OnUsb {
 
 struct Phone {
     board: OnUsb,
-    /// The lock image the app carries, its flash bytes, or none.
-    lock_image: Option<Vec<u8>>,
+    /// The images the app carries besides the release, their flash bytes.
+    carried: Vec<(Carried, Vec<u8>)>,
 }
 
-/// The lock image's flash bytes for the model: an image of its own at flash's first byte, which the
-/// model recognises in flash when the board starts ([`BootromModel::lock_image`]).
-fn lock_image() -> Vec<u8> {
-    let code: Vec<u8> = (0..700u32).map(|i| (0x4c + i * 13) as u8).collect();
+/// An image of its own at flash's first byte, its code drawn from `seed`: what the model recognises
+/// in flash when the board starts.
+fn image_at_flash(seed: u32, len: u32) -> Vec<u8> {
+    let code: Vec<u8> = (0..len).map(|i| (seed + i * 13) as u8).collect();
     flatten_elf(&elf(&[(FLASH_BASE, &code)])).expect("an image at flash's first byte")
 }
+
+/// The lock image's flash bytes for the model ([`BootromModel::lock_image`]).
+fn lock_image() -> Vec<u8> {
+    image_at_flash(0x4c, 700)
+}
+
+/// The prepare image's flash bytes for the model ([`BootromModel::prepare_image`]).
+fn prepare_image() -> Vec<u8> {
+    image_at_flash(0x51, 900)
+}
+
+/// The trial image's flash bytes for the model ([`BootromModel::trial_image`]).
+fn trial_image() -> Vec<u8> {
+    image_at_flash(0x77, 1100)
+}
+
+/// What the prepare image answers every request with once it has configured a T103's PTRNG: the
+/// chip's description (shortened here to the part and firmware the boards in hand read), then the
+/// outcome in the secure monitor's words (`InitFailure::Prepared`).
+const PREPARED: &str =
+    "the chip is TR01-C2P-T103, firmware 0.3.1. Its PTRNG is now configured and \
+                        tested at every start-up. Load the trial image";
 
 impl BoardPort for Phone {
     type Link = OnUsb;
@@ -380,10 +403,12 @@ impl BoardPort for Phone {
     fn release(&self) -> Result<Release, String> {
         Ok(release())
     }
-    fn lock_image(&self) -> Result<Vec<u8>, String> {
-        self.lock_image
-            .clone()
-            .ok_or_else(|| "the app carries no anchor-release/lock-pages.elf".to_string())
+    fn image(&self, image: Carried) -> Result<Vec<u8>, String> {
+        self.carried
+            .iter()
+            .find(|(carried, _bytes)| *carried == image)
+            .map(|(_carried, bytes)| bytes.clone())
+            .ok_or_else(|| format!("the app carries no anchor-release/{}", image.file()))
     }
     fn secret(&self) -> Result<[u8; 32], String> {
         Ok(SECRET)
@@ -395,28 +420,61 @@ impl BoardPort for Phone {
             LastBoot::NotYet => Err("the board never rebooted".to_string()),
         }
     }
+    /// The board as the DSM Anchor answers as the image it runs does, in the anchor's own wire bytes.
+    fn anchor_exchange(&self, frame: Vec<u8>) -> Result<Vec<u8>, String> {
+        let body = frame.get(4..).ok_or("a frame shorter than its length")?;
+        let request = anchor_core::proto::decode_request(body).map_err(|e| format!("{e:?}"))?;
+        match held(&self.board.0).running {
+            Some(Carried::PrepareChip) => Ok(anchor_core::service::refusal(
+                request.op,
+                err::NOT_UP,
+                PREPARED,
+            )),
+            Some(Carried::Trial) => Ok(anchor_core::service::refusal(
+                request.op,
+                err::NOT_PROVISIONED,
+                "the anchor is not provisioned",
+            )),
+            Some(Carried::LockPages) | None => Err("no DSM Anchor on USB".to_string()),
+        }
+    }
 }
 
-/// A phone whose app carries the lock image, and the board it is plugged into.
+/// A board that recognises the prepare and the trial image in its flash.
+fn with_images(mut model: BootromModel) -> BootromModel {
+    model.prepare_image = Some(prepare_image());
+    model.trial_image = Some(trial_image());
+    model
+}
+
+/// A phone whose app carries the lock, the prepare and the trial image, and the board it is plugged
+/// into.
 fn phone_with(mut model: BootromModel) -> (BoardSetup<Phone>, Arc<Mutex<BootromModel>>) {
     model.lock_image = Some(lock_image());
-    let board = Arc::new(Mutex::new(model));
+    let board = Arc::new(Mutex::new(with_images(model)));
     (
         BoardSetup::new(Phone {
             board: OnUsb(board.clone()),
-            lock_image: Some(lock_image()),
+            carried: vec![
+                (Carried::LockPages, lock_image()),
+                (Carried::PrepareChip, prepare_image()),
+                (Carried::Trial, trial_image()),
+            ],
         }),
         board,
     )
 }
 
-/// A phone whose app carries no lock image.
+/// A phone whose app carries the prepare and the trial image and no lock image.
 fn phone_without_lock_image(model: BootromModel) -> (BoardSetup<Phone>, Arc<Mutex<BootromModel>>) {
-    let board = Arc::new(Mutex::new(model));
+    let board = Arc::new(Mutex::new(with_images(model)));
     (
         BoardSetup::new(Phone {
             board: OnUsb(board.clone()),
-            lock_image: None,
+            carried: vec![
+                (Carried::PrepareChip, prepare_image()),
+                (Carried::Trial, trial_image()),
+            ],
         }),
         board,
     )
@@ -968,4 +1026,198 @@ fn a_board_whose_page_63_refuses_secure_writes_too_is_not_started() {
         answer.refused
     );
     assert_eq!(state_of(&answer, K::LoadImage), S::Blocked);
+}
+
+// ---- The prepare and the trial image, before the first burn (the owner's message, 2026-11-12: "The
+// entire appliance setup must work from an Android phone, without a Mac or any other computer.") ----
+
+/// The kinds a read offers besides the board's next step.
+fn offered_kinds(answer: &pb::AnchorBoardResponse) -> Vec<i32> {
+    answer.offered.iter().map(|offer| offer.kind).collect()
+}
+
+#[test]
+fn a_board_before_its_digest_is_offered_the_prepare_and_the_trial_image() {
+    use pb::AnchorBoardStepKind as K;
+    use pb::AnchorBoardStepState as S;
+    let (setup, _board) = phone_with(BootromModel::sealed_board());
+    let answer = setup.read();
+    assert_eq!(
+        offered_kinds(&answer),
+        vec![K::PrepareChip as i32, K::TrialImage as i32],
+        "{answer:?}"
+    );
+    let prepare = &answer.offered[0];
+    assert!(
+        prepare.permanent,
+        "the prepare image writes the chip for good"
+    );
+    assert!(
+        !answer.offered[1].permanent,
+        "the trial image is flash, loaded over at Step 3"
+    );
+    assert_eq!(
+        state_of(&answer, K::LoadImage),
+        S::Next,
+        "the signed image stays the next step"
+    );
+}
+
+#[test]
+fn the_phone_starts_the_prepare_image_and_says_what_the_board_answered() {
+    use pb::AnchorBoardStepKind as K;
+    let (setup, board) = phone_with(BootromModel::sealed_board());
+    let raw = held(&board).raw.clone();
+    let answer = setup.step(&step(K::PrepareChip, CHIP));
+    assert_eq!(answer.refused, "", "{answer:?}");
+    assert!(
+        held(&board).flash.starts_with(&prepare_image()),
+        "the prepare image is in flash"
+    );
+    assert_eq!(held(&board).rebooted, 1, "and the board was started on it");
+    assert_eq!(held(&board).raw, raw, "no OTP row was written");
+    assert!(
+        answer.written[0].contains("the prepare image") && answer.written[0].contains("read back"),
+        "{:?}",
+        answer.written
+    );
+    assert!(
+        answer.written.iter().any(|line| line.contains(PREPARED)),
+        "the board's own answer, word for word: {:?}",
+        answer.written
+    );
+    assert!(
+        answer
+            .written
+            .iter()
+            .any(|line| line.contains("start the trial image")),
+        "{:?}",
+        answer.written
+    );
+    assert!(
+        answer.steps.is_empty(),
+        "out of BOOTSEL, the board has nothing to read"
+    );
+}
+
+#[test]
+fn the_trial_image_comes_up_with_nothing_installed_and_the_signed_image_goes_over_it() {
+    use pb::AnchorBoardStepKind as K;
+    use pb::AnchorBoardStepState as S;
+    let (setup, board) = phone_with(BootromModel::sealed_board());
+    let raw = held(&board).raw.clone();
+    let answer = setup.step(&step(K::TrialImage, CHIP));
+    assert_eq!(answer.refused, "", "{answer:?}");
+    assert!(held(&board).flash.starts_with(&trial_image()));
+    assert_eq!(held(&board).raw, raw, "no OTP row was written");
+    assert!(
+        answer
+            .written
+            .iter()
+            .any(|line| line.contains("nothing installed")),
+        "{:?}",
+        answer.written
+    );
+    assert!(
+        answer
+            .written
+            .iter()
+            .any(|line| line.contains("Try the install")),
+        "{:?}",
+        answer.written
+    );
+    // Back in BOOTSEL after the try-run, the signed image is next, and goes over the trial image.
+    let read = setup.read();
+    assert_eq!(state_of(&read, K::LoadImage), S::Next, "{read:?}");
+    let loaded = setup.step(&step(K::LoadImage, CHIP));
+    assert_eq!(loaded.refused, "", "{loaded:?}");
+    let image = padded(&release());
+    assert_eq!(held(&board).flash[..image.len()], image[..]);
+}
+
+#[test]
+fn neither_image_is_offered_or_started_once_the_digest_is_burned() {
+    use pb::AnchorBoardStepKind as K;
+    let (setup, board) = phone_with(BootromModel::sealed_board());
+    for kind in [K::LoadImage, K::WriteDigest] {
+        let answer = setup.step(&step(kind, CHIP));
+        assert_eq!(answer.refused, "", "{kind:?}: {answer:?}");
+    }
+    let read = setup.read();
+    assert!(
+        !offered_kinds(&read).contains(&(K::PrepareChip as i32))
+            && !offered_kinds(&read).contains(&(K::TrialImage as i32)),
+        "{read:?}"
+    );
+    let flash = held(&board).flash.clone();
+    for kind in [K::PrepareChip, K::TrialImage] {
+        let refused = setup.step(&step(kind, CHIP));
+        assert!(
+            refused
+                .refused
+                .contains("runs only while the board's firmware digest is not burned"),
+            "{kind:?}: {}",
+            refused.refused
+        );
+    }
+    assert_eq!(held(&board).flash, flash, "the flash is as it was");
+    assert_eq!(held(&board).rebooted, 0, "nothing was started");
+}
+
+#[test]
+fn the_procedure_itself_starts_no_image_on_a_board_whose_digest_is_burned() {
+    let mut model = with_images(BootromModel::sealed_board());
+    digest_burned(&mut model, &release());
+    let flash = model.flash.clone();
+    let mut pb = Picoboot::connect(model).expect("connect");
+    let refused = crate::otp_burn::boot_before_the_digest(&mut pb, &trial_image())
+        .expect_err("the digest is burned");
+    assert!(refused.contains("nothing was written"), "{refused}");
+    let model = pb_model(&mut pb);
+    assert_eq!(model.flash, flash, "the flash is as it was");
+    assert_eq!(model.rebooted, 0, "nothing was started");
+}
+
+#[test]
+fn a_board_the_procedure_cannot_finish_is_offered_neither_image() {
+    use pb::AnchorBoardStepKind as K;
+    let (setup, board) =
+        phone_without_lock_image(lock_pages_as_yellow_holds_them(BootromModel::sealed_board()));
+    let read = setup.read();
+    assert!(read.offered.is_empty(), "{read:?}");
+    let refused = setup.step(&step(K::PrepareChip, CHIP));
+    assert!(
+        refused.refused.contains("nothing was written"),
+        "{}",
+        refused.refused
+    );
+    assert_eq!(held(&board).rebooted, 0, "nothing was started");
+}
+
+#[test]
+fn the_changed_image_check_is_offered_only_at_the_first_boot() {
+    use pb::AnchorBoardStepKind as K;
+    let (setup, _board) = locked_down(None);
+    assert_eq!(
+        offered_kinds(&setup.read()),
+        vec![K::CheckChangedImage as i32]
+    );
+}
+
+#[test]
+fn an_app_without_the_prepare_image_says_so_and_writes_nothing() {
+    use pb::AnchorBoardStepKind as K;
+    let board = Arc::new(Mutex::new(with_images(BootromModel::sealed_board())));
+    let setup = BoardSetup::new(Phone {
+        board: OnUsb(board.clone()),
+        carried: vec![(Carried::Trial, trial_image())],
+    });
+    let flash = held(&board).flash.clone();
+    let refused = setup.step(&step(K::PrepareChip, CHIP));
+    assert!(
+        refused.refused.contains("does not carry the prepare image"),
+        "{}",
+        refused.refused
+    );
+    assert_eq!(held(&board).flash, flash, "the flash is as it was");
 }

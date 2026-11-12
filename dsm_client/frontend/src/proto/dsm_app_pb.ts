@@ -744,7 +744,7 @@ export enum AnchorBoardStepKind {
   /**
    * Step 9's check, after the lockdown and before the first boot: the release's image with one byte
    * of its code changed is loaded and booted, the board must come back in BOOTSEL, and the signed
-   * image is loaded back. Not a burn, and never listed among the steps.
+   * image is loaded back. Not a burn, and never listed among the steps: `offered` names it then.
    *
    * @generated from enum value: ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE = 9;
    */
@@ -760,6 +760,30 @@ export enum AnchorBoardStepKind {
    * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOCK_PAGES = 10;
    */
   LOCK_PAGES = 10,
+
+  /**
+   * Before the board's first burn (its firmware digest blank, its lockdown not done), an image the app
+   * carries is loaded into flash and started; the board comes back as the DSM Anchor and is asked how
+   * it stands, and its answer is reported. Flash only, on the board: Step 3 loads the signed image over
+   * it. Neither image is signed, and neither is listed among the steps: `offered` names them while they
+   * may run. The owner's message, 2026-11-12: "The entire appliance setup must work from an Android
+   * phone, without a Mac or any other computer."
+   *
+   * The prepare image (the secure monitor built with `prepare_chip`): on a test part whose PTRNG Tropic
+   * Square left unconfigured, it clears CFG_START_UP[RNGTEST_DIS], for good, and erases any key the chip
+   * made before; it answers every request with how that went. Permanent on the chip.
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_PREPARE_CHIP = 11;
+   */
+  PREPARE_CHIP = 11,
+
+  /**
+   * The trial image (the secure monitor built with `bench_self_enroll`): an anchor that installs
+   * nothing permanent, for the try-run on this very board from the wallet (`anchor.tryRun`).
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_TRIAL_IMAGE = 12;
+   */
+  TRIAL_IMAGE = 12,
 }
 // Retrieve enum metadata with: proto3.getEnumType(AnchorBoardStepKind)
 proto3.util.setEnumType(AnchorBoardStepKind, "dsm.AnchorBoardStepKind", [
@@ -774,6 +798,8 @@ proto3.util.setEnumType(AnchorBoardStepKind, "dsm.AnchorBoardStepKind", [
   { no: 8, name: "ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES" },
   { no: 9, name: "ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE" },
   { no: 10, name: "ANCHOR_BOARD_STEP_KIND_LOCK_PAGES" },
+  { no: 11, name: "ANCHOR_BOARD_STEP_KIND_PREPARE_CHIP" },
+  { no: 12, name: "ANCHOR_BOARD_STEP_KIND_TRIAL_IMAGE" },
 ]);
 
 /**
@@ -14342,7 +14368,8 @@ export class AnchorBoardResponse extends Message<AnchorBoardResponse> {
   found: string[] = [];
 
   /**
-   * the last step's rows, each confirmed by its read-back
+   * What the last step did: each row and byte it wrote, confirmed by its read-back, and what the board
+   * answered after it.
    *
    * @generated from field: repeated string written = 7;
    */
@@ -14354,6 +14381,15 @@ export class AnchorBoardResponse extends Message<AnchorBoardResponse> {
    * @generated from field: bool done = 8;
    */
   done = false;
+
+  /**
+   * What the board takes now besides its next step, each on its own and each with its name and whether
+   * it can be undone (its state NEXT): the prepare and the trial image before its first burn, and the
+   * changed-image check before its first boot.
+   *
+   * @generated from field: repeated dsm.AnchorBoardStep offered = 9;
+   */
+  offered: AnchorBoardStep[] = [];
 
   constructor(data?: PartialMessage<AnchorBoardResponse>) {
     super();
@@ -14371,6 +14407,7 @@ export class AnchorBoardResponse extends Message<AnchorBoardResponse> {
     { no: 6, name: "found", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 7, name: "written", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 8, name: "done", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 9, name: "offered", kind: "message", T: AnchorBoardStep, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorBoardResponse {

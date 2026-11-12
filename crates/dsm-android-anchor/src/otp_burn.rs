@@ -918,12 +918,17 @@ pub fn burn<L: BootselLink>(
 pub const SECTOR: usize = 4096;
 pub const PAGE: usize = 256;
 
-/// The release's image in flash, from its first byte: padded with zeros to whole pages, as picotool
-/// leaves it.
-fn padded_image(release: &Release) -> Vec<u8> {
-    let mut image = release.image.clone();
+/// An image's bytes as flash holds them from its first byte: padded with zeros to whole pages, as
+/// picotool leaves them.
+fn padded(image: &[u8]) -> Vec<u8> {
+    let mut image = image.to_vec();
     image.resize(image.len().div_ceil(PAGE) * PAGE, 0);
     image
+}
+
+/// The release's image in flash ([`padded`]).
+fn padded_image(release: &Release) -> Vec<u8> {
+    padded(&release.image)
 }
 
 /// Bytes into flash from its first byte, erased first in whole sectors, then read back whole.
@@ -988,9 +993,29 @@ pub fn boot_lock_image<L: BootselLink>(
     if !lock_image_covers(&otp, bootrom, &barred)? {
         return Err(barred_words(&barred));
     }
-    let mut image = lock_image.to_vec();
-    image.resize(image.len().div_ceil(PAGE) * PAGE, 0);
-    write_flash(pb, &image)?;
+    write_flash(pb, &padded(lock_image))?;
+    pb.reboot_normal().map_err(|e| e.to_string())
+}
+
+/// An image the app carries for a board's first burn to wait on (the prepare image or the trial
+/// image, their flash bytes from the app) loaded into flash, read back whole, and started. Only on a
+/// board whose digest is blank and which is not locked down: neither image is signed, and the trial
+/// image refuses a board whose digest is burned. Flash only, on the board: Step 3 loads the signed
+/// image over it.
+pub fn boot_before_the_digest<L: BootselLink>(
+    pb: &mut Picoboot<L>,
+    image: &[u8],
+) -> Result<(), String> {
+    let otp = OtpReading::read(pb).map_err(|e| e.to_string())?;
+    let standing = Standing::read(pb, &otp)?;
+    if standing.digest != Hash32::Blank || standing.locked_down {
+        return Err(
+            "this image runs only on a board whose firmware digest is not yet burned and which is \
+             not locked down: nothing was written"
+                .to_string(),
+        );
+    }
+    write_flash(pb, &padded(image))?;
     pb.reboot_normal().map_err(|e| e.to_string())
 }
 

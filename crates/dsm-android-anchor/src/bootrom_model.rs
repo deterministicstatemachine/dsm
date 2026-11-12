@@ -10,6 +10,7 @@
 //! by sector and written by page, and a reboot into a signed image records its rollback version, as
 //! the bootrom's first boot of one does.
 
+use crate::board_setup::Carried;
 use crate::otp_burn::{
     lock0, lock1, BOOTROM_HEADER, BOOT_FLAGS0_ROW, DIGEST_ROW, LOCK_IMAGE_ROWS, PAGES, PAGE_ROWS,
     ROLLBACK_ROW, ROWS,
@@ -78,6 +79,13 @@ pub struct BootromModel {
     /// flash on a board whose secure boot is off, it does what that image does
     /// ([`Self::run_lock_image`]) and reboots into BOOTSEL.
     pub lock_image: Option<Vec<u8>>,
+    /// The prepare and the trial image's flash bytes, as the phone loads them: started from flash on a
+    /// board whose secure boot is off, each comes up as the DSM Anchor ([`Self::running`]).
+    pub prepare_image: Option<Vec<u8>>,
+    pub trial_image: Option<Vec<u8>>,
+    /// Which of those two the board runs as the DSM Anchor since its last start: none after a start on
+    /// anything else.
+    pub running: Option<Carried>,
 }
 
 /// How a reboot went.
@@ -135,7 +143,25 @@ impl BootromModel {
             bootrom_version: 2,
             soft_locks: None,
             lock_image: None,
+            prepare_image: None,
+            trial_image: None,
+            running: None,
         }
+    }
+
+    /// The prepare or the trial image, where flash starts with one.
+    fn anchor_image_in_flash(&self) -> Option<Carried> {
+        [
+            (Carried::PrepareChip, &self.prepare_image),
+            (Carried::Trial, &self.trial_image),
+        ]
+        .into_iter()
+        .find_map(|(carried, image)| {
+            image
+                .as_ref()
+                .filter(|bytes| self.flash.starts_with(bytes.as_slice()))
+                .map(|_held| carried)
+        })
     }
 
     /// What the lock image does, as Secure code at a normal boot: each row it writes, only where the
@@ -274,6 +300,7 @@ impl BootromModel {
     /// `ROLLBACK_REQUIRED`.
     fn boot_signed_image(&mut self) {
         let secure = self.raw[0x40] & 1 != 0;
+        self.running = None;
         // The lock image is never signed: it runs only where secure boot is off.
         let lock_image_in_flash = self
             .lock_image
@@ -282,6 +309,12 @@ impl BootromModel {
         if !secure && lock_image_in_flash {
             self.run_lock_image();
             self.last_boot = LastBoot::BackToBootsel;
+            return;
+        }
+        // Nor are the prepare and the trial image: each comes up as the DSM Anchor.
+        if let Some(started) = self.anchor_image_in_flash().filter(|_image| !secure) {
+            self.running = Some(started);
+            self.last_boot = LastBoot::Ran;
             return;
         }
         self.last_boot = match &self.signed_image {

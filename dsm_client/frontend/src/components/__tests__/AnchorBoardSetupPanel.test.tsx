@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! A board's one-time setup from the phone: the panel shows what Rust read off the board, offers only
-//! the step Rust names next, and sends it only once the chip's last four characters are typed back,
-//! with the chip id the board read named. The real bridge code runs here over a host that answers each
-//! route as the SDK does, and keeps what it was asked.
+//! the step Rust names next and the actions Rust offers beside it, and sends one only once the chip's
+//! last four characters are typed back, with the chip id the board read named. The real bridge code
+//! runs here over a host that answers each route as the SDK does, and keeps what it was asked.
 
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -58,6 +58,23 @@ function nameOf(kind: pb.AnchorBoardStepKind): string {
   return name;
 }
 
+/** The actions Rust offers beside the next step, as it names them. */
+const OFFER_NAMES = new Map<pb.AnchorBoardStepKind, string>([
+  [K.PREPARE_CHIP, 'Prepare the chip: its random-number self-test on, for good'],
+  [K.TRIAL_IMAGE, 'Start the trial image, for the try-run'],
+  [K.CHECK_CHANGED_IMAGE, 'Check that a changed image is refused'],
+]);
+
+function offer(kind: pb.AnchorBoardStepKind): pb.AnchorBoardStep {
+  const name = OFFER_NAMES.get(kind);
+  if (name === undefined) throw new Error(`no offer named for ${kind}`);
+  return new pb.AnchorBoardStep({ kind, state: S.NEXT, permanent: kind === K.PREPARE_CHIP, name });
+}
+
+/**
+ * A board read with `next` its next step, and what Rust offers beside it by its rule: the prepare and
+ * the trial image while the firmware digest is not burned, the changed-image check at the first boot.
+ */
 function boardWith(next: pb.AnchorBoardStepKind, written: string[]): pb.AnchorBoardResponse {
   const order = [K.LOAD_IMAGE, K.SEAL_SECRET, K.WRITE_DIGEST, K.LOCK_DIGEST, K.WRITE_BOOT_KEY, K.LOCKDOWN, K.BOOT, K.LOCK_BOOT_PAGES];
   const at = order.indexOf(next);
@@ -79,6 +96,8 @@ function boardWith(next: pb.AnchorBoardStepKind, written: string[]): pb.AnchorBo
   board.steps.forEach((step) => {
     step.permanent = step.kind !== K.LOAD_IMAGE;
   });
+  if (at <= order.indexOf(K.WRITE_DIGEST)) board.offered.push(offer(K.PREPARE_CHIP), offer(K.TRIAL_IMAGE));
+  if (next === K.BOOT) board.offered.push(offer(K.CHECK_CHANGED_IMAGE));
   return board;
 }
 
@@ -171,6 +190,7 @@ describe('a board set up from the phone', () => {
     });
     blocked.refused =
       "this board's bootloader cannot write every row the procedure has left to burn, so the procedure cannot be finished from BOOTSEL and nothing more is burned: LockDigestPage writes row 0xfdd, which this bootrom guards by page 63, the page it sits in";
+    blocked.offered = [];
     const asked = hostAnswering(blocked, blocked);
     render(<AnchorBoardSetupPanel />);
     fireEvent.click(screen.getByText('Read board'));
@@ -193,6 +213,7 @@ describe('a board set up from the phone', () => {
           name: kind === K.LOCK_PAGES ? 'Lock the digest and rollback pages, from a one-time image' : nameOf(kind),
         }),
     );
+    board.offered = [];
     const asked = hostAnswering(board, board);
     render(<AnchorBoardSetupPanel />);
     fireEvent.click(screen.getByText('Read board'));
@@ -214,5 +235,56 @@ describe('a board set up from the phone', () => {
     fireEvent.click(screen.getByText('Read board'));
     await waitFor(() => screen.getByText('Next step…'));
     expect(screen.queryByTestId('anchor-board-check')).not.toBeInTheDocument();
+  });
+
+  it('offers the prepare image before the first burn as permanent, and sends it once typed back', async () => {
+    const started = new pb.AnchorBoardResponse({
+      chipId: CHIP,
+      written: [
+        'flash: the prepare image, 254840 bytes, read back whole, and the board started it',
+        'the prepare image says: TR01-C2P-T103 on firmware 0.3.1. Its PTRNG is now configured and tested at every start-up. Load the trial image',
+      ],
+    });
+    const asked = hostAnswering(boardWith(K.LOAD_IMAGE, []), started);
+    render(<AnchorBoardSetupPanel />);
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => screen.getByTestId('anchor-board-prepare'));
+    expect(screen.getByTestId('anchor-board-trial')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('anchor-board-prepare'));
+    expect(screen.getByText(/random-number self-test on, for good/)).toBeInTheDocument();
+    expect(screen.getByText(/can never be undone/)).toBeInTheDocument();
+    const prepare = screen.getByText('Prepare it');
+    expect(prepare).toBeDisabled();
+    fireEvent.change(screen.getByTestId('anchor-board-confirm'), { target: { value: '3c8e' } });
+    fireEvent.click(prepare);
+    await waitFor(() => expect(screen.getByTestId('anchor-board-written')).toHaveTextContent('Its PTRNG is now configured'));
+    const sent = asked.filter((a) => a.route === 'anchor.board.step');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].step?.step).toBe(K.PREPARE_CHIP);
+    expect(sent[0].step?.chipId).toBe(CHIP);
+  });
+
+  it('starts the trial image as nothing burned, and sends it once typed back', async () => {
+    const asked = hostAnswering(boardWith(K.LOAD_IMAGE, []), new pb.AnchorBoardResponse({ chipId: CHIP }));
+    render(<AnchorBoardSetupPanel />);
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => screen.getByTestId('anchor-board-trial'));
+    fireEvent.click(screen.getByTestId('anchor-board-trial'));
+    expect(screen.getByText(/nothing is burned/)).toBeInTheDocument();
+    expect(screen.queryByText(/can never be undone/)).not.toBeInTheDocument();
+    const go = screen.getByText('Go on');
+    fireEvent.change(screen.getByTestId('anchor-board-confirm'), { target: { value: '3C8E' } });
+    fireEvent.click(go);
+    await waitFor(() => expect(asked.filter((a) => a.route === 'anchor.board.step')).toHaveLength(1));
+    expect(asked.filter((a) => a.route === 'anchor.board.step')[0].step?.step).toBe(K.TRIAL_IMAGE);
+  });
+
+  it('offers neither image once the firmware digest is burned', async () => {
+    hostAnswering(boardWith(K.LOCK_DIGEST, []), boardWith(K.LOCK_DIGEST, []));
+    render(<AnchorBoardSetupPanel />);
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => screen.getByText('Next step…'));
+    expect(screen.queryByTestId('anchor-board-prepare')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('anchor-board-trial')).not.toBeInTheDocument();
   });
 });

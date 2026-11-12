@@ -88,6 +88,9 @@ object Unified {
     @Keep @JvmStatic fun bootselFileDescriptor(): Int = BootselUsb.fileDescriptor()
     @Keep @JvmStatic fun bootselInterfaceReset(): Int = BootselUsb.interfaceReset()
     @Keep @JvmStatic fun bootselWaitForReturn(serial: String): Int = BootselUsb.waitForReturn(serial)
+    // The board running as the DSM Anchor after the board setup started an image: 0 once Android
+    // lets DSM use it, else -1 with bootselLastError saying why.
+    @Keep @JvmStatic fun anchorPermitted(): Int = BootselUsb.anchorPermitted()
     @Keep @JvmStatic fun bootselClose(): Int = BootselUsb.close()
     // The production release the app carries (the signing's public outputs, from its assets).
     @Keep @JvmStatic fun anchorReleaseFile(path: String): ByteArray? = BootselUsb.releaseFile(path)

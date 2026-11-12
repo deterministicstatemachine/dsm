@@ -168,10 +168,16 @@ export interface BoardSetup {
   refused: string;
   /** What the read-only check found beyond blank. */
   found: string[];
-  /** The last step's rows, each confirmed by its read-back. */
+  /** What the last step did: each row and byte it wrote, confirmed by its read-back, and what the board answered after it. */
   written: string[];
   /** Every step is done: the board goes on to its install. */
   done: boolean;
+  /**
+   * What the board takes now besides its next step, each on its own: the prepare and the trial image
+   * before its first burn, the changed-image check before its first boot. Rust names them; none is
+   * offered on a board the procedure cannot finish.
+   */
+  offered: BoardSetupStep[];
 }
 
 const stateOf = (state: pb.AnchorBoardStepState): BoardSetupStep['state'] => {
@@ -189,6 +195,13 @@ const stateOf = (state: pb.AnchorBoardStepState): BoardSetupStep['state'] => {
   }
 };
 
+const stepOf = (step: pb.AnchorBoardStep): BoardSetupStep => ({
+  kind: step.kind,
+  state: stateOf(step.state),
+  permanent: step.permanent,
+  name: step.name,
+});
+
 function boardSetupOf(bytes: Uint8Array, route: string): BoardSetup {
   const env = decodeFramedEnvelopeV3(bytes);
   if (env.payload.case === 'error') {
@@ -202,16 +215,12 @@ function boardSetupOf(bytes: Uint8Array, route: string): BoardSetup {
     connected: resp.boardConnected,
     chipId: resp.chipId,
     release: resp.release,
-    steps: resp.steps.map((step) => ({
-      kind: step.kind,
-      state: stateOf(step.state),
-      permanent: step.permanent,
-      name: step.name,
-    })),
+    steps: resp.steps.map(stepOf),
     refused: resp.refused,
     found: [...resp.found],
     written: [...resp.written],
     done: resp.done,
+    offered: resp.offered.map(stepOf),
   };
 }
 

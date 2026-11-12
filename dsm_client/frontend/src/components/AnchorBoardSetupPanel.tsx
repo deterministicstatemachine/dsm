@@ -2,9 +2,9 @@
 // A board's one-time setup for production, from the phone alone (owner, 2026-11-11: "Not everyone
 // has a Mac. It has to be doable from the phone"). The board is plugged in with BOOTSEL held; the
 // phone drives its own bootloader. Rust reads the board fresh each time and decides everything: which
-// step is next, whether it may run, and what it wrote. This renders what Rust reports and carries the
-// taps. A step that burns OTP takes the board's chip id typed back, its last four characters, so it
-// only ever reaches the board the person is looking at.
+// step is next, what else the board takes now, whether it may run, and what it wrote. This renders
+// what Rust reports and carries the taps. A step takes the board's chip id typed back, its last four
+// characters, so it only ever reaches the board the person is looking at.
 import React, { useState } from 'react';
 import { Notice } from './common/ScreenFrame';
 import * as pb from '../proto/dsm_app_pb';
@@ -22,12 +22,42 @@ const MARKS: Record<BoardSetupStep['state'], string> = {
 };
 const mark = (step: BoardSetupStep) => MARKS[step.state];
 
+/** The button for each action Rust offers besides the next step, and its test id. */
+const OFFERS = new Map<pb.AnchorBoardStepKind, { label: string; testId: string }>([
+  [pb.AnchorBoardStepKind.PREPARE_CHIP, { label: 'Prepare the chip…', testId: 'anchor-board-prepare' }],
+  [pb.AnchorBoardStepKind.TRIAL_IMAGE, { label: 'Start the trial image…', testId: 'anchor-board-trial' }],
+  [pb.AnchorBoardStepKind.CHECK_CHANGED_IMAGE, { label: 'Check…', testId: 'anchor-board-check' }],
+]);
+
+/** What the person is told before a step or an action runs, ending with the chip's last four to type. */
+function confirmText(action: BoardSetupStep, lastFour: string): string {
+  const typeBack = `Type the chip's last four characters (${lastFour}) to go on`;
+  switch (action.kind) {
+    case pb.AnchorBoardStepKind.CHECK_CHANGED_IMAGE:
+      return `This loads the image with one byte changed and starts the board: it must come back in BOOTSEL, and the signed image is loaded back. Tap Allow when Android asks again. ${typeBack}`;
+    case pb.AnchorBoardStepKind.LOCK_PAGES:
+      return `This loads a one-time image that sets the two locks and starts the board; it comes back in BOOTSEL and the signed image is loaded back. Tap Allow when Android asks again. ${action.name} can never be undone. ${typeBack}`;
+    case pb.AnchorBoardStepKind.PREPARE_CHIP:
+      return `This loads the prepare image and starts the board. On a test part it turns the chip's random-number self-test on, for good, and erases any key the chip made before; then the phone asks the board how it went. Tap Allow when Android asks. ${action.name} can never be undone. ${typeBack}`;
+    case pb.AnchorBoardStepKind.TRIAL_IMAGE:
+      return `This loads the trial image and starts the board, for its try-run on this very board: nothing is burned. Tap Allow when Android asks. ${typeBack}`;
+    default:
+      return action.permanent ? `${action.name} can never be undone. ${typeBack}` : typeBack;
+  }
+}
+
+/** The button that runs the confirmed step or action. */
+function goLabel(action: BoardSetupStep): string {
+  if (action.kind === pb.AnchorBoardStepKind.PREPARE_CHIP) return 'Prepare it';
+  return action.permanent ? 'Burn it' : 'Go on';
+}
+
 export default function AnchorBoardSetupPanel() {
   const [board, setBoard] = useState<BoardSetup | null>(null);
   const [stage, setStage] = useState<Stage>('idle');
   const [typed, setTyped] = useState('');
-  /** The step being confirmed: the board's next, or the changed-image check before its first boot. */
-  const [action, setAction] = useState<pb.AnchorBoardStepKind | null>(null);
+  /** What is being confirmed: the board's next step, or an action Rust offers besides it. */
+  const [action, setAction] = useState<BoardSetupStep | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const read = () => {
@@ -46,16 +76,9 @@ export default function AnchorBoardSetupPanel() {
   };
 
   const next = board?.steps.find((step) => step.state === 'next');
-  // Step 9's check is offered only when the board's next step is its first boot: Rust refuses it at
-  // any other time.
-  const checkOffered = next?.kind === pb.AnchorBoardStepKind.BOOT;
-  const checking = action === pb.AnchorBoardStepKind.CHECK_CHANGED_IMAGE;
-  const permanent = !checking && next?.permanent;
-  // The lock image's step restarts the board too: Android asks again when it is back in BOOTSEL.
-  const restarts = action === pb.AnchorBoardStepKind.LOCK_PAGES;
 
-  const confirm = (kind: pb.AnchorBoardStepKind) => {
-    setAction(kind);
+  const confirm = (chosen: BoardSetupStep) => {
+    setAction(chosen);
     setTyped('');
     setStage('confirming');
   };
@@ -64,7 +87,7 @@ export default function AnchorBoardSetupPanel() {
     if (!board || action === null) return;
     setStage('stepping');
     setError(null);
-    stepBoardSetup(action, board.chipId)
+    stepBoardSetup(action.kind, board.chipId)
       .then((after) => {
         setBoard(after);
         setTyped('');
@@ -79,6 +102,7 @@ export default function AnchorBoardSetupPanel() {
   const working = stage === 'reading' || stage === 'stepping';
   const lastFour = board ? board.chipId.slice(-4) : '';
   const confirmed = typed.trim().toUpperCase() === lastFour.toUpperCase() && lastFour.length === 4;
+  const offered = board?.connected && stage === 'read' ? board.offered : [];
   return (
     <div className="sb-field" data-testid="anchor-board-setup">
       <span className="sb-label">Production setup, from this phone</span>
@@ -114,7 +138,7 @@ export default function AnchorBoardSetupPanel() {
           )}
           {board.written.length > 0 && (
             <>
-              <span className="sb-label">Written and read back</span>
+              <span className="sb-label">The last step</span>
               <ul data-testid="anchor-board-written">
                 {board.written.map((line) => (
                   <li key={line}>{line}</li>
@@ -127,17 +151,9 @@ export default function AnchorBoardSetupPanel() {
         </>
       )}
       {error && <Notice kind="error">{error}</Notice>}
-      {next && stage === 'confirming' && (
+      {action && stage === 'confirming' && (
         <label className="sb-field">
-          <span className="sb-label">
-            {checking
-              ? `This loads the image with one byte changed and starts the board: it must come back in BOOTSEL, and the signed image is loaded back. Tap Allow when Android asks again. Type the chip's last four characters (${lastFour}) to go on`
-              : restarts
-                ? `This loads a one-time image that sets the two locks and starts the board; it comes back in BOOTSEL and the signed image is loaded back. Tap Allow when Android asks again. ${next.name} can never be undone. Type the chip's last four characters (${lastFour}) to go on`
-                : permanent
-                  ? `${next.name} can never be undone. Type the chip's last four characters (${lastFour}) to go on`
-                  : `Type the chip's last four characters (${lastFour}) to go on`}
-          </span>
+          <span className="sb-label">{confirmText(action, lastFour)}</span>
           <input
             className="sb-input"
             data-testid="anchor-board-confirm"
@@ -152,31 +168,38 @@ export default function AnchorBoardSetupPanel() {
           {stage === 'reading' ? 'Reading…' : board ? 'Read again' : 'Read board'}
         </button>
         {next && board?.connected && stage === 'read' && (
-          <button type="button" className="sb-btn" onClick={() => confirm(next.kind)}>
+          <button type="button" className="sb-btn" onClick={() => confirm(next)}>
             Next step…
           </button>
         )}
-        {next && (stage === 'confirming' || stage === 'stepping') && (
+        {action && (stage === 'confirming' || stage === 'stepping') && (
           <button
             type="button"
             className="sb-btn sb-btn--primary"
             disabled={working || !confirmed}
             onClick={run}
           >
-            {stage === 'stepping' ? 'Working…' : permanent ? 'Burn it' : 'Go on'}
+            {stage === 'stepping' ? 'Working…' : goLabel(action)}
           </button>
         )}
       </div>
-      {checkOffered && board?.connected && stage === 'read' && (
+      {offered.length > 0 && (
         <div className="sb-actions" style={{ margin: 0 }}>
-          <button
-            type="button"
-            className="sb-btn"
-            data-testid="anchor-board-check"
-            onClick={() => confirm(pb.AnchorBoardStepKind.CHECK_CHANGED_IMAGE)}
-          >
-            Check…
-          </button>
+          {offered.map((offer) => {
+            const shown = OFFERS.get(offer.kind);
+            return (
+              <button
+                key={offer.kind}
+                type="button"
+                className="sb-btn"
+                data-testid={shown?.testId}
+                title={offer.name}
+                onClick={() => confirm(offer)}
+              >
+                {shown?.label ?? `${offer.name}…`}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

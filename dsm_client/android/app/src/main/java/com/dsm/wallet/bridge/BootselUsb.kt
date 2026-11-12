@@ -40,12 +40,13 @@ object BootselUsb {
 
     /**
      * Waits while a rebooting board leaves USB and comes back, counted in polls of the device list
-     * [RETURN_POLL_MS] apart, never read off a clock: up to ~10 s to leave, ~20 s to come back, and
-     * ~60 s for the person to let DSM use it again.
+     * [RETURN_POLL_MS] apart, never read off a clock: up to ~10 s to leave, ~60 s to come back (an
+     * image that brings its chip up first, as the prepare and the trial image do, is on USB only once
+     * it has), and ~60 s for the person to let DSM use it again.
      */
     private const val RETURN_POLL_MS = 250L
     private const val LEAVE_POLLS = 40
-    private const val COME_BACK_POLLS = 80
+    private const val COME_BACK_POLLS = 240
     private const val PERMISSION_POLLS = 240
 
     /** picotool's bulk timeout; an OTP write or a flash erase answers within it. */
@@ -115,6 +116,34 @@ object BootselUsb {
         }
         fail("the board did not come back on USB")
         return -1
+    }
+
+    /**
+     * The board running as the DSM Anchor, once Android lets DSM use it: 0, or -1 with [lastError]
+     * saying why. Asks once, then waits for the person's Allow. What the board setup asks it goes over
+     * the wallet's own link to it ([LocalPicoUsb]), which asks nothing and fails until it may.
+     */
+    @Synchronized
+    fun anchorPermitted(): Int {
+        val ctx = appContext ?: run { fail("BootselUsb.init(context) was not called"); return -1 }
+        val usb = ctx.getSystemService(Context.USB_SERVICE) as? UsbManager
+            ?: run { fail("this phone has no USB host service"); return -1 }
+        val anchor = usb.deviceList.values.firstOrNull {
+            LocalPicoUsb.isDsmAnchor(it.vendorId, it.productId)
+        } ?: run { fail("no DSM Anchor on USB"); return -1 }
+        if (!usb.hasPermission(anchor)) {
+            askPermission(ctx, usb, anchor)
+            var polls = 0
+            while (!usb.hasPermission(anchor)) {
+                polls += 1
+                if (polls > PERMISSION_POLLS) {
+                    fail("Android has not let DSM use the DSM Anchor: tap Allow when it asks")
+                    return -1
+                }
+                Thread.sleep(RETURN_POLL_MS)
+            }
+        }
+        return 0
     }
 
     /** The board back in BOOTSEL, once Android lets DSM use it again: 0, or -1. */

@@ -163,7 +163,9 @@ Change them here before the first burn, not after.
 
 ## From the phone: the procedure for everyone
 
-Owner, 2026-11-11: "Not everyone has a Mac. It has to be doable from the phone." The wallet does
+Owner, 2026-11-11: "Not everyone has a Mac. It has to be doable from the phone." The owner's message,
+2026-11-12: "The entire appliance setup must work from an Android phone, without a Mac or any other
+computer." The wallet prepares a test part's chip, starts the trial image for the try-run, and does
 Steps 3 to 9b itself, through the board's own USB bootloader, with the board plugged into the phone
 in BOOTSEL. It speaks the bootloader's protocol as picotool does and applies `provision-otp.sh`'s
 checks row for row (`crates/dsm-android-anchor`: `picoboot`, `otp_burn`, `board_setup`). Signing
@@ -172,19 +174,31 @@ phone carries only its public outputs.
 
 1. **The release into the app**, once per signing, before the APK is built:
    `scripts/anchor-release-into-app.sh` copies `signed.elf`, `ns_app.bin`, `mu-enrolled.bin` and
-   the boot key's hash into the app's assets, and builds the lock image (item 4) into them. Before
-   writing anything the phone checks that the digest is the firmware's own measurement of the
-   Non-secure app and that the image holds that app.
+   the boot key's hash into the app's assets, and builds into them the prepare and the trial image
+   (item 3), around the signing's own Non-secure app, and the lock image (item 5). Before writing
+   anything the phone checks that the digest is the firmware's own measurement of the Non-secure app
+   and that the image holds that app.
 2. **Plug the board into the phone with BOOTSEL held.** Appliance → Production setup → Read the board.
    The panel names the chip, lists the steps below in order, marks each done, next or later from
    the board's own OTP (never from anything the phone remembers), and shows what Step 0's check
    found.
-3. **Each step is the board's next or it is refused**, and runs only on the board whose chip id the
+3. **Before the first burn, the chip and the try-run.** While the board's firmware digest is not
+   burned and it is not locked down, the panel offers two images besides the next step, each loaded
+   into flash, read back, and started; the board comes back as the DSM Anchor (tap Allow when Android
+   asks), and the phone asks it how it stands and shows its answer. Flash only on the board: Step 3
+   loads the signed image over either. **Prepare the chip…** on a test part (T101, T103) is the
+   preparing above: the prepare image says what the chip is and how it went. **Start the trial
+   image…** then brings up the trial image, and its try-run is the wallet's own: Check again, then Try
+   the install. Do not go on unless every step says OK, and do not install it. Then unplug the board,
+   hold BOOTSEL, plug it in again and read it. The phone offers these and does not require them:
+   nothing a board holds in BOOTSEL records a try-run. An install for good refuses a chip that does
+   not test its PTRNG, whatever was skipped.
+4. **Each step is the board's next or it is refused**, and runs only on the board whose chip id the
    person types back (its last four characters). Every write is read back before the step is done.
    Before the first burn the phone reads the bootrom's version from ROM and checks that the board's
    bootloader may write every row the procedure will write, by that bootrom's own rule; a board it
    cannot finish is not started, and the panel says which rows and why (BLOCKED).
-4. **On an RP2350 A2 whose page 63 refuses the bootloader** (the yellow board, 2026-11-11): its
+5. **On an RP2350 A2 whose page 63 refuses the bootloader** (the yellow board, 2026-11-11): its
    bootrom guards a page's lock row by the page the row sits in, so the digest page's lock (Step 6)
    and the rollback page's (part of Step 9b) cannot be written from BOOTSEL. Where page 63's Secure
    lock is open, the panel lists "Lock the digest and rollback pages, from a one-time image" after
@@ -193,16 +207,16 @@ phone carries only its public outputs.
    (tap Allow when Android asks again). The phone reads both rows back and loads the signed image
    again. It must come before the lockdown: the lock image is never signed. Step 9b then writes the
    boot pages' locks alone; the rollback page's is already held.
-5. **Before the first boot, Check…** (offered only once the lockdown is done and the first boot is
+6. **Before the first boot, Check…** (offered only once the lockdown is done and the first boot is
    next): the phone loads the signed image with one byte of its code changed and starts the board.
    A board whose secure boot is in force finds no image it may run and comes back in BOOTSEL (tap
    Allow when Android asks again); the phone then loads the signed image back and reads it back. A
    board that comes back as the DSM Anchor ran an image not as signed: stop there. This is Step 9's
    unsigned-image check, made on a changed copy of the very image the board will run.
-6. **After "Start the signed image once"** the board leaves BOOTSEL and records its rollback version.
+7. **After "Start the signed image once"** the board leaves BOOTSEL and records its rollback version.
    Once it has started, unplug it, hold BOOTSEL, and plug it in again for the last step: the phone
    locks the boot pages only once `ROLLBACK_REQUIRED` is set.
-7. **Then plug it in normally** and install it from the wallet that will keep it (Step 10).
+8. **Then plug it in normally** and install it from the wallet that will keep it (Step 10).
 
 What the phone does differently: a blank secret page is written and locked in one step (Steps 4 and
 the secret half of 6), so no page stands written and unlocked between steps; every write is read
