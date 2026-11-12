@@ -330,6 +330,11 @@ pub mod class {
     /// vault's history: the genesis leaf, the frontier's own root, or one
     /// step (SoFi Amendment S34).
     pub const SOFI_VAULT_BASELINE_CONTRADICTION: u16 = 0x0076;
+    /// `0x0077` — a write at an application cell (DSM Amendment A35): the
+    /// application, the name it gives the cell, the writer set, the payload
+    /// and one writer's signature. It occupies the cell only when it proves
+    /// its own authority from these bytes; the payload means nothing here.
+    pub const APP_CELL_WRITE: u16 = 0x0077;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

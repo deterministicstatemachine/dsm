@@ -75,6 +75,24 @@ async fn connect(
     relay: &ForwardRelay,
     code: &str,
 ) -> [u8; 32] {
+    connect_shown(
+        r,
+        wallet,
+        relay,
+        code,
+        "Lock stakes for matches: up to 30.00 ERA a time, 60.00 ERA in all",
+    )
+    .await
+}
+
+/// The same, for an offer whose preview shows `scope_line` for its scope.
+async fn connect_shown(
+    r: &TestDevice,
+    wallet: &TestDevice,
+    relay: &ForwardRelay,
+    code: &str,
+    scope_line: &str,
+) -> [u8; 32] {
     let previewed = query(
         wallet,
         "connect.preview",
@@ -87,7 +105,7 @@ async fn connect(
     assert_eq!(
         preview.scope_lines,
         vec![
-            "Lock stakes for matches: up to 30.00 ERA a time, 60.00 ERA in all".to_string(),
+            scope_line.to_string(),
             format!(
                 "Up to {FREE_REQUESTS} requests that spend nothing; after them, each waits for you"
             ),
@@ -823,4 +841,387 @@ async fn a_collects_status_is_read_once_and_answered_from_its_record() {
             first.fact_detail.clone()
         )
     );
+}
+
+// ── contributions (DSM Amendment A35) ───────────────────────────────────────
+
+/// R's offer through `relay`: a contribute scope committing up to 30 ERA a
+/// time and 60 ERA in all. The code.
+async fn contribution_offer(r: &TestDevice, relay: &ForwardRelay) -> String {
+    let made = invoke(
+        r,
+        "connect.app.offer",
+        args(&generated::ConnectAppOfferRequestV1 {
+            display_name: "Territories".into(),
+            endpoint: relay.endpoint.clone(),
+            cert_pin: relay.pin.to_vec(),
+            scopes: vec![generated::ConnectScopeV1 {
+                kind: generated::ConnectScopeKind::Contribute as i32,
+                policy_commits: Vec::new(),
+                caps: vec![generated::ConnectCapV1 {
+                    policy_commit: era().to_vec(),
+                    per_request: whole_era(30),
+                    total: whole_era(60),
+                }],
+                programs: Vec::new(),
+            }],
+            token_anchors: Vec::new(),
+            free_requests: FREE_REQUESTS,
+        }),
+    )
+    .await;
+    let Reply::Offer(offer) = reply(&made) else {
+        panic!("connect.app.offer answered another reply");
+    };
+    let digest: [u8; 32] = offer.offer_digest.as_slice().try_into().expect("a digest");
+    relay.held().offer = Some((digest, offer.offer.clone()));
+    offer.code
+}
+
+/// What a wallet shows for the contribute scope of [`contribution_offer`].
+const CONTRIBUTE_LINE: &str =
+    "Commit what you own to what this app names, yours to take back: up to 30.00 ERA \
+                               a time, 60.00 ERA in all";
+
+fn contribute(external: &[u8], amount: u64) -> Kind {
+    Kind::Contribute(generated::ConnectContributeV1 {
+        external: external.to_vec(),
+        policy_commit: era().to_vec(),
+        amount,
+        memo: "watchtower".into(),
+    })
+}
+
+fn take_back(vaults: &[&[u8]]) -> Kind {
+    Kind::ContributionRelease(generated::ConnectContributionReleaseV1 {
+        vault_ids: vaults.iter().map(|v| v.to_vec()).collect(),
+    })
+}
+
+/// R's account established that its session `sid`'s request `seq` committed
+/// `amount`: the vault it found.
+async fn contributed(r: &TestDevice, sid: &[u8; 32], seq: u64, amount: u64) -> Vec<u8> {
+    let s = status(r, sid, seq).await;
+    assert_eq!(
+        fact(&s),
+        generated::ConnectFact::Contributed,
+        "{}",
+        s.fact_detail
+    );
+    assert_eq!(s.escrow_amount, amount);
+    assert_eq!(s.escrow_vault_ids.len(), 1);
+    s.escrow_vault_ids[0].clone()
+}
+
+/// R's account established that request `seq` took its vaults back, on
+/// `decided`.
+async fn taken_back(r: &TestDevice, sid: &[u8; 32], seq: u64, decided: &str) {
+    let s = status(r, sid, seq).await;
+    assert_eq!(
+        fact(&s),
+        generated::ConnectFact::ContributionReleased,
+        "{}",
+        s.fact_detail
+    );
+    assert!(s.fact_detail.contains(decided), "{}", s.fact_detail);
+}
+
+/// A member commits an amount to a structure through their grant, and takes
+/// it back themselves. The wallet builds the terms from the contribution
+/// template; the game names only the commitment, the object and the amount.
+/// While the vault is Active the amount is out of the wallet's balance; the
+/// wallet's own `withdraw` returns it, with nothing asked of the game. The
+/// game counts the commitment and the return only from the vault its own
+/// account walks. A vault that is not a contribution is not taken back
+/// through the grant, and a commitment past the cap waits on the device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_contribution_is_committed_under_the_grant_and_taken_back_by_its_owner() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let code = contribution_offer(&r, &relay).await;
+    let sid = connect_shown(&r, &p.a, &relay, &code, CONTRIBUTE_LINE).await;
+    let amount = whole_era(20);
+
+    let asked = request(&r, &relay, &sid, contribute(b"faction 4 / tower 9", amount)).await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    carried_out(&p.a, &sid, asked).await;
+    let vault = contributed(&r, &sid, asked, amount).await;
+    assert_eq!(balance(&p.a, &era()), whole_era(100) - amount);
+
+    let back = request(&r, &relay, &sid, take_back(&[&vault])).await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    carried_out(&p.a, &sid, back).await;
+    assert_eq!(balance(&p.a, &era()), whole_era(100));
+    taken_back(&r, &sid, back, "withdraw").await;
+
+    // A's own escrow vault, not a contribution: not the application's to
+    // have released.
+    let me = party(&p.a).await;
+    let own = match payload(
+        &invoke(
+            &p.a,
+            "escrow.create",
+            args(&generated::EscrowCreateRequest {
+                external: b"A's own agreement".to_vec(),
+                token_policy_commit: era().to_vec(),
+                amount_entered: "5".into(),
+                branches: vec![generated::EscrowBranchV1 {
+                    outcome: b"done".to_vec(),
+                    signers: vec![me.signer.clone().expect("A's signer")],
+                    recipient_genesis: me.genesis.clone(),
+                    recipient_device_id: me.device_id.clone(),
+                }],
+                counterpart_vault_id: Vec::new(),
+            }),
+        )
+        .await,
+    ) {
+        Payload::EscrowCreatedResponse(created) => created,
+        other => panic!("escrow.create answered {other:?}"),
+    };
+    let foreign = request(&r, &relay, &sid, take_back(&[&own.vault_id])).await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    failed(
+        &p.a,
+        &sid,
+        foreign,
+        "is not a contribution this application returns",
+    )
+    .await;
+    assert_eq!(
+        balance(&p.a, &era()),
+        whole_era(95),
+        "A's own vault stays locked"
+    );
+
+    // Past the cap of 30 ERA a time: it waits on the device.
+    let past_cap = request(
+        &r,
+        &relay,
+        &sid,
+        contribute(b"faction 4 / wall 2", whole_era(40)),
+    )
+    .await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    let Reply::Pending(pending) = reply(&query(&p.a, "connect.pending", Vec::new()).await) else {
+        panic!("connect.pending answered another reply");
+    };
+    assert_eq!(pending.pending.len(), 1);
+    assert_eq!(pending.pending[0].seq, past_cap);
+    assert_eq!(
+        balance(&p.a, &era()),
+        whole_era(95),
+        "nothing was committed"
+    );
+    assert_eq!(
+        fact(&status(&r, &sid, past_cap).await),
+        generated::ConnectFact::None
+    );
+}
+
+/// The game returns a contribution: it decides `return` with its own key,
+/// and the amount goes back to the member who committed it and to nobody
+/// else. The game can decide when; the template gives it no outcome that
+/// pays another identity, and `withdraw` is not the game's to decide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_game_returns_a_contribution_to_its_owner_and_decides_nothing_else() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let code = contribution_offer(&r, &relay).await;
+    let sid = connect_shown(&r, &p.a, &relay, &code, CONTRIBUTE_LINE).await;
+    let amount = whole_era(25);
+
+    let asked = request(&r, &relay, &sid, contribute(b"faction 4 / tower 9", amount)).await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    let vault = contributed(&r, &sid, asked, amount).await;
+    assert_eq!(balance(&p.a, &era()), whole_era(100) - amount);
+
+    // The owner's outcome is not the game's: its key does not complete it.
+    let refused = invoke(
+        &r,
+        "escrow.adjudicate",
+        args(&generated::EscrowOutcomeRequest {
+            vault_id: vault.clone(),
+            outcome: b"withdraw".to_vec(),
+        }),
+    )
+    .await;
+    let why = refused
+        .error_message
+        .clone()
+        .expect("the game's withdraw is refused, with the reason");
+    assert!(
+        why.contains("the gathered signatures do not decide \"withdraw\""),
+        "{why}"
+    );
+
+    adjudicate(&r, &vault, b"return").await;
+    assert_eq!(
+        balance(&p.a, &era()),
+        whole_era(100) - amount,
+        "a return is decided, not yet released"
+    );
+    let back = request(&r, &relay, &sid, take_back(&[&vault])).await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    carried_out(&p.a, &sid, back).await;
+    assert_eq!(balance(&p.a, &era()), whole_era(100));
+    assert_eq!(balance(&r, &era()), 0, "the game holds nothing of it");
+    taken_back(&r, &sid, back, "return").await;
+}
+
+// ── application cells (DSM Amendment A35) ───────────────────────────────────
+
+/// R's offer through `relay`: a state scope. The code.
+async fn state_offer(r: &TestDevice, relay: &ForwardRelay) -> String {
+    let made = invoke(
+        r,
+        "connect.app.offer",
+        args(&generated::ConnectAppOfferRequestV1 {
+            display_name: "Territories".into(),
+            endpoint: relay.endpoint.clone(),
+            cert_pin: relay.pin.to_vec(),
+            scopes: vec![generated::ConnectScopeV1 {
+                kind: generated::ConnectScopeKind::AppCell as i32,
+                policy_commits: Vec::new(),
+                caps: Vec::new(),
+                programs: Vec::new(),
+            }],
+            token_anchors: Vec::new(),
+            free_requests: FREE_REQUESTS,
+        }),
+    )
+    .await;
+    let Reply::Offer(offer) = reply(&made) else {
+        panic!("connect.app.offer answered another reply");
+    };
+    let digest: [u8; 32] = offer.offer_digest.as_slice().try_into().expect("a digest");
+    relay.held().offer = Some((digest, offer.offer.clone()));
+    offer.code
+}
+
+const STATE_LINE: &str = "Sign and store changes to this app's shared state, as you";
+
+fn cell_write(name: &[u8], writers: &[&generated::ConnectSessionV1], payload: &[u8]) -> Kind {
+    Kind::AppCellWrite(generated::ConnectAppCellWriteV1 {
+        name: name.to_vec(),
+        writer_keys: writers.iter().map(|w| w.peer_signing_key.clone()).collect(),
+        payload: payload.to_vec(),
+    })
+}
+
+/// Two members of one faction each write the faction's next step through
+/// their grants, at the one cell the game names for both of them. The first
+/// write at the cell's leader holds it; the second member's write, validly
+/// signed by a writer of the same set, never does. The game counts a write
+/// only from the cell its own account derives and reads: A's is a fact with
+/// the step the next cell commits, B's is reported as another writer's
+/// holding the cell. A write for a cell whose writers leave the wallet out
+/// is refused before it is asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_first_members_write_holds_a_cell_and_a_second_members_never_does() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let code_a = state_offer(&r, &relay).await;
+    let sid_a = connect_shown(&r, &p.a, &relay, &code_a, STATE_LINE).await;
+    let code_b = state_offer(&r, &relay).await;
+    let sid_b = connect_shown(&r, &p.b, &relay, &code_b, STATE_LINE).await;
+    let as_a = player_of(&r, &sid_a).await;
+    let as_b = player_of(&r, &sid_b).await;
+    let members = [&as_a, &as_b];
+
+    let by_a = request(
+        &r,
+        &relay,
+        &sid_a,
+        cell_write(b"faction 4 / step 1", &members, b"place watchtower at 4,9"),
+    )
+    .await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    carried_out(&p.a, &sid_a, by_a).await;
+    let held = status(&r, &sid_a, by_a).await;
+    assert_eq!(
+        fact(&held),
+        generated::ConnectFact::AppCellHeld,
+        "{}",
+        held.fact_detail
+    );
+    assert_eq!(held.app_cell.len(), 32);
+    assert_eq!(
+        held.app_cell_step.len(),
+        32,
+        "a final occupant has its step"
+    );
+
+    // B writes another change at the same cell: its wallet signs and stores
+    // it, and the cell stays A's.
+    let by_b = request(
+        &r,
+        &relay,
+        &sid_b,
+        cell_write(b"faction 4 / step 1", &members, b"place wall at 2,2"),
+    )
+    .await;
+    assert_eq!(sync(&p.b, &r, &relay).await, "");
+    carried_out(&p.b, &sid_b, by_b).await;
+    let lost = status(&r, &sid_b, by_b).await;
+    assert_eq!(
+        fact(&lost),
+        generated::ConnectFact::None,
+        "{}",
+        lost.fact_detail
+    );
+    assert!(
+        lost.fact_detail
+            .contains("another writer's write holds the cell"),
+        "{}",
+        lost.fact_detail
+    );
+    assert_eq!(lost.app_cell, held.app_cell, "both wrote the one cell");
+    assert_eq!(
+        lost.app_cell_step, held.app_cell_step,
+        "and it has one step"
+    );
+    let still = status(&r, &sid_a, by_a).await;
+    assert_eq!(fact(&still), generated::ConnectFact::AppCellHeld);
+    assert_eq!(still.app_cell_step, held.app_cell_step);
+
+    // The next step is another cell, and B's write holds it.
+    let next = request(
+        &r,
+        &relay,
+        &sid_b,
+        cell_write(b"faction 4 / step 2", &members, b"place wall at 2,2"),
+    )
+    .await;
+    assert_eq!(sync(&p.b, &r, &relay).await, "");
+    let second = status(&r, &sid_b, next).await;
+    assert_eq!(
+        fact(&second),
+        generated::ConnectFact::AppCellHeld,
+        "{}",
+        second.fact_detail
+    );
+    assert_ne!(second.app_cell, held.app_cell);
+
+    // A cell B does not write: the game's own account refuses to ask.
+    let refused = invoke(
+        &r,
+        "connect.app.request",
+        args(&generated::ConnectAppRequestIntentV1 {
+            session_id: sid_b.to_vec(),
+            kind: Some(cell_write(b"faction 4 / step 3", &[&as_a], b"raze")),
+        }),
+    )
+    .await;
+    let why = refused
+        .error_message
+        .clone()
+        .expect("a write the wallet cannot sign is refused, with the reason");
+    assert!(why.contains("not one of the cell's writers"), "{why}");
 }

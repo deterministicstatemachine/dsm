@@ -66,6 +66,7 @@
 //! - All secrets use `Zeroize` + `ZeroizeOnDrop` for memory safety
 //! - Feature-gated optional modules (bluetooth)
 
+pub mod app_cell; // application cells (DSM Amendment A35)
 pub mod authored_object; // authored objects (storage spec §5, §7)
 pub mod bilateral;
 pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md

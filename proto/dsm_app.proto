@@ -5139,6 +5139,8 @@ enum ConnectScopeKind {
   CONNECT_SCOPE_KIND_ESCROW        = 5; // lock stakes in matches the application referees, and collect results (DSM Amendment A12)
   CONNECT_SCOPE_KIND_DUEL          = 6; // stake in matches a pinned program decides, play their moves, settle and collect (SoFi Amendment S22)
   CONNECT_SCOPE_KIND_CONTACTS      = 7; // read the DSM identities of the wallet's contacts, nothing more (DSM Amendment A16)
+  CONNECT_SCOPE_KIND_APP_CELL      = 9; // sign and store writes at the cells the application names, as one of each cell's writers (DSM Amendment A35)
+  CONNECT_SCOPE_KIND_CONTRIBUTE    = 8; // commit amounts to what the application names, every outcome returning them to the wallet, and take them back (DSM Amendment A35)
 }
 
 // A cap on one token a scope may spend, in that token's base units.
@@ -5153,7 +5155,7 @@ message ConnectScopeV1 {
   // SWAP: the two tokens of the pair, in either order. HOLDINGS: the tokens
   // the application may ask about (objects it issued are always included).
   repeated bytes        policy_commits = 2 [(dsm_fixed_len)=32];
-  // PAY, SWAP, ESCROW and DUEL: the tokens it may spend (ESCROW, DUEL: lock) and how much.
+  // PAY, SWAP, ESCROW, DUEL and CONTRIBUTE: the tokens it may spend (ESCROW, DUEL, CONTRIBUTE: lock) and how much.
   repeated ConnectCapV1 caps = 3;
   // DUEL: the outcome programs, by the hash P each is pinned by, whose matches it may stake in.
   repeated bytes        programs = 4 [(dsm_fixed_len)=32];
@@ -5270,6 +5272,41 @@ message ConnectEscrowLockV1 {
 // verdict cell's verdict is final on a branch that pays it.
 message ConnectEscrowReleaseV1 {
   repeated bytes vault_ids = 1 [(dsm_fixed_len)=32]; // 1..2
+}
+
+// ---- Contributions (DSM Amendment A35): an amount the wallet commits to
+// what the application names, in a vault whose two outcomes both pay the
+// wallet. The request names no branch, signer or recipient: the wallet builds
+// the terms from its own template. ----
+
+message ConnectContributeV1 {
+  bytes  external      = 1 [(dsm_max_len)=256]; // X, what the amount is committed to: 1..256
+  bytes  policy_commit = 2 [(dsm_fixed_len)=32];
+  uint64 amount        = 3;                     // base units, > 0
+  string memo          = 4 [(dsm_max_len)=256];
+}
+// Take contributions back: each named vault released to this wallet. Where
+// the application has not returned it, the wallet decides its own withdraw.
+message ConnectContributionReleaseV1 {
+  repeated bytes vault_ids = 1 [(dsm_fixed_len)=32]; // 1..8
+}
+
+// ---- Application cells (DSM Amendment A35): the wallet signs a write at a
+// cell the connected application names and stores it. The cell's key commits
+// the application's own genesis, which the wallet takes from the session and
+// never from the request, so a grant writes no other application's cells. The
+// payload is the application's and the wallet does not read it. ----
+
+message ConnectAppCellWriteV1 {
+  bytes          name        = 1 [(dsm_max_len)=64];    // the application's name for the cell: 1..64
+  repeated bytes writer_keys = 2 [(dsm_max_len)=64];    // the cell's writers' signing keys: 1..64, the wallet's among them
+  bytes          payload     = 3 [(dsm_max_len)=16384]; // 1..16384
+}
+// What the wallet wrote and what it then read at the cell: a notification,
+// never evidence.
+message ConnectAppCellWriteResultV1 {
+  bytes cell  = 1 [(dsm_fixed_len)=32];
+  bytes write = 2 [(dsm_max_len)=131072]; // the wallet's signed AppCellWrite
 }
 
 // ---- Computed matches (SoFi Amendment S22): a stake decided by a pinned
@@ -5406,6 +5443,9 @@ message AppRequestBodyV1 {
     ConnectDuelCollectV1    duel_collect     = 23;
     ConnectContactsV1       contacts         = 24;
     ConnectSignV1           sign             = 25;
+    ConnectContributeV1          contribute           = 26;
+    ConnectContributionReleaseV1 contribution_release = 27;
+    ConnectAppCellWriteV1        app_cell_write       = 28;
   }
 }
 message AppRequestV1 {
@@ -5536,6 +5576,9 @@ message AppResponseBodyV1 {
     ConnectDuelSignResultV1       duel_sign        = 19;
     ConnectContactsResultV1       contacts         = 20;
     ConnectSignResultV1           sign             = 21;
+    ConnectEscrowLockResultV1     contribute           = 22; // the contribution's vault and its verdict cell
+    ConnectEscrowReleaseResultV1  contribution_release = 23;
+    ConnectAppCellWriteResultV1   app_cell_write       = 24;
   }
 }
 message AppResponseV1 {
@@ -5665,6 +5708,9 @@ message ConnectAppRequestIntentV1 {
     ConnectDuelCollectV1    duel_collect     = 23;
     ConnectContactsV1       contacts         = 24;
     ConnectSignV1           sign             = 25;
+    ConnectContributeV1          contribute           = 26;
+    ConnectContributionReleaseV1 contribution_release = 27;
+    ConnectAppCellWriteV1        app_cell_write       = 28;
   }
 }
 message ConnectAppRequestsQueryV1 {
@@ -5691,6 +5737,9 @@ enum ConnectFact {
   CONNECT_FACT_DUEL_WITHDRAWN  = 8; // a Withdraw holds the match's start cell: void
   CONNECT_FACT_SIGNED          = 10; // the session's wallet signed exactly the statement asked, after approval on its device
   CONNECT_FACT_DUEL_SETTLED    = 9; // an occupant the registered program recognizes holds the match cell on `fact_detail`'s outcome
+  CONNECT_FACT_CONTRIBUTED           = 11; // the wallet's Active vault holds the amount under exactly the contribution template, on the wallet's verdict cell for the commitment
+  CONNECT_FACT_APP_CELL_HELD         = 13; // the session's wallet's write of exactly the asked payload holds the cell this account derives, final
+  CONNECT_FACT_CONTRIBUTION_RELEASED = 12; // each named vault is a contribution of the wallet's, Retired, and its cell's final verdict returned it to the wallet
 }
 message VerifiedHoldingV1 {
   bytes  policy_commit = 1 [(dsm_fixed_len)=32];
@@ -5723,6 +5772,10 @@ message ConnectAppStatusV1 {
   // which anyone holding the wallet's AK can check again.
   string                     signed_statement    = 18 [(dsm_max_len)=512];
   bytes                      answer_signature    = 19 [(dsm_max_len)=65535];
+  // An application cell write: the cell this account derived, and, once its
+  // occupant is final, the step the next cell's name commits.
+  bytes                      app_cell            = 20 [(dsm_max_len)=32];
+  bytes                      app_cell_step       = 21 [(dsm_max_len)=32];
 }
 
 // One envelope payload for every DSM Connect reply.

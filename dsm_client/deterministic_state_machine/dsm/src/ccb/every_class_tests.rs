@@ -1325,6 +1325,36 @@ fn every_class() -> Vec<Shown> {
         }),
     ));
 
+    // ── application cells (DSM Amendment A35) ───────────────────────────
+    let writers = ok(
+        crate::app_cell::WriterSet::new(vec![ok(
+            crate::app_cell::Writer::new(ALG, &key()),
+            "app cell writer",
+        )]),
+        "app cell writer set",
+    );
+    let write = ok(
+        crate::app_cell::AppCellWrite::new(
+            b(0xAC),
+            b"step 1",
+            writers,
+            0,
+            b"payload",
+            &signature(),
+        ),
+        "app cell write",
+    );
+    all.push(shown(
+        class::APP_CELL_WRITE,
+        crate::app_cell::SCHEMA_V1,
+        write.encode(),
+        Read::Parsed(|b| {
+            Ok(crate::app_cell::AppCellWrite::decode(b)
+                .map_err(text)?
+                .encode())
+        }),
+    ));
+
     all
 }
 
