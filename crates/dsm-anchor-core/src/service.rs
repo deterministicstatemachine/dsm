@@ -599,8 +599,15 @@ pub fn handle<A: Served>(app: &mut A, frame: &[u8]) -> Vec<u8> {
         if frame.len() > MAX_PAYMENT_CHECK_BYTES || app.view().active.status != Status::Ready {
             return encode_response(&fail(pb::Op::CheckPayment as i32, err::FRAME_TOO_LARGE));
         }
+        // The frame was let past a head's size as a payment check, on the first op it names. A
+        // message may name its op again further in, and the decoder keeps the last: what is
+        // dispatched here is a payment check and nothing else, so no other request arrives at
+        // this size.
         return match crate::proto::decode_request(frame) {
-            Ok(req) => encode_response(&dispatch(app, &req, &[])),
+            Ok(req) if req.op == pb::Op::CheckPayment as i32 => {
+                encode_response(&dispatch(app, &req, &[]))
+            }
+            Ok(req) => encode_response(&fail(req.op, err::FRAME_TOO_LARGE)),
             Err(e) => encode_response(&fail(0, proto_code(e))),
         };
     }

@@ -282,6 +282,11 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         None => return Err(InitFailure::Entropy),
     }
 
+    // A production image reads the board's secret only on a board locked for it: the lock is
+    // checked first, so a board that fails it is refused with the secret never read into memory.
+    #[cfg(feature = "production")]
+    sealed::assert_secure_context().map_err(InitFailure::Sealed)?;
+
     // The board's sealed secret: without it the anchor has no identity to serve under.
     #[cfg(not(feature = "bench_self_enroll"))]
     let mut sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
@@ -317,9 +322,6 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         Err(SealedError::Unprovisioned) => "its OTP secret page is blank",
         Err(cause) => return Err(InitFailure::Sealed(cause)),
     };
-    #[cfg(feature = "production")]
-    sealed::assert_secure_context().map_err(InitFailure::Sealed)?;
-
     // Let the TROPIC01 settle after cold power-up before the first SPI transaction (~1 s @150 MHz).
     cortex_m::asm::delay(150_000_000);
 

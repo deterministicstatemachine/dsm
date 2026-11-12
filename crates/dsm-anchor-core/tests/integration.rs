@@ -815,6 +815,19 @@ fn over_the_wire_an_authorization_is_the_message_and_the_signature_after_it() {
         "a message longer than a request's largest"
     );
 
+    // The same message behind a first field that names a payment check: the decoder keeps the op
+    // named last, the prepare. It is not served at a payment check's size.
+    let mut disguised = vec![0x08, pb::Op::CheckPayment as u8];
+    disguised.extend_from_slice(&encode_request(&too_long));
+    let r = decode_response(&handle(&mut f.a, &disguised)).unwrap();
+    assert_eq!(
+        r.error,
+        err::FRAME_TOO_LARGE,
+        "a prepare let in at a payment check's size"
+    );
+    assert_eq!(r.op, pb::Op::Prepare as i32);
+    assert_eq!(f.a.active.status, Status::Ready);
+
     let r = decode_response(&handle(&mut f.a, &authorize_frame(&digest, &signature))).unwrap();
     assert!(r.ok, "authorize: error {}", r.error);
     assert_eq!(r.op, pb::Op::Authorize as i32);

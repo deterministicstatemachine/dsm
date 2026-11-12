@@ -42,6 +42,9 @@ pub const CHIP_KEY_SLOT: u16 = 0;
 const FACTORY_SLOT: u8 = 0;
 /// The pairing slot the board's own key is written to.
 const OWN_SLOT: u8 = 1;
+/// The pairing slots a birth neither writes nor invalidates. A chip is born only with both holding
+/// no key: the cage closes the board's own slot and nothing else.
+const SPARE_SLOTS: [u8; 2] = [2, 3];
 /// Bytes one R-memory data slot holds (TROPIC01 datasheet, `R_Mem_Data_Write`).
 pub const RMEM_SLOT_BYTES: usize = 444;
 /// R-memory data slots, numbered from 0 (`tropic01::R_MEM_DATA_SLOT_MAX` is the last).
@@ -646,11 +649,27 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         }
     }
 
+    /// Refused while a spare pairing slot holds a key: the birth would leave that key valid, with
+    /// the rights a slot has by default (the counter's re-initialization among them), outside the
+    /// cage. An empty slot and an invalidated one hold none. Only read.
+    fn spare_slots_hold_no_key(&mut self) -> Result<(), TropicError> {
+        for slot in SPARE_SLOTS {
+            match self.with(|s| s.pairing_key_read(u16::from(slot).into()).copied()) {
+                Ok(_key) => return Err(TropicError::Refused(ChipRefusal::SpareSlotHoldsKey)),
+                Err(Fault::InvalidKey | Fault::SlotEmpty | Fault::SlotInvalid) => {}
+                Err(e) => return Err(fault(e)),
+            }
+        }
+        Ok(())
+    }
+
     /// Whether this chip can take a birth, checked before anything is written to it: the counter at
-    /// `h0`, the board's slot free or already the board's, and the cage not begun. A counter a used
+    /// `h0`, the board's slot free or already the board's, no other slot holding a key, and the cage
+    /// not begun. A counter a used
     /// chip left elsewhere is set to `h0`, which only an uncaged chip allows. A chip refused here is
     /// left exactly as it was found.
     pub fn ready_for_birth(&mut self, h0: u32) -> Result<(), TropicError> {
+        self.spare_slots_hold_no_key()?;
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot == FACTORY_SLOT {
             match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied()) {
@@ -764,6 +783,18 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     /// In place of the key write: the slot is free or already this board's, and the session that
     /// will write it holds the right to.
     fn rehearse_key_write(&mut self) -> Result<(), Unrehearsed> {
+        if let Err(held) = self.spare_slots_hold_no_key() {
+            return Err(match held {
+                TropicError::Refused(refusal) => Unrehearsed::refused(
+                    refusal,
+                    "a pairing slot other than the board's holds a key".to_string(),
+                ),
+                other => Unrehearsed {
+                    why: format!("{other:?}"),
+                    error: other,
+                },
+            });
+        }
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot != FACTORY_SLOT {
             return Ok(());
@@ -830,6 +861,9 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     fn close_birth(&mut self, h0: u32) -> Result<(), TropicError> {
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot == FACTORY_SLOT {
+            // Before the first permanent write, the board's key: nothing is written to a chip
+            // whose spare slots hold a key.
+            self.spare_slots_hold_no_key()?;
             match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied()) {
                 Ok(key) if key == *own.as_bytes() => {}
                 Ok(_other) => {
@@ -856,6 +890,9 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
             .with(|s| s.i_config_read(I_CONFIG_WRITE.into()))
             .map_err(fault)?;
         if config & (1u32 << OWN_SLOT) != 0 {
+            // And again before the cage, for a birth taken up after a cut on the board's own
+            // slot. A closed cage is not read this way: its chip was born as it was.
+            self.spare_slots_hold_no_key()?;
             // The factory slot goes before the cage begins. A cut in the cage can leave invalidation
             // already revoked, and the slot already gone: lane 0 of its register says which.
             let invalidate = self

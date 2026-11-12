@@ -611,6 +611,39 @@ fn a_power_cut_anywhere_in_a_spend_keeps_one_release_and_one_counter_step() {
     });
 }
 
+/// A chip whose slot 2 holds a key is refused before anything is written to it. The birth cages the
+/// board's own slot and invalidates the factory's; a key left in another slot would stay valid
+/// after it, outside the cage. The chip is left as it was found: uncaged, slot 1 empty.
+#[test]
+fn a_chip_with_a_key_in_a_spare_slot_is_refused_before_anything_is_written() {
+    let model = ModelServer::start();
+    let other = StaticSecret::from([0x25u8; 32]);
+    let mut session = factory_session(&model);
+    if let Err(e) = session.pairing_key_write(2u16.into(), PublicKey::from(&other).as_bytes()) {
+        panic!("slot 2 did not take a key: {e:?}");
+    }
+    drop(session);
+
+    match model.boot() {
+        Ok(_anchor) => panic!("a chip with a key in a spare slot came up to be provisioned"),
+        Err(anchor_chip::bring_up::BringUpFailure::Enroll(
+            anchor_core::tropic::TropicError::Refused(
+                anchor_core::tropic::ChipRefusal::SpareSlotHoldsKey,
+            ),
+        )) => {}
+        Err(e) => panic!("refused for another reason: {e:?}"),
+    }
+    let mut session = factory_session(&model);
+    let open = session.i_config_read(0x040u16.into());
+    assert!(
+        matches!(open, Ok(bits) if bits & 0b10 != 0),
+        "the chip was caged"
+    );
+    if let Ok(key) = session.pairing_key_read(1u16.into()) {
+        panic!("the board's slot was written: it holds {key:02x?}");
+    }
+}
+
 /// A chip already used: its counter away from the start, its slot 1 holding another board's key.
 /// Neither is caged or written further: a refusal at boot leaves it as it was.
 #[test]
