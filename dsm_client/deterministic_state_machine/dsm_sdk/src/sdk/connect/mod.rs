@@ -24,9 +24,13 @@
 //!   the facts its own account established.
 //! - [`wager`]: the match template a wallet builds for a stake the application
 //!   asks it to lock (DSM Amendment A12).
+//! - [`contribution`]: the contribution template a wallet builds for an
+//!   amount the application asks it to commit, every outcome paying the
+//!   vault's own owner (DSM Amendment A35).
 
 pub mod app;
 pub mod code;
+pub mod contribution;
 pub mod grant;
 pub mod holdings;
 pub mod operations;
