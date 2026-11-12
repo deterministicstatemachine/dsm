@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Your application's account at a glance: its identity, what it owns, every
-connected wallet, and the latest activity. Runs against `make app-dev`."""
+connected wallet, and the latest activity. Runs against `dsm-app up` (from the repo, `make app-dev`)."""
 
 from dsm_app_client import local_app
 

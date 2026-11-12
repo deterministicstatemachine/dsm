@@ -1,16 +1,23 @@
 # Run your app's account in production
 
-`make app-dev` runs your app's account for you while you develop. In production you run the same program, `dsm-app-host`, yourself, beside your server.
+`dsm-app up` runs your app's account for you while you develop. In production you run the same program, `dsm-app-host`, yourself, beside your server.
 
-## Build it
+## Get it
 
-From the repo, the way `make app-dev` builds it:
+The install from [Set up your machine](setup.md) put it in `~/.local/bin`. On a server, install it where your service manager runs it from; `DSM_PREFIX` names the place (`/usr/local/bin/dsm-app-host` here):
+
+```bash
+curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.4/install.sh
+sudo DSM_PREFIX=/usr/local sh install.sh
+```
+
+From the repo instead, build it:
 
 ```bash
 cargo build --release --locked -p dsm-app-host
 ```
 
-The program is `target/release/dsm-app-host`.
+The program is then `target/release/dsm-app-host`.
 
 ## Run it
 
@@ -31,7 +38,7 @@ dsm-app-host \
 |---|---|
 | `--data-dir` | The account: its state and `RECOVERY_MNEMONIC`. The first start creates the account and writes the mnemonic there (mode 0600). |
 | `--ingress-secret-dir` | Where each launch writes a new ingress secret, `ingress-token`. It must be apart from the data directory: your app gets the secret and nothing of the account. |
-| `--env-config` | The network's storage set, each member with its own certificate authority. The wallet's own is [`dsm_client/frontend/public/dsm_env_config.toml`](https://github.com/deterministicstatemachine/dsm/blob/main/dsm_client/frontend/public/dsm_env_config.toml), and `make app-dev` uses it too. |
+| `--env-config` | The network's storage set, each member with its own certificate authority. The wallet's own is [`dsm_client/frontend/public/dsm_env_config.toml`](https://github.com/deterministicstatemachine/dsm/blob/main/dsm_client/frontend/public/dsm_env_config.toml). For the beta network, `--network beta` instead: the host carries that file and uses it, as `dsm-app up` does. |
 | `--game-bind` | The ingress your server calls. Loopback only; anything else is refused. |
 | `--relay-bind`, `--relay-endpoint`, `--relay-name` | Where wallets reach your account. The host makes its own TLS certificate for these names, and every connect code pins it, so you need no certificate authority. |
 

@@ -8,21 +8,21 @@ Your web app stays what it is: Node, Python, whatever it is today. Beside it run
 
 ## 1. Start it
 
+In your app's folder:
+
 ```bash
-make app-dev
+dsm-app up
 ```
 
-This builds the TypeScript client, generates the Python client's types from `proto/dsm_app.proto`, builds the app host, and runs it with a data directory, a directory for the ingress secret, and the network's client config: the same five storage nodes the wallet ships with. The first build takes a while; later runs reuse it.
+This runs `dsm-app-host` in the background with a data directory, a directory for the ingress secret, and the beta network's client config, which the host carries: the same five storage nodes the wallet ships with. It keeps them under `.dsm-dev` in this folder.
 
 The first launch creates the account. It writes a recovery mnemonic once to the data directory, readable by you alone, and makes the account the way a phone does. The host waits until the network holds the account's directory entry, and only then opens its ingress. Then the account is funded from the network's faucet.
 
-The end of what it prints, from a run on the beta network:
+What it prints, from a run on the beta network (13 seconds, on a Mac):
 
 ```text
-[app-dev] building dsm-app-host (release)
-    Finished `release` profile [optimized] target(s) in 1m 06s
-[app-dev] app account running
-  storage set:    the beta network (hosted; …/dsm_client/frontend/public/dsm_env_config.toml)
+[dsm-app] app account running
+  storage set:    the beta network (carried in dsm-app-host)
   ingress:        http://127.0.0.1:8787   (your server calls this)
   ingress secret: …/.dsm-dev/app/ingress/ingress-token
   relay:          https://127.0.0.1:8443   (wallets reach this)
@@ -31,9 +31,9 @@ The end of what it prints, from a run on the beta network:
 funded: claimed 100.00 ERA (economic position 1)
 ```
 
-`…` is the folder you cloned into. Line by line:
+`…` is your app's folder. Line by line:
 
-- **storage set**: the beta network, hosted, and the file that names it.
+- **storage set**: the beta network, hosted.
 - **ingress**, on loopback port 8787: your server calls this.
 - **ingress secret**: in its own directory, so your app can read the secret and nothing else of the account.
 - **relay**, on port 8443: wallets reach this.
@@ -43,24 +43,24 @@ funded: claimed 100.00 ERA (economic position 1)
 > [!WARNING]
 > Back up the recovery mnemonic like a wallet's, because that is what it is. Whoever can read the data directory controls the account.
 
-`make app-dev` returns once the account is running; the host keeps running in the background. `make app-dev-down` stops it, and `make dev-down` stops it and the terminal wallets. Run `make app-dev` again whenever you like: it builds what changed, keeps the same account, and claims nothing more from the faucet once the account holds ERA (it says `already holds` and the amount).
+`dsm-app up` returns once the account is running; the host keeps running in the background. `dsm-app down` stops it, and `dsm-app status` says whether it runs. Run `dsm-app up` again whenever you like: it keeps the same account, and claims nothing more from the faucet once the account holds ERA (it says `already holds` and the amount).
 
 ## 2. Look at it
 
-The app's command line talks to the account through the same ingress your code will. `id` prints the account's identity:
+`dsm-app` talks to the account through the same ingress your code will. `id` prints the account's identity:
 
 ```bash
-make app ARGS=id
+dsm-app id
 ```
 
 ```text
-0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80
+P1TTQ65K20YCW6FCHVJ8A8V0VQ55NN3DZK6KCBFMCC3M98KN3X2G
 ```
 
 `owned` prints what it holds: a hundred ERA from the faucet, and nothing of dBTC yet.
 
 ```bash
-make app ARGS=owned
+dsm-app owned
 ```
 
 ```text
@@ -73,11 +73,11 @@ Each line is an object: its symbol, the amount in its own units, its kind, and i
 `activity` is the account's own record of every call made through the ingress:
 
 ```bash
-make app ARGS=activity
+dsm-app activity
 ```
 
 ```text
-account 0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80
+account P1TTQ65K20YCW6FCHVJ8A8V0VQ55NN3DZK6KCBFMCC3M98KN3X2G
 1  ROUTE  faucet.claim  claim ERA from the network's faucet  -> claimed 100.00 ERA (economic position 1)
 ```
 
@@ -101,7 +101,14 @@ On the wire, each call is one protobuf message, the route's name and its argumen
 
 ## 5. The first call
 
-Here is the first call in TypeScript and in Python: open the local account, and ask for its connections.
+Here is the first call in TypeScript and in Python: open the local account, and ask for its connections. First the client, into your app's folder. TypeScript, from the package the install put in `~/.local/share/dsm/clients`:
+
+```bash
+npm init -y
+npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.0-beta.4.tgz
+```
+
+`npm init -y` makes a `package.json` if your folder has none. The client's types are inside the package, so nothing is compiled. Then:
 
 ```ts
 import { localAccount } from "dsm-app-client";
@@ -117,23 +124,25 @@ app = local_app()
 print(app.connections())
 ```
 
-Each prints an empty list: nothing is connected yet. [Write it into your app](clients.md) runs whole programs. To try the Python client now, from the repo:
+Each prints an empty list: nothing is connected yet. `localAccount("app")` and `local_app()` find the account `dsm-app up` started by looking for the `.dsm-dev` folder above the folder you run in; from anywhere else, name it with `DSM_DEV_DIR`. [Write it into your app](clients.md) runs whole programs.
+
+The Python client goes into a virtual environment, from its package beside the TypeScript one:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install -e clients/python
-python3 clients/python/examples/account_status.py
+pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.0b4-py3-none-any.whl
+python3 ~/.local/share/dsm/examples/account_status.py
 ```
 
-`account_status.py` prints your account at a glance: its identity, what it owns, every connected wallet with what it may do, and the latest activity.
+`account_status.py` prints your account at a glance: its identity, what it owns, every connected wallet with what it may do, and the latest activity. Its types are inside the package too, so pip installs it with nothing to compile; it fetches one dependency, `protobuf`.
 
 ## The whole page, as one script
 
 ```bash
-make app-dev
-make app ARGS=id
-make app ARGS=owned
-make app ARGS=activity
+dsm-app up
+dsm-app id
+dsm-app owned
+dsm-app activity
 ```
 
 Next: [Make an offer, connect a wallet](connect.md).

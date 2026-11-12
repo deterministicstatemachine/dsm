@@ -10,7 +10,7 @@ Your app stays what it is: a game, a shop, a service, in the language you alread
 
 This guide walks the whole path, a page at a time. Every command on these pages is in a box with a copy button; paste it into a terminal as it is. The screenshots are from real runs.
 
-1. [Set up your machine](setup.md): the tools, the code, a check.
+1. [Set up your machine](setup.md): Node.js, and DSM's tools from a release: no Rust, no clone.
 2. [The wallet on Android and iOS](wallet.md): what your players run. Optional; a wallet in the terminal does for testing.
 3. [Your app's own DSM account](account.md): one command, and your app has an account on the beta network, funded.
 4. [Make an offer, connect a wallet](connect.md): a code, a scan, an approval.

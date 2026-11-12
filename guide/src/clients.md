@@ -8,27 +8,21 @@ This page has the whole of an app, twice: the same program in JavaScript and in 
 
 ## The whole program, in JavaScript
 
-Two files: [`guide/examples/my-game/package.json`](https://github.com/deterministicstatemachine/dsm/blob/main/guide/examples/my-game/package.json), which depends on the client in your clone of the repo,
-
-```json
-{{#include ../examples/my-game/package.json}}
-```
-
-and [`guide/examples/my-game/my-game.mjs`](https://github.com/deterministicstatemachine/dsm/blob/main/guide/examples/my-game/my-game.mjs):
+One file, [`my-game.mjs`](https://github.com/deterministicstatemachine/dsm/blob/main/guide/examples/my-game/my-game.mjs). Save it in your app's folder, where the TypeScript client is installed ([the account page](account.md#5-the-first-call)):
 
 ```js
 {{#include ../examples/my-game/my-game.mjs}}
 ```
 
-It is plain JavaScript, so `node` runs it with no build step, and it is valid TypeScript too. With `make app-dev` running, from the repo:
+It is plain JavaScript, so `node` runs it with no build step, and it is valid TypeScript too. With `dsm-app up` running:
 
 ```bash
-cd guide/examples/my-game
-npm install
 node my-game.mjs
 ```
 
-It prints a connect code and waits. In a second terminal, connect a wallet to it: `make dev-wallet-connect CODE=` followed by the code, or scan it on a phone. (A wallet connects to an app once: if the terminal wallet is still connected from the earlier pages, `make wallet ARGS="disconnect $S"` first, or connect a second one with `make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`.) When the program asks for the sign-in, approve it as on the last page: `make dev-wallet-pending` shows the connection and the request's number, and `make wallet ARGS="approve <connection> <number>"` approves it.
+(From the repo, it is in `guide/examples/my-game`, whose `package.json` depends on the client in the clone: `npm install`, then the same `node my-game.mjs`.)
+
+It prints a connect code and waits. In a second terminal, connect a wallet to it: `dsm-dev-wallet connect ` followed by the code, or scan it on a phone. (A wallet connects to an app once: if the terminal wallet is still connected from the earlier pages, `dsm-dev-wallet disconnect $S` first, or connect a second one with `DSM_WALLET_NAME=wallet2 dsm-dev-wallet up`, then `DSM_WALLET_NAME=wallet2 dsm-dev-wallet connect <the code>`.) When the program asks for the sign-in, approve it as on the last page: `dsm-dev-wallet pending` shows the connection and the request's number, and `dsm-dev-wallet approve <connection> <number>` approves it.
 
 What it printed:
 
@@ -53,18 +47,17 @@ dBTC           0.00000000   currency 0EJ2PSRS2YQR8BR77P3WZ92SV12VJT7XP6NWP0SH5P8
 
 ## The same program, in Python
 
-[`guide/examples/my_game.py`](https://github.com/deterministicstatemachine/dsm/blob/main/guide/examples/my_game.py):
+[`my_game.py`](https://github.com/deterministicstatemachine/dsm/blob/main/guide/examples/my_game.py). Save it in your app's folder too:
 
 ```python
 {{#include ../examples/my_game.py}}
 ```
 
-The Python client goes into a virtual environment. `make app-dev` already generated its protobuf types. From the repo:
+With the Python client in the virtual environment from [the account page](account.md#5-the-first-call):
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e clients/python
-python3 guide/examples/my_game.py
+. .venv/bin/activate
+python3 my_game.py
 ```
 
 Connect a wallet to the code it prints, and approve the sign-in, as above. What it printed:
@@ -84,14 +77,14 @@ This run came after the JavaScript one, on the same account: issuing GEMS a seco
 
 ## Your account at a glance
 
-The repo has two more Python programs: [`first_payment.py`](https://github.com/deterministicstatemachine/dsm/blob/main/clients/python/examples/first_payment.py), a connect code and one payment received (the newcomer check, `make first-run`, runs it on a clean Ubuntu), and [`account_status.py`](https://github.com/deterministicstatemachine/dsm/blob/main/clients/python/examples/account_status.py):
+The install put two more Python programs in `~/.local/share/dsm/examples`: [`first_payment.py`](https://github.com/deterministicstatemachine/dsm/blob/main/clients/python/examples/first_payment.py), a connect code and one payment received (the newcomer check, `make first-run`, runs it on a clean Ubuntu), and [`account_status.py`](https://github.com/deterministicstatemachine/dsm/blob/main/clients/python/examples/account_status.py):
 
 ```python
 {{#include ../../clients/python/examples/account_status.py}}
 ```
 
 ```bash
-python3 clients/python/examples/account_status.py
+python3 ~/.local/share/dsm/examples/account_status.py
 ```
 
 On the account from these pages, it began:
@@ -125,9 +118,11 @@ On the starter's page, the switch at the top shows every piece's code in Python 
 
 ## In your own app
 
-**JavaScript or TypeScript.** Depend on the client by path, as `package.json` above does; the path is from your app's folder to `clients/typescript` in your clone. `localAccount("app")` finds the account `make app-dev` runs by looking for the repo's `.dsm-dev` folder above the folder you run in. From anywhere else, name it: `DSM_DEV_DIR=/path/to/your/clone/.dsm-dev`. On a server of your own, open the account from the ingress's address and the secret file the host writes: `new AppAccount(await Ingress.fromSecretFile(url, secretFile))`.
+**JavaScript or TypeScript.** `npm install` the client's package (`~/.local/share/dsm/clients/dsm-app-client-0.1.0-beta.4.tgz`) into your app, as [the account page](account.md#5-the-first-call) did; its types are inside it, so nothing is compiled. `localAccount("app")` finds the account `dsm-app up` runs by looking for the `.dsm-dev` folder above the folder you run in. From anywhere else, name it: `DSM_DEV_DIR=/path/to/your/app/.dsm-dev`. On a server of your own, open the account from the ingress's address and the secret file the host writes: `new AppAccount(await Ingress.fromSecretFile(url, secretFile))`.
 
-**Python.** `pip install -e` the `clients/python` folder of your clone into your app's virtual environment. `local_app()` finds the account the same way, and `DSM_DEV_DIR` names it from anywhere else. On a server of your own: `AppAccount(Ingress.from_secret_file(url, secret_file))`.
+**Python.** `pip install` the client's wheel (`~/.local/share/dsm/clients/dsm_app_client-0.1.0b4-py3-none-any.whl`) into your app's virtual environment. `local_app()` finds the account the same way, and `DSM_DEV_DIR` names it from anywhere else. On a server of your own: `AppAccount(Ingress.from_secret_file(url, secret_file))`.
+
+From a clone of the repo, the clients are `clients/typescript` (depend on it by path) and `clients/python` (`pip install -e clients/python`); both carry their generated types, so neither needs protoc.
 
 ## Any other language
 
