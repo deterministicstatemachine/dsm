@@ -11,7 +11,8 @@
 //! the bootrom's first boot of one does.
 
 use crate::otp_burn::{
-    lock0, lock1, BOOTROM_HEADER, BOOT_FLAGS0_ROW, PAGES, PAGE_ROWS, ROLLBACK_ROW, ROWS,
+    lock0, lock1, BOOTROM_HEADER, BOOT_FLAGS0_ROW, DIGEST_ROW, LOCK_IMAGE_ROWS, PAGES, PAGE_ROWS,
+    ROLLBACK_ROW, ROWS,
 };
 use crate::picoboot::{BootselLink, COMMAND_BYTES, MAGIC, NOT_PERMITTED, RAW_ROW_MASK};
 use crate::release::FLASH_BASE;
@@ -73,6 +74,10 @@ pub struct BootromModel {
     /// Each page's soft lock for the bootloader, set on entering BOOTSEL: bit 0 bars writes, bit 1
     /// reads. Unset until the board's first command after it comes up in BOOTSEL.
     soft_locks: Option<Vec<u32>>,
+    /// The lock image's flash bytes (`dsm-anchor-lock-pages`), as the phone loads them: started from
+    /// flash on a board whose secure boot is off, it does what that image does
+    /// ([`Self::run_lock_image`]) and reboots into BOOTSEL.
+    pub lock_image: Option<Vec<u8>>,
 }
 
 /// How a reboot went.
@@ -83,6 +88,8 @@ pub enum LastBoot {
     Refused,
     /// It ran the image in flash.
     Ran,
+    /// It ran the lock image, which rebooted it into BOOTSEL.
+    BackToBootsel,
 }
 
 impl BootromModel {
@@ -127,6 +134,34 @@ impl BootromModel {
             last_boot: LastBoot::NotYet,
             bootrom_version: 2,
             soft_locks: None,
+            lock_image: None,
+        }
+    }
+
+    /// What the lock image does, as Secure code at a normal boot: each row it writes, only where the
+    /// row's guarding page has its Secure lock open and no access key (nothing advances a soft lock
+    /// at a normal boot), the digest page's only once the digest is burned, and neither where it
+    /// holds a bit outside the value.
+    fn run_lock_image(&mut self) {
+        let majority = |row: u32| {
+            let (a, b, c) = (row & 0xff, (row >> 8) & 0xff, (row >> 16) & 0xff);
+            (a & b) | (b & c) | (a & c)
+        };
+        let digest_burned = (DIGEST_ROW..DIGEST_ROW + 16).any(|r| self.raw[usize::from(r)] != 0);
+        for (row, value) in LOCK_IMAGE_ROWS {
+            if row == lock1(46) && !digest_burned {
+                continue;
+            }
+            let old = self.raw[usize::from(row)];
+            if old == value || old & !value != 0 {
+                continue;
+            }
+            let page = self.guarding_page(row);
+            let secure = majority(self.raw[usize::from(lock1(page))]) & WRITE_BARRED;
+            let keyed = majority(self.raw[usize::from(lock0(page))]) & 0x3f;
+            if secure == 0 && keyed == 0 {
+                self.raw[usize::from(row)] = value;
+            }
         }
     }
 
@@ -239,6 +274,16 @@ impl BootromModel {
     /// `ROLLBACK_REQUIRED`.
     fn boot_signed_image(&mut self) {
         let secure = self.raw[0x40] & 1 != 0;
+        // The lock image is never signed: it runs only where secure boot is off.
+        let lock_image_in_flash = self
+            .lock_image
+            .as_ref()
+            .is_some_and(|image| self.flash.starts_with(image));
+        if !secure && lock_image_in_flash {
+            self.run_lock_image();
+            self.last_boot = LastBoot::BackToBootsel;
+            return;
+        }
         self.last_boot = match &self.signed_image {
             Some(signed) if secure && self.flash[..signed.len()] != signed[..] => LastBoot::Refused,
             _runs => LastBoot::Ran,

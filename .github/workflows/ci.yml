@@ -968,6 +968,16 @@ jobs:
           cargo clippy --release --locked -- -D warnings
           cargo fmt --check
 
+      # The lock image the phone starts once on a board whose bootloader may not
+      # write the page locks its Secure code may. No tests (`[[bin]] test = false`):
+      # what it does is the bootloader model's in dsm-android-anchor's tests.
+      - name: dsm-anchor-lock-pages builds (thumbv8m)
+        working-directory: crates/dsm-anchor-lock-pages
+        run: |
+          cargo build --release --locked
+          cargo clippy --release --locked -- -D warnings
+          cargo fmt --check
+
       # Host harness. serialport's default `libudev` feature needs the system
       # library on Linux; the USB bench itself is hardware-only and is never
       # invoked here, but the 2 unit tests are real and do run.

@@ -28,6 +28,9 @@ pub trait BoardPort: Send + Sync {
     fn open(&self) -> Result<(Self::Link, String), String>;
     /// The production release this app carries.
     fn release(&self) -> Result<Release, String>;
+    /// The lock image this app carries (`dsm-anchor-lock-pages`), its flash bytes from flash's first
+    /// byte: for a board whose bootloader may not write the page locks its Secure code may.
+    fn lock_image(&self) -> Result<Vec<u8>, String>;
     /// 32 bytes from the phone's random source, for a blank board's secret.
     fn secret(&self) -> Result<[u8; 32], String>;
     /// After a reboot: wait for the board to leave USB and come back, and say how it came back.
@@ -43,17 +46,25 @@ pub enum Returned {
     AsAnchor,
 }
 
-/// The steps in the runbook's order.
-const ORDER: [Kind; 8] = [
-    Kind::LoadImage,
-    Kind::SealSecret,
-    Kind::WriteDigest,
-    Kind::LockDigest,
-    Kind::WriteBootKey,
-    Kind::Lockdown,
-    Kind::Boot,
-    Kind::LockBootPages,
-];
+/// The steps in the runbook's order. On a board whose bootloader may not write the page locks the
+/// lock image sets, that image's step takes the digest page lock's place, after the digest.
+fn order(read: &Read) -> [Kind; 8] {
+    let lock = if read.via_lock_image {
+        Kind::LockPages
+    } else {
+        Kind::LockDigest
+    };
+    [
+        Kind::LoadImage,
+        Kind::SealSecret,
+        Kind::WriteDigest,
+        lock,
+        Kind::WriteBootKey,
+        Kind::Lockdown,
+        Kind::Boot,
+        Kind::LockBootPages,
+    ]
+}
 
 fn kind_name(kind: Kind) -> &'static str {
     match kind {
@@ -66,6 +77,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Boot => "Start the signed image once",
         Kind::LockBootPages => "Lock the boot pages",
         Kind::CheckChangedImage => "Check that a changed image is refused",
+        Kind::LockPages => "Lock the digest and rollback pages, from a one-time image",
         Kind::Unspecified => "no step",
     }
 }
@@ -108,12 +120,28 @@ struct Read {
     next: Option<Kind>,
     found: Vec<String>,
     blocked: Option<String>,
+    /// This board's bootloader may not write a page lock the lock image sets: its procedure goes
+    /// through the lock image, after the digest.
+    via_lock_image: bool,
 }
 
 /// The lock pages, 62 and 63: an A2 bootrom guards every page's lock row by one of them.
 const LOCK_PAGES: [u16; 2] = [62, 63];
 
-fn read_board<L: BootselLink>(boot: &mut Picoboot<L>, release: &Release) -> Result<Read, String> {
+/// Whether this board's bootloader may not write one of the page locks the lock image sets.
+fn barred_from_lock_image_rows(otp: &OtpReading, bootrom: Bootrom) -> Result<bool, String> {
+    let mut barred = Vec::new();
+    for (row, _value) in otp_burn::LOCK_IMAGE_ROWS {
+        barred.push(!BootloaderAccess::of(otp, bootrom.guarding_page(row))?.may_write());
+    }
+    Ok(barred.iter().any(|b| *b))
+}
+
+fn read_board<L: BootselLink>(
+    boot: &mut Picoboot<L>,
+    release: &Release,
+    lock_image: &Result<Vec<u8>, String>,
+) -> Result<Read, String> {
     let bootrom = Bootrom::read(boot)?;
     let otp = OtpReading::read(boot).map_err(|e| e.to_string())?;
     let standing = Standing::read(boot, &otp)?;
@@ -121,11 +149,25 @@ fn read_board<L: BootselLink>(boot: &mut Picoboot<L>, release: &Release) -> Resu
     for page in LOCK_PAGES {
         found.push(BootloaderAccess::of(&otp, page)?.words());
     }
-    // Every burn left, checked before any of them runs: a procedure this bootloader cannot finish
-    // is not started, and one it cannot go on with stops where it stands.
-    let blocked =
-        otp_burn::bootloader_may_write(&otp, bootrom, &otp_burn::burns_left(&standing, release)?)
-            .err();
+    // Every burn left, checked before any of them runs: a procedure that cannot be finished is not
+    // started, and one that cannot go on stops where it stands. A row this bootloader may not write
+    // is the lock image's to write, where it writes that row, Secure code may, and the lockdown has
+    // not yet made an unsigned image unbootable.
+    let barred = otp_burn::barred_rows(&otp, bootrom, &otp_burn::burns_left(&standing, release)?)?;
+    let blocked = if barred.is_empty() {
+        None
+    } else if !standing.locked_down && otp_burn::lock_image_covers(&otp, bootrom, &barred)? {
+        match lock_image {
+            Ok(_carried) => None,
+            Err(why) => Some(format!(
+                "{}. The lock image would set them, and this app carries none: {why}",
+                otp_burn::barred_words(&barred)
+            )),
+        }
+    } else {
+        Some(otp_burn::barred_words(&barred))
+    };
+    let via_lock_image = barred_from_lock_image_rows(&otp, bootrom)?;
     if standing.secret == SecretPage::Sealed && standing.digest == otp_burn::Hash32::Blank {
         found.push(
             "the board's secret is sealed by an earlier procedure: it keeps that secret"
@@ -141,16 +183,18 @@ fn read_board<L: BootselLink>(boot: &mut Picoboot<L>, release: &Release) -> Resu
             OnBoard::Differs { .. } => Some(Kind::LoadImage),
         },
         Next::Burn(burn) => {
-            // Step 3 comes before the first burn on a board: the image goes into flash first.
-            let first = matches!(burn, Burn::SealSecret | Burn::WriteDigest);
-            if first {
+            if matches!(burn, Burn::SealSecret | Burn::WriteDigest) {
                 found.extend(otp_burn::check_blank(&otp)?.locks_already_set);
-                match otp_burn::image_on_board(boot, release)? {
-                    OnBoard::Release => Some(burn_kind(burn)),
-                    OnBoard::Differs { .. } => Some(Kind::LoadImage),
+            }
+            // Every burn goes toward the image in flash: Step 3 comes before the first, and the
+            // signed image is loaded again wherever flash holds another (the lock image's, or the
+            // changed one after its check).
+            match otp_burn::image_on_board(boot, release)? {
+                OnBoard::Differs { .. } => Some(Kind::LoadImage),
+                OnBoard::Release if burn == Burn::LockDigestPage && via_lock_image => {
+                    Some(Kind::LockPages)
                 }
-            } else {
-                Some(burn_kind(burn))
+                OnBoard::Release => Some(burn_kind(burn)),
             }
         }
     };
@@ -159,6 +203,7 @@ fn read_board<L: BootselLink>(boot: &mut Picoboot<L>, release: &Release) -> Resu
         next,
         found,
         blocked,
+        via_lock_image,
     })
 }
 
@@ -170,10 +215,11 @@ fn steps(read: &Read) -> Vec<pb::AnchorBoardStep> {
         Some(_why) => State::Blocked,
         None => State::Next,
     };
+    let order = order(read);
     let next_at = read
         .next
-        .and_then(|next| ORDER.iter().position(|k| *k == next));
-    ORDER
+        .and_then(|next| order.iter().position(|k| *k == next));
+    order
         .iter()
         .enumerate()
         .map(|(i, kind)| {
@@ -225,7 +271,7 @@ impl<P: BoardPort> BoardSetup<P> {
             release: release_words(release),
             ..Default::default()
         };
-        match read_board(boot, release) {
+        match read_board(boot, release, &self.port.lock_image()) {
             Ok(read) => {
                 let mut answer = pb::AnchorBoardResponse {
                     steps: steps(&read),
@@ -325,6 +371,90 @@ impl<P: BoardPort> BoardSetup<P> {
         }
     }
 
+    /// The lock image's step: the image loaded and started, the board back in BOOTSEL with the page
+    /// locks it sets read back, and the signed image loaded again and read back whole.
+    fn lock_pages(
+        &self,
+        mut boot: Picoboot<P::Link>,
+        chip_id: &str,
+        release: &Release,
+    ) -> pb::AnchorBoardResponse {
+        let gone = pb::AnchorBoardResponse {
+            chip_id: chip_id.to_string(),
+            release: release_words(release),
+            ..Default::default()
+        };
+        let started = self
+            .port
+            .lock_image()
+            .and_then(|image| otp_burn::boot_lock_image(&mut boot, release, &image));
+        if let Err(why) = started {
+            let mut answer = self.answer(&mut boot, chip_id, release);
+            answer.refused = why;
+            return answer;
+        }
+        // The board is rebooting: its link goes with it.
+        drop(boot);
+        match self.port.wait_for_return(chip_id) {
+            Err(why) => pb::AnchorBoardResponse {
+                refused: format!(
+                    "the board did not come back after the lock image: {why}. Unplug it, hold \
+                     BOOTSEL, plug it in again, and read it"
+                ),
+                ..gone
+            },
+            Ok(Returned::AsAnchor) => pb::AnchorBoardResponse {
+                refused:
+                    "the board came back as the DSM Anchor, not in BOOTSEL: the lock image did \
+                          not run. Unplug it, hold BOOTSEL, plug it in again, and read it"
+                        .to_string(),
+                ..gone
+            },
+            Ok(Returned::Bootsel) => {
+                let mut boot = match self.reopen(chip_id) {
+                    Ok(boot) => boot,
+                    Err(why) => {
+                        return pb::AnchorBoardResponse {
+                            refused: format!(
+                            "the board came back in BOOTSEL after the lock image, but could not \
+                                 be opened again: {why}. Read it again"
+                        ),
+                            ..gone
+                        }
+                    }
+                };
+                let rows = otp_burn::lock_image_rows(&mut boot);
+                let loaded = otp_burn::load_image(&mut boot, release);
+                let mut answer = self.answer(&mut boot, chip_id, release);
+                match (rows, loaded) {
+                    (Ok(mut rows), Ok(())) => {
+                        rows.push(format!(
+                            "flash: the signed image again, {} bytes, read back whole",
+                            release.image.len()
+                        ));
+                        answer.written = rows;
+                    }
+                    (Err(why), _either) => answer.refused = why,
+                    (Ok(_rows), Err(why)) => {
+                        answer.refused = format!(
+                            "the page locks are set, and loading the signed image back failed: {why}"
+                        );
+                    }
+                }
+                answer
+            }
+        }
+    }
+
+    /// The board back in BOOTSEL after a reboot: its link opened again, and the same chip.
+    fn reopen(&self, chip_id: &str) -> Result<Picoboot<P::Link>, String> {
+        let (link, id) = self.port.open()?;
+        if id != chip_id {
+            return Err(format!("another board came back: {id}"));
+        }
+        Picoboot::connect(link).map_err(|e| e.to_string())
+    }
+
     fn run(
         &self,
         boot: &mut Picoboot<P::Link>,
@@ -358,6 +488,10 @@ impl<P: BoardPort> BoardSetup<P> {
             // It reboots the board and waits for it to come back: `check_changed_image` runs it.
             Kind::CheckChangedImage => Err(
                 "the changed-image check runs on its own, across the board's reboot".to_string(),
+            ),
+            // So does the lock image's step: `lock_pages` runs it.
+            Kind::LockPages => Err(
+                "the lock image's step runs on its own, across the board's reboot".to_string(),
             ),
             Kind::Unspecified => Err("no step was named".to_string()),
         }
@@ -445,7 +579,7 @@ impl<P: BoardPort> dsm_sdk::bridge::AnchorBoardSetup for BoardSetup<P> {
             answer.refused = format!("step {} is not one this app knows", request.step);
             return answer;
         };
-        let due = match read_board(&mut boot, &release) {
+        let due = match read_board(&mut boot, &release, &self.port.lock_image()) {
             Ok(Read {
                 blocked: Some(why), ..
             }) => {
@@ -469,6 +603,17 @@ impl<P: BoardPort> dsm_sdk::bridge::AnchorBoardSetup for BoardSetup<P> {
                 return answer;
             }
             return self.check_changed_image(boot, &chip_id, &release);
+        }
+        if step == Kind::LockPages {
+            if due != Some(Kind::LockPages) {
+                let mut answer = self.answer(&mut boot, &chip_id, &release);
+                answer.refused = format!(
+                    "{} is not this board's next step; nothing was written",
+                    kind_name(step)
+                );
+                return answer;
+            }
+            return self.lock_pages(boot, &chip_id, &release);
         }
         if due != Some(step) {
             let mut answer = self.answer(&mut boot, &chip_id, &release);
@@ -734,7 +879,12 @@ pub mod jni_port {
             )
         }
 
-        /// Filled from the phone's random source into memory never initialised to anything else.
+        /// The lock image, built from `crates/dsm-anchor-lock-pages` into the app's assets by
+        /// `scripts/anchor-release-into-app.sh`.
+        fn lock_image(&self) -> Result<Vec<u8>, String> {
+            crate::release::flatten_elf(&release_file("lock-pages.elf")?)
+        }
+
         fn wait_for_return(&self, chip_id: &str) -> Result<super::Returned, String> {
             let returned = with_unified(|env, cls| {
                 let jid = env.new_string(chip_id).map_err(|e| e.to_string())?;
@@ -755,6 +905,7 @@ pub mod jni_port {
             }
         }
 
+        /// Filled from the phone's random source into memory never initialised to anything else.
         fn secret(&self) -> Result<[u8; 32], String> {
             let mut fresh = [core::mem::MaybeUninit::<u8>::uninit(); 32];
             let drawn = getrandom::fill_uninit(&mut fresh)

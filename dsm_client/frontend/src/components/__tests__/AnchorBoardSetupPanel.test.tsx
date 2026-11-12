@@ -181,6 +181,33 @@ describe('a board set up from the phone', () => {
     expect(asked.filter((a) => a.route === 'anchor.board.step')).toHaveLength(0);
   });
 
+  it('says the lock image restarts the board and asks for Allow again, and sends it once typed back', async () => {
+    const order = [K.LOAD_IMAGE, K.SEAL_SECRET, K.WRITE_DIGEST, K.LOCK_PAGES, K.WRITE_BOOT_KEY, K.LOCKDOWN, K.BOOT, K.LOCK_BOOT_PAGES];
+    const board = boardWith(K.WRITE_DIGEST, []);
+    board.steps = order.map(
+      (kind, i) =>
+        new pb.AnchorBoardStep({
+          kind,
+          state: i < 3 ? S.DONE : i === 3 ? S.NEXT : S.LATER,
+          permanent: kind !== K.LOAD_IMAGE,
+          name: kind === K.LOCK_PAGES ? 'Lock the digest and rollback pages, from a one-time image' : nameOf(kind),
+        }),
+    );
+    const asked = hostAnswering(board, board);
+    render(<AnchorBoardSetupPanel />);
+    fireEvent.click(screen.getByText('Read board'));
+    await waitFor(() => screen.getByText('Next step…'));
+    fireEvent.click(screen.getByText('Next step…'));
+    expect(screen.getByText(/one-time image that sets the two locks/)).toBeInTheDocument();
+    expect(screen.getByText(/Tap Allow when Android asks again/)).toBeInTheDocument();
+    const burn = screen.getByText('Burn it');
+    expect(burn).toBeDisabled();
+    fireEvent.change(screen.getByTestId('anchor-board-confirm'), { target: { value: '3C8E' } });
+    fireEvent.click(burn);
+    await waitFor(() => expect(asked.filter((a) => a.route === 'anchor.board.step')).toHaveLength(1));
+    expect(asked.filter((a) => a.route === 'anchor.board.step')[0].step?.step).toBe(K.LOCK_PAGES);
+  });
+
   it('does not offer the check while the board is not at its first boot', async () => {
     hostAnswering(boardWith(K.WRITE_DIGEST, []), boardWith(K.WRITE_DIGEST, []));
     render(<AnchorBoardSetupPanel />);

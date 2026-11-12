@@ -51,6 +51,8 @@ export default function AnchorBoardSetupPanel() {
   const checkOffered = next?.kind === pb.AnchorBoardStepKind.BOOT;
   const checking = action === pb.AnchorBoardStepKind.CHECK_CHANGED_IMAGE;
   const permanent = !checking && next?.permanent;
+  // The lock image's step restarts the board too: Android asks again when it is back in BOOTSEL.
+  const restarts = action === pb.AnchorBoardStepKind.LOCK_PAGES;
 
   const confirm = (kind: pb.AnchorBoardStepKind) => {
     setAction(kind);
@@ -130,9 +132,11 @@ export default function AnchorBoardSetupPanel() {
           <span className="sb-label">
             {checking
               ? `This loads the image with one byte changed and starts the board: it must come back in BOOTSEL, and the signed image is loaded back. Tap Allow when Android asks again. Type the chip's last four characters (${lastFour}) to go on`
-              : permanent
-                ? `${next.name} can never be undone. Type the chip's last four characters (${lastFour}) to go on`
-                : `Type the chip's last four characters (${lastFour}) to go on`}
+              : restarts
+                ? `This loads a one-time image that sets the two locks and starts the board; it comes back in BOOTSEL and the signed image is loaded back. Tap Allow when Android asks again. ${next.name} can never be undone. Type the chip's last four characters (${lastFour}) to go on`
+                : permanent
+                  ? `${next.name} can never be undone. Type the chip's last four characters (${lastFour}) to go on`
+                  : `Type the chip's last four characters (${lastFour}) to go on`}
           </span>
           <input
             className="sb-input"

@@ -749,6 +749,17 @@ export enum AnchorBoardStepKind {
    * @generated from enum value: ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE = 9;
    */
   CHECK_CHANGED_IMAGE = 9,
+
+  /**
+   * Steps 6 and 9b's page locks on a board whose bootloader may not write them (an RP2350 A2 with page
+   * 63 closed to it): the lock image (crates/dsm-anchor-lock-pages) is loaded and started after the
+   * digest, sets the digest page's and the rollback page's locks as Secure code, and the board comes
+   * back in BOOTSEL; the rows are read back and the signed image loaded again. Listed in place of Step
+   * 6 on such a board.
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOCK_PAGES = 10;
+   */
+  LOCK_PAGES = 10,
 }
 // Retrieve enum metadata with: proto3.getEnumType(AnchorBoardStepKind)
 proto3.util.setEnumType(AnchorBoardStepKind, "dsm.AnchorBoardStepKind", [
@@ -762,6 +773,7 @@ proto3.util.setEnumType(AnchorBoardStepKind, "dsm.AnchorBoardStepKind", [
   { no: 7, name: "ANCHOR_BOARD_STEP_KIND_BOOT" },
   { no: 8, name: "ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES" },
   { no: 9, name: "ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE" },
+  { no: 10, name: "ANCHOR_BOARD_STEP_KIND_LOCK_PAGES" },
 ]);
 
 /**

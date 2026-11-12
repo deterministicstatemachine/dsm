@@ -6,6 +6,7 @@
 # that app's digest and the boot key's hash. The boot key never leaves ~/.dsm-anchor-secure-boot.
 #
 # usage: scripts/anchor-release-into-app.sh [the signing's build directory]
+#        (also builds the lock image, crates/dsm-anchor-lock-pages, for the boards that need it)
 #        (default ~/.dsm-anchor-secure-boot/build, where sign.sh --sign writes)
 set -euo pipefail
 BUILD="${1:-$HOME/.dsm-anchor-secure-boot/build}"
@@ -24,4 +25,11 @@ if len(key) != 32:
     sys.exit(f"ERROR: bootkey0 is {len(key)} bytes, not 32")
 open(sys.argv[2], "wb").write(bytes(key))
 PY
+# The lock image (crates/dsm-anchor-lock-pages): for a board whose USB bootloader may not write the
+# page locks its Secure code may (an RP2350 A2 with page 63 closed to the bootloader), the phone loads
+# and starts it once after the digest. Built here from this checkout; never signed, and it runs only
+# before the lockdown.
+LOCK_CRATE="$(cd "$(dirname "$0")/.." && pwd)/crates/dsm-anchor-lock-pages"
+(cd "$LOCK_CRATE" && cargo build --release --locked)
+cp "$LOCK_CRATE/target/thumbv8m.main-none-eabihf/release/dsm-anchor-lock-pages" "$OUT/lock-pages.elf"
 echo "the app carries the release: $(cd "$OUT" && ls | tr '\n' ' ')"

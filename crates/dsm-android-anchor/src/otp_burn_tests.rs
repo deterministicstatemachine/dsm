@@ -361,6 +361,15 @@ impl BootselLink for OnUsb {
 
 struct Phone {
     board: OnUsb,
+    /// The lock image the app carries, its flash bytes, or none.
+    lock_image: Option<Vec<u8>>,
+}
+
+/// The lock image's flash bytes for the model: an image of its own at flash's first byte, which the
+/// model recognises in flash when the board starts ([`BootromModel::lock_image`]).
+fn lock_image() -> Vec<u8> {
+    let code: Vec<u8> = (0..700u32).map(|i| (0x4c + i * 13) as u8).collect();
+    flatten_elf(&elf(&[(FLASH_BASE, &code)])).expect("an image at flash's first byte")
 }
 
 impl BoardPort for Phone {
@@ -371,23 +380,43 @@ impl BoardPort for Phone {
     fn release(&self) -> Result<Release, String> {
         Ok(release())
     }
+    fn lock_image(&self) -> Result<Vec<u8>, String> {
+        self.lock_image
+            .clone()
+            .ok_or_else(|| "the app carries no anchor-release/lock-pages.elf".to_string())
+    }
     fn secret(&self) -> Result<[u8; 32], String> {
         Ok(SECRET)
     }
     fn wait_for_return(&self, _chip_id: &str) -> Result<Returned, String> {
         match held(&self.board.0).last_boot {
-            LastBoot::Refused => Ok(Returned::Bootsel),
+            LastBoot::Refused | LastBoot::BackToBootsel => Ok(Returned::Bootsel),
             LastBoot::Ran => Ok(Returned::AsAnchor),
             LastBoot::NotYet => Err("the board never rebooted".to_string()),
         }
     }
 }
 
-fn phone_with(model: BootromModel) -> (BoardSetup<Phone>, Arc<Mutex<BootromModel>>) {
+/// A phone whose app carries the lock image, and the board it is plugged into.
+fn phone_with(mut model: BootromModel) -> (BoardSetup<Phone>, Arc<Mutex<BootromModel>>) {
+    model.lock_image = Some(lock_image());
     let board = Arc::new(Mutex::new(model));
     (
         BoardSetup::new(Phone {
             board: OnUsb(board.clone()),
+            lock_image: Some(lock_image()),
+        }),
+        board,
+    )
+}
+
+/// A phone whose app carries no lock image.
+fn phone_without_lock_image(model: BootromModel) -> (BoardSetup<Phone>, Arc<Mutex<BootromModel>>) {
+    let board = Arc::new(Mutex::new(model));
+    (
+        BoardSetup::new(Phone {
+            board: OnUsb(board.clone()),
+            lock_image: None,
         }),
         board,
     )
@@ -672,16 +701,17 @@ fn the_bootroms_header_names_its_stepping_and_its_guard() {
 }
 
 #[test]
-fn an_a2_board_whose_bootloader_cannot_write_a_lock_row_is_not_started() {
+fn an_a2_board_whose_lock_rows_the_app_cannot_set_is_not_started() {
     use pb::AnchorBoardStepKind as K;
     use pb::AnchorBoardStepState as S;
-    let (setup, board) = phone_with(BootromModel::yellow_board());
+    let (setup, board) = phone_without_lock_image(BootromModel::yellow_board());
     let answer = setup.read();
     assert!(
         answer.refused.contains("cannot be finished from BOOTSEL")
             && answer.refused.contains("LockDigestPage writes row 0xfdd")
             && answer.refused.contains("page 63, the page it sits in")
-            && answer.refused.contains("LockBootPages writes row 0xfd9"),
+            && answer.refused.contains("LockBootPages writes row 0xfd9")
+            && answer.refused.contains("this app carries none"),
         "{}",
         answer.refused
     );
@@ -757,10 +787,10 @@ fn a_board_burned_to_its_digest_stops_where_its_bootloader_cannot_go_on() {
     let mut model = BootromModel::yellow_board();
     digest_burned(&mut model, &release);
     model.flash[..padded(&release).len()].copy_from_slice(&padded(&release));
-    let (setup, board) = phone_with(model);
+    let (setup, board) = phone_without_lock_image(model);
     let answer = setup.read();
     assert_eq!(state_of(&answer, K::WriteDigest), S::Done);
-    assert_eq!(state_of(&answer, K::LockDigest), S::Blocked);
+    assert_eq!(state_of(&answer, K::LockPages), S::Blocked);
     assert!(
         answer.refused.contains("LockDigestPage writes row 0xfdd"),
         "{}",
@@ -804,4 +834,138 @@ fn a_secret_page_closed_to_the_bootloader_is_closed_on_every_bootrom() {
             status: crate::picoboot::NOT_PERMITTED
         })
     );
+}
+
+/// The yellow board as it stood after Step 5 on 2026-11-11: the signed image in flash, the digest
+/// burned, its A2 bootrom refusing page 63's lock rows to the bootloader.
+fn yellow_after_its_digest(release: &Release) -> BootromModel {
+    let mut model = BootromModel::yellow_board();
+    digest_burned(&mut model, release);
+    model.flash[..padded(release).len()].copy_from_slice(&padded(release));
+    model
+}
+
+#[test]
+fn yellow_takes_its_last_two_locks_from_the_lock_image_and_finishes_from_the_phone() {
+    use pb::AnchorBoardStepKind as K;
+    use pb::AnchorBoardStepState as S;
+    let release = release();
+    let (setup, board) = phone_with(yellow_after_its_digest(&release));
+    let answer = setup.read();
+    assert_eq!(answer.refused, "", "the lock image covers both rows");
+    assert_eq!(state_of(&answer, K::LockPages), S::Next);
+    assert!(
+        !answer.steps.iter().any(|s| s.kind == K::LockDigest as i32),
+        "the lock image's step takes the digest page lock's place"
+    );
+
+    let locked = setup.step(&step(K::LockPages, CHIP));
+    assert_eq!(locked.refused, "", "{locked:?}");
+    assert_eq!(
+        locked.written,
+        vec![
+            "0xfdd: 0x1d1d1d, set by the lock image and read back".to_string(),
+            "0xfd9: 0x141414, set by the lock image and read back".to_string(),
+            format!(
+                "flash: the signed image again, {} bytes, read back whole",
+                release.image.len()
+            ),
+        ]
+    );
+    {
+        let model = held(&board);
+        assert_eq!(model.last_boot, LastBoot::BackToBootsel);
+        assert_eq!(model.raw[usize::from(lock1(46))], DIGEST_LOCK);
+        assert_eq!(model.raw[usize::from(lock1(44))], ROLLBACK_LOCK);
+        assert_eq!(
+            model.flash[..padded(&release).len()],
+            padded(&release)[..],
+            "the signed image is back"
+        );
+    }
+    assert_eq!(state_of(&locked, K::LockPages), S::Done);
+    assert_eq!(state_of(&locked, K::WriteBootKey), S::Next);
+
+    for kind in [K::WriteBootKey, K::Lockdown] {
+        let answer = setup.step(&step(kind, CHIP));
+        assert_eq!(answer.refused, "", "{kind:?}: {answer:?}");
+    }
+    let booted = setup.step(&step(K::Boot, CHIP));
+    assert_eq!(booted.refused, "", "{booted:?}");
+    let last = setup.step(&step(K::LockBootPages, CHIP));
+    assert_eq!(last.refused, "", "{last:?}");
+    assert!(
+        last.written
+            .iter()
+            .any(|w| w == "0xfd9: 0x141414, already held"),
+        "the rollback page's lock is not written twice: {:?}",
+        last.written
+    );
+    assert!(
+        last.done,
+        "every step done: the board goes on to its install"
+    );
+    let model = held(&board);
+    assert_eq!(model.raw[usize::from(lock1(1))], BOOT_PAGES_LOCK);
+    assert_eq!(model.raw[usize::from(lock1(2))], BOOT_PAGES_LOCK);
+}
+
+#[test]
+fn a_fresh_a2_board_with_page_63_closed_goes_through_with_the_lock_image() {
+    use pb::AnchorBoardStepKind as K;
+    let (setup, board) = phone_with(BootromModel::yellow_board());
+    for kind in [
+        K::LoadImage,
+        K::WriteDigest,
+        K::LockPages,
+        K::WriteBootKey,
+        K::Lockdown,
+        K::Boot,
+        K::LockBootPages,
+    ] {
+        let answer = setup.step(&step(kind, CHIP));
+        assert_eq!(answer.refused, "", "{kind:?}: {answer:?}");
+    }
+    let done = setup.read();
+    assert!(done.done, "{done:?}");
+    let model = held(&board);
+    assert_eq!(model.raw[usize::from(lock1(46))], DIGEST_LOCK);
+    assert_eq!(model.raw[usize::from(lock1(44))], ROLLBACK_LOCK);
+}
+
+#[test]
+fn the_lock_image_waits_for_the_digest() {
+    use pb::AnchorBoardStepKind as K;
+    let release = release();
+    let mut model = BootromModel::yellow_board();
+    model.flash[..padded(&release).len()].copy_from_slice(&padded(&release));
+    let (setup, board) = phone_with(model);
+    let raw = held(&board).raw.clone();
+    let flash = held(&board).flash.clone();
+    let early = setup.step(&step(K::LockPages, CHIP));
+    assert!(
+        early.refused.contains("not this board's next step"),
+        "{}",
+        early.refused
+    );
+    assert_eq!(held(&board).raw, raw, "no OTP row changed");
+    assert_eq!(held(&board).flash, flash, "the flash is as it was");
+    assert_eq!(held(&board).rebooted, 0, "nothing was started");
+}
+
+#[test]
+fn a_board_whose_page_63_refuses_secure_writes_too_is_not_started() {
+    use pb::AnchorBoardStepKind as K;
+    use pb::AnchorBoardStepState as S;
+    let mut model = BootromModel::yellow_board();
+    model.raw[usize::from(lock1(63))] = lock_row_value(READ_ONLY, READ_ONLY, READ_ONLY);
+    let (setup, _board) = phone_with(model);
+    let answer = setup.read();
+    assert!(
+        answer.refused.contains("cannot be finished from BOOTSEL")
+            && !answer.refused.contains("lock image"),
+        "{}",
+        answer.refused
+    );
+    assert_eq!(state_of(&answer, K::LoadImage), S::Blocked);
 }

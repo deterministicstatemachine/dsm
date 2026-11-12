@@ -210,6 +210,14 @@ impl BootloaderAccess {
         self.held() & 0x1 == 0 && by_majority(self.keys) & ACCESS_KEYS == 0
     }
 
+    /// Whether Secure code at a normal boot may write the page: there nothing advances a soft lock,
+    /// so it is the page's Secure lock alone (`LOCK_S`), with no access key registered. What the
+    /// lock image (`dsm-anchor-lock-pages`) writes through.
+    #[must_use]
+    pub fn secure_may_write(&self) -> bool {
+        by_majority(self.lock) & 0x1 == 0 && by_majority(self.keys) & ACCESS_KEYS == 0
+    }
+
     /// The page's lock rows and what they leave the bootloader.
     #[must_use]
     pub fn words(&self) -> String {
@@ -625,6 +633,20 @@ pub fn burns_left(standing: &Standing, release: &Release) -> Result<Vec<Burn>, S
     })
 }
 
+/// The lock rows a burn sets, each with the value it burns there.
+fn lock_rows(burn: Burn) -> Vec<(u16, u32)> {
+    match burn {
+        Burn::SealSecret => vec![(lock1(48), SECRET_LOCK)],
+        Burn::LockDigestPage => vec![(lock1(46), DIGEST_LOCK)],
+        Burn::LockBootPages => vec![
+            (lock1(1), BOOT_PAGES_LOCK),
+            (lock1(2), BOOT_PAGES_LOCK),
+            (lock1(44), ROLLBACK_LOCK),
+        ],
+        Burn::WriteDigest | Burn::WriteBootKey | Burn::Lockdown => Vec::new(),
+    }
+}
+
 /// The OTP rows a burn writes.
 fn rows_written(burn: Burn) -> Vec<u16> {
     match burn {
@@ -632,34 +654,55 @@ fn rows_written(burn: Burn) -> Vec<u16> {
             .chain([lock1(48)])
             .collect(),
         Burn::WriteDigest => (DIGEST_ROW..DIGEST_ROW + HASH_ROWS).collect(),
-        Burn::LockDigestPage => vec![lock1(46)],
         Burn::WriteBootKey => (BOOTKEY0_ROW..BOOTKEY0_ROW + HASH_ROWS).collect(),
         Burn::Lockdown => (BOOT_FLAGS1_ROW..BOOT_FLAGS1_ROW + FLAG_COPIES)
             .chain(CRIT1_ROW..CRIT1_ROW + CRIT1_COPIES)
             .collect(),
-        Burn::LockBootPages => vec![lock1(1), lock1(2), lock1(44)],
+        Burn::LockDigestPage | Burn::LockBootPages => lock_rows(burn)
+            .into_iter()
+            .map(|(row, _value)| row)
+            .collect(),
     }
 }
 
-/// Every row `burns` write is one this board's bootloader may write, page by page as its bootrom
-/// guards them. Checked for every burn left before the first of them runs, so no procedure starts
-/// that cannot be finished from BOOTSEL, and for each burn's own rows before it writes one, so no
-/// step stops part-written. Found on the yellow board, 2026-11-11: its A2 bootrom refused the digest
-/// page's lock row, which sits in page 63, after the digest itself was burned.
-pub fn bootloader_may_write(
+/// The rows a burn will write on a board that reads so: a lock row that already holds the value the
+/// burn sets there is not written again ([`set_raw_row`]), so it needs no write access.
+fn rows_to_write(burn: Burn, otp: &OtpReading) -> Vec<u16> {
+    let held = lock_rows(burn);
+    rows_written(burn)
+        .into_iter()
+        .filter(|row| {
+            !held
+                .iter()
+                .any(|(lock, value)| lock == row && otp.row(*row) == Some(*value))
+        })
+        .collect()
+}
+
+/// The lock rows the lock image writes (`dsm-anchor-lock-pages`) and the values it writes there:
+/// the digest page's lock, once the digest is burned, and the rollback page's. MUST equal its own.
+pub const LOCK_IMAGE_ROWS: [(u16, u32); 2] = [(lock1(46), DIGEST_LOCK), (lock1(44), ROLLBACK_LOCK)];
+
+/// A row the procedure has left to write that this board's bootloader may not write.
+pub struct Barred {
+    pub burn: Burn,
+    pub row: u16,
+    /// The page whose lock guards it.
+    pub page: u16,
+    words: String,
+}
+
+/// The rows `burns` will write that this board's bootloader may not, page by page as its bootrom
+/// guards them.
+pub fn barred_rows(
     otp: &OtpReading,
     bootrom: Bootrom,
     burns: &[Burn],
-) -> Result<(), String> {
+) -> Result<Vec<Barred>, String> {
     let mut barred = Vec::new();
     for burn in burns {
-        let mut seen: Vec<u16> = Vec::new();
-        for row in rows_written(*burn) {
+        for row in rows_to_write(*burn, otp) {
             let page = bootrom.guarding_page(row);
-            if seen.contains(&page) {
-                continue;
-            }
-            seen.push(page);
             let access = BootloaderAccess::of(otp, page)?;
             if !access.may_write() {
                 let by = if page == row / PAGE_ROWS {
@@ -667,22 +710,72 @@ pub fn bootloader_may_write(
                 } else {
                     "the page it locks"
                 };
-                barred.push(format!(
-                    "{burn:?} writes row {row:#05x}, which this bootrom guards by page {page}, {by}; \
-                     {}",
-                    access.words()
-                ));
+                barred.push(Barred {
+                    burn: *burn,
+                    row,
+                    page,
+                    words: format!(
+                        "{burn:?} writes row {row:#05x}, which this bootrom guards by page {page}, \
+                         {by}; {}",
+                        access.words()
+                    ),
+                });
             }
         }
     }
+    Ok(barred)
+}
+
+/// Why the procedure cannot be finished from BOOTSEL: each burn and page once.
+#[must_use]
+pub fn barred_words(barred: &[Barred]) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut seen: Vec<(Burn, u16)> = Vec::new();
+    for b in barred {
+        if !seen.contains(&(b.burn, b.page)) {
+            seen.push((b.burn, b.page));
+            lines.push(&b.words);
+        }
+    }
+    format!(
+        "this board's bootloader cannot write every row the procedure has left to burn, so the \
+         procedure cannot be finished from BOOTSEL and nothing more is burned: {}",
+        lines.join("; ")
+    )
+}
+
+/// Every row `burns` write is one this board's bootloader may write, page by page as its bootrom
+/// guards them. Checked for every burn left before the first of them runs, so no procedure starts
+/// that cannot be finished, and for each burn's own rows before it writes one, so no step stops
+/// part-written. Found on the yellow board, 2026-11-11: its A2 bootrom refused the digest page's
+/// lock row, which sits in page 63, after the digest itself was burned.
+pub fn bootloader_may_write(
+    otp: &OtpReading,
+    bootrom: Bootrom,
+    burns: &[Burn],
+) -> Result<(), String> {
+    let barred = barred_rows(otp, bootrom, burns)?;
     if barred.is_empty() {
         return Ok(());
     }
-    Err(format!(
-        "this board's bootloader cannot write every row the procedure has left to burn, so the \
-         procedure cannot be finished from BOOTSEL and nothing more is burned: {}",
-        barred.join("; ")
-    ))
+    Err(barred_words(&barred))
+}
+
+/// Whether the lock image can write every barred row in the bootloader's place: each is a row it
+/// writes, in a page whose Secure lock lets Secure code write it at a normal boot. The bootrom guards
+/// a Secure write by the same page rule; at a normal boot nothing advances the soft lock.
+pub fn lock_image_covers(
+    otp: &OtpReading,
+    bootrom: Bootrom,
+    barred: &[Barred],
+) -> Result<bool, String> {
+    let mut covered = Vec::new();
+    for b in barred {
+        let image_writes = LOCK_IMAGE_ROWS.iter().any(|(row, _value)| *row == b.row);
+        let secure = BootloaderAccess::of(otp, bootrom.guarding_page(b.row))?.secure_may_write();
+        covered.push(image_writes && secure);
+    }
+    Ok(covered.iter().all(|c| *c))
 }
 
 /// What a burn wrote and read back.
@@ -701,6 +794,11 @@ fn set_raw_row<L: BootselLink>(
     value: u32,
 ) -> Result<String, String> {
     let old = read_raw_row(pb, row)?;
+    // Set already, by the lock image or an earlier procedure: nothing to write, and the bootloader
+    // may not be allowed to write it anyway.
+    if old == value & RAW_ROW_MASK {
+        return Ok(format!("{row:#05x}: {old:#08x}, already held"));
+    }
     if old & !value & RAW_ROW_MASK != 0 {
         return Err(format!(
             "row {row:#05x} holds {old:#x}: writing {value:#x} would clear bits, which OTP cannot"
@@ -853,6 +951,66 @@ fn write_flash<L: BootselLink>(pb: &mut Picoboot<L>, image: &[u8]) -> Result<(),
 /// at any time, and after the lockdown only a signed image boots.
 pub fn load_image<L: BootselLink>(pb: &mut Picoboot<L>, release: &Release) -> Result<(), String> {
     write_flash(pb, &padded_image(release))
+}
+
+/// The lock image (`dsm-anchor-lock-pages`, its flash bytes from the app) loaded into flash, read
+/// back whole, and started. It sets the page locks this board's bootloader may not write, as Secure
+/// code at a normal boot, and reboots into BOOTSEL; the caller reads the rows back
+/// ([`lock_image_rows`]) once the board is back, and loads the signed image again. Only where it is
+/// the board's next step: the digest burned, its page not yet locked, and so before the lockdown
+/// (after it only a signed image boots, and this one is never signed); and only on a board whose
+/// barred rows it covers ([`lock_image_covers`]).
+pub fn boot_lock_image<L: BootselLink>(
+    pb: &mut Picoboot<L>,
+    release: &Release,
+    lock_image: &[u8],
+) -> Result<(), String> {
+    let otp = OtpReading::read(pb).map_err(|e| e.to_string())?;
+    let standing = Standing::read(pb, &otp)?;
+    match next(&standing, release)? {
+        Next::Burn(Burn::LockDigestPage) => {}
+        due => {
+            return Err(format!(
+                "the lock image runs once the digest is burned and before its page is locked: this \
+                 board needs {due:?}"
+            ))
+        }
+    }
+    let bootrom = Bootrom::read(pb)?;
+    let barred = barred_rows(&otp, bootrom, &burns_left(&standing, release)?)?;
+    if barred.is_empty() {
+        return Err(
+            "this board's bootloader may write every row the procedure has left: it needs no lock \
+             image"
+                .to_string(),
+        );
+    }
+    if !lock_image_covers(&otp, bootrom, &barred)? {
+        return Err(barred_words(&barred));
+    }
+    let mut image = lock_image.to_vec();
+    image.resize(image.len().div_ceil(PAGE) * PAGE, 0);
+    write_flash(pb, &image)?;
+    pb.reboot_normal().map_err(|e| e.to_string())
+}
+
+/// After the lock image, back in BOOTSEL: each row it writes, read back holding its value.
+pub fn lock_image_rows<L: BootselLink>(pb: &mut Picoboot<L>) -> Result<Vec<String>, String> {
+    let otp = OtpReading::read(pb).map_err(|e| e.to_string())?;
+    LOCK_IMAGE_ROWS
+        .iter()
+        .map(|(row, value)| match otp.row(*row) {
+            Some(now) if now == *value => Ok(format!(
+                "{row:#05x}: {now:#08x}, set by the lock image and read back"
+            )),
+            Some(now) => Err(format!(
+                "the lock image did not set row {row:#05x}: it holds {now:#x}, not {value:#x}"
+            )),
+            None => Err(format!(
+                "row {row:#05x} cannot be read through the bootloader"
+            )),
+        })
+        .collect()
 }
 
 /// Where the changed image differs from the release's: one byte inside the code, which the signature

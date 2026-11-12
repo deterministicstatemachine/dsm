@@ -28,6 +28,8 @@ exclude = [
     "crates/dsm-anchor-chip",
     # RP2350 TrustZone measurement-seal images (thumbv8m-only; two-image build).
     "crates/dsm-anchor-secure-monitor",
+    # RP2350 lock image (thumbv8m-only): the page locks a board's bootloader may not write.
+    "crates/dsm-anchor-lock-pages",
     "crates/dsm-anchor-nonsecure-app",
 ]
 
