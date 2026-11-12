@@ -7714,6 +7714,10 @@ A read-through of main at 1705ee076 by subsystem (storage node, wallet apps, SDK
 - *The legacy vault module* (`vault/limbo_vault.rs`: a threshold that counts repeated pairs, predicates built from public inputs, a `claim` that cannot decrypt) and *the Bitcoin explorer client's unbounded reads* are dBTC, which is being replaced.
 - *The receipt service has no global cap on sends.* Not deployed for beta.
 
+### 6.160 Readers that ask for one object together ask the members once (2026-11-12)
+
+Main's run on 647b4d1d0 was red at `one_resolution_asks_each_node_for_a_final_cell_or_an_object_once`: one node was asked twice for one immutable object in one resolution. The same test had failed once that morning on a branch cut from 1705ee076, so it is not from the day's changes. An object is kept once it is read (§6.60), but looking in the store, asking the members and keeping what they served were three steps, and a resolution's reads overlap (§6.61): two readers that both looked before either had kept both asked. Now a reader takes a turn at the address (`final_reads::read_turn`) across the three, for the objects one member's bytes establish (`fetch_immutable`) and for the ones read `Stored` (`read_stored_bytes_kept`) alike; a second reader of the same address waits and finds the object kept, and readers of other addresses do not wait. Test, on the node's own code on Postgres: `readers_asking_together_ask_the_members_once`, eight readers of one object; with a turn that waits on nobody it counts 40 requests where one reader makes 5.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
