@@ -114,6 +114,10 @@ pub enum ChipRefusal {
     BoardKeyNotAsWritten,
     /// The factory slot may no longer write the board's pairing slot.
     BoardSlotNotWritable,
+    /// A pairing slot that is neither the factory's nor the board's holds a key. The birth cages
+    /// the board's own slot and invalidates the factory's; a key in another slot would stay valid
+    /// after it, with every right the chip gives a slot by default.
+    SpareSlotHoldsKey,
     /// The board's pairing slot may no longer invalidate the factory slot.
     FactorySlotNotInvalidatable,
     /// The session's pairing slot may no longer write the access rules.

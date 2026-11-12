@@ -129,10 +129,23 @@ async fn latest(Extension(state): Extension<Arc<AppState>>) -> Result<Response, 
     Ok(commit_or_absent(commit))
 }
 
+/// A cycle index the store can hold. The store counts cycles in a signed
+/// 64-bit integer, so a larger number names no cycle this node could have
+/// closed or mirrored: `400`, a request that is not one, never the `500` of a
+/// node that failed.
+fn storable_cycle(cycle: u64) -> Result<u64, StatusCode> {
+    i64::try_from(cycle).map_err(|e| {
+        log::info!("bytecommit: {cycle} is not a cycle index: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+    Ok(cycle)
+}
+
 async fn by_cycle(
     Extension(state): Extension<Arc<AppState>>,
     Path(cycle): Path<u64>,
 ) -> Result<Response, StatusCode> {
+    let cycle = storable_cycle(cycle)?;
     match db::get_own_bytecommit(&state.db_pool, Some(cycle))
         .await
         .map_err(internal("cycle"))?
@@ -159,6 +172,7 @@ async fn proof(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
+    let cycle = storable_cycle(cycle)?;
     let key: [u8; 32] = digest32(&key)?
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -179,6 +193,7 @@ async fn mirror_read(
     let member = text_id::decode_base32_crockford(member.trim())
         .filter(|m| !m.is_empty())
         .ok_or(StatusCode::BAD_REQUEST)?;
+    let cycle = storable_cycle(cycle)?;
     let commits = db::mirror_get(&state.db_pool, &member, cycle)
         .await
         .map_err(internal("mirror read"))?;

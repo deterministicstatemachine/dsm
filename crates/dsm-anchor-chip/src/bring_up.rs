@@ -151,6 +151,7 @@ fn op_requires_measurement(op: i32) -> bool {
             | pb::Op::Finalize
             | pb::Op::Recover
             | pb::Op::Challenge
+            | pb::Op::AuthorizationNonce
             | pb::Op::CheckPayment)
     )
 }

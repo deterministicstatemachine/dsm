@@ -20,6 +20,7 @@ import { encodeBase32Crockford } from '../utils/textId';
 /** The contact the sends name: Bob, by his device id. */
 const BOB_DEVICE_ID = encodeBase32Crockford(new Uint8Array(32).fill(0xb0));
 import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
+import { Unanswered } from '../dsm/NativeBoundaryBridge';
 
 // ─────────────────────────── Constants ───────────────────────────
 
@@ -300,7 +301,7 @@ describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send sc
     expect(String(res.message)).toMatch(/internal error|DSM error/);
   });
 
-  test('unexpected payload case → error', async () => {
+  test('an answer that is not a transfer answer is unanswered, never a refusal', async () => {
     onlineTransferOverride = () => {
       return frameEnvelope(new pb.Envelope({
         version: 3,
@@ -312,9 +313,11 @@ describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send sc
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(4000 + testIndex), undefined, 'ERA');
-    expect(res.success).toBe(false);
-    expect(String(res.message)).toMatch(/Expected onlineTransferResponse|unexpected/i);
+    // Rust was asked and what came back cannot be read as its answer: the
+    // send may have been made, so the call does not report that it failed.
+    const sending = dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(4000 + testIndex), undefined, 'ERA');
+    await expect(sending).rejects.toBeInstanceOf(Unanswered);
+    await expect(sending).rejects.toThrow(/Expected onlineTransferResponse/);
   });
 
   test('OnlineTransferResponse with success=false carries message', async () => {

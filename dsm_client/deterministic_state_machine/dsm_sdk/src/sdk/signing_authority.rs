@@ -70,12 +70,18 @@ pub(crate) fn current_public_key() -> Result<Vec<u8>, DsmError> {
     Ok(derive_current_signing_keypair()?.public_key().to_vec())
 }
 
-pub(crate) fn current_secret_key() -> Result<Vec<u8>, DsmError> {
-    Ok(derive_current_signing_keypair()?.secret_key().to_vec())
+/// The device signing key's secret half. It is wiped when the caller lets go
+/// of it, at every call site, since the type carries that and no caller has
+/// to remember to.
+pub(crate) fn current_secret_key() -> Result<zeroize::Zeroizing<Vec<u8>>, DsmError> {
+    Ok(zeroize::Zeroizing::new(
+        derive_current_signing_keypair()?.secret_key().to_vec(),
+    ))
 }
 
 /// Both halves of the device signing keypair, for callers that sign and embed
-/// the public key in one object.
-pub fn current_keypair() -> Result<(Vec<u8>, Vec<u8>), dsm::types::error::DsmError> {
+/// the public key in one object. The secret half is wiped when dropped.
+pub fn current_keypair(
+) -> Result<(Vec<u8>, zeroize::Zeroizing<Vec<u8>>), dsm::types::error::DsmError> {
     Ok((current_public_key()?, current_secret_key()?))
 }

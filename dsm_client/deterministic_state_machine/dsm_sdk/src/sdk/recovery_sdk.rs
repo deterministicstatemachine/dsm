@@ -43,8 +43,8 @@ pub fn wallet_seed_from_mnemonic(phrase: &str) -> Result<[u8; 64], DsmError> {
 /// In-memory cached recovery authority SPHINCS+ keypair (public, secret).
 /// Derived from the wallet root via a separate KS1 Expand label (`DSM/recovery-authority/v2`).
 /// Used to sign tombstone and succession receipts during device recovery.
-/// Never persisted to disk — cleared alongside the encryption key. The secret key is zeroized
-/// when replaced or cleared.
+/// Never persisted to disk. It stays in memory while the app runs, the app lock included (the
+/// lock is a gate on requests, not a wipe); the secret key is zeroized when replaced.
 static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Zeroizing<Vec<u8>>)>> = Mutex::new(None);
 
 /// In-memory cached BIP39 wallet seed (`mnemonic.to_seed("")`). The canonical Genesis v2
@@ -1145,9 +1145,12 @@ impl RecoverySDK {
         Ok(true)
     }
 
-    /// Clear the in-memory wallet-seed cache WITHOUT deleting the sealed bundle at rest
-    /// (wallet lock: the seed leaves RAM but the Keystore-sealed blob remains for the
-    /// next auth-gated unlock).
+    /// Clear the in-memory wallet-seed cache WITHOUT deleting the sealed bundle at rest.
+    ///
+    /// The app lock does not call this. The lock is a gate on requests
+    /// (`ingress`): a locked wallet still receives, so the seed it receives
+    /// with stays in memory while the app runs. This clears the cache where a
+    /// process starts over with no identity (the test reset).
     pub fn clear_wallet_seed_cache() {
         if let Ok(mut guard) = WALLET_SEED_CACHE.lock() {
             *guard = None;

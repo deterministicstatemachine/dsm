@@ -165,11 +165,12 @@ pub(crate) fn kept_seal(message_id_b32: &str) -> Result<Vec<u8>, DsmError> {
 
 /// This device's Kyber secret, re-derived from `Smaster` (KS1 `ml_kem_seed`, keyed by Smaster) —
 /// the key pair whose public half its directory entry publishes
-/// (`kyber_identity::local_kyber_public_key`). Never kept.
-pub(crate) fn local_kyber_secret() -> Result<Vec<u8>, DsmError> {
+/// (`kyber_identity::local_kyber_public_key`). Never kept: wiped when the
+/// caller lets go of it.
+pub(crate) fn local_kyber_secret() -> Result<zeroize::Zeroizing<Vec<u8>>, DsmError> {
     let smaster = crate::init::current_smaster()?;
     let (.., secret) = dsm::crypto::kyber::generate_kyber_identity_keypair(&smaster)?;
-    Ok(secret)
+    Ok(zeroize::Zeroizing::new(secret))
 }
 
 /// Open a spooled envelope (DSM Amendment A7): the inner envelope its seal

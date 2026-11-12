@@ -212,6 +212,20 @@ impl AnchorAppliance for UsbAnchorAppliance {
         })
     }
 
+    fn authorization_nonce(&mut self) -> Result<[u8; 32], DsmError> {
+        let resp = exchange(
+            &self.usb,
+            pb::ApplianceRequest {
+                op: pb::Op::AuthorizationNonce as i32,
+                ..Default::default()
+            },
+        )?;
+        if !resp.ok {
+            return Err(refused(&resp));
+        }
+        arr32(&resp.authorization_nonce)
+    }
+
     fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DsmError> {
         let req = pb::ApplianceRequest {
             op: pb::Op::Authorize as i32,

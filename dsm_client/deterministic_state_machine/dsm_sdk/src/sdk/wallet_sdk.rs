@@ -287,7 +287,7 @@ impl fmt::Debug for WalletSDK {
 }
 
 impl WalletSDK {
-    fn current_signing_keypair(&self) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    fn current_signing_keypair(&self) -> Result<(Vec<u8>, zeroize::Zeroizing<Vec<u8>>), DsmError> {
         Ok((
             crate::sdk::signing_authority::current_public_key()?,
             crate::sdk::signing_authority::current_secret_key()?,
@@ -301,7 +301,9 @@ impl WalletSDK {
     ///
     /// Visibility: `pub(crate)` to limit attack surface — only the SDK's
     /// receipt-signing flow should touch the AK_sk directly.
-    pub(crate) fn ak_keypair_for_cert_chain(&self) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    pub(crate) fn ak_keypair_for_cert_chain(
+        &self,
+    ) -> Result<(Vec<u8>, zeroize::Zeroizing<Vec<u8>>), DsmError> {
         self.current_signing_keypair()
     }
 
@@ -358,11 +360,14 @@ impl WalletSDK {
         // device id in the app state) there is no key to install, and the wallet
         // is not built.
         let smaster = crate::init::current_smaster()?;
+        // Only the public half is kept. The secret half is re-derived by
+        // whoever opens with it (`b0x_sdk::local_kyber_secret`) and is never
+        // held here: nothing reads it from this keystore.
         let (kyber_pk, kyber_sk) = dsm::crypto::kyber::generate_kyber_identity_keypair(&smaster)?;
+        drop(zeroize::Zeroizing::new(kyber_sk));
 
         let mut ks_mut = self.keystore.write();
         ks_mut.insert(format!("{id}_device_kyber_pk", id = current_id), kyber_pk);
-        ks_mut.insert(format!("{id}_device_kyber_sk", id = current_id), kyber_sk);
 
         drop(ks_mut);
 

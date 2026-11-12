@@ -627,6 +627,13 @@ impl AnchorAppliance for HostAppliance {
         })
     }
 
+    fn authorization_nonce(&mut self) -> Result<[u8; 32], DsmError> {
+        self.with(|d| {
+            d.draw_authorization_nonce()
+                .map_err(|e| appliance_error("authorization nonce", e))
+        })
+    }
+
     fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DsmError> {
         self.with(|d| {
             d.authorize(digest, signature)
@@ -1022,6 +1029,10 @@ mod model_correspondence {
             Ok(s) => s.root,
             Err(e) => panic!("the board's frontier: {e}"),
         };
+        let nonce = match board.authorization_nonce() {
+            Ok(nonce) => nonce,
+            Err(e) => panic!("the board draws a nonce: {e}"),
+        };
         let digest = anchor_core::appliance::owner_authorization_digest(
             &bundle,
             &root,
@@ -1029,6 +1040,7 @@ mod model_correspondence {
             &transition_digest(&t.as_transition(), &CHALLENGE),
             before,
             after,
+            &nonce,
         );
         let signature = match dsm::crypto::sphincs::sign(
             dsm::crypto::sphincs::SphincsVariant::SPX256f,

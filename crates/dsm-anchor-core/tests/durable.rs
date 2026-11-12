@@ -330,6 +330,7 @@ fn owner_key() -> &'static (Vec<u8>, Vec<u8>) {
 /// `before`/`after`, and the owner's signature of it.
 fn owner_authorization<T: Tropic, P: PartitionSig>(
     a: &Appliance<T, P>,
+    nonce: &[u8; 32],
     t: &OwnedTransition,
     rc: &[u8; 32],
     before: &[u8; 32],
@@ -342,6 +343,7 @@ fn owner_authorization<T: Tropic, P: PartitionSig>(
         &transition_digest(&t.as_transition(), rc),
         before,
         after,
+        nonce,
     );
     (digest, owner_sign(&digest))
 }
@@ -361,7 +363,8 @@ fn authorize<T: Tropic, P: PartitionSig>(
     before: &[u8; 32],
     after: &[u8; 32],
 ) {
-    let (digest, signature) = owner_authorization(a, t, rc, before, after);
+    let nonce = ok(a.draw_authorization_nonce(), "the anchor draws a nonce");
+    let (digest, signature) = owner_authorization(a, &nonce, t, rc, before, after);
     ok(a.authorize(&digest, &signature), "authorized");
 }
 
@@ -556,9 +559,11 @@ fn transition(prev: [u8; 32], u: u64) -> OwnedTransition {
 }
 
 fn prepare(d: &mut Durable) -> Result<OwnedTransition, DurableError> {
+    let nonce = d.draw_authorization_nonce()?;
     let a = d.appliance();
     let t = transition(a.active.root, a.active.anchor_counter);
-    let (digest, signature) = owner_authorization(a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+    let (digest, signature) =
+        owner_authorization(a, &nonce, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
     d.authorize(&digest, &signature)?;
     d.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)?;
     Ok(t)
@@ -992,7 +997,9 @@ fn a_partition_that_cannot_sign_prepares_nothing_and_says_so() {
             PartitionError::SelfCheck
         ))
     );
-    let (digest, signature) = owner_authorization(&a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+    let nonce = ok(a.draw_authorization_nonce(), "the anchor draws a nonce");
+    let (digest, signature) =
+        owner_authorization(&a, &nonce, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
     let authorized = anchor_core::service::handle(&mut a, &authorize_frame(&digest, &signature));
     assert!(ok(decode_response(&authorized), "a response").ok);
     let frame = anchor_core::service::handle(
@@ -1119,15 +1126,18 @@ fn a_provisioning_the_store_does_not_take_leaves_the_anchor_provisionable() {
     assert_eq!(anchor.cage.get(), Cage::Closed);
 }
 
-/// The owner's authorization lives in memory: a reboot drops it, and a prepare after one is refused
-/// until the owner authorizes again.
+/// The owner's authorization lives in memory, and so does the nonce it binds: a reboot drops both.
+/// A prepare after one is refused, the authorization from before the reboot played again
+/// authorizes nothing, and the owner's fresh authorization, over a nonce drawn since, is taken.
 #[test]
 fn an_authorization_does_not_outlive_a_reboot() {
     let anchor = Anchor::new(0x40);
     let mut d = anchor.born();
+    let nonce = ok(d.draw_authorization_nonce(), "the anchor draws a nonce");
     let a = d.appliance();
     let t = transition(a.active.root, a.active.anchor_counter);
-    let (digest, signature) = owner_authorization(a, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
+    let (digest, signature) =
+        owner_authorization(a, &nonce, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER);
     ok(d.authorize(&digest, &signature), "authorized");
     drop(d);
     let mut restored = ok(anchor.reboot(), "serves");
@@ -1137,10 +1147,20 @@ fn an_authorization_does_not_outlive_a_reboot() {
             anchor_core::appliance::ApplianceError::OwnerUnauthorized
         ))
     );
-    ok(restored.authorize(&digest, &signature), "authorized again");
     ok(
+        restored.authorize(&digest, &signature),
+        "the owner's signature still verifies",
+    );
+    assert_eq!(
         restored.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
-        "prepared",
+        Err(DurableError::Appliance(
+            anchor_core::appliance::ApplianceError::OwnerUnauthorized
+        )),
+        "the authorization from before the reboot was taken again"
+    );
+    ok(
+        authorized_prepare(&mut restored, &t, &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+        "prepared on the owner's fresh authorization",
     );
 }
 
@@ -1423,7 +1443,8 @@ fn authorized_prepare(
     before: &[u8; 32],
     after: &[u8; 32],
 ) -> Result<(), DurableError> {
-    let (digest, signature) = owner_authorization(d.appliance(), t, rc, before, after);
+    let nonce = d.draw_authorization_nonce()?;
+    let (digest, signature) = owner_authorization(d.appliance(), &nonce, t, rc, before, after);
     d.authorize(&digest, &signature)?;
     d.prepare(&t.as_transition(), rc, before, after)
 }

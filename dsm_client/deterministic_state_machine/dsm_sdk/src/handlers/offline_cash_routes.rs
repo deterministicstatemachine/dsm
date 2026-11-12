@@ -338,6 +338,9 @@ mod tests {
         fn status(&mut self) -> Result<crate::anchor::ApplianceStatus, DsmError> {
             self.anchor.status()
         }
+        fn authorization_nonce(&mut self) -> Result<[u8; 32], DsmError> {
+            self.anchor.authorization_nonce()
+        }
         fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DsmError> {
             self.anchor.authorize(digest, signature)
         }

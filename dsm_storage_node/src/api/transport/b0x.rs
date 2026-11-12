@@ -34,11 +34,18 @@ pub const MAX_WAIT_MARKS: usize = 512;
 /// device falls back to reading on its own schedule.
 pub const MAX_WAITERS: usize = 4096;
 
-/// Waits the node holds at once on any one spool. A spool is one
+/// Waits one peer ([`crate::liveness::Peer`]) holds at once, out of
+/// [`MAX_WAITERS`]: every device behind one address, each with a wait or two.
+/// One more from that peer is answered `503` at once, and the waits it
+/// cannot take stay with everyone else.
+pub const MAX_WAITERS_PER_PEER: usize = 256;
+
+/// Waits one peer holds at once on any one spool. A spool is one
 /// relationship's inbox at one step, read by one device, so a few waits
 /// cover a device whose earlier wait is still held when it opens the next.
-/// One more naming that spool is answered `503` at once, as one over
-/// [`MAX_WAITERS`] is.
+/// One more from that peer naming that spool is answered `503` at once, as
+/// one over [`MAX_WAITERS`] is. Counted per peer, so waits another peer
+/// holds on a spool take nothing from its reader's.
 pub const MAX_WAITERS_PER_SPOOL: usize = 4;
 
 /// Waits reading the store at once, out of the node's
@@ -62,19 +69,34 @@ const ARRIVALS_BUFFER: usize = 1024;
 /// any of them reading the store.
 #[derive(Clone, Debug)]
 struct Arrival {
-    spool_key: String,
+    spool: [u8; 32],
     seq_num: i64,
 }
 
+/// The spools a wait names, each once and in spool order, with the position asked of each. Shared
+/// between the wait and what holds its counts, so a held wait keeps one copy.
+type WaitMarks = Arc<[([u8; 32], i64)]>;
+
+/// What a wait is counted against: the peer its connection names, or nothing
+/// when the app is served without the node's listener.
+type Waiter = Option<crate::liveness::Peer>;
+
+/// The waits each peer holds, and the waits each holds on each spool.
+#[derive(Default)]
+struct WaitCounts {
+    per_peer: std::collections::HashMap<Waiter, usize>,
+    per_spool: std::collections::HashMap<(Waiter, [u8; 32]), usize>,
+}
+
 /// The spools that took an entry, announced to every wait (storage spec §8,
-/// long-poll), the slots waits are held in, across the node and per spool,
-/// and the turns waits take reading the store ([`WAIT_LOOKS`]). In-process:
-/// a node's spool is written by its own submit route alone.
+/// long-poll), the slots waits are held in, across the node, per peer and
+/// per spool, and the turns waits take reading the store ([`WAIT_LOOKS`]).
+/// In-process: a node's spool is written by its own submit route alone.
 #[derive(Clone)]
 pub struct SpoolWaits {
     arrivals: tokio::sync::broadcast::Sender<Arrival>,
     slots: Arc<tokio::sync::Semaphore>,
-    per_spool: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    counts: Arc<std::sync::Mutex<WaitCounts>>,
     looks: Arc<tokio::sync::Semaphore>,
 }
 
@@ -84,28 +106,50 @@ impl Default for SpoolWaits {
         Self {
             arrivals,
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_WAITERS)),
-            per_spool: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            counts: Arc::new(std::sync::Mutex::new(WaitCounts::default())),
             looks: Arc::new(tokio::sync::Semaphore::new(WAIT_LOOKS)),
         }
     }
 }
 
-/// A wait held: its slot under [`MAX_WAITERS`] and its count on every spool
-/// it watches, both given back when the wait ends.
-struct HeldWait {
-    per_spool: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
-    watched: Vec<String>,
+/// A wait's place under [`MAX_WAITERS`] and in its peer's share of them,
+/// taken before a byte of its request is read and given back when the wait
+/// ends.
+struct WaitSlot {
+    counts: Arc<std::sync::Mutex<WaitCounts>>,
+    waiter: Waiter,
     _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for WaitSlot {
+    fn drop(&mut self) {
+        let mut held = SpoolWaits::counts(&self.counts);
+        if let Some(count) = held.per_peer.get_mut(&self.waiter) {
+            *count -= 1;
+            if *count == 0 {
+                held.per_peer.remove(&self.waiter);
+            }
+        }
+    }
+}
+
+/// A wait held: its slot and its count on every spool it watches, both given
+/// back when the wait ends. The marks are the wait's own, shared, so a held
+/// wait keeps one copy of the spools it names.
+struct HeldWait {
+    marks: WaitMarks,
+    slot: WaitSlot,
 }
 
 impl Drop for HeldWait {
     fn drop(&mut self) {
-        let mut held = SpoolWaits::counts(&self.per_spool);
-        for key in &self.watched {
-            if let Some(count) = held.get_mut(key) {
+        let mut held = SpoolWaits::counts(&self.slot.counts);
+        for (spool, _from) in self.marks.iter() {
+            let key = (self.slot.waiter, *spool);
+            if let Some(count) = held.per_spool.get_mut(&key) {
                 *count -= 1;
                 if *count == 0 {
-                    held.remove(key);
+                    held.per_spool.remove(&key);
                 }
             }
         }
@@ -115,52 +159,68 @@ impl Drop for HeldWait {
 impl SpoolWaits {
     /// Wake every wait on the spool that took the entry at `seq_num`. With
     /// no wait held there is no one to wake, and the send has nowhere to go.
-    fn announce(&self, spool_key: &str, seq_num: i64) {
+    fn announce(&self, spool: &[u8; 32], seq_num: i64) {
         if self.arrivals.receiver_count() > 0 {
             let arrival = Arrival {
-                spool_key: spool_key.to_string(),
+                spool: *spool,
                 seq_num,
             };
             if let Err(e) = self.arrivals.send(arrival) {
-                log::error!("b0x submit: the arrival on {spool_key} reached no wait: {e}");
+                log::error!("b0x submit: an arrival reached no wait: {e}");
             }
         }
     }
 
-    /// The per-spool counts. A panic while they were held leaves every
-    /// count whole (each is one integer written in place), so they are read
-    /// as they stand.
-    fn counts(
-        per_spool: &std::sync::Mutex<std::collections::HashMap<String, usize>>,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, usize>> {
-        match per_spool.lock() {
+    /// The counts. A panic while they were held leaves every count whole
+    /// (each is one integer written in place), so they are read as they
+    /// stand.
+    fn counts(counts: &std::sync::Mutex<WaitCounts>) -> std::sync::MutexGuard<'_, WaitCounts> {
+        match counts.lock() {
             Ok(counts) => counts,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    /// Hold a wait on the `watched` spools, or `503` when the node already
-    /// holds [`MAX_WAITERS`] waits, or [`MAX_WAITERS_PER_SPOOL`] on any one
-    /// of them.
-    fn hold(&self, watched: &std::collections::HashSet<String>) -> Result<HeldWait, StatusCode> {
-        let Ok(slot) = self.slots.clone().try_acquire_owned() else {
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        };
-        let mut held = Self::counts(&self.per_spool);
-        if watched
-            .iter()
-            .any(|key| held.get(key).is_some_and(|n| *n >= MAX_WAITERS_PER_SPOOL))
+    /// A place for one more wait from `waiter`, or `503` when the node
+    /// already holds [`MAX_WAITERS`] waits or `waiter` holds
+    /// [`MAX_WAITERS_PER_PEER`] of them.
+    fn slot(&self, waiter: Waiter) -> Result<WaitSlot, StatusCode> {
+        let mut held = Self::counts(&self.counts);
+        if held
+            .per_peer
+            .get(&waiter)
+            .is_some_and(|n| *n >= MAX_WAITERS_PER_PEER)
         {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
-        for key in watched {
-            *held.entry(key.clone()).or_insert(0) += 1;
-        }
-        Ok(HeldWait {
-            per_spool: self.per_spool.clone(),
-            watched: watched.iter().cloned().collect(),
+        let Ok(slot) = self.slots.clone().try_acquire_owned() else {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        *held.per_peer.entry(waiter).or_insert(0) += 1;
+        Ok(WaitSlot {
+            counts: self.counts.clone(),
+            waiter,
             _slot: slot,
         })
+    }
+
+    /// Hold the wait in `slot` on the spools `marks` names (each once), or
+    /// `503` when its peer already holds [`MAX_WAITERS_PER_SPOOL`] on any
+    /// one of them.
+    fn hold(&self, slot: WaitSlot, marks: WaitMarks) -> Result<HeldWait, StatusCode> {
+        let mut held = Self::counts(&self.counts);
+        if marks.iter().any(|(spool, _from)| {
+            held.per_spool
+                .get(&(slot.waiter, *spool))
+                .is_some_and(|n| *n >= MAX_WAITERS_PER_SPOOL)
+        }) {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        for (spool, _from) in marks.iter() {
+            *held.per_spool.entry((slot.waiter, *spool)).or_insert(0) += 1;
+        }
+        drop(held);
+        Ok(HeldWait { marks, slot })
     }
 }
 
@@ -308,7 +368,7 @@ async fn submit_b0x_envelope(
     })?;
     match appended {
         crate::db::LockedAppend::Appended(seq_num) => {
-            app.spool_waits.announce(&recipient_spool_key, seq_num);
+            app.spool_waits.announce(&address, seq_num);
             Ok(StatusCode::NO_CONTENT)
         }
         crate::db::LockedAppend::NotTheAddressKey => {
@@ -331,13 +391,69 @@ async fn submit_b0x_envelope(
 /// does.
 async fn wait_for_spools(
     Extension(app): Extension<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: axum::extract::Request,
 ) -> Result<axum::response::Response, StatusCode> {
     use tokio::sync::broadcast::error::RecvError;
 
-    require_protobuf(&headers)?;
-    let request = dsm::types::proto::B0xWaitRequest::decode(body.as_ref()).map_err(|e| {
+    require_protobuf(request.headers())?;
+    // The wait takes its place before a byte of its body is read, so a
+    // request still arriving is counted as the wait it will be: this route
+    // sits outside the node's request slots, and nothing else would count it.
+    let waiter = request.extensions().get::<crate::liveness::Peer>().copied();
+    let slot = app.spool_waits.slot(waiter)?;
+    let marks = {
+        let body = axum::body::to_bytes(request.into_body(), MAX_WAIT_BODY_BYTES)
+            .await
+            .map_err(|e| {
+                log::info!("b0x wait: the request's body was not read: {e}");
+                StatusCode::BAD_REQUEST
+            })?;
+        wait_marks(&body)?
+    };
+
+    let held = app.spool_waits.hold(slot, marks)?;
+    let marks = &held.marks;
+    // Subscribed before the first look, so an entry that lands between the
+    // look and the wait still wakes it.
+    let mut arrivals = app.spool_waits.arrivals.subscribe();
+    let ready = ready_spools(&app, marks).await?;
+    if !ready.is_empty() {
+        return Ok(wait_answer(ready));
+    }
+    loop {
+        match arrivals.recv().await {
+            // The arrival says where the entry landed, which is all a wait
+            // asks: no wait reads the store to learn it.
+            Ok(arrival) => {
+                let watched = marks
+                    .binary_search_by(|(spool, _from)| spool.cmp(&arrival.spool))
+                    .is_ok_and(|at| arrival.seq_num >= marks[at].1);
+                if watched {
+                    return Ok(wait_answer(vec![text_id::encode_base32_crockford(
+                        &arrival.spool,
+                    )]));
+                }
+            }
+            // Arrivals went by unseen: look at the spools again.
+            Err(RecvError::Lagged(missed)) => {
+                log::debug!("b0x wait: {missed} arrival(s) went by unseen; looking again");
+                let ready = ready_spools(&app, marks).await?;
+                if !ready.is_empty() {
+                    return Ok(wait_answer(ready));
+                }
+            }
+            // The node is shutting down: nothing more will land here.
+            Err(RecvError::Closed) => return Ok(StatusCode::NO_CONTENT.into_response()),
+        }
+    }
+}
+
+/// The spools a [`dsm::types::proto::B0xWaitRequest`] names with the position
+/// asked of each, in spool order, each spool once: named twice, a spool is
+/// watched from the earlier position. `400` for a request that is not one.
+/// Nothing of the request is kept but these.
+fn wait_marks(body: &[u8]) -> Result<WaitMarks, StatusCode> {
+    let request = dsm::types::proto::B0xWaitRequest::decode(body).map_err(|e| {
         log::info!("b0x wait: the request does not decode: {e}");
         StatusCode::BAD_REQUEST
     })?;
@@ -356,54 +472,31 @@ async fn wait_for_spools(
             );
             StatusCode::BAD_REQUEST
         })?;
-        marks.push((key, from));
+        marks.push((spool_key_bytes(&key)?, from));
     }
-    let watched: std::collections::HashSet<String> =
-        marks.iter().map(|(key, _from)| key.clone()).collect();
-
-    let _held = app.spool_waits.hold(&watched)?;
-    // Subscribed before the first look, so an entry that lands between the
-    // look and the wait still wakes it.
-    let mut arrivals = app.spool_waits.arrivals.subscribe();
-    let ready = ready_spools(&app, &marks).await?;
-    if !ready.is_empty() {
-        return Ok(wait_answer(ready));
-    }
-    loop {
-        match arrivals.recv().await {
-            // The arrival says where the entry landed, which is all a wait
-            // asks: no wait reads the store to learn it.
-            Ok(arrival)
-                if marks
-                    .iter()
-                    .any(|(key, from)| *key == arrival.spool_key && arrival.seq_num >= *from) =>
-            {
-                return Ok(wait_answer(vec![arrival.spool_key]));
-            }
-            Ok(_elsewhere) => continue,
-            // Arrivals went by unseen: look at the spools again.
-            Err(RecvError::Lagged(missed)) => {
-                log::debug!("b0x wait: {missed} arrival(s) went by unseen; looking again");
-                let ready = ready_spools(&app, &marks).await?;
-                if !ready.is_empty() {
-                    return Ok(wait_answer(ready));
-                }
-            }
-            // The node is shutting down: nothing more will land here.
-            Err(RecvError::Closed) => return Ok(StatusCode::NO_CONTENT.into_response()),
-        }
-    }
+    marks.sort_unstable();
+    marks.dedup_by_key(|(spool, _from)| *spool);
+    Ok(marks.into())
 }
 
 /// The spools among `marks` that hold an entry at or after the position
 /// given for each, read from the store once this wait's turn among
 /// [`WAIT_LOOKS`] comes; until then it holds no connection.
-async fn ready_spools(app: &AppState, marks: &[(String, i64)]) -> Result<Vec<String>, StatusCode> {
+async fn ready_spools(
+    app: &AppState,
+    marks: &[([u8; 32], i64)],
+) -> Result<Vec<String>, StatusCode> {
     let _turn = app.spool_waits.looks.acquire().await.map_err(|e| {
         log::error!("b0x wait: the store's turns are closed: {e}");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
-    crate::db::spool_ready(&app.db_pool, marks)
+    // The store names a spool by its text; that spelling is made for the
+    // read and dropped with it.
+    let named: Vec<(String, i64)> = marks
+        .iter()
+        .map(|(spool, from)| (text_id::encode_base32_crockford(spool), *from))
+        .collect();
+    crate::db::spool_ready(&app.db_pool, &named)
         .await
         .map_err(|e| {
             log::error!("b0x wait: spool_ready failed: {e:?}");
@@ -422,8 +515,9 @@ fn wait_answer(ready: Vec<String>) -> axum::response::Response {
     (StatusCode::OK, headers, answer.encode_to_vec()).into_response()
 }
 
-/// Up to [`MAX_BATCH_RETRIEVE`] entries of the spool named by
-/// `x-dsm-b0x-address`, from position `from_seq` on, as a
+/// Up to [`MAX_BATCH_RETRIEVE`] entries, and at most
+/// [`dsm::spool::SPOOL_PAGE_BYTES`] of them past the first, of the spool
+/// named by `x-dsm-b0x-address`, from position `from_seq` on, as a
 /// `SequencedBatchEnvelope` of the bytes exactly as they were submitted.
 /// `204 No Content` when nothing is held there.
 async fn retrieve_b0x_batch_from_seq(
@@ -1166,6 +1260,141 @@ mod tests {
         }
     }
 
+    /// `request` as it reaches the app over a connection from the peer at
+    /// 192.0.2.`last`.
+    fn from_peer(mut request: Request<axum::body::Body>, last: u8) -> Request<axum::body::Body> {
+        request.extensions_mut().insert(peer(last));
+        request
+    }
+
+    fn peer(last: u8) -> crate::liveness::Peer {
+        crate::liveness::Peer::of(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            192, 0, 2, last,
+        )))
+    }
+
+    /// The bound on a spool's waits is each peer's own: a peer holding
+    /// MAX_WAITERS_PER_SPOOL waits on a spool is refused one more there,
+    /// and a wait another peer opens on the same spool is still held. A
+    /// spool's reader is not shut out by waits someone else holds on it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waits_another_peer_holds_on_a_spool_take_nothing_from_its_reader() {
+        let (app_state, router) = waits_on(
+            crate::db::test_store::fresh_pool().await,
+            std::time::Duration::from_secs(3),
+        );
+        let spool = crate::db::test_store::unique_name(0x67);
+        let crowd: Vec<_> = (0..MAX_WAITERS_PER_SPOOL)
+            .map(|_| {
+                tokio::spawn(
+                    router
+                        .clone()
+                        .oneshot(from_peer(wait_request(&[spool.as_str()]), 1)),
+                )
+            })
+            .collect();
+        until_held(&app_state, MAX_WAITERS_PER_SPOOL).await;
+
+        let one_more = router
+            .clone()
+            .oneshot(from_peer(wait_request(&[spool.as_str()]), 1))
+            .await
+            .expect("answer");
+        assert_eq!(one_more.status(), HttpStatus::SERVICE_UNAVAILABLE);
+
+        let reader = tokio::spawn(
+            router
+                .clone()
+                .oneshot(from_peer(wait_request(&[spool.as_str()]), 2)),
+        );
+        until_held(&app_state, MAX_WAITERS_PER_SPOOL + 1).await;
+        assert!(
+            !reader.is_finished(),
+            "another peer's wait on the spool is held"
+        );
+        for wait in crowd.into_iter().chain([reader]) {
+            wait.abort();
+        }
+    }
+
+    /// One peer holds at most MAX_WAITERS_PER_PEER waits: one more from it is
+    /// answered 503 at once, and a wait from another peer is still held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_peer_holds_no_more_than_its_share_of_the_waits() {
+        let (app_state, router) = waits_on(
+            crate::db::test_store::fresh_pool().await,
+            std::time::Duration::from_secs(30),
+        );
+        let held: Vec<_> = (0..MAX_WAITERS_PER_PEER)
+            .map(|_| {
+                let spool = crate::db::test_store::unique_name(0x68);
+                tokio::spawn(
+                    router
+                        .clone()
+                        .oneshot(from_peer(wait_request(&[spool.as_str()]), 1)),
+                )
+            })
+            .collect();
+        until_held(&app_state, MAX_WAITERS_PER_PEER).await;
+
+        let spool = crate::db::test_store::unique_name(0x68);
+        let one_more = router
+            .clone()
+            .oneshot(from_peer(wait_request(&[spool.as_str()]), 1))
+            .await
+            .expect("answer");
+        assert_eq!(one_more.status(), HttpStatus::SERVICE_UNAVAILABLE);
+
+        let other = tokio::spawn(
+            router
+                .clone()
+                .oneshot(from_peer(wait_request(&[spool.as_str()]), 2)),
+        );
+        until_held(&app_state, MAX_WAITERS_PER_PEER + 1).await;
+        assert!(!other.is_finished(), "another peer's wait is held");
+        for wait in held.into_iter().chain([other]) {
+            wait.abort();
+        }
+    }
+
+    /// A wait is counted against its peer from before its body arrives: a
+    /// wait request whose body has not come holds a place among its peer's
+    /// waits, and gives it back when the request ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wait_is_counted_before_its_body_arrives() {
+        let (app_state, router) = waits_on(
+            crate::db::test_store::fresh_pool().await,
+            std::time::Duration::from_secs(30),
+        );
+        let (sender, body) = futures::channel::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v2/b0x/wait")
+            .header("content-type", "application/octet-stream")
+            .body(axum::body::Body::from_stream(body))
+            .unwrap();
+        let arriving = tokio::spawn(router.clone().oneshot(from_peer(request, 1)));
+        let counted = || {
+            SpoolWaits::counts(&app_state.spool_waits.counts)
+                .per_peer
+                .get(&Some(peer(1)))
+                .copied()
+        };
+        let held = until(1_000_000, || counted() == Some(1)).await;
+        assert!(held, "the wait whose body has not arrived is not counted");
+        assert_eq!(
+            app_state.spool_waits.arrivals.receiver_count(),
+            0,
+            "the wait is held on no spool before its body names one"
+        );
+
+        // The body ends having named nothing: a request that is not one.
+        drop(sender);
+        let answer = arriving.await.expect("task").expect("answer");
+        assert_eq!(answer.status(), HttpStatus::BAD_REQUEST);
+        assert_eq!(counted(), None, "the place was given back");
+    }
+
     /// A submit wakes its waits without any of them reading the store: once
     /// the waits have looked at their spool, the node's only database
     /// connection is taken, an entry lands (written over another connection),
@@ -1204,7 +1433,8 @@ mod tests {
                 crate::db::LockedAppend::Appended(seq_num) => seq_num,
                 other => panic!("the first write fixes the key: {other:?}"),
             };
-        app_state.spool_waits.announce(&spool_key, seq_num);
+        let spool = spool_key_bytes(&spool_key).expect("a spool key");
+        app_state.spool_waits.announce(&spool, seq_num);
 
         for wait in waits {
             let answer = wait.await.expect("task").expect("answer");
