@@ -73,6 +73,10 @@ struct Arrival {
     seq_num: i64,
 }
 
+/// The spools a wait names, each once and in spool order, with the position asked of each. Shared
+/// between the wait and what holds its counts, so a held wait keeps one copy.
+type WaitMarks = Arc<[([u8; 32], i64)]>;
+
 /// What a wait is counted against: the peer its connection names, or nothing
 /// when the app is served without the node's listener.
 type Waiter = Option<crate::liveness::Peer>;
@@ -133,7 +137,7 @@ impl Drop for WaitSlot {
 /// back when the wait ends. The marks are the wait's own, shared, so a held
 /// wait keeps one copy of the spools it names.
 struct HeldWait {
-    marks: Arc<[([u8; 32], i64)]>,
+    marks: WaitMarks,
     slot: WaitSlot,
 }
 
@@ -203,7 +207,7 @@ impl SpoolWaits {
     /// Hold the wait in `slot` on the spools `marks` names (each once), or
     /// `503` when its peer already holds [`MAX_WAITERS_PER_SPOOL`] on any
     /// one of them.
-    fn hold(&self, slot: WaitSlot, marks: Arc<[([u8; 32], i64)]>) -> Result<HeldWait, StatusCode> {
+    fn hold(&self, slot: WaitSlot, marks: WaitMarks) -> Result<HeldWait, StatusCode> {
         let mut held = Self::counts(&self.counts);
         if marks.iter().any(|(spool, _from)| {
             held.per_spool
@@ -448,7 +452,7 @@ async fn wait_for_spools(
 /// asked of each, in spool order, each spool once: named twice, a spool is
 /// watched from the earlier position. `400` for a request that is not one.
 /// Nothing of the request is kept but these.
-fn wait_marks(body: &[u8]) -> Result<Arc<[([u8; 32], i64)]>, StatusCode> {
+fn wait_marks(body: &[u8]) -> Result<WaitMarks, StatusCode> {
     let request = dsm::types::proto::B0xWaitRequest::decode(body).map_err(|e| {
         log::info!("b0x wait: the request does not decode: {e}");
         StatusCode::BAD_REQUEST

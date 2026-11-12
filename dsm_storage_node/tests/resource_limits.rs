@@ -603,8 +603,9 @@ fn an_http2_connection_with_no_request_is_closed_once_idle() {
 
 /// A response whose write makes no progress ends its connection once the
 /// write bound passes: a client that asks for a large answer and never reads
-/// it holds the node no longer. Its socket's receive buffer is kept small,
-/// so the answer cannot all wait in the kernel.
+/// it holds the node no longer. Its socket's receive buffer is kept small
+/// and it asks for more than the kernel's buffers hold, so the answer cannot
+/// all wait in the kernel.
 #[test]
 fn a_response_nobody_reads_ends_its_connection_once_its_write_stalls() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -630,7 +631,10 @@ fn a_response_nobody_reads_ends_its_connection_once_its_write_stalls() {
             let answer = common::ok_or_panic(app.clone().oneshot(submit).await, "submit");
             assert_eq!(answer.status(), StatusCode::NO_CONTENT);
         }
-        let full = page * envelope.len();
+        // One page is small enough to wait whole in the kernel's buffers, so the page is asked
+        // for many times over on the one connection: together the answers cannot.
+        let asks = 16;
+        let full = asks * page * envelope.len();
 
         let stall = Duration::from_secs(1);
         let address = served_plain(
@@ -647,7 +651,7 @@ fn a_response_nobody_reads_ends_its_connection_once_its_write_stalls() {
         let ask = format!(
             "GET /api/v2/b0x/retrieve/0 HTTP/1.1\r\nhost: node\r\nx-dsm-b0x-address: {spool}\r\n\r\n"
         );
-        common::ok_or_panic(socket.write_all(ask.as_bytes()).await, "ask");
+        common::ok_or_panic(socket.write_all(ask.repeat(asks).as_bytes()).await, "ask");
         // Read nothing while the node's write stalls past its bound.
         tokio::time::sleep(stall * 4).await;
         let mut got = Vec::new();
