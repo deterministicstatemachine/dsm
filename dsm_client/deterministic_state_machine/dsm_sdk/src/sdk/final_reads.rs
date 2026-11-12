@@ -147,6 +147,63 @@ fn lock<T>(store: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
+/// Which of the two object stores a read fills.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ObjectStore {
+    /// Bytes one member served that re-hash to the address ([`object`]).
+    Served,
+    /// Bytes Core read `Stored` ([`stored_object`]).
+    Stored,
+}
+
+/// The reads of objects under way: one gate for each address being read into
+/// a store.
+type ReadsUnderWay = HashMap<(ObjectStore, [u8; 32]), std::sync::Arc<tokio::sync::Mutex<()>>>;
+
+static READS_UNDER_WAY: once_cell::sync::Lazy<Mutex<ReadsUnderWay>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// This reader's turn at one address: held from before it looks in the store
+/// until what it read is kept.
+pub(crate) struct ReadTurn {
+    key: (ObjectStore, [u8; 32]),
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for ReadTurn {
+    fn drop(&mut self) {
+        // The gate goes once nobody else is waiting at it: the store holds
+        // the object by then, or no member served it and the next reader
+        // asks afresh. Two holders are the map and this turn.
+        let mut under_way = lock(&READS_UNDER_WAY);
+        if std::sync::Arc::strong_count(&self.gate) <= 2 {
+            under_way.remove(&self.key);
+        }
+    }
+}
+
+/// Take a turn at reading the object at `addr` into `store`. Looking in a
+/// store, asking the members and keeping what they served are three steps;
+/// two readers that both looked before either had kept would both ask, and
+/// one resolution would ask a member twice for an object it reads once. A
+/// reader holds its turn across the three, so a second reader of the same
+/// address waits and then finds the object kept. Readers of other addresses
+/// do not wait on it.
+pub(crate) async fn read_turn(store: ObjectStore, addr: &[u8; 32]) -> ReadTurn {
+    let key = (store, *addr);
+    let gate = lock(&READS_UNDER_WAY)
+        .entry(key)
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let held = gate.clone().lock_owned().await;
+    ReadTurn {
+        key,
+        gate,
+        _held: held,
+    }
+}
+
 /// The immutable object at `addr`, when it is kept.
 pub(crate) fn object(addr: &[u8; 32]) -> Option<Vec<u8>> {
     lock(&OBJECTS).get(addr)

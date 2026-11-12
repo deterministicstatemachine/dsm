@@ -44,7 +44,11 @@ pub(crate) async fn fetch_immutable(
 ) -> Result<Option<Vec<u8>>, DsmError> {
     let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
     // An object is its bytes: once a member served bytes that re-hash to the
-    // address, they are kept and never fetched again.
+    // address, they are kept and never fetched again. One reader at a time
+    // looks, asks and keeps, so readers that ask together ask the members once.
+    let _turn =
+        crate::sdk::final_reads::read_turn(crate::sdk::final_reads::ObjectStore::Served, &addr)
+            .await;
     if let Some(kept) = crate::sdk::final_reads::object(&addr) {
         return Ok(Some(kept));
     }
@@ -91,6 +95,9 @@ pub(crate) async fn read_stored_bytes_kept(
     set: &StorageSet,
     addr: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, DsmError> {
+    let _turn =
+        crate::sdk::final_reads::read_turn(crate::sdk::final_reads::ObjectStore::Stored, addr)
+            .await;
     if let Some(kept) = crate::sdk::final_reads::stored_object(addr) {
         return Ok(Some(kept));
     }
@@ -397,6 +404,66 @@ mod tests {
         assert!(
             asked_for(&fleet, &addr) >= 3,
             "a publisher's read-back asks the members"
+        );
+    }
+
+    /// Readers that ask for one object together ask the members once between
+    /// them: each waits its turn at the address, and all but the first find
+    /// the object kept. Eight readers of an object read `Stored` ask as one
+    /// reader does; eight readers of an object one member's bytes establish
+    /// ask each member at most once. Looking, asking and keeping without a
+    /// turn, every reader looked before any had kept and every one asked: one
+    /// resolution asked a node twice for an object (main's run of 2026-11-12,
+    /// `one_resolution_asks_each_node_for_a_final_cell_or_an_object_once`).
+    /// MUTATION CONTROL: a turn that waits on no other reader (`read_turn`
+    /// locking a gate of its own) turns this red at its first count, 40
+    /// requests where one reader makes 5.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn readers_asking_together_ask_the_members_once() {
+        let fleet = Fleet::start();
+        crate::sdk::final_reads::forget_everything();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        let members = fleet.nodes().nodes.len();
+        let readers = 8;
+
+        let stored = b"an object eight readers read Stored together".to_vec();
+        let (stored_addr, took) = put_immutable(&set, NAMESPACE, &stored)
+            .await
+            .expect("the put");
+        assert!(took >= 3, "the members took the object");
+        forget_requests(&fleet);
+        let reads = futures::future::join_all(
+            (0..readers).map(|_reader| read_stored_bytes_kept(&set, &stored_addr)),
+        )
+        .await;
+        for read in reads {
+            assert_eq!(read.expect("read"), Some(stored.clone()));
+        }
+        assert_eq!(
+            asked_for(&fleet, &stored_addr),
+            members,
+            "eight readers asked as one does: every member once"
+        );
+
+        let served = b"an object eight readers fetch together".to_vec();
+        let inner = dsm::storage_object::immutable_inner(NAMESPACE, &served);
+        let (served_addr, took) = put_immutable(&set, NAMESPACE, &served)
+            .await
+            .expect("the put");
+        assert!(took >= 3, "the members took the object");
+        forget_requests(&fleet);
+        let fetched = futures::future::join_all(
+            (0..readers).map(|_reader| fetch_immutable(&set, NAMESPACE, &inner)),
+        )
+        .await;
+        for read in fetched {
+            assert_eq!(read.expect("read"), Some(served.clone()));
+        }
+        let asked = asked_for(&fleet, &served_addr);
+        assert!(
+            (1..=members).contains(&asked),
+            "eight readers asked the members {asked} times for one object"
         );
     }
 

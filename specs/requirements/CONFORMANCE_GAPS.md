@@ -7677,6 +7677,7 @@ Owner, 2026-11-10: "get the Android one ready. Let's test it and see if it's rea
 - *One Secure crossing at a time.* `dsm_secure_handler` takes a crossing from thread mode only, masks exceptions for its length and refuses one that finds another being served. No test off silicon.
 - *A frame past a head's size is dispatched as a payment check or not at all* (`service::handle`; asserted in `over_the_wire_an_authorization_is_the_message_and_the_signature_after_it`).
 - *A production image checks the board's lock before it reads the sealed secret.*
+- *The Secure heap is 154 KiB* (owner, 2026-11-12: "Yes, from the heap"). The changes above grew the Secure image until, built on macOS, it ended 488 bytes inside the 59 KiB stack's reservation and the linker refused it; the same code linked on CI's Linux, so nothing was left there either. The heap gave up 2 KiB: the production image now ends 1,560 bytes under the stack's floor, the heap's measured peak is 105,456 bytes against the 118,272 the rehearsal holds it to (`secure_heap`), and the stack bound is 55,336 bytes of 60,416 (`stack-bound.py`). The monitor was compile-checked, not linked, before that change was merged; all four images are linked for this one.
 - *Left:* the measurement gate does not cover `OP_AUTHORIZE`, which finishes an install; any link holder can discard an open receive challenge.
 
 ### 6.159 The read-through of 2026-11-12: what a client can make a node hold, what a screen says of a send, and what a release hands its installer
@@ -7735,6 +7736,9 @@ The owner, 2026-11-12, on a game whose faction base is funded by its members' ow
 
 **Rows.** MR-DSM-0368 to MR-DSM-0373 added, Met. Three matrix rows added.
 
+### 6.161 Readers that ask for one object together ask the members once (2026-11-12)
+
+Main's run on 647b4d1d0 was red at `one_resolution_asks_each_node_for_a_final_cell_or_an_object_once`: one node was asked twice for one immutable object in one resolution. The same test had failed once that morning on a branch cut from 1705ee076, so it is not from the day's changes. An object is kept once it is read (§6.60), but looking in the store, asking the members and keeping what they served were three steps, and a resolution's reads overlap (§6.61): two readers that both looked before either had kept both asked. Now a reader takes a turn at the address (`final_reads::read_turn`) across the three, for the objects one member's bytes establish (`fetch_immutable`) and for the ones read `Stored` (`read_stored_bytes_kept`) alike; a second reader of the same address waits and finds the object kept, and readers of other addresses do not wait. Test, on the node's own code on Postgres: `readers_asking_together_ask_the_members_once`, eight readers of one object; with a turn that waits on nobody it counts 40 requests where one reader makes 5.
 
 ## 7 Totals
 
