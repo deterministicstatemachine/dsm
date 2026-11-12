@@ -14,7 +14,7 @@ Everything below works today, on the path the check in this repo runs on every c
 
 | You run today | With DSM | Why it's better |
 |---|---|---|
-| Passwords, password resets, an authenticator app, SMS codes, security keys | `ask.login`: the player approves "Sign in to *your app*" on their device, and the wallet's identity signs it. Your account verifies the signature and gives you the fact `signed`. | Nothing to store but a nonce, nothing to leak, nothing to phish: the words are shown on the device and signed there. Post-quantum signatures. No hardware key to buy, ship or replace. |
+| Passwords, password resets, an authenticator app, SMS codes, security keys | `ask.login`: the player approves "Sign in to *your app*" on their device, and the wallet's identity signs it. Your account verifies the signature and gives you the fact `signed`. | No password or code to store, leak, reuse or intercept. The player reads the words on their own device and signs them there, and the signature names this connection and this request, so it signs the player in to your app and nowhere else. It does not stop a player approving a look-alike app's own requests: the wallet shows which app is asking, and the player decides. Post-quantum signatures. No hardware key to buy, ship or replace. |
 | A payment processor for in-app purchases | `ask.send`: the wallet sends your account ERA, or a coin you issued. Fact: `received`. | A transfer your account accepted is final; there is no chargeback. Small amounts cost what a storage write costs, not a percentage plus a fixed fee. Inside the grant's caps the player is not asked again. |
 | An inventory database as the source of truth for who owns what | `issue` an object, `give` it, and later `ask.owns`: the wallet proves what it owns, your account verifies the proof. Fact: `owns`. | Items are the player's: they can send them to each other in the wallet, and your app still sees who holds what. Your database keeps game state; ownership lives with the player. |
 | An escrow service, or trusting yourself with both players' stakes | `ask.match.stake`, `decide`, `ask.match.collect`: both players stake from their own wallets, your app decides, the winner collects. | Your app never holds the stakes. Each wallet locks its own, under terms it built itself; your key only decides. |
@@ -36,7 +36,7 @@ Every request has two answers, and only one is evidence:
 
 Storage on DSM is paid for by the account that writes: a one-time entry payment (a flat rate to three storage operators), then credits consumed by each write, priced in token units by a network parameter. Nobody is billed per month or per user, and reading is free. That leaves you three ways to set things up:
 
-1. **Players pay their own way.** Each player's wallet is their own account, on the public set. In the beta, the faucet funds every new wallet. Later they buy ERA like anything else. Your app pays only for its own account's writes. This is the setup `make app-dev` gives you: your app's account on the beta network, funded by the same faucet.
+1. **Players pay their own way.** Each player's wallet is their own account, on the public set. In the beta, the faucet funds every new wallet. Later they buy ERA like anything else. Your app pays only for its own account's writes. This is the setup `dsm-app up` gives you: your app's account on the beta network, funded by the same faucet.
 2. **Your app pays for its players.** `give` a player ERA when they connect; their wallet spends it on its own writes. What you give is theirs, and works anywhere on DSM, so this is a gift, not a subscription.
 3. **Your app runs the storage, and players pay nothing.** Run your own storage set ([dsm_storage_node/RUN_A_NODE.md](dsm_storage_node/RUN_A_NODE.md)) and point your players' wallets at it, the way `make phones-local` points them at your local set. A node may enforce the entry payment and credits, or not; on your own set, that is your call. You pay the hosting; accounts on your set are still their owners', and a wallet on your set reaches only your set.
 
@@ -61,18 +61,39 @@ Your app needs a server side, even a small one, because the account's secret mus
 
 ## Start in five minutes
 
-You need what [QUICKSTART.md](QUICKSTART.md)'s prerequisites list (Rust, Node.js 20+, protoc) and outbound HTTPS. Nothing of the network runs on your machine: your app's account joins the beta network, the hosted storage set every wallet ships configured for, and the faucet funds it.
+You need Node.js 20 or later, Python 3 with `venv` for the Python client, `curl`, and outbound HTTPS. No Rust, no protobuf compiler, no clone of this repo, and nothing of the network runs on your machine: your app's account joins the beta network, the hosted storage set every wallet ships configured for, and the faucet funds it. On Ubuntu or Debian (on Windows, in WSL2), Node.js 20 comes from NodeSource; on macOS, `brew install node`. The guide's [Set up your machine](https://deterministicstatemachine.github.io/dsm/setup.html) has the lines.
+
+DSM's tools, prebuilt for Linux (x86-64, ARM64) and macOS (Apple silicon, Intel). The install script checks every download against the release's `SHA256SUMS` before it unpacks anything, and installs into `~/.local`:
+
+```bash
+curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.4/install.sh
+sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+A folder for your app; its account lives there:
+
+```bash
+mkdir my-app && cd my-app
+```
 
 Your app's account on the beta network, funded:
 
 ```bash
-make app-dev
+dsm-app up
 ```
 
-Then the starter app. It keeps running: open http://127.0.0.1:3000, and use a second terminal for the commands below.
+The TypeScript client, into your app (its protobuf types are inside the package):
 
 ```bash
-make starter
+npm init -y
+npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.0-beta.4.tgz
+```
+
+Then the starter app, from your app's folder. It keeps running: open http://127.0.0.1:3000, and use a second terminal (in the same folder, with the same `PATH`) for the commands below.
+
+```bash
+dsm-connect-starter
 ```
 
 The starter's page is a builder. It has three kinds of pieces, in the order an app uses them:
@@ -86,24 +107,31 @@ Under every piece is the exact code it is, in TypeScript or Python, with a Copy 
 Press **Show the connect code**. Then connect a wallet. With no phone, make a player's wallet in the terminal, funded:
 
 ```bash
-make dev-wallet
+dsm-dev-wallet up
 ```
 
 and connect it with the code the starter shows, pasted in place of `dsm:connect/v1:...`:
 
 ```bash
-make dev-wallet-connect CODE=dsm:connect/v1:...
+dsm-dev-wallet connect dsm:connect/v1:...
 ```
 
-With phones (debug builds of the wallet), which are on the beta network as installed, open the code in each wallet: every adb device and every booted iOS Simulator.
+With phones (debug builds of the wallet, from a clone of this repo), which are on the beta network as installed, open the code in each wallet: every adb device and every booted iOS Simulator.
 
 ```bash
 make phones-connect CODE=dsm:connect/v1:...
 ```
 
-Back in the starter, the wallet appears under **Connected wallets**. Under **Ask a connected wallet**, ask it to send 0.05 ERA and watch the fact become `received`. Ask for 0.20, over the per-request cap, and it waits for the player: `make dev-wallet-pending`, then `make wallet ARGS="approve <connection> <seq>"` (or approve it on the phone). Ask it to **sign in** and approve that the same way: the fact is `signed`.
+Back in the starter, the wallet appears under **Connected wallets**. Under **Ask a connected wallet**, ask it to send 0.05 ERA and watch the fact become `received`. Ask for 0.20, over the per-request cap, and it waits for the player: `dsm-dev-wallet pending`, then `dsm-dev-wallet approve <connection> <seq>` (or approve it on the phone). Ask it to **sign in** and approve that the same way: the fact is `signed`.
 
-`make dev-down` stops everything. `make developer-path` runs the whole path, every helper once, as CI does.
+`dsm-dev-wallet down` and `dsm-app down` stop the wallet and your app's account:
+
+```bash
+dsm-dev-wallet down
+dsm-app down
+```
+
+**From a clone of this repo instead**, to work on DSM itself: the make targets run the same programs built from the checkout (QUICKSTART.md's prerequisites: Rust, protoc, and the rest). `make app-dev` is `dsm-app up`, `make app ARGS="..."` is `dsm-app ...`, `make dev-wallet` is `dsm-dev-wallet up`, `make wallet ARGS="..."` is `dsm-dev-wallet ...`, `make starter` is `dsm-connect-starter`, and `make dev-down` stops them all. `make developer-path` runs the whole path, every helper once, as CI does.
 
 **A storage set of your own, instead.** `make app-dev-local` runs the network's five storage nodes on this machine (PostgreSQL; [QUICKSTART.md](QUICKSTART.md#optional-local-storage-nodes)) and your app's account on them; `make dev-wallet` and the rest follow it there, and `make phones-local` points the phones at it (after `make nodes-reset`, a new set with new CAs, clear the phones' wallets and run it again). Nothing reaches outside your machine. An account exists only on the set it was made on, so `make dev-reset` forgets this machine's accounts (and the local set, if they were on it) before you change sets.
 
@@ -111,7 +139,7 @@ Back in the starter, the wallet appears under **Connected wallets**. Under **Ask
 
 ### TypeScript (Node.js 20+)
 
-[clients/typescript/](clients/typescript/), built by `make clients`.
+[clients/typescript/](clients/typescript/). Installed into your app from the package the install put in `~/.local/share/dsm/clients` (above); from a clone, depend on `clients/typescript` by path. Its protobuf types are committed, so neither needs protoc.
 
 ```ts
 import { localAccount, grant, ask } from "dsm-app-client";
@@ -126,7 +154,7 @@ const offer = await app.offer({
 console.log(offer.code);                        // show it as a QR code
 
 // 2. Once a wallet connected:
-const [player] = await app.connections();
+const player = (await app.connections()).find((c) => c.connected);
 const paid = await app.wait(await app.request(player, ask.send("ERA", "0.05", "a sword")));
 if (paid.fact === "received") {
   const sword = await app.issue({ symbol: "SWORD", name: "Sword", supply: "1" });
@@ -141,12 +169,14 @@ if (login.fact === "signed") console.log(`${player.peer} signed in`);
 
 ### Python (3.10+)
 
-[clients/python/](clients/python/). `make clients` generates its protobuf types; install it into a virtual environment:
+[clients/python/](clients/python/). Its protobuf types are inside the package. Install it into a virtual environment in your app's folder, from the wheel the install put beside the TypeScript package:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install -e clients/python
+pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.0b4-py3-none-any.whl
 ```
+
+From a clone, `pip install -e clients/python` instead.
 
 ```python
 from dsm_app_client import local_app, grant, ask
@@ -155,7 +185,7 @@ app = local_app()
 offer = app.offer("My Game", [grant.send("ERA", "0.10", "1.00"), grant.owns(["ERA"]), grant.accept()])
 print(offer.code)
 
-player = app.connections()[0]
+player = next(c for c in app.connections() if c.connected)
 paid = app.wait(app.request(player, ask.send("ERA", "0.05", "a sword")))
 if paid.fact == "received":
     sword = app.issue("SWORD", "Sword", "1")
@@ -163,19 +193,24 @@ if paid.fact == "received":
     app.give(player, sword, "1")
 ```
 
-[clients/python/examples/first_payment.py](clients/python/examples/first_payment.py) is this, as a program: it prints the connect code, waits for a wallet to connect to it, asks for 0.05 ERA and prints the fact.
+[clients/python/examples/first_payment.py](clients/python/examples/first_payment.py) is this, as a program: it prints the connect code, waits for a wallet to connect to it, asks for 0.05 ERA and prints the fact. The install put it in `~/.local/share/dsm/examples`:
 
 ```bash
-python3 clients/python/examples/first_payment.py
+python3 ~/.local/share/dsm/examples/first_payment.py
 ```
 
 Then, in a second terminal, connect a wallet to the code it prints:
 
 ```bash
-make dev-wallet-connect CODE=dsm:connect/v1:...
+dsm-dev-wallet connect dsm:connect/v1:...
 ```
 
-A wallet connects to an app once. If the terminal wallet is already connected to your account (through the starter, say), it disconnects first (`make wallet ARGS="disconnect <connection>"`), or a second wallet connects: `make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`.
+A wallet connects to an app once. If the terminal wallet is already connected to your account (through the starter, say), it disconnects first (`dsm-dev-wallet disconnect <connection>`), or a second wallet connects:
+
+```bash
+DSM_WALLET_NAME=wallet2 dsm-dev-wallet up
+DSM_WALLET_NAME=wallet2 dsm-dev-wallet connect dsm:connect/v1:...
+```
 
 Any other language: generate types from [`proto/dsm_app.proto`](proto/dsm_app.proto) and send an `IngressRequest` (a `RouterInvokeOp` or `RouterQueryOp`: the route's name and an `ArgPack` holding its request message) to `POST /ingress`. An `IngressResponse` comes back: either an error, or `0x03` followed by an `Envelope`. [clients/typescript/src/ingress.ts](clients/typescript/src/ingress.ts) is the whole exchange, in one short file.
 
@@ -213,7 +248,7 @@ Your app's own calls are all online. Offline transfers are the wallet's feature,
 
 ## Your app's account
 
-`make app-dev` runs it for you. In production you run it yourself:
+`dsm-app up` runs it for you. In production you run it yourself:
 
 ```bash
 dsm-app-host \
@@ -230,7 +265,7 @@ dsm-app-host \
 |---|---|
 | `--data-dir` | The account: its state and `RECOVERY_MNEMONIC`. The first start creates the account and writes the mnemonic there (mode 0600). |
 | `--ingress-secret-dir` | Where each launch writes a new ingress secret, `ingress-token`. It must be apart from the data dir: your app gets the secret and nothing of the account. |
-| `--env-config` | The network's storage set, each member with its own CA. The wallet's own is [`dsm_client/frontend/public/dsm_env_config.toml`](dsm_client/frontend/public/dsm_env_config.toml), and `make app-dev` uses it too; `make app-dev-local` uses your local set's. |
+| `--env-config` | The network's storage set, each member with its own CA. The wallet's own is [`dsm_client/frontend/public/dsm_env_config.toml`](dsm_client/frontend/public/dsm_env_config.toml), and `make app-dev` uses it; `make app-dev-local` uses your local set's. `--network beta` instead uses the beta network's, which the host carries (`dsm-app up` runs it so). |
 | `--game-bind` | The ingress your server calls. Loopback only; anything else is refused. |
 | `--relay-bind`, `--relay-endpoint`, `--relay-name` | Where wallets reach your account. The host makes its own TLS certificate for these names, and every connect code pins it, so you need no certificate authority. |
 
@@ -245,10 +280,11 @@ The first lines it logs name the relay and its certificate pin, the ingress, and
 
 ## Testing
 
-- `make dev-wallet` runs a second account as a player's wallet, and `make dev-wallet2` a third for matches. `make wallet ARGS=...` (and `make wallet2 ARGS=...`) drives them: `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`.
-- `make app ARGS=...` drives your app's account from the terminal: `offer`, `connections`, `send`, `owns`, `accept`, `login`, `contacts`, `result`, `issue`, `give`, `owned`, `vault`, `vaults`, `price`, `trade`, `stake`, `decide`, `collect`, `activity` (`make app ARGS=help` lists them with their arguments).
+- `dsm-dev-wallet up` runs a second account as a player's wallet, and `DSM_WALLET_NAME=wallet2 dsm-dev-wallet up` a third for matches. `dsm-dev-wallet ...` (and `DSM_WALLET_NAME=wallet2 dsm-dev-wallet ...`) drives them: `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`.
+- `dsm-app ...` drives your app's account from the terminal: `offer`, `connections`, `send`, `owns`, `accept`, `login`, `contacts`, `result`, `issue`, `give`, `owned`, `vault`, `vaults`, `price`, `trade`, `stake`, `decide`, `collect`, `activity` (`dsm-app help` lists them with their arguments).
 - `make developer-path` first proves that the code the starter's page shows under each piece is the code the starter runs: every shown call, in TypeScript and in Python, is evaluated with the real client and compared with what the server hands it, and every shown program is checked against the client (`npm test` in `examples/connect-starter`). Then it runs every helper once against a local set (`make app-dev-local`, so CI depends on no hosted node): connect, send inside and over the grant, prove what is owned, sign in, issue and give an item, open a vault and trade, referee a match between two wallets, disconnect; then the Python client. CI runs it on every change.
-- `make first-run` is a newcomer's first run, proven: a clean Ubuntu (in Docker) with nothing on it but what QUICKSTART.md's prerequisites say to install (no PostgreSQL, no node), a fresh clone, and this page's commands alone, on the beta network, in TypeScript (the starter's page, its buttons pressed in a real browser and its table read) and in Python (`first_payment.py`), each to a wallet connected and its own request's payment received. The prerequisites are read out of QUICKSTART.md, and every command it types is one this page shows, so the docs cannot drift from what works. A release runs it.
+- `make first-run` is a newcomer's first run, proven: a clean Ubuntu (in Docker) with nothing on it but what the guide's setup page says to install (Node.js, Python's venv, curl: no git, no Rust, no protoc, no PostgreSQL, no storage node), no clone of this repo, and this page's commands alone, on the beta network: `install.sh` installs a release's files (a release passes its own; otherwise they are built from this commit, the host in a Linux container), then TypeScript (the starter's page, its buttons pressed in a real browser and its table read, after the client's package is installed into the app's folder) and Python (the wheel, `first_payment.py`), each to a wallet connected and its own request's payment received. The prerequisites are read out of the setup page, and every command it types is one this page shows, so the docs cannot drift from what works. A release runs it on the files it publishes.
+- On every pull request that touches them, `.github/workflows/app-host-binaries.yml` builds `dsm-app-host` for Linux x86-64 and ARM64 and macOS arm64 and x86-64, smoke-tests each on its own runner, packages the developer archive, writes `SHA256SUMS`, and runs `install.sh` on all four against those files.
 
 ## Reference
 

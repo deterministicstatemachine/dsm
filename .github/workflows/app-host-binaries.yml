@@ -1,0 +1,311 @@
+name: App host binaries
+
+# What a developer installs to plug an app into DSM, with no Rust, no protobuf
+# compiler and no copy of the repo: dsm-app-host built for every platform a
+# developer runs (Linux x86-64 and ARM64, which is also Windows through WSL2;
+# macOS on Apple silicon and Intel), each smoke-tested on the machine it was
+# built on; the developer archive (the clients as packages, the dsm-app and
+# dsm-dev-wallet commands, the starter app); scripts/install.sh; and the
+# SHA256SUMS install.sh checks every download against. Then install.sh itself
+# runs on each platform against those files, as a developer runs it against a
+# release, and must refuse a file the checksums do not match.
+#
+# A pull request that touches any of it runs this and publishes nothing; the
+# files are kept as this run's artifacts. A release (release.yml) calls this
+# with the tag's version and publishes what it built.
+#
+# Security: nothing here holds a token that writes (contents: read); the one
+# input, `version`, is read into an env variable and checked against the
+# crates' own version before any build step.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'dsm_client/deterministic_state_machine/**'
+      - 'dsm_client/frontend/public/dsm_env_config.toml'
+      - 'proto/**'
+      - 'clients/**'
+      - 'examples/connect-starter/**'
+      - 'scripts/install.sh'
+      - 'scripts/release/**'
+      - 'ci/client_types_check.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/app-host-binaries.yml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: "The release's version, without the v (it must be the crates' version)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # --------------------------------------------------------------------------
+  # One version names everything: the host crate's, which the TypeScript and
+  # Python clients and install.sh must carry too, and a release's tag.
+  # --------------------------------------------------------------------------
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Read and agree
+        id: read
+        env:
+          ASKED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          host="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/dsm-app-host/Cargo.toml | head -1)"
+          ts="$(node -p "require('./clients/typescript/package.json').version")"
+          py="$(sed -n 's/^version = "\(.*\)"$/\1/p' clients/python/pyproject.toml | head -1)"
+          script="$(sed -n 's/^DSM_VERSION="\(.*\)"$/\1/p' scripts/install.sh)"
+          py_want="$(echo "$host" | sed -e 's/-beta\./b/' -e 's/-alpha\./a/' -e 's/-rc\./rc/')"
+          echo "dsm-app-host $host; TypeScript client $ts; Python client $py; install.sh $script"
+          [ "$ts" = "$host" ] || { echo "::error::clients/typescript is $ts, dsm-app-host $host"; exit 1; }
+          [ "$py" = "$py_want" ] || { echo "::error::clients/python is $py, not $py_want (dsm-app-host $host)"; exit 1; }
+          [ "$script" = "$host" ] || { echo "::error::scripts/install.sh installs $script, dsm-app-host is $host"; exit 1; }
+          if [ -n "$ASKED" ] && [ "$ASKED" != "$host" ]; then
+            echo "::error::the release is $ASKED, the crates are $host: set the version, then tag"
+            exit 1
+          fi
+          echo "version=$host" >> "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------------------
+  # The clients' committed protobuf types are what proto/dsm_app.proto
+  # generates (ci/client_types_check.sh), so the packages need no compiler.
+  # --------------------------------------------------------------------------
+  client-types:
+    name: Client types match the proto
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      # Ubuntu 24.04's python3 is 3.12, which grpcio-tools 1.71.0 has wheels for.
+      - name: Regenerate and compare
+        run: bash ci/client_types_check.sh
+
+  # --------------------------------------------------------------------------
+  # dsm-app-host, built natively on each platform's own runner, smoke-tested
+  # there (scripts/release/smoke_app_host.sh), then packaged. Linux builds on
+  # Ubuntu 22.04 so the binary needs no newer glibc than 2.35.
+  # --------------------------------------------------------------------------
+  build:
+    name: dsm-app-host (${{ matrix.platform }})
+    needs: [version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+          - platform: macos-arm64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: app-host-${{ matrix.platform }}
+
+      # Ubuntu 22.04's own protoc (3.12) predates proto3 `optional`, which
+      # proto/dsm_app.proto uses: protoc 29.3 from protobuf's release, by digest.
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        env:
+          ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            X64) zip=protoc-29.3-linux-x86_64.zip; sum=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a ;;
+            ARM64) zip=protoc-29.3-linux-aarch_64.zip; sum=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32 ;;
+            *) echo "::error::no protoc pinned for $ARCH"; exit 1 ;;
+          esac
+          curl -fsSL -o "$RUNNER_TEMP/$zip" "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/$zip"
+          echo "$sum  $RUNNER_TEMP/$zip" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/protoc"
+          unzip -q "$RUNNER_TEMP/$zip" -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/protoc/bin/protoc" --version
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Build (release)
+        run: cargo build --locked --release -p dsm-app-host
+
+      - name: Smoke test
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: bash scripts/release/smoke_app_host.sh target/release/dsm-app-host "$VERSION"
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          bash scripts/release/package_app_host.sh target/release/dsm-app-host "$VERSION" "$PLATFORM" dist
+          ls -la dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: app-host-${{ matrix.platform }}
+          path: dist/dsm-app-host-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  # --------------------------------------------------------------------------
+  # The developer archive: the same on every platform.
+  # --------------------------------------------------------------------------
+  developer:
+    name: Developer archive (clients, commands, starter)
+    needs: [version, client-types]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "20"
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          bash scripts/release/package_developer.sh "$VERSION" dist
+          ls -la dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: developer-archive
+          path: dist/dsm-developer-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  # --------------------------------------------------------------------------
+  # install.sh and SHA256SUMS beside every archive: the files a release
+  # attaches, as one artifact (developer-release).
+  # --------------------------------------------------------------------------
+  assemble:
+    name: Checksums and install.sh
+    needs: [version, build, developer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: app-host-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: developer-archive
+          path: dist
+
+      - name: SHA256SUMS
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: bash scripts/release/checksums.sh dist "$VERSION"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: developer-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  # --------------------------------------------------------------------------
+  # install.sh on each platform, against those files, as a developer runs it
+  # against a release: the host runs, the commands run, each client installs
+  # into a project of its own and imports. And a download the checksums do
+  # not match is refused, with nothing installed.
+  # --------------------------------------------------------------------------
+  install:
+    name: install.sh (${{ matrix.platform }})
+    needs: [version, assemble]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: macos-arm64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: developer-release
+          path: release
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "20"
+
+      - name: Install, from the release's own install.sh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/dsm"
+          DSM_PREFIX="$prefix" DSM_RELEASE_URL="file://$PWD/release" sh release/install.sh
+          export PATH="$prefix/bin:$PATH"
+          test "$(dsm-app-host --version)" = "dsm-app-host $VERSION"
+          dsm-app help >"$RUNNER_TEMP/app-help.txt"
+          grep -q '^usage: dsm-app up' "$RUNNER_TEMP/app-help.txt"
+          dsm-dev-wallet help >"$RUNNER_TEMP/wallet-help.txt"
+          grep -q '^usage: dsm-dev-wallet up' "$RUNNER_TEMP/wallet-help.txt"
+          ts_project="$RUNNER_TEMP/ts-app"
+          mkdir -p "$ts_project" && cd "$ts_project"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$prefix/share/dsm/clients/dsm-app-client-$VERSION.tgz"
+          node --input-type=module -e "import { localAccount, grant, ask } from 'dsm-app-client'; console.log('TypeScript client:', typeof localAccount, typeof grant.send, typeof ask.send)"
+          python3 -m venv "$RUNNER_TEMP/py-app"
+          "$RUNNER_TEMP/py-app/bin/pip" install --quiet "$prefix"/share/dsm/clients/dsm_app_client-*-py3-none-any.whl
+          "$RUNNER_TEMP/py-app/bin/python" -c "from dsm_app_client import local_app, grant, ask, pb; print('Python client:', local_app.__name__, pb.IngressRequest.DESCRIPTOR.full_name)"
+
+      - name: A download the checksums do not match is refused
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cp -R release tampered
+          printf 'not the archive' >> "tampered/dsm-developer-$VERSION.tar.gz"
+          if DSM_PREFIX="$RUNNER_TEMP/tampered" DSM_RELEASE_URL="file://$PWD/tampered" sh tampered/install.sh 2>err.log; then
+            echo "::error::install.sh installed a file its checksums do not match"
+            exit 1
+          fi
+          cat err.log
+          grep -q 'does not match' err.log
+          test ! -e "$RUNNER_TEMP/tampered/bin/dsm-app-host"

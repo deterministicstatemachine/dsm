@@ -2,33 +2,48 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # A newcomer's first run, proven: a clean Ubuntu (in Docker) with nothing on
-# it but what QUICKSTART.md's prerequisites say to install, a fresh clone of
-# this commit, and BUILDING_APPS.md's commands alone, in the docs' order, in
-# TypeScript and in Python, each to a wallet connected and a payment received.
-# The accounts go where `make app-dev` puts them: on the beta network, the
-# hosted storage set, so the machine runs no node and no PostgreSQL (the
-# prerequisites QUICKSTART.md lists install neither), and the run needs
-# outbound HTTPS to the fleet.
+# it but what the guide's setup page says to install (guide/src/setup.md:
+# Node.js, Python's venv, curl; no git, no Rust, no protobuf compiler), no
+# copy of the DSM repo, and BUILDING_APPS.md's commands alone, in the docs'
+# order, in TypeScript and in Python, each to a wallet connected and a payment
+# received. The accounts go on the beta network, the hosted storage set, so
+# the machine runs no node and no PostgreSQL, and the run needs outbound HTTPS
+# to the fleet, npm's registry and PyPI.
+#
+# What it installs is a release's own files, the way a developer installs a
+# release: install.sh, SHA256SUMS, the host archive for the machine and the
+# developer archive.
+#   FIRST_RUN_RELEASE=DIR   those files, already built (a release passes the
+#                           ones it publishes, from app-host-binaries.yml)
+#   otherwise               they are built here from this commit (committed
+#                           files only): dsm-app-host for Linux in a Rust
+#                           container, smoke-tested there, then packaged with
+#                           scripts/release/ as CI packages them. Needs Node.js
+#                           20+ and Python 3.10+ here.
+# The one thing the newcomer types that differs: the guide downloads
+# install.sh from the release's page; here it is the release directory's copy,
+# and install.sh reads that directory (DSM_RELEASE_URL=file://...).
 #
 # Nothing here knows more than the docs:
-#   - the Linux prerequisites are read out of QUICKSTART.md's "Prerequisites"
-#     section (every bash block under a "Linux" label) and run as written;
-#   - every `make ...` and `python3 ...` command the newcomer types is checked
-#     to be one BUILDING_APPS.md shows, before anything runs.
+#   - the Linux prerequisites are read out of guide/src/setup.md (the bash
+#     block under "Ubuntu or Debian") and run as written;
+#   - every command the newcomer types is checked to be one BUILDING_APPS.md
+#     shows, before anything runs.
 # So the docs cannot drift from what works. `make first-run` runs this; so
 # does a release.
 #
 # What the newcomer does, in order:
-#   make app-dev; make starter; open http://127.0.0.1:3000 in a browser and
-#   press "Show the connect code"; make dev-wallet; make dev-wallet-connect
-#   CODE=...; on the page, ask the connected wallet to send 0.05 ERA and watch
-#   that request's row show the fact `received`. The browser is real: headless
-#   Chromium presses the page's own buttons and reads its table
-#   (scripts/first_run_page.mjs), so the page is proven, not its HTTP alone.
-#   Then Python: the virtual environment and pip install the guide shows,
-#   clients/python/examples/first_payment.py, a second wallet (a wallet
-#   connects to an app once, and the first is still connected to the
-#   starter) connected to the code it prints, and its own request `received`.
+#   sh install.sh; put ~/.local/bin on PATH; make a folder for the app;
+#   dsm-app up; npm install the TypeScript client into it; dsm-connect-starter;
+#   open http://127.0.0.1:3000 in a browser and press "Show the connect code";
+#   dsm-dev-wallet up; dsm-dev-wallet connect <code>; on the page, ask the
+#   connected wallet to send 0.05 ERA and watch that request's row show the
+#   fact `received`. The browser is real: headless Chromium presses the page's
+#   own buttons and reads its table (scripts/first_run_page.mjs), so the page
+#   is proven, not its HTTP alone. Then Python: the virtual environment and pip
+#   install the guide shows, first_payment.py, a second wallet (a wallet
+#   connects to an app once, and the first is still connected to the starter)
+#   connected to the code it prints, and its own request `received`.
 #
 # Needs Docker. Logs under .dsm-dev/first-run/. FIRST_RUN_IMAGE_ONLY=1 builds
 # the clean machine and stops.
@@ -40,19 +55,29 @@ cd "$REPO"
 OUT="$REPO/.dsm-dev/first-run"
 IMAGE="dsm-first-run-machine"
 mkdir -p "$OUT"
+VERSION="$(sed -n 's/^DSM_VERSION="\(.*\)"$/\1/p' scripts/install.sh)"
+PY_VERSION="$(echo "$VERSION" | sed -e 's/-beta\./b/' -e 's/-alpha\./a/' -e 's/-rc\./rc/')"
+TS_CLIENT="~/.local/share/dsm/clients/dsm-app-client-$VERSION.tgz"
+PY_CLIENT="~/.local/share/dsm/clients/dsm_app_client-$PY_VERSION-py3-none-any.whl"
 
 # ---- the commands the newcomer types, each one the guide shows -------------
 TYPED=(
-    "make app-dev"
-    "make starter"
-    "make dev-wallet"
-    "make dev-wallet-connect CODE="
+    "releases/download/v$VERSION/install.sh"
+    "sh install.sh"
+    'export PATH="$HOME/.local/bin:$PATH"'
+    "mkdir my-app && cd my-app"
+    "dsm-app up"
+    "npm init -y"
+    "npm install $TS_CLIENT"
+    "dsm-connect-starter"
+    "dsm-dev-wallet up"
+    "dsm-dev-wallet connect "
     "python3 -m venv .venv && . .venv/bin/activate"
-    "pip install -e clients/python"
-    "python3 clients/python/examples/first_payment.py"
-    "make dev-wallet2"
-    "make wallet2 ARGS="
-    "make dev-down"
+    "pip install $PY_CLIENT"
+    "python3 ~/.local/share/dsm/examples/first_payment.py"
+    "DSM_WALLET_NAME=wallet2 dsm-dev-wallet up"
+    "DSM_WALLET_NAME=wallet2 dsm-dev-wallet connect "
+    "dsm-app down"
 )
 for cmd in "${TYPED[@]}"; do
     if ! grep -qF -- "$cmd" BUILDING_APPS.md; then
@@ -63,21 +88,71 @@ done
 
 # ---- the docs' Linux prerequisites, verbatim --------------------------------
 awk '
-    /^## Prerequisites/ { sec = 1; next }
-    sec && /^## /       { exit }
-    sec && /^### /      { next }
-    sec && /^Linux/     { linux = 1; next }
-    sec && /^(macOS|All platforms|Windows)/ { linux = 0 }
-    sec && linux && /^```bash/ { block = 1; next }
-    sec && block && /^```/     { block = 0; next }
-    sec && block               { print }
-' QUICKSTART.md >"$OUT/prerequisites.sh"
+    /^## 1\. Install the prerequisites/ { sec = 1; next }
+    sec && /^## /                     { exit }
+    sec && /^\*\*Ubuntu or Debian/    { linux = 1; next }
+    sec && linux && /^```bash/        { block = 1; next }
+    sec && block && /^```/            { exit }
+    sec && block                      { print }
+' guide/src/setup.md >"$OUT/prerequisites.sh"
 if ! grep -q 'apt install' "$OUT/prerequisites.sh"; then
-    echo "[first-run] QUICKSTART.md's Prerequisites have no Linux apt lines" >&2
+    echo "[first-run] guide/src/setup.md's prerequisites have no Ubuntu apt lines" >&2
     exit 1
 fi
-echo "[first-run] the prerequisites, from QUICKSTART.md:"
+echo "[first-run] the prerequisites, from guide/src/setup.md:"
 sed 's/^/    /' "$OUT/prerequisites.sh"
+
+# ---- the release's files -----------------------------------------------------
+docker_arch="$(docker info --format '{{.Architecture}}')"
+case "$docker_arch" in
+    x86_64 | amd64) PLATFORM=linux-x86_64 ;;
+    aarch64 | arm64) PLATFORM=linux-arm64 ;;
+    *) echo "[first-run] no dsm-app-host is built for Docker's $docker_arch" >&2; exit 1 ;;
+esac
+RELEASE="$OUT/release"
+if [ -n "${FIRST_RUN_RELEASE:-}" ]; then
+    rm -rf "$RELEASE"
+    cp -R "$FIRST_RUN_RELEASE" "$RELEASE"
+    echo "[first-run] the release's files: $FIRST_RUN_RELEASE"
+else
+    echo "[first-run] building the release's files from this commit ($(git rev-parse --short HEAD), committed files only)"
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "[first-run] note: uncommitted changes here are not in what the newcomer installs" >&2
+    fi
+    rm -rf "$OUT/src" "$RELEASE"
+    mkdir -p "$OUT/src" "$OUT/build" "$RELEASE"
+    git archive HEAD | tar -x -C "$OUT/src"
+    # dsm-app-host for this Docker's Linux, built and smoke-tested in a Rust
+    # container (the cargo cache and target stay in Docker volumes).
+    docker run --rm \
+        -v "$OUT/src:/src:ro" -v "$OUT/build:/out" \
+        -v dsm-first-run-cargo:/usr/local/cargo/registry -v dsm-first-run-target:/target \
+        -e CARGO_TARGET_DIR=/target -e VERSION="$VERSION" \
+        rust:1.98.0-bookworm bash -c '
+            set -euo pipefail
+            apt-get update -qq && apt-get install -y -qq protobuf-compiler >/dev/null
+            cd /src
+            cargo build --locked --release -p dsm-app-host
+            bash scripts/release/smoke_app_host.sh /target/release/dsm-app-host "$VERSION"
+            cp /target/release/dsm-app-host /out/dsm-app-host
+        ' >"$OUT/build.log" 2>&1 || {
+        tail -40 "$OUT/build.log" >&2
+        echo "[first-run] dsm-app-host did not build for $PLATFORM" >&2
+        exit 1
+    }
+    grep '^\[smoke\]' "$OUT/build.log" | sed 's/^/    /'
+    bash "$OUT/src/scripts/release/package_app_host.sh" "$OUT/build/dsm-app-host" "$VERSION" "$PLATFORM" "$RELEASE"
+    bash "$OUT/src/scripts/release/package_developer.sh" "$VERSION" "$RELEASE" >"$OUT/developer.log" 2>&1 || {
+        tail -40 "$OUT/developer.log" >&2
+        exit 1
+    }
+    CHECKSUMS_PARTIAL=1 bash "$OUT/src/scripts/release/checksums.sh" "$RELEASE" "$VERSION" >/dev/null
+fi
+for f in install.sh SHA256SUMS "dsm-app-host-$VERSION-$PLATFORM.tar.gz" "dsm-developer-$VERSION.tar.gz"; do
+    [ -f "$RELEASE/$f" ] || { echo "[first-run] the release's files have no $f" >&2; exit 1; }
+done
+echo "[first-run] SHA256SUMS:"
+sed 's/^/    /' "$RELEASE/SHA256SUMS"
 
 # ---- the clean machine -------------------------------------------------------
 cat >"$OUT/Dockerfile" <<'EOF'
@@ -90,16 +165,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends sudo ca-certifi
 USER newcomer
 WORKDIR /home/newcomer
 SHELL ["/bin/bash", "-lc"]
-# QUICKSTART.md, Prerequisites, Linux: as written.
+# guide/src/setup.md, Ubuntu or Debian: as written.
 COPY --chown=newcomer prerequisites.sh /first-run/prerequisites.sh
 RUN set -e; . /first-run/prerequisites.sh
-# QUICKSTART.md, All platforms: "Rust via rustup.rs", which says to run this.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-ENV PATH="/home/newcomer/.cargo/bin:${PATH}"
 # The tester's hand, not the newcomer's machine: a browser to press the page's
 # buttons with (scripts/first_run_page.mjs). It lives here, off PATH, and
 # nothing the newcomer types uses it. (--with-deps adds Chromium's own shared
-# libraries and fonts; none is anything DSM builds against.)
+# libraries and fonts; none is anything DSM uses.)
 ENV FIRST_RUN_HAND=/home/newcomer/.first-run-hand
 RUN mkdir -p "$FIRST_RUN_HAND" && cd "$FIRST_RUN_HAND" \
     && echo '{ "name": "first-run-hand", "private": true }' >package.json \
@@ -115,33 +187,49 @@ docker build --progress=plain -t "$IMAGE" "$OUT" >"$OUT/image.log" 2>&1 || {
 }
 if [ -n "${FIRST_RUN_IMAGE_ONLY:-}" ]; then exit 0; fi
 
-# ---- this commit, as a clone -------------------------------------------------
-git bundle create "$OUT/dsm.bundle" HEAD >/dev/null 2>&1
-if [ -n "$(git status --porcelain)" ]; then
-    echo "[first-run] note: uncommitted changes here are not in the clone the newcomer gets" >&2
-fi
-
 # ---- what the newcomer does --------------------------------------------------
-cat >"$OUT/newcomer.sh" <<'EOF'
+cat >"$OUT/newcomer.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+VERSION="$VERSION"
+TS_CLIENT=$TS_CLIENT
+PY_CLIENT=$PY_CLIENT
+EOF
+cat >>"$OUT/newcomer.sh" <<'EOF'
 step() { printf '\n==== [%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 json() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const v=JSON.parse(d);console.log($1)})"; }
 starter() { curl -fsS --max-time 10 "$@"; }
 page() { node /first-run/first_run_page.mjs "$@"; }   # the tester's hand on the page: a real browser
 
-step "the machine: node $(node --version), $(protoc --version), $(cargo --version | cut -d' ' -f1-2), $(python3 --version); no PostgreSQL, no storage node"
-if command -v psql >/dev/null 2>&1; then echo "psql is installed: the prerequisites changed under this check"; exit 1; fi
+step "the machine: node $(node --version), $(python3 --version); no git, no Rust, no protoc, no PostgreSQL, no storage node"
+for tool in git cargo rustc protoc psql; do
+    if command -v "$tool" >/dev/null 2>&1; then echo "$tool is installed: the prerequisites changed under this check"; exit 1; fi
+done
 
-step "git clone (the docs: git clone https://github.com/deterministicstatemachine/dsm.git; here, this commit)"
-git -c advice.detachedHead=false clone -q /first-run/dsm.bundle dsm && cd dsm
+step "curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v$VERSION/install.sh   (here: the release directory's copy)"
+cp /first-run/release/install.sh install.sh
 
-step "make app-dev"
-make app-dev
+step "sh install.sh   (DSM_RELEASE_URL=file:///first-run/release: this build's release files)"
+DSM_RELEASE_URL=file:///first-run/release sh install.sh
 
-step "make starter   (in the background; the docs: open http://127.0.0.1:3000)"
-(make starter >~/starter.log 2>&1 &)
-for _ in $(seq 1 300); do starter http://127.0.0.1:3000/api/state >/dev/null 2>&1 && break; sleep 1; done
+step 'export PATH="$HOME/.local/bin:$PATH"'
+export PATH="$HOME/.local/bin:$PATH"
+dsm-app-host --version
+
+step "mkdir my-app && cd my-app"
+mkdir my-app && cd my-app
+
+step "dsm-app up"
+dsm-app up
+
+step "npm init -y; npm install $TS_CLIENT"
+npm init -y >/dev/null
+eval "npm install --no-audit --no-fund $TS_CLIENT"
+node --input-type=module -e 'import { localAccount } from "dsm-app-client"; const app = await localAccount("app"); console.log("connections:", JSON.stringify(await app.connections()));'
+
+step "dsm-connect-starter   (in the background; the docs: open http://127.0.0.1:3000)"
+(dsm-connect-starter >~/starter.log 2>&1 &)
+for _ in $(seq 1 120); do starter http://127.0.0.1:3000/api/state >/dev/null 2>&1 && break; sleep 1; done
 starter http://127.0.0.1:3000/api/state >/dev/null || { echo "the starter never answered:"; tail -20 ~/starter.log; exit 1; }
 echo "your account owns: $(starter http://127.0.0.1:3000/api/state | json 'v.owned.map(o=>o.symbol+" "+o.amount).join(", ")')"
 
@@ -149,11 +237,11 @@ step "open http://127.0.0.1:3000 in a browser and press Show the connect code"
 CODE=$(page offer)
 echo "${CODE:0:48}..."
 
-step "make dev-wallet"
-make dev-wallet
+step "dsm-dev-wallet up"
+dsm-dev-wallet up
 
-step "make dev-wallet-connect CODE=..."
-make dev-wallet-connect CODE="$CODE"
+step "dsm-dev-wallet connect dsm:connect/v1:..."
+dsm-dev-wallet connect "$CODE"
 
 step "on the page: ask the connected wallet to send 0.05 ERA, and watch that request's row"
 page send 0.05
@@ -162,11 +250,11 @@ echo "TYPESCRIPT: a wallet connected, 0.05 ERA received"
 step "python3 -m venv .venv && . .venv/bin/activate"
 python3 -m venv .venv && . .venv/bin/activate
 
-step "pip install -e clients/python"
-pip install --quiet -e clients/python
+step "pip install $PY_CLIENT"
+eval "pip install --quiet $PY_CLIENT"
 
-step "python3 clients/python/examples/first_payment.py   (in the background; then the wallet connects to its code)"
-python3 clients/python/examples/first_payment.py >~/first_payment.log 2>&1 &
+step "python3 ~/.local/share/dsm/examples/first_payment.py   (in the background; then a wallet connects to its code)"
+python3 ~/.local/share/dsm/examples/first_payment.py >~/first_payment.log 2>&1 &
 PY=$!
 for _ in $(seq 1 120); do
     grep -q '^connect code: ' ~/first_payment.log && break
@@ -176,11 +264,11 @@ done
 PYCODE=$(sed -n 's/^connect code: //p' ~/first_payment.log | head -1)
 [ -n "$PYCODE" ] || { echo "first_payment.py printed no connect code:"; cat ~/first_payment.log; exit 1; }
 
-step "make dev-wallet2   (a second player's wallet: a wallet connects to an app once, and the first is connected to the starter)"
-make dev-wallet2
+step "DSM_WALLET_NAME=wallet2 dsm-dev-wallet up   (a second player's wallet: a wallet connects to an app once, and the first is connected to the starter)"
+DSM_WALLET_NAME=wallet2 dsm-dev-wallet up
 
-step "make wallet2 ARGS=\"connect ...\""
-make wallet2 ARGS="connect $PYCODE"
+step "DSM_WALLET_NAME=wallet2 dsm-dev-wallet connect dsm:connect/v1:..."
+DSM_WALLET_NAME=wallet2 dsm-dev-wallet connect "$PYCODE"
 if wait "$PY"; then
     cat ~/first_payment.log
     echo "PYTHON: a wallet connected, 0.05 ERA received"
@@ -190,16 +278,20 @@ else
     exit 1
 fi
 
-step "make dev-down"
-make dev-down >/dev/null
-step "FIRST RUN: both paths reached a payment received"
+step "dsm-dev-wallet down; DSM_WALLET_NAME=wallet2 dsm-dev-wallet down; dsm-app down"
+dsm-dev-wallet down
+DSM_WALLET_NAME=wallet2 dsm-dev-wallet down
+dsm-app down
+step "FIRST RUN: no clone, no Rust; both paths reached a payment received"
 EOF
 chmod +x "$OUT/newcomer.sh"
 
 echo "[first-run] the newcomer's run (log: $OUT/newcomer.log)"
 docker rm -f dsm-first-run >/dev/null 2>&1 || :
 set +e
-docker run --name dsm-first-run -v "$OUT:/first-run:ro" "$IMAGE" bash -lc /first-run/newcomer.sh 2>&1 | tee "$OUT/newcomer.log"
+docker run --name dsm-first-run -v "$OUT/newcomer.sh:/first-run/newcomer.sh:ro" \
+    -v "$OUT/first_run_page.mjs:/first-run/first_run_page.mjs:ro" -v "$RELEASE:/first-run/release:ro" \
+    "$IMAGE" bash -lc /first-run/newcomer.sh 2>&1 | tee "$OUT/newcomer.log"
 code=${PIPESTATUS[0]}
 set -e
 docker rm -f dsm-first-run >/dev/null 2>&1 || :
@@ -207,4 +299,4 @@ if [ "$code" != 0 ]; then
     echo "[first-run] FAILED (exit $code): a newcomer following the docs stalls where the log above stops" >&2
     exit "$code"
 fi
-echo "[first-run] passed: a clean machine, the docs alone, TypeScript and Python each to a payment received"
+echo "[first-run] passed: a clean machine, no clone and no Rust, the docs alone, TypeScript and Python each to a payment received"

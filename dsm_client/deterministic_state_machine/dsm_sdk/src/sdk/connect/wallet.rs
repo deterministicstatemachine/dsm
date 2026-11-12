@@ -99,7 +99,7 @@ pub fn granted_free_requests(accept_body: &[u8]) -> Result<u32, String> {
 /// A token as the player reads it: its symbol and an amount in its decimals,
 /// or its anchor's first characters while this device has not rooted it.
 /// An amount as the player reads it, by what this device has rooted.
-pub(crate) fn amount_text(policy_commit: &[u8; 32], amount: u64) -> String {
+pub fn amount_text(policy_commit: &[u8; 32], amount: u64) -> String {
     amount_of(policy_commit, amount, &Names::new())
 }
 
@@ -109,7 +109,7 @@ fn amount_of(policy_commit: &[u8; 32], amount: u64, names: &Names) -> String {
             "{} {symbol}",
             crate::handlers::wallet_routes::format_base_units_for_display(amount, decimals)
         ),
-        None => format!("{amount} base units of {}", short(policy_commit)),
+        None => format!("{amount} smallest units of {}", short(policy_commit)),
     }
 }
 
@@ -159,19 +159,15 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
         ScopeKind::Contacts => {
             "See which of your contacts are here: their DSM IDs, not their names".to_string()
         }
-        ScopeKind::Pay => format!("Pay this app: {}", caps(scope)),
+        ScopeKind::Pay => format!("Send this app: {}", caps(scope)),
         ScopeKind::Swap => match scope.policy_commits.as_slice() {
             [a, b] => format!(
-                "Swap {} for {} through SoFi: {}",
+                "Trade between {} and {}: {}",
                 symbol_of(a, names),
                 symbol_of(b, names),
                 caps(scope)
             ),
-            other => format!(
-                "Swap among {} tokens through SoFi: {}",
-                other.len(),
-                caps(scope)
-            ),
+            other => format!("Trade among {} objects: {}", other.len(), caps(scope)),
         },
         ScopeKind::Escrow => format!("Lock stakes for matches: {}", caps(scope)),
         ScopeKind::Duel => {
@@ -193,10 +189,10 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
                 .map(|c| symbol_of(c, names))
                 .collect();
             if named.is_empty() {
-                "Prove your holdings of objects this app issued".to_string()
+                "Prove what you own of objects this app issued".to_string()
             } else {
                 format!(
-                    "Prove your holdings of {} and of objects this app issued",
+                    "Prove what you own of {} and of objects this app issued",
                     named.join(", ")
                 )
             }
@@ -251,10 +247,10 @@ pub fn describe_request(request: &Request) -> String {
             amount,
             memo,
         } => {
-            let paid = amount_of(policy_commit, *amount, &none);
+            let sent = amount_of(policy_commit, *amount, &none);
             match memo.trim() {
-                "" => format!("Pay {paid}"),
-                memo => format!("Pay {paid} for {memo}"),
+                "" => format!("Send {sent}"),
+                memo => format!("Send {sent} for {memo}"),
             }
         }
         Request::Quote {
@@ -263,7 +259,7 @@ pub fn describe_request(request: &Request) -> String {
             amount_in,
             ..
         } => format!(
-            "Quote {} for {}",
+            "Price {} in {}",
             amount_of(token_in, *amount_in, &none),
             symbol_of(token_out, &none)
         ),
@@ -274,12 +270,12 @@ pub fn describe_request(request: &Request) -> String {
             min_amount_out,
             ..
         } => format!(
-            "Swap {} for at least {}",
+            "Trade {} for at least {}",
             amount_of(token_in, *amount_in, &none),
             amount_of(token_out, *min_amount_out, &none)
         ),
         Request::Holdings { policy_commits } => format!(
-            "Prove holdings of {}",
+            "Prove what you own of {}",
             policy_commits
                 .iter()
                 .map(|c| symbol_of(c, &none))
@@ -331,7 +327,7 @@ pub fn describe_request(request: &Request) -> String {
 /// its creating device.
 pub fn issued_by(app_device_id: &[u8; 32]) -> Result<BTreeSet<[u8; 32]>, String> {
     let rows = crate::storage::client_db::token_registry::all_tokens()
-        .map_err(|e| format!("the token registry: {e}"))?;
+        .map_err(|e| format!("the object registry: {e}"))?;
     let mut issued = BTreeSet::new();
     for row in rows {
         if &row.creator_device_id == app_device_id {
