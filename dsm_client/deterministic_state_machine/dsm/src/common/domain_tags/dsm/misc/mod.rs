@@ -8,6 +8,7 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 mod addressing;
+mod app_cell;
 mod connect;
 mod economic;
 mod escrow;
@@ -19,6 +20,7 @@ mod token_ops;
 mod wallet;
 
 pub use addressing::*;
+pub use app_cell::*;
 pub use connect::*;
 pub use economic::*;
 pub use escrow::*;
@@ -40,6 +42,12 @@ pub(super) fn sofi_tags() -> &'static [TaggedHashDomain<'static>] {
 #[cfg(test)]
 pub(super) fn escrow_tags() -> &'static [TaggedHashDomain<'static>] {
     escrow::ESCROW_TAGS
+}
+
+/// The application-cell tags (DSM Amendment A35), collected the same way.
+#[cfg(test)]
+pub(super) fn app_cell_tags() -> &'static [TaggedHashDomain<'static>] {
+    app_cell::APP_CELL_TAGS
 }
 
 /// The shared-lineage tags (SoFi Amendment S23), collected the same way.
