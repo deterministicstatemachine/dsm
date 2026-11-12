@@ -86,8 +86,20 @@ pub enum LastBoot {
 }
 
 impl BootromModel {
-    /// A board as the two in hand stood on 2026-11-11: the secret page burned and locked by an
-    /// earlier procedure, the boot pages' lock rows at `0x040404`, everything else blank.
+    /// The yellow board as its A2 bootloader showed it through the 9FF phone on 2026-11-11, before
+    /// its burns: [`Self::sealed_board`] with the lock pages' own lock rows as it holds them, page 62's
+    /// at `0x040404` (the bootloader may write it) and page 63's at `0x141414` (the bootloader may
+    /// read it and not write it); both pages' access-key rows zero.
+    pub fn yellow_board() -> Self {
+        let mut board = Self::sealed_board();
+        board.raw[usize::from(lock1(62))] = 0x04_0404;
+        board.raw[usize::from(lock1(63))] = 0x14_1414;
+        board
+    }
+
+    /// A board sealed as the two in hand are: the secret page burned and locked by an earlier
+    /// procedure, the boot pages' lock rows at `0x040404`, everything else blank, the lock pages'
+    /// own lock rows included, as a board burned to the end from BOOTSEL needs them.
     pub fn sealed_board() -> Self {
         let mut board = Self::blank_board();
         for row in 0..PAGE_ROWS {

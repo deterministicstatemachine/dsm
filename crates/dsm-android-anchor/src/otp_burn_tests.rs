@@ -477,7 +477,7 @@ fn a_step_that_is_not_the_boards_next_writes_nothing() {
 }
 
 #[test]
-fn the_wallet_takes_a_board_in_hand_through_every_step() {
+fn the_wallet_takes_a_sealed_board_through_every_step() {
     use pb::AnchorBoardStepKind as K;
     let (setup, board) = phone_with(BootromModel::sealed_board());
     for kind in [
@@ -624,10 +624,12 @@ use crate::otp_burn::{
     bootloader_may_write, lock_row_value, Bootrom, Guard, INACCESSIBLE, READ_ONLY, READ_WRITE,
 };
 
-/// A board whose page 63 the bootloader may read and not write: its lock row's bootloader field
-/// read-only. On an A2 bootrom that bars every lock row page 63 holds, the digest page's among them.
-fn page_63_closed_to_bootloader_writes(mut model: BootromModel) -> BootromModel {
-    model.raw[usize::from(lock1(63))] = lock_row_value(READ_WRITE, READ_WRITE, READ_ONLY);
+/// The lock pages' own lock rows as the yellow board holds them (read 2026-11-11): page 62's at
+/// `0x040404`, page 63's at `0x141414`, its bootloader field read-only. On an A2 bootrom that bars
+/// every lock row page 63 holds, the digest page's and the rollback page's among them.
+fn lock_pages_as_yellow_holds_them(mut model: BootromModel) -> BootromModel {
+    model.raw[usize::from(lock1(62))] = lock_row_value(READ_WRITE, READ_ONLY, READ_WRITE);
+    model.raw[usize::from(lock1(63))] = lock_row_value(READ_WRITE, READ_ONLY, READ_ONLY);
     model
 }
 
@@ -673,9 +675,7 @@ fn the_bootroms_header_names_its_stepping_and_its_guard() {
 fn an_a2_board_whose_bootloader_cannot_write_a_lock_row_is_not_started() {
     use pb::AnchorBoardStepKind as K;
     use pb::AnchorBoardStepState as S;
-    let (setup, board) = phone_with(page_63_closed_to_bootloader_writes(
-        BootromModel::sealed_board(),
-    ));
+    let (setup, board) = phone_with(BootromModel::yellow_board());
     let answer = setup.read();
     assert!(
         answer.refused.contains("cannot be finished from BOOTSEL")
@@ -691,13 +691,13 @@ fn an_a2_board_whose_bootloader_cannot_write_a_lock_row_is_not_started() {
         "nothing is offered"
     );
     assert!(!answer.steps.iter().any(|s| s.state == S::Next as i32));
-    assert!(
-        answer.found.iter().any(
-            |f| f.contains("page 63's lock rows") && f.contains("may read it and not write it")
-        ),
-        "{:?}",
-        answer.found
-    );
+    for page in [
+        "page 62's lock rows 0xffc and 0xffd hold 0x0 and 0x40404: the bootloader may read and write it",
+        "page 63's lock rows 0xffe and 0xfff hold 0x0 and 0x141414: the bootloader may read it and not \
+         write it",
+    ] {
+        assert!(answer.found.iter().any(|f| f == page), "{:?}", answer.found);
+    }
 
     let flash = held(&board).flash.clone();
     let raw = held(&board).raw.clone();
@@ -724,7 +724,7 @@ fn an_a2_board_whose_bootloader_cannot_write_a_lock_row_is_not_started() {
 #[test]
 fn the_same_locks_on_an_a4_bootrom_guard_each_lock_row_by_its_own_page() {
     let release = release();
-    let mut model = page_63_closed_to_bootloader_writes(BootromModel::blank_board());
+    let mut model = lock_pages_as_yellow_holds_them(BootromModel::blank_board());
     model.bootrom_version = 4;
     let mut pb = Picoboot::connect(model).expect("connect");
     let otp = OtpReading::read(&mut pb).expect("read");
@@ -754,7 +754,7 @@ fn a_board_burned_to_its_digest_stops_where_its_bootloader_cannot_go_on() {
     let release = release();
     // The yellow board as it stood after Step 5 on 2026-11-11: the signed image in flash, the digest
     // burned, and its A2 bootrom refusing the digest page's lock row.
-    let mut model = page_63_closed_to_bootloader_writes(BootromModel::sealed_board());
+    let mut model = BootromModel::yellow_board();
     digest_burned(&mut model, &release);
     model.flash[..padded(&release).len()].copy_from_slice(&padded(&release));
     let (setup, board) = phone_with(model);
