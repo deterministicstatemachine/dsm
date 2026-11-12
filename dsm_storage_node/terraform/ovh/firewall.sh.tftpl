@@ -11,3 +11,7 @@ ufw default allow outgoing
 ufw allow from ${allowed_ssh_cidr} to any port 22 proto tcp
 ufw allow 8080/tcp
 ufw --force enable
+# The last line of the node's bootstrap: provisioning waits for this file, so
+# a node whose firewall did not come up is never deployed to.
+ufw status | grep '^Status: active' >/dev/null
+touch /opt/dsm-storage/.firewall-done

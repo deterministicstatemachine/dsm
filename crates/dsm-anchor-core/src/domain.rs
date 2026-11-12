@@ -34,9 +34,13 @@ pub const ANCHOR_ROOT_ADVANCE_V2: &str = "DSM/anchor-root-advance/v2";
 pub const ROOT_ADVANCE_MESSAGE_V2: &str = "DSM/root-advance/v2";
 /// The owner's authorization of one prepare: the digest the provisioned device key `pk_on`
 /// signs, binding this anchor's bundle `B`, the frontier and counter it advances from, the
-/// transition digest `D_{i+1}` and the device roots the release will carry. An anchor signs
-/// nothing for a prepare its owner did not authorize, whoever holds the link to it.
-pub const OWNER_AUTHORIZATION_V1: &str = "DSM/anchor/owner-authorization/v1";
+/// transition digest `D_{i+1}`, the device roots the release will carry, and the nonce the anchor
+/// drew for this one authorization. An anchor signs nothing for a prepare its owner did not
+/// authorize, whoever holds the link to it, and an authorization serves once: the nonce is the
+/// anchor's own and is gone with the prepare, a cancel or a reboot.
+pub const OWNER_AUTHORIZATION_V2: &str = "DSM/anchor/owner-authorization/v2";
+/// The nonce an anchor draws for one owner authorization, from both hardware sources.
+pub const AUTHORIZATION_NONCE_V1: &str = "DSM/anchor/authorization-nonce/v1";
 
 /// The digest of the appliance's record as R-memory holds it.
 pub const RMEM_RECORD_V1: &str = "DSM/anchor/rmem-record/v1";

@@ -26,6 +26,10 @@
 
 set -eu
 
+# Everything runs from `main`, called on the last line: a copy of this script
+# that was cut short in the download defines a function and runs nothing.
+main() {
+
 # This script installs the release it is part of.
 DSM_VERSION="0.1.0-beta.4"
 
@@ -79,9 +83,11 @@ fetch "$TOOLS.tar.gz"
 check "$HOST.tar.gz"
 check "$TOOLS.tar.gz"
 
+# Unpacked as the user running this, whoever the archive says owned its files:
+# installed with sudo, nothing lands owned by the account that built the release.
 mkdir -p "$WORK/host" "$WORK/tools"
-tar -C "$WORK/host" -xzf "$WORK/$HOST.tar.gz"
-tar -C "$WORK/tools" -xzf "$WORK/$TOOLS.tar.gz"
+tar --no-same-owner --no-same-permissions -C "$WORK/host" -xzf "$WORK/$HOST.tar.gz"
+tar --no-same-owner --no-same-permissions -C "$WORK/tools" -xzf "$WORK/$TOOLS.tar.gz"
 [ -x "$WORK/host/$HOST/dsm-app-host" ] || fail "$HOST.tar.gz holds no dsm-app-host"
 [ -d "$WORK/tools/$TOOLS/dsm-app-client" ] || fail "$TOOLS.tar.gz holds no dsm-app-client"
 
@@ -92,7 +98,8 @@ cp "$WORK/host/$HOST/dsm-app-host" "$BIN/dsm-app-host.new"
 chmod 755 "$BIN/dsm-app-host.new"
 mv -f "$BIN/dsm-app-host.new" "$BIN/dsm-app-host"
 rm -rf "$SHARE.new"
-mv "$WORK/tools/$TOOLS" "$SHARE.new"
+# Copied, not moved, so every installed file is a new file of the installing user's.
+cp -R "$WORK/tools/$TOOLS" "$SHARE.new"
 echo "$DSM_VERSION" >"$SHARE.new/VERSION"
 rm -rf "$SHARE"
 mv "$SHARE.new" "$SHARE"
@@ -133,3 +140,7 @@ case ":$PATH:" in
        say "note: $(shown "$BIN") is not on your PATH; add it (and the same line to your shell's profile):"
        say "  export PATH=\"$on_path:\$PATH\"" ;;
 esac
+
+}
+
+main "$@"

@@ -10,7 +10,10 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.hardware.usb.UsbRequest
 import android.util.Log
+import java.nio.ByteBuffer
+import java.util.concurrent.TimeoutException
 
 /**
  * H2 — the Phone->Pico USB-OTG transport: each phone talking to its own Pico, the payer's to release
@@ -54,27 +57,32 @@ object LocalPicoUsb {
     private const val DRAIN_TIMEOUT_MS = 200
     private const val DRAIN_QUIET_POLLS = 4   // ~800ms of silence ends the drain
     private const val DRAIN_MAX_POLLS = 40    // hard cap (~8s worst case) so boot chatter can finish
-    // Max idle bulk-IN polls before failing closed (each blocks up to READ_TIMEOUT_MS). Bounds the
-    // total read wait deterministically without a wall-clock deadline (repo invariant). The firmware
+    // Max waits of READ_TIMEOUT_MS that see no bulk-IN packet before failing closed. Bounds the
+    // total read wait by a count, without a wall-clock deadline (repo invariant). The firmware
     // sends nothing while it serves: a try-run is a whole spend and its records around two chip
-    // reboots, and an install is that and more. 600 polls x 500ms = ~5 min covers them, and it is
+    // reboots, and an install is that and more. 600 waits x 500ms = ~5 min covers them, and it is
     // only ever spent on an anchor still serving: a hung one is reset by its own watchdog, which
     // drops the device, and a read of a dropped device fails at once. An install this outruns is
     // read back from the anchor (`CoreSDK::anchor_install`), never reported as failed on the wait.
-    private const val MAX_EMPTY_POLLS = 600
+    private const val MAX_QUIET_WAITS = 600
 
     @Volatile private var appContext: Context? = null
     private var connection: UsbDeviceConnection? = null
     private var iface: UsbInterface? = null
     private var epIn: UsbEndpoint? = null
     private var epOut: UsbEndpoint? = null
-    // Bytes pulled off the bulk-IN endpoint that belong to a LATER read. Android's `bulkTransfer`
-    // hands back one whole USB packet at a time; the firmware coalesces the `LE32 len` and the body
-    // into a single 64-byte packet, so a read for the 4-byte length over-runs into the body. Those
-    // surplus bytes MUST be carried to the next read, not discarded — discarding desyncs the stream,
-    // the following body read then blocks until timeout, and a valid response comes back empty (Rust
-    // decodes it as a default `ok=false, error=0` frame). Per-connection; cleared on reset/reopen.
+    // Bytes pulled off the bulk-IN endpoint that belong to a LATER read. A read hands back one whole
+    // USB packet at a time, and the firmware may send the `LE32 len` and the start of the body in one
+    // 64-byte packet, so a read for the 4-byte length can over-run into the body. Those surplus
+    // bytes MUST be carried to the next read, not discarded — discarding desyncs the stream, the
+    // following body read then blocks until timeout, and the response comes back empty.
+    // Per-connection; cleared on reset/reopen.
     private var residual = ByteArray(0)
+    // The read queued on the bulk-IN endpoint and the buffer it fills: queued once, waited on until
+    // a packet completes it, and never cancelled by a wait that sees nothing ([nextPacket]). Null
+    // while no read is queued; cancelled and closed with the connection.
+    private var inRead: UsbRequest? = null
+    private var inBuffer: ByteBuffer? = null
 
     /** Cache the application context so the static `Unified.picoUsbTransceive` can reach UsbManager. */
     @JvmStatic
@@ -135,6 +143,11 @@ object LocalPicoUsb {
     /** Tear down the cached connection so the next transceive reopens + reconfigures from scratch
      * (a half-open handle with DTR unset must never be reused), and fail closed with empty bytes. */
     private fun resetAndFail(): ByteArray {
+        inRead?.let {
+            it.cancel()
+            it.close()
+        }
+        inRead = null; inBuffer = null
         try { iface?.let { connection?.releaseInterface(it) } } catch (_: Exception) {}
         try { connection?.close() } catch (_: Exception) {}
         connection = null; iface = null; epIn = null; epOut = null; residual = ByteArray(0)
@@ -142,44 +155,113 @@ object LocalPicoUsb {
     }
 
     /** Read exactly `n` bytes off the bulk-IN endpoint (accumulating across USB packets), or null.
-     * Bounded by a poll COUNT (not wall-clock — repo invariant): each `bulkTransfer` already blocks
-     * up to `READ_TIMEOUT_MS`, so at most `MAX_EMPTY_POLLS` idle polls elapse before we fail closed.
-     * A `bulkTransfer` returns a whole USB packet, which may run PAST `n` (the firmware coalesces the
-     * length prefix and body into one packet); the surplus is carried in [residual] for the next read
-     * rather than dropped — dropping it desyncs the frame and silently truncates the next response. */
-    private fun readExact(conn: UsbDeviceConnection, ep: UsbEndpoint, n: Int): ByteArray? {
+     * What a packet brings past `n` is kept in [residual] for the next read ([readExactly]). */
+    private fun readExact(conn: UsbDeviceConnection, ep: UsbEndpoint, n: Int): ByteArray? =
+        when (val read = readExactly(n, residual, MAX_QUIET_WAITS) { nextPacket(conn, ep) }) {
+            is ReadOutcome.Read -> {
+                residual = read.carried
+                read.bytes
+            }
+            is ReadOutcome.Unread -> {
+                Log.w(TAG, "USB read: ${read.why} — recover online")
+                null
+            }
+        }
+
+    /** One wait on the bulk-IN endpoint: a packet, a wait that saw none (the read stays queued, so a
+     * packet arriving next is still received), or a failure. */
+    internal sealed interface InPacket {
+        class Bytes(val data: ByteArray) : InPacket
+        object Quiet : InPacket
+        class Failed(val why: String) : InPacket
+    }
+
+    /** A read of exactly the bytes asked for, with what came past them (the next read's), or why
+     * the bytes were not read. */
+    internal sealed interface ReadOutcome {
+        class Read(val bytes: ByteArray, val carried: ByteArray) : ReadOutcome
+        class Unread(val why: String) : ReadOutcome
+    }
+
+    /** Assemble exactly `n` bytes: first those `carried` from an earlier packet, then packets from
+     * `next`, one wait at a time. A wait that sees no packet is only a wait, bounded in a row by
+     * `maxQuietWaits` (a count, not a clock); a packet that runs past `n` leaves its tail as the next
+     * read's. A failure ends the read. */
+    internal fun readExactly(
+        n: Int,
+        carried: ByteArray,
+        maxQuietWaits: Int,
+        next: () -> InPacket,
+    ): ReadOutcome {
         val out = ByteArray(n)
-        var got = 0
-        // Serve carried-over bytes from a prior over-read before touching the endpoint.
-        if (residual.isNotEmpty()) {
-            val take = minOf(residual.size, n)
-            System.arraycopy(residual, 0, out, 0, take)
-            got += take
-            residual = residual.copyOfRange(take, residual.size)
-        }
-        val buf = ByteArray(ep.maxPacketSize.coerceAtLeast(64))
-        var emptyPolls = 0
+        var got = minOf(carried.size, n)
+        System.arraycopy(carried, 0, out, 0, got)
+        var surplus = carried.copyOfRange(got, carried.size)
+        var quiet = 0
         while (got < n) {
-            val r = conn.bulkTransfer(ep, buf, buf.size, READ_TIMEOUT_MS)
-            if (r < 0) {
-                emptyPolls++
-                if (emptyPolls > MAX_EMPTY_POLLS) {
-                    Log.w(TAG, "USB read gave up after $MAX_EMPTY_POLLS idle polls ($got/$n) — recover online")
-                    return null
+            when (val packet = next()) {
+                is InPacket.Quiet -> {
+                    quiet += 1
+                    if (quiet > maxQuietWaits) {
+                        return ReadOutcome.Unread("no packet in $maxQuietWaits waits ($got/$n)")
+                    }
                 }
-                continue
-            }
-            emptyPolls = 0
-            val take = minOf(r, n - got)
-            System.arraycopy(buf, 0, out, got, take)
-            got += take
-            if (r > take) {
-                // Packet ran past this read's target — stash the tail for the next readExact.
-                val extra = buf.copyOfRange(take, r)
-                residual = if (residual.isEmpty()) extra else residual + extra
+                is InPacket.Failed -> return ReadOutcome.Unread("${packet.why} ($got/$n)")
+                is InPacket.Bytes -> {
+                    quiet = 0
+                    val take = minOf(packet.data.size, n - got)
+                    System.arraycopy(packet.data, 0, out, got, take)
+                    got += take
+                    surplus += packet.data.copyOfRange(take, packet.data.size)
+                }
             }
         }
-        return out
+        return ReadOutcome.Read(out, surplus)
+    }
+
+    /** One wait of [READ_TIMEOUT_MS] for the next bulk-IN packet. The read is queued once and stays
+     * queued across waits that see nothing, until a packet completes it. A synchronous
+     * `bulkTransfer` with a timeout kills its transfer whenever the timeout passes, and a packet the
+     * device completes into a transfer as it is killed is lost. On the rig (2026-11-11) that was a
+     * reply's 4-byte length prefix — the first packet the anchor sends after the silence of its
+     * work — and the phone read the reply's first four body bytes as its length. */
+    private fun nextPacket(conn: UsbDeviceConnection, ep: UsbEndpoint): InPacket {
+        val request = inRead ?: queueRead(conn, ep)
+            ?: return InPacket.Failed("the bulk-IN read could not be queued")
+        val done = try {
+            conn.requestWait(READ_TIMEOUT_MS.toLong())
+        } catch (nothingYet: TimeoutException) {
+            // The wait ended before a packet came: the read stays queued for the next wait.
+            return InPacket.Quiet
+        } catch (e: RuntimeException) {
+            return InPacket.Failed("the bulk-IN read failed: ${e.message}")
+        }
+        if (done !== request) return InPacket.Failed("a bulk-IN read this transport did not queue completed")
+        val buffer = inBuffer ?: return InPacket.Failed("the bulk-IN read lost its buffer")
+        inRead = null
+        inBuffer = null
+        request.close()
+        buffer.flip()
+        val data = ByteArray(buffer.remaining())
+        buffer.get(data)
+        return InPacket.Bytes(data)
+    }
+
+    /** Queue one read of a packet on the bulk-IN endpoint, or null when Android refuses it. */
+    private fun queueRead(conn: UsbDeviceConnection, ep: UsbEndpoint): UsbRequest? {
+        val request = UsbRequest()
+        if (!request.initialize(conn, ep)) {
+            request.close()
+            return null
+        }
+        val buffer = ByteBuffer.allocate(ep.maxPacketSize.coerceAtLeast(64))
+        if (!request.queue(buffer)) {
+            request.close()
+            return null
+        }
+        inRead = request
+        inBuffer = buffer
+        return request
     }
 
     private fun ensureOpen(): UsbDeviceConnection {

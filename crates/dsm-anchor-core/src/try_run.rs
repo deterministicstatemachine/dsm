@@ -203,6 +203,14 @@ fn device_roots() -> ([u8; 32], [u8; 32]) {
     )
 }
 
+/// The nonce the rehearsal's authorization binds. A real anchor draws one for each authorization and
+/// holds it in memory; a rehearsal's anchor is made anew for each of its two requests, so its nonce
+/// is fixed, as its challenge and its device roots are. It authorizes nothing outside a rehearsal:
+/// only a try-run's anchor, under the rehearsal owner's key, ever holds it.
+fn authorization_nonce() -> [u8; 32] {
+    h("DSM/anchor/try-run/v1", &[b"authorization nonce"])
+}
+
 /// The owner-authorization digest of the rehearsal's payment on `anchor`, standing where it does.
 fn awaiting_of<P: PartitionSig>(anchor: &Lent<'_, P>) -> [u8; 32] {
     let a = anchor.appliance();
@@ -215,6 +223,7 @@ fn awaiting_of<P: PartitionSig>(anchor: &Lent<'_, P>) -> [u8; 32] {
         &transition_digest(&transition.as_transition(), &challenge()),
         &before,
         &after,
+        &authorization_nonce(),
     )
 }
 
@@ -400,6 +409,7 @@ fn spend<P: PartitionSig>(
             "its owner authorizes the payment",
             match authorization {
                 Some(mut signature) => {
+                    anchor.hold_rehearsal_nonce(authorization_nonce());
                     let taken = anchor.authorize(&digest, &signature);
                     crate::util::zeroize_vec(&mut signature);
                     taken

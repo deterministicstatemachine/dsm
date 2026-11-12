@@ -673,6 +673,176 @@ proto3.util.setEnumType(BilateralFailureReason, "dsm.BilateralFailureReason", [
 ]);
 
 /**
+ * A board's one-time setup for production, from the phone alone (owner, 2026-11-11: "Not everyone
+ * has a Mac. It has to be doable from the phone"): the phone drives the board's own USB bootloader
+ * while the board is in BOOTSEL. The steps, in the runbook's order.
+ *
+ * @generated from enum dsm.AnchorBoardStepKind
+ */
+export enum AnchorBoardStepKind {
+  /**
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Step 3: the signed image into flash (flash, not OTP)
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOAD_IMAGE = 1;
+   */
+  LOAD_IMAGE = 1,
+
+  /**
+   * Step 4 with its page's lock, on a board whose page is blank
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_SEAL_SECRET = 2;
+   */
+  SEAL_SECRET = 2,
+
+  /**
+   * Step 5: the Non-secure app's digest
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_WRITE_DIGEST = 3;
+   */
+  WRITE_DIGEST = 3,
+
+  /**
+   * Step 6: the digest page locked
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOCK_DIGEST = 4;
+   */
+  LOCK_DIGEST = 4,
+
+  /**
+   * Step 7: the boot key's hash
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_WRITE_BOOT_KEY = 5;
+   */
+  WRITE_BOOT_KEY = 5,
+
+  /**
+   * Step 8: secure boot on, debug off
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOCKDOWN = 6;
+   */
+  LOCKDOWN = 6,
+
+  /**
+   * Step 9: reboot into the signed image, once
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_BOOT = 7;
+   */
+  BOOT = 7,
+
+  /**
+   * Step 9b: the boot pages locked, back in BOOTSEL
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES = 8;
+   */
+  LOCK_BOOT_PAGES = 8,
+
+  /**
+   * Step 9's check, after the lockdown and before the first boot: the release's image with one byte
+   * of its code changed is loaded and booted, the board must come back in BOOTSEL, and the signed
+   * image is loaded back. Not a burn, and never listed among the steps: `offered` names it then.
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE = 9;
+   */
+  CHECK_CHANGED_IMAGE = 9,
+
+  /**
+   * Steps 6 and 9b's page locks on a board whose bootloader may not write them (an RP2350 A2 with page
+   * 63 closed to it): the lock image (crates/dsm-anchor-lock-pages) is loaded and started after the
+   * digest, sets the digest page's and the rollback page's locks as Secure code, and the board comes
+   * back in BOOTSEL; the rows are read back and the signed image loaded again. Listed in place of Step
+   * 6 on such a board.
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOCK_PAGES = 10;
+   */
+  LOCK_PAGES = 10,
+
+  /**
+   * Before the board's first burn (its firmware digest blank, its lockdown not done), an image the app
+   * carries is loaded into flash and started; the board comes back as the DSM Anchor and is asked how
+   * it stands, and its answer is reported. Flash only, on the board: Step 3 loads the signed image over
+   * it. Neither image is signed, and neither is listed among the steps: `offered` names them while they
+   * may run. The owner's message, 2026-11-12: "The entire appliance setup must work from an Android
+   * phone, without a Mac or any other computer."
+   *
+   * The prepare image (the secure monitor built with `prepare_chip`): on a test part whose PTRNG Tropic
+   * Square left unconfigured, it clears CFG_START_UP[RNGTEST_DIS], for good, and erases any key the chip
+   * made before; it answers every request with how that went. Permanent on the chip.
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_PREPARE_CHIP = 11;
+   */
+  PREPARE_CHIP = 11,
+
+  /**
+   * The trial image (the secure monitor built with `bench_self_enroll`): an anchor that installs
+   * nothing permanent, for the try-run on this very board from the wallet (`anchor.tryRun`).
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_TRIAL_IMAGE = 12;
+   */
+  TRIAL_IMAGE = 12,
+}
+// Retrieve enum metadata with: proto3.getEnumType(AnchorBoardStepKind)
+proto3.util.setEnumType(AnchorBoardStepKind, "dsm.AnchorBoardStepKind", [
+  { no: 0, name: "ANCHOR_BOARD_STEP_KIND_UNSPECIFIED" },
+  { no: 1, name: "ANCHOR_BOARD_STEP_KIND_LOAD_IMAGE" },
+  { no: 2, name: "ANCHOR_BOARD_STEP_KIND_SEAL_SECRET" },
+  { no: 3, name: "ANCHOR_BOARD_STEP_KIND_WRITE_DIGEST" },
+  { no: 4, name: "ANCHOR_BOARD_STEP_KIND_LOCK_DIGEST" },
+  { no: 5, name: "ANCHOR_BOARD_STEP_KIND_WRITE_BOOT_KEY" },
+  { no: 6, name: "ANCHOR_BOARD_STEP_KIND_LOCKDOWN" },
+  { no: 7, name: "ANCHOR_BOARD_STEP_KIND_BOOT" },
+  { no: 8, name: "ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES" },
+  { no: 9, name: "ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE" },
+  { no: 10, name: "ANCHOR_BOARD_STEP_KIND_LOCK_PAGES" },
+  { no: 11, name: "ANCHOR_BOARD_STEP_KIND_PREPARE_CHIP" },
+  { no: 12, name: "ANCHOR_BOARD_STEP_KIND_TRIAL_IMAGE" },
+]);
+
+/**
+ * @generated from enum dsm.AnchorBoardStepState
+ */
+export enum AnchorBoardStepState {
+  /**
+   * @generated from enum value: ANCHOR_BOARD_STEP_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: ANCHOR_BOARD_STEP_STATE_DONE = 1;
+   */
+  DONE = 1,
+
+  /**
+   * @generated from enum value: ANCHOR_BOARD_STEP_STATE_NEXT = 2;
+   */
+  NEXT = 2,
+
+  /**
+   * @generated from enum value: ANCHOR_BOARD_STEP_STATE_LATER = 3;
+   */
+  LATER = 3,
+
+  /**
+   * the board's bootloader cannot write what is left: `refused` says why
+   *
+   * @generated from enum value: ANCHOR_BOARD_STEP_STATE_BLOCKED = 4;
+   */
+  BLOCKED = 4,
+}
+// Retrieve enum metadata with: proto3.getEnumType(AnchorBoardStepState)
+proto3.util.setEnumType(AnchorBoardStepState, "dsm.AnchorBoardStepState", [
+  { no: 0, name: "ANCHOR_BOARD_STEP_STATE_UNSPECIFIED" },
+  { no: 1, name: "ANCHOR_BOARD_STEP_STATE_DONE" },
+  { no: 2, name: "ANCHOR_BOARD_STEP_STATE_NEXT" },
+  { no: 3, name: "ANCHOR_BOARD_STEP_STATE_LATER" },
+  { no: 4, name: "ANCHOR_BOARD_STEP_STATE_BLOCKED" },
+]);
+
+/**
  * =========================== Bluetooth Transport ====================
  *
  * @generated from enum dsm.BtMessageType
@@ -14132,6 +14302,218 @@ export class AnchorTryRunResponse extends Message<AnchorTryRunResponse> {
 }
 
 /**
+ * @generated from message dsm.AnchorBoardStep
+ */
+export class AnchorBoardStep extends Message<AnchorBoardStep> {
+  /**
+   * @generated from field: dsm.AnchorBoardStepKind kind = 1;
+   */
+  kind = AnchorBoardStepKind.UNSPECIFIED;
+
+  /**
+   * @generated from field: dsm.AnchorBoardStepState state = 2;
+   */
+  state = AnchorBoardStepState.UNSPECIFIED;
+
+  /**
+   * it burns OTP: it can never be undone
+   *
+   * @generated from field: bool permanent = 3;
+   */
+  permanent = false;
+
+  /**
+   * what it does, as the person reads it
+   *
+   * @generated from field: string name = 4;
+   */
+  name = "";
+
+  constructor(data?: PartialMessage<AnchorBoardStep>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorBoardStep";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "kind", kind: "enum", T: proto3.getEnumType(AnchorBoardStepKind) },
+    { no: 2, name: "state", kind: "enum", T: proto3.getEnumType(AnchorBoardStepState) },
+    { no: 3, name: "permanent", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorBoardStep {
+    return new AnchorBoardStep().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorBoardStep {
+    return new AnchorBoardStep().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorBoardStep {
+    return new AnchorBoardStep().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorBoardStep | PlainMessage<AnchorBoardStep> | undefined, b: AnchorBoardStep | PlainMessage<AnchorBoardStep> | undefined): boolean {
+    return proto3.util.equals(AnchorBoardStep, a, b);
+  }
+}
+
+/**
+ * `anchor.board.read`, and the answer to every `anchor.board.step`: the board in BOOTSEL as its own
+ * bootloader shows it, read fresh from its OTP every time, and where its setup stands.
+ *
+ * @generated from message dsm.AnchorBoardResponse
+ */
+export class AnchorBoardResponse extends Message<AnchorBoardResponse> {
+  /**
+   * a board in BOOTSEL is on USB and the phone may use it
+   *
+   * @generated from field: bool board_connected = 1;
+   */
+  boardConnected = false;
+
+  /**
+   * its RP2350 chip id, 16 hexadecimal digits, as its bootloader names it
+   *
+   * @generated from field: string chip_id = 2;
+   */
+  chipId = "";
+
+  /**
+   * the production release this app carries, or why it carries none
+   *
+   * @generated from field: string release = 3;
+   */
+  release = "";
+
+  /**
+   * @generated from field: repeated dsm.AnchorBoardStep steps = 4;
+   */
+  steps: AnchorBoardStep[] = [];
+
+  /**
+   * why the setup cannot go on, or why the last step stopped
+   *
+   * @generated from field: string refused = 5;
+   */
+  refused = "";
+
+  /**
+   * what the read-only check found beyond blank (lock rows already set)
+   *
+   * @generated from field: repeated string found = 6;
+   */
+  found: string[] = [];
+
+  /**
+   * What the last step did: each row and byte it wrote, confirmed by its read-back, and what the board
+   * answered after it.
+   *
+   * @generated from field: repeated string written = 7;
+   */
+  written: string[] = [];
+
+  /**
+   * every step is done: the board goes on to its install
+   *
+   * @generated from field: bool done = 8;
+   */
+  done = false;
+
+  /**
+   * What the board takes now besides its next step, each on its own and each with its name and whether
+   * it can be undone (its state NEXT): the prepare and the trial image before its first burn, and the
+   * changed-image check before its first boot.
+   *
+   * @generated from field: repeated dsm.AnchorBoardStep offered = 9;
+   */
+  offered: AnchorBoardStep[] = [];
+
+  constructor(data?: PartialMessage<AnchorBoardResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorBoardResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "board_connected", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "chip_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "release", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "steps", kind: "message", T: AnchorBoardStep, repeated: true },
+    { no: 5, name: "refused", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "found", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 7, name: "written", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 8, name: "done", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 9, name: "offered", kind: "message", T: AnchorBoardStep, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorBoardResponse {
+    return new AnchorBoardResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorBoardResponse {
+    return new AnchorBoardResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorBoardResponse {
+    return new AnchorBoardResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorBoardResponse | PlainMessage<AnchorBoardResponse> | undefined, b: AnchorBoardResponse | PlainMessage<AnchorBoardResponse> | undefined): boolean {
+    return proto3.util.equals(AnchorBoardResponse, a, b);
+  }
+}
+
+/**
+ * `anchor.board.step`: run the board's next step. The person types back the chip id the board read
+ * named, so a step only ever reaches the board they are looking at.
+ *
+ * @generated from message dsm.AnchorBoardStepRequest
+ */
+export class AnchorBoardStepRequest extends Message<AnchorBoardStepRequest> {
+  /**
+   * @generated from field: dsm.AnchorBoardStepKind step = 1;
+   */
+  step = AnchorBoardStepKind.UNSPECIFIED;
+
+  /**
+   * @generated from field: string chip_id = 2;
+   */
+  chipId = "";
+
+  constructor(data?: PartialMessage<AnchorBoardStepRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorBoardStepRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "step", kind: "enum", T: proto3.getEnumType(AnchorBoardStepKind) },
+    { no: 2, name: "chip_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorBoardStepRequest {
+    return new AnchorBoardStepRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorBoardStepRequest {
+    return new AnchorBoardStepRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorBoardStepRequest {
+    return new AnchorBoardStepRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorBoardStepRequest | PlainMessage<AnchorBoardStepRequest> | undefined, b: AnchorBoardStepRequest | PlainMessage<AnchorBoardStepRequest> | undefined): boolean {
+    return proto3.util.equals(AnchorBoardStepRequest, a, b);
+  }
+}
+
+/**
  * ── Offline-cash (two-regime money model) ──────────────────────────────────
  * Deliberately load online balance into a device-bound offline-bearer allocation
  * ("cash in hand"), spend it offline, reconcile it back. Request bodies ride
@@ -18598,6 +18980,14 @@ export class Envelope extends Message<Envelope> {
     case: "anchorTryRunResponse";
   } | {
     /**
+     * A board's one-time setup from the phone, through its own bootloader (`anchor.board.*`).
+     *
+     * @generated from field: dsm.AnchorBoardResponse anchor_board_response = 143;
+     */
+    value: AnchorBoardResponse;
+    case: "anchorBoardResponse";
+  } | {
+    /**
      * Offline-cash load/unload (two-regime money model): device-bound allocation balance.
      *
      * @generated from field: dsm.OfflineCashResponse offline_cash_response = 113;
@@ -18873,6 +19263,7 @@ export class Envelope extends Message<Envelope> {
     { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
     { no: 112, name: "anchor_status_response", kind: "message", T: AnchorStatusResponse, oneof: "payload" },
     { no: 141, name: "anchor_try_run_response", kind: "message", T: AnchorTryRunResponse, oneof: "payload" },
+    { no: 143, name: "anchor_board_response", kind: "message", T: AnchorBoardResponse, oneof: "payload" },
     { no: 113, name: "offline_cash_response", kind: "message", T: OfflineCashResponse, oneof: "payload" },
     { no: 116, name: "token_burn_response", kind: "message", T: TokenBurnResponse, oneof: "payload" },
     { no: 117, name: "token_fee_schedule_response", kind: "message", T: TokenFeeScheduleResponse, oneof: "payload" },

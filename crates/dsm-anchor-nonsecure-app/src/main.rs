@@ -131,17 +131,29 @@ const KEEPALIVE_IDLE_ITERS: u32 = 2_000;
 /// bytes are only dropped, and a host streaming them must not stop the watchdog being fed.
 const KEEPALIVE_BYTES: usize = 16 * 1024;
 
+/// Whether a write went out whole, or the frame it belongs to is abandoned.
+#[must_use = "a frame stops at its first write that does not go out whole"]
+enum Written {
+    Whole,
+    Abandoned,
+}
+
 /// Write every byte to USB-CDC, polling + retrying on a full buffer (mirrors the pico anchor). A host
-/// that has stopped reading is waited for across keepalives, never by tripping the watchdog; a host
-/// that has dropped DTR has gone, and what it asked for is abandoned.
-fn write_all(serial: &mut Serial, usb_dev: &mut UsbDev, data: &[u8]) {
+/// that has stopped reading is waited for across keepalives, never by tripping the watchdog. A host
+/// that was there when the frame began and has since dropped DTR has gone, and what it asked for is
+/// abandoned; so is a frame a write of which the USB stack refuses.
+fn write_all(
+    serial: &mut Serial,
+    usb_dev: &mut UsbDev,
+    host_was_there: bool,
+    data: &[u8],
+) -> Written {
     let mut sent = 0;
     let mut blocked = 0u32;
-    let host_was_there = serial.dtr();
     while sent < data.len() {
         usb_dev.poll(&mut [serial]);
         if host_was_there && !serial.dtr() {
-            return;
+            return Written::Abandoned;
         }
         match serial.write(&data[sent..]) {
             Ok(n) => {
@@ -155,24 +167,44 @@ fn write_all(serial: &mut Serial, usb_dev: &mut UsbDev, data: &[u8]) {
                     secure_call(OP_KEEPALIVE, 0, 0, &[], &mut []);
                 }
             }
-            Err(_) => return,
+            Err(_usb_fault) => return Written::Abandoned,
         }
     }
+    Written::Whole
 }
 
 /// Write a response frame to USB: its length, its first part, then each further part the Secure
-/// side serves. A crossing that fails ends the frame short of its length, which the host refuses.
+/// side serves. Whether a host is there is read once, as the frame begins, and the frame stops at its
+/// first write that does not go out whole: what followed a lost length would be read as one. A
+/// crossing that fails ends the frame short of its length, which the host refuses.
 fn write_response(serial: &mut Serial, usb_dev: &mut UsbDev, first: &Crossing, resp: &mut [u8]) {
-    write_all(serial, usb_dev, &(first.total as u32).to_le_bytes());
-    write_all(serial, usb_dev, &resp[..first.part]);
+    let host_was_there = serial.dtr();
+    let length = (first.total as u32).to_le_bytes();
+    let Written::Whole = write_all(serial, usb_dev, host_was_there, &length) else {
+        return;
+    };
+    let Written::Whole = write_all(serial, usb_dev, host_was_there, &resp[..first.part]) else {
+        return;
+    };
     let mut sent = first.part;
     while sent < first.total {
         let next = secure_call(OP_RESPONSE_PART, sent, first.total, &[], resp);
         if next.status != SG_OK || next.part == 0 {
             return;
         }
-        write_all(serial, usb_dev, &resp[..next.part]);
+        let Written::Whole = write_all(serial, usb_dev, host_was_there, &resp[..next.part]) else {
+            return;
+        };
         sent += next.part;
+    }
+}
+
+/// Write an empty frame, which the host refuses. Nothing follows its length, so a write of it that
+/// does not go out whole leaves nothing after it to stop.
+fn write_empty_frame(serial: &mut Serial, usb_dev: &mut UsbDev) {
+    let host_was_there = serial.dtr();
+    match write_all(serial, usb_dev, host_was_there, &0u32.to_le_bytes()) {
+        Written::Whole | Written::Abandoned => {}
     }
 }
 
@@ -275,7 +307,7 @@ fn serve_over_usb(serial: &mut Serial, usb_dev: &mut UsbDev) -> ! {
             part_len = 0;
             if forwarded >= total {
                 if refused != 0 {
-                    write_all(serial, usb_dev, &0u32.to_le_bytes());
+                    write_empty_frame(serial, usb_dev);
                 }
                 header_len = 0;
             }

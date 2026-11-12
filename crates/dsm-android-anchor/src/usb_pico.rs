@@ -18,11 +18,27 @@ use dsm_sdk::types::error::DsmError;
 /// relay task, not the BLE/GATT thread.
 pub type UsbTransceive = Arc<dyn Fn(Vec<u8>) -> Result<Vec<u8>, DsmError> + Send + Sync>;
 
+/// What came back over USB, taken as an answer only when there is one. Kotlin's transport hands back
+/// an empty array whenever no exchange took place: no appliance on USB, Android not yet letting DSM
+/// use it, a write or a read that failed, or a frame the appliance refused without an answer. That
+/// is a USB failure, never a response to decode: decoded, it reads as the appliance refusing op 0
+/// with error 0, which is how the rig showed a phone waiting for Allow (2026-11-11).
+#[cfg(any(target_os = "android", test))]
+fn answer_over_usb(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() {
+        return Err("no answer over USB: the appliance is not plugged in, Android has not let DSM \
+                    use it yet (tap Allow when it asks), the link dropped, or the appliance refused \
+                    the frame"
+            .to_string());
+    }
+    Ok(bytes)
+}
+
 /// The raw opaque USB round-trip: up-call Kotlin's `Unified.picoUsbTransceive([B)[B`, which does the
 /// actual USB-OTG round-trip to A's own Pico. Mirrors `queue_follow_up_chunks`' `with_env` +
-/// re-derive-mutable-JNIEnv pattern. Any JNI/USB failure -> `Err` (fail-closed); a null return from
-/// Kotlin (no device / permission / timeout) is a USB failure. The transport of
-/// [`crate::usb_appliance::UsbAnchorAppliance`].
+/// re-derive-mutable-JNIEnv pattern. Any JNI/USB failure -> `Err` (fail-closed): a null return from
+/// Kotlin, and the empty array it returns when no exchange took place ([`answer_over_usb`]). The
+/// transport of [`crate::usb_appliance::UsbAnchorAppliance`].
 #[cfg(target_os = "android")]
 pub(crate) fn jni_usb_transceive(frame: Vec<u8>) -> Result<Vec<u8>, DsmError> {
     use jni::objects::{JByteArray, JObject, JValue};
@@ -50,8 +66,32 @@ pub(crate) fn jni_usb_transceive(frame: Vec<u8>) -> Result<Vec<u8>, DsmError> {
         if obj.is_null() {
             return Err("picoUsbTransceive returned null (USB failure)".to_string());
         }
-        env.convert_byte_array(JByteArray::from(obj))
-            .map_err(|e| format!("convert_byte_array: {e}"))
+        let bytes = env
+            .convert_byte_array(JByteArray::from(obj))
+            .map_err(|e| format!("convert_byte_array: {e}"))?;
+        answer_over_usb(bytes)
     })
     .map_err(|e| DsmError::invalid_operation(format!("usb-pico JNI up-call: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::answer_over_usb;
+    use anchor_core::proto::{encode_response, pb};
+
+    #[test]
+    fn no_bytes_over_usb_is_no_answer() {
+        let refused = answer_over_usb(Vec::new()).expect_err("no bytes came back: no answer");
+        assert!(refused.contains("no answer over USB"), "{refused}");
+    }
+
+    #[test]
+    fn bytes_over_usb_are_the_answer_as_sent() {
+        let frame = encode_response(&pb::ApplianceResponse {
+            op: pb::Op::Status as i32,
+            active_anchor_counter: 3,
+            ..Default::default()
+        });
+        assert_eq!(answer_over_usb(frame.clone()).expect("an answer"), frame);
+    }
 }

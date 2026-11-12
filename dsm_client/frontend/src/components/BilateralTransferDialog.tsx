@@ -13,6 +13,7 @@ import { useFx } from './fx/FxProvider';
 import { getPendingBilateralListStrictBridge } from '../dsm/WebViewBridge';
 import { decodeOfflinePendingList } from '../domain/bilateral';
 import { ScreenGuard } from './common/ScreenGuard';
+import { deviceFingerprint } from '../domain/displayName';
 
 interface BilateralTransferDialogProps {
   /** Optional: limit to specific contact alias */
@@ -30,6 +31,13 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
   const fx = useFx();
   // The bilateral subscription is installed once; it reads the live fx actions.
   const fxRef = useRef(fx);
+  // Proposals that arrived while another was on screen, in arrival order.
+  const waitingIncoming = useRef<BilateralTransferEvent[]>([]);
+  useEffect(() => {
+    if (incomingTransfer !== null) return;
+    const next = waitingIncoming.current.shift();
+    if (next !== undefined) setIncomingTransfer(next);
+  }, [incomingTransfer]);
   fxRef.current = fx;
   const [inboxOpen, setInboxOpen] = useState(false);
 
@@ -93,9 +101,17 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
         // Handle different event types
         switch (event.eventType) {
           case BilateralEventType.PREPARE_RECEIVED:
-            // Incoming transfer request
-            console.warn('[BilateralTransfer] PREPARE_RECEIVED event: senderBleAddress=', event.senderBleAddress, 'commitmentHash=', event.commitmentHash);
-            setIncomingTransfer(event);
+            // Incoming transfer request. The one on screen stays on screen:
+            // Accept accepts what the dialog shows, so a later proposal waits
+            // its turn and never takes the dialog over.
+            setIncomingTransfer((shown) => {
+              if (shown === null) return event;
+              const named = (e: BilateralTransferEvent) => String(e.commitmentHash);
+              if (named(shown) !== named(event) && !waitingIncoming.current.some((e) => named(e) === named(event))) {
+                waitingIncoming.current.push(event);
+              }
+              return shown;
+            });
             break;
 
           case BilateralEventType.ACCEPT_SENT:
@@ -223,7 +239,10 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
             <div className="bilateral-transfer-info">
               <div className="bilateral-transfer-label">From:</div>
               <div className="bilateral-transfer-value">
-                {incomingTransfer.counterpartyDeviceId.slice(0, 12)}…
+                {aliasFor(incomingTransfer.counterpartyDeviceId)}
+                <span data-testid="incoming-transfer-device" style={{ display: 'block', fontFamily: 'ui-monospace, monospace' }}>
+                  {deviceFingerprint(incomingTransfer.counterpartyDeviceId)}
+                </span>
               </div>
             </div>
             

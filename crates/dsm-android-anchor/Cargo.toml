@@ -23,6 +23,9 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 on_device_installs = []
 
 [dependencies]
+# The firmware's own measurement of the Non-secure app (the monitor's `measurement_ok`), checked
+# against a release's digest before the phone burns it.
+blake3 = { version = "1.5.0" }
 # The SDK whose bridge install seams we fill. One-directional: dsm_sdk never depends back on us.
 dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk" }
 # The ApplianceRequest/Response codec — the Phone->Pico USB bridge frames requests and decodes
@@ -39,6 +42,10 @@ log = "0.4"
 [target.'cfg(target_os = "android")'.dependencies]
 dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk", features = ["jni", "bluetooth"] }
 jni = "0.21"
+# The phone's random source, for a blank board's secret (the board setup's Android port).
+getrandom = "0.4.2"
+# `USBDEVFS_CLEAR_HALT` on the board link's usbfs descriptor, as libusb clears a halt.
+libc = "0.2"
 
 # This crate is workspace-EXCLUDED, so it is its own profile root: mirror the deterministic_state_machine
 # workspace release profile — LTO must stay off and symbols unstripped to preserve the JNI exports when

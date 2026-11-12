@@ -17,7 +17,7 @@ use anchor_core::hash::{h, kdf};
 use anchor_core::proto::pb;
 use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
 use anchor_core::service::err;
-use anchor_core::tropic::{ChipSig, HostSig, PartitionSig, TropicError};
+use anchor_core::tropic::{ChipRefusal, ChipSig, HostSig, PartitionSig, TropicError};
 use anchor_core::try_run::TRIAL_PERMANENT;
 use control::Part;
 use support::{
@@ -237,7 +237,17 @@ fn prepare(
     prepare: &pb::ApplianceRequest,
     bundle: &[u8],
 ) -> pb::ApplianceResponse {
-    let (digest, signature) = support::authorization_for(prepare, bundle);
+    // The anchor draws the nonce from its chip: with the power cut there, the draw is the step
+    // that failed, and its answer is this prepare's.
+    let drawn = anchor.bare(pb::Op::AuthorizationNonce);
+    if !drawn.ok {
+        return drawn;
+    }
+    let nonce: [u8; 32] = match drawn.authorization_nonce.as_slice().try_into() {
+        Ok(nonce) => nonce,
+        Err(e) => panic!("a 32-byte nonce: {e}"),
+    };
+    let (digest, signature) = support::authorization_for(prepare, bundle, &nonce);
     let authorized = anchor.frame(
         support::authorize_frame(&digest, &signature),
         Measurement::Matches,
@@ -611,6 +621,39 @@ fn a_power_cut_anywhere_in_a_spend_keeps_one_release_and_one_counter_step() {
     });
 }
 
+/// A chip whose slot 2 holds a key is refused before anything is written to it. The birth cages the
+/// board's own slot and invalidates the factory's; a key left in another slot would stay valid
+/// after it, outside the cage. The chip is left as it was found: uncaged, slot 1 empty.
+#[test]
+fn a_chip_with_a_key_in_a_spare_slot_is_refused_before_anything_is_written() {
+    let model = ModelServer::start();
+    let other = StaticSecret::from([0x25u8; 32]);
+    let mut session = factory_session(&model);
+    if let Err(e) = session.pairing_key_write(2u16.into(), PublicKey::from(&other).as_bytes()) {
+        panic!("slot 2 did not take a key: {e:?}");
+    }
+    drop(session);
+
+    match model.boot() {
+        Ok(_anchor) => panic!("a chip with a key in a spare slot came up to be provisioned"),
+        Err(anchor_chip::bring_up::BringUpFailure::Enroll(
+            anchor_core::tropic::TropicError::Refused(
+                anchor_core::tropic::ChipRefusal::SpareSlotHoldsKey,
+            ),
+        )) => {}
+        Err(e) => panic!("refused for another reason: {e:?}"),
+    }
+    let mut session = factory_session(&model);
+    let open = session.i_config_read(0x040u16.into());
+    assert!(
+        matches!(open, Ok(bits) if bits & 0b10 != 0),
+        "the chip was caged"
+    );
+    if let Ok(key) = session.pairing_key_read(1u16.into()) {
+        panic!("the board's slot was written: it holds {key:02x?}");
+    }
+}
+
 /// A chip already used: its counter away from the start, its slot 1 holding another board's key.
 /// Neither is caged or written further: a refusal at boot leaves it as it was.
 #[test]
@@ -626,7 +669,9 @@ fn a_chip_holding_another_boards_key_is_refused_before_anything_is_written() {
     match model.boot() {
         Ok(_anchor) => panic!("a chip holding another board's key came up to be provisioned"),
         Err(anchor_chip::bring_up::BringUpFailure::Enroll(
-            anchor_core::tropic::TropicError::Refused,
+            anchor_core::tropic::TropicError::Refused(
+                anchor_core::tropic::ChipRefusal::BoardSlotHoldsAnotherKey,
+            ),
         )) => {}
         Err(e) => panic!("refused for another reason: {e:?}"),
     }
@@ -1069,7 +1114,7 @@ fn a_record_wiped_from_a_caged_chip_never_makes_it_installable_again() {
     drop(session);
     match model.boot() {
         Ok(_anchor) => panic!("a caged chip with no record came up to be installed"),
-        Err(BringUpFailure::Enroll(TropicError::Refused)) => {}
+        Err(BringUpFailure::Enroll(TropicError::Refused(ChipRefusal::AccessRulesNotWritable))) => {}
         Err(e) => panic!("refused for another reason: {e:?}"),
     }
     assert_birth_closed(&model);

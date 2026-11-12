@@ -571,6 +571,22 @@ fn prepare(
         .as_slice()
         .try_into()
         .map_err(|e| format!("a {}-byte bundle: {e}", status.anchor_bundle.len()))?;
+    // The anchor draws the nonce the authorization binds.
+    let drawn = roundtrip(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::AuthorizationNonce as i32,
+            ..Default::default()
+        },
+    )?;
+    if !drawn.ok {
+        return Err(format!("no authorization nonce: error {}", drawn.error));
+    }
+    let nonce: [u8; 32] = drawn
+        .authorization_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|e| format!("a {}-byte nonce: {e}", drawn.authorization_nonce.len()))?;
     let digest = owner_authorization_digest(
         &bundle,
         &prev,
@@ -578,6 +594,7 @@ fn prepare(
         &d,
         &BENCH_R_I,
         &BENCH_R_NEXT,
+        &nonce,
     );
     let signature = sign(&keys.owner_sk, &digest)?;
     let authorized = answer_with_tail(

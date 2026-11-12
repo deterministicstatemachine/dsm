@@ -1,0 +1,13 @@
+# The lock image runs on the RP2350's Arm cores, from flash, at a normal boot.
+#   cargo build --release
+
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = [
+  "-C", "link-arg=--nmagic",
+  # cortex-m-rt's link.x, with this crate's memory.x (the build script puts it on the link path).
+  "-C", "link-arg=-Tlink.x",
+  "-C", "target-cpu=cortex-m33",
+]

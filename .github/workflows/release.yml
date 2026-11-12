@@ -72,6 +72,23 @@ jobs:
           echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
           echo "OK: tag '$REF_NAME' is a valid semver release tag"
 
+      # A release is built from main, never from a tag pushed onto some other
+      # commit: the tagged commit must be main's, or one main already holds.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tagged commit is on main
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::Tag '$REF_NAME' names $GITHUB_SHA, which is not on main. A release is tagged on main." >&2
+            exit 1
+          fi
+          echo "OK: $GITHUB_SHA is on main"
+
   # --------------------------------------------------------------------------
   # Run the full test gate before publishing. A red test suite must NEVER
   # produce a tagged release — these tests run on the exact tagged commit.
@@ -111,6 +128,7 @@ jobs:
 
       - name: Install CI system deps
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler ripgrep jq
 
@@ -176,6 +194,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Resolve Ubuntu's package servers
+        run: bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
+
       - name: Download this release's developer files
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -187,7 +208,7 @@ jobs:
 
       - name: Upload the newcomer's log
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: first-run-log
           path: .dsm-dev/first-run/newcomer.log
@@ -215,6 +236,7 @@ jobs:
 
       - name: Install build deps
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
@@ -334,6 +356,7 @@ jobs:
 
       - name: Install SBOM tooling
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y jq protobuf-compiler
           cargo install cargo-cyclonedx --quiet --locked --version 0.5.9
@@ -342,7 +365,7 @@ jobs:
       # (scripts/generate-assurance.py); without Lean it records the check as
       # skipped, never as passed.
       - name: Cache elan toolchain
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.elan
           key: elan-${{ hashFiles('lean4/lean-toolchain') }}
@@ -532,7 +555,7 @@ jobs:
           head -40 dist/RELEASE_BODY.md
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           tag_name: ${{ github.ref_name }}
           name: DSM ${{ github.ref_name }}

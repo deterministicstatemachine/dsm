@@ -204,8 +204,8 @@ impl<I: PeerAddressed, S> axum_server::accept::Accept<I, S> for LiveConnections 
         std::future::ready(
             stream
                 .peer()
-                .and_then(|peer| self.admit(peer))
-                .map(|(open, share)| {
+                .and_then(|peer| self.admit(peer).map(|held| (peer, held)))
+                .map(|(peer, (open, share))| {
                     let connection = Arc::new(ConnectionUse::default());
                     (
                         LiveConnection {
@@ -221,6 +221,7 @@ impl<I: PeerAddressed, S> axum_server::accept::Accept<I, S> for LiveConnections 
                         Counted {
                             inner: service,
                             connection,
+                            peer,
                         },
                     )
                 }),
@@ -351,19 +352,22 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for LiveConnection<S> {
 }
 
 /// The node's service on one connection, counting each request as in flight
-/// until its response is written whole or abandoned.
+/// until its response is written whole or abandoned, and naming the
+/// connection's peer to the app (a [`Peer`] among the request's extensions),
+/// so a route can count what it holds against that peer's share.
 #[derive(Clone)]
 pub struct Counted<S> {
     inner: S,
     connection: Arc<ConnectionUse>,
+    peer: Peer,
 }
 
 type CountedFuture<B, E> =
     Pin<Box<dyn Future<Output = Result<axum::http::Response<CountedBody<B>>, E>> + Send>>;
 
-impl<S, R, B> tower::Service<R> for Counted<S>
+impl<S, Q, B> tower::Service<axum::http::Request<Q>> for Counted<S>
 where
-    S: tower::Service<R, Response = axum::http::Response<B>>,
+    S: tower::Service<axum::http::Request<Q>, Response = axum::http::Response<B>>,
     S::Future: Send + 'static,
     S::Error: 'static,
     B: 'static,
@@ -376,8 +380,9 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, request: R) -> Self::Future {
+    fn call(&mut self, mut request: axum::http::Request<Q>) -> Self::Future {
         let in_flight = InFlight::start(&self.connection);
+        request.extensions_mut().insert(self.peer);
         let answering = self.inner.call(request);
         Box::pin(async move {
             let response = answering.await?;
@@ -413,6 +418,194 @@ impl<B: HttpBody + Unpin> HttpBody for CountedBody<B> {
 
     fn size_hint(&self) -> http_body::SizeHint {
         self.body.size_hint()
+    }
+}
+
+/// The most of a response's body handed to the connection at a time. The
+/// HTTP library asks for a body's next part only once the connection has room
+/// for some of it, so a body handed over in parts of this size stays with the
+/// request, and with the slot it holds ([`RequestSlots`]), until its reader
+/// has taken all but the last part. Handed over whole, it would sit in the
+/// connection's buffers, counted by nothing, for as long as its reader left
+/// it there.
+pub const RESPONSE_PART_BYTES: usize = 16 * 1024;
+
+/// The requests the node serves at once, each counted from when it reaches
+/// the app until its response is written or abandoned, and each peer's share
+/// of them ([`Peer`]). A request waits for a slot, as long as the request
+/// timeout outside this allows; a request from a peer already holding its
+/// whole share is answered `503` at once, so one peer's requests, however
+/// slowly it sends or reads them, leave the rest of the slots to everyone
+/// else. A request whose connection names no peer (the app served without
+/// the node's listener) is counted against the node's slots alone.
+#[derive(Clone)]
+pub struct RequestSlots {
+    slots: Arc<tokio::sync::Semaphore>,
+    peers: PeerCounts,
+    max_per_peer: usize,
+}
+
+impl RequestSlots {
+    pub fn new(slots: usize, max_per_peer: usize) -> Self {
+        Self {
+            slots: Arc::new(tokio::sync::Semaphore::new(slots)),
+            peers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            max_per_peer,
+        }
+    }
+
+    /// A place in `peer`'s share, or `None` when it holds its whole share.
+    fn share(&self, peer: Peer) -> Option<PeerShare> {
+        let mut held = LiveConnections::counts(&self.peers);
+        if held.get(&peer).is_some_and(|n| *n >= self.max_per_peer) {
+            return None;
+        }
+        *held.entry(peer).or_insert(0) += 1;
+        Some(PeerShare {
+            peers: self.peers.clone(),
+            peer,
+        })
+    }
+}
+
+impl<S> tower::Layer<S> for RequestSlots {
+    type Service = Slotted<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        Slotted {
+            inner,
+            slots: self.clone(),
+        }
+    }
+}
+
+/// A service whose every request holds one of the node's [`RequestSlots`].
+#[derive(Clone)]
+pub struct Slotted<S> {
+    inner: S,
+    slots: RequestSlots,
+}
+
+type SlottedFuture<E> =
+    Pin<Box<dyn Future<Output = Result<axum::http::Response<axum::body::Body>, E>> + Send>>;
+
+impl<S> tower::Service<axum::extract::Request> for Slotted<S>
+where
+    S: tower::Service<axum::extract::Request, Response = axum::http::Response<axum::body::Body>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    S::Error: 'static,
+{
+    type Response = axum::http::Response<axum::body::Body>;
+    type Error = S::Error;
+    type Future = SlottedFuture<S::Error>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: axum::extract::Request) -> Self::Future {
+        let unavailable = || {
+            let mut response = axum::http::Response::new(axum::body::Body::empty());
+            *response.status_mut() = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+            response
+        };
+        let share = match request.extensions().get::<Peer>().copied() {
+            Some(peer) => match self.slots.share(peer) {
+                Some(share) => Some(share),
+                None => {
+                    log::info!("{peer:?} holds as many requests as one peer may");
+                    return Box::pin(async move { Ok(unavailable()) });
+                }
+            },
+            None => None,
+        };
+        let slots = self.slots.slots.clone();
+        // The service that was polled ready serves this request; its clone
+        // waits for the next.
+        let ready = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, ready);
+        Box::pin(async move {
+            let slot = match slots.acquire_owned().await {
+                Ok(slot) => slot,
+                Err(closed) => {
+                    log::error!("the node's request slots are closed: {closed}");
+                    return Ok(unavailable());
+                }
+            };
+            let response = inner.call(request).await?;
+            // A response with no body has nothing left to write: its slot
+            // is free as soon as it is answered.
+            if response.body().is_end_stream() {
+                return Ok(response);
+            }
+            Ok(response.map(|body| {
+                axum::body::Body::new(SlotBody {
+                    body,
+                    part: axum::body::Bytes::new(),
+                    _slot: slot,
+                    _share: share,
+                })
+            }))
+        })
+    }
+}
+
+/// A response body that keeps its request's slot, and its peer's share, until
+/// it is written or dropped, and is handed to the connection
+/// [`RESPONSE_PART_BYTES`] at a time.
+struct SlotBody {
+    body: axum::body::Body,
+    part: axum::body::Bytes,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+    _share: Option<PeerShare>,
+}
+
+impl SlotBody {
+    fn next_part(&mut self) -> axum::body::Bytes {
+        let take = self.part.len().min(RESPONSE_PART_BYTES);
+        self.part.split_to(take)
+    }
+}
+
+impl HttpBody for SlotBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        if !this.part.is_empty() {
+            return Poll::Ready(Some(Ok(http_body::Frame::data(this.next_part()))));
+        }
+        match Pin::new(&mut this.body).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                Ok(data) => {
+                    this.part = data;
+                    Poll::Ready(Some(Ok(http_body::Frame::data(this.next_part()))))
+                }
+                Err(trailers) => Poll::Ready(Some(Ok(trailers))),
+            },
+            other => other,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.part.is_empty() && self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        let mut hint = self.body.size_hint();
+        let held = self.part.len() as u64;
+        hint.set_lower(hint.lower().saturating_add(held));
+        if let Some(upper) = hint.upper() {
+            hint.set_upper(upper.saturating_add(held));
+        }
+        hint
     }
 }
 

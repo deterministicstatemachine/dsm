@@ -88,5 +88,12 @@ rm -rf "$STAGE/connect-starter/node_modules/dsm-app-client"
 cp -R "$STAGE/dsm-app-client" "$STAGE/connect-starter/node_modules/dsm-app-client"
 
 cp "$REPO/LICENSE-MIT" "$REPO/LICENSE-APACHE" "$STAGE/"
-tar -C "$WORK/stage" -cf - "$NAME" | gzip -n -9 >"$OUT/$NAME.tar.gz"
+# Every file is recorded as root's, by number: the archive names no account
+# of the machine that built it, so one unpacked as root hands nothing to
+# whichever local account happens to have the builder's id.
+case "$(tar --version 2>/dev/null)" in
+    *GNU*) set -- --owner=0 --group=0 --numeric-owner ;;
+    *) set -- --uid 0 --gid 0 --numeric-owner ;;
+esac
+tar "$@" -C "$WORK/stage" -cf - "$NAME" | gzip -n -9 >"$OUT/$NAME.tar.gz"
 echo "[developer] $OUT/$NAME.tar.gz"

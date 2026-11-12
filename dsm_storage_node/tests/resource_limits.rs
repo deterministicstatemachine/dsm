@@ -603,17 +603,20 @@ fn an_http2_connection_with_no_request_is_closed_once_idle() {
 
 /// A response whose write makes no progress ends its connection once the
 /// write bound passes: a client that asks for a large answer and never reads
-/// it holds the node no longer. Its socket's receive buffer is kept small,
-/// so the answer cannot all wait in the kernel.
+/// it holds the node no longer. Its socket's receive buffer is kept small
+/// and it asks for more than the kernel's buffers hold, so the answer cannot
+/// all wait in the kernel.
 #[test]
 fn a_response_nobody_reads_ends_its_connection_once_its_write_stalls() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     common::runtime().block_on(async {
         let app = node("rl_write_stall", limits(256, Duration::from_secs(60))).await;
-        // A spool holding a full retrieve batch of large envelopes.
+        // A spool holding a full page of large envelopes.
         let spool = common::locked_spool(0x5C);
         let envelope = vec![0xE5u8; 120 * 1024];
-        for _ in 0..dsm::spool::MAX_BATCH_RETRIEVE {
+        // One page of them is all a read answers with.
+        let page = dsm::spool::SPOOL_PAGE_BYTES / envelope.len();
+        for _ in 0..page {
             let (write, message_id) = common::signed_write(&spool, &envelope);
             let submit = common::ok_or_panic(
                 Request::builder()
@@ -628,7 +631,10 @@ fn a_response_nobody_reads_ends_its_connection_once_its_write_stalls() {
             let answer = common::ok_or_panic(app.clone().oneshot(submit).await, "submit");
             assert_eq!(answer.status(), StatusCode::NO_CONTENT);
         }
-        let full = dsm::spool::MAX_BATCH_RETRIEVE * envelope.len();
+        // One page is small enough to wait whole in the kernel's buffers, so the page is asked
+        // for many times over on the one connection: together the answers cannot.
+        let asks = 16;
+        let full = asks * page * envelope.len();
 
         let stall = Duration::from_secs(1);
         let address = served_plain(
@@ -645,7 +651,7 @@ fn a_response_nobody_reads_ends_its_connection_once_its_write_stalls() {
         let ask = format!(
             "GET /api/v2/b0x/retrieve/0 HTTP/1.1\r\nhost: node\r\nx-dsm-b0x-address: {spool}\r\n\r\n"
         );
-        common::ok_or_panic(socket.write_all(ask.as_bytes()).await, "ask");
+        common::ok_or_panic(socket.write_all(ask.repeat(asks).as_bytes()).await, "ask");
         // Read nothing while the node's write stalls past its bound.
         tokio::time::sleep(stall * 4).await;
         let mut got = Vec::new();
@@ -703,5 +709,232 @@ fn a_body_that_trickles_in_is_cut_off_once_its_grace_has_passed() {
             started.elapsed()
         );
         trickle.abort();
+    });
+}
+
+/// `request` as it reaches the app over a connection from the peer at
+/// 192.0.2.`last`.
+fn from_peer(mut request: Request<Body>, last: u8) -> Request<Body> {
+    request
+        .extensions_mut()
+        .insert(dsm_storage_node::liveness::Peer::of(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::new(192, 0, 2, last),
+        )));
+    request
+}
+
+/// Submit `envelope` to `spool`.
+async fn submit(app: &axum::Router, spool: &str, envelope: &[u8]) {
+    let (write, message_id) = common::signed_write(spool, envelope);
+    let request = common::ok_or_panic(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v2/b0x/submit")
+            .header("content-type", "application/octet-stream")
+            .header("x-dsm-recipient", spool)
+            .header("x-dsm-message-id", message_id)
+            .body(Body::from(write)),
+        "request",
+    );
+    let answer = common::ok_or_panic(app.clone().oneshot(request).await, "submit");
+    assert_eq!(answer.status(), StatusCode::NO_CONTENT);
+}
+
+fn retrieve(spool: &str, from: u64) -> Request<Body> {
+    common::ok_or_panic(
+        Request::builder()
+            .method("GET")
+            .uri(format!("/api/v2/b0x/retrieve/{from}"))
+            .header("x-dsm-b0x-address", spool)
+            .body(Body::empty()),
+        "request",
+    )
+}
+
+/// One peer holds at most its share of the node's request slots
+/// ([`dsm_storage_node::PEER_REQUEST_SHARE`]): with a share of one, a peer
+/// whose request is held is answered `503` for its next at once, while
+/// another peer's request, and one that names no peer, are served. Once the
+/// held request is answered, the peer's next is served again.
+#[test]
+fn one_peer_holds_no_more_than_its_share_of_the_nodes_requests() {
+    common::runtime().block_on(async {
+        let app = node("rl_peer_requests", limits(4, Duration::from_secs(60))).await;
+        let (mut sender, held, write) = held_submission();
+        let holder = tokio::spawn(app.clone().oneshot(from_peer(held, 1)));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let refused = common::ok_or_panic(
+            app.clone().oneshot(from_peer(health(), 1)).await,
+            "the app answers",
+        );
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        for other in [from_peer(health(), 2), health()] {
+            let served = match tokio::time::timeout(
+                Duration::from_secs(5),
+                app.clone().oneshot(other),
+            )
+            .await
+            {
+                Ok(answer) => common::ok_or_panic(answer, "the app answers"),
+                Err(elapsed) => panic!("one peer's held request kept another's waiting: {elapsed}"),
+            };
+            assert_eq!(served.status(), StatusCode::OK);
+        }
+
+        common::ok_or_panic(
+            futures::SinkExt::send(&mut sender, Ok(Bytes::from(write))).await,
+            "the held body",
+        );
+        drop(sender);
+        let held = common::ok_or_panic(common::ok_or_panic(holder.await, "task"), "answer");
+        assert_eq!(held.status(), StatusCode::NO_CONTENT);
+        drop(held);
+        let again = common::ok_or_panic(
+            app.clone().oneshot(from_peer(health(), 1)).await,
+            "the app answers",
+        );
+        assert_eq!(again.status(), StatusCode::OK);
+    });
+}
+
+/// A request holds its slot until its response is written, not only until
+/// its handler returns: with room for one request, a spool page that has
+/// been answered and not yet read keeps a request on another route waiting
+/// its whole request time (`408`). Once the page is read, the next request is
+/// served. The page is handed over in parts of at most
+/// [`dsm_storage_node::liveness::RESPONSE_PART_BYTES`], and is whole.
+#[test]
+fn a_response_not_yet_read_keeps_its_slot() {
+    use futures::StreamExt;
+    common::runtime().block_on(async {
+        let app = node("rl_unread_response", limits(1, Duration::from_secs(1))).await;
+        let spool = common::locked_spool(0x5D);
+        let envelope = vec![0xE6u8; 64 * 1024];
+        for _ in 0..2 {
+            submit(&app, &spool, &envelope).await;
+        }
+
+        let page = common::ok_or_panic(app.clone().oneshot(retrieve(&spool, 0)).await, "the page");
+        assert_eq!(page.status(), StatusCode::OK);
+        let waiting = common::ok_or_panic(app.clone().oneshot(health()).await, "the app answers");
+        assert_eq!(
+            waiting.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "a request was served while an unread response held the node's one slot"
+        );
+
+        let mut body = page.into_body().into_data_stream();
+        let mut read = Vec::new();
+        while let Some(part) = body.next().await {
+            let part = common::ok_or_panic(part, "a part of the page");
+            assert!(
+                part.len() <= dsm_storage_node::liveness::RESPONSE_PART_BYTES,
+                "a part of {} bytes was handed over at once",
+                part.len()
+            );
+            read.extend_from_slice(&part);
+        }
+        drop(body);
+        let batch = common::ok_or_panic(
+            <dsm::types::proto::SequencedBatchEnvelope as prost::Message>::decode(read.as_slice()),
+            "the page",
+        );
+        assert_eq!(batch.envelopes.len(), 2);
+        assert!(batch.envelopes.iter().all(|e| e.envelope == envelope));
+
+        let served = common::ok_or_panic(app.clone().oneshot(health()).await, "the app answers");
+        assert_eq!(served.status(), StatusCode::OK);
+    });
+}
+
+/// A spool read answers with at most [`dsm::spool::SPOOL_PAGE_BYTES`] of
+/// envelopes, whatever the spool holds: a spool of more is read a page at a
+/// time, each from where the last ended, and every entry comes once, in
+/// order.
+#[test]
+fn a_spool_page_holds_no_more_than_its_bytes() {
+    common::runtime().block_on(async {
+        let app = node("rl_spool_page_bytes", limits(256, Duration::from_secs(60))).await;
+        let spool = common::locked_spool(0x5E);
+        let envelope_len = 120 * 1024;
+        let fits = dsm::spool::SPOOL_PAGE_BYTES / envelope_len;
+        // Each entry is filled with its own number, so the order read is
+        // the order written.
+        let every: Vec<u8> = (0u8..).take(fits + 2).collect();
+        for nth in &every {
+            submit(&app, &spool, &vec![*nth; envelope_len]).await;
+        }
+
+        let mut read = Vec::new();
+        let mut from = 0u64;
+        let mut pages = Vec::new();
+        loop {
+            let answer = common::ok_or_panic(
+                app.clone().oneshot(retrieve(&spool, from)).await,
+                "the app answers",
+            );
+            if answer.status() == StatusCode::NO_CONTENT {
+                break;
+            }
+            assert_eq!(answer.status(), StatusCode::OK);
+            let body = common::ok_or_panic(
+                axum::body::to_bytes(answer.into_body(), usize::MAX).await,
+                "body",
+            );
+            let batch = common::ok_or_panic(
+                <dsm::types::proto::SequencedBatchEnvelope as prost::Message>::decode(
+                    body.as_ref(),
+                ),
+                "a page",
+            );
+            let bytes: usize = batch.envelopes.iter().map(|e| e.envelope.len()).sum();
+            assert!(
+                bytes <= dsm::spool::SPOOL_PAGE_BYTES,
+                "a page of {bytes} envelope bytes"
+            );
+            pages.push(batch.envelopes.len());
+            read.extend(batch.envelopes.into_iter().map(|e| e.envelope[0]));
+            from = batch.next_seq;
+        }
+        assert_eq!(pages, vec![fits, 2]);
+        assert_eq!(read, every);
+    });
+}
+
+/// A position or cycle the store cannot hold names nothing this node could
+/// have: `400`, a request that is not one, on every route that takes one.
+#[test]
+fn a_number_past_the_stores_range_is_a_request_that_is_not_one() {
+    common::runtime().block_on(async {
+        let app = node("rl_out_of_range", limits(256, Duration::from_secs(60))).await;
+        let past = u64::MAX;
+        let key = dsm::utils::text_id::encode_base32_crockford(&[0x5Fu8; 32]);
+        let asks = [
+            ("GET", format!("/api/v2/cell/{key}?from={past}"), None),
+            ("GET", format!("/api/v2/bytecommit/cycle/{past}"), None),
+            ("GET", format!("/api/v2/bytecommit/proof/{key}"), Some(past)),
+            (
+                "GET",
+                format!("/api/v2/bytecommit/mirror/{key}/{past}"),
+                None,
+            ),
+        ];
+        for (method, uri, cycle) in asks {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri.as_str())
+                .header("x-namespace", "dsm");
+            if let Some(cycle) = cycle {
+                request = request.header("x-cycle", cycle.to_string());
+            }
+            let answer = common::ok_or_panic(
+                app.clone()
+                    .oneshot(common::ok_or_panic(request.body(Body::empty()), "request"))
+                    .await,
+                "the app answers",
+            );
+            assert_eq!(answer.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
     });
 }

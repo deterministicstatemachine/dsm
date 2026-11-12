@@ -222,12 +222,17 @@ fn owner_key() -> &'static (Vec<u8>, Vec<u8>) {
 /// The owner-authorization digest of preparing `t` on `a`, under challenge `rc` with device roots
 /// `before`/`after`, and the owner's signature of it.
 fn owner_authorization<T: Tropic, P: PartitionSig>(
-    a: &Appliance<T, P>,
+    a: &mut Appliance<T, P>,
     t: &OwnedTransition,
     rc: &[u8; 32],
     before: &[u8; 32],
     after: &[u8; 32],
 ) -> ([u8; 32], Vec<u8>) {
+    // The anchor draws the nonce this authorization binds; the owner signs over it.
+    let nonce = match a.draw_authorization_nonce() {
+        Ok(nonce) => nonce,
+        Err(e) => panic!("the anchor draws a nonce: {e:?}"),
+    };
     let digest = owner_authorization_digest(
         &a.bundle,
         &a.active.root,
@@ -235,6 +240,7 @@ fn owner_authorization<T: Tropic, P: PartitionSig>(
         &transition_digest(&t.as_transition(), rc),
         before,
         after,
+        &nonce,
     );
     (digest, owner_sign(&digest))
 }
@@ -624,6 +630,54 @@ fn proto_release_roundtrip() {
     accept_offline::<_, Ed25519Chip, Partition>(&back, &c, &Dsm::ok()).unwrap();
 }
 
+/// An authorization serves the one prepare it was made for, once. The frame that carried it
+/// crosses the link in the clear, so whoever holds the link holds it. Played again after the owner
+/// cancelled the payment, the anchor still at the same frontier and counter, it authorizes nothing:
+/// the nonce it binds was the anchor's own and went with the prepare. Played against a nonce drawn
+/// afterwards it authorizes nothing either, and so does an authorization with no nonce drawn. The
+/// owner's fresh authorization is then taken. MUTATION CONTROL: binding no nonce in
+/// `owner_authorization_digest`, or leaving the nonce held after `prepare`, lets the replay through:
+/// red at "after a cancel".
+#[test]
+fn an_authorization_recorded_off_the_link_is_never_taken_again() {
+    let mut f = fixture(H0);
+    let t = make_transition(f.frontier0, 0);
+    let prepare = |a: &mut App| a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT);
+
+    let (digest, signature) = owner_authorization(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    f.a.authorize(&digest, &signature).unwrap();
+    assert_eq!(prepare(&mut f.a), Ok(()), "the owner's authorization");
+    f.a.cancel().unwrap();
+    assert_eq!(f.a.active.status, Status::Ready);
+    assert_eq!(f.a.active.root, f.frontier0, "the same frontier as before");
+
+    // The recorded frame, as it was: the signature is the owner's and verifies.
+    assert_eq!(f.a.authorize(&digest, &signature), Ok(()));
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "after a cancel"
+    );
+
+    // Whoever holds the link draws a nonce and plays the frame against it.
+    let drawn = f.a.draw_authorization_nonce().unwrap();
+    assert_eq!(f.a.authorize(&digest, &signature), Ok(()));
+    assert_eq!(
+        prepare(&mut f.a),
+        Err(ApplianceError::OwnerUnauthorized),
+        "against a nonce drawn afterwards"
+    );
+    let again = f.a.draw_authorization_nonce().unwrap();
+    assert_ne!(drawn, again, "each nonce is drawn anew");
+
+    assert_eq!(f.a.active.status, Status::Ready);
+    assert!(matches!(f.a.active.record, Record::Empty));
+    assert_eq!(f.a.live_index(), Ok(0), "the counter has not moved");
+
+    authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    assert_eq!(prepare(&mut f.a), Ok(()), "the owner's fresh authorization");
+}
+
 /// An anchor signs nothing for a prepare its owner did not authorize, whoever holds the link to
 /// it. No authorization, a stranger's signature, the owner's authorization of another payment, of
 /// other device roots, or of this payment from a frontier the anchor does not stand at: each leaves
@@ -634,7 +688,7 @@ fn proto_release_roundtrip() {
 fn a_prepare_its_owner_did_not_authorize_signs_nothing() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
-    let (digest, _) = owner_authorization(&f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    let (digest, _) = owner_authorization(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     let prepare = |a: &mut App| a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT);
 
     assert_eq!(
@@ -673,6 +727,7 @@ fn a_prepare_its_owner_did_not_authorize_signs_nothing() {
         "an authorization over other device roots"
     );
     // ... and this payment from a frontier the anchor does not stand at (stale, or another anchor's).
+    let nonce = f.a.draw_authorization_nonce().unwrap();
     let elsewhere = owner_authorization_digest(
         &f.a.bundle,
         &[0x99; 32],
@@ -680,6 +735,7 @@ fn a_prepare_its_owner_did_not_authorize_signs_nothing() {
         &transition_digest(&t.as_transition(), &RCHAL),
         &R_I,
         &R_NEXT,
+        &nonce,
     );
     f.a.authorize(&elsewhere, &owner_sign(&elsewhere)).unwrap();
     assert_eq!(
@@ -753,7 +809,7 @@ fn an_authorization_serves_one_prepare_and_is_consumed_with_it() {
 
     // One that does not verify drops the one standing.
     authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
-    let (digest, _) = owner_authorization(&f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    let (digest, _) = owner_authorization(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     assert_eq!(
         f.a.authorize(&digest, &[0u8; 8]),
         Err(ApplianceError::OwnerUnauthorized)
@@ -789,7 +845,7 @@ fn over_the_wire_an_authorization_is_the_message_and_the_signature_after_it() {
     assert!(!r.ok);
     assert_eq!(r.error, err::OWNER_UNAUTHORIZED);
 
-    let (digest, signature) = owner_authorization(&f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    let (digest, signature) = owner_authorization(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     assert_eq!(
         signature.len(),
         anchor_core::service::OWNER_AUTHORIZATION_BYTES
@@ -814,6 +870,19 @@ fn over_the_wire_an_authorization_is_the_message_and_the_signature_after_it() {
         err::FRAME_TOO_LARGE,
         "a message longer than a request's largest"
     );
+
+    // The same message behind a first field that names a payment check: the decoder keeps the op
+    // named last, the prepare. It is not served at a payment check's size.
+    let mut disguised = vec![0x08, pb::Op::CheckPayment as u8];
+    disguised.extend_from_slice(&encode_request(&too_long));
+    let r = decode_response(&handle(&mut f.a, &disguised)).unwrap();
+    assert_eq!(
+        r.error,
+        err::FRAME_TOO_LARGE,
+        "a prepare let in at a payment check's size"
+    );
+    assert_eq!(r.op, pb::Op::Prepare as i32);
+    assert_eq!(f.a.active.status, Status::Ready);
 
     let r = decode_response(&handle(&mut f.a, &authorize_frame(&digest, &signature))).unwrap();
     assert!(r.ok, "authorize: error {}", r.error);
@@ -847,7 +916,7 @@ fn service_handle_full_flow() {
         sender_device_root_after: R_NEXT.to_vec(),
         ..Default::default()
     };
-    let (digest, signature) = owner_authorization(&f.a, &t, &RCHAL, &R_I, &R_NEXT);
+    let (digest, signature) = owner_authorization(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     let r = decode_response(&handle(&mut f.a, &authorize_frame(&digest, &signature))).unwrap();
     assert!(r.ok, "authorize failed: {}", r.error);
     let r = decode_response(&handle(&mut f.a, &encode_request(&prep))).unwrap();

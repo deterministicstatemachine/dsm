@@ -472,9 +472,13 @@ pub fn owner_key() -> &'static (Vec<u8>, Vec<u8>) {
     )
 }
 
-/// The owner-authorization digest of `prepare` on the anchor whose bundle is `bundle`, and the
-/// owner's signature of it.
-pub fn authorization_for(prepare: &pb::ApplianceRequest, bundle: &[u8]) -> ([u8; 32], Vec<u8>) {
+/// The owner-authorization digest of `prepare` on the anchor whose bundle is `bundle`, over the
+/// `nonce` the anchor drew for it, and the owner's signature of it.
+pub fn authorization_for(
+    prepare: &pb::ApplianceRequest,
+    bundle: &[u8],
+    nonce: &[u8; 32],
+) -> ([u8; 32], Vec<u8>) {
     let bundle: [u8; 32] = match bundle.try_into() {
         Ok(bundle) => bundle,
         Err(e) => panic!("a 32-byte bundle: {e}"),
@@ -501,6 +505,7 @@ pub fn authorization_for(prepare: &pb::ApplianceRequest, bundle: &[u8]) -> ([u8;
         &transition_digest(&transition.as_transition(), &challenge),
         &field(&prepare.sender_device_root_before, "device root"),
         &field(&prepare.sender_device_root_after, "device root"),
+        nonce,
     );
     let signature = match anchor_chip::bring_up::SphincsPart::owner_sign(&owner_key().0, &digest) {
         Ok(sig) => sig,

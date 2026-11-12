@@ -27,7 +27,7 @@ use anchor_core::appliance::RecoverOutcome;
 use anchor_core::durable::{ActiveStore, DurableAppliance, DurableBootRefusal, StoreError};
 use anchor_core::enrollment::{ChipBirth, Provisioning};
 use anchor_core::root_advance::Transition;
-use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{ChipLink, PartitionError, PartitionSig, Tropic, TropicError};
 use ed25519_dalek::{Signer, SigningKey};
 
 use crate::anchor::{
@@ -74,23 +74,27 @@ struct Supply {
 #[derive(Clone)]
 struct Board(Arc<Mutex<Supply>>);
 
+/// The chip with the supply off, as its driver reports it: a chip with no power never reports itself
+/// ready.
+const NO_POWER: TropicError = TropicError::Comm(ChipLink::Busy);
+
 impl Board {
     fn powered(&self) -> Result<(), TropicError> {
         match held(&self.0).power {
             Power::On => Ok(()),
-            Power::Off => Err(TropicError::Comm),
+            Power::Off => Err(NO_POWER),
         }
     }
 
     fn write_starts(&self) -> Result<(), StoreError> {
         let mut s = held(&self.0);
         if s.power == Power::Off {
-            return Err(StoreError::Unavailable);
+            return Err(StoreError::Chip(NO_POWER));
         }
         s.writes += 1;
         if s.cut == Cut::AtWrite(s.writes) {
             s.power = Power::Off;
-            return Err(StoreError::Unavailable);
+            return Err(StoreError::Chip(NO_POWER));
         }
         Ok(())
     }
@@ -188,7 +192,7 @@ impl SoftwareRMemory {
     fn on_the_supply(&self) -> Result<(), StoreError> {
         match held(&self.board.0).power {
             Power::On => Ok(()),
-            Power::Off => Err(StoreError::Unavailable),
+            Power::Off => Err(StoreError::Chip(NO_POWER)),
         }
     }
 }
@@ -204,7 +208,7 @@ impl ActiveStore for SoftwareRMemory {
     fn read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
         match held(&self.board.0).power {
             Power::On => Ok(held(&self.slot).clone()),
-            Power::Off => Err(StoreError::Unavailable),
+            Power::Off => Err(StoreError::Chip(NO_POWER)),
         }
     }
 
@@ -623,6 +627,13 @@ impl AnchorAppliance for HostAppliance {
         })
     }
 
+    fn authorization_nonce(&mut self) -> Result<[u8; 32], DsmError> {
+        self.with(|d| {
+            d.draw_authorization_nonce()
+                .map_err(|e| appliance_error("authorization nonce", e))
+        })
+    }
+
     fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DsmError> {
         self.with(|d| {
             d.authorize(digest, signature)
@@ -1018,6 +1029,10 @@ mod model_correspondence {
             Ok(s) => s.root,
             Err(e) => panic!("the board's frontier: {e}"),
         };
+        let nonce = match board.authorization_nonce() {
+            Ok(nonce) => nonce,
+            Err(e) => panic!("the board draws a nonce: {e}"),
+        };
         let digest = anchor_core::appliance::owner_authorization_digest(
             &bundle,
             &root,
@@ -1025,6 +1040,7 @@ mod model_correspondence {
             &transition_digest(&t.as_transition(), &CHALLENGE),
             before,
             after,
+            &nonce,
         );
         let signature = match dsm::crypto::sphincs::sign(
             dsm::crypto::sphincs::SphincsVariant::SPX256f,

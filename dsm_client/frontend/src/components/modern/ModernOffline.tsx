@@ -10,6 +10,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { getAnchorStatus, type AnchorStatus } from '../../dsm/anchor';
 import AnchorInstallPanel from '../AnchorInstallPanel';
+import AnchorBoardSetupPanel from '../AnchorBoardSetupPanel';
 import { applianceConnected, applianceStateText, type ApplianceRead } from '../applianceRead';
 import type { TokenBalanceView } from '../../dsm/types';
 
@@ -113,6 +114,7 @@ export default function ModernOffline({ token, onMoved }: Props): React.JSX.Elem
         <button type="button" className="s-btn s-btn-quiet" disabled={busy} onClick={() => connect()}>
           {busy ? 'Connecting…' : connected ? 'Check again' : 'Connect'}
         </button>
+        <AnchorBoardSetupPanel />
       </section>
 
       <section className="s-card" aria-label="Offline funding">
