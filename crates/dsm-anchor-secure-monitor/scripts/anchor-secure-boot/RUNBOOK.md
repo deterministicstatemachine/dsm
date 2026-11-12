@@ -72,7 +72,10 @@ The parts:
 | T005 | I-config and R-config empty, tamper sensors off, engineering-sample key | Refused. Nothing here repairs one. |
 
 **Preparing a test part, only if the owner has decided to use one.** It clears that one bit, for good, which is
-Tropic Square's own correction, and erases any key the chip generated before it:
+Tropic Square's own correction, and erases any key the chip generated before it. Like the trial image it runs on
+any board not locked for production, whatever its secret page holds, under a secret of that boot held nowhere:
+it writes the chip and never the board (one image prepares every board: owner, 2026-11-08). The chip reboots
+and latches the change, so the trial image's `--try-run` after it is the proof that it took:
 
 ```
 cargo build --release --features bench_self_enroll,prepare_chip
@@ -158,14 +161,89 @@ Change them here before the first burn, not after.
   secret regardless.
 - **The glitch detectors stay off,** because their effect on a working board has not been measured.
 
+## From the phone: the procedure for everyone
+
+Owner, 2026-11-11: "Not everyone has a Mac. It has to be doable from the phone." The owner's message,
+2026-11-12: "The entire appliance setup must work from an Android phone, without a Mac or any other
+computer." The wallet prepares a test part's chip, starts the trial image for the try-run, and does
+Steps 3 to 9b itself, through the board's own USB bootloader, with the board plugged into the phone
+in BOOTSEL. It speaks the bootloader's protocol as picotool does and applies `provision-otp.sh`'s
+checks row for row (`crates/dsm-android-anchor`: `picoboot`, `otp_burn`, `board_setup`). Signing
+(Steps 1 and 2) stays the vendor's one-time step on a computer, with the owner's passphrase; the
+phone carries only its public outputs.
+
+1. **The release into the app**, once per signing, before the APK is built:
+   `scripts/anchor-release-into-app.sh` copies `signed.elf`, `ns_app.bin`, `mu-enrolled.bin` and
+   the boot key's hash into the app's assets, and builds into them the prepare and the trial image
+   (item 3), around the signing's own Non-secure app, and the lock image (item 5). Before writing
+   anything the phone checks that the digest is the firmware's own measurement of the Non-secure app
+   and that the image holds that app.
+2. **Plug the board into the phone with BOOTSEL held.** Appliance → Production setup → Read the board.
+   The panel names the chip, lists the steps below in order, marks each done, next or later from
+   the board's own OTP (never from anything the phone remembers), and shows what Step 0's check
+   found.
+3. **Before the first burn, the chip and the try-run.** While the board's firmware digest is not
+   burned and it is not locked down, the panel offers two images besides the next step, each loaded
+   into flash, read back, and started; the board comes back as the DSM Anchor (tap Allow when Android
+   asks), and the phone asks it how it stands and shows its answer. Flash only on the board: Step 3
+   loads the signed image over either. **Prepare the chip…** on a test part (T101, T103) is the
+   preparing above: the prepare image says what the chip is and how it went. **Start the trial
+   image…** then brings up the trial image, and its try-run is the wallet's own: Check again, then Try
+   the install. Do not go on unless every step says OK, and do not install it. Then unplug the board,
+   hold BOOTSEL, plug it in again and read it. The phone offers these and does not require them:
+   nothing a board holds in BOOTSEL records a try-run. An install for good refuses a chip that does
+   not test its PTRNG, whatever was skipped.
+4. **Each step is the board's next or it is refused**, and runs only on the board whose chip id the
+   person types back (its last four characters). Every write is read back before the step is done.
+   Before the first burn the phone reads the bootrom's version from ROM and checks that the board's
+   bootloader may write every row the procedure will write, by that bootrom's own rule; a board it
+   cannot finish is not started, and the panel says which rows and why (BLOCKED).
+5. **On an RP2350 A2 whose page 63 refuses the bootloader** (the yellow board, 2026-11-11): its
+   bootrom guards a page's lock row by the page the row sits in, so the digest page's lock (Step 6)
+   and the rollback page's (part of Step 9b) cannot be written from BOOTSEL. Where page 63's Secure
+   lock is open, the panel lists "Lock the digest and rollback pages, from a one-time image" after
+   the digest, in Step 6's place: the phone loads the lock image (`crates/dsm-anchor-lock-pages`),
+   starts it, and it sets those two rows as Secure code at a normal boot and reboots into BOOTSEL
+   (tap Allow when Android asks again). The phone reads both rows back and loads the signed image
+   again. It must come before the lockdown: the lock image is never signed. Step 9b then writes the
+   boot pages' locks alone; the rollback page's is already held.
+6. **Before the first boot, Check…** (offered only once the lockdown is done and the first boot is
+   next): the phone loads the signed image with one byte of its code changed and starts the board.
+   A board whose secure boot is in force finds no image it may run and comes back in BOOTSEL (tap
+   Allow when Android asks again); the phone then loads the signed image back and reads it back. A
+   board that comes back as the DSM Anchor ran an image not as signed: stop there. This is Step 9's
+   unsigned-image check, made on a changed copy of the very image the board will run.
+7. **After "Start the signed image once"** the board leaves BOOTSEL and records its rollback version.
+   Once it has started, unplug it, hold BOOTSEL, and plug it in again for the last step: the phone
+   locks the boot pages only once `ROLLBACK_REQUIRED` is set.
+8. **Then plug it in normally** and install it from the wallet that will keep it (Step 10).
+
+What the phone does differently: a blank secret page is written and locked in one step (Steps 4 and
+the secret half of 6), so no page stands written and unlocked between steps; every write is read
+back, the rows picotool's JSON load writes included; and Step 9's refused-image check is made before
+the first boot, on a changed copy of the signed image.
+
+The commands below are the same procedure from a computer with picotool.
+
 ## Step 0 — check the board is blank (READ-ONLY)
 
 Name each board. Its secret and records live under `~/.dsm-anchor-secure-boot/boards/<name>/`.
+Every command also names the board's RP2350 chip id, as `picotool info -d` gives it in BOOTSEL (`chipid`,
+16 hexadecimal digits), and every picotool call goes to that chip alone: with two boards in BOOTSEL, nothing
+reaches the other. The first run records the chip id under the board's name, and a later run under that name
+for another chip stops.
 
 ```
-./provision-otp.sh --board <name> --check-blank
+./provision-otp.sh --board <name> --ser <chip id> --check-blank
 ```
-It refuses when any row this procedure writes already holds a value.
+It refuses when any row this procedure writes data into already holds a value, or when a lock row it burns
+holds a bit outside what it burns there. A lock row already holding some of those bits is fine and is named:
+on the boards read on 2026-11-11 the boot configuration and boot key pages' lock rows hold `0x040404`
+(Non-secure read-only), within the `0x151515` Step 9b burns. One exception it also names: a secret
+page an earlier procedure burned and locked exactly as Step 4 and Step 6 do (the lock row says so; the
+bootloader cannot read the rows of a locked page). Such a board keeps that secret,
+which production reads through the same rows (OTP is never rewritten, and the board holds its only copy):
+skip Step 4 on it, and Step 6 locks the digest page alone. A secret page in any other state stops the procedure.
 
 ## Step 1 — create the boot signing key, once
 
@@ -202,33 +280,35 @@ request `NOT_UP`, naming what is missing (`secure boot is not enabled in OTP`).
 ## Step 4 — burn the board's secret  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --board <name> --gen-secret
-./provision-otp.sh --board <name> --write-secret            # DRY RUN: prints the command
-./provision-otp.sh --board <name> --write-secret --commit   # page 48
+./provision-otp.sh --board <name> --ser <chip id> --gen-secret
+./provision-otp.sh --board <name> --ser <chip id> --write-secret            # DRY RUN: prints the command
+./provision-otp.sh --board <name> --ser <chip id> --write-secret --commit   # page 48
 ```
+On a board whose secret page Step 0 found sealed, both refuse: it already holds its secret and goes on with it.
 
 ## Step 5 — burn the firmware digest  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --board <name> --write-digest
-./provision-otp.sh --board <name> --write-digest --commit   # page 46
+./provision-otp.sh --board <name> --ser <chip id> --write-digest
+./provision-otp.sh --board <name> --ser <chip id> --write-digest --commit   # page 46
 ```
 
 ## Step 6 — lock both pages  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --board <name> --lock-pages
-./provision-otp.sh --board <name> --lock-pages --commit
+./provision-otp.sh --board <name> --ser <chip id> --lock-pages
+./provision-otp.sh --board <name> --ser <chip id> --lock-pages --commit
 ```
 Secure firmware reads both; Non-secure reads neither; nothing writes either. The USB bootloader
 reads the digest and never the secret. With `--commit` this removes `host-secret.bin`: nothing reads it
-again, and it could restore no board, since the chip's key does not leave the chip.
+again, and it could restore no board, since the chip's key does not leave the chip. On a board whose secret
+page Step 0 found sealed, only the digest page is locked here; its secret page is already as this leaves it.
 
 ## Step 7 — burn the boot key's hash  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --board <name> --write-bootkey
-./provision-otp.sh --board <name> --write-bootkey --commit
+./provision-otp.sh --board <name> --ser <chip id> --write-bootkey
+./provision-otp.sh --board <name> --ser <chip id> --write-bootkey --commit
 ```
 `picotool otp load` reads back what it wrote and fails on a mismatch. Do not go on after a failure:
 a boot key with uncorrectable faults leaves a secure-boot board unbootable.
@@ -239,8 +319,8 @@ This step takes the hash from it and Step 8 burns the flags.
 ## Step 8 — lock down  ⚠️ IRREVERSIBLE, LAST
 
 ```
-./provision-otp.sh --board <name> --lockdown
-./provision-otp.sh --board <name> --lockdown --commit
+./provision-otp.sh --board <name> --ser <chip id> --lockdown
+./provision-otp.sh --board <name> --ser <chip id> --lockdown --commit
 ```
 This marks boot key 0 valid and keys 1-3 invalid, then sets `SECURE_BOOT_ENABLE` and
 `DEBUG_DISABLE`. The board now boots only images signed by the key, with debug off.
@@ -271,8 +351,8 @@ bound it yet. Stop and look if any line is not as stated.
 ## Step 9b — lock the boot pages  ⚠️ IRREVERSIBLE, AFTER THE FIRST BOOT
 
 ```
-./provision-otp.sh --board <name> --lock-boot-pages
-./provision-otp.sh --board <name> --lock-boot-pages --commit
+./provision-otp.sh --board <name> --ser <chip id> --lock-boot-pages
+./provision-otp.sh --board <name> --ser <chip id> --lock-boot-pages --commit
 ```
 Pages 1 and 2, the boot configuration and the boot key hashes, become read-only for everyone, and page 44,
 the rollback version, read-only for the USB bootloader. Not before Step 9: that first boot of the signed

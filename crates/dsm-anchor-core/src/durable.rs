@@ -29,14 +29,15 @@ use crate::appliance::{
 use crate::enrollment::{ChipBirth, Provisioning};
 use crate::proto::{arr32, pb, ProtoError};
 use crate::root_advance::{OfflineRelease, Transition};
-use crate::tropic::{PartitionSig, Tropic};
+use crate::tropic::{PartitionSig, Tropic, TropicError};
 
 /// Why the durable record could not be written or read.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StoreError {
-    /// The store did not take the write or answer the read: no power, or the bus failed.
-    Unavailable,
-    /// The store's device took the command and refused it.
+    /// The chip the store lives in did not take the write or answer the read, for the reason it
+    /// gives: its link failed, or it refused the command.
+    Chip(TropicError),
+    /// The store will not do it: a try of a record over the record it holds.
     Refused,
     /// The store holds written slots that form no complete record.
     Corrupt,
@@ -512,6 +513,16 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             sender_device_root_after,
         )?;
         self.persist()
+    }
+
+    /// [`Appliance::draw_authorization_nonce`]. Held in memory only, so nothing is written.
+    pub fn draw_authorization_nonce(&mut self) -> Result<[u8; 32], DurableError> {
+        Ok(self.app.draw_authorization_nonce()?)
+    }
+
+    /// [`Appliance::hold_rehearsal_nonce`], for a try-run's anchor.
+    pub(crate) fn hold_rehearsal_nonce(&mut self, nonce: [u8; 32]) {
+        self.app.hold_rehearsal_nonce(nonce);
     }
 
     /// [`Appliance::authorize`]: the owner's standing authorization of the next prepare. Held in

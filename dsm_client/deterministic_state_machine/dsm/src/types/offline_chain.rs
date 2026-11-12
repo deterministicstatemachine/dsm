@@ -1038,6 +1038,10 @@ pub(crate) mod fixture {
                 )
                 .expect("the spend advances");
             // The device authorizes exactly this prepare under its own key, as the wallet does.
+            let nonce = self
+                .app
+                .draw_authorization_nonce()
+                .expect("the anchor draws a nonce");
             let authorization = owner_authorization_digest(
                 &self.pin.bundle,
                 &frontier,
@@ -1045,6 +1049,7 @@ pub(crate) mod fixture {
                 &transition_digest(&core, &challenge),
                 &out.transition.pre_root(),
                 &out.child_r_a,
+                &nonce,
             );
             let signature = crate::crypto::sphincs::sign(
                 crate::crypto::sphincs::SphincsVariant::SPX256f,

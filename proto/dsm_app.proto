@@ -2248,6 +2248,86 @@ message AnchorTryRunResponse {
   bool              trial     = 5;
 }
 
+// A board's one-time setup for production, from the phone alone (owner, 2026-11-11: "Not everyone
+// has a Mac. It has to be doable from the phone"): the phone drives the board's own USB bootloader
+// while the board is in BOOTSEL. The steps, in the runbook's order.
+enum AnchorBoardStepKind {
+  ANCHOR_BOARD_STEP_KIND_UNSPECIFIED     = 0;
+  ANCHOR_BOARD_STEP_KIND_LOAD_IMAGE      = 1; // Step 3: the signed image into flash (flash, not OTP)
+  ANCHOR_BOARD_STEP_KIND_SEAL_SECRET     = 2; // Step 4 with its page's lock, on a board whose page is blank
+  ANCHOR_BOARD_STEP_KIND_WRITE_DIGEST    = 3; // Step 5: the Non-secure app's digest
+  ANCHOR_BOARD_STEP_KIND_LOCK_DIGEST     = 4; // Step 6: the digest page locked
+  ANCHOR_BOARD_STEP_KIND_WRITE_BOOT_KEY  = 5; // Step 7: the boot key's hash
+  ANCHOR_BOARD_STEP_KIND_LOCKDOWN        = 6; // Step 8: secure boot on, debug off
+  ANCHOR_BOARD_STEP_KIND_BOOT            = 7; // Step 9: reboot into the signed image, once
+  ANCHOR_BOARD_STEP_KIND_LOCK_BOOT_PAGES = 8; // Step 9b: the boot pages locked, back in BOOTSEL
+  // Step 9's check, after the lockdown and before the first boot: the release's image with one byte
+  // of its code changed is loaded and booted, the board must come back in BOOTSEL, and the signed
+  // image is loaded back. Not a burn, and never listed among the steps: `offered` names it then.
+  ANCHOR_BOARD_STEP_KIND_CHECK_CHANGED_IMAGE = 9;
+  // Steps 6 and 9b's page locks on a board whose bootloader may not write them (an RP2350 A2 with page
+  // 63 closed to it): the lock image (crates/dsm-anchor-lock-pages) is loaded and started after the
+  // digest, sets the digest page's and the rollback page's locks as Secure code, and the board comes
+  // back in BOOTSEL; the rows are read back and the signed image loaded again. Listed in place of Step
+  // 6 on such a board.
+  ANCHOR_BOARD_STEP_KIND_LOCK_PAGES = 10;
+  // Before the board's first burn (its firmware digest blank, its lockdown not done), an image the app
+  // carries is loaded into flash and started; the board comes back as the DSM Anchor and is asked how
+  // it stands, and its answer is reported. Flash only, on the board: Step 3 loads the signed image over
+  // it. Neither image is signed, and neither is listed among the steps: `offered` names them while they
+  // may run. The owner's message, 2026-11-12: "The entire appliance setup must work from an Android
+  // phone, without a Mac or any other computer."
+  //
+  // The prepare image (the secure monitor built with `prepare_chip`): on a test part whose PTRNG Tropic
+  // Square left unconfigured, it clears CFG_START_UP[RNGTEST_DIS], for good, and erases any key the chip
+  // made before; it answers every request with how that went. Permanent on the chip.
+  ANCHOR_BOARD_STEP_KIND_PREPARE_CHIP = 11;
+  // The trial image (the secure monitor built with `bench_self_enroll`): an anchor that installs
+  // nothing permanent, for the try-run on this very board from the wallet (`anchor.tryRun`).
+  ANCHOR_BOARD_STEP_KIND_TRIAL_IMAGE = 12;
+}
+
+enum AnchorBoardStepState {
+  ANCHOR_BOARD_STEP_STATE_UNSPECIFIED = 0;
+  ANCHOR_BOARD_STEP_STATE_DONE        = 1;
+  ANCHOR_BOARD_STEP_STATE_NEXT        = 2;
+  ANCHOR_BOARD_STEP_STATE_LATER       = 3;
+  ANCHOR_BOARD_STEP_STATE_BLOCKED     = 4; // the board's bootloader cannot write what is left: `refused` says why
+}
+
+message AnchorBoardStep {
+  AnchorBoardStepKind  kind      = 1;
+  AnchorBoardStepState state     = 2;
+  bool                 permanent = 3; // it burns OTP: it can never be undone
+  string               name      = 4; // what it does, as the person reads it
+}
+
+// `anchor.board.read`, and the answer to every `anchor.board.step`: the board in BOOTSEL as its own
+// bootloader shows it, read fresh from its OTP every time, and where its setup stands.
+message AnchorBoardResponse {
+  bool   board_connected = 1;  // a board in BOOTSEL is on USB and the phone may use it
+  string chip_id         = 2;  // its RP2350 chip id, 16 hexadecimal digits, as its bootloader names it
+  string release         = 3;  // the production release this app carries, or why it carries none
+  repeated AnchorBoardStep steps = 4;
+  string refused         = 5;  // why the setup cannot go on, or why the last step stopped
+  repeated string found  = 6;  // what the read-only check found beyond blank (lock rows already set)
+  // What the last step did: each row and byte it wrote, confirmed by its read-back, and what the board
+  // answered after it.
+  repeated string written = 7;
+  bool   done            = 8;  // every step is done: the board goes on to its install
+  // What the board takes now besides its next step, each on its own and each with its name and whether
+  // it can be undone (its state NEXT): the prepare and the trial image before its first burn, and the
+  // changed-image check before its first boot.
+  repeated AnchorBoardStep offered = 9;
+}
+
+// `anchor.board.step`: run the board's next step. The person types back the chip id the board read
+// named, so a step only ever reaches the board they are looking at.
+message AnchorBoardStepRequest {
+  AnchorBoardStepKind step    = 1;
+  string              chip_id = 2;
+}
+
 // ── Offline-cash (two-regime money model) ──────────────────────────────────
 // Deliberately load online balance into a device-bound offline-bearer allocation
 // ("cash in hand"), spend it offline, reconcile it back. Request bodies ride
@@ -2876,6 +2956,8 @@ message Envelope {
     // Offline-bearer anchor status (signal (c)) — read-only `anchor.status` diagnostics.
     AnchorStatusResponse              anchor_status_response           = 112;
     AnchorTryRunResponse              anchor_try_run_response          = 141;
+    // A board's one-time setup from the phone, through its own bootloader (`anchor.board.*`).
+    AnchorBoardResponse               anchor_board_response            = 143;
 
     // Offline-cash load/unload (two-regime money model): device-bound allocation balance.
     OfflineCashResponse               offline_cash_response            = 113;

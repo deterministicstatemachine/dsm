@@ -2,6 +2,8 @@
 //! Anchor route handlers for the app router (offline-bearer signal (c)).
 //!
 //! Query routes:
+//! - `anchor.board.read` → a board in BOOTSEL as its own bootloader shows it, and where its one-time
+//!   setup for production stands. Writes nothing.
 //! - `anchor.tryRun` → an install gone through on the connected anchor with its permanent parts
 //!   substituted, what it found, and what installing would make permanent. Binds nothing.
 //! - `anchor.status` → read-only [`AnchorStatusResponse`] diagnostics snapshot of the sender's
@@ -10,6 +12,7 @@
 //!   rather than failing the route.
 
 use dsm::types::proto as generated;
+use prost::Message;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 
@@ -33,11 +36,37 @@ fn status_response(
     }
 }
 
+/// A board's setup needs the phone's USB link to the board's bootloader, which the device layer
+/// installs; a device without one says so.
+const NO_BOARD_LINK: &str = "this device has no USB link to a board's bootloader";
+
+/// `anchor.board.step`: the board's next step, on the board whose chip id the person typed back.
+fn board_step(i: &AppInvoke) -> AppResult {
+    let arg_pack = match generated::ArgPack::decode(&*i.args) {
+        Ok(p) => p,
+        Err(e) => return err(format!("anchor.board.step: decode ArgPack failed: {e}")),
+    };
+    let request = match generated::AnchorBoardStepRequest::decode(&*arg_pack.body) {
+        Ok(r) => r,
+        Err(e) => return err(format!("anchor.board.step: decode the request failed: {e}")),
+    };
+    match crate::bridge::anchor_board_setup() {
+        Some(setup) => {
+            let answer = tokio::task::block_in_place(move || setup.step(&request));
+            pack_envelope_ok(generated::envelope::Payload::AnchorBoardResponse(answer))
+        }
+        None => err(format!("anchor.board.step: {NO_BOARD_LINK}")),
+    }
+}
+
 impl AppRouterImpl {
     /// `anchor.install`: install the connected anchor for this device, for good, or as a trial on the
     /// trial image. The one route that makes an anchor permanent, and only ever on being told to: the
     /// anchor goes through its try-run again first, and refuses with nothing written unless it passes.
     pub(crate) async fn handle_anchor_invoke(&self, i: AppInvoke) -> AppResult {
+        if i.method == "anchor.board.step" {
+            return board_step(&i);
+        }
         if i.method != "anchor.install" {
             return err(format!("unknown anchor route: {}", i.method));
         }
@@ -58,6 +87,13 @@ impl AppRouterImpl {
                     status_response(self.core_sdk.anchor_appliance_status()),
                 ))
             }
+            "anchor.board.read" => match crate::bridge::anchor_board_setup() {
+                Some(setup) => {
+                    let answer = tokio::task::block_in_place(move || setup.read());
+                    pack_envelope_ok(generated::envelope::Payload::AnchorBoardResponse(answer))
+                }
+                None => err(format!("anchor.board.read: {NO_BOARD_LINK}")),
+            },
             "anchor.tryRun" => {
                 let core = self.core_sdk.clone();
                 match tokio::task::block_in_place(move || core.anchor_try_run()) {

@@ -431,9 +431,9 @@ pub struct B0xSubmissionParams {
     /// §16.6 defect zero: the DETERMINISTIC submission id, derived from the
     /// receipt commitment (`dsm::crypto::spool_address::submission_id`), so it is
     /// known BEFORE the send is committed locally and is identical on every
-    /// retry. Storage nodes enforce `UNIQUE(message_id)` with
-    /// `ON CONFLICT DO NOTHING`, so a resend collapses onto the same spool row
-    /// instead of spawning duplicates.
+    /// retry. A storage node keeps every write and deduplicates none (storage
+    /// spec §8), so a resend is spooled again under the same id; the recipient
+    /// takes one message per id, recording each id it consumed (`b0x_consumed`).
     pub submission_id: String,
     /// Sender economic locators (3.5b): OUTPUTS of the sender's built
     /// admission — the admitted position and THE debit mutation index of the
@@ -1865,9 +1865,9 @@ impl B0xSDK {
         //
         // MESSAGE ID: the submission id the send derived from the receipt
         // commitment (`dsm::crypto::spool_address::submission_id`). It is known
-        // before the send is committed locally and is identical on every retry;
-        // storage nodes enforce `UNIQUE(message_id)`, so a resend collapses onto
-        // the same spool row instead of spooling a duplicate.
+        // before the send is committed locally and is identical on every retry.
+        // A node spools a resend again (it deduplicates nothing, storage spec
+        // §8); the recipient takes one message per id, by the ids it consumed.
         let message_id_b32 = params.submission_id.clone();
         let message_id_bytes: [u8; 16] = {
             let decoded = text_id::decode_base32_crockford(&message_id_b32).ok_or_else(|| {

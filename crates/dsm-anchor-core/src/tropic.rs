@@ -17,17 +17,117 @@ use alloc::vec::Vec;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TropicError {
-    /// SPI / L3-session failure, or chip absent.
-    Comm,
+    /// The chip gave no answer a session can use: the link, the session or the chip failed, as named.
+    /// A locked board has no debug port, so the name is all that says which.
+    Comm(ChipLink),
     /// `MCounter_Update` on an exhausted counter (`H == 0`) — online only.
     CounterExhausted,
-    /// The chip took the command and refused it: a key or slot in the wrong state, an access the
-    /// session's pairing slot is denied, a command or parameter it does not accept.
-    Refused,
+    /// The chip took the command and refused it, or the board read back from the chip a state the
+    /// step cannot take: which, as named.
+    Refused(ChipRefusal),
     /// After closing its birth the chip still accepts a command the closed birth denies.
     CageOpen,
     /// The board's random generator failed its own health tests: nothing random is drawn from it.
     NoEntropy,
+}
+
+/// Why the chip gave no answer a session can use. Every one but the first is the fault the chip's
+/// driver reports. A chip with no power, its data line held low, never reports itself ready, so the
+/// driver gives up on it as [`ChipLink::Busy`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChipLink {
+    /// No session is open on the chip: an earlier step lost it and none was opened again.
+    NoSession,
+    /// The chip is in alarm mode, and answers nothing until it is rebooted.
+    AlarmMode,
+    /// The SPI bus failed.
+    Bus,
+    /// The chip never reported itself ready.
+    Busy,
+    /// An answer did not decrypt under the session.
+    Decryption,
+    /// A command did not encrypt under the session.
+    Encryption,
+    /// The chip-select line failed.
+    ChipSelect,
+    /// The secure session's handshake failed.
+    Handshake,
+    /// The chip's status byte is not one its driver reads.
+    ChipStatus,
+    /// An answer's CRC did not hold.
+    Crc,
+    /// The chip's L2 answer was not a valid one.
+    L2Response,
+    /// The chip's answer was not a valid one.
+    Response,
+    /// An L3 answer ran past its buffer.
+    L3Overflow,
+    /// An L3 answer did not parse.
+    L3Parse,
+    /// The chip reported a hardware failure.
+    HardwareFail,
+    /// The chip answered with a status the command does not expect.
+    UnexpectedStatus,
+}
+
+/// What the chip refused, as its driver names the refusal, or what the board read back from the chip
+/// that the step cannot take.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChipRefusal {
+    /// The key in the slot asked for does not exist.
+    InvalidKey,
+    /// The chip does not take this L3 command.
+    InvalidL3Command,
+    /// A public key in the chip's certificate is not a valid one.
+    InvalidPublicKey,
+    /// A parameter of the command is not one the chip takes.
+    InvalidParameter,
+    /// The chip refused an L2 command with a status of its own.
+    L2Status,
+    /// The chip did not carry out the L3 command.
+    L3CommandFailed,
+    /// The request is larger than the chip takes.
+    RequestTooLarge,
+    /// The slot already holds something.
+    SlotNotEmpty,
+    /// The slot has expired.
+    SlotExpired,
+    /// The chip did not take the update.
+    UpdateFailed,
+    /// The monotonic counter is not a valid one.
+    CounterInvalid,
+    /// The slot is empty.
+    SlotEmpty,
+    /// The slot is not a valid one.
+    SlotInvalid,
+    /// The session's pairing slot may not do this.
+    Unauthorized,
+    /// A step only the factory pairing slot takes was asked on another.
+    NotFactorySlot,
+    /// `CFG_START_UP` read back other than as written.
+    StartUpNotAsWritten,
+    /// The resident key is not an Ed25519 key the chip generated.
+    ResidentKeyNotGenerated,
+    /// The board's pairing slot holds another board's key.
+    BoardSlotHoldsAnotherKey,
+    /// The board's pairing slot read back other than the key written to it.
+    BoardKeyNotAsWritten,
+    /// The factory slot may no longer write the board's pairing slot.
+    BoardSlotNotWritable,
+    /// A pairing slot that is neither the factory's nor the board's holds a key. The birth cages
+    /// the board's own slot and invalidates the factory's; a key in another slot would stay valid
+    /// after it, with every right the chip gives a slot by default.
+    SpareSlotHoldsKey,
+    /// The board's pairing slot may no longer invalidate the factory slot.
+    FactorySlotNotInvalidatable,
+    /// The session's pairing slot may no longer write the access rules.
+    AccessRulesNotWritable,
+    /// An access rule read back other than as written.
+    AccessRuleNotAsWritten,
+    /// The counter stands past the start a birth gives it.
+    CounterPastBirth,
+    /// The chip gave fewer random bytes than asked for.
+    ShortRandom,
 }
 
 /// TROPIC01 primitives used over an authenticated L3 session, mediated by the RP2350

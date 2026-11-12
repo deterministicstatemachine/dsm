@@ -336,8 +336,12 @@ impl<M: SlotMemory> ActiveStore for SlottedStore<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tropic::{ChipLink, TropicError};
     use alloc::vec;
     use core::fmt::Debug;
+
+    /// A power cut, as the chip's driver gives it: a chip with no power never reports itself ready.
+    const CUT: StoreError = StoreError::Chip(TropicError::Comm(ChipLink::Busy));
 
     fn ok<T, E: Debug>(result: Result<T, E>, what: &str) -> T {
         match result {
@@ -385,7 +389,7 @@ mod tests {
 
         fn spend(&mut self) -> Result<(), StoreError> {
             match self.budget {
-                Some(0) => Err(StoreError::Unavailable),
+                Some(0) => Err(CUT),
                 Some(n) => {
                     self.budget = Some(n - 1);
                     Ok(())
@@ -469,7 +473,7 @@ mod tests {
                     assert_eq!(read, Some(after));
                     break;
                 }
-                Err(e) => assert_eq!(e, StoreError::Unavailable),
+                Err(e) => assert_eq!(e, CUT),
             }
             assert_eq!(read, Some(before.clone()), "cut after {steps} operations");
             steps += 1;
@@ -495,7 +499,7 @@ mod tests {
                     assert_eq!(read, Some(first));
                     break;
                 }
-                Err(e) => assert_eq!(e, StoreError::Unavailable),
+                Err(e) => assert_eq!(e, CUT),
             }
             assert_eq!(read, None, "cut after {steps} operations");
             steps += 1;
@@ -589,8 +593,8 @@ mod tests {
     fn a_failure_of_the_bus_is_never_read_as_a_torn_slot() {
         let mut store = ok(SlottedStore::new(Memory::new(32, 96), 0, 256), "laid out");
         ok(store.write(&record(200, 0x21)), "written");
-        store.memory.read_fault = Some(StoreError::Unavailable);
-        assert_eq!(store.read(), Err(StoreError::Unavailable));
+        store.memory.read_fault = Some(CUT);
+        assert_eq!(store.read(), Err(CUT));
     }
 
     #[test]

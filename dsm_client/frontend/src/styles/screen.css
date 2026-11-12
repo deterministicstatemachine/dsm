@@ -364,6 +364,8 @@
   margin: 10px 0 8px;
 }
 .sb-actions > * { flex: 1 1 0; min-width: 0; }
+/* A label longer than its button's share of the row wraps inside the button, never past its edge. */
+.sb-actions > .sb-btn { white-space: normal; overflow-wrap: anywhere; text-align: center; line-height: 1.25; }
 .sb-actions--end { justify-content: flex-end; }
 .sb-actions--end > * { flex: 0 0 auto; }
 .sb-btn {

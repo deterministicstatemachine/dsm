@@ -279,10 +279,12 @@ pub fn insert_sender_outbox_artifact_with_conn(
     // A re-entry on the same submission id is idempotent ONLY when it carries
     // the identical artifact. The id is 16 bytes truncated from a 32-byte
     // digest, so a collision is a 128-bit possibility rather than an
-    // impossibility -- and the storage node resolves `UNIQUE(message_id)` with
-    // `ON CONFLICT DO NOTHING`, which ACCEPTS a colliding id silently. Without
-    // this check, two different artifacts sharing an id would see the second
-    // quietly discarded and its transfer stall with no error anywhere.
+    // impossibility -- and a recipient takes one message per id: the node keeps
+    // both (it deduplicates nothing, storage spec §8), but once the recipient
+    // has consumed one it records the id (`b0x_consumed`) and passes every later
+    // copy by. Without this check, two different artifacts sharing an id would
+    // see the second quietly passed by and its transfer stall with no error
+    // anywhere.
     //
     // Same id + same bytes -> no-op. Same id + different bytes -> fail closed.
     if let Some((existing_bytes, existing_digest)) = tx
@@ -1817,10 +1819,10 @@ mod tests {
     /// Same submission id + DIFFERENT bytes must fail closed.
     ///
     /// The id is 16 bytes truncated from a 32-byte digest, so a collision is a
-    /// 128-bit possibility rather than an impossibility -- and the storage node
-    /// resolves `UNIQUE(message_id)` with `ON CONFLICT DO NOTHING`, which
-    /// ACCEPTS a colliding id silently. Uniqueness alone is therefore not a
-    /// safety property; the content equality check is.
+    /// 128-bit possibility rather than an impossibility -- and a recipient takes
+    /// one message per id: the node keeps both (storage spec §8), and the
+    /// recipient passes by every copy after the first it consumed. Uniqueness
+    /// alone is therefore not a safety property; the content equality check is.
     ///
     /// Same id + same bytes stays idempotent, so an ordinary retry is unaffected.
     #[test]

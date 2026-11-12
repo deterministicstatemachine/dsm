@@ -143,9 +143,12 @@ pub enum BootRecoveryRefusal {
 
 /// The digest the owner's device key signs to authorize one prepare: this anchor's bundle `B`,
 /// the frontier `h_i` and counter `u_i` it advances from, the transition digest `D_{i+1}` (which
-/// binds the transition and the receiver's challenge) and the device roots `R_i`/`R_{i+1}` the
-/// release will carry. Bound to all of them, a signature authorizes this one prepare on this one
-/// anchor: replayed elsewhere, or after the anchor has moved, it authorizes nothing.
+/// binds the transition and the receiver's challenge), the device roots `R_i`/`R_{i+1}` the
+/// release will carry, and the `nonce` this anchor drew for the authorization
+/// ([`Appliance::draw_authorization_nonce`]). Bound to all of them, a signature authorizes this one
+/// prepare on this one anchor, once: replayed elsewhere, after the anchor has moved, or after the
+/// nonce is gone (a prepare used it, the owner cancelled, the anchor restarted), it authorizes
+/// nothing.
 pub fn owner_authorization_digest(
     bundle: &[u8; 32],
     prev_frontier: &[u8; 32],
@@ -153,9 +156,10 @@ pub fn owner_authorization_digest(
     transition_digest: &[u8; 32],
     sender_device_root_before: &[u8; 32],
     sender_device_root_after: &[u8; 32],
+    nonce: &[u8; 32],
 ) -> [u8; 32] {
     crate::hash::h(
-        crate::domain::OWNER_AUTHORIZATION_V1,
+        crate::domain::OWNER_AUTHORIZATION_V2,
         &[
             bundle,
             prev_frontier,
@@ -163,6 +167,7 @@ pub fn owner_authorization_digest(
             transition_digest,
             sender_device_root_before,
             sender_device_root_after,
+            nonce,
         ],
     )
 }
@@ -190,6 +195,12 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     /// ([`Self::authorize`]), consumed by the prepare that claims it. Held in memory only: a reboot
     /// drops it, and the owner authorizes again.
     authorized: Option<[u8; 32]>,
+    /// The nonce drawn for the owner's next authorization ([`Self::draw_authorization_nonce`]),
+    /// which the authorized digest must bind. Held in memory only and used once: the prepare that
+    /// claims an authorization takes it, a cancel drops it, and a restart starts with none. An
+    /// authorization recorded off the link therefore serves the one prepare it was made for and
+    /// can never be played again.
+    authorization_nonce: Option<[u8; 32]>,
     /// The owner's DSM device id its bundle binds: a payment it receives must name it.
     pub owner_device_id: [u8; 32],
     /// The policy its bundle binds: a payer's anchor must be enrolled under it too.
@@ -228,6 +239,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             install,
             owner_pk,
             authorized: None,
+            authorization_nonce: None,
             owner_device_id: birth.device_id,
             policy_hash: birth.policy_hash,
             checked: None,
@@ -235,6 +247,36 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             tropic,
             _p: PhantomData,
         }
+    }
+
+    /// Draw the nonce the owner's next authorization must bind, from both hardware sources, in
+    /// place of any drawn before, and drop any authorization held: an authorization is for the
+    /// nonce drawn last. Refused unless Ready. Nothing durable changes.
+    pub fn draw_authorization_nonce(&mut self) -> Result<[u8; 32], ApplianceError> {
+        if self.active.status != Status::Ready {
+            return Err(ApplianceError::WrongState);
+        }
+        self.authorized = None;
+        self.authorization_nonce = None;
+        let entropy = self
+            .tropic
+            .challenge_entropy()
+            .map_err(ApplianceError::Tropic)?;
+        let nonce = crate::hash::h(
+            crate::domain::AUTHORIZATION_NONCE_V1,
+            &[&entropy.board, &entropy.chip],
+        );
+        self.authorization_nonce = Some(nonce);
+        Ok(nonce)
+    }
+
+    /// A try-run's nonce, held as a drawn one is. A rehearsal is two requests with the anchor made
+    /// anew for each, so the nonce its payment's authorization binds is the rehearsal's own fixed
+    /// one ([`crate::try_run`]), not one drawn in a request that is gone by the next. Only a
+    /// try-run's anchor, under the rehearsal owner's key, is given one.
+    pub(crate) fn hold_rehearsal_nonce(&mut self, nonce: [u8; 32]) {
+        self.authorized = None;
+        self.authorization_nonce = Some(nonce);
     }
 
     /// The owner's authorization of the next prepare: `signature`, under the device key the anchor
@@ -294,6 +336,10 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         if self.active.status != Status::Ready {
             return Err(ApplianceError::WrongState);
         }
+        // The authorization and its nonce are taken before anything is checked, so this prepare
+        // uses them up whatever its outcome: nothing below leaves either for a later one.
+        let authorized = self.authorized.take();
+        let nonce = self.authorization_nonce.take();
         if !ct_eq_32(&self.active.root, t.prev_root) {
             return Err(ApplianceError::PrevRootMismatch);
         }
@@ -341,8 +387,11 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             return Err(ApplianceError::NextRootMismatch);
         }
 
-        // The owner authorized exactly this prepare, from this frontier and counter, or nothing
-        // is signed. The authorization is consumed here whatever follows: it serves one prepare.
+        // The owner authorized exactly this prepare, from this frontier and counter, under the
+        // nonce this anchor drew for it, or nothing is signed.
+        let (Some(authorized), Some(nonce)) = (authorized, nonce) else {
+            return Err(ApplianceError::OwnerUnauthorized);
+        };
         let expected = owner_authorization_digest(
             &self.bundle,
             &self.active.root,
@@ -350,10 +399,10 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             &d,
             sender_device_root_before,
             sender_device_root_after,
+            &nonce,
         );
-        match self.authorized.take() {
-            Some(authorized) if ct_eq_32(&authorized, &expected) => {}
-            _ => return Err(ApplianceError::OwnerUnauthorized),
+        if !ct_eq_32(&authorized, &expected) {
+            return Err(ApplianceError::OwnerUnauthorized);
         }
 
         let m = root_advance_message(
@@ -585,6 +634,9 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             Record::Prepared(_) => {
                 self.active.status = Status::Ready;
                 self.active.record = Record::Empty;
+                // The owner withdrew the payment: nothing it authorized for it is left to use.
+                self.authorized = None;
+                self.authorization_nonce = None;
                 Ok(())
             }
             _ => Err(ApplianceError::WrongState),

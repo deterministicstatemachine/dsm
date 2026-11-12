@@ -282,16 +282,21 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         None => return Err(InitFailure::Entropy),
     }
 
+    // A production image reads the board's secret only on a board locked for it: the lock is
+    // checked first, so a board that fails it is refused with the secret never read into memory.
+    #[cfg(feature = "production")]
+    sealed::assert_secure_context().map_err(InitFailure::Sealed)?;
+
     // The board's sealed secret: without it the anchor has no identity to serve under.
     #[cfg(not(feature = "bench_self_enroll"))]
     let mut sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
-    // A board locked for production is a finished unit, and the trial stands down on it. Any other
-    // board, its secret page blank or written by an earlier procedure, takes the trial under a secret
-    // of this boot held nowhere: the page is neither used nor written.
-    #[cfg(all(
-        feature = "bench_self_enroll",
-        not(any(feature = "identify_chip", feature = "prepare_chip"))
-    ))]
+    // A board locked for production is a finished unit, and the trial and the prepare image stand
+    // down on it. Any other board, its secret page blank or written by an earlier procedure, takes
+    // either under a secret of this boot held nowhere: the page is neither used nor written. The
+    // prepare image writes the chip, never the board, and a board whose page an earlier procedure
+    // sealed goes on to production with that page as it is (one image prepares every board: owner,
+    // 2026-11-08).
+    #[cfg(all(feature = "bench_self_enroll", not(feature = "identify_chip")))]
     let mut sealed: [u8; 32] = {
         match sealed::read_sealed_secret() {
             Ok(mut burned) => {
@@ -307,16 +312,6 @@ pub unsafe fn init() -> Result<(), InitFailure> {
             .random_key()
             .ok_or(InitFailure::Entropy)?
     };
-    // The prepare image writes the chip irreversibly, so it runs only on a board whose secret page is
-    // blank, and its secret is one of this boot held nowhere.
-    #[cfg(feature = "prepare_chip")]
-    let mut sealed: [u8; 32] = match sealed::read_sealed_secret() {
-        Err(SealedError::Unprovisioned) => (Rp2350Board { rosc: &rosc })
-            .random_key()
-            .ok_or(InitFailure::Entropy)?,
-        Ok(_burned) => return Err(InitFailure::Sealed(SealedError::AlreadySealed)),
-        Err(cause) => return Err(InitFailure::Sealed(cause)),
-    };
     // The identify image binds nothing and needs no secret. It says whether the board holds one.
     #[cfg(feature = "identify_chip")]
     let board_otp = match sealed::read_sealed_secret() {
@@ -327,9 +322,6 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         Err(SealedError::Unprovisioned) => "its OTP secret page is blank",
         Err(cause) => return Err(InitFailure::Sealed(cause)),
     };
-    #[cfg(feature = "production")]
-    sealed::assert_secure_context().map_err(InitFailure::Sealed)?;
-
     // Let the TROPIC01 settle after cold power-up before the first SPI transaction (~1 s @150 MHz).
     cortex_m::asm::delay(150_000_000);
 

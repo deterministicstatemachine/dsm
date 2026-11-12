@@ -1380,7 +1380,9 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     assert!(!ended.connected, "{}", ended.status);
     assert!(ended.awaiting_install, "{}", ended.status);
     assert!(
-        ended.status.contains("the trial on this anchor ended"),
+        ended
+            .status
+            .contains("the trial anchor this wallet had stopped answering"),
         "{}",
         ended.status
     );
@@ -1399,7 +1401,7 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     assert!(
         again
             .status
-            .contains("what that account held is gone: 19.93 ERA"),
+            .contains("What that account held is gone: 19.93 ERA"),
         "{}",
         again.status
     );
@@ -3954,6 +3956,10 @@ async fn a_release_cut_off_after_its_prepare_goes_back_to_waiting_with_the_count
     let staged = stage_release(&a, &b, &operation);
     // A authorizes exactly this prepare under its own key, as
     // `release_offline_bearer` does: the anchor signs nothing for anyone else.
+    let nonce = (*appliance)
+        .clone()
+        .authorization_nonce()
+        .expect("A's anchor draws the nonce its authorization binds");
     let digest = anchor_core::appliance::owner_authorization_digest(
         &staged.spend.staged.pin.bundle,
         &staged.spend.staged.appliance_prev_root,
@@ -3964,6 +3970,7 @@ async fn a_release_cut_off_after_its_prepare_goes_back_to_waiting_with_the_count
         ),
         &staged.root_before,
         &staged.root_after,
+        &nonce,
     );
     let signature = dsm::crypto::sphincs::sphincs_sign(
         &crate::sdk::signing_authority::current_secret_key().expect("A's key"),

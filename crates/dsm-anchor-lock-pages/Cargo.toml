@@ -1,0 +1,26 @@
+[package]
+name = "dsm-anchor-lock-pages"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "DSM anchor RP2350 lock image: run once from the phone before the lockdown, it sets the two page locks the burn procedure needs from page 63 (the digest page's, once the digest is burned, and the rollback page's) as Secure code at a normal boot, on a board whose USB bootloader may not write them (an RP2350 A2 whose page 63 is closed to the bootloader and open to Secure code). Writes nothing else, then reboots into BOOTSEL; the phone reads the rows back. Never signed. Not a workspace member: thumbv8m-only."
+
+[[bin]]
+name = "dsm-anchor-lock-pages"
+test = false
+bench = false
+
+[dependencies]
+# The bootrom's own `otp_access` and `reboot`, and the boot block (IMAGE_DEF). No `binary-info`.
+rp235x-hal = { version = "0.3", features = ["critical-section-impl", "rt"] }
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+
+[profile.release]
+opt-level = "s"
+codegen-units = 1
+lto = "fat"
+debug = 2
+
+# Its own workspace: excluded from the root manifest.
+[workspace]

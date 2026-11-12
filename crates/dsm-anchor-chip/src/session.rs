@@ -22,7 +22,7 @@ use anchor_core::durable::StoreError;
 use anchor_core::enrollment::Install;
 use anchor_core::identify::ChipReading;
 use anchor_core::rmem::SlotMemory;
-use anchor_core::tropic::{Tropic, TropicError};
+use anchor_core::tropic::{ChipLink, ChipRefusal, Tropic, TropicError};
 use anchor_core::try_run::TryStep;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::SpiDevice;
@@ -42,6 +42,9 @@ pub const CHIP_KEY_SLOT: u16 = 0;
 const FACTORY_SLOT: u8 = 0;
 /// The pairing slot the board's own key is written to.
 const OWN_SLOT: u8 = 1;
+/// The pairing slots a birth neither writes nor invalidates. A chip is born only with both holding
+/// no key: the cage closes the board's own slot and nothing else.
+const SPARE_SLOTS: [u8; 2] = [2, 3];
 /// Bytes one R-memory data slot holds (TROPIC01 datasheet, `R_Mem_Data_Write`).
 pub const RMEM_SLOT_BYTES: usize = 444;
 /// R-memory data slots, numbered from 0 (`tropic01::R_MEM_DATA_SLOT_MAX` is the last).
@@ -211,44 +214,68 @@ fn denied<R, ES, EG>(probe: Result<R, Fault<ES, EG>>) -> Result<(), TropicError>
         Ok(_accepted) => Err(TropicError::CageOpen),
         Err(Fault::Unauthorized) => Ok(()),
         Err(e) => match fault(e) {
-            TropicError::Refused => Err(TropicError::CageOpen),
+            TropicError::Refused(_past_the_access_check) => Err(TropicError::CageOpen),
             other => Err(other),
         },
     }
 }
 
-/// A driver fault as the appliance reports it: the transport failed, or the chip refused.
+/// A rehearsal the chip did not pass: the chip's error, and the sentence a try-run shows for it.
+struct Unrehearsed {
+    error: TropicError,
+    why: String,
+}
+
+impl Unrehearsed {
+    /// A driver fault, said as the appliance reports it.
+    fn fault<ES, EG>(e: Fault<ES, EG>) -> Self {
+        let error = fault(e);
+        Self {
+            error,
+            why: format!("{error:?}"),
+        }
+    }
+
+    fn refused(refusal: ChipRefusal, why: String) -> Self {
+        Self {
+            error: TropicError::Refused(refusal),
+            why,
+        }
+    }
+}
+
+/// A driver fault as the appliance reports it: the link failed, or the chip refused, and which.
 pub fn fault<ES, EG>(e: Fault<ES, EG>) -> TropicError {
     match e {
-        Fault::AlarmMode
-        | Fault::BusError(..)
-        | Fault::ChipBusy
-        | Fault::Decryption(..)
-        | Fault::Encryption(..)
-        | Fault::GPIOError(..)
-        | Fault::HandshakeFailed
-        | Fault::InvalidChipStatus(..)
-        | Fault::InvalidCRC
-        | Fault::InvalidL2Response
-        | Fault::InvalidResponse
-        | Fault::L3ResponseBufferOverflow
-        | Fault::ParsingError(..)
-        | Fault::HardwareFail
-        | Fault::UnexpectedResponseStatus => TropicError::Comm,
-        Fault::InvalidKey
-        | Fault::InvalidL3Cmd
-        | Fault::InvalidPublicKey
-        | Fault::InvalidParameter
-        | Fault::L2ResponseError(..)
-        | Fault::L3CmdFailed
-        | Fault::RequestExceedsSize
-        | Fault::SlotNotEmpty
-        | Fault::SlotExpired
-        | Fault::UpdateErr
-        | Fault::CounterInvalid
-        | Fault::SlotEmpty
-        | Fault::SlotInvalid
-        | Fault::Unauthorized => TropicError::Refused,
+        Fault::AlarmMode => TropicError::Comm(ChipLink::AlarmMode),
+        Fault::BusError(..) => TropicError::Comm(ChipLink::Bus),
+        Fault::ChipBusy => TropicError::Comm(ChipLink::Busy),
+        Fault::Decryption(..) => TropicError::Comm(ChipLink::Decryption),
+        Fault::Encryption(..) => TropicError::Comm(ChipLink::Encryption),
+        Fault::GPIOError(..) => TropicError::Comm(ChipLink::ChipSelect),
+        Fault::HandshakeFailed => TropicError::Comm(ChipLink::Handshake),
+        Fault::InvalidChipStatus(..) => TropicError::Comm(ChipLink::ChipStatus),
+        Fault::InvalidCRC => TropicError::Comm(ChipLink::Crc),
+        Fault::InvalidL2Response => TropicError::Comm(ChipLink::L2Response),
+        Fault::InvalidResponse => TropicError::Comm(ChipLink::Response),
+        Fault::L3ResponseBufferOverflow => TropicError::Comm(ChipLink::L3Overflow),
+        Fault::ParsingError(..) => TropicError::Comm(ChipLink::L3Parse),
+        Fault::HardwareFail => TropicError::Comm(ChipLink::HardwareFail),
+        Fault::UnexpectedResponseStatus => TropicError::Comm(ChipLink::UnexpectedStatus),
+        Fault::InvalidKey => TropicError::Refused(ChipRefusal::InvalidKey),
+        Fault::InvalidL3Cmd => TropicError::Refused(ChipRefusal::InvalidL3Command),
+        Fault::InvalidPublicKey => TropicError::Refused(ChipRefusal::InvalidPublicKey),
+        Fault::InvalidParameter => TropicError::Refused(ChipRefusal::InvalidParameter),
+        Fault::L2ResponseError(..) => TropicError::Refused(ChipRefusal::L2Status),
+        Fault::L3CmdFailed => TropicError::Refused(ChipRefusal::L3CommandFailed),
+        Fault::RequestExceedsSize => TropicError::Refused(ChipRefusal::RequestTooLarge),
+        Fault::SlotNotEmpty => TropicError::Refused(ChipRefusal::SlotNotEmpty),
+        Fault::SlotExpired => TropicError::Refused(ChipRefusal::SlotExpired),
+        Fault::UpdateErr => TropicError::Refused(ChipRefusal::UpdateFailed),
+        Fault::CounterInvalid => TropicError::Refused(ChipRefusal::CounterInvalid),
+        Fault::SlotEmpty => TropicError::Refused(ChipRefusal::SlotEmpty),
+        Fault::SlotInvalid => TropicError::Refused(ChipRefusal::SlotInvalid),
+        Fault::Unauthorized => TropicError::Refused(ChipRefusal::Unauthorized),
     }
 }
 
@@ -387,7 +414,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     /// a chip still on its factory slot takes this, and only the image built to do it asks.
     pub fn configure_randomness(&mut self) -> Result<(), TropicError> {
         if self.slot != FACTORY_SLOT {
-            return Err(TropicError::Refused);
+            return Err(TropicError::Refused(ChipRefusal::NotFactorySlot));
         }
         let held = self
             .with(|s| s.i_config_read(CFG_START_UP.into()))
@@ -399,7 +426,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                 .with(|s| s.i_config_read(CFG_START_UP.into()))
                 .map_err(fault)?;
             if now != held & !(1u32 << RNGTEST_DIS_BIT) {
-                return Err(TropicError::Refused);
+                return Err(TropicError::Refused(ChipRefusal::StartUpNotAsWritten));
             }
         }
         match self.with(|s| s.ecc_key_erase(CHIP_KEY_SLOT.into())) {
@@ -458,7 +485,10 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     /// The session ended, and the chip handed back.
     #[inline(never)]
     fn end_session(&mut self) -> Result<Tropic01<SPI, CS, NoSession>, TropicError> {
-        let session = self.session.take().ok_or(TropicError::Comm)?;
+        let session = self
+            .session
+            .take()
+            .ok_or(TropicError::Comm(ChipLink::NoSession))?;
         match session.session_abort() {
             Ok(chip) => Ok(chip),
             Err((session, e)) => {
@@ -506,7 +536,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
             Err(e) => return Err(fault(e)),
         };
         if curve != EccCurve::Ed25519 || origin != EccOrigin::KeyGenerate {
-            return Err(TropicError::Refused);
+            return Err(TropicError::Refused(ChipRefusal::ResidentKeyNotGenerated));
         }
         Ok(pk)
     }
@@ -619,16 +649,34 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         }
     }
 
+    /// Refused while a spare pairing slot holds a key: the birth would leave that key valid, with
+    /// the rights a slot has by default (the counter's re-initialization among them), outside the
+    /// cage. An empty slot and an invalidated one hold none. Only read.
+    fn spare_slots_hold_no_key(&mut self) -> Result<(), TropicError> {
+        for slot in SPARE_SLOTS {
+            match self.with(|s| s.pairing_key_read(u16::from(slot).into()).copied()) {
+                Ok(_key) => return Err(TropicError::Refused(ChipRefusal::SpareSlotHoldsKey)),
+                Err(Fault::InvalidKey | Fault::SlotEmpty | Fault::SlotInvalid) => {}
+                Err(e) => return Err(fault(e)),
+            }
+        }
+        Ok(())
+    }
+
     /// Whether this chip can take a birth, checked before anything is written to it: the counter at
-    /// `h0`, the board's slot free or already the board's, and the cage not begun. A counter a used
+    /// `h0`, the board's slot free or already the board's, no other slot holding a key, and the cage
+    /// not begun. A counter a used
     /// chip left elsewhere is set to `h0`, which only an uncaged chip allows. A chip refused here is
     /// left exactly as it was found.
     pub fn ready_for_birth(&mut self, h0: u32) -> Result<(), TropicError> {
+        self.spare_slots_hold_no_key()?;
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot == FACTORY_SLOT {
             match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied()) {
                 Ok(key) if key == *own.as_bytes() => {}
-                Ok(_other) => return Err(TropicError::Refused),
+                Ok(_other) => {
+                    return Err(TropicError::Refused(ChipRefusal::BoardSlotHoldsAnotherKey))
+                }
                 Err(Fault::InvalidKey | Fault::SlotEmpty) => {}
                 Err(e) => return Err(fault(e)),
             }
@@ -636,14 +684,14 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                 .with(|s| s.i_config_read(PAIRING_KEY_WRITE.into()))
                 .map_err(fault)?;
             if writable & (1u32 << (8 + FACTORY_SLOT)) == 0 {
-                return Err(TropicError::Refused);
+                return Err(TropicError::Refused(ChipRefusal::BoardSlotNotWritable));
             }
         }
         let config = self
             .with(|s| s.i_config_read(I_CONFIG_WRITE.into()))
             .map_err(fault)?;
         if config & (1u32 << self.slot) == 0 {
-            return Err(TropicError::Refused);
+            return Err(TropicError::Refused(ChipRefusal::AccessRulesNotWritable));
         }
         let live = self.with(|s| s.mcounter_get(COUNTER)).map_err(fault)?;
         if live != h0 {
@@ -676,11 +724,12 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
         ));
         steps.push(TryStep::new(
             "the chip would take the board's pairing key",
-            self.rehearse_key_write(),
+            self.rehearse_key_write()
+                .map_err(|unrehearsed| unrehearsed.why),
         ));
         steps.push(TryStep::new(
             "the chip would let the board close it",
-            self.rehearse_cage(),
+            self.rehearse_cage().map_err(|unrehearsed| unrehearsed.why),
         ));
         steps.push(TryStep::new(
             "the chip reboots and opens a session again",
@@ -733,46 +782,78 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
 
     /// In place of the key write: the slot is free or already this board's, and the session that
     /// will write it holds the right to.
-    fn rehearse_key_write(&mut self) -> Result<(), String> {
+    fn rehearse_key_write(&mut self) -> Result<(), Unrehearsed> {
+        if let Err(held) = self.spare_slots_hold_no_key() {
+            return Err(match held {
+                TropicError::Refused(refusal) => Unrehearsed::refused(
+                    refusal,
+                    "a pairing slot other than the board's holds a key".to_string(),
+                ),
+                other => Unrehearsed {
+                    why: format!("{other:?}"),
+                    error: other,
+                },
+            });
+        }
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot != FACTORY_SLOT {
             return Ok(());
         }
         match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied()) {
             Ok(key) if key == *own.as_bytes() => {}
-            Ok(_other) => return Err("another board's key holds the slot".to_string()),
+            Ok(_other) => {
+                return Err(Unrehearsed::refused(
+                    ChipRefusal::BoardSlotHoldsAnotherKey,
+                    "another board's key holds the slot".to_string(),
+                ))
+            }
             Err(Fault::InvalidKey | Fault::SlotEmpty) => {}
-            Err(e) => return Err(format!("{:?}", fault(e))),
+            Err(e) => return Err(Unrehearsed::fault(e)),
         }
         let writable = self
             .with(|s| s.i_config_read(PAIRING_KEY_WRITE.into()))
-            .map_err(|e| format!("{:?}", fault(e)))?;
+            .map_err(Unrehearsed::fault)?;
         if writable & (1u32 << (8 + FACTORY_SLOT)) == 0 {
-            return Err("the factory slot may not write the board's slot".to_string());
+            return Err(Unrehearsed::refused(
+                ChipRefusal::BoardSlotNotWritable,
+                "the factory slot may not write the board's slot".to_string(),
+            ));
         }
         Ok(())
     }
 
     /// In place of the cage: the chip answers for every register the cage writes, and the slot that
     /// will write them still may. A bit already clear is one the cage need not write.
-    fn rehearse_cage(&mut self) -> Result<(), String> {
+    fn rehearse_cage(&mut self) -> Result<(), Unrehearsed> {
         for register in CAGE {
             self.with(|s| s.i_config_read(register.into()))
-                .map_err(|e| format!("register {register:#x}: {:?}", fault(e)))?;
+                .map_err(|e| {
+                    let error = fault(e);
+                    Unrehearsed {
+                        error,
+                        why: format!("register {register:#x}: {error:?}"),
+                    }
+                })?;
         }
         let writes = self
             .with(|s| s.i_config_read(I_CONFIG_WRITE.into()))
-            .map_err(|e| format!("{:?}", fault(e)))?;
+            .map_err(Unrehearsed::fault)?;
         if writes & own_bits(I_CONFIG_WRITE) != own_bits(I_CONFIG_WRITE) {
-            return Err(format!(
-                "the access rules hold {writes:#x}: the board's slot may no longer write them"
+            return Err(Unrehearsed::refused(
+                ChipRefusal::AccessRulesNotWritable,
+                format!(
+                    "the access rules hold {writes:#x}: the board's slot may no longer write them"
+                ),
             ));
         }
         let invalidates = self
             .with(|s| s.i_config_read(PAIRING_KEY_INVALIDATE.into()))
-            .map_err(|e| format!("{:?}", fault(e)))?;
+            .map_err(Unrehearsed::fault)?;
         if invalidates & (1u32 << OWN_SLOT) == 0 {
-            return Err("the board's slot may not invalidate the factory slot".to_string());
+            return Err(Unrehearsed::refused(
+                ChipRefusal::FactorySlotNotInvalidatable,
+                "the board's slot may not invalidate the factory slot".to_string(),
+            ));
         }
         Ok(())
     }
@@ -780,9 +861,14 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
     fn close_birth(&mut self, h0: u32) -> Result<(), TropicError> {
         let own = PublicKey::from(&StaticSecret::from(self.pairing));
         if self.slot == FACTORY_SLOT {
+            // Before the first permanent write, the board's key: nothing is written to a chip
+            // whose spare slots hold a key.
+            self.spare_slots_hold_no_key()?;
             match self.with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied()) {
                 Ok(key) if key == *own.as_bytes() => {}
-                Ok(_other) => return Err(TropicError::Refused),
+                Ok(_other) => {
+                    return Err(TropicError::Refused(ChipRefusal::BoardSlotHoldsAnotherKey))
+                }
                 Err(Fault::InvalidKey | Fault::SlotEmpty) => {
                     self.with(|s| s.pairing_key_write(u16::from(OWN_SLOT).into(), own.as_bytes()))
                         .map_err(fault)?;
@@ -791,7 +877,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                         .with(|s| s.pairing_key_read(u16::from(OWN_SLOT).into()).copied())
                         .map_err(fault)?;
                     if held != *own.as_bytes() {
-                        return Err(TropicError::Refused);
+                        return Err(TropicError::Refused(ChipRefusal::BoardKeyNotAsWritten));
                     }
                 }
                 Err(e) => return Err(fault(e)),
@@ -804,6 +890,9 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
             .with(|s| s.i_config_read(I_CONFIG_WRITE.into()))
             .map_err(fault)?;
         if config & (1u32 << OWN_SLOT) != 0 {
+            // And again before the cage, for a birth taken up after a cut on the board's own
+            // slot. A closed cage is not read this way: its chip was born as it was.
+            self.spare_slots_hold_no_key()?;
             // The factory slot goes before the cage begins. A cut in the cage can leave invalidation
             // already revoked, and the slot already gone: lane 0 of its register says which.
             let invalidate = self
@@ -831,7 +920,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
                             .with(|s| s.i_config_read(register.into()))
                             .map_err(fault)?;
                         if now != held {
-                            return Err(TropicError::Refused);
+                            return Err(TropicError::Refused(ChipRefusal::AccessRuleNotAsWritten));
                         }
                     }
                 }
@@ -925,7 +1014,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> Tropic for RealChip<SPI, CS, B> {
             Install::ForGood => session.close_birth(self.h0),
             Install::ForTrial => match (session.rehearse_key_write(), session.rehearse_cage()) {
                 (Ok(()), Ok(())) => Ok(()),
-                (Err(_key), _) | (_, Err(_key)) => Err(TropicError::Refused),
+                (Err(unrehearsed), _) | (_, Err(unrehearsed)) => Err(unrehearsed.error),
             },
         }
     }
@@ -950,7 +1039,8 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> Tropic for RealChip<SPI, CS, B> {
         let drawn = session
             .with(|s| s.get_random_value(32).map(<[u8]>::to_vec))
             .map_err(fault)?;
-        let chip = <[u8; 32]>::try_from(drawn.as_slice()).map_err(|_short| TropicError::Refused)?;
+        let chip = <[u8; 32]>::try_from(drawn.as_slice())
+            .map_err(|_short| TropicError::Refused(ChipRefusal::ShortRandom))?;
         Ok(anchor_core::tropic::ChallengeEntropy { board, chip })
     }
 }
@@ -964,16 +1054,6 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> Drop for ChipSession<SPI, CS, B> {
 /// R-memory data slots over the shared session: the store the appliance's record lives in.
 pub struct RMemSlots<SPI: SpiDevice, CS: OutputPin, B: Board> {
     pub session: Rc<RefCell<ChipSession<SPI, CS, B>>>,
-}
-
-fn store_fault(e: TropicError) -> StoreError {
-    match e {
-        TropicError::Comm => StoreError::Unavailable,
-        TropicError::Refused
-        | TropicError::CounterExhausted
-        | TropicError::CageOpen
-        | TropicError::NoEntropy => StoreError::Refused,
-    }
 }
 
 impl<SPI: SpiDevice, CS: OutputPin, B: Board> SlotMemory for RMemSlots<SPI, CS, B> {
@@ -996,7 +1076,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> SlotMemory for RMemSlots<SPI, CS, 
             Ok(data) => Ok(Some(data)),
             Err(Fault::SlotEmpty) => Ok(None),
             Err(Fault::HardwareFail | Fault::L3CmdFailed) => Err(StoreError::Unreadable),
-            Err(e) => Err(store_fault(fault(e))),
+            Err(e) => Err(StoreError::Chip(fault(e))),
         }
     }
 
@@ -1004,7 +1084,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> SlotMemory for RMemSlots<SPI, CS, 
         self.session
             .borrow_mut()
             .with(|s| s.r_mem_data_erase(slot.into()))
-            .map_err(|e| store_fault(fault(e)))
+            .map_err(|e| StoreError::Chip(fault(e)))
     }
 
     fn write(&mut self, slot: u16, data: &[u8]) -> Result<(), StoreError> {
@@ -1020,7 +1100,7 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> SlotMemory for RMemSlots<SPI, CS, 
                 self.erase(slot)?;
                 Err(StoreError::NotHeld)
             }
-            Err(e) => Err(store_fault(fault(e))),
+            Err(e) => Err(StoreError::Chip(fault(e))),
         }
     }
 }

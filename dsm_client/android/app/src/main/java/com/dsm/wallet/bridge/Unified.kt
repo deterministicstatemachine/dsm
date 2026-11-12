@@ -75,6 +75,26 @@ object Unified {
     @Keep @JvmStatic fun picoUsbTransceive(frame: ByteArray): ByteArray =
         LocalPicoUsb.transceive(frame)
 
+    // A board's one-time burns from the phone alone (owner, 2026-11-11): Rust (`dsm-android-anchor`
+    // `board_setup`) drives the board's own USB bootloader through these, and they only move bytes.
+    // `BootselUsb.init(context)` is called at startup beside `LocalPicoUsb.init`.
+    @Keep @JvmStatic fun bootselOpen(): String? = BootselUsb.open()
+    @Keep @JvmStatic fun bootselLastError(): String = BootselUsb.lastError()
+    @Keep @JvmStatic fun bootselBulkOut(data: ByteArray): Int = BootselUsb.bulkOut(data)
+    @Keep @JvmStatic fun bootselBulkIn(max: Int): ByteArray? = BootselUsb.bulkIn(max)
+    @Keep @JvmStatic fun bootselAckIn(): Int = BootselUsb.ackIn()
+    @Keep @JvmStatic fun bootselCommandStatus(): ByteArray? = BootselUsb.commandStatus()
+    @Keep @JvmStatic fun bootselHaltedEndpoints(): IntArray? = BootselUsb.haltedEndpoints()
+    @Keep @JvmStatic fun bootselFileDescriptor(): Int = BootselUsb.fileDescriptor()
+    @Keep @JvmStatic fun bootselInterfaceReset(): Int = BootselUsb.interfaceReset()
+    @Keep @JvmStatic fun bootselWaitForReturn(serial: String): Int = BootselUsb.waitForReturn(serial)
+    // The board running as the DSM Anchor after the board setup started an image: 0 once Android
+    // lets DSM use it, else -1 with bootselLastError saying why.
+    @Keep @JvmStatic fun anchorPermitted(): Int = BootselUsb.anchorPermitted()
+    @Keep @JvmStatic fun bootselClose(): Int = BootselUsb.close()
+    // The production release the app carries (the signing's public outputs, from its assets).
+    @Keep @JvmStatic fun anchorReleaseFile(path: String): ByteArray? = BootselUsb.releaseFile(path)
+
     // GATED sender-transport install (only in on_device_installs-feature .so; absent otherwise):
     // installs the USB anchor appliance factory so offline-bearer sends drive the phone's own
     // physical RP2350/TROPIC01 (v2: the receiver needs NO hardware — this is the entire device

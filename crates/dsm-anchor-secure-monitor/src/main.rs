@@ -27,7 +27,7 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicU32, Ordering};
 use rp235x_hal as hal;
 use subtle::ConstantTimeEq;
 
@@ -248,9 +248,56 @@ fn measurement_ok() -> bool {
 
 // ── The Secure handler behind the NSC veneer ─────────────────────────────────────────────────
 
+/// Whether a crossing is being served: [`HANDLER_IDLE`] or [`HANDLER_SERVING`].
+static HANDLER: AtomicU32 = AtomicU32::new(HANDLER_IDLE);
+const HANDLER_IDLE: u32 = 0;
+const HANDLER_SERVING: u32 = 1;
+
 /// Called by the `-mcmse` veneer's single NSC entry `dsm_secure_dispatch`. Secure-only.
+///
+/// One crossing is served at a time, and that is Secure's own doing, not a property of how the
+/// Non-secure app is written. The handler works on one request, one response and one sequence
+/// floor; a second crossing arriving while the first is part-way (from a Non-secure exception
+/// that preempted it) would free what the first still reads. So:
+///
+/// - a crossing is taken from thread mode only: one made from an exception handler is refused;
+/// - Secure masks exceptions for the length of the crossing (PRIMASK_S; with AIRCR.PRIS clear
+///   that holds off every Non-secure exception too), so nothing Non-secure runs until it returns.
+///   Secure code takes no interrupt: its timer is polled, and the watchdog is fed, not serviced;
+/// - and a crossing that finds one already being served is refused, whatever let it in.
 #[no_mangle]
 pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u32 {
+    if !matches!(
+        cortex_m::peripheral::SCB::vect_active(),
+        cortex_m::peripheral::scb::VectActive::ThreadMode
+    ) {
+        return SG_ERR_STATE;
+    }
+    let masked_before = cortex_m::register::primask::read();
+    cortex_m::interrupt::disable();
+    let status = match HANDLER.compare_exchange(
+        HANDLER_IDLE,
+        HANDLER_SERVING,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        Ok(_idle) => {
+            let status = serve_crossing(slot_index, sequence_number);
+            HANDLER.store(HANDLER_IDLE, Ordering::SeqCst);
+            status
+        }
+        Err(_serving) => SG_ERR_STATE,
+    };
+    if masked_before.is_inactive() {
+        // Safety: exceptions were unmasked when this crossing began, and nothing here relies on
+        // them staying masked once it has returned its status.
+        unsafe { cortex_m::interrupt::enable() };
+    }
+    status
+}
+
+/// One crossing, served alone ([`dsm_secure_handler`]).
+fn serve_crossing(slot_index: u32, sequence_number: u32) -> u32 {
     // The Non-secure app crosses here only with its clocks and USB up, and needs none of those
     // peripherals again. From the first crossing it holds the USB block alone.
     boundary::revoke_ns_init_grants();

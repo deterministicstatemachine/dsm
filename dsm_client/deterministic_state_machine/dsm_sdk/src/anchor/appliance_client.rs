@@ -109,6 +109,10 @@ impl RehearsalOwner {
 pub trait AnchorAppliance {
     /// `OP_STATUS`: the active state (no mutation).
     fn status(&mut self) -> Result<ApplianceStatus, DsmError>;
+    /// `OP_AUTHORIZATION_NONCE`: the nonce the anchor draws for the owner's next authorization. The
+    /// digest the owner signs binds it, and the anchor holds it for one prepare: an authorization
+    /// recorded off the link serves that prepare and no other, ever.
+    fn authorization_nonce(&mut self) -> Result<[u8; 32], DsmError>;
     /// `OP_AUTHORIZE`: the owner's authorization of the next prepare, `signature` under this device's
     /// key over `digest`, the anchor-core `owner_authorization_digest` of that prepare. The anchor
     /// serves its owner, not whoever holds the link to it: without this, `OP_PREPARE` signs nothing.
