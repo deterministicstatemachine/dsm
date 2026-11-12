@@ -36,6 +36,9 @@ pub struct Args {
     pub data_dir: PathBuf,
     /// The network's environment config: the pinned storage set and its CA.
     pub env_config: PathBuf,
+    /// With `--network beta`, the config this binary carries, written to
+    /// `env_config` (inside the data directory) at every start.
+    pub carried_env_config: Option<&'static str>,
     /// The local address the application reaches the ingress on: a loopback
     /// address, never one another machine can reach.
     pub game_bind: SocketAddr,
@@ -52,9 +55,36 @@ pub struct Args {
     pub ingress_secret_dir: PathBuf,
 }
 
-const USAGE: &str = "dsm-app-host --data-dir DIR --ingress-secret-dir DIR --env-config FILE \
---game-bind 127.0.0.1:8787 --relay-bind 0.0.0.0:8443 \
+const USAGE: &str = "dsm-app-host --data-dir DIR --ingress-secret-dir DIR \
+(--env-config FILE | --network beta) --game-bind 127.0.0.1:8787 --relay-bind 0.0.0.0:8443 \
 --relay-endpoint https://HOST:8443 [--relay-name HOST ...]";
+
+/// The beta network's config: its storage set, each member with its CA. It is
+/// the file the wallet ships with, and the set it names is the one core pins
+/// (`dsm::economic::register`), so a binary reaches this set and no other.
+const BETA_ENV_CONFIG: &str =
+    include_str!("../../../dsm_client/frontend/public/dsm_env_config.toml");
+
+/// Where `--network beta` writes the config it carries, in the data directory.
+const BETA_ENV_CONFIG_FILE: &str = "beta_env_config.toml";
+
+const HELP: &str = "\
+dsm-app-host: your application's own DSM account (DSM Connect, Amendment A11)
+
+usage: dsm-app-host --data-dir DIR --ingress-secret-dir DIR (--env-config FILE | --network beta)
+                    --game-bind 127.0.0.1:8787 --relay-bind 0.0.0.0:8443
+                    --relay-endpoint https://HOST:8443 [--relay-name HOST ...]
+       dsm-app-host --help | --version
+
+  --data-dir DIR            the account: its state and RECOVERY_MNEMONIC (made on the first start)
+  --ingress-secret-dir DIR  where each launch writes its ingress secret, ingress-token; apart from --data-dir
+  --env-config FILE         the network's storage set, each member with its CA
+  --network beta            the beta network's storage set, carried in this binary (instead of --env-config)
+  --game-bind ADDR          the ingress your server calls: a loopback address only
+  --relay-bind ADDR         where wallets reach this account
+  --relay-endpoint URL      the relay's https:// origin as wallets reach it, named in every connect code
+  --relay-name NAME         a name (IP or host) the relay's certificate carries; repeatable
+";
 
 impl Args {
     fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
@@ -65,6 +95,7 @@ impl Args {
         let mut relay_endpoint = None;
         let mut relay_names = Vec::new();
         let mut ingress_secret_dir = None;
+        let mut network = None;
         while let Some(flag) = args.next() {
             let value = args
                 .next()
@@ -72,6 +103,7 @@ impl Args {
             match flag.as_str() {
                 "--data-dir" => data_dir = Some(PathBuf::from(value)),
                 "--env-config" => env_config = Some(PathBuf::from(value)),
+                "--network" => network = Some(value),
                 "--game-bind" => {
                     game_bind = Some(value.parse().map_err(|e| format!("--game-bind: {e}"))?)
                 }
@@ -99,10 +131,27 @@ impl Args {
         let ingress_secret_dir: PathBuf =
             ingress_secret_dir.ok_or_else(|| need("--ingress-secret-dir"))?;
         apart_from_the_account(&ingress_secret_dir, &data_dir)?;
+        let (env_config, carried_env_config) = match (env_config, network.as_deref()) {
+            (Some(file), None) => (file, None),
+            (None, Some("beta")) => (data_dir.join(BETA_ENV_CONFIG_FILE), Some(BETA_ENV_CONFIG)),
+            (None, Some(other)) => {
+                return Err(format!(
+                    "--network {other}: this binary carries the beta network's config only; \
+                     for another set, name its file with --env-config"
+                ))
+            }
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "--env-config and --network both name the network: give one\nusage: {USAGE}"
+                ))
+            }
+            (None, None) => return Err(need("--env-config FILE (or --network beta)")),
+        };
         Ok(Self {
             data_dir,
             ingress_secret_dir,
-            env_config: env_config.ok_or_else(|| need("--env-config"))?,
+            env_config,
+            carried_env_config,
             game_bind,
             relay_bind: relay_bind.ok_or_else(|| need("--relay-bind"))?,
             relay_endpoint,
@@ -130,6 +179,17 @@ fn apart_from_the_account(
 }
 
 fn main() -> Result<(), String> {
+    match std::env::args().nth(1).as_deref() {
+        Some("--help" | "-h") => {
+            print!("{HELP}");
+            return Ok(());
+        }
+        Some("--version" | "-V") => {
+            println!("dsm-app-host {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse(std::env::args().skip(1))?;
     std::fs::create_dir_all(&args.data_dir)
@@ -142,6 +202,10 @@ fn main() -> Result<(), String> {
         std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))
     };
     apart_from_the_account(&real(&args.ingress_secret_dir)?, &real(&args.data_dir)?)?;
+    if let Some(config) = args.carried_env_config {
+        std::fs::write(&args.env_config, config)
+            .map_err(|e| format!("{}: {e}", args.env_config.display()))?;
+    }
 
     // The SDK first, on this thread: its dispatchers block on the SDK's own
     // runtime, so they never run inside the host's.
@@ -399,5 +463,47 @@ mod tests {
             .map(|a| a.ingress_secret_dir)
             .expect_err("no secret directory");
         assert!(err.contains("--ingress-secret-dir"), "{err}");
+    }
+
+    /// `--network beta` names the config this binary carries, written into
+    /// the data directory; it and `--env-config` exclude each other, and no
+    /// other network is carried.
+    #[test]
+    fn the_beta_network_is_carried_in_the_binary() {
+        let with = |network: &[&str]| {
+            let mut list = vec![
+                "--data-dir",
+                "/srv/game/account",
+                "--ingress-secret-dir",
+                "/srv/game/ingress",
+                "--game-bind",
+                "127.0.0.1:8787",
+                "--relay-bind",
+                "0.0.0.0:8443",
+                "--relay-endpoint",
+                "https://192.168.1.5:8443",
+            ];
+            list.extend_from_slice(network);
+            args(&list)
+        };
+        let beta = with(&["--network", "beta"]).map(|a| (a.env_config, a.carried_env_config));
+        assert_eq!(
+            beta,
+            Ok((
+                PathBuf::from("/srv/game/account").join(BETA_ENV_CONFIG_FILE),
+                Some(BETA_ENV_CONFIG)
+            ))
+        );
+        let file = with(&["--env-config", "/tmp/x.toml"]).map(|a| a.carried_env_config);
+        assert_eq!(file, Ok(None));
+        for refused in [
+            vec!["--network", "main"],
+            vec!["--network", "beta", "--env-config", "/tmp/x.toml"],
+            vec![],
+        ] {
+            with(&refused)
+                .map(|a| a.env_config)
+                .expect_err("no network, two, or one this binary does not carry");
+        }
     }
 }
