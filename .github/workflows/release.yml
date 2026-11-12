@@ -162,7 +162,7 @@ jobs:
 
   # --------------------------------------------------------------------------
   # A newcomer's first run (owner, 2026-11-09: a release gate). A clean Ubuntu
-  # in Docker with nothing on it but what QUICKSTART.md's prerequisites say to
+  # in Docker with nothing on it but what the guide's setup page says to
   # install, no clone of DSM and no Rust: it installs this release's own files
   # (the ones publish attaches) with install.sh, and follows BUILDING_APPS.md's
   # commands alone, in TypeScript and in Python, each to a wallet connected

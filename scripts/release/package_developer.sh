@@ -14,6 +14,8 @@
 #         `dsm-dev-wallet` commands run from
 #     dsm-developer-<version>/connect-starter/
 #         the starter app (examples/connect-starter), built, with its dependencies
+#     dsm-developer-<version>/examples/
+#         the Python client's examples (first_payment.py, account_status.py)
 #
 # Every dependency inside comes from the repo's lockfiles, so the archive's
 # checksum covers all of it.
@@ -65,6 +67,8 @@ if f"dsm_app_client-{want}-py3-none-any.whl" not in sys.argv[1]:
     sys.exit(f"the wheel {sys.argv[1]} is not version {want}")
 EOF
 cp "$wheel" "$STAGE/clients/"
+mkdir -p "$STAGE/examples"
+cp "$REPO"/clients/python/examples/*.py "$STAGE/examples/"
 
 echo "[developer] the starter app"
 (cd "$REPO/examples/connect-starter" && npm_quiet ci && npm run --silent build)

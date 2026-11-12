@@ -33,6 +33,8 @@ BASE="${DSM_RELEASE_URL:-https://github.com/deterministicstatemachine/dsm/releas
 PREFIX="${DSM_PREFIX:-$HOME/.local}"
 
 say() { printf '%s\n' "$*"; }
+# A path as shown: under your home directory, as ~/...
+shown() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
 fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 case "$(uname -s)-$(uname -m)" in
@@ -109,12 +111,12 @@ launcher dsm-connect-starter connect-starter/dist/server.js
 
 say ""
 say "installed:"
-say "  $BIN/dsm-app-host        $("$BIN/dsm-app-host" --version)"
-say "  $BIN/dsm-app"
-say "  $BIN/dsm-dev-wallet"
-say "  $BIN/dsm-connect-starter"
+say "  $(shown "$BIN")/dsm-app-host        $("$BIN/dsm-app-host" --version)"
+say "  $(shown "$BIN")/dsm-app"
+say "  $(shown "$BIN")/dsm-dev-wallet"
+say "  $(shown "$BIN")/dsm-connect-starter"
 say "  the clients, to install into your app:"
-for f in "$SHARE"/clients/*; do say "    $f"; done
+for f in "$SHARE"/clients/*; do say "    $(shown "$f")"; done
 
 if command -v node >/dev/null 2>&1; then
     major="$(node -p 'process.versions.node.split(".")[0]')"
@@ -124,6 +126,10 @@ else
 fi
 case ":$PATH:" in
     *":$BIN:"*) ;;
-    *) say "note: $BIN is not on your PATH; add it (and to your shell's profile):"
-       say "  export PATH=\"$BIN:\$PATH\"" ;;
+    *) case "$BIN" in
+           "$HOME"/*) on_path="\$HOME/${BIN#"$HOME"/}" ;;
+           *) on_path="$BIN" ;;
+       esac
+       say "note: $(shown "$BIN") is not on your PATH; add it (and the same line to your shell's profile):"
+       say "  export PATH=\"$on_path:\$PATH\"" ;;
 esac
