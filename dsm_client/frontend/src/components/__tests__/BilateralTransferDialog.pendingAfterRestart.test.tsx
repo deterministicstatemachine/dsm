@@ -67,7 +67,8 @@ describe('an incoming step awaiting this user, after a restart', () => {
 
     await waitFor(() => expect(screen.getByText('Incoming Offline Transfer')).toBeTruthy());
     expect(screen.getByText('6.00 ERA')).toBeTruthy();
-    expect(screen.getByText(/KT4ZBZ8SXD73/)).toBeTruthy();
+    // The sender is named by the device's fingerprint, as the send screens name a device.
+    expect(screen.getByTestId('incoming-transfer-device').textContent).toBe('KT4Z-BZ8S-XD73');
   });
 
   test('is not shown before the wallet is up', async () => {

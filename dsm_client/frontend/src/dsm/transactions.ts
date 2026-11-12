@@ -19,6 +19,7 @@ import { bridgeEvents } from '../bridge/bridgeEvents';
 import logger from '../utils/logger';
 
 import { GenericTransaction, GenericTxResponse } from './types';
+import { RustRefusal, Unanswered } from './NativeBoundaryBridge';
 import type { PendingBilateralPhase } from '../domain/bilateral';
 
 
@@ -57,6 +58,12 @@ function schedulePostAcceptRefreshes(): void {
  * its device id (the Base32 key the send screen selects it by, or its bytes).
  * Never by alias: an alias is a label two contacts can share. Rust refuses a
  * device id that is not 32 bytes, or not an added contact.
+ *
+ * An answer that did not succeed is Rust's refusal, or a request that never
+ * left this page. A request that was handed to Rust and brought back nothing
+ * that can be read (a dropped bridge, a timeout, a reply that does not decode)
+ * throws `Unanswered`: the send may have been made, and no screen may say it
+ * was not.
  */
 export async function sendOnlineTransferSmart(
     to: string | Uint8Array,
@@ -64,6 +71,9 @@ export async function sendOnlineTransferSmart(
     memo?: string,
     tokenId?: string
 ): Promise<{ success: boolean; message?: string; newBalance?: bigint; transactionHash?: Uint8Array }> {
+    // Where the request is: from the moment it is handed to Rust, only Rust's
+    // own answer says the send was not made.
+    let handoff: 'on_this_page' | 'handed_to_rust' = 'on_this_page';
     try {
       const recipientDeviceId = typeof to === 'string'
         ? new Uint8Array(decodeBase32Crockford(to.trim()))
@@ -81,6 +91,7 @@ export async function sendOnlineTransferSmart(
         body: new Uint8Array(smartReq.toBinary()),
       });
 
+      handoff = 'handed_to_rust';
       const resBytes = await routerInvokeBin('wallet.sendSmart', new Uint8Array(argPack.toBinary()));
 
       if (!resBytes || resBytes.length === 0) {
@@ -90,8 +101,9 @@ export async function sendOnlineTransferSmart(
       // Canonical Envelope v3 decode
       const env = decodeFramedEnvelopeV3(resBytes);
       if (env.payload.case === 'error') {
+        // Rust answered, and the answer is no.
         const errMsg = env.payload.value.message || `Error code ${env.payload.value.code}`;
-        throw new Error(`DSM error: ${errMsg}`);
+        throw new RustRefusal(`DSM error: ${errMsg}`);
       }
       if (env.payload.case !== 'onlineTransferResponse') {
         throw new Error(`Expected onlineTransferResponse, got ${env.payload.case}`);
@@ -100,6 +112,7 @@ export async function sendOnlineTransferSmart(
       // The hash names the transfer on a receipt; Rust answers it with every accepted send.
       return { success: inner.success, message: inner.message, newBalance: inner.newBalance, transactionHash: inner.transactionHash?.v };
     } catch (e: any) {
+      if (handoff === 'handed_to_rust' && !(e instanceof RustRefusal)) throw new Unanswered(e);
       return { success: false, message: e?.message || 'Online transfer failed' };
     }
 }
@@ -118,6 +131,10 @@ export type SendWatch = {
 };
 
 export async function offlineSend(transfer: GenericTransaction, watch: SendWatch = {}): Promise<GenericTxResponse> {
+  // Where the request is: from the moment it is handed to Rust, only Rust's
+  // own answer says the step was not started. Handed over and unanswered, it
+  // throws `Unanswered`.
+  let handoff: 'on_this_page' | 'handed_to_rust' = 'on_this_page';
   try {
     let toBytes: Uint8Array;
     if (typeof transfer.to === 'string') {
@@ -272,15 +289,17 @@ export async function offlineSend(transfer: GenericTransaction, watch: SendWatch
     // and the dispatch connects (scanning for the peer as it needs) itself.
     // This used to set the advertised identity, start advertising and
     // scanning, and sleep 1.5 s first, swallowing every failure.
+    handoff = 'handed_to_rust';
     const respBytes = await routerInvokeBin('wallet.sendOffline', new Uint8Array(argPack.toBinary()));
     if (!respBytes || respBytes.length === 0) {
       finish({ accepted: false, result: 'offlineSend: empty response from bridge' });
-      return { accepted: false, result: 'offlineSend: empty response from bridge' };
+      throw new Unanswered('offlineSend: empty response from bridge');
     }
     // Canonical Envelope v3 decode
     const env1 = decodeFramedEnvelopeV3(respBytes);
     if (env1.payload.case === 'error') {
       const errMsg = env1.payload.value.message || `Error code ${env1.payload.value.code}`;
+      // Rust answered, and the answer is no.
       finish({ accepted: false, result: `offlineSend: ${errMsg}` });
       return { accepted: false, result: `offlineSend: ${errMsg}` };
     }
@@ -304,7 +323,7 @@ export async function offlineSend(transfer: GenericTransaction, watch: SendWatch
 
     if (!commitmentHash || commitmentHash.length !== 32) {
       finish({ accepted: false, result: 'offlineSend: missing commitment hash' });
-      return { accepted: false, result: 'offlineSend: missing commitment hash' };
+      throw new Unanswered('offlineSend: missing commitment hash');
     }
 
     // --- Drain any events that arrived while we were awaiting the prepare response ---
@@ -334,6 +353,8 @@ export async function offlineSend(transfer: GenericTransaction, watch: SendWatch
       }
     });
   } catch (e: any) {
+    if (e instanceof Unanswered) throw e;
+    if (handoff === 'handed_to_rust' && !(e instanceof RustRefusal)) throw new Unanswered(e);
     return {
       accepted: false,
       result: e?.message || 'Failed',

@@ -10,24 +10,29 @@ import React, { useMemo, useRef, useState } from 'react';
 import { useWallet } from '../../contexts/WalletContext';
 import { useContacts } from '../../contexts/ContactsContext';
 import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
-import { sendTransfer, sendingWords, type SendMode } from '../../domain/sendTransfer';
+import { sendTransfer, sendingWords, UNKNOWN_OUTCOME, type SendMode } from '../../domain/sendTransfer';
 import type { PendingBilateralPhase } from '../../domain/bilateral';
 import { emailReceiptIfDue } from '../../domain/sendReceipt';
 import { Avatar, Icon, PageTitle, Sheet, mainBalance, personName, sendable } from './parts';
 import { modernNav } from './modernNav';
 import type { DomainContact } from '../../domain/types';
+import type { TokenBalanceView } from '../../dsm/types';
 import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
 import { ScreenGuard } from '../common/ScreenGuard';
 import ModernOffline from './ModernOffline';
 
 const QUICK = ['10', '50', '100', '200'];
 
+/** Exactly what a review shows and its Send sends: fixed when the review opens. */
+type Reviewed = { contact: DomainContact; token: TokenBalanceView; amount: string; note: string; mode: SendMode };
+
 type Stage =
   | { kind: 'form' }
-  | { kind: 'review' }
+  | { kind: 'review'; reviewed: Reviewed }
   | { kind: 'sending'; phase: PendingBilateralPhase | null }
   | { kind: 'done'; sent: 'sent' | 'open'; message: string; receipt: string | null }
-  | { kind: 'failed'; message: string };
+  | { kind: 'failed'; message: string }
+  | { kind: 'unknown'; message: string };
 
 export default function ModernSend({ to, tokenId: asked }: { to: string | null; tokenId?: string }): React.JSX.Element {
   const wallet = useWallet();
@@ -46,9 +51,12 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
   const leave = useRef<AbortController | null>(null);
 
   const contact: DomainContact | null = contacts.find((c) => c.deviceId === recipient) ?? null;
-  // Other contacts who go by the same name as the one paid.
-  const namesakes = contact !== null ? contactsNamed(contacts, personName(contact), contact.deviceId) : [];
-  const token = tokens.find((b) => b.tokenId === tokenId) ?? (tokens.length > 0 ? tokens[0] : null);
+  // The token chosen, or the first on offer while none has been chosen. A
+  // chosen token that is no longer on offer is no token: the screen never
+  // puts another in its place.
+  const token = tokenId !== null
+    ? tokens.find((b) => b.tokenId === tokenId) ?? null
+    : tokens.length > 0 ? tokens[0] : null;
   const amountOk = /^\d+(\.\d+)?$/.test(amount.trim()) && Number(amount) > 0;
   // What still stands between the form and a review, said rather than shown
   // as a grey button.
@@ -63,8 +71,9 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
   // the screen says what is still missing, and stops once nothing is.
   const [tried, setTried] = useState<'tried' | 'not_tried'>('not_tried');
 
-  const send = () => {
-    if (contact === null || token === null) return;
+  // Sends what the review showed, whatever the form or the wallet holds by
+  // the time Send is tapped.
+  const send = ({ contact, token, amount, note, mode }: Reviewed) => {
     setStage({ kind: 'sending', phase: null });
     const sentAtLocal = new Date().toLocaleString();
     const controller = new AbortController();
@@ -78,6 +87,10 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
         if (outcome.kind === 'refused') {
           setStage({ kind: 'failed', message: outcome.message });
           return undefined;
+        }
+        if (outcome.kind === 'unknown') {
+          setStage({ kind: 'unknown', message: outcome.message });
+          return wallet.refreshAll();
         }
         const message = `${amount.trim()} ${token.symbol} to ${personName(contact)}`;
         if (outcome.kind === 'open') {
@@ -212,31 +225,22 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
             setTried('tried');
             return;
           }
-          setStage({ kind: 'review' });
+          if (contact === null || token === null) return;
+          setStage({ kind: 'review', reviewed: { contact, token, amount, note, mode } });
         }}
       >
         <Icon name="send" /> Review Send
       </button>
       {tried === 'tried' && missing !== null ? <p className="s-hint" role="alert" style={{ textAlign: 'center', marginTop: 10 }}>{missing}</p> : null}
 
-      {stage.kind === 'review' && contact !== null && token !== null ? (
-        <Sheet label="Review send" onClose={() => setStage({ kind: 'form' })}>
-          <ScreenGuard kind="confirm" />
-          <h2>Send {amount.trim()} {token.symbol}?</h2>
-          <p>To <strong>{personName(contact)}</strong>{note.length > 0 ? ` · “${note}”` : ''}</p>
-          <p data-testid="send-review-device">Device <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{deviceFingerprint(contact.deviceId)}</strong></p>
-          {namesakes.length > 0 ? (
-            <div className="s-notice s-error" role="alert">
-              Also named {personName(contact)}: {namesakes.map((c) => deviceFingerprint(c.deviceId)).join(', ')}.
-              Check the device above is the person you mean.
-            </div>
-          ) : null}
-          {runtime.receiptsEmail === 'on' && contact.profile?.email ? <p>A receipt will be emailed to {contact.profile.email}.</p> : null}
-          <div className="s-stack">
-            <button type="button" className="s-btn s-btn-primary" onClick={send}><Icon name="send" /> Send now</button>
-            <button type="button" className="s-btn s-btn-quiet" onClick={() => setStage({ kind: 'form' })}>Cancel</button>
-          </div>
-        </Sheet>
+      {stage.kind === 'review' ? (
+        <ReviewSheet
+          reviewed={stage.reviewed}
+          namesakes={contactsNamed(contacts, personName(stage.reviewed.contact), stage.reviewed.contact.deviceId)}
+          receiptsEmail={runtime.receiptsEmail}
+          onSend={() => send(stage.reviewed)}
+          onCancel={() => setStage({ kind: 'form' })}
+        />
       ) : null}
 
       {stage.kind === 'sending' ? (
@@ -269,6 +273,15 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
         </Sheet>
       ) : null}
 
+      {stage.kind === 'unknown' ? (
+        <Sheet label="Outcome unknown" onClose={() => modernNav.back()}>
+          <h2>Outcome unknown</h2>
+          <p data-testid="send-outcome-unknown">{UNKNOWN_OUTCOME}</p>
+          <p className="s-hint">{stage.message}</p>
+          <button type="button" className="s-btn s-btn-primary" onClick={() => modernNav.back()}>Done</button>
+        </Sheet>
+      ) : null}
+
       {stage.kind === 'failed' ? (
         <Sheet label="Not sent" onClose={() => setStage({ kind: 'form' })}>
           <h2>Not sent</h2>
@@ -277,5 +290,35 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
         </Sheet>
       ) : null}
     </>
+  );
+}
+
+/** The review of one send: what it shows is what its Send sends. */
+function ReviewSheet({ reviewed, namesakes, receiptsEmail, onSend, onCancel }: {
+  reviewed: Reviewed;
+  namesakes: DomainContact[];
+  receiptsEmail: string;
+  onSend: () => void;
+  onCancel: () => void;
+}): React.JSX.Element {
+  const { contact, token, amount, note } = reviewed;
+  return (
+    <Sheet label="Review send" onClose={onCancel}>
+      <ScreenGuard kind="confirm" />
+      <h2>Send {amount.trim()} {token.symbol}?</h2>
+      <p>To <strong>{personName(contact)}</strong>{note.length > 0 ? ` · “${note}”` : ''}</p>
+      <p data-testid="send-review-device">Device <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{deviceFingerprint(contact.deviceId)}</strong></p>
+      {namesakes.length > 0 ? (
+        <div className="s-notice s-error" role="alert">
+          Also named {personName(contact)}: {namesakes.map((c) => deviceFingerprint(c.deviceId)).join(', ')}.
+          Check the device above is the person you mean.
+        </div>
+      ) : null}
+      {receiptsEmail === 'on' && contact.profile?.email ? <p>A receipt will be emailed to {contact.profile.email}.</p> : null}
+      <div className="s-stack">
+        <button type="button" className="s-btn s-btn-primary" onClick={onSend}><Icon name="send" /> Send now</button>
+        <button type="button" className="s-btn s-btn-quiet" onClick={onCancel}>Cancel</button>
+      </div>
+    </Sheet>
   );
 }

@@ -13,6 +13,7 @@ import * as sofi from '../../dsm/sofi';
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../utils/textId';
 import { useWallet } from '../../contexts/WalletContext';
 import { Disclosure, Notice, ScreenFrame, ScreenTabs, middleTruncate } from '../common/ScreenFrame';
+import { ScreenGuard } from '../common/ScreenGuard';
 import { InfoTip } from '../common/InfoTip';
 import { TokenSelect, type TokenOption } from '../common/TokenSelect';
 import { useFx } from '../fx/FxProvider';
@@ -355,6 +356,8 @@ export default function SofiScreen(): React.JSX.Element {
                     : 'Each hop paid its own vault\'s fee.'}
                 </p>
               )}
+              {/* A trade cannot be undone: no other app's window may sit over its confirmation. */}
+              <ScreenGuard kind="confirm" />
               <p className="sb-hint">A fill below this is refused. Once it lands there is no undo.</p>
               <div className="sb-actions" style={{ margin: 0 }}>
                 <button type="button" className="sb-btn" onClick={() => setQuote(null)} disabled={busy}>Cancel</button>

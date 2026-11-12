@@ -11,7 +11,7 @@ import {
 import { encodeBase32Crockford, decodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { emitWalletRefresh } from './events';
-import { RustRefusal } from './NativeBoundaryBridge';
+import { RustRefusal, Unanswered } from './NativeBoundaryBridge';
 
 /**
  * Create a native DSM token.
@@ -99,12 +99,6 @@ export async function checkToken(details: TokenCreateDetails): Promise<TokenFiel
   return env.payload.value.refusals.map((r) => ({ field: r.field, reason: r.reason }));
 }
 
-/** A call Rust never answered, as distinct from Rust's refusal. */
-class Unanswered extends Error {
-  constructor(readonly lost: unknown) {
-    super(lost instanceof Error ? lost.message : String(lost));
-  }
-}
 
 /**
  * Create a token. Rust's refusal comes back as a result that did not succeed,

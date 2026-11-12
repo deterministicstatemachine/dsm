@@ -265,6 +265,18 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
     }
 
     func sceneDidEnterBackground() {
+        // The scanner is a screen of this app, not another app on top of it:
+        // once the app is in the background no scan is running. The pause
+        // published as the scene resigned said one was (it may only have been
+        // the camera's permission alert), so Rust held the lock back. Now the
+        // scan is over: Rust is told so and decides the lock, and the scanner
+        // closes, so the wallet is never left open behind it.
+        if SessionFacts.shared.qrRoundTrip != .idle {
+            SessionFacts.shared.qrRoundTrip = SessionFacts.shared.qrRoundTrip.resumeSettled()
+            SessionFacts.shared.appForeground = false
+            SessionFacts.shared.publish("pause")
+            (presentedViewController as? QrScannerViewController)?.cancelScan()
+        }
         // Rust stops the inbox poller unless something is still owed; its
         // answer is informational here, since iOS has no service to keep.
         let keepAlive = DsmSdk.onAppBackgrounded()

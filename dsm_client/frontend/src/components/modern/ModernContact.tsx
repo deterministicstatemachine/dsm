@@ -16,6 +16,7 @@ import { modernNav } from './modernNav';
 import { loadImageFile } from '../../utils/imageCrop';
 import ImageCropper from './ImageCropper';
 import { contactPhotoStore, useContactPhoto } from './contactPhotos';
+import { ScreenGuard } from '../common/ScreenGuard';
 
 /** The size a contact's photo is kept at. */
 const PHOTO_SIDE = 320;
@@ -189,6 +190,8 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
           </>
         ) : (
           <section className="s-card" aria-label="End relationship">
+            {/* Ending is final: no other app's window may sit over its confirmation. */}
+            <ScreenGuard kind="confirm" />
             <p className="s-hint">
               End your relationship with {name}? Neither of you can send the other money again on this wallet.
             </p>

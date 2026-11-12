@@ -35,6 +35,9 @@ import java.util.concurrent.atomic.AtomicReference
 class GattServerHost(private val context: Context) {
 
     internal var peerLookup: ((String) -> PeerSession)? = null
+
+    /** Drops the session kept for an address once nothing is held in it. */
+    internal var peerForget: ((String) -> Unit)? = null
     internal var peerEntries: (() -> Collection<PeerSession>)? = null
 
     private val txResponseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -130,6 +133,9 @@ class GattServerHost(private val context: Context) {
                 peer.clearServerState()
                 pendingTxWriteBuffers.remove(deviceAddress)
                 inboundChunks.close(deviceAddress)
+                // A central that has gone leaves nothing behind: any device in range can connect
+                // under a new address each time, and a session kept for each would never end.
+                peerForget?.invoke(deviceAddress)
                 Log.i("GattServerHost", "GATT server client disconnected: $deviceAddress")
                 try {
                     com.dsm.wallet.bridge.Unified.bleLinkClosed(deviceAddress, BleConstants.LINK_ROLE_SERVER)

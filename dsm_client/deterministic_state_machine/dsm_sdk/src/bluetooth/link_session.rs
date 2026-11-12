@@ -141,7 +141,7 @@ impl LinkKeys for WalletKeys {
     }
 
     fn own_kem_secret(&self) -> Result<Zeroizing<Vec<u8>>, DsmError> {
-        crate::sdk::b0x_sdk::local_kyber_secret().map(Zeroizing::new)
+        crate::sdk::b0x_sdk::local_kyber_secret()
     }
 
     fn contact(&self, device_id: &D32) -> Result<Option<Contact>, DsmError> {

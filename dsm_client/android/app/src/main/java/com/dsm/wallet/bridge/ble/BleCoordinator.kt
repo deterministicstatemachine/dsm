@@ -111,6 +111,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
         // Wire peer lookup so GattServerHost delegates per-device state to PeerSession
         gattServer.peerLookup = { address -> peers.getOrPut(address) { PeerSession(address) } }
+        gattServer.peerForget = { address -> peers[address]?.takeIf { it.isEmpty }?.let { peers.remove(address) } }
         gattServer.peerEntries = { peers.values }
 
         advertiser.setCallback(advertiserCallback)
@@ -141,6 +142,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         this.advertiser.setCallback(advertiserCallback)
         // Re-wire peer lookup after replacing the gattServer instance
         this.gattServer.peerLookup = { address -> peers.getOrPut(address) { PeerSession(address) } }
+        this.gattServer.peerForget = { address -> peers[address]?.takeIf { it.isEmpty }?.let { peers.remove(address) } }
         this.gattServer.peerEntries = { peers.values }
     }
 

@@ -31,6 +31,12 @@ mkdir -p "$STAGE/$NAME" "$OUT"
 cp "$BIN" "$STAGE/$NAME/dsm-app-host"
 chmod 755 "$STAGE/$NAME/dsm-app-host"
 cp "$REPO/LICENSE-MIT" "$REPO/LICENSE-APACHE" "$STAGE/$NAME/"
-# Owner and times are fixed, so the archive's bytes are its contents'.
-tar -C "$STAGE" -cf - "$NAME" | gzip -n -9 >"$OUT/$NAME.tar.gz"
+# Every file is recorded as root's, by number: the archive names no account
+# of the machine that built it, so one unpacked as root hands nothing to
+# whichever local account happens to have the builder's id.
+case "$(tar --version 2>/dev/null)" in
+    *GNU*) set -- --owner=0 --group=0 --numeric-owner ;;
+    *) set -- --uid 0 --gid 0 --numeric-owner ;;
+esac
+tar "$@" -C "$STAGE" -cf - "$NAME" | gzip -n -9 >"$OUT/$NAME.tar.gz"
 echo "[package] $OUT/$NAME.tar.gz"

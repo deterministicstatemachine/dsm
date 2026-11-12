@@ -7,6 +7,7 @@ import { dsmClient } from '../services/dsmClient';
 import { failureReasonMessage, type PendingBilateralPhase } from './bilateral';
 import type { SendWatch } from '../dsm/transactions';
 import { encodeBase32Crockford } from '../utils/textId';
+import { Unanswered } from '../dsm/NativeBoundaryBridge';
 
 export type SendMode = 'online' | 'offline';
 
@@ -24,7 +25,15 @@ export type SendOutcome =
   | { kind: 'sent'; reference: string | null }
   /** Offline only: not finished and not failed; it completes when the appliances meet again. */
   | { kind: 'open'; message: string }
-  | { kind: 'refused'; message: string };
+  | { kind: 'refused'; message: string }
+  /**
+   * The request reached Rust and no answer came back that can be read. The send may have been
+   * made: the screen says so, and never that it was not.
+   */
+  | { kind: 'unknown'; message: string };
+
+/** What a send screen says of a send whose outcome is not known. */
+export const UNKNOWN_OUTCOME = 'The wallet did not answer, so this may or may not have been sent. Check Activity before sending it again.';
 
 export type { SendWatch };
 
@@ -54,6 +63,16 @@ export function sendingWords(phase: PendingBilateralPhase | null, name: string):
 }
 
 export async function sendTransfer(request: SendRequest, watch: SendWatch = {}): Promise<SendOutcome> {
+  try {
+    return await answeredSend(request, watch);
+  } catch (e) {
+    if (e instanceof Unanswered) return { kind: 'unknown', message: e.message };
+    throw e;
+  }
+}
+
+/** The send as Rust answered it; throws `Unanswered` when Rust was asked and no answer came back. */
+async function answeredSend(request: SendRequest, watch: SendWatch): Promise<SendOutcome> {
   const amount = request.amount.trim();
   const memo = request.note.length > 0 ? request.note : undefined;
   if (request.mode === 'offline') {
