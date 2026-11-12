@@ -3,6 +3,19 @@
 # Never permitted: Lean.ofReduceBool, Lean.trustCompiler, sorryAx.
 # Outside this audit: lean4/Sphincs/RustExtraction (Aeneas backend; gated by scripts/check_sphincs_source_refinement.sh).
 module	theorem	axioms
+lean4/DSMApplicationCell.lean	DSMApplicationCell.a_later_write_never_holds_the_cell	(none)
+lean4/DSMApplicationCell.lean	DSMApplicationCell.fields_inj	propext
+lean4/DSMApplicationCell.lean	DSMApplicationCell.occupant_is_recognized	propext
+lean4/DSMApplicationCell.lean	DSMApplicationCell.occupant_is_stable	(none)
+lean4/DSMApplicationCell.lean	DSMApplicationCell.one_cell_one_writer_set	(none)
+lean4/DSMApplicationCell.lean	DSMApplicationCell.other_cell_is_not_recognized	Quot.sound,propext
+lean4/DSMApplicationCell.lean	DSMApplicationCell.outsider_is_not_recognized	Quot.sound,propext
+lean4/DSMApplicationCell.lean	DSMApplicationCell.read_ignores_the_other_seats	(none)
+lean4/DSMApplicationCell.lean	DSMApplicationCell.recognized_iff	Quot.sound,propext
+lean4/DSMApplicationCell.lean	DSMApplicationCell.recognized_signer_is_a_writer_of_the_cell	Quot.sound,propext
+lean4/DSMApplicationCell.lean	DSMApplicationCell.step_commits_the_occupant	propext
+lean4/DSMApplicationCell.lean	DSMApplicationCell.unrecognized_values_are_passed_over	propext
+lean4/DSMApplicationCell.lean	DSMApplicationCell.unverified_is_not_recognized	Quot.sound,propext
 lean4/DSMCardinality.lean	card_le_succ_of_le	(none)
 lean4/DSMCardinality.lean	card_succ_le_of_lt	Quot.sound,propext
 lean4/DSMCardinality.lean	commit_shape_emit	Quot.sound,propext
