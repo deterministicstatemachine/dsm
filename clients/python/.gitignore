@@ -1,4 +1,3 @@
 .venv/
-dsm_app_client/generated/dsm_app_pb2.py
 *.egg-info/
 build/

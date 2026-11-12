@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 // dsm-dev-wallet: a player's wallet in the terminal, for trying an application
-// without a phone. It is a second dsm-app-host (`make dev-wallet`) on the same
-// SDK path a phone runs; this only names its routes.
+// without a phone. It is a second dsm-app-host (`dsm-dev-wallet up`, or
+// `make dev-wallet` from the DSM repo) on the same SDK path a phone runs; this
+// only names its routes.
 //
+//   dsm-dev-wallet up                     start this wallet on the beta network (a new one the first time)
+//                                         and fund it; it keeps running in the background
+//   dsm-dev-wallet down                   stop it
+//   dsm-dev-wallet status                 whether it is running, and where
 //   dsm-dev-wallet id                     this wallet's identity
 //   dsm-dev-wallet fund                   ERA from the development set's faucet, unless it holds some
 //   dsm-dev-wallet owned                  what it owns
@@ -20,14 +25,17 @@
 // DSM_WALLET_NAME picks the wallet (`wallet`, the default, or `wallet2`).
 
 import { pb } from "./index.js";
+import { down, status, up } from "./dev-host.js";
 import { localAccount } from "./local.js";
+import type { WalletAccount } from "./account.js";
 import type { Connection } from "./results.js";
 
+const USAGE =
+  "usage: dsm-dev-wallet up | down | status | id | fund | owned | connect <code> | connections | sync | pending |\n" +
+  "       approve <connection> <seq> | decline <connection> <seq> | log <connection> | disconnect <connection> | help";
+
 function usage(): never {
-  console.error(
-    "usage: dsm-dev-wallet id | fund | owned | connect <code> | connections | sync | pending |\n" +
-      "       approve <connection> <seq> | decline <connection> <seq> | log <connection> | disconnect <connection>",
-  );
+  console.error(USAGE);
   process.exit(2);
 }
 
@@ -44,30 +52,52 @@ function show(c: Connection): void {
   if (c.lastError.length > 0) console.log(`  last sync: ${c.lastError}`);
 }
 
+/** ERA from the faucet, unless the wallet holds some. */
+async function fund(wallet: WalletAccount): Promise<void> {
+  const era = await wallet.owns("ERA").catch(() => undefined);
+  if (era !== undefined && era.amount > 0n) {
+    console.log(`already holds ${era.display} ERA`);
+    return;
+  }
+  for (let attempt = 1; attempt <= 120; attempt++) {
+    const claim = await wallet.fund();
+    if (claim.funded) {
+      console.log(`funded: ${claim.message}`);
+      return;
+    }
+    if (attempt === 1) console.log(`waiting for the faucet: ${claim.message}`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error("the faucet did not fund this wallet within a minute");
+}
+
 async function main(args: string[]): Promise<void> {
   const name = process.env.DSM_WALLET_NAME === "wallet2" ? "wallet2" : "wallet";
+  switch (args[0]) {
+    case undefined:
+      usage();
+    case "help":
+      console.log(USAGE);
+      return;
+    case "up":
+      await up("dsm-dev-wallet", name);
+      await fund(await localAccount(name));
+      return;
+    case "down":
+      await down("dsm-dev-wallet", name);
+      return;
+    case "status":
+      await status("dsm-dev-wallet", name);
+      return;
+  }
   const wallet = await localAccount(name);
   switch (args[0]) {
     case "id":
       console.log(await wallet.id());
       return;
-    case "fund": {
-      const era = await wallet.owns("ERA").catch(() => undefined);
-      if (era !== undefined && era.amount > 0n) {
-        console.log(`already holds ${era.display} ERA`);
-        return;
-      }
-      for (let attempt = 1; attempt <= 120; attempt++) {
-        const claim = await wallet.fund();
-        if (claim.funded) {
-          console.log(`funded: ${claim.message}`);
-          return;
-        }
-        if (attempt === 1) console.log(`waiting for the faucet: ${claim.message}`);
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      throw new Error("the faucet did not fund this wallet within a minute");
-    }
+    case "fund":
+      await fund(wallet);
+      return;
     case "owned":
       for (const o of await wallet.owned()) {
         console.log(`${o.object.symbol.padEnd(8)} ${o.display.padStart(16)}   ${o.object.kind.padEnd(8)} ${o.object.id}`);
