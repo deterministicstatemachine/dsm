@@ -3064,7 +3064,6 @@ fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance
     Err(DsmError::invalid_operation(OFFLINE_BEARER_NO_APPLIANCE_MSG))
 }
 
-/// The anchor appliance connected to this device now, attached to nothing.
 /// The pin of an anchor whose install finished after its answer was lost. Its late answer to the
 /// provisioning can still be on the wire ahead of the status, and is refused as out of step, so the
 /// status is asked for again. `None` when the anchor holds no install, or does not answer.
@@ -3145,6 +3144,7 @@ fn lost_words(lost: &BTreeMap<[u8; 32], u64>) -> String {
         .join(", ")
 }
 
+/// The anchor appliance connected to this device now, attached to nothing.
 fn connected_appliance() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
     match crate::bridge::anchor_appliance_factory() {
         Some(factory) => factory(),
