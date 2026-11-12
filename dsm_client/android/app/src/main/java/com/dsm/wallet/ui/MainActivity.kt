@@ -549,15 +549,8 @@ class MainActivity : AppCompatActivity() {
 
             Log.i(tag, "DSM bridge: received message bytes=${req.size}")
 
-            run {
-                val previewLen = minOf(req.size, 24)
-                val prefixB32 = if (previewLen > 0) {
-                    SinglePathWebViewBridge.base32CrockfordEncode(req.copyOfRange(0, previewLen)).take(32)
-                } else {
-                    ""
-                }
-                Log.i(tag, "DSM bridge: request payload bytes=${req.size} b32Prefix=${prefixB32}")
-            }
+            // A request is logged by its size alone. The log is kept on disk and goes out in the
+            // debug report, so no byte of a request is written to it.
 
             if (req.size < 8) return // Need at least 8 bytes msgId
 
@@ -579,7 +572,7 @@ class MainActivity : AppCompatActivity() {
             val bridgeReq = try {
                 com.dsm.wallet.bridge.BridgeEnvelopeCodec.parseBridgeRequest(requestBytes)
             } catch (t: Throwable) {
-                Log.e(tag, "DSM bridge: failed to parse BridgeRpcRequest (size=${requestBytes.size}, firstBytes=${requestBytes.copyOfRange(0, minOf(16, requestBytes.size)).joinToString("") { String.format("%02x", it) }})", t)
+                Log.e(tag, "DSM bridge: failed to parse BridgeRpcRequest (size=${requestBytes.size})", t)
                 val errorResponse = com.dsm.wallet.bridge.SinglePathWebViewBridge.createErrorResponse(
                     "invalid_request",
                     2,
@@ -697,6 +690,17 @@ class MainActivity : AppCompatActivity() {
         } catch (t: Throwable) {
             Log.w(tag, "ensureBluetoothEnabled: failed to request enable", t)
         }
+    }
+
+    /**
+     * The scanner left the foreground with no result (Home, another app, the screen off): no scan
+     * is running any more. The pause published when the scanner opened said one was, so Rust held
+     * the lock back; Rust is told the scan is over and decides the lock again, with the app in
+     * the background.
+     */
+    internal fun onScannerLeftForeground() {
+        qrLockRoundTripState = QrLockRoundTripState()
+        publishSessionState("qrLeftForeground")
     }
 
     fun requestBlePermissionsFromUi() {

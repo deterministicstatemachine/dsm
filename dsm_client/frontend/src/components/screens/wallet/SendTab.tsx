@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Send tab — transaction form with online/offline mode toggle.
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { sendTransfer, sendingWords } from '../../../domain/sendTransfer';
+import { sendTransfer, sendingWords, UNKNOWN_OUTCOME } from '../../../domain/sendTransfer';
 import type { PendingBilateralPhase } from '../../../domain/bilateral';
 import { emailReceiptIfDue } from '../../../domain/sendReceipt';
 import { appRuntimeStore } from '../../../runtime/appRuntimeStore';
@@ -125,9 +125,13 @@ function SendTabInner({
   useEffect(() => {
     if (tokenOptions.length === 0) return;
     if (!tokenOptions.some((b) => b.tokenId === sendForm.token)) {
+      // An open confirmation names the token it will send. While it is
+      // open nothing is put in that token's place: the form picks another
+      // only once the confirmation has been answered.
+      if (showSendConfirm) return;
       setSendForm((prev) => ({ ...prev, token: tokenOptions[0].tokenId }));
     }
-  }, [tokenOptions, sendForm.token]);
+  }, [tokenOptions, sendForm.token, showSendConfirm]);
 
   useEffect(() => {
     if (contacts.length === 0) {
@@ -192,6 +196,21 @@ function SendTabInner({
         return;
       }
       if (outcome.kind === 'refused') throw new Error(outcome.message);
+      if (outcome.kind === 'unknown') {
+        // No answer came back: the send may have been made. Said as that,
+        // never as "Not sent", and the wallet is read again.
+        fx.play({
+          anim: 'trace',
+          title: 'Outcome unknown',
+          caption: UNKNOWN_OUTCOME,
+          tone: 'neutral',
+          okLabel: 'OK',
+          coin: { ticker: selectedSendBalance.symbol, iconUrl: selectedSendBalance.iconUrl },
+        });
+        onSendComplete();
+        await loadWalletData();
+        return;
+      }
 
       // A receipt to the person paid, when the owner has receipts on and the
       // person has an email (A17). The send is done either way.

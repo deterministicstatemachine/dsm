@@ -413,6 +413,20 @@ class QrScannerActivity : AppCompatActivity() {
         }
     }
     
+    /**
+     * The scanner is no longer visible and is not closing by itself: the user left the app, or
+     * the screen went off. The scan ends there. Left open, it would keep the wallet marked as
+     * scanning, and the lock-on-leaving policy would never run for this departure.
+     */
+    override fun onStop() {
+        super.onStop()
+        if (!isFinishing && !isChangingConfigurations) {
+            MainActivity.getActiveInstance()?.onScannerLeftForeground()
+            setResult(android.app.Activity.RESULT_CANCELED)
+            finish()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()

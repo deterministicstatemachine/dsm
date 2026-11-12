@@ -103,6 +103,12 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         finish(nil)
     }
 
+    /// Ends the scan with no result, as Cancel does: the app left the
+    /// foreground while the scanner was on top.
+    func cancelScan() {
+        finish(nil)
+    }
+
     /// Hands the result over once; later reads are not results.
     private func finish(_ text: String?) {
         guard outcome == .pending else { return }

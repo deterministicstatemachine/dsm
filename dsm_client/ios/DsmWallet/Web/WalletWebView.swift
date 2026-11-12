@@ -20,7 +20,7 @@ final class WalletWebView: WKWebView {
         self.messages = messages
         configuration.userContentController.addScriptMessageHandler(messages, contentWorld: .page, name: "dsm")
         configuration.userContentController.addUserScript(
-            WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+            WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
         super.init(frame: .zero, configuration: configuration)
         backgroundColor = .black
@@ -74,7 +74,23 @@ final class WalletWebView: WKWebView {
 /// or `rpc` (a method and payload, answered with the success bytes or a
 /// rejection carrying the error's message), bytes as Base32 Crockford.
 final class BridgeMessageHandler: NSObject, WKScriptMessageHandlerWithReply {
+    /// The most bytes one request may carry, on either kind of message.
+    private static let largestRequest = 1024 * 1024
+
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
+        // The wallet page is the main frame, served from the app's own
+        // scheme. The bridge answers that page and nothing else: the handler
+        // checks who is calling itself, and does not rest on the navigation
+        // policy and the page's content policy having kept every other frame
+        // out.
+        let page = message.frameInfo.request.url
+        guard message.frameInfo.isMainFrame,
+              page?.scheme?.lowercased() == WebNavigationPolicy.appScheme,
+              page?.host?.lowercased() == WebNavigationPolicy.appHost
+        else {
+            replyHandler(nil, "DSM bridge: a message from a frame that is not the wallet page")
+            return
+        }
         guard let body = message.body as? [String: Any], let kind = body["kind"] as? String else {
             replyHandler(nil, "DSM bridge: a message with no kind")
             return
@@ -86,7 +102,7 @@ final class BridgeMessageHandler: NSObject, WKScriptMessageHandlerWithReply {
                 return
             }
             let request = Base32Crockford.decode(requestText)
-            guard request.count <= 1024 * 1024 else {
+            guard request.count <= Self.largestRequest else {
                 replyHandler(nil, "DSM bridge: request too large: \(request.count) bytes")
                 return
             }
@@ -110,7 +126,12 @@ final class BridgeMessageHandler: NSObject, WKScriptMessageHandlerWithReply {
                 replyHandler(nil, "DSM bridge: an rpc message with no method or payload")
                 return
             }
-            BridgeDispatcher.shared.dispatch(method: method, payload: Base32Crockford.decode(payloadText)) { outcome in
+            let payload = Base32Crockford.decode(payloadText)
+            guard payload.count <= Self.largestRequest else {
+                replyHandler(nil, "DSM bridge: request too large: \(payload.count) bytes")
+                return
+            }
+            BridgeDispatcher.shared.dispatch(method: method, payload: payload) { outcome in
                 DispatchQueue.main.async {
                     switch outcome {
                     case .success(let data): replyHandler(Base32Crockford.encode(data), nil)

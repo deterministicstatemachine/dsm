@@ -16,6 +16,8 @@ import { Disclosure, Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFra
 import { InfoTip } from '../common/InfoTip';
 import { pairingLineFor, pairingStage } from '../../domain/pairing';
 import { canEnd, relationshipLineFor } from '../../domain/relationship';
+import ConfirmModal from '../ConfirmModal';
+import { deviceFingerprint } from '../../domain/displayName';
 
 interface Props { onNavigate?: (screen: string) => void; eraTokenSrc?: string }
 
@@ -41,6 +43,9 @@ const ContactsTabScreen: React.FC<Props> = () => {
   // The contact whose ending is under way, and the last ending Rust refused.
   const [endingContact, setEndingContact] = useState<string | null>(null);
   const [endRefused, setEndRefused] = useState<{ deviceId: string; message: string } | null>(null);
+  // The contact whose ending is being asked about. Ending is final (TERMINATE),
+  // so the button asks first, as the Modern skin does.
+  const [endAsked, setEndAsked] = useState<{ deviceId: string; alias: string } | null>(null);
   const endRelationship = useCallback((deviceId: string) => {
     setEndingContact(deviceId);
     setEndRefused(null);
@@ -349,7 +354,7 @@ const ContactsTabScreen: React.FC<Props> = () => {
                               className="sb-btn"
                               style={{ marginTop: 8, width: '100%' }}
                               disabled={endingContact === c.deviceId}
-                              onClick={() => endRelationship(c.deviceId)}
+                              onClick={() => setEndAsked({ deviceId: c.deviceId, alias: c.alias })}
                             >
                               {endingContact === c.deviceId ? 'Ending…' : 'End relationship'}
                             </button>
@@ -395,6 +400,19 @@ const ContactsTabScreen: React.FC<Props> = () => {
       ) : (
         <MyContactInfoPanel />
       )}
+      <ConfirmModal
+        visible={endAsked !== null}
+        title="End relationship"
+        message={endAsked !== null
+          ? `End the relationship with ${endAsked.alias} (device ${deviceFingerprint(endAsked.deviceId)})? This is final: it cannot be undone, and nothing more can be sent either way.`
+          : ''}
+        onConfirm={() => {
+          const asked = endAsked;
+          setEndAsked(null);
+          if (asked !== null) endRelationship(asked.deviceId);
+        }}
+        onCancel={() => setEndAsked(null)}
+      />
     </ScreenFrame>
   );
 };
