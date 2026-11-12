@@ -812,6 +812,12 @@ TAG_DSM_SHARED_LINEAGE_VAULT_STEP           DSM/shared-lineage/vault-step/v1    
 TAG_DSM_SHARED_LINEAGE_CHECKPOINT           DSM/shared-lineage/checkpoint/v1          checkpoint_digest
 TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR        DSM/shared-lineage/epoch-locator/v1       locator of an epoch's hints and checkpoints
 TAG_DSM_SHARED_LINEAGE_OBJECT               DSM/shared-lineage/object/v1              address of a hint, checkpoint or bundle
+Application cells (DSM Amendment A35), constants in CORE/common/domain_tags/dsm/misc/app_cell.rs
+TAG_DSM_APP_WRITERS                         DSM/app/writers/v1                        ω, an application cell's writer set
+TAG_DSM_APP_CELL                            DSM/app/cell/v1                           K_app
+TAG_DSM_APP_CELL_SEED                       DSM/app/cell-seed/v1                      s_app, the seed of the cell's route
+TAG_DSM_APP_WRITE                           DSM/app/write/v1                          m(p), what a writer signs for payload p
+TAG_DSM_APP_STEP                            DSM/app/step/v1                           the cell and the bytes of the write holding it
 TAG_DSM_SOFI_ROUTE_LANE                     DSM/sofi/route-lane/v1                    a trader's order over near-equal routes (client policy, §31 note)
 TAG_DSM_SOFI_VAULT_FRONTIER                 DSM/sofi/vault-frontier/v1                c_f of a VaultFrontierV1 (Amendment S24)
 TAG_DSM_SOFI_VAULT_BASELINE                 DSM/sofi/vault-baseline/v1                c_n of an OwnerBaselineAuthV1, which the owner's anchor signs (Amendment S24)
@@ -899,6 +905,7 @@ pre
 0x0073           SOFI_OWNER_BASELINE_AUTH                      a frontier commitment and the owner-authority position its signer is proven at (Amendment S24)
 0x0074           SOFI_VAULT_HISTORY_HEAD                       a vault's history at one generation: its peaks (Amendment S26)
 0x0076           SOFI_VAULT_BASELINE_CONTRADICTION             what an owner baseline contradicts in its vault's history (Amendment S34)
+0x0077           APP_CELL_WRITE                                a write at an application cell (DSM Amendment A35)
 
 
 <!-- Source PDF page 19 -->

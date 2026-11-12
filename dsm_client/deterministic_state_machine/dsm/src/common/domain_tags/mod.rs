@@ -220,7 +220,9 @@ mod tests {
     // commitment of its envelope.
     // +2 with lock-bound inbox addresses (DSM Amendment A34): the route
     // digest and the locked address.
-    const EXPECTED_TAG_COUNT: usize = 447;
+    // +5 with application cells (DSM Amendment A35): the writer set, the
+    // cell, its seed, a write's statement and the step.
+    const EXPECTED_TAG_COUNT: usize = 452;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

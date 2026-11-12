@@ -170,6 +170,13 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
             other => format!("Trade among {} objects: {}", other.len(), caps(scope)),
         },
         ScopeKind::Escrow => format!("Lock stakes for matches: {}", caps(scope)),
+        ScopeKind::AppCell => {
+            "Sign and store changes to this app's shared state, as you".to_string()
+        }
+        ScopeKind::Contribute => format!(
+            "Commit what you own to what this app names, yours to take back: {}",
+            caps(scope)
+        ),
         ScopeKind::Duel => {
             let programs: Vec<String> = scope
                 .programs
@@ -292,6 +299,21 @@ pub fn describe_request(request: &Request) -> String {
         Request::EscrowRelease { vault_ids } => match vault_ids.len() {
             1 => "Collect a match result".to_string(),
             n => format!("Collect a match result ({n} stakes)"),
+        },
+        Request::Contribute(asked) => {
+            let committed = amount_of(&asked.policy_commit, asked.amount, &none);
+            match asked.memo.trim() {
+                "" => format!("Commit {committed}, yours to take back"),
+                memo => format!("Commit {committed}, yours to take back ({memo})"),
+            }
+        }
+        Request::AppCellWrite(asked) => format!(
+            "Sign a change to this app's shared state ({} bytes)",
+            asked.payload.len()
+        ),
+        Request::ContributionRelease { vault_ids } => match vault_ids.len() {
+            1 => "Take a contribution back".to_string(),
+            n => format!("Take {n} contributions back"),
         },
         Request::DuelSessionKey { .. } => "Name your key for a battle".to_string(),
         Request::DuelLock(lock) => {
