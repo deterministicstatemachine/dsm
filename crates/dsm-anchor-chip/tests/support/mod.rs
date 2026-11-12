@@ -458,6 +458,17 @@ impl Served {
             ..Default::default()
         })
     }
+
+    /// The nonce the anchor draws for its owner's next authorization, asked over the wire as a
+    /// wallet asks.
+    pub fn authorization_nonce(&mut self) -> [u8; 32] {
+        let drawn = self.bare(pb::Op::AuthorizationNonce);
+        assert!(drawn.ok, "the anchor draws a nonce: error {}", drawn.error);
+        match drawn.authorization_nonce.as_slice().try_into() {
+            Ok(nonce) => nonce,
+            Err(e) => panic!("a 32-byte nonce: {e}"),
+        }
+    }
 }
 
 /// The owner's device key, BLAKE3-SPHINCS+ SPX256f from a fixed seed: the key [`provisioning`]
@@ -472,9 +483,13 @@ pub fn owner_key() -> &'static (Vec<u8>, Vec<u8>) {
     )
 }
 
-/// The owner-authorization digest of `prepare` on the anchor whose bundle is `bundle`, and the
-/// owner's signature of it.
-pub fn authorization_for(prepare: &pb::ApplianceRequest, bundle: &[u8]) -> ([u8; 32], Vec<u8>) {
+/// The owner-authorization digest of `prepare` on the anchor whose bundle is `bundle`, over the
+/// `nonce` the anchor drew for it, and the owner's signature of it.
+pub fn authorization_for(
+    prepare: &pb::ApplianceRequest,
+    bundle: &[u8],
+    nonce: &[u8; 32],
+) -> ([u8; 32], Vec<u8>) {
     let bundle: [u8; 32] = match bundle.try_into() {
         Ok(bundle) => bundle,
         Err(e) => panic!("a 32-byte bundle: {e}"),
@@ -501,6 +516,7 @@ pub fn authorization_for(prepare: &pb::ApplianceRequest, bundle: &[u8]) -> ([u8;
         &transition_digest(&transition.as_transition(), &challenge),
         &field(&prepare.sender_device_root_before, "device root"),
         &field(&prepare.sender_device_root_after, "device root"),
+        nonce,
     );
     let signature = match anchor_chip::bring_up::SphincsPart::owner_sign(&owner_key().0, &digest) {
         Ok(sig) => sig,

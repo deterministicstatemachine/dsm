@@ -136,6 +136,7 @@ fn base(op: i32) -> pb::ApplianceResponse {
         error: err::NONE,
         release: None,
         awaiting_authorization: Vec::new(),
+        authorization_nonce: Vec::new(),
         active_root: Vec::new(),
         anchor_bundle: Vec::new(),
         active_anchor_counter: 0,
@@ -298,6 +299,8 @@ pub trait Served {
         sender_device_root_before: &[u8; 32],
         sender_device_root_after: &[u8; 32],
     ) -> Result<(), Refusal>;
+    /// The nonce the owner's next authorization binds ([`Appliance::draw_authorization_nonce`]).
+    fn draw_authorization_nonce(&mut self) -> Result<[u8; 32], Refusal>;
     /// The owner's authorization of the next prepare ([`Appliance::authorize`]).
     fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), Refusal>;
     fn commit(&mut self) -> Result<(), Refusal>;
@@ -328,6 +331,9 @@ impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
         after: &[u8; 32],
     ) -> Result<(), Refusal> {
         Appliance::prepare(self, t, rc, before, after).map_err(Refusal::from)
+    }
+    fn draw_authorization_nonce(&mut self) -> Result<[u8; 32], Refusal> {
+        Appliance::draw_authorization_nonce(self).map_err(Refusal::from)
     }
     fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), Refusal> {
         Appliance::authorize(self, digest, signature).map_err(Refusal::from)
@@ -376,6 +382,9 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Served for DurableAppliance<T, 
         after: &[u8; 32],
     ) -> Result<(), Refusal> {
         DurableAppliance::prepare(self, t, rc, before, after).map_err(Refusal::from)
+    }
+    fn draw_authorization_nonce(&mut self) -> Result<[u8; 32], Refusal> {
+        DurableAppliance::draw_authorization_nonce(self).map_err(Refusal::from)
     }
     fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), Refusal> {
         DurableAppliance::authorize(self, digest, signature).map_err(Refusal::from)
@@ -540,6 +549,13 @@ pub fn dispatch<A: Served>(
         Ok(pb::Op::Challenge) => match app.draw_challenge() {
             Ok(challenge) => pb::ApplianceResponse {
                 receiver_challenge: challenge.to_vec(),
+                ..ok(op)
+            },
+            Err(refusal) => refused(op, refusal),
+        },
+        Ok(pb::Op::AuthorizationNonce) => match app.draw_authorization_nonce() {
+            Ok(nonce) => pb::ApplianceResponse {
+                authorization_nonce: nonce.to_vec(),
                 ..ok(op)
             },
             Err(refusal) => refused(op, refusal),

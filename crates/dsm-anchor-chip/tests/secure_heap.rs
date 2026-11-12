@@ -145,7 +145,8 @@ fn every_operation_fits_the_secure_heap() {
     // The owner's authorization: signed by the host outside what is measured; the frame, the one
     // copy the monitor holds, and its check are the anchor's.
     let authorize = |anchor: &mut Served, request: &pb::ApplianceRequest, name: &str| {
-        let (digest, signature) = authorization_for(request, &bundle);
+        let nonce = anchor.authorization_nonce();
+        let (digest, signature) = authorization_for(request, &bundle, &nonce);
         let frame = support::authorize_frame(&digest, &signature);
         drop(signature);
         let answer = peak_of(name, ceiling, || anchor.frame(frame, Measurement::Matches));

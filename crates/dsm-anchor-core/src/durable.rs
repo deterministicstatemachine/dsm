@@ -515,6 +515,16 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
         self.persist()
     }
 
+    /// [`Appliance::draw_authorization_nonce`]. Held in memory only, so nothing is written.
+    pub fn draw_authorization_nonce(&mut self) -> Result<[u8; 32], DurableError> {
+        Ok(self.app.draw_authorization_nonce()?)
+    }
+
+    /// [`Appliance::hold_rehearsal_nonce`], for a try-run's anchor.
+    pub(crate) fn hold_rehearsal_nonce(&mut self, nonce: [u8; 32]) {
+        self.app.hold_rehearsal_nonce(nonce);
+    }
+
     /// [`Appliance::authorize`]: the owner's standing authorization of the next prepare. Held in
     /// memory only, so nothing is written: a reboot drops it, and the owner authorizes again.
     pub fn authorize(&mut self, digest: &[u8; 32], signature: &[u8]) -> Result<(), DurableError> {

@@ -237,7 +237,17 @@ fn prepare(
     prepare: &pb::ApplianceRequest,
     bundle: &[u8],
 ) -> pb::ApplianceResponse {
-    let (digest, signature) = support::authorization_for(prepare, bundle);
+    // The anchor draws the nonce from its chip: with the power cut there, the draw is the step
+    // that failed, and its answer is this prepare's.
+    let drawn = anchor.bare(pb::Op::AuthorizationNonce);
+    if !drawn.ok {
+        return drawn;
+    }
+    let nonce: [u8; 32] = match drawn.authorization_nonce.as_slice().try_into() {
+        Ok(nonce) => nonce,
+        Err(e) => panic!("a 32-byte nonce: {e}"),
+    };
+    let (digest, signature) = support::authorization_for(prepare, bundle, &nonce);
     let authorized = anchor.frame(
         support::authorize_frame(&digest, &signature),
         Measurement::Matches,

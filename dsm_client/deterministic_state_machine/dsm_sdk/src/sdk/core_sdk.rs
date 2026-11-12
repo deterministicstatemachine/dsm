@@ -2774,6 +2774,9 @@ impl CoreSDK {
 
         // This device authorizes exactly this prepare, under the key the anchor was provisioned for:
         // the anchor signs for its owner, not for whoever holds the link to it.
+        // The anchor draws the nonce this authorization binds, so the authorization serves
+        // this one prepare and can never be played to the anchor again.
+        let nonce = app.authorization_nonce()?;
         let digest = anchor_core::appliance::owner_authorization_digest(
             &staged.pin.bundle,
             &staged.appliance_prev_root,
@@ -2784,6 +2787,7 @@ impl CoreSDK {
             ),
             &sender_device_root_before,
             &sender_device_root_after,
+            &nonce,
         );
         let secret = crate::sdk::signing_authority::current_secret_key()?;
         let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &digest)?;
@@ -2975,6 +2979,9 @@ impl CoreSDK {
         app.check_payment(paid, payer)?;
         // This device authorizes exactly this receive, under the key its board was provisioned for,
         // as it authorizes a release: the board signs for its owner, not for whoever holds the link.
+        // The anchor draws the nonce this authorization binds, so the authorization serves
+        // this one prepare and can never be played to the anchor again.
+        let nonce = app.authorization_nonce()?;
         let digest = anchor_core::appliance::owner_authorization_digest(
             &staged.pin.bundle,
             &staged.appliance_prev_root,
@@ -2985,6 +2992,7 @@ impl CoreSDK {
             ),
             &device_root_before,
             &device_root_after,
+            &nonce,
         );
         let secret = crate::sdk::signing_authority::current_secret_key()?;
         let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &digest)?;

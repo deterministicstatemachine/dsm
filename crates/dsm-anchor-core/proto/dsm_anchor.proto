@@ -98,6 +98,8 @@ enum Op {
   // The receiver's side of an offline payment (owner, 2026-11-07). See receive.rs.
   OP_CHALLENGE     = 14; // draw a receive challenge from both hardware sources and hold it open
   OP_CHECK_PAYMENT = 15; // check the payer's release against the open challenge, before the receive
+  OP_AUTHORIZATION_NONCE = 16; // draw the nonce the owner's next OP_AUTHORIZE must bind: an
+                               // authorization serves the one prepare it was made for, once
 }
 
 // What a payer discloses of its enrollment, for its bundle B to recompute (every field B binds).
@@ -214,6 +216,7 @@ message ApplianceResponse {
   bytes awaiting_authorization       = 23;
   bytes receiver_challenge           = 24; // OP_CHALLENGE: the challenge drawn (32)
   bytes open_challenge               = 25; // OP_STATUS: the challenge held open (32), if any
+  bytes authorization_nonce          = 26; // OP_AUTHORIZATION_NONCE: the nonce drawn (32)
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the
