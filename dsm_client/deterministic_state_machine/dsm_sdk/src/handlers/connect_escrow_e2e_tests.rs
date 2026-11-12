@@ -879,7 +879,8 @@ async fn contribution_offer(r: &TestDevice, relay: &ForwardRelay) -> String {
 }
 
 /// What a wallet shows for the contribute scope of [`contribution_offer`].
-const CONTRIBUTE_LINE: &str = "Commit what you own to what this app names, yours to take back: up to 30.00 ERA \
+const CONTRIBUTE_LINE: &str =
+    "Commit what you own to what this app names, yours to take back: up to 30.00 ERA \
                                a time, 60.00 ERA in all";
 
 fn contribute(external: &[u8], amount: u64) -> Kind {
@@ -1009,7 +1010,11 @@ async fn a_contribution_is_committed_under_the_grant_and_taken_back_by_its_owner
     };
     assert_eq!(pending.pending.len(), 1);
     assert_eq!(pending.pending[0].seq, past_cap);
-    assert_eq!(balance(&p.a, &era()), whole_era(95), "nothing was committed");
+    assert_eq!(
+        balance(&p.a, &era()),
+        whole_era(95),
+        "nothing was committed"
+    );
     assert_eq!(
         fact(&status(&r, &sid, past_cap).await),
         generated::ConnectFact::None
@@ -1147,7 +1152,11 @@ async fn the_first_members_write_holds_a_cell_and_a_second_members_never_does() 
         held.fact_detail
     );
     assert_eq!(held.app_cell.len(), 32);
-    assert_eq!(held.app_cell_step.len(), 32, "a final occupant has its step");
+    assert_eq!(
+        held.app_cell_step.len(),
+        32,
+        "a final occupant has its step"
+    );
 
     // B writes another change at the same cell: its wallet signs and stores
     // it, and the cell stays A's.
@@ -1161,14 +1170,23 @@ async fn the_first_members_write_holds_a_cell_and_a_second_members_never_does() 
     assert_eq!(sync(&p.b, &r, &relay).await, "");
     carried_out(&p.b, &sid_b, by_b).await;
     let lost = status(&r, &sid_b, by_b).await;
-    assert_eq!(fact(&lost), generated::ConnectFact::None, "{}", lost.fact_detail);
+    assert_eq!(
+        fact(&lost),
+        generated::ConnectFact::None,
+        "{}",
+        lost.fact_detail
+    );
     assert!(
-        lost.fact_detail.contains("another writer's write holds the cell"),
+        lost.fact_detail
+            .contains("another writer's write holds the cell"),
         "{}",
         lost.fact_detail
     );
     assert_eq!(lost.app_cell, held.app_cell, "both wrote the one cell");
-    assert_eq!(lost.app_cell_step, held.app_cell_step, "and it has one step");
+    assert_eq!(
+        lost.app_cell_step, held.app_cell_step,
+        "and it has one step"
+    );
     let still = status(&r, &sid_a, by_a).await;
     assert_eq!(fact(&still), generated::ConnectFact::AppCellHeld);
     assert_eq!(still.app_cell_step, held.app_cell_step);

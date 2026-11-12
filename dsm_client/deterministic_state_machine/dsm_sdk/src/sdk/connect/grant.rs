@@ -397,7 +397,11 @@ fn app_cell_write_from_wire(r: &generated::ConnectAppCellWriteV1) -> Result<AppC
         Ok(())
     };
     within("a cell's name", r.name.len(), dsm::app_cell::MAX_NAME_BYTES)?;
-    within("a write's payload", r.payload.len(), dsm::app_cell::MAX_PAYLOAD_BYTES)?;
+    within(
+        "a write's payload",
+        r.payload.len(),
+        dsm::app_cell::MAX_PAYLOAD_BYTES,
+    )?;
     Ok(AppCellWrite {
         name: r.name.clone(),
         writers: crate::sdk::app_cell_flow::writers(&r.writer_keys)?,
@@ -1382,22 +1386,42 @@ mod tests {
         let commit = |amount| request_from_wire(&contribute_wire(amount, b"tower"));
         let take_back = request_from_wire(&take_back_wire(1))?;
         assert_eq!(
-            decide(&contribute_grant(), &commit(25)?, &nothing_spent, &BTreeSet::new()),
+            decide(
+                &contribute_grant(),
+                &commit(25)?,
+                &nothing_spent,
+                &BTreeSet::new()
+            ),
             Decision::InScope {
                 spend: Some((WILD, 25))
             }
         );
         assert!(matches!(
-            decide(&contribute_grant(), &commit(26)?, &nothing_spent, &BTreeSet::new()),
+            decide(
+                &contribute_grant(),
+                &commit(26)?,
+                &nothing_spent,
+                &BTreeSet::new()
+            ),
             Decision::Outside(..)
         ));
         let spent_36 = |c: &[u8; 32]| if *c == WILD { 36 } else { 0 };
         assert!(matches!(
-            decide(&contribute_grant(), &commit(25)?, &spent_36, &BTreeSet::new()),
+            decide(
+                &contribute_grant(),
+                &commit(25)?,
+                &spent_36,
+                &BTreeSet::new()
+            ),
             Decision::Outside(..)
         ));
         assert_eq!(
-            decide(&contribute_grant(), &take_back, &nothing_spent, &BTreeSet::new()),
+            decide(
+                &contribute_grant(),
+                &take_back,
+                &nothing_spent,
+                &BTreeSet::new()
+            ),
             Decision::InScope { spend: None }
         );
         // The other scope's requests stay outside each grant.
@@ -1459,8 +1483,12 @@ mod tests {
         request_from_wire(&write_wire(b"", keys.clone(), b"p")).expect_err("a cell with no name");
         request_from_wire(&write_wire(b"n", keys.clone(), b"")).expect_err("an empty payload");
         request_from_wire(&write_wire(b"n", vec![], b"p")).expect_err("a cell nobody writes");
-        request_from_wire(&write_wire(b"n", vec![keys[0].clone(), keys[0].clone()], b"p"))
-            .expect_err("one writer named twice");
+        request_from_wire(&write_wire(
+            b"n",
+            vec![keys[0].clone(), keys[0].clone()],
+            b"p",
+        ))
+        .expect_err("one writer named twice");
         request_from_wire(&write_wire(b"n", vec![vec![7; 12]], b"p"))
             .expect_err("a writer that is no signing key");
         request_from_wire(&write_wire(

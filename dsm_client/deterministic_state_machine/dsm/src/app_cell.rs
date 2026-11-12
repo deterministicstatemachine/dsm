@@ -85,7 +85,9 @@ pub enum AppCellError {
 impl core::fmt::Display for AppCellError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::UnknownSignatureAlg { alg } => write!(f, "signature algorithm {alg} is not declared"),
+            Self::UnknownSignatureAlg { alg } => {
+                write!(f, "signature algorithm {alg} is not declared")
+            }
             Self::KeyLength { expected, got } => {
                 write!(f, "a key of {got} bytes where the algorithm has {expected}")
             }
@@ -444,8 +446,7 @@ pub fn sign_write(
     bounded("payload bytes", 1, MAX_PAYLOAD_BYTES, payload.len())
         .map_err(|e| refused(e.to_string()))?;
     let cell = cell_key(&application, &writers_digest(&writers), name);
-    let signature =
-        crate::crypto::sphincs::sphincs_sign(secret_key, &statement(&cell, payload))?;
+    let signature = crate::crypto::sphincs::sphincs_sign(secret_key, &statement(&cell, payload))?;
     let write = AppCellWrite::new(application, name, writers, signer, payload, &signature)
         .map_err(|e| refused(e.to_string()))?;
     write_authority(&write, &cell).map_err(|e| refused(format!("{e:?}")))?;
@@ -791,7 +792,10 @@ mod tests {
         let other = WriterSet::new(vec![m.a.0.clone(), m.outsider.0.clone()]).expect("two");
         assert_ne!(cell_key(&APP, &writers_digest(&other), NAME), k);
         assert_ne!(cell_key(&[0xAD; 32], &writers_digest(&m.set), NAME), k);
-        assert_ne!(cell_key(&APP, &writers_digest(&m.set), b"lineage step 8"), k);
+        assert_ne!(
+            cell_key(&APP, &writers_digest(&m.set), b"lineage step 8"),
+            k
+        );
 
         assert_eq!(
             WriterSet::new(vec![m.a.0.clone(), m.a.0.clone()]),
@@ -799,7 +803,10 @@ mod tests {
         );
         assert!(matches!(
             WriterSet::new(Vec::new()),
-            Err(AppCellError::OutOfBounds { what: "writers", .. })
+            Err(AppCellError::OutOfBounds {
+                what: "writers",
+                ..
+            })
         ));
     }
 
@@ -819,7 +826,10 @@ mod tests {
         );
         for cut in [0, 3, 36, 40, bytes.len() - 1] {
             assert!(
-                matches!(AppCellWrite::decode(&bytes[..cut]), Err(DecodeError::Truncated)),
+                matches!(
+                    AppCellWrite::decode(&bytes[..cut]),
+                    Err(DecodeError::Truncated)
+                ),
                 "a write cut at {cut} still decoded"
             );
         }
@@ -834,11 +844,24 @@ mod tests {
         );
         assert!(matches!(
             AppCellWrite::new(APP, b"", m.set.clone(), 0, b"p", b"s"),
-            Err(AppCellError::OutOfBounds { what: "name bytes", .. })
+            Err(AppCellError::OutOfBounds {
+                what: "name bytes",
+                ..
+            })
         ));
         assert!(matches!(
-            AppCellWrite::new(APP, NAME, m.set.clone(), 0, &vec![7; MAX_PAYLOAD_BYTES + 1], b"s"),
-            Err(AppCellError::OutOfBounds { what: "payload bytes", .. })
+            AppCellWrite::new(
+                APP,
+                NAME,
+                m.set.clone(),
+                0,
+                &vec![7; MAX_PAYLOAD_BYTES + 1],
+                b"s"
+            ),
+            Err(AppCellError::OutOfBounds {
+                what: "payload bytes",
+                ..
+            })
         ));
     }
 
@@ -852,12 +875,22 @@ mod tests {
         assert_eq!(write_occupying(&good.encode(), &k), Ok(good.clone()));
 
         // A key outside the set cannot produce a write at all.
-        let refused = sign_write(APP, NAME, m.set.clone(), &m.outsider.0, &m.outsider.1, b"build");
-        assert!(matches!(refused, Err(e) if e.to_string().contains("not one of the cell's writers")));
+        let refused = sign_write(
+            APP,
+            NAME,
+            m.set.clone(),
+            &m.outsider.0,
+            &m.outsider.1,
+            b"build",
+        );
+        assert!(
+            matches!(refused, Err(e) if e.to_string().contains("not one of the cell's writers"))
+        );
 
         // The outsider signs and claims a member's place in the set.
-        let forged_sig = crate::crypto::sphincs::sphincs_sign(&m.outsider.1, &statement(&k, b"build"))
-            .expect("signs");
+        let forged_sig =
+            crate::crypto::sphincs::sphincs_sign(&m.outsider.1, &statement(&k, b"build"))
+                .expect("signs");
         let forged = AppCellWrite::new(APP, NAME, m.set.clone(), 0, b"build", &forged_sig)
             .expect("has an encoding");
         assert_eq!(
@@ -877,8 +910,15 @@ mod tests {
         );
 
         // A member's signature over one payload carries no other.
-        let moved = AppCellWrite::new(APP, NAME, m.set.clone(), good.signer, b"raze", good.signature())
-            .expect("has an encoding");
+        let moved = AppCellWrite::new(
+            APP,
+            NAME,
+            m.set.clone(),
+            good.signer,
+            b"raze",
+            good.signature(),
+        )
+        .expect("has an encoding");
         assert_eq!(
             write_occupying(&moved.encode(), &k),
             Err(WriteRefusal::SignatureDoesNotVerify)
@@ -950,8 +990,9 @@ mod tests {
         let m = members();
         let cell = the_cell(&m);
         let k = *cell.key();
-        let forged_sig = crate::crypto::sphincs::sphincs_sign(&m.outsider.1, &statement(&k, b"raze"))
-            .expect("signs");
+        let forged_sig =
+            crate::crypto::sphincs::sphincs_sign(&m.outsider.1, &statement(&k, b"raze"))
+                .expect("signs");
         let forged = AppCellWrite::new(APP, NAME, m.set.clone(), 1, b"raze", &forged_sig)
             .expect("has an encoding")
             .encode();

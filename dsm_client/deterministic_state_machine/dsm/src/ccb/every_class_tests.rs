@@ -1334,7 +1334,14 @@ fn every_class() -> Vec<Shown> {
         "app cell writer set",
     );
     let write = ok(
-        crate::app_cell::AppCellWrite::new(b(0xAC), b"step 1", writers, 0, b"payload", &signature()),
+        crate::app_cell::AppCellWrite::new(
+            b(0xAC),
+            b"step 1",
+            writers,
+            0,
+            b"payload",
+            &signature(),
+        ),
         "app cell write",
     );
     all.push(shown(

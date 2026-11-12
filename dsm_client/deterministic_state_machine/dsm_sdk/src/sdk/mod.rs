@@ -19,13 +19,13 @@
 //! * `contact_sdk`: Manages peer relationships and communications
 //! * `wallet_sdk`: Key management and secure storage capabilities
 //!
+pub mod app_cell_flow;
 /// Objects an account publishes under a topic of its own, signed by its AK.
 pub mod authored_objects;
 /// Escrow vaults (SoFi §19.9): stakes released by a canonical verdict.
 pub mod computed_flow;
 pub mod economic_admission_flow;
 pub mod economic_registers;
-pub mod app_cell_flow;
 pub mod escrow_flow;
 pub mod faucet_claim_flow;
 pub mod native_reserve;

@@ -1806,9 +1806,11 @@ impl AppRouterImpl {
             Err(e) => return Executed::failed(e),
         };
         let answer = |released| {
-            Some(generated::app_response_body_v1::Result::ContributionRelease(
-                generated::ConnectEscrowReleaseResultV1 { released },
-            ))
+            Some(
+                generated::app_response_body_v1::Result::ContributionRelease(
+                    generated::ConnectEscrowReleaseResultV1 { released },
+                ),
+            )
         };
         let mut released = Vec::with_capacity(vault_ids.len());
         for vault_id in vault_ids {

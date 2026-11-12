@@ -20,8 +20,7 @@ pub const TAG_DSM_APP_CELL_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/app/cell-seed/v1");
 /// `m(p) = H(tag ‖ K_app ‖ u32be(|p|) ‖ p)` — what a writer signs to write
 /// payload `p` at the cell.
-pub const TAG_DSM_APP_WRITE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/app/write/v1");
+pub const TAG_DSM_APP_WRITE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/app/write/v1");
 /// `step = H(tag ‖ K_app ‖ occupant bytes)` — what the next cell's name
 /// commits of this cell and the write that holds it.
 pub const TAG_DSM_APP_STEP: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/app/step/v1");
