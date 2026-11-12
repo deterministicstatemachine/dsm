@@ -132,11 +132,25 @@ jobs:
         with:
           key: app-host-${{ matrix.platform }}
 
+      # Ubuntu 22.04's own protoc (3.12) predates proto3 `optional`, which
+      # proto/dsm_app.proto uses: protoc 29.3 from protobuf's release, by digest.
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
+        env:
+          ARCH: ${{ runner.arch }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          set -euo pipefail
+          case "$ARCH" in
+            X64) zip=protoc-29.3-linux-x86_64.zip; sum=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a ;;
+            ARM64) zip=protoc-29.3-linux-aarch_64.zip; sum=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32 ;;
+            *) echo "::error::no protoc pinned for $ARCH"; exit 1 ;;
+          esac
+          curl -fsSL -o "$RUNNER_TEMP/$zip" "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/$zip"
+          echo "$sum  $RUNNER_TEMP/$zip" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/protoc"
+          unzip -q "$RUNNER_TEMP/$zip" -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/protoc/bin/protoc" --version
 
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
