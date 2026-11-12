@@ -178,6 +178,11 @@ pub fn describe_call(method: &str, args: &[u8]) -> String {
                     short(&k.opponent_device_id),
                     memo_note(&k.memo)
                 ),
+                Some(pb::connect_app_request_intent_v1::Kind::AppCellWrite(k)) => format!(
+                    "ask the wallet to write {} bytes at the cell {:?}",
+                    k.payload.len(),
+                    String::from_utf8_lossy(&k.name)
+                ),
                 Some(pb::connect_app_request_intent_v1::Kind::Contribute(k)) => format!(
                     "ask the wallet to commit {}{}",
                     amount_of(&k.policy_commit, k.amount),
@@ -337,6 +342,7 @@ pub fn describe_answer(response: &pb::IngressResponse) -> Result<String, String>
                         Ok(pb::ConnectFact::EscrowLocked) => "STAKE LOCKED",
                         Ok(pb::ConnectFact::EscrowReleased) => "RESULT COLLECTED",
                         Ok(pb::ConnectFact::Contributed) => "CONTRIBUTED",
+                        Ok(pb::ConnectFact::AppCellHeld) => "WRITTEN",
                         Ok(pb::ConnectFact::ContributionReleased) => "TAKEN BACK",
                         _ => "nothing established",
                     },

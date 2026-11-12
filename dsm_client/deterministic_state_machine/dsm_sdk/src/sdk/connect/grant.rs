@@ -35,6 +35,9 @@ pub enum ScopeKind {
     /// outcome pays this wallet, and take them back (DSM Amendment A35).
     /// Capped as a payment scope is.
     Contribute,
+    /// Sign and store writes at the cells the application names, as one of
+    /// each cell's writers (DSM Amendment A35). It spends nothing.
+    AppCell,
 }
 
 impl ScopeKind {
@@ -50,6 +53,7 @@ impl ScopeKind {
             ScopeKind::Duel => "duel",
             ScopeKind::Contacts => "contacts",
             ScopeKind::Contribute => "contribute",
+            ScopeKind::AppCell => "state",
         }
     }
 }
@@ -96,6 +100,7 @@ fn kind_from_wire(kind: i32) -> Result<ScopeKind, String> {
         Ok(generated::ConnectScopeKind::Duel) => Ok(ScopeKind::Duel),
         Ok(generated::ConnectScopeKind::Contacts) => Ok(ScopeKind::Contacts),
         Ok(generated::ConnectScopeKind::Contribute) => Ok(ScopeKind::Contribute),
+        Ok(generated::ConnectScopeKind::AppCell) => Ok(ScopeKind::AppCell),
         _ => Err(format!("scope kind {kind} is not one this wallet knows")),
     }
 }
@@ -110,6 +115,7 @@ fn kind_to_wire(kind: ScopeKind) -> generated::ConnectScopeKind {
         ScopeKind::Duel => generated::ConnectScopeKind::Duel,
         ScopeKind::Contacts => generated::ConnectScopeKind::Contacts,
         ScopeKind::Contribute => generated::ConnectScopeKind::Contribute,
+        ScopeKind::AppCell => generated::ConnectScopeKind::AppCell,
     }
 }
 
@@ -194,6 +200,11 @@ pub fn scopes_from_wire(wire: &[generated::ConnectScopeV1]) -> Result<Vec<Scope>
                     return Err(
                         "a match scope caps the objects it may lock, and names no others".into(),
                     );
+                }
+            }
+            ScopeKind::AppCell => {
+                if !scope.policy_commits.is_empty() || !scope.caps.is_empty() {
+                    return Err("a state scope names no objects and no caps".into());
                 }
             }
             ScopeKind::Contribute => {
@@ -367,6 +378,33 @@ pub struct Contribute {
     pub memo: String,
 }
 
+/// A write at a cell the application names (DSM Amendment A35). It names no
+/// application: the wallet writes only the connected application's cells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppCellWrite {
+    pub name: Vec<u8>,
+    pub writers: dsm::app_cell::WriterSet,
+    pub payload: Vec<u8>,
+}
+
+/// A write's fields read and checked for their shape: a name and a payload
+/// within Core's bounds, and writers that form a set.
+fn app_cell_write_from_wire(r: &generated::ConnectAppCellWriteV1) -> Result<AppCellWrite, String> {
+    let within = |what: &str, len: usize, most: usize| {
+        if len == 0 || len > most {
+            return Err(format!("{what} is 1 to {most} bytes, not {len}"));
+        }
+        Ok(())
+    };
+    within("a cell's name", r.name.len(), dsm::app_cell::MAX_NAME_BYTES)?;
+    within("a write's payload", r.payload.len(), dsm::app_cell::MAX_PAYLOAD_BYTES)?;
+    Ok(AppCellWrite {
+        name: r.name.clone(),
+        writers: crate::sdk::app_cell_flow::writers(&r.writer_keys)?,
+        payload: r.payload.clone(),
+    })
+}
+
 /// The most contributions one request takes back.
 pub const MAX_RELEASED_CONTRIBUTIONS: usize = 8;
 
@@ -469,6 +507,7 @@ pub enum Request {
         vault_ids: Vec<[u8; 32]>,
     },
     Contribute(Contribute),
+    AppCellWrite(AppCellWrite),
     /// Take contributions back: release each vault to this wallet.
     ContributionRelease {
         vault_ids: Vec<[u8; 32]>,
@@ -753,6 +792,7 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
             vault_ids: vault_list(&r.vault_ids)?,
         }),
         Some(Kind::Contribute(r)) => Ok(Request::Contribute(contribute_from_wire(r)?)),
+        Some(Kind::AppCellWrite(r)) => Ok(Request::AppCellWrite(app_cell_write_from_wire(r)?)),
         Some(Kind::ContributionRelease(r)) => Ok(Request::ContributionRelease {
             vault_ids: vaults_named(&r.vault_ids, MAX_RELEASED_CONTRIBUTIONS)?,
         }),
@@ -914,6 +954,12 @@ pub fn decide(
         Request::EscrowRelease { .. } => match of_kind(ScopeKind::Escrow).next() {
             Some(..) => Decision::InScope { spend: None },
             None => Decision::Outside("the grant does not let it collect match results".into()),
+        },
+        // A write moves nothing the wallet owns: it runs within the grant's
+        // count of requests that spend nothing.
+        Request::AppCellWrite(..) => match of_kind(ScopeKind::AppCell).next() {
+            Some(..) => Decision::InScope { spend: None },
+            None => Decision::Outside("the grant does not let it write shared state as you".into()),
         },
         // A contribution is capped as a payment is: the amount leaves the
         // wallet's balance for as long as the vault is Active.
@@ -1369,6 +1415,85 @@ mod tests {
                 "{asked:?} ran under {granted:?}"
             );
         }
+        Ok(())
+    }
+
+    fn state_grant() -> Vec<Scope> {
+        vec![Scope {
+            kind: ScopeKind::AppCell,
+            policy_commits: vec![],
+            caps: vec![],
+            programs: vec![],
+        }]
+    }
+
+    fn write_wire(name: &[u8], keys: Vec<Vec<u8>>, payload: &[u8]) -> generated::AppRequestBodyV1 {
+        generated::AppRequestBodyV1 {
+            session_id: vec![1; 32],
+            seq: 1,
+            kind: Some(generated::app_request_body_v1::Kind::AppCellWrite(
+                generated::ConnectAppCellWriteV1 {
+                    name: name.to_vec(),
+                    writer_keys: keys,
+                    payload: payload.to_vec(),
+                },
+            )),
+        }
+    }
+
+    /// A write names the cell's name, its writers and a payload, and no
+    /// application: that is the session's. It spends nothing and runs only
+    /// under a state scope, which caps nothing and names nothing.
+    #[test]
+    fn a_cell_write_runs_under_a_state_scope_and_names_no_application() -> Result<(), String> {
+        let keys = vec![signing_key(), signing_key()];
+        let asked = request_from_wire(&write_wire(b"step 1", keys.clone(), b"place tower"))?;
+        let Request::AppCellWrite(write) = &asked else {
+            return Err(format!("read as {asked:?}"));
+        };
+        assert_eq!(
+            (write.name.as_slice(), write.payload.as_slice()),
+            (&b"step 1"[..], &b"place tower"[..])
+        );
+        assert_eq!(write.writers.writers().len(), 2);
+        request_from_wire(&write_wire(b"", keys.clone(), b"p")).expect_err("a cell with no name");
+        request_from_wire(&write_wire(b"n", keys.clone(), b"")).expect_err("an empty payload");
+        request_from_wire(&write_wire(b"n", vec![], b"p")).expect_err("a cell nobody writes");
+        request_from_wire(&write_wire(b"n", vec![keys[0].clone(), keys[0].clone()], b"p"))
+            .expect_err("one writer named twice");
+        request_from_wire(&write_wire(b"n", vec![vec![7; 12]], b"p"))
+            .expect_err("a writer that is no signing key");
+        request_from_wire(&write_wire(
+            b"n",
+            keys.clone(),
+            &vec![7; dsm::app_cell::MAX_PAYLOAD_BYTES + 1],
+        ))
+        .expect_err("a payload past Core's bound");
+
+        assert_eq!(
+            scopes_from_wire(&scopes_to_wire(&state_grant()))?,
+            state_grant()
+        );
+        let mut capped = scopes_to_wire(&state_grant());
+        capped[0].caps = scopes_to_wire(&escrow_grant())[0].caps.clone();
+        scopes_from_wire(&capped).expect_err("a state scope that caps an object");
+        assert_eq!(
+            decide(&state_grant(), &asked, &nothing_spent, &BTreeSet::new()),
+            Decision::InScope { spend: None }
+        );
+        for granted in [escrow_grant(), contribute_grant(), grant()] {
+            assert!(
+                matches!(
+                    decide(&granted, &asked, &nothing_spent, &BTreeSet::new()),
+                    Decision::Outside(..)
+                ),
+                "a write ran under {granted:?}"
+            );
+        }
+        assert!(matches!(
+            decide(&state_grant(), &lock(1), &nothing_spent, &BTreeSet::new()),
+            Decision::Outside(..)
+        ));
         Ok(())
     }
 

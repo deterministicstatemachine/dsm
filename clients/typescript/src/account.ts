@@ -22,6 +22,7 @@ import {
   ConnectDuelSignV1,
   ConnectDuelSignedEntryV1,
   ConnectDuelWithdrawV1,
+  ConnectAppCellWriteV1,
   ConnectContributeV1,
   ConnectContributionReleaseV1,
   ConnectEscrowLockV1,
@@ -224,6 +225,8 @@ export class Account {
         });
       case "match":
         return new ConnectScopeV1({ kind: ConnectScopeKind.ESCROW, caps: await this.caps(g.caps) });
+      case "state":
+        return new ConnectScopeV1({ kind: ConnectScopeKind.APP_CELL });
       case "contribute":
         return new ConnectScopeV1({ kind: ConnectScopeKind.CONTRIBUTE, caps: await this.caps(g.caps) });
       case "duel":
@@ -296,6 +299,11 @@ export class Account {
             amount: await this.units(a.object, a.amount),
             memo: a.memo,
           }),
+        };
+      case "write":
+        return {
+          case: "appCellWrite",
+          value: new ConnectAppCellWriteV1({ name: a.cell, writerKeys: a.writers, payload: a.payload }),
         };
       case "takeBack":
         return { case: "contributionRelease", value: new ConnectContributionReleaseV1({ vaultIds: a.contributions }) };

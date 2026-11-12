@@ -1067,3 +1067,143 @@ async fn the_game_returns_a_contribution_to_its_owner_and_decides_nothing_else()
     assert_eq!(balance(&r, &era()), 0, "the game holds nothing of it");
     taken_back(&r, &sid, back, "return").await;
 }
+
+// ── application cells (DSM Amendment A35) ───────────────────────────────────
+
+/// R's offer through `relay`: a state scope. The code.
+async fn state_offer(r: &TestDevice, relay: &ForwardRelay) -> String {
+    let made = invoke(
+        r,
+        "connect.app.offer",
+        args(&generated::ConnectAppOfferRequestV1 {
+            display_name: "Territories".into(),
+            endpoint: relay.endpoint.clone(),
+            cert_pin: relay.pin.to_vec(),
+            scopes: vec![generated::ConnectScopeV1 {
+                kind: generated::ConnectScopeKind::AppCell as i32,
+                policy_commits: Vec::new(),
+                caps: Vec::new(),
+                programs: Vec::new(),
+            }],
+            token_anchors: Vec::new(),
+            free_requests: FREE_REQUESTS,
+        }),
+    )
+    .await;
+    let Reply::Offer(offer) = reply(&made) else {
+        panic!("connect.app.offer answered another reply");
+    };
+    let digest: [u8; 32] = offer.offer_digest.as_slice().try_into().expect("a digest");
+    relay.held().offer = Some((digest, offer.offer.clone()));
+    offer.code
+}
+
+const STATE_LINE: &str = "Sign and store changes to this app's shared state, as you";
+
+fn cell_write(name: &[u8], writers: &[&generated::ConnectSessionV1], payload: &[u8]) -> Kind {
+    Kind::AppCellWrite(generated::ConnectAppCellWriteV1 {
+        name: name.to_vec(),
+        writer_keys: writers.iter().map(|w| w.peer_signing_key.clone()).collect(),
+        payload: payload.to_vec(),
+    })
+}
+
+/// Two members of one faction each write the faction's next step through
+/// their grants, at the one cell the game names for both of them. The first
+/// write at the cell's leader holds it; the second member's write, validly
+/// signed by a writer of the same set, never does. The game counts a write
+/// only from the cell its own account derives and reads: A's is a fact with
+/// the step the next cell commits, B's is reported as another writer's
+/// holding the cell. A write for a cell whose writers leave the wallet out
+/// is refused before it is asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_first_members_write_holds_a_cell_and_a_second_members_never_does() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let code_a = state_offer(&r, &relay).await;
+    let sid_a = connect_shown(&r, &p.a, &relay, &code_a, STATE_LINE).await;
+    let code_b = state_offer(&r, &relay).await;
+    let sid_b = connect_shown(&r, &p.b, &relay, &code_b, STATE_LINE).await;
+    let as_a = player_of(&r, &sid_a).await;
+    let as_b = player_of(&r, &sid_b).await;
+    let members = [&as_a, &as_b];
+
+    let by_a = request(
+        &r,
+        &relay,
+        &sid_a,
+        cell_write(b"faction 4 / step 1", &members, b"place watchtower at 4,9"),
+    )
+    .await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    carried_out(&p.a, &sid_a, by_a).await;
+    let held = status(&r, &sid_a, by_a).await;
+    assert_eq!(
+        fact(&held),
+        generated::ConnectFact::AppCellHeld,
+        "{}",
+        held.fact_detail
+    );
+    assert_eq!(held.app_cell.len(), 32);
+    assert_eq!(held.app_cell_step.len(), 32, "a final occupant has its step");
+
+    // B writes another change at the same cell: its wallet signs and stores
+    // it, and the cell stays A's.
+    let by_b = request(
+        &r,
+        &relay,
+        &sid_b,
+        cell_write(b"faction 4 / step 1", &members, b"place wall at 2,2"),
+    )
+    .await;
+    assert_eq!(sync(&p.b, &r, &relay).await, "");
+    carried_out(&p.b, &sid_b, by_b).await;
+    let lost = status(&r, &sid_b, by_b).await;
+    assert_eq!(fact(&lost), generated::ConnectFact::None, "{}", lost.fact_detail);
+    assert!(
+        lost.fact_detail.contains("another writer's write holds the cell"),
+        "{}",
+        lost.fact_detail
+    );
+    assert_eq!(lost.app_cell, held.app_cell, "both wrote the one cell");
+    assert_eq!(lost.app_cell_step, held.app_cell_step, "and it has one step");
+    let still = status(&r, &sid_a, by_a).await;
+    assert_eq!(fact(&still), generated::ConnectFact::AppCellHeld);
+    assert_eq!(still.app_cell_step, held.app_cell_step);
+
+    // The next step is another cell, and B's write holds it.
+    let next = request(
+        &r,
+        &relay,
+        &sid_b,
+        cell_write(b"faction 4 / step 2", &members, b"place wall at 2,2"),
+    )
+    .await;
+    assert_eq!(sync(&p.b, &r, &relay).await, "");
+    let second = status(&r, &sid_b, next).await;
+    assert_eq!(
+        fact(&second),
+        generated::ConnectFact::AppCellHeld,
+        "{}",
+        second.fact_detail
+    );
+    assert_ne!(second.app_cell, held.app_cell);
+
+    // A cell B does not write: the game's own account refuses to ask.
+    let refused = invoke(
+        &r,
+        "connect.app.request",
+        args(&generated::ConnectAppRequestIntentV1 {
+            session_id: sid_b.to_vec(),
+            kind: Some(cell_write(b"faction 4 / step 3", &[&as_a], b"raze")),
+        }),
+    )
+    .await;
+    let why = refused
+        .error_message
+        .clone()
+        .expect("a write the wallet cannot sign is refused, with the reason");
+    assert!(why.contains("not one of the cell's writers"), "{why}");
+}

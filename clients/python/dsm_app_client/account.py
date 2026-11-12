@@ -156,6 +156,8 @@ class Account:
             return pb.ConnectScopeV1(kind=pb.CONNECT_SCOPE_KIND_SWAP, policy_commits=self._ids(g.objects), caps=caps)
         if g.kind == "match":
             return pb.ConnectScopeV1(kind=pb.CONNECT_SCOPE_KIND_ESCROW, caps=caps)
+        if g.kind == "state":
+            return pb.ConnectScopeV1(kind=pb.CONNECT_SCOPE_KIND_APP_CELL)
         if g.kind == "contribute":
             return pb.ConnectScopeV1(kind=pb.CONNECT_SCOPE_KIND_CONTRIBUTE, caps=caps)
         if g.kind == "duel":
@@ -224,6 +226,10 @@ class Account:
                     amount=self.units(a.object, a.amount),
                     memo=a.memo,
                 )
+            )
+        elif a.kind == "write":
+            m.app_cell_write.CopyFrom(
+                pb.ConnectAppCellWriteV1(name=a.match, writer_keys=list(a.stakes), payload=a.entry)
             )
         elif a.kind == "take_back":
             m.contribution_release.CopyFrom(pb.ConnectContributionReleaseV1(vault_ids=list(a.stakes)))

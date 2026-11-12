@@ -25,6 +25,7 @@ export type Grant =
   | { kind: "trade"; pair: [ObjectRef, ObjectRef]; caps: Cap[] }
   | { kind: "match"; caps: Cap[] }
   | { kind: "contribute"; caps: Cap[] }
+  | { kind: "state" }
   | { kind: "duel"; programs: Uint8Array[]; caps: Cap[] };
 
 /** What an offer asks a wallet to let the application do without asking again. */
@@ -52,6 +53,10 @@ export const grant = {
   /** Stake in matches this application referees, within `caps`. */
   match(caps: Cap[]): Grant {
     return { kind: "match", caps };
+  },
+  /** Sign and store changes to this application's shared state, as the wallet. Spends nothing. */
+  state(): Grant {
+    return { kind: "state" };
   },
   /** Commit amounts to what this application names, the wallet's to take back, within `caps`. */
   contribute(caps: Cap[]): Grant {
@@ -93,6 +98,7 @@ export type Ask =
   | { kind: "collect"; stakes: Uint8Array[] }
   | { kind: "contribute"; to: Uint8Array; object: ObjectRef; amount: Amount; memo: string }
   | { kind: "takeBack"; contributions: Uint8Array[] }
+  | { kind: "write"; cell: Uint8Array; writers: Uint8Array[]; payload: Uint8Array }
   | { kind: "duelSessionKey"; nonce: Uint8Array }
   | {
       kind: "duelStake";
@@ -193,6 +199,17 @@ export const ask = {
     /** Collect the stakes a decided match pays this wallet (one or two stake ids). */
     collect(stakes: Uint8Array[]): Ask {
       return { kind: "collect", stakes };
+    },
+  },
+  /**
+   * Shared state (DSM Amendment A35): a cell this application names, written
+   * once by one of the wallets whose signing keys `writers` lists. The first
+   * write at the cell holds it; a later one never does.
+   */
+  state: {
+    /** Write `payload` at the cell named `cell` (1 to 64 bytes), as one of `writers`. */
+    write(cell: Uint8Array | string, writers: Uint8Array[], payload: Uint8Array): Ask {
+      return { kind: "write", cell: typeof cell === "string" ? new TextEncoder().encode(cell) : cell, writers, payload };
     },
   },
   /**

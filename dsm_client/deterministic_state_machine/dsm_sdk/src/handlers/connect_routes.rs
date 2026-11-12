@@ -46,7 +46,7 @@ use crate::sdk::connect::grant::{
     DuelSigned, EscrowLock, Opponent, Request, Scope,
 };
 use crate::sdk::connect::contribution;
-use crate::sdk::connect::grant::Contribute;
+use crate::sdk::connect::grant::{AppCellWrite, Contribute};
 use crate::sdk::connect::wager::{self, Player, Referee};
 use crate::sdk::connect::pinned_tls::Relay;
 use crate::sdk::connect::signed::{own_card, own_network, sign_own};
@@ -230,6 +230,8 @@ fn waits(
         | Request::DuelWithdraw { .. }
         | Request::DuelSign { .. }
         | Request::DuelSettle { .. } => Ok(None),
+        // A write admits no position either: it signs and writes a cell.
+        Request::AppCellWrite(..) => Ok(None),
     }
 }
 
@@ -312,6 +314,7 @@ fn duel_belongs_to(session: &store::WalletSession, request: &Request) -> Result<
         | Request::EscrowRelease { .. }
         | Request::Contribute(..)
         | Request::ContributionRelease { .. }
+        | Request::AppCellWrite(..)
         | Request::DuelCollect { .. } => Ok(()),
     }
 }
@@ -1377,6 +1380,14 @@ impl AppRouterImpl {
             Request::ContributionRelease { vault_ids } => {
                 Box::pin(self.take_back(session, vault_ids)).await
             }
+            Request::AppCellWrite(asked) => {
+                match Box::pin(self.write_app_cell(session, asked)).await {
+                    Ok(written) => Executed::carried_out(Some(
+                        generated::app_response_body_v1::Result::AppCellWrite(written),
+                    )),
+                    Err(e) => Executed::failed(e),
+                }
+            }
             Request::DuelSessionKey { match_nonce } => {
                 let answered =
                     crate::sdk::computed_flow::session_public_key(match_nonce).and_then(|key| {
@@ -1683,6 +1694,32 @@ impl AppRouterImpl {
             verdict_cell: created.verdict_cell.to_vec(),
             external_commitment: created.external_commitment.to_vec(),
             position: created.position,
+        })
+    }
+
+    /// Write at a cell of the connected application's (DSM Amendment A35).
+    /// The cell's key commits the application's genesis as this wallet holds
+    /// it from the session, never from the request, so the grant writes no
+    /// other application's cells. This wallet signs as itself and must be
+    /// one of the writers the request names. The payload is not read.
+    async fn write_app_cell(
+        &self,
+        session: &store::WalletSession,
+        asked: &AppCellWrite,
+    ) -> Result<generated::ConnectAppCellWriteResultV1, String> {
+        let (signed, occupied) = crate::sdk::app_cell_flow::write(
+            &self.core_sdk,
+            &own_set()?,
+            &session.app_genesis,
+            &asked.name,
+            &asked.writers,
+            &asked.payload,
+        )
+        .await
+        .map_err(|e| format!("writing the application's cell: {e}"))?;
+        Ok(generated::ConnectAppCellWriteResultV1 {
+            cell: occupied.cell.to_vec(),
+            write: signed.encode(),
         })
     }
 
@@ -2291,6 +2328,7 @@ impl AppRouterImpl {
             Request::Contribute(asked) => {
                 self.contribute_fact(&session, asked, &mut status).await?
             }
+            Request::AppCellWrite(asked) => self.app_cell_fact(&session, asked, &mut status)?,
             Request::ContributionRelease { vault_ids } => {
                 self.contribution_release_fact(&session, vault_ids, &mut status)
                     .await?
@@ -2589,6 +2627,55 @@ impl AppRouterImpl {
                     .into();
             }
         }
+        Ok(())
+    }
+
+    /// FACT_APP_CELL_HELD (DSM Amendment A35), from the cell this account
+    /// derives from its own genesis, the asked name and the asked writers,
+    /// and reads itself: its canonical occupant is the session's wallet's
+    /// write of exactly the asked payload, final. Another writer's write
+    /// holding the cell is reported as that, and is no fact about this
+    /// request.
+    fn app_cell_fact(
+        &self,
+        session: &store::AppSession,
+        asked: &AppCellWrite,
+        status: &mut generated::ConnectAppStatusV1,
+    ) -> Result<(), String> {
+        let wallet = crate::sdk::app_cell_flow::writer(&session.wallet_ak)?;
+        let application = own_player(&self.core_sdk)?.genesis;
+        let cell = crate::sdk::app_cell_flow::cell_of(&application, &asked.name, &asked.writers);
+        status.app_cell = cell.to_vec();
+        let occupied = match crate::sdk::app_cell_flow::read(&self.core_sdk, &own_set()?, &cell) {
+            Ok(occupied) => occupied,
+            Err(e) => {
+                status.fact_detail = format!("the cell {}: {e}", short(&cell));
+                return Ok(());
+            }
+        };
+        if let Some(step) = occupied.step {
+            status.app_cell_step = step.to_vec();
+        }
+        status.fact_detail = match occupied.held {
+            None => "no recognized write holds the cell; an answer saying written grants nothing"
+                .to_string(),
+            Some((held, _)) if *held.signer() != wallet => {
+                "another writer's write holds the cell, not the wallet's".to_string()
+            }
+            Some((held, _)) if held.payload() != asked.payload.as_slice() => {
+                "the wallet's write holding the cell carries another payload".to_string()
+            }
+            Some((_, dsm::route_chain::ChainState::Final)) => {
+                status.fact = generated::ConnectFact::AppCellHeld as i32;
+                format!(
+                    "the wallet's write of the asked payload holds the cell {}, final",
+                    short(&cell)
+                )
+            }
+            Some((_, state)) => format!(
+                "the wallet's write of the asked payload holds the cell, {state:?}: not final yet"
+            ),
+        };
         Ok(())
     }
 
@@ -2895,6 +2982,7 @@ impl AppRouterImpl {
             Some(Intent::EscrowLock(k)) => Body::EscrowLock(k),
             Some(Intent::EscrowRelease(k)) => Body::EscrowRelease(k),
             Some(Intent::Contribute(k)) => Body::Contribute(k),
+            Some(Intent::AppCellWrite(k)) => Body::AppCellWrite(k),
             Some(Intent::ContributionRelease(k)) => Body::ContributionRelease(k),
             Some(Intent::DuelSessionKey(k)) => Body::DuelSessionKey(k),
             Some(Intent::DuelLock(k)) => Body::DuelLock(k),
@@ -2920,6 +3008,17 @@ impl AppRouterImpl {
                 &own_referee(&self.core_sdk)?,
             )
             .map_err(|e| format!("{ROUTE}: {e}"))?;
+        }
+        // A write the wallet could never sign is not asked for: it writes
+        // only as one of the cell's writers.
+        if let Request::AppCellWrite(write) = &asked {
+            let wallet = crate::sdk::app_cell_flow::writer(&session.wallet_ak)
+                .map_err(|e| format!("{ROUTE}: {e}"))?;
+            if write.writers.position(&wallet).is_none() {
+                return Err(format!(
+                    "{ROUTE}: the wallet's key is not one of the cell's writers"
+                ));
+            }
         }
         // A contribution this account could never return is not asked for.
         if let Request::Contribute(..) = &asked {

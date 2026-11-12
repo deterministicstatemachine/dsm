@@ -1465,6 +1465,13 @@ export enum ConnectScopeKind {
   CONTACTS = 7,
 
   /**
+   * sign and store writes at the cells the application names, as one of each cell's writers (DSM Amendment A35)
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_APP_CELL = 9;
+   */
+  APP_CELL = 9,
+
+  /**
    * commit amounts to what the application names, every outcome returning them to the wallet, and take them back (DSM Amendment A35)
    *
    * @generated from enum value: CONNECT_SCOPE_KIND_CONTRIBUTE = 8;
@@ -1481,6 +1488,7 @@ proto3.util.setEnumType(ConnectScopeKind, "dsm.ConnectScopeKind", [
   { no: 5, name: "CONNECT_SCOPE_KIND_ESCROW" },
   { no: 6, name: "CONNECT_SCOPE_KIND_DUEL" },
   { no: 7, name: "CONNECT_SCOPE_KIND_CONTACTS" },
+  { no: 9, name: "CONNECT_SCOPE_KIND_APP_CELL" },
   { no: 8, name: "CONNECT_SCOPE_KIND_CONTRIBUTE" },
 ]);
 
@@ -1709,6 +1717,13 @@ export enum ConnectFact {
   CONTRIBUTED = 11,
 
   /**
+   * the session's wallet's write of exactly the asked payload holds the cell this account derives, final
+   *
+   * @generated from enum value: CONNECT_FACT_APP_CELL_HELD = 13;
+   */
+  APP_CELL_HELD = 13,
+
+  /**
    * each named vault is a contribution of the wallet's, Retired, and its cell's final verdict returned it to the wallet
    *
    * @generated from enum value: CONNECT_FACT_CONTRIBUTION_RELEASED = 12;
@@ -1729,6 +1744,7 @@ proto3.util.setEnumType(ConnectFact, "dsm.ConnectFact", [
   { no: 10, name: "CONNECT_FACT_SIGNED" },
   { no: 9, name: "CONNECT_FACT_DUEL_SETTLED" },
   { no: 11, name: "CONNECT_FACT_CONTRIBUTED" },
+  { no: 13, name: "CONNECT_FACT_APP_CELL_HELD" },
   { no: 12, name: "CONNECT_FACT_CONTRIBUTION_RELEASED" },
 ]);
 
@@ -31290,6 +31306,109 @@ export class ConnectContributionReleaseV1 extends Message<ConnectContributionRel
 }
 
 /**
+ * @generated from message dsm.ConnectAppCellWriteV1
+ */
+export class ConnectAppCellWriteV1 extends Message<ConnectAppCellWriteV1> {
+  /**
+   * the application's name for the cell: 1..64
+   *
+   * @generated from field: bytes name = 1;
+   */
+  name = new Uint8Array(0);
+
+  /**
+   * the cell's writers' signing keys: 1..64, the wallet's among them
+   *
+   * @generated from field: repeated bytes writer_keys = 2;
+   */
+  writerKeys: Uint8Array[] = [];
+
+  /**
+   * 1..16384
+   *
+   * @generated from field: bytes payload = 3;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectAppCellWriteV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectAppCellWriteV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "name", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "writer_keys", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 3, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppCellWriteV1 {
+    return new ConnectAppCellWriteV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectAppCellWriteV1 {
+    return new ConnectAppCellWriteV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectAppCellWriteV1 {
+    return new ConnectAppCellWriteV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectAppCellWriteV1 | PlainMessage<ConnectAppCellWriteV1> | undefined, b: ConnectAppCellWriteV1 | PlainMessage<ConnectAppCellWriteV1> | undefined): boolean {
+    return proto3.util.equals(ConnectAppCellWriteV1, a, b);
+  }
+}
+
+/**
+ * What the wallet wrote and what it then read at the cell: a notification,
+ * never evidence.
+ *
+ * @generated from message dsm.ConnectAppCellWriteResultV1
+ */
+export class ConnectAppCellWriteResultV1 extends Message<ConnectAppCellWriteResultV1> {
+  /**
+   * @generated from field: bytes cell = 1;
+   */
+  cell = new Uint8Array(0);
+
+  /**
+   * the wallet's signed AppCellWrite
+   *
+   * @generated from field: bytes write = 2;
+   */
+  write = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectAppCellWriteResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectAppCellWriteResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "write", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppCellWriteResultV1 {
+    return new ConnectAppCellWriteResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectAppCellWriteResultV1 {
+    return new ConnectAppCellWriteResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectAppCellWriteResultV1 {
+    return new ConnectAppCellWriteResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectAppCellWriteResultV1 | PlainMessage<ConnectAppCellWriteResultV1> | undefined, b: ConnectAppCellWriteResultV1 | PlainMessage<ConnectAppCellWriteResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectAppCellWriteResultV1, a, b);
+  }
+}
+
+/**
  * This wallet's session public key for the match whose setup carries
  * `match_nonce`: what the application puts in the setup for the wallet's side.
  * Derived in the wallet from its own seed; its secret never leaves the wallet.
@@ -32206,6 +32325,12 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
      */
     value: ConnectContributionReleaseV1;
     case: "contributionRelease";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectAppCellWriteV1 app_cell_write = 28;
+     */
+    value: ConnectAppCellWriteV1;
+    case: "appCellWrite";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppRequestBodyV1>) {
@@ -32236,6 +32361,7 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
     { no: 25, name: "sign", kind: "message", T: ConnectSignV1, oneof: "kind" },
     { no: 26, name: "contribute", kind: "message", T: ConnectContributeV1, oneof: "kind" },
     { no: 27, name: "contribution_release", kind: "message", T: ConnectContributionReleaseV1, oneof: "kind" },
+    { no: 28, name: "app_cell_write", kind: "message", T: ConnectAppCellWriteV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestBodyV1 {
@@ -33148,6 +33274,12 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
      */
     value: ConnectEscrowReleaseResultV1;
     case: "contributionRelease";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectAppCellWriteResultV1 app_cell_write = 24;
+     */
+    value: ConnectAppCellWriteResultV1;
+    case: "appCellWrite";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppResponseBodyV1>) {
@@ -33176,6 +33308,7 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
     { no: 21, name: "sign", kind: "message", T: ConnectSignResultV1, oneof: "result" },
     { no: 22, name: "contribute", kind: "message", T: ConnectEscrowLockResultV1, oneof: "result" },
     { no: 23, name: "contribution_release", kind: "message", T: ConnectEscrowReleaseResultV1, oneof: "result" },
+    { no: 24, name: "app_cell_write", kind: "message", T: ConnectAppCellWriteResultV1, oneof: "result" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppResponseBodyV1 {
@@ -34155,6 +34288,12 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
      */
     value: ConnectContributionReleaseV1;
     case: "contributionRelease";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectAppCellWriteV1 app_cell_write = 28;
+     */
+    value: ConnectAppCellWriteV1;
+    case: "appCellWrite";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectAppRequestIntentV1>) {
@@ -34184,6 +34323,7 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
     { no: 25, name: "sign", kind: "message", T: ConnectSignV1, oneof: "kind" },
     { no: 26, name: "contribute", kind: "message", T: ConnectContributeV1, oneof: "kind" },
     { no: 27, name: "contribution_release", kind: "message", T: ConnectContributionReleaseV1, oneof: "kind" },
+    { no: 28, name: "app_cell_write", kind: "message", T: ConnectAppCellWriteV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestIntentV1 {
@@ -34468,6 +34608,19 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
    */
   answerSignature = new Uint8Array(0);
 
+  /**
+   * An application cell write: the cell this account derived, and, once its
+   * occupant is final, the step the next cell's name commits.
+   *
+   * @generated from field: bytes app_cell = 20;
+   */
+  appCell = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes app_cell_step = 21;
+   */
+  appCellStep = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectAppStatusV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -34495,6 +34648,8 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
     { no: 17, name: "answer_body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 18, name: "signed_statement", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 19, name: "answer_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 20, name: "app_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 21, name: "app_cell_step", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppStatusV1 {

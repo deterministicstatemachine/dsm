@@ -25,6 +25,7 @@ pub mod authored_objects;
 pub mod computed_flow;
 pub mod economic_admission_flow;
 pub mod economic_registers;
+pub mod app_cell_flow;
 pub mod escrow_flow;
 pub mod faucet_claim_flow;
 pub mod native_reserve;
