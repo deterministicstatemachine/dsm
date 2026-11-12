@@ -7677,6 +7677,7 @@ Owner, 2026-11-10: "get the Android one ready. Let's test it and see if it's rea
 - *One Secure crossing at a time.* `dsm_secure_handler` takes a crossing from thread mode only, masks exceptions for its length and refuses one that finds another being served. No test off silicon.
 - *A frame past a head's size is dispatched as a payment check or not at all* (`service::handle`; asserted in `over_the_wire_an_authorization_is_the_message_and_the_signature_after_it`).
 - *A production image checks the board's lock before it reads the sealed secret.*
+- *The Secure heap is 154 KiB* (owner, 2026-11-12: "Yes, from the heap"). The changes above grew the Secure image until, built on macOS, it ended 488 bytes inside the 59 KiB stack's reservation and the linker refused it; the same code linked on CI's Linux, so nothing was left there either. The heap gave up 2 KiB: the production image now ends 1,560 bytes under the stack's floor, the heap's measured peak is 105,456 bytes against the 118,272 the rehearsal holds it to (`secure_heap`), and the stack bound is 55,336 bytes of 60,416 (`stack-bound.py`). The monitor was compile-checked, not linked, before that change was merged; all four images are linked for this one.
 - *Left:* the measurement gate does not cover `OP_AUTHORIZE`, which finishes an install; any link holder can discard an open receive challenge.
 
 ### 6.159 The read-through of 2026-11-12: what a client can make a node hold, what a screen says of a send, and what a release hands its installer

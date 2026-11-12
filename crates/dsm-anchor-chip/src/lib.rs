@@ -30,9 +30,12 @@ pub trait Board {
 /// The Secure heap the monitor gives the anchor. Its size is here so that the rehearsal holds every
 /// operation to it. 156 KiB: the owner's authorization (CONFORMANCE_GAPS 6.152) grew the Secure
 /// image by about 7 KiB past the 5 KiB the 400 KiB region had left over its 64 KiB stack, and the
-/// heap gave up 4 KiB for it, its measured peaks (105,473 bytes, a boot that recovers a committed
-/// record) standing well under three quarters of what remains.
-pub const SECURE_HEAP_BYTES: usize = 156 * 1024;
+/// heap gave up 4 KiB for it. 154 KiB (owner, 2026-11-12: "Yes, from the heap"): the single-use
+/// authorization, the spare-slot check and the handler's exclusion (CONFORMANCE_GAPS 6.158) grew
+/// the image again, to 488 bytes past its 59 KiB stack's floor, and the heap gave up 2 KiB more.
+/// Its measured peak (105,456 bytes, a boot that recovers a committed record) stands under three
+/// quarters of what remains, which is what the rehearsal holds every operation to.
+pub const SECURE_HEAP_BYTES: usize = 154 * 1024;
 
 /// The largest request frame the monitor takes: a request's largest message and, after it, the
 /// owner's authorization signature when the request is one (anchor-core's frame rule,
