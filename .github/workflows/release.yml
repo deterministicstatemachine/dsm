@@ -187,7 +187,7 @@ jobs:
 
       - name: Upload the newcomer's log
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: first-run-log
           path: .dsm-dev/first-run/newcomer.log
@@ -342,7 +342,7 @@ jobs:
       # (scripts/generate-assurance.py); without Lean it records the check as
       # skipped, never as passed.
       - name: Cache elan toolchain
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.elan
           key: elan-${{ hashFiles('lean4/lean-toolchain') }}
@@ -532,7 +532,7 @@ jobs:
           head -40 dist/RELEASE_BODY.md
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           tag_name: ${{ github.ref_name }}
           name: DSM ${{ github.ref_name }}
