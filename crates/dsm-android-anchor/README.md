@@ -5,7 +5,9 @@ The SENDER phone's USB link to its own RP2350/TROPIC01 appliance, plus gated dev
 v2 needs **nothing receiver-side** (no relay, no counter reader, no verifier slot) — the one
 device install is the sender's appliance factory.
 
-Workspace-EXCLUDED (pulls `tropic01`); built only via cargo-ndk for Android.
+Workspace-EXCLUDED (pulls `tropic01`); built via cargo-ndk for Android. Its host tests (the board
+setup against a model of the RP2350 bootloader, the USB appliance client) run from this directory
+with `cargo test --release --locked --lib`, as CI's `phone-anchor` job runs them.
 
 ## Build flavors
 
@@ -35,8 +37,10 @@ cp target/aarch64-linux-android/release/libdsm_android_anchor.so \
 
 ## Device setup order
 
-1. A new board goes through its try-run on the trial image before anything is burned on it
-   (`crates/dsm-anchor-secure-monitor/scripts/anchor-secure-boot/RUNBOOK.md`).
+1. A new board is set up from this phone, plugged in with BOOTSEL held (Appliance → Production
+   setup): a test part's chip prepared, its try-run on the trial image, then the one-time burns, each
+   step read back (`crates/dsm-anchor-secure-monitor/scripts/anchor-secure-boot/RUNBOOK.md`, "From the
+   phone").
 2. Attach the appliance over USB-OTG. Android asks to allow it. Attaching changes nothing: a status
    read of a new anchor reports it as awaiting its install.
 3. In the wallet's Appliance screen, try the install, read what it makes permanent, and install it.
