@@ -24,6 +24,7 @@ export type Grant =
   | { kind: "contacts" }
   | { kind: "trade"; pair: [ObjectRef, ObjectRef]; caps: Cap[] }
   | { kind: "match"; caps: Cap[] }
+  | { kind: "contribute"; caps: Cap[] }
   | { kind: "duel"; programs: Uint8Array[]; caps: Cap[] };
 
 /** What an offer asks a wallet to let the application do without asking again. */
@@ -51,6 +52,10 @@ export const grant = {
   /** Stake in matches this application referees, within `caps`. */
   match(caps: Cap[]): Grant {
     return { kind: "match", caps };
+  },
+  /** Commit amounts to what this application names, the wallet's to take back, within `caps`. */
+  contribute(caps: Cap[]): Grant {
+    return { kind: "contribute", caps };
   },
   /** Stake in matches these programs decide (each by the hash it is pinned by), within `caps`. */
   duel(programs: Uint8Array[], caps: Cap[]): Grant {
@@ -86,6 +91,8 @@ export type Ask =
       memo: string;
     }
   | { kind: "collect"; stakes: Uint8Array[] }
+  | { kind: "contribute"; to: Uint8Array; object: ObjectRef; amount: Amount; memo: string }
+  | { kind: "takeBack"; contributions: Uint8Array[] }
   | { kind: "duelSessionKey"; nonce: Uint8Array }
   | {
       kind: "duelStake";
@@ -186,6 +193,21 @@ export const ask = {
     /** Collect the stakes a decided match pays this wallet (one or two stake ids). */
     collect(stakes: Uint8Array[]): Ask {
       return { kind: "collect", stakes };
+    },
+  },
+  /**
+   * Contributions (DSM Amendment A35): an amount the wallet commits to what
+   * this application names. Both outcomes return it to the wallet; the
+   * application decides when, never to whom.
+   */
+  contribution: {
+    /** Commit `amount` of `object` to what `to` describes (its agreed bytes, 1 to 256). */
+    commit(to: Uint8Array | string, object: ObjectRef, amount: Amount, memo = ""): Ask {
+      return { kind: "contribute", to: typeof to === "string" ? new TextEncoder().encode(to) : to, object, amount, memo };
+    },
+    /** Take contributions back into this wallet (one to eight contribution ids). */
+    takeBack(contributions: Uint8Array[]): Ask {
+      return { kind: "takeBack", contributions };
     },
   },
   /** Matches a pinned program decides from both players' signed moves (SoFi Amendment S22). */

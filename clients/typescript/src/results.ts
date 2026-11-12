@@ -61,6 +61,8 @@ export type Fact =
   | "owns"
   | "staked"
   | "collected"
+  | "contributed"
+  | "taken_back"
   | "duel_staked"
   | "duel_started"
   | "duel_withdrawn"
@@ -82,6 +84,8 @@ const FACTS: Record<ConnectFact, Fact> = {
   [ConnectFact.HOLDINGS]: "owns",
   [ConnectFact.ESCROW_LOCKED]: "staked",
   [ConnectFact.ESCROW_RELEASED]: "collected",
+  [ConnectFact.CONTRIBUTED]: "contributed",
+  [ConnectFact.CONTRIBUTION_RELEASED]: "taken_back",
   [ConnectFact.DUEL_LOCKED]: "duel_staked",
   [ConnectFact.DUEL_STARTED]: "duel_started",
   [ConnectFact.DUEL_WITHDRAWN]: "duel_withdrawn",
@@ -113,6 +117,8 @@ export interface Result {
   owns?: { object: string; amount: bigint }[];
   /** fact "staked" or "collected": the stakes, the match's verdict cell, and the amount staked. */
   match?: { stakes: Uint8Array[]; cell: Uint8Array; amount: bigint };
+  /** fact "contributed" or "taken_back": the contributions, the wallet's verdict cell for the commitment, and the amount committed. */
+  contribution?: { contributions: Uint8Array[]; cell: Uint8Array; amount: bigint };
   /** A price: what the wallet's vaults would give. Information, never a fact. */
   price?: { amountIn: bigint; amountOut: bigint; hops: number };
   /** fact "signed": the statement the wallet signed, and its signature over `raw.answerBody`. */
@@ -136,6 +142,9 @@ export function resultOf(ref: RequestRef, s: ConnectAppStatusV1): Result {
   }
   if (s.fact === ConnectFact.ESCROW_LOCKED || s.fact === ConnectFact.ESCROW_RELEASED) {
     result.match = { stakes: s.escrowVaultIds, cell: s.escrowVerdictCell, amount: s.escrowAmount };
+  }
+  if (s.fact === ConnectFact.CONTRIBUTED || s.fact === ConnectFact.CONTRIBUTION_RELEASED) {
+    result.contribution = { contributions: s.escrowVaultIds, cell: s.escrowVerdictCell, amount: s.escrowAmount };
   }
   if (s.quote !== undefined && s.quote.amountIn > 0n) {
     result.price = { amountIn: s.quote.amountIn, amountOut: s.quote.amountOut, hops: s.quote.hops };

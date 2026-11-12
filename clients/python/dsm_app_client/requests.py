@@ -65,6 +65,11 @@ class grant:
         return Grant("match", caps=tuple(caps))
 
     @staticmethod
+    def contribute(caps: Sequence[Cap]) -> Grant:
+        """Commit amounts to what this application names, the wallet's to take back, within `caps`."""
+        return Grant("contribute", caps=tuple(caps))
+
+    @staticmethod
     def duel(programs: Sequence[bytes], caps: Sequence[Cap]) -> Grant:
         """Stake in matches these programs decide (each by the hash it is pinned by), within `caps`."""
         return Grant("duel", programs=tuple(programs), caps=tuple(caps))
@@ -200,10 +205,32 @@ class _Duel:
         return Ask("duel_collect", stakes=tuple(stakes))
 
 
+class _Contribution:
+    """Contributions (DSM Amendment A35): an amount the wallet commits to what this application
+    names. Both outcomes return it to the wallet; the application decides when, never to whom."""
+
+    @staticmethod
+    def commit(to: bytes | str, object: ObjectRef, amount: Amount, memo: str = "") -> Ask:
+        """Commit `amount` of `object` to what `to` describes (its agreed bytes, 1 to 256)."""
+        return Ask(
+            "contribute",
+            match=to.encode() if isinstance(to, str) else to,
+            object=object,
+            amount=amount,
+            memo=memo,
+        )
+
+    @staticmethod
+    def take_back(contributions: Sequence[bytes]) -> Ask:
+        """Take contributions back into this wallet (one to eight contribution ids)."""
+        return Ask("take_back", stakes=tuple(contributions))
+
+
 class ask:
     """What an application asks a connected wallet to do."""
 
     match = _Match
+    contribution = _Contribution
     duel = _Duel
 
     @staticmethod

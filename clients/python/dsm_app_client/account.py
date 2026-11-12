@@ -156,6 +156,8 @@ class Account:
             return pb.ConnectScopeV1(kind=pb.CONNECT_SCOPE_KIND_SWAP, policy_commits=self._ids(g.objects), caps=caps)
         if g.kind == "match":
             return pb.ConnectScopeV1(kind=pb.CONNECT_SCOPE_KIND_ESCROW, caps=caps)
+        if g.kind == "contribute":
+            return pb.ConnectScopeV1(kind=pb.CONNECT_SCOPE_KIND_CONTRIBUTE, caps=caps)
         if g.kind == "duel":
             return pb.ConnectScopeV1(kind=pb.CONNECT_SCOPE_KIND_DUEL, programs=list(g.programs), caps=caps)
         raise ValueError(f"no grant of kind {g.kind!r}")
@@ -213,6 +215,18 @@ class Account:
             )
         elif a.kind == "collect":
             m.escrow_release.CopyFrom(pb.ConnectEscrowReleaseV1(vault_ids=list(a.stakes)))
+        elif a.kind == "contribute":
+            assert a.object is not None and a.amount is not None
+            m.contribute.CopyFrom(
+                pb.ConnectContributeV1(
+                    external=a.match,
+                    policy_commit=self.object_id(a.object),
+                    amount=self.units(a.object, a.amount),
+                    memo=a.memo,
+                )
+            )
+        elif a.kind == "take_back":
+            m.contribution_release.CopyFrom(pb.ConnectContributionReleaseV1(vault_ids=list(a.stakes)))
         elif a.kind == "duel_session_key":
             m.duel_session_key.CopyFrom(pb.ConnectDuelSessionKeyV1(match_nonce=a.nonce))
         elif a.kind == "duel_stake":
@@ -446,6 +460,13 @@ class AppAccount(Account):
         """Decide a match this application referees: who the stake pays. Both stakes share one verdict."""
         route = "escrow.adjudicate"
         request = pb.EscrowOutcomeRequest(vault_id=stake, outcome=_DECISIONS[decision])
+        return payload(route, self.ingress.call("invoke", route, request), "escrow_verdict_response")
+
+    def return_contribution(self, contribution: bytes) -> pb.EscrowVerdictResponse:
+        """Return a contribution to the wallet that committed it. This decides when it goes back,
+        never to whom: the wallet then takes it back."""
+        route = "escrow.adjudicate"
+        request = pb.EscrowOutcomeRequest(vault_id=contribution, outcome=b"return")
         return payload(route, self.ingress.call("invoke", route, request), "escrow_verdict_response")
 
 

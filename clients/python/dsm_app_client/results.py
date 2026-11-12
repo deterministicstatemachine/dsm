@@ -58,6 +58,8 @@ FACTS: Dict[int, str] = {
     pb.CONNECT_FACT_HOLDINGS: "owns",
     pb.CONNECT_FACT_ESCROW_LOCKED: "staked",
     pb.CONNECT_FACT_ESCROW_RELEASED: "collected",
+    pb.CONNECT_FACT_CONTRIBUTED: "contributed",
+    pb.CONNECT_FACT_CONTRIBUTION_RELEASED: "taken_back",
     pb.CONNECT_FACT_DUEL_LOCKED: "duel_staked",
     pb.CONNECT_FACT_DUEL_STARTED: "duel_started",
     pb.CONNECT_FACT_DUEL_WITHDRAWN: "duel_withdrawn",
@@ -87,6 +89,8 @@ class Result:
     received: Optional[bytes] = None  # fact "received": the accepted transfer's id
     owns: Tuple[Tuple[str, int], ...] = ()  # fact "owns": (object id, amount) pairs
     match: Optional[Tuple[Tuple[bytes, ...], bytes, int]] = None  # (stakes, verdict cell, amount)
+    # fact "contributed" or "taken_back": (contributions, the wallet's verdict cell, amount)
+    contribution: Optional[Tuple[Tuple[bytes, ...], bytes, int]] = None
     price: Optional[Tuple[int, int, int]] = None  # (amount in, amount out, hops); information, never a fact
     signed: Optional[Tuple[str, bytes]] = None  # fact "signed": (statement, signature over raw.answer_body)
     raw: Optional[pb.ConnectAppStatusV1] = None
@@ -100,6 +104,9 @@ def result_of(ref: RequestRef, s: pb.ConnectAppStatusV1) -> Result:
     match = None
     if s.fact in (pb.CONNECT_FACT_ESCROW_LOCKED, pb.CONNECT_FACT_ESCROW_RELEASED):
         match = (tuple(s.escrow_vault_ids), s.escrow_verdict_cell, s.escrow_amount)
+    contribution = None
+    if s.fact in (pb.CONNECT_FACT_CONTRIBUTED, pb.CONNECT_FACT_CONTRIBUTION_RELEASED):
+        contribution = (tuple(s.escrow_vault_ids), s.escrow_verdict_cell, s.escrow_amount)
     price = None
     if s.HasField("quote") and s.quote.amount_in > 0:
         price = (s.quote.amount_in, s.quote.amount_out, s.quote.hops)
@@ -114,6 +121,7 @@ def result_of(ref: RequestRef, s: pb.ConnectAppStatusV1) -> Result:
         received=received,
         owns=owns,
         match=match,
+        contribution=contribution,
         price=price,
         signed=signed,
         raw=s,

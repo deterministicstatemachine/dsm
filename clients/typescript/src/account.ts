@@ -22,6 +22,8 @@ import {
   ConnectDuelSignV1,
   ConnectDuelSignedEntryV1,
   ConnectDuelWithdrawV1,
+  ConnectContributeV1,
+  ConnectContributionReleaseV1,
   ConnectEscrowLockV1,
   ConnectEscrowReleaseV1,
   ConnectHoldingsV1,
@@ -222,6 +224,8 @@ export class Account {
         });
       case "match":
         return new ConnectScopeV1({ kind: ConnectScopeKind.ESCROW, caps: await this.caps(g.caps) });
+      case "contribute":
+        return new ConnectScopeV1({ kind: ConnectScopeKind.CONTRIBUTE, caps: await this.caps(g.caps) });
       case "duel":
         return new ConnectScopeV1({ kind: ConnectScopeKind.DUEL, programs: g.programs, caps: await this.caps(g.caps) });
     }
@@ -283,6 +287,18 @@ export class Account {
         };
       case "collect":
         return { case: "escrowRelease", value: new ConnectEscrowReleaseV1({ vaultIds: a.stakes }) };
+      case "contribute":
+        return {
+          case: "contribute",
+          value: new ConnectContributeV1({
+            external: a.to,
+            policyCommit: await this.objectId(a.object),
+            amount: await this.units(a.object, a.amount),
+            memo: a.memo,
+          }),
+        };
+      case "takeBack":
+        return { case: "contributionRelease", value: new ConnectContributionReleaseV1({ vaultIds: a.contributions }) };
       case "duelSessionKey":
         return { case: "duelSessionKey", value: new ConnectDuelSessionKeyV1({ matchNonce: a.nonce }) };
       case "duelStake":
@@ -568,6 +584,16 @@ export class AppAccount extends Account {
   async decide(stake: Uint8Array, decision: Decision): Promise<EscrowVerdictResponse> {
     const route = "escrow.adjudicate";
     const request = new EscrowOutcomeRequest({ vaultId: stake, outcome: new TextEncoder().encode(DECISIONS[decision]) });
+    return payload(route, await this.ingress.call("invoke", route, request), "escrowVerdictResponse");
+  }
+
+  /**
+   * Return a contribution to the wallet that committed it. This decides when
+   * it goes back, never to whom: the wallet then takes it back.
+   */
+  async returnContribution(contribution: Uint8Array): Promise<EscrowVerdictResponse> {
+    const route = "escrow.adjudicate";
+    const request = new EscrowOutcomeRequest({ vaultId: contribution, outcome: new TextEncoder().encode("return") });
     return payload(route, await this.ingress.call("invoke", route, request), "escrowVerdictResponse");
   }
 }

@@ -45,6 +45,8 @@ use crate::sdk::connect::grant::{
     decide, narrows, request_from_wire, scopes_from_wire, scopes_to_wire, Decision, DuelLock,
     DuelSigned, EscrowLock, Opponent, Request, Scope,
 };
+use crate::sdk::connect::contribution;
+use crate::sdk::connect::grant::Contribute;
 use crate::sdk::connect::wager::{self, Player, Referee};
 use crate::sdk::connect::pinned_tls::Relay;
 use crate::sdk::connect::signed::{own_card, own_network, sign_own};
@@ -211,6 +213,8 @@ fn waits(
         Request::Holdings { .. }
         | Request::EscrowLock(..)
         | Request::EscrowRelease { .. }
+        | Request::Contribute(..)
+        | Request::ContributionRelease { .. }
         | Request::DuelLock(..)
         | Request::DuelCollect { .. }
         | Request::Quote { .. }
@@ -306,6 +310,8 @@ fn duel_belongs_to(session: &store::WalletSession, request: &Request) -> Result<
         | Request::Sign { .. }
         | Request::EscrowLock(..)
         | Request::EscrowRelease { .. }
+        | Request::Contribute(..)
+        | Request::ContributionRelease { .. }
         | Request::DuelCollect { .. } => Ok(()),
     }
 }
@@ -1362,6 +1368,15 @@ impl AppRouterImpl {
             Request::EscrowRelease { vault_ids } => {
                 Box::pin(self.collect(session, vault_ids)).await
             }
+            Request::Contribute(asked) => match Box::pin(self.contribute(session, asked)).await {
+                Ok(locked) => Executed::carried_out(Some(
+                    generated::app_response_body_v1::Result::Contribute(locked),
+                )),
+                Err(e) => Executed::failed(e),
+            },
+            Request::ContributionRelease { vault_ids } => {
+                Box::pin(self.take_back(session, vault_ids)).await
+            }
             Request::DuelSessionKey { match_nonce } => {
                 let answered =
                     crate::sdk::computed_flow::session_public_key(match_nonce).and_then(|key| {
@@ -1669,6 +1684,157 @@ impl AppRouterImpl {
             external_commitment: created.external_commitment.to_vec(),
             position: created.position,
         })
+    }
+
+    /// Commit an amount (DSM Amendment A35). The terms are the contribution
+    /// template for this wallet and the application's own key; nothing in
+    /// them comes from the request but what the amount is committed to, the
+    /// object and the amount. Both outcomes pay this wallet.
+    async fn contribute(
+        &self,
+        session: &store::WalletSession,
+        asked: &Contribute,
+    ) -> Result<generated::ConnectEscrowLockResultV1, String> {
+        let me = own_player(&self.core_sdk)?;
+        let terms = contribution::terms(
+            &asked.external,
+            asked.policy_commit,
+            &me,
+            &app_referee(session)?,
+        )?;
+        let created = crate::sdk::escrow_flow::create(
+            &self.core_sdk,
+            &own_set()?,
+            &crate::sdk::escrow_flow::CreateEscrowIntent {
+                external: asked.external.clone(),
+                token: asked.policy_commit,
+                amount: asked.amount,
+                branches: terms.branches().to_vec(),
+                counterpart: None,
+            },
+        )
+        .await
+        .map_err(|e| format!("committing the contribution: {e}"))?;
+        Ok(generated::ConnectEscrowLockResultV1 {
+            vault_id: created.vault_id.to_vec(),
+            verdict_cell: created.verdict_cell.to_vec(),
+            external_commitment: created.external_commitment.to_vec(),
+            position: created.position,
+        })
+    }
+
+    /// Take contributions back (DSM Amendment A35): each vault released to
+    /// this wallet. Every vault is checked first to be this wallet's own,
+    /// under exactly the contribution template this application returns; one
+    /// that is not is no business of the application, and nothing is decided
+    /// or released. Where no verdict holds a vault's cell yet, this wallet
+    /// decides its own `withdraw`; where the application's `return` got
+    /// there first, that is what the release stands on. Either pays this
+    /// wallet.
+    async fn take_back(&self, session: &store::WalletSession, vault_ids: &[[u8; 32]]) -> Executed {
+        let checked = async {
+            let me = own_player(&self.core_sdk)?;
+            let application = app_referee(session)?;
+            let set = own_set()?;
+            for vault_id in vault_ids {
+                let held = crate::sdk::escrow_flow::vault(&self.core_sdk, &set, vault_id)
+                    .await
+                    .map_err(|e| format!("vault {}: {e}", short(vault_id)))?;
+                if (held.owner_genesis, held.owner_device_id) != (me.genesis, me.device_id) {
+                    return Err(format!("vault {} is not this wallet's", short(vault_id)));
+                }
+                let decides_withdraw = contribution::is_contribution_of(
+                    &held.owner_genesis,
+                    &held.owner_device_id,
+                    &held.branches,
+                    &application,
+                )
+                .map_err(|why| {
+                    format!(
+                        "vault {} is not a contribution this application returns: {why}",
+                        short(vault_id)
+                    )
+                })?;
+                if decides_withdraw != me.signer {
+                    return Err(format!(
+                        "vault {}'s withdraw is decided by another key than this wallet's",
+                        short(vault_id)
+                    ));
+                }
+            }
+            Ok::<_, String>(set)
+        };
+        let set = match checked.await {
+            Ok(set) => set,
+            Err(e) => return Executed::failed(e),
+        };
+        let answer = |released| {
+            Some(generated::app_response_body_v1::Result::ContributionRelease(
+                generated::ConnectEscrowReleaseResultV1 { released },
+            ))
+        };
+        let mut released = Vec::with_capacity(vault_ids.len());
+        for vault_id in vault_ids {
+            let taken = self.take_one_back(&set, vault_id).await;
+            match taken {
+                Ok(outcome) => {
+                    released.push(generated::ConnectEscrowReleasedV1 {
+                        vault_id: vault_id.to_vec(),
+                        position: outcome.position,
+                        state: position_state(outcome.state) as i32,
+                    });
+                    match outcome.state {
+                        crate::sdk::sofi_flow::PositionState::Realized => {}
+                        other => {
+                            return Executed {
+                                outcome: generated::ConnectOutcome::Failed,
+                                reason: format!(
+                                    "the release of {} at position {} did not realize: {other:?}",
+                                    short(vault_id),
+                                    outcome.position
+                                ),
+                                result: answer(released),
+                            }
+                        }
+                    }
+                }
+                Err(reason) => {
+                    return Executed {
+                        outcome: generated::ConnectOutcome::Failed,
+                        reason,
+                        result: answer(released),
+                    }
+                }
+            }
+        }
+        Executed::carried_out(answer(released))
+    }
+
+    /// One contribution back to this wallet: its own `withdraw` decided when
+    /// nothing holds the vault's verdict cell, then the release.
+    async fn take_one_back(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        vault_id: &[u8; 32],
+    ) -> Result<crate::sdk::sofi_flow::PositionOutcome, String> {
+        let standing = crate::sdk::escrow_flow::verdict(&self.core_sdk, set, vault_id)
+            .await
+            .map_err(|e| format!("the verdict cell of {}: {e}", short(vault_id)))?;
+        if standing.held.is_none() {
+            crate::sdk::escrow_flow::adjudicate(
+                &self.core_sdk,
+                set,
+                &crate::sdk::escrow_flow::OutcomeIntent {
+                    vault_id: *vault_id,
+                    outcome: contribution::WITHDRAW.to_vec(),
+                },
+            )
+            .await
+            .map_err(|e| format!("deciding the withdraw of {}: {e}", short(vault_id)))?;
+        }
+        crate::sdk::escrow_flow::release(&self.core_sdk, set, vault_id)
+            .await
+            .map_err(|e| format!("releasing {}: {e}", short(vault_id)))
     }
 
     /// Collect a match result (DSM Amendment A12): each vault released to
@@ -2122,6 +2288,13 @@ impl AppRouterImpl {
                 self.release_fact(&session, req.seq, vault_ids, &mut status)
                     .await?
             }
+            Request::Contribute(asked) => {
+                self.contribute_fact(&session, asked, &mut status).await?
+            }
+            Request::ContributionRelease { vault_ids } => {
+                self.contribution_release_fact(&session, vault_ids, &mut status)
+                    .await?
+            }
             Request::DuelLock(lock) => self.duel_lock_fact(&session, lock, &mut status).await?,
             Request::DuelReady { match_cell, .. }
             | Request::DuelWithdraw { match_cell }
@@ -2419,6 +2592,137 @@ impl AppRouterImpl {
         Ok(())
     }
 
+    /// FACT_CONTRIBUTED (DSM Amendment A35), from the vaults bound to the
+    /// wallet's verdict cell for the commitment, which this account derives
+    /// from the template and reads and walks itself: the wallet's vault
+    /// there, Active, holding exactly the asked object and amount under
+    /// exactly the template's terms.
+    async fn contribute_fact(
+        &self,
+        session: &store::AppSession,
+        asked: &Contribute,
+        status: &mut generated::ConnectAppStatusV1,
+    ) -> Result<(), String> {
+        let wallet = wallet_player(session)?;
+        let terms = contribution::terms(
+            &asked.external,
+            asked.policy_commit,
+            &wallet,
+            &own_referee(&self.core_sdk)?,
+        )?;
+        let cell = dsm::sofi::escrow::verdict_cell_of(&terms);
+        let set = own_set()?;
+        let (vaults, search) = crate::sdk::escrow_flow::locked_by(
+            &self.core_sdk,
+            &set,
+            &cell,
+            &(wallet.genesis, wallet.device_id),
+        )
+        .await
+        .map_err(|e| format!("the wallet's vaults on its cell for the commitment: {e}"))?;
+        let held = vaults.iter().find(|v| {
+            (v.owner_genesis, v.owner_device_id) == (wallet.genesis, wallet.device_id)
+                && v.status == dsm::sofi::wire::VAULT_STATUS_ACTIVE
+                && (v.token, v.amount) == (asked.policy_commit, asked.amount)
+                && v.external_commitment == *terms.external_commitment()
+                && v.branches.as_slice() == terms.branches()
+        });
+        match (held, search) {
+            (Some(v), _) => {
+                status.fact = generated::ConnectFact::Contributed as i32;
+                status.escrow_vault_ids = vec![v.vault_id.to_vec()];
+                status.escrow_verdict_cell = cell.to_vec();
+                status.escrow_amount = v.amount;
+                status.fact_detail = format!(
+                    "the wallet's vault {} holds the amount under the contribution's terms,                      Active on its verdict cell",
+                    short(&v.vault_id)
+                );
+            }
+            (None, crate::sdk::sofi_flow::Search::Complete) => {
+                status.fact_detail = "no vault of the wallet's holds this contribution on its                                       verdict cell; an answer saying committed grants nothing"
+                    .into();
+            }
+            (None, crate::sdk::sofi_flow::Search::Partial) => {
+                status.fact_detail = "no vault of the wallet's holds this contribution on its                                       verdict cell yet; not every vault there could be walked"
+                    .into();
+            }
+        }
+        Ok(())
+    }
+
+    /// FACT_CONTRIBUTION_RELEASED (DSM Amendment A35): every named vault is
+    /// the session's wallet's own, under exactly the contribution template
+    /// this account returns, Retired at its walked head, with a final
+    /// verdict on its cell. Both outcomes of the template pay the wallet, so
+    /// a Retired contribution went back to it. Read again on every poll.
+    async fn contribution_release_fact(
+        &self,
+        session: &store::AppSession,
+        vault_ids: &[[u8; 32]],
+        status: &mut generated::ConnectAppStatusV1,
+    ) -> Result<(), String> {
+        let wallet = wallet_player(session)?;
+        let application = own_referee(&self.core_sdk)?;
+        let set = own_set()?;
+        let reads = crate::sdk::escrow_flow::EscrowReads::new(&self.core_sdk, &set)
+            .map_err(|e| format!("reading the contribution: {e}"))?;
+        let mut outcomes = Vec::with_capacity(vault_ids.len());
+        for vault_id in vault_ids {
+            let held = match reads.vault(vault_id).await {
+                Ok(held) => held,
+                Err(e) => {
+                    status.fact_detail = format!("vault {}: {e}", short(vault_id));
+                    return Ok(());
+                }
+            };
+            if (held.owner_genesis, held.owner_device_id) != (wallet.genesis, wallet.device_id) {
+                status.fact_detail = format!("vault {} is not the wallet's", short(vault_id));
+                return Ok(());
+            }
+            if let Err(why) = contribution::is_contribution_of(
+                &held.owner_genesis,
+                &held.owner_device_id,
+                &held.branches,
+                &application,
+            ) {
+                status.fact_detail = format!(
+                    "vault {} is not a contribution this account returns: {why}",
+                    short(vault_id)
+                );
+                return Ok(());
+            }
+            if held.status != dsm::sofi::wire::VAULT_STATUS_RETIRED {
+                status.fact_detail = format!(
+                    "vault {} is not released yet; an answer saying taken back grants nothing",
+                    short(vault_id)
+                );
+                return Ok(());
+            }
+            let verdict = reads
+                .verdict(vault_id)
+                .map_err(|e| format!("the verdict of vault {}: {e}", short(vault_id)))?;
+            match verdict.held {
+                Some((outcome, dsm::route_chain::ChainState::Final)) => {
+                    outcomes.push(String::from_utf8_lossy(&outcome).into_owned())
+                }
+                Some(..) | None => {
+                    status.fact_detail = format!(
+                        "vault {} is Retired but its cell's verdict is not final",
+                        short(vault_id)
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        status.fact = generated::ConnectFact::ContributionReleased as i32;
+        status.escrow_vault_ids = vault_ids.iter().map(|v| v.to_vec()).collect();
+        status.fact_detail = format!(
+            "each vault is Retired and its cell's final verdict ({}) returned it to the wallet",
+            outcomes.join(", ")
+        );
+        Ok(())
+    }
+
     /// FACT_ESCROW_RELEASED (DSM Amendment A12): every named vault is a stake
     /// of a match this account decides with the session's wallet as a
     /// player, Retired at its walked head, and its cell's final verdict names
@@ -2590,6 +2894,8 @@ impl AppRouterImpl {
             Some(Intent::Sign(k)) => Body::Sign(k),
             Some(Intent::EscrowLock(k)) => Body::EscrowLock(k),
             Some(Intent::EscrowRelease(k)) => Body::EscrowRelease(k),
+            Some(Intent::Contribute(k)) => Body::Contribute(k),
+            Some(Intent::ContributionRelease(k)) => Body::ContributionRelease(k),
             Some(Intent::DuelSessionKey(k)) => Body::DuelSessionKey(k),
             Some(Intent::DuelLock(k)) => Body::DuelLock(k),
             Some(Intent::DuelReady(k)) => Body::DuelReady(k),
@@ -2614,6 +2920,11 @@ impl AppRouterImpl {
                 &own_referee(&self.core_sdk)?,
             )
             .map_err(|e| format!("{ROUTE}: {e}"))?;
+        }
+        // A contribution this account could never return is not asked for.
+        if let Request::Contribute(..) = &asked {
+            contribution::branches(&wallet_player(&session)?, &own_referee(&self.core_sdk)?)
+                .map_err(|e| format!("{ROUTE}: {e}"))?;
         }
         // A stake in a computed match: the setup names the wallet on its side,
         // read by the program this account registered.
