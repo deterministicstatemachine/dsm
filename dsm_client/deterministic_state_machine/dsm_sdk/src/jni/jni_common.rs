@@ -143,14 +143,43 @@ where
     let vm = get_java_vm_borrowed().ok_or("JavaVM not set")?;
 
     match vm.get_env() {
-        Ok(env) => f(&env),
+        Ok(env) => f(&env).map_err(|failed| {
+            clear_pending_exception(&env);
+            failed
+        }),
         Err(_) => {
             let env = vm
                 .attach_current_thread()
                 .map_err(|e| format!("attach_current_thread failed: {e}"))?;
             // `AttachGuard` derefs to `JNIEnv`, so `&env` coerces to `&JNIEnv`.
-            f(&env)
+            f(&env).map_err(|failed| {
+                clear_pending_exception(&env);
+                failed
+            })
         }
+    }
+}
+
+/// Take a Java exception an up-call threw off this thread, once the up-call
+/// has been answered as failed. Rust has its answer (the `Err` the caller
+/// returns), so the exception must not stay pending: left there, every later
+/// JNI call on the thread runs with it raised, and when the thread is one
+/// Java called into Rust on, Java raises it again at that call's return, as
+/// if the whole call had failed, after Rust finished it. It is written to
+/// the log first.
+fn clear_pending_exception(env: &JNIEnv<'_>) {
+    match env.exception_check() {
+        Ok(pending) => {
+            if pending {
+                if let Err(e) = env.exception_describe() {
+                    log::error!("a pending Java exception could not be described: {e}");
+                }
+                if let Err(e) = env.exception_clear() {
+                    log::error!("a pending Java exception could not be cleared: {e}");
+                }
+            }
+        }
+        Err(e) => log::error!("whether a Java exception is pending could not be read: {e}"),
     }
 }
 

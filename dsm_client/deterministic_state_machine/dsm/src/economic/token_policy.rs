@@ -295,7 +295,9 @@ pub fn parse_token_policy_blob(blob: &[u8]) -> Result<TokenPolicy, String> {
     // and a kind-NONE blob carries an explicit zero.
     let allowlist_kind = r.u8()?;
     let allowlist_count = r.u16be()?;
-    let mut allowlist_device_ids = Vec::with_capacity(allowlist_count);
+    // Grown as each id is read: the count is the blob's own word, and nothing
+    // is set aside for ids the blob has not been shown to carry.
+    let mut allowlist_device_ids = Vec::new();
     match allowlist_kind {
         ALLOWLIST_KIND_NONE => {
             if allowlist_count != 0 {

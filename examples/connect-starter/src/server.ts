@@ -29,6 +29,7 @@ import { readFile } from "node:fs/promises";
 import QRCode from "qrcode";
 import { AppAccount, localAccount, loginStatement } from "dsm-app-client";
 import type { Connection, Decision, RequestRef, Result } from "dsm-app-client";
+import { fromOwnPage } from "./own-page.js";
 import {
   askCall,
   giveCall,
@@ -421,6 +422,10 @@ async function makeAsk(app: AppAccount, c: Connection, p: AskPiece): Promise<{ s
 }
 
 async function route(app: AppAccount, page: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!fromOwnPage({ method: req.method, host: req.headers.host, origin: req.headers.origin, contentType: req.headers["content-type"] }, PORT)) {
+    send(res, 403, { error: "this server answers its own page only" });
+    return;
+  }
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = `${req.method} ${url.pathname}`;
   if (path === "GET /") {

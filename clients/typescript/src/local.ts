@@ -10,7 +10,7 @@
 // Outside the repo, name them yourself: DSM_INGRESS_URL and
 // DSM_INGRESS_SECRET_FILE.
 
-import { access, mkdir, readFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { AppAccount, WalletAccount } from "./account.js";
 import { Ingress } from "./ingress.js";
@@ -50,7 +50,13 @@ export async function findDevDir(create = false): Promise<string> {
     if (parent === dir) {
       if (create) {
         const made = join(process.cwd(), ".dsm-dev");
-        await mkdir(made, { recursive: true });
+        await mkdir(made, { recursive: true, mode: 0o700 });
+        // The directory holds an account's recovery phrase and its ingress
+        // secret, and it is made inside the app's own folder: git is told to
+        // leave everything in it alone, so `git add -A` never stages them.
+        await writeFile(join(made, ".gitignore"), "*\n", { flag: "wx" }).catch((e: NodeJS.ErrnoException) => {
+          if (e.code !== "EEXIST") throw e;
+        });
         return made;
       }
       throw new Error(

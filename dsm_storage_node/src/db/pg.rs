@@ -731,16 +731,27 @@ pub async fn spool_list_from_seq(
     from_seq: i64,
     limit: i64,
 ) -> Result<Vec<(Vec<u8>, i64)>> {
+    let most_bytes = i64::try_from(dsm::spool::SPOOL_PAGE_BYTES)?;
     let client = pool.get().await?;
+    // Lengths are summed over the page's rows alone, and only the rows the
+    // page keeps are read out: at most `SPOOL_PAGE_BYTES` of envelopes, and
+    // always the first.
     let stmt = client
         .prepare_cached(
-            "SELECT envelope, seq_num FROM inbox_spool
-             WHERE device_id=$1 AND seq_num >= $2
-             ORDER BY seq_num ASC LIMIT $3",
+            "SELECT envelope, seq_num FROM (
+               SELECT envelope, seq_num,
+                      SUM(octet_length(envelope)) OVER (ORDER BY seq_num) AS through,
+                      ROW_NUMBER() OVER (ORDER BY seq_num) AS nth
+               FROM (SELECT envelope, seq_num FROM inbox_spool
+                     WHERE device_id=$1 AND seq_num >= $2
+                     ORDER BY seq_num ASC LIMIT $3) first_rows
+             ) page
+             WHERE through <= $4 OR nth = 1
+             ORDER BY seq_num ASC",
         )
         .await?;
     let rows = client
-        .query(&stmt, &[&device_id, &from_seq, &limit])
+        .query(&stmt, &[&device_id, &from_seq, &limit, &most_bytes])
         .await?;
     Ok(rows
         .into_iter()

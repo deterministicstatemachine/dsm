@@ -257,6 +257,13 @@ async fn get_cell(
     let ns = namespace(&headers)?;
     let key = digest32(&key)?;
     let from = cell_query(raw.as_deref())?;
+    // Arrival indexes are a signed 64-bit integer in the store: a larger
+    // `from` names no entry a cell could hold, and is a request that is not
+    // one, never a node that failed.
+    i64::try_from(from).map_err(|e| {
+        log::info!("cell get: position {from} is not an arrival index: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
     let held = crate::db::get_cell_page(&state.db_pool, &ns, &key, from)
         .await
         .map_err(|e| {

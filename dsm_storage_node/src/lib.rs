@@ -402,7 +402,9 @@ mod storage_set_tests {
 #[derive(Debug, Clone, Copy)]
 pub struct AppLimits {
     pub body_limit_bytes: usize,
-    /// Requests in flight at once, across every route together.
+    /// Requests in flight at once, across every route together, each counted
+    /// until its response is written ([`liveness::RequestSlots`]). One peer
+    /// holds at most [`PEER_REQUEST_SHARE`] of them.
     pub concurrency_limit: usize,
     /// How long one request may take, from the moment it waits for a slot
     /// under `concurrency_limit` until it is answered, its body included.
@@ -440,6 +442,17 @@ async fn health(state: std::sync::Arc<AppState>) -> (axum::http::StatusCode, &'s
         }
     }
 }
+
+/// The part of [`AppLimits::concurrency_limit`] one peer
+/// ([`liveness::Peer`]) may hold at once: a quarter, and never less than one
+/// request. A peer over it is answered `503`, and the slots it cannot take
+/// stay with everyone else.
+pub const PEER_REQUEST_SHARE: usize = 4;
+
+/// Requests one HTTP/2 connection may have in flight at once. Set by the
+/// node, so what one connection can ask for at a time does not rest on the
+/// HTTP library's default.
+pub const H2_STREAMS_PER_CONNECTION: u32 = 32;
 
 /// How long a request's body may go without a byte arriving before the node
 /// stops reading it and answers. A client that starts a body and then sends
@@ -506,6 +519,7 @@ pub fn bound_connections(
     builder
         .http2()
         .timer(hyper_util::rt::TokioTimer::new())
+        .max_concurrent_streams(H2_STREAMS_PER_CONNECTION)
         .keep_alive_interval(bounds.h2_ping_every)
         .keep_alive_timeout(bounds.h2_ping_answer);
 }
@@ -533,7 +547,6 @@ pub fn node_server<A: axum_server::Address>(
 pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Router<()> {
     use axum::routing::get;
     use axum::Router;
-    use tower::limit::GlobalConcurrencyLimitLayer;
     use tower_http::{
         limit::RequestBodyLimitLayer,
         timeout::{RequestBodyTimeoutLayer, TimeoutLayer},
@@ -557,8 +570,14 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
         .layer(RequestBodyLimitLayer::new(limits.body_limit_bytes))
         // One limit for the whole node. A router applies a layer to each
         // route on its own, so a per-service limit would be one limit per
-        // route; this one shares a single count across all of them.
-        .layer(GlobalConcurrencyLimitLayer::new(limits.concurrency_limit))
+        // route; this one shares a single count across all of them. A slot
+        // is held until its response is written, so a response nobody reads
+        // is counted for as long as the node holds it, and one peer holds at
+        // most its share of the slots.
+        .layer(crate::liveness::RequestSlots::new(
+            limits.concurrency_limit,
+            (limits.concurrency_limit / PEER_REQUEST_SHARE).max(1),
+        ))
         // Outside the limit, so waiting for a slot is bounded too.
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
@@ -566,9 +585,10 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
         ))
         // A device's wait on its spools is held open on purpose, so it sits
         // outside the timeout and the concurrency limit above: the wait
-        // bounds its own length and the number held (b0x::MAX_WAIT,
-        // b0x::MAX_WAITERS), holds no database connection while it waits, and
-        // takes one of b0x::WAIT_LOOKS turns to read the store.
+        // bounds its own length and the number held, across the node and by
+        // any one peer (b0x::MAX_WAIT, b0x::MAX_WAITERS,
+        // b0x::MAX_WAITERS_PER_PEER), holds no database connection while it
+        // waits, and takes one of b0x::WAIT_LOOKS turns to read the store.
         .merge(crate::api::transport::b0x::wait_router(
             state.clone(),
             limits.wait_bound,

@@ -53,6 +53,17 @@ function encodeIngressRequest(request: IngressRequest | Uint8Array): Uint8Array 
  */
 export class RustRefusal extends Error {}
 
+/**
+ * A call that was handed to Rust and never answered in a way that can be
+ * read: the bridge dropped, timed out, or carried back bytes that are not an
+ * answer. Not a refusal: what was asked may have been done.
+ */
+export class Unanswered extends Error {
+  constructor(readonly lost: unknown) {
+    super(lost instanceof Error ? lost.message : String(lost));
+  }
+}
+
 function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
   const response = IngressResponse.fromBinary(responseBytes);
   if (response.result.case === 'okBytes') {
