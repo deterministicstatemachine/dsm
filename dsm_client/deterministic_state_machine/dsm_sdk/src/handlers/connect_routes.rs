@@ -111,7 +111,7 @@ impl Executed {
     fn paid_undelivered(why: impl std::fmt::Display) -> Self {
         Self {
             outcome: generated::ConnectOutcome::CarriedOut,
-            reason: format!("paid; its delivery is still being carried forward: {why}"),
+            reason: format!("sent; its delivery is still being carried forward: {why}"),
             result: None,
         }
     }
@@ -165,7 +165,7 @@ static PROCESSING: once_cell::sync::Lazy<
 fn session_lock(session_id: &[u8; 32]) -> Result<std::sync::Arc<tokio::sync::Mutex<()>>, String> {
     let mut locks = PROCESSING
         .lock()
-        .map_err(|e| format!("the sessions' processing locks: {e}"))?;
+        .map_err(|e| format!("the connections' processing locks: {e}"))?;
     Ok(locks.entry(*session_id).or_default().clone())
 }
 
@@ -312,7 +312,7 @@ fn duel_belongs_to(session: &store::WalletSession, request: &Request) -> Result<
 
 fn own_player(core: &crate::sdk::core_sdk::CoreSDK) -> Result<Player, String> {
     let me = crate::sdk::escrow_flow::party(core)
-        .map_err(|e| format!("this device as an escrow party: {e}"))?;
+        .map_err(|e| format!("this device as a party to a match: {e}"))?;
     Ok(Player {
         genesis: me.genesis,
         device_id: me.device_id,
@@ -635,7 +635,7 @@ impl AppRouterImpl {
                     let policy = self
                         .verified_policy(*anchor)
                         .await
-                        .map_err(|e| format!("{ROUTE}: a token the offer names: {e}"))?;
+                        .map_err(|e| format!("{ROUTE}: an object the offer names: {e}"))?;
                     (policy.ticker, policy.decimals)
                 }
             };
@@ -783,7 +783,7 @@ impl AppRouterImpl {
     async fn connect_respond(&self, args: &[u8]) -> Result<Reply, String> {
         const ROUTE: &str = "connect.respond";
         let req: generated::ConnectRespondRequestV1 = body(args, ROUTE)?;
-        let sid = d32(&req.session_id, "the session")?;
+        let sid = d32(&req.session_id, "the connection")?;
         let lock = session_lock(&sid)?;
         let one = lock.lock().await;
         let session = store::session(&sid)
@@ -858,7 +858,7 @@ impl AppRouterImpl {
         crate::sdk::connect::wallet::start_listener()?;
         let now = store::session(&sid)
             .map_err(|e| format!("{ROUTE}: {e}"))?
-            .ok_or_else(|| format!("{ROUTE}: the session vanished"))?;
+            .ok_or_else(|| format!("{ROUTE}: the connection vanished"))?;
         Ok(Reply::Decided(generated::ConnectDecidedV1 {
             session: Some(wallet_session_view(&now, delivered)?),
             outcome: outcome as i32,
@@ -1270,7 +1270,7 @@ impl AppRouterImpl {
                         "the object's committed policy names another creator than this application",
                     ),
                     Ok(None) => Executed::failed("the object is not in the registry after rooting"),
-                    Err(e) => Executed::failed(format!("the token registry: {e}")),
+                    Err(e) => Executed::failed(format!("the object registry: {e}")),
                 }
             }
             Request::Pay {
@@ -1803,7 +1803,7 @@ impl AppRouterImpl {
                 return executed;
             }
             log::info!(
-                "[connect] swap attempt {attempt}/{SWAP_ATTEMPTS} lost its vault's key: Void, \
+                "[connect] trade attempt {attempt}/{SWAP_ATTEMPTS} lost its vault's key: Void, \
                  trading again"
             );
             attempt += 1;
@@ -1851,7 +1851,7 @@ impl AppRouterImpl {
         .await;
         let outcome = match traded {
             Ok(outcome) => outcome,
-            Err(e) => return (None, Executed::failed(format!("sofi trade: {e}"))),
+            Err(e) => return (None, Executed::failed(format!("the trade: {e}"))),
         };
         let state = position_state(outcome.state);
         let result = Some(generated::app_response_body_v1::Result::Swap(
@@ -1903,7 +1903,7 @@ impl AppRouterImpl {
                 return if held.accept == accept.encode_to_vec() {
                     Ok(Reply::Session(app_session_view(&held)?))
                 } else {
-                    Err(format!("{ROUTE}: this session holds another accept"))
+                    Err(format!("{ROUTE}: this connection holds another accept"))
                 };
             }
         }
@@ -1943,13 +1943,13 @@ impl AppRouterImpl {
     async fn connect_app_status(&self, args: &[u8]) -> Result<Reply, String> {
         const ROUTE: &str = "connect.app.status";
         let req: generated::ConnectRequestRefV1 = body(args, ROUTE)?;
-        let sid = d32(&req.session_id, "the session")?;
+        let sid = d32(&req.session_id, "the connection")?;
         let session = store::app_session(&sid)
             .map_err(|e| format!("{ROUTE}: {e}"))?
-            .ok_or_else(|| format!("{ROUTE}: no such session"))?;
+            .ok_or_else(|| format!("{ROUTE}: no such connection"))?;
         let (request, response) = store::app_request(&sid, req.seq)
             .map_err(|e| format!("{ROUTE}: {e}"))?
-            .ok_or_else(|| format!("{ROUTE}: no request {} in this session", req.seq))?;
+            .ok_or_else(|| format!("{ROUTE}: no request {} on this connection", req.seq))?;
         let request = generated::AppRequestV1::decode(request.as_slice())
             .map_err(|e| format!("{ROUTE}: the stored request: {e}"))?;
         let request_body: generated::AppRequestBodyV1 =
@@ -2047,7 +2047,7 @@ impl AppRouterImpl {
                         }
                         None => {
                             status.fact_detail = format!(
-                                "no transfer this account accepted pays it yet; an answer saying paid grants nothing{sync_note}"
+                                "no transfer this account accepted answers it yet; an answer saying sent grants nothing{sync_note}"
                             );
                         }
                     }
@@ -2088,10 +2088,10 @@ impl AppRouterImpl {
                 _ => status.fact_detail = "no proof answers it yet".into(),
             },
             Request::Swap { .. } => {
-                status.fact_detail = "a trade shows through this account's own vault (sofi.vaults) or a later holdings proof; the answer is a notification".into();
+                status.fact_detail = "a trade shows through this account's own vault (sofi.vaults) or a later proof of what it owns; the answer is a notification".into();
             }
             Request::Quote { .. } => {
-                status.fact_detail = "a quote is information and carries no authority".into();
+                status.fact_detail = "a price is information and carries no authority".into();
             }
             Request::Sign { statement } => match &answer {
                 Some(generated::AppResponseBodyV1 {
@@ -2115,7 +2115,7 @@ impl AppRouterImpl {
             }
             Request::AcceptIssued { .. } => {
                 status.fact_detail =
-                    "whether the wallet holds the object shows in a holdings proof".into();
+                    "whether the wallet holds the object shows when it proves what it owns".into();
             }
             Request::EscrowLock(lock) => self.lock_fact(&session, lock, &mut status).await?,
             Request::EscrowRelease { vault_ids } => {
@@ -2453,7 +2453,7 @@ impl AppRouterImpl {
         let referee = own_referee(&self.core_sdk)?;
         let set = own_set()?;
         let reads = crate::sdk::escrow_flow::EscrowReads::new(&self.core_sdk, &set)
-            .map_err(|e| format!("the escrow reads: {e}"))?;
+            .map_err(|e| format!("reading the match: {e}"))?;
         let mut released = Released {
             vaults: Vec::with_capacity(vault_ids.len()),
         };
@@ -2541,8 +2541,8 @@ impl AppRouterImpl {
         wallet: ([u8; 32], [u8; 32]),
     ) -> Result<Vec<generated::ConnectVaultWitnessV1>, String> {
         let tokens = [
-            d32(token_in, "the token in")?,
-            d32(token_out, "the token out")?,
+            d32(token_in, "the object in")?,
+            d32(token_out, "the object out")?,
         ];
         let offered =
             crate::sdk::vault_baseline::offer(&self.core_sdk, &own_set()?, &tokens, wallet).await;
@@ -2558,10 +2558,10 @@ impl AppRouterImpl {
     async fn connect_app_request(&self, args: &[u8]) -> Result<Reply, String> {
         const ROUTE: &str = "connect.app.request";
         let req: generated::ConnectAppRequestIntentV1 = body(args, ROUTE)?;
-        let sid = d32(&req.session_id, "the session")?;
+        let sid = d32(&req.session_id, "the connection")?;
         let session = store::app_session(&sid)
             .map_err(|e| format!("{ROUTE}: {e}"))?
-            .ok_or_else(|| format!("{ROUTE}: no such session"))?;
+            .ok_or_else(|| format!("{ROUTE}: no such connection"))?;
         if session.connected == store::SessionStatus::Disconnected {
             return Err(format!(
                 "{ROUTE}: the wallet disconnected this application; it can be asked nothing more"
@@ -2627,7 +2627,7 @@ impl AppRouterImpl {
             };
             if (named.genesis, named.device_id) != (wallet.genesis, wallet.device_id) {
                 return Err(format!(
-                    "{ROUTE}: the setup does not name the session's wallet on its side"
+                    "{ROUTE}: the setup does not name the connection's wallet on its side"
                 ));
             }
         }
@@ -2730,7 +2730,7 @@ fn read_request(
     )?;
     let body: generated::AppRequestBodyV1 = canonical(&request.body, "a request")?;
     if body.session_id.as_slice() != session.session_id.as_slice() {
-        return Err("the request is another session's".into());
+        return Err("the request is another connection's".into());
     }
     let read = request_from_wire(&body)?;
     Ok((body, read))
@@ -2842,7 +2842,7 @@ fn connect_pending() -> Result<Reply, String> {
 
 fn connect_log(params: &[u8]) -> Result<Reply, String> {
     let req: generated::ConnectSessionRefV1 = body(params, "connect.log")?;
-    let sid = d32(&req.session_id, "the session")?;
+    let sid = d32(&req.session_id, "the connection")?;
     let entries = store::log(&sid)
         .map_err(|e| format!("connect.log: {e}"))?
         .into_iter()
@@ -2864,7 +2864,7 @@ pub(crate) const DISCONNECT_SEQ: u64 = 0;
 async fn connect_disconnect(args: &[u8]) -> Result<Reply, String> {
     const ROUTE: &str = "connect.disconnect";
     let req: generated::ConnectSessionRefV1 = body(args, ROUTE)?;
-    let sid = d32(&req.session_id, "the session")?;
+    let sid = d32(&req.session_id, "the connection")?;
     // A request being carried out finishes first; none starts after.
     let lock = session_lock(&sid)?;
     let one = lock.lock().await;
@@ -2872,7 +2872,7 @@ async fn connect_disconnect(args: &[u8]) -> Result<Reply, String> {
     drop(one);
     let session = store::session(&sid)
         .map_err(|e| format!("{ROUTE}: {e}"))?
-        .ok_or_else(|| format!("{ROUTE}: the session vanished"))?;
+        .ok_or_else(|| format!("{ROUTE}: the connection vanished"))?;
     // The application learns of it from the wallet's own signature (the grant
     // ends when the player disconnects: DSM Amendment A11), over the same
     // relay its answers go over. The session is ended here first, whether or
@@ -3014,12 +3014,12 @@ fn free_requests_left(
 fn connect_app_requests(params: &[u8]) -> Result<Reply, String> {
     const ROUTE: &str = "connect.app.requests";
     let req: generated::ConnectAppRequestsQueryV1 = body(params, ROUTE)?;
-    let sid = d32(&req.session_id, "the session")?;
+    let sid = d32(&req.session_id, "the connection")?;
     // A read for a session this account never made has nothing to wait for:
     // refused at once, so the relay does not hold it (SA-123).
     let session = store::app_session(&sid)
         .map_err(|e| format!("{ROUTE}: {e}"))?
-        .ok_or_else(|| format!("{ROUTE}: no such session"))?;
+        .ok_or_else(|| format!("{ROUTE}: no such connection"))?;
     // Only the session's wallet reads its requests: the read presents the
     // secret its signed accept committed, and a session its wallet ended
     // reads nothing more (SA-128). The secret is never logged.
@@ -3027,7 +3027,7 @@ fn connect_app_requests(params: &[u8]) -> Result<Reply, String> {
     dsm::connect::check_read_secret(&sid, &secret, &session.read_commitment)
         .map_err(|e| format!("{ROUTE}: {e}"))?;
     if session.connected != store::SessionStatus::Connected {
-        return Err(format!("{ROUTE}: the session's wallet ended it"));
+        return Err(format!("{ROUTE}: the connection's wallet ended it"));
     }
     let mut requests = Vec::new();
     for bytes in store::app_requests_after(&sid, req.after).map_err(|e| format!("{ROUTE}: {e}"))? {
@@ -3049,10 +3049,10 @@ fn connect_app_respond(args: &[u8]) -> Result<Reply, String> {
         .map_err(|e| format!("{ROUTE}: decode the answer: {e}"))?;
     let probe: generated::AppResponseBodyV1 =
         canonical(&response.body, "the answer").map_err(|e| format!("{ROUTE}: {e}"))?;
-    let sid = d32(&probe.session_id, "the session")?;
+    let sid = d32(&probe.session_id, "the connection")?;
     let session = store::app_session(&sid)
         .map_err(|e| format!("{ROUTE}: {e}"))?
-        .ok_or_else(|| format!("{ROUTE}: no such session"))?;
+        .ok_or_else(|| format!("{ROUTE}: no such connection"))?;
     let answer = app::verify_response(&response, &session).map_err(|e| format!("{ROUTE}: {e}"))?;
     if answer.seq == DISCONNECT_SEQ {
         // Not an answer: the wallet's signed notice that it ended the session.
@@ -3065,7 +3065,7 @@ fn connect_app_respond(args: &[u8]) -> Result<Reply, String> {
     }
     let (_, stored) = store::app_request(&sid, answer.seq)
         .map_err(|e| format!("{ROUTE}: {e}"))?
-        .ok_or_else(|| format!("{ROUTE}: no request {} in this session", answer.seq))?;
+        .ok_or_else(|| format!("{ROUTE}: no request {} on this connection", answer.seq))?;
     let bytes = response.encode_to_vec();
     match stored {
         None => store::app_store_response(&sid, answer.seq, &bytes),

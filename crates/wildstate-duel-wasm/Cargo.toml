@@ -3,7 +3,7 @@ name = "wildstate-duel-wasm"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "WebAssembly bindings of the Wildstate duel outcome program, so the game server and the escrow run the same rules."
+description = "WebAssembly bindings of the Wildstate duel outcome program, so the game server and the match run the same rules."
 
 [lib]
 crate-type = ["cdylib", "rlib"]

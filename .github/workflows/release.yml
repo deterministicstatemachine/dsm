@@ -9,6 +9,10 @@ name: Release
 #
 # Scope of this workflow:
 #   • storage node binary (Linux x86_64, the primary deployment target)
+#   • what a developer plugs an app in with (app-host-binaries.yml):
+#     dsm-app-host for Linux x86-64 and ARM64 and macOS arm64 and x86-64,
+#     the developer archive (clients, commands, starter), install.sh, and the
+#     SHA256SUMS install.sh checks every download against
 #   • frontend bundle (built React assets, tar.gz)
 #   • SBOM bundle (CycloneDX 1.5, with TLA validation evidence)
 #   • GitHub Release entry with release notes
@@ -18,7 +22,7 @@ name: Release
 #     armv7-linux-androideabi). The Gradle / NDK build is non-trivial in
 #     hosted runners; ship as a follow-on once the NDK pipeline is
 #     stable enough to gate a tag on.
-#   • macOS / iOS artifacts (require macos-latest runner; deferred).
+#   • iOS artifacts (deferred).
 #   • Docker image push to a registry (current ci.yml builds the image
 #     for lint; pushing to a registry needs a credentials decision).
 #
@@ -145,16 +149,30 @@ jobs:
           bash ci/audit_every_lockfile.sh
 
   # --------------------------------------------------------------------------
+  # What a developer installs: dsm-app-host for every platform (each built and
+  # smoke-tested on its own runner), the developer archive, install.sh and
+  # SHA256SUMS, with install.sh run on every platform against them. The same
+  # jobs run on a pull request that touches them, publishing nothing.
+  # --------------------------------------------------------------------------
+  app-host:
+    name: App host binaries
+    needs: [validate-tag, test-gate]
+    uses: ./.github/workflows/app-host-binaries.yml
+    with:
+      version: ${{ needs.validate-tag.outputs.version }}
+
+  # --------------------------------------------------------------------------
   # A newcomer's first run (owner, 2026-11-09: a release gate). A clean Ubuntu
-  # in Docker with nothing on it but what QUICKSTART.md's prerequisites say to
-  # install, a fresh clone of the tagged commit, and BUILDING_APPS.md's
+  # in Docker with nothing on it but what the guide's setup page says to
+  # install, no clone of DSM and no Rust: it installs this release's own files
+  # (the ones publish attaches) with install.sh, and follows BUILDING_APPS.md's
   # commands alone, in TypeScript and in Python, each to a wallet connected
   # and a payment received. scripts/first_run_check.sh; `make first-run`.
   # --------------------------------------------------------------------------
   first-run:
     name: First run (clean machine, the docs alone)
     runs-on: ubuntu-latest
-    needs: [validate-tag]
+    needs: [validate-tag, app-host]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -162,8 +180,14 @@ jobs:
       - name: Resolve Ubuntu's package servers
         run: bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
 
+      - name: Download this release's developer files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: developer-release
+          path: release-files
+
       - name: The newcomer's first run
-        run: make first-run
+        run: FIRST_RUN_RELEASE="$PWD/release-files" make first-run
 
       - name: Upload the newcomer's log
         if: always()
@@ -395,12 +419,21 @@ jobs:
       contents: write   # required to create GitHub Releases
     needs:
       - validate-tag
+      - app-host
       - first-run
       - build-storage-node
       - build-frontend
       - build-sbom
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # dsm-app-host's archives, the developer archive, install.sh, and the
+      # SHA256SUMS over them that install.sh reads.
+      - name: Download the developer files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: developer-release
+          path: dist/
 
       - name: Download storage node artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -428,7 +461,9 @@ jobs:
           SBOM_SHA256: ${{ needs.build-sbom.outputs.sha256 }}
         run: |
           ls -la dist/
-          cat > dist/SHA256SUMS <<EOF
+          # SHA256SUMS already lists the developer files; the rest join it.
+          test -s dist/SHA256SUMS
+          cat >> dist/SHA256SUMS <<EOF
           ${STORAGE_SHA256}  dsm_storage_node-${VERSION}-linux-x86_64
           ${FRONTEND_SHA256}  dsm-frontend-${VERSION}.tar.gz
           ${SBOM_SHA256}  dsm-sbom-${VERSION}.tar.gz
@@ -453,6 +488,22 @@ jobs:
           else
             cat > dist/RELEASE_BODY.md <<EOF
           # DSM v${VERSION}
+
+          ## Plug an app in
+
+          \`dsm-app-host\` for Linux (x86-64, ARM64; Windows through WSL2)
+          and macOS (Apple silicon, Intel), the TypeScript and Python
+          clients, and the \`dsm-app\`, \`dsm-dev-wallet\` and
+          \`dsm-connect-starter\` commands, with no Rust and no protobuf
+          compiler. \`install.sh\` checks every download against
+          \`SHA256SUMS\` before it unpacks anything:
+
+          \`\`\`bash
+          curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v${VERSION}/install.sh
+          sh install.sh
+          \`\`\`
+
+          The guide: https://deterministicstatemachine.github.io/dsm/
 
           ## Artifacts
 
@@ -495,6 +546,9 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
+            dist/install.sh
+            dist/dsm-app-host-*.tar.gz
+            dist/dsm-developer-*.tar.gz
             dist/dsm_storage_node-*-linux-x86_64
             dist/dsm_storage_node-*-linux-x86_64.sha256
             dist/dsm-frontend-*.tar.gz

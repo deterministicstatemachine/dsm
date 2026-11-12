@@ -20,10 +20,10 @@ Amounts are in the object's own units: `"0.10"` is a tenth of an ERA. This page 
 
 ## 1. The starter: your app as a page
 
-The starter is a web app plugged into DSM, and the place to build your app from pieces. It runs in the foreground, so give it a terminal of its own:
+The starter is a web app plugged into DSM, and the place to build your app from pieces. It runs in the foreground, so give it a terminal of its own, in your app's folder:
 
 ```bash
-make starter
+dsm-connect-starter
 ```
 
 Open [http://127.0.0.1:3000](http://127.0.0.1:3000).
@@ -43,21 +43,21 @@ Under every piece is the exact code it is, with a **Copy** button. The page neve
 <figure style="flex-basis:300px;max-width:300px"><a href="images/starter-connect-code.webp"><img src="images/starter-connect-code.webp" alt="The connect code as a QR code, a link to open it in the wallet on the same device, and the code as text"></a><figcaption><b>Show the connect code</b>: a QR for a phone, a link for a wallet on the same device, and the code as text.</figcaption></figure>
 </div>
 
-To connect the terminal wallet below to the page's code instead of the command line's, copy the code under the QR and run `make dev-wallet-connect CODE=` followed by it.
+To connect the terminal wallet below to the page's code instead of the command line's, copy the code under the QR and run `dsm-dev-wallet connect ` followed by it.
 
 ## 2. A wallet in the terminal
 
 To test without a phone, start a player's wallet in the terminal:
 
 ```bash
-make dev-wallet
+dsm-dev-wallet up
 ```
 
-It is a second account, made the same way `make app-dev` made yours, on the same network, and funded from the faucet:
+It is a second account, made the same way `dsm-app up` made yours, on the same network, and funded from the faucet:
 
 ```text
-[app-dev] wallet account running
-  storage set:    the beta network (hosted; …/dsm_client/frontend/public/dsm_env_config.toml)
+[dsm-dev-wallet] wallet account running
+  storage set:    the beta network (carried in dsm-app-host)
   ingress:        http://127.0.0.1:8788   (your server calls this)
   ingress secret: …/.dsm-dev/wallet/ingress/ingress-token
   relay:          https://127.0.0.1:8444   (wallets reach this)
@@ -66,10 +66,12 @@ It is a second account, made the same way `make app-dev` made yours, on the same
 funded: claimed 100.00 ERA (economic position 1)
 ```
 
+`dsm-dev-wallet down` stops it.
+
 ## 3. Make the offer from the command line
 
 ```bash
-CODE=$(make -s app ARGS="offer 'My Game' ERA 0.10 1.00")
+CODE=$(dsm-app offer 'My Game' ERA 0.10 1.00)
 ```
 
 The words after `offer` are your app's name, the object a wallet may send it, the cap per request and the cap in all. The command line's offer asks for more than sends: to be shown what the wallet owns, to hand it objects your account issues, to see its contacts, and to referee matches it stakes ERA in (1.00 a match, 2.00 in all).
@@ -89,23 +91,23 @@ It is long because it carries the relay's address and its certificate pin: the w
 ## 4. Connect the terminal wallet
 
 ```bash
-make dev-wallet-connect CODE="$CODE"
+dsm-dev-wallet connect "$CODE"
 ```
 
 The wallet fetches the offer, checks it, and prints what My Game asks for. The terminal wallet is your test wallet, so it approves on its own, and prints the connection: its id, the app, `CONNECTED`, and the grants it now holds.
 
 ```text
 My Game (account 0RHS9YDRSPR9PG9WESBX7PMGAVMEJSSVSC11QSD4NG4JPKY3XQ80) asks to:
-  - Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-  - Prove your holdings of ERA and of objects this app issued
+  - Send this app: up to 0.10 ERA a time, 1.00 ERA in all
+  - Prove what you own of ERA and of objects this app issued
   - Receive objects this app issues
   - See which of your contacts are here: their DSM IDs, not their names
   - Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
   - Up to 64 requests that spend nothing; after them, each waits for you
 approved:
 connection RKBQ40RXFBYWZCJ150X3XG32V7EQYPN1SDGV96VGGTCAQCJMCSTG  My Game  CONNECTED
-  grants: Pay this app: up to 0.10 ERA a time, 1.00 ERA in all
-  grants: Prove your holdings of ERA and of objects this app issued
+  grants: Send this app: up to 0.10 ERA a time, 1.00 ERA in all
+  grants: Prove what you own of ERA and of objects this app issued
   grants: Receive objects this app issues
   grants: See which of your contacts are here: their DSM IDs, not their names
   grants: Lock stakes for matches: up to 1.00 ERA a time, 2.00 ERA in all
@@ -117,7 +119,7 @@ A player on a phone reads the same list and decides.
 ## 5. See it from your app's side
 
 ```bash
-make app ARGS=connections
+dsm-app connections
 ```
 
 ```text
@@ -138,7 +140,7 @@ On Android, the wallet's **Apps** screen has **Connect an app**. Scan the starte
 <figure><img src="images/android-connect-approve.webp" width="210" alt="Android: the end of the list, with Cancel and Approve"><figcaption>The player approves, or cancels.</figcaption></figure>
 </div>
 
-The iOS Simulator has no camera, so there the code opens as a link. This opens a code in the wallet on every phone on your machine at once, the adb devices and the booted iOS Simulators (debug builds of the wallet):
+The iOS Simulator has no camera, so there the code opens as a link. From the repo ([building from source](setup.md#building-from-source-instead)), this opens a code in the wallet on every phone on your machine at once, the adb devices and the booted iOS Simulators (debug builds of the wallet):
 
 ```bash
 make phones-connect CODE="$CODE"
@@ -161,18 +163,18 @@ These phones were recorded before the command line's `offer` asked to see contac
 - Your account holds a connection to the wallet.
 - No keys moved, and nothing was taken on the relay's word.
 
-A wallet connects to an app once. To connect it again, it disconnects first (the [next page](requests.md) ends with that), or a second wallet connects: `make dev-wallet2`, then `make wallet2 ARGS="connect $CODE"`.
+A wallet connects to an app once. To connect it again, it disconnects first (the [next page](requests.md) ends with that), or a second wallet connects: `DSM_WALLET_NAME=wallet2 dsm-dev-wallet up`, then `DSM_WALLET_NAME=wallet2 dsm-dev-wallet connect $CODE`.
 
 ## The whole page, as one script
 
-With `make app-dev` running, this makes the terminal wallet, the offer and the connection:
+With `dsm-app up` running, this makes the terminal wallet, the offer and the connection:
 
 ```bash
-make dev-wallet
-CODE=$(make -s app ARGS="offer 'My Game' ERA 0.10 1.00")
+dsm-dev-wallet up
+CODE=$(dsm-app offer 'My Game' ERA 0.10 1.00)
 echo $CODE
-make dev-wallet-connect CODE="$CODE"
-make app ARGS=connections
+dsm-dev-wallet connect "$CODE"
+dsm-app connections
 ```
 
 Next: [Ask the wallet for things](requests.md).

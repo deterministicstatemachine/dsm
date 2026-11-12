@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Your first payment, in Python: a connect code, a wallet that connects to
 it, 0.05 ERA asked for, and the fact your own account established. Runs
-against `make app-dev`; connect a wallet to the code it prints:
-`make dev-wallet-connect CODE=<the code>`, or scan it with a phone. A wallet
-connects to an app once: one already connected to this account (say, through
-the starter) must disconnect first, or a second one connects
-(`make dev-wallet2`, then `make wallet2 ARGS="connect <the code>"`)."""
+against `dsm-app up` (from the repo, `make app-dev`); connect a wallet to the
+code it prints: `dsm-dev-wallet connect <the code>`, or scan it with a phone.
+A wallet connects to an app once: one already connected to this account (say,
+through the starter) must disconnect first, or a second one connects
+(`DSM_WALLET_NAME=wallet2 dsm-dev-wallet up`, then
+`DSM_WALLET_NAME=wallet2 dsm-dev-wallet connect <the code>`)."""
 
 import sys
 import time

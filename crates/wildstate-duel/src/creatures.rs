@@ -3,8 +3,8 @@
 //! A creature's published states: the chain a match setup's team is read
 //! from.
 //!
-//! The account that issued a creature (the creator of its token, a supply of
-//! one) publishes the creature's state as it changes: first the state it was
+//! The account that issued a creature (an object of which exactly one exists)
+//! publishes the creature's state as it changes: first the state it was
 //! issued in, then each successor naming the record before it. Each record
 //! is a content-addressed immutable object, authored and signed by that
 //! account, under a locator derived from the creature's anchor. This module

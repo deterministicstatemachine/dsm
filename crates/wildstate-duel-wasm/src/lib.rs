@@ -3,7 +3,7 @@
 //! WebAssembly bindings of the Wildstate duel outcome program.
 //!
 //! The game server resolves every staked match through these exports, so the
-//! screen and the escrow run the same compiled rules. Objects cross the
+//! screen and the match run the same compiled rules. Objects cross the
 //! boundary as their canonical CCB bytes (`Uint8Array`); the plain objects
 //! returned by `step`, `replay`, `stateView` and `outcome` are display views
 //! of those bytes, never inputs to the program.

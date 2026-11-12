@@ -10,7 +10,7 @@ Your app stays what it is: a game, a shop, a service, in the language you alread
 
 This guide walks the whole path, a page at a time. Every command on these pages is in a box with a copy button; paste it into a terminal as it is. The screenshots are from real runs.
 
-1. [Set up your machine](setup.md): the tools, the code, a check.
+1. [Set up your machine](setup.md): Node.js, and DSM's tools from a release: no Rust, no clone.
 2. [The wallet on Android and iOS](wallet.md): what your players run. Optional; a wallet in the terminal does for testing.
 3. [Your app's own DSM account](account.md): one command, and your app has an account on the beta network, funded.
 4. [Make an offer, connect a wallet](connect.md): a code, a scan, an approval.
@@ -31,13 +31,32 @@ By the fifth page your app has shown a code, a wallet has connected to it, and y
 
 <figure class="term"><a href="images/starter-requests.webp"><img src="images/starter-requests.webp" alt="The starter's requests: two payments received and a sign-in signed"></a><figcaption>And your own account established the facts: two payments received, one sign-in signed.</figcaption></figure>
 
+In your app's code, the heart of it is this. The whole program, which ran as shown, is on [Write it into your app](clients.md).
+
+```js
+import { ask, grant, localAccount } from "dsm-app-client";
+
+const app = await localAccount("app");
+const offer = await app.offer({ name: "My Game", grants: [grant.send("ERA", "0.10", "1.00")] });
+console.log(offer.code); // show it as a QR code
+
+// Once a wallet has connected to it (the whole program waits for one):
+const player = (await app.connections()).find((c) => c.connected);
+const paid = await app.wait(await app.request(player, ask.send("ERA", "0.05", "100 gems")));
+if (paid.fact === "received") {
+  // Your own account took up the transfer: hand over the gems.
+}
+```
+
 Each page ends with all of its commands as one script, and [Write it into your app](clients.md) has the whole app as one program, in JavaScript and in Python, to copy and run.
+
+Apps already plugged into DSM, a game, a warehouse system and a prototype AI with a body, are on [Apps plugged into DSM](apps.md), with screenshots of each.
 
 ## What DSM is, for an app builder
 
 - Each party keeps its own state. Your app has an account, each player has a wallet.
 - There is no global ledger to wait on, no validators and no fee market. Storage nodes keep an index of where everyone's state is, and decide nothing.
-- You plug in. You deploy nothing anywhere.
+- You plug in. You don't deploy storage nodes or run any part of the DSM network: your app runs its own DSM account beside your existing server.
 
 ## Your app is an account
 
@@ -51,7 +70,8 @@ Your web app stays a web app. Beside it runs one process, the app host, and that
  player's DSM wallet (phone) ──HTTPS, pinned in the code──────┘  (the relay)
 ```
 
-The relay carries messages and proves nothing. What counts is what your account itself establishes from the evidence: a transfer it accepted, a proof it verified, a signature it checked.
+> [!IMPORTANT]
+> **Trust your account, not the relay.** The relay carries messages between wallets and your account, and proves nothing. A wallet's answer to a request, its *outcome*, is what the wallet says happened. Your app acts only on a *fact*: what your own account established from the evidence itself, a transfer it accepted, a proof of holdings it verified, a signature it checked. [Outcome and fact](requests.md#outcome-and-fact) shows the two side by side.
 
 ## Connect, in one picture
 
@@ -71,7 +91,7 @@ A grant is the player's consent, written down: which kinds of requests your app 
 
 | You run today | With DSM | Why it's better |
 |---|---|---|
-| Passwords, password resets, an authenticator app, SMS codes, security keys | `ask.login`: the player approves "Sign in to *your app*" on their device, and the wallet's identity signs it. Your account verifies the signature and gives you the fact `signed`. | Nothing to store but a nonce, nothing to leak, nothing to phish: the words are shown on the device and signed there. Post-quantum signatures. No hardware key to buy, ship or replace. |
+| Passwords, password resets, an authenticator app, SMS codes, security keys | `ask.login`: the player approves "Sign in to *your app*" on their device, and the wallet's identity signs it. Your account verifies the signature and gives you the fact `signed`. | No password or code to store, leak, reuse or intercept. The player reads the words on their own device and signs them there, and the signature names this connection and this request, so it signs the player in to your app and nowhere else. It does not stop a player approving a look-alike app's own requests: the wallet shows which app is asking, and the player decides. Post-quantum signatures. No hardware key to buy, ship or replace. |
 | A payment processor for in-app purchases | `ask.send`: the wallet sends your account ERA, or a coin you issued. Fact: `received`. | A transfer your account accepted is final; there is no chargeback. Small amounts cost what a storage write costs, not a percentage plus a fixed fee. Inside the grant's caps the player is not asked again. |
 | An inventory database as the source of truth for who owns what | `issue` an object, `give` it, and later `ask.owns`: the wallet proves what it owns, and your account verifies the proof. Fact: `owns`. | Items are the player's: they can send them to each other in the wallet, and your app still sees who holds what. Your database keeps game state; ownership lives with the player. |
 | An escrow service, or trusting yourself with both players' stakes | A match: both players stake from their own wallets, your app decides, the winner collects. | Your app never holds the stakes. Each wallet locks its own, under terms it built itself; your key only decides. |

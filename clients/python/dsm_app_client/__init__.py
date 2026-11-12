@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """Plug your application into DSM: a client for a dsm-app-host's local
 ingress, which is your application's own DSM account (DSM Connect, Amendment
-A11). Generate the protobuf types first: `make clients` in the DSM repo (or
-`protoc -I proto --python_out=...`)."""
+A11). Its protobuf types are generated from proto/dsm_app.proto and shipped
+in the package (generated/dsm_app_pb2.py), so it installs with no protoc."""
 
 from .account import (
     Account,

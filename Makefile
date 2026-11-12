@@ -597,9 +597,12 @@ DSM_APP := node $(TS_CLIENT_DIR)/dist/app-cli.js
 DSM_WALLET := node $(TS_CLIENT_DIR)/dist/dev-wallet.js
 
 .PHONY: clients
-clients: ## Build the TypeScript client and generate the Python client's types from proto/dsm_app.proto
+clients: ## Build the TypeScript client (both clients' protobuf types are committed: make client-types after a proto change)
 	cd $(TS_CLIENT_DIR) && npm ci --no-audit --no-fund && npm run build
-	protoc -I $(REPO_ROOT)/proto --python_out=$(PY_CLIENT_DIR)/dsm_app_client/generated $(REPO_ROOT)/proto/dsm_app.proto
+
+.PHONY: client-types
+client-types: ## Regenerate both clients' protobuf types from proto/dsm_app.proto (needs protoc and Python 3.10-3.13)
+	@bash ci/client_types_check.sh --write
 
 .PHONY: app-dev
 app-dev: clients ## Your app's own DSM account on the beta network, funded: nothing to run but it (on your local set, if you made one)
