@@ -282,8 +282,10 @@ jobs:
           DSM_PREFIX="$prefix" DSM_RELEASE_URL="file://$PWD/release" sh release/install.sh
           export PATH="$prefix/bin:$PATH"
           test "$(dsm-app-host --version)" = "dsm-app-host $VERSION"
-          dsm-app help | head -1
-          dsm-dev-wallet help | head -1
+          dsm-app help >"$RUNNER_TEMP/app-help.txt"
+          grep -q '^usage: dsm-app up' "$RUNNER_TEMP/app-help.txt"
+          dsm-dev-wallet help >"$RUNNER_TEMP/wallet-help.txt"
+          grep -q '^usage: dsm-dev-wallet up' "$RUNNER_TEMP/wallet-help.txt"
           ts_project="$RUNNER_TEMP/ts-app"
           mkdir -p "$ts_project" && cd "$ts_project"
           npm init -y >/dev/null

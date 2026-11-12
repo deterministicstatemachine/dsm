@@ -44,7 +44,9 @@ echo "[developer] the TypeScript client"
 (cd "$REPO/clients/typescript" && npm_quiet ci && npm run --silent build)
 (cd "$REPO/clients/typescript" && npm pack --silent --pack-destination "$STAGE/clients" >/dev/null)
 [ -f "$STAGE/clients/dsm-app-client-$VERSION.tgz" ] || { echo "npm pack made no dsm-app-client-$VERSION.tgz" >&2; exit 1; }
-tar -tzf "$STAGE/clients/dsm-app-client-$VERSION.tgz" | grep -q '^package/dist/generated/dsm_app_pb.js$' \
+# Listed to a file first: grep -q stops reading early, which fails tar under pipefail.
+tar -tzf "$STAGE/clients/dsm-app-client-$VERSION.tgz" >"$WORK/packed.txt"
+grep -qx 'package/dist/generated/dsm_app_pb.js' "$WORK/packed.txt" \
     || { echo "the packed TypeScript client has no dist/generated/dsm_app_pb.js" >&2; exit 1; }
 # The commands' copy: the packed client and its production dependencies, by the lockfile.
 mkdir -p "$WORK/cli"

@@ -34,7 +34,8 @@ got="$("$BIN" --version)"
 [ "$got" = "dsm-app-host $VERSION" ] || fail "--version says '$got', not 'dsm-app-host $VERSION'"
 say "--version: $got"
 
-"$BIN" --help | grep -q -- "--network beta" || fail "--help does not list --network beta"
+help="$("$BIN" --help)"
+case "$help" in *"--network beta"*) ;; *) fail "--help does not list --network beta" ;; esac
 say "--help lists --network beta"
 
 if "$BIN" --data-dir "$WORK/r/data" --ingress-secret-dir "$WORK/r/ingress" --network beta \
