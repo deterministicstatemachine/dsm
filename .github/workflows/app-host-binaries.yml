@@ -95,6 +95,7 @@ jobs:
 
       - name: Install protoc
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 

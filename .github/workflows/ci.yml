@@ -193,6 +193,7 @@ jobs:
 
       - name: Install CI system deps
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler ripgrep
 
@@ -295,6 +296,7 @@ jobs:
 
       - name: Install CI system deps
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler ripgrep
 
@@ -392,6 +394,7 @@ jobs:
 
       - name: Install CI system deps
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler ripgrep
 
@@ -524,7 +527,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install CI system deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
+        run: bash "$GITHUB_WORKSPACE/ci/runner_dns.sh" && sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
 
       # The registers promise that an acknowledged claim survives a restart,
       # and the node REFUSES to start on a server that cannot keep it. Show
@@ -611,7 +614,7 @@ jobs:
           node-version: "20"
 
       - name: Install CI system deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
+        run: bash "$GITHUB_WORKSPACE/ci/runner_dns.sh" && sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
 
       - name: The Python client's runtime
         run: |
@@ -664,6 +667,7 @@ jobs:
 
       - name: Install formal validation deps
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
@@ -713,7 +717,7 @@ jobs:
       # Both used to run only in `rust-gates`, which a frontend-only change
       # never selects.
       - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
+        run: bash "$GITHUB_WORKSPACE/ci/runner_dns.sh" && sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Bridge contract gate
         working-directory: .
@@ -852,6 +856,7 @@ jobs:
         # The dsm build script compiles the protocol with prost, which needs
         # protoc; every other Rust job installs it the same way.
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
@@ -972,7 +977,7 @@ jobs:
       # library on Linux; the USB bench itself is hardware-only and is never
       # invoked here, but the 2 unit tests are real and do run.
       - name: Install libudev
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: bash "$GITHUB_WORKSPACE/ci/runner_dns.sh" && sudo apt-get update && sudo apt-get install -y libudev-dev
 
       - name: dsm-anchor-bench builds and tests (host)
         working-directory: crates/dsm-anchor-bench
@@ -1105,6 +1110,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
       - name: Install SPHINCS refinement build dependencies
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
       - name: Cross-check SPHINCS construction and DSM signing wrappers
@@ -1168,6 +1174,7 @@ jobs:
 
       - name: Install SBOM tooling
         run: |
+          bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
           sudo apt-get update
           sudo apt-get install -y jq protobuf-compiler
           cargo install cargo-cyclonedx --quiet --locked --version 0.5.9
@@ -1201,6 +1208,9 @@ jobs:
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Resolve Ubuntu's package servers
+        run: bash "$GITHUB_WORKSPACE/ci/runner_dns.sh"
 
       - name: Build storage node image
         run: docker build -f ci/docker/StorageNode.Dockerfile -t dsm/storage-node:ci .
