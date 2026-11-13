@@ -18,7 +18,7 @@ Generates a usable DSM SBOM bundle:
 - validation evidence from `cargo run -p dsm_vertical_validation -- tla-check`
 - the security-assurance record (`scripts/generate-assurance.py`): a CycloneDX 1.7
   document with the offline appliance's hardware and firmware, every gated
-  requirement, every internal audit finding, and the evidence and status of each;
+  requirement, and what this run executed for each, with its status;
   `--board-log` decides each named test from the cargo board of this commit
 EOF
 }

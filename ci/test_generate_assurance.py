@@ -15,7 +15,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "generate-assurance.py"
 MATRIX = ROOT / "specs" / "requirements" / "VERIFICATION_MATRIX.md"
-GAPS = ROOT / "specs" / "requirements" / "CONFORMANCE_GAPS.md"
 
 
 def generator():
@@ -161,38 +160,16 @@ class AssuranceRecord(unittest.TestCase):
         self.assertEqual(ga.formal_tla_status(shorthand, results, "pass"), "incomplete")
         self.assertEqual(ga.formal_tla_status("TLA `DSM.tla` (`_tiny.cfg`)", results, "pass"), "fail")
 
-    def test_a_requirements_status_is_its_row_in_the_per_requirement_results(self):
-        ga = generator()
-        text = (
-            "## 6 Records\n\n| MR-ID | Was | Now |\n|---|---|---|\n"
-            "| MR-DSM-0001 | Violated | Met | an earlier table: what the row was |\n"
-            "| MR-DSM-0009 | Missing | Met | named only in the earlier table |\n\n"
-            "## 8 Per-requirement results\n\n| MR-ID | Status | Code | Test | Note |\n|---|---|---|---|---|\n"
-            "| MR-DSM-0001 | Met | code | test | — |\n"
-            "| MR-DSM-0002 | Not code | — | — | superseded |\n\n"
-            "## 9 After\n\n| MR-DSM-0003 | Violated | a later table |\n"
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            gaps = Path(tmp) / "CONFORMANCE_GAPS.md"
-            gaps.write_text(text)
-            ga.GAPS = gaps
-            self.assertEqual(ga.requirement_statuses(), {"MR-DSM-0001": "Met", "MR-DSM-0002": "Not code"})
-            gaps.write_text("## 6 Records\n\n| MR-DSM-0001 | Violated | Met |\n")
-            with self.assertRaises(SystemExit):
-                ga.requirement_statuses()
-
-    def test_the_repositorys_own_statuses_agree_with_its_totals(self):
-        # The row that showed the fault: superseded by an amendment, and once read as Violated
-        # from an earlier table that shows what it was.
-        statuses = generator().requirement_statuses()
-        self.assertEqual(statuses["MR-DSM-0275"], "Not code")
-        counted = {}
-        for status in statuses.values():
-            counted[status] = counted.get(status, 0) + 1
-        totals = re.search(r"\| \*\*All\*\* \| \*\*\d+\*\* \| \*\*\d+\*\* \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \|", GAPS.read_text())
-        self.assertIsNotNone(totals)
-        partial, missing, violated, not_code = (int(x) for x in totals.groups())
-        self.assertEqual((counted.get("Partial", 0), counted.get("Missing", 0), counted.get("Violated", 0), counted.get("Not code", 0)), (partial, missing, violated, not_code))
+    def test_a_matrix_rows_pointers_into_the_conformance_file_are_left_out(self):
+        clean = generator().without_pointers
+        self.assertEqual(clean("held once, by the receiver's own transition (SA-116, SA-91; §6.103)"), "held once, by the receiver's own transition")
+        self.assertEqual(clean("answered with the same confirm (SA-112); a lost acknowledgment"), "answered with the same confirm; a lost acknowledgment")
+        self.assertEqual(clean('both sides (owner, 2026-11-07: "they have to have boards"; CONFORMANCE_GAPS 6.153): a phone'), 'both sides (owner, 2026-11-07: "they have to have boards"): a phone')
+        self.assertEqual(clean("Error mapping removed → red (2026-09-24, deleted by §6.99)"), "Error mapping removed → red (2026-09-24, deleted)")
+        self.assertEqual(clean("the flow test red. Their own controls are in §6.120."), "the flow test red.")
+        self.assertEqual(clean("junk under predictable keys (SA-87 to SA-89) is refused"), "junk under predictable keys is refused")
+        # A sentence with no pointer is returned as it was.
+        self.assertEqual(clean("Gate removed → red (2026-09-24). Restored → green."), "Gate removed → red (2026-09-24). Restored → green.")
 
     def test_without_a_board_log_no_named_test_is_reported_passed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,32 +182,31 @@ class AssuranceRecord(unittest.TestCase):
             self.assertFalse([e for e in tests if e["status"] == "pass"])
             self.assertEqual(ev["ev-board"]["status"], "incomplete")
 
-    def test_skipped_checks_say_skipped_and_hardware_says_what_the_repository_records(self):
+    def test_skipped_checks_say_skipped_and_nothing_is_read_from_the_conformance_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             self.assertEqual(generate(run).returncode, 0)
             doc, ev = evidence(run)
-            for check in ("lean", "conformance-evidence", "real-code-guard", "sphincs-map", "tla"):
+            for check in ("lean", "real-code-guard", "sphincs-map", "tla"):
                 self.assertEqual(ev[f"ev-check-{check}"]["status"], "skipped", check)
-            hardware = {ref: e for ref, e in ev.items() if ref.startswith("ev-hw-")}
-            self.assertEqual(len(hardware), 6)
-            gaps = GAPS.read_text()
-            for ref, e in hardware.items():
-                # Every hardware row says what the records hold; none is decided by this run.
-                self.assertIn(e["status"], ("recorded", "not-run"), ref)
-                self.assertTrue(e["reason"], ref)
-                if e["status"] == "recorded":
-                    # A recorded property names sections of CONFORMANCE_GAPS.md that exist.
-                    self.assertEqual(e["executed"], "recorded", ref)
-                    sections = re.findall(r"§(\d+\.\d+)", e["record"])
-                    self.assertTrue(sections, ref)
-                    for n in sections:
-                        self.assertIn(f"\n### {n} ", gaps, f"{ref} names §{n}")
-                else:
-                    self.assertEqual(e["executed"], "never", ref)
-                    self.assertNotIn("record", e, ref)
+            # The assessment of DSM is the external audit's. The record carries no internal
+            # audit finding, no conformance status and no hardware claim: only what a run
+            # executes, the verification matrix's gates, and the appliance's parts.
+            self.assertFalse([ref for ref in ev if ref.startswith(("ev-sa-", "ev-hw-"))])
+            self.assertNotIn("ev-check-conformance-evidence", ev)
+            identifiers = [r["identifier"] for r in doc["definitions"]["standards"][0]["requirements"]]
+            self.assertTrue(identifiers)
+            self.assertFalse([i for i in identifiers if i.startswith(("SA-", "HW-"))])
             report = (run / "assurance-report.md").read_text()
-            self.assertNotIn("hardware stage has not started", report)
+            record = (run / "assurance.cdx.json").read_text()
+            for text, name in ((report, "the report"), (record, "the record")):
+                for word in ("CONFORMANCE_GAPS", "Internal security audit", "hardware stage has not started", "Violated", "SA-0", "SA-1"):
+                    self.assertNotIn(word, text, f"{name} names {word}")
+            # Every part the appliance is said to depend on is a part the record lists.
+            listed = {c["bom-ref"] for c in doc["components"]}
+            for dep in doc["dependencies"]:
+                for ref in dep["dependsOn"]:
+                    self.assertIn(ref, listed, ref)
             self.assertEqual(doc["specVersion"], "1.7")
             self.assertEqual({c["type"] for c in doc["components"]}, {"application", "device", "firmware"})
             for e in ev.values():
