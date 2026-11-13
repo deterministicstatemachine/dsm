@@ -1860,12 +1860,12 @@ fn parse_number_with_commas(s: &str) -> u64 {
 mod tests {
     #[test]
     fn a_step_bound_is_searched_through_its_last_action() -> std::io::Result<()> {
-        // DSM_CrossingSettles.cfg's witness takes all thirteen actions it allows: fourteen states.
+        // DSM_CrossingSettles.cfg's witness takes all fourteen actions it allows: fifteen states.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tla/DSM_CrossingSettles.cfg");
         let crossing = std::fs::read_to_string(&path)?;
-        assert!(crossing.contains("MaxStep = 13"));
-        assert_eq!(super::dfid_depth_for_config(&crossing), 14);
+        assert!(crossing.contains("MaxStep = 14"));
+        assert_eq!(super::dfid_depth_for_config(&crossing), 15);
         assert_eq!(super::dfid_depth_for_config("MaxStep = 3"), 10);
         Ok(())
     }

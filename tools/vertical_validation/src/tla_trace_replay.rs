@@ -314,6 +314,8 @@ fn dsm_replay_candidates() -> &'static [(&'static str, ReplayFn)] {
     &[
         ("add_device", apply_add_device),
         ("create_relationship", apply_create_relationship),
+        ("establish", apply_establish),
+        ("terminate", apply_terminate),
         ("send", apply_send),
         ("recv_transfer", apply_recv_transfer),
         ("recv_delta", apply_recv_delta),
@@ -556,13 +558,13 @@ fn create_relationship_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaS
             &mut expected,
             "relationships",
             pair_of(d1, d2),
-            relationship_record(g, "active"),
+            relationship_record(g, "opened"),
         )?;
         set_map_entry(
             &mut expected,
             "relationships",
             pair_of(d2, d1),
-            relationship_record(g, "active"),
+            relationship_record(g, "opened"),
         )?;
         update_relationship_smt_leaf(&mut expected, d1, d2, g)?;
         set_online(&mut expected, d1, d2, start.clone())?;
@@ -576,6 +578,100 @@ fn create_relationship_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaS
 
 fn apply_create_relationship(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
     Ok(create_relationship_candidates(current)?.contains(next))
+}
+
+fn relationship_state(state: &TlaState, pair: &TlaValue) -> anyhow::Result<String> {
+    let relationships = map_var(state, "relationships")?;
+    let relationship = relationships
+        .get(pair)
+        .ok_or_else(|| anyhow!("missing relationship {}", pair.display()))?;
+    Ok(record_str(record_fields(relationship)?, "state")?.to_string())
+}
+
+/// DSM.tla's `Settled(d, p)`: d holds nothing in flight toward p.
+fn settled(state: &TlaState, d: &TlaValue, p: &TlaValue) -> anyhow::Result<bool> {
+    let o = online_of(state, d, p)?;
+    let mut in_flight = 0usize;
+    for r in set_var(state, "outbox")? {
+        let rec = record_fields(r)?;
+        in_flight += usize::from(rec.get("from") == Some(d) && rec.get("to") == Some(p));
+    }
+    Ok(record_int(&o, "gate")? == 0 && record_int(&o, "awaits")? == 0 && in_flight == 0)
+}
+
+/// DSM.tla's `Establish` and `Terminate` (DSM Amendment A33): a step on the
+/// relationship's chain that moves no value and that both sides hold. Both
+/// start from a relationship in one of `from` on both sides, settled both
+/// ways, with both projections at its tip; both lineages, pins and
+/// projections move to the same successor, and the relationship's state
+/// becomes `to` on both sides.
+fn lifecycle_candidates(
+    current: &TlaState,
+    from: &[&str],
+    to: &str,
+) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let c = int_var(current, "nextMsgId")?;
+    let relationships = map_var(current, "relationships")?;
+    for pair_key in relationships.keys() {
+        let pair = seq_items(pair_key)?;
+        if pair.len() != 2 || pair[0] == pair[1] {
+            continue;
+        }
+        let (d1, d2) = (&pair[0], &pair[1]);
+        let state = relationship_state(current, &pair_of(d1, d2))?;
+        if !from.contains(&state.as_str())
+            || relationship_state(current, &pair_of(d2, d1))? != state
+        {
+            continue;
+        }
+        let tip = relationship_tip(current, &pair_of(d1, d2))?;
+        if relationship_tip(current, &pair_of(d2, d1))? != tip
+            || !settled(current, d1, d2)?
+            || !settled(current, d2, d1)?
+        {
+            continue;
+        }
+        let (o1, o2) = (online_of(current, d1, d2)?, online_of(current, d2, d1)?);
+        if record_int(&o1, "local")? != tip || record_int(&o2, "local")? != tip {
+            continue;
+        }
+        let stepped = |o: BTreeMap<String, TlaValue>| {
+            with_field(
+                with_field(with_field(with_field(o, "prev", tip), "local", c), "lin", c),
+                "pin",
+                c,
+            )
+        };
+        let mut expected = current.clone();
+        set_map_entry(
+            &mut expected,
+            "relationships",
+            pair_of(d1, d2),
+            relationship_record(c, to),
+        )?;
+        set_map_entry(
+            &mut expected,
+            "relationships",
+            pair_of(d2, d1),
+            relationship_record(c, to),
+        )?;
+        update_relationship_smt_leaf(&mut expected, d1, d2, c)?;
+        set_online(&mut expected, d1, d2, stepped(o1))?;
+        set_online(&mut expected, d2, d1, stepped(o2))?;
+        set_var_value(&mut expected, "nextMsgId", int_value(c + 1))?;
+        bump_step(&mut expected)?;
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_establish(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(lifecycle_candidates(current, &["opened"], "active")?.contains(next))
+}
+
+fn apply_terminate(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(lifecycle_candidates(current, &["opened", "active"], "ended")?.contains(next))
 }
 
 fn transfer_msg(
@@ -2072,41 +2168,117 @@ mod tests {
         assert!(matches!(value, TlaValue::Map(_)));
     }
 
+    /// The name of the rule that explains each step of a trace.
+    fn actions(states: &[TlaState]) -> Vec<&'static str> {
+        states
+            .windows(2)
+            .map(|w| {
+                matching_dsm_action_with_candidates(&w[0], &w[1], dsm_replay_candidates())
+                    .expect("a replayable step")
+                    .expect("a rule explains the step")
+            })
+            .collect()
+    }
+
     /// TLC's own simulation of DSM.tla (`DSM_tiny.cfg`, seed 42): a
-    /// relationship, two sends that cross, a dropped copy and its re-drive,
-    /// and both transfers applied. Every step is one the online rules explain.
+    /// relationship opened and then established (DSM Amendment A33), two
+    /// sends, and both transfers applied. Every step is one the online rules
+    /// explain.
     #[test]
-    fn replays_a_dsm_simulation_where_two_sends_cross() {
+    fn replays_a_dsm_simulation_where_two_sends_are_applied() {
         let states = parse_trace_states(include_str!("../fixtures/dsm_tiny_42_simulation.trace"))
             .expect("parse the simulation");
         let failures = replay_dsm_trace(&states);
         assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+        let actions = actions(&states);
+        assert_eq!(actions[..2], ["create_relationship", "establish"]);
+        assert_eq!(actions.iter().filter(|a| **a == "send").count(), 2);
+        assert_eq!(actions.iter().filter(|a| **a == "recv_transfer").count(), 2);
     }
 
-    /// TLC's own simulation of DSM.tla (`DSM_tiny.cfg`, seed 7): a send
-    /// applied, finalized on its delta, copies of its delta, and its
-    /// certificate reaching storage.
+    /// TLC's own simulation of DSM.tla (`DSM_tiny.cfg`, seed 7): a
+    /// relationship opened and established, a send and its transfer applied,
+    /// and a second send.
     #[test]
-    fn replays_a_dsm_simulation_through_finalization_and_the_certificate() {
+    fn replays_a_dsm_simulation_through_a_send_and_its_apply() {
         let states = parse_trace_states(include_str!("../fixtures/dsm_tiny_7_simulation.trace"))
             .expect("parse the simulation");
         let failures = replay_dsm_trace(&states);
         assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+        let actions = actions(&states);
+        assert_eq!(
+            actions[..4],
+            ["create_relationship", "establish", "send", "recv_transfer"]
+        );
+    }
+
+    /// TLC's own simulation of DSM.tla (`DSM_tiny.cfg`, seed 2): a
+    /// relationship opened, established and then ended (DSM Amendment A33).
+    #[test]
+    fn replays_a_dsm_simulation_where_a_relationship_is_established_and_ended() {
+        let states = parse_trace_states(include_str!("../fixtures/dsm_tiny_2_simulation.trace"))
+            .expect("parse the simulation");
+        let failures = replay_dsm_trace(&states);
+        assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+        let lifecycle: Vec<&str> = actions(&states)
+            .into_iter()
+            .filter(|a| ["create_relationship", "establish", "terminate"].contains(a))
+            .collect();
+        assert_eq!(lifecycle, ["create_relationship", "establish", "terminate"]);
+    }
+
+    /// The same simulation with the establishment's step leaving the
+    /// relationship opened: its tip, pins and roots moved as an establishment
+    /// moves them, but it reads "opened" on both sides, and no rule explains
+    /// the step.
+    #[test]
+    fn rejects_a_dsm_simulation_whose_establishment_leaves_the_relationship_opened() {
+        let mut states =
+            parse_trace_states(include_str!("../fixtures/dsm_tiny_2_simulation.trace"))
+                .expect("parse the simulation");
+        let step = actions(&states)
+            .iter()
+            .position(|a| *a == "establish")
+            .expect("the simulation establishes a relationship")
+            + 1;
+        let mut changed = 0;
+        if let Some(TlaValue::Map(relationships)) = states[step].get_mut("relationships") {
+            for value in relationships.values_mut() {
+                if let TlaValue::Record(record) = value {
+                    if record.get("state") == Some(&TlaValue::Str("active".into())) {
+                        record.insert("state".into(), TlaValue::Str("opened".into()));
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            changed, 2,
+            "both sides of the relationship were established"
+        );
+        let failures = replay_dsm_trace(&states);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.starts_with(&format!("step {step}:"))),
+            "a step that moved the tip and left the relationship opened was explained: {failures:?}"
+        );
     }
 
     /// TLC's counterexample to `NoCrossingSettles` (`DSM_CrossingSettles.cfg`):
-    /// two sends cross, both apply, both finalize on the joined tip, both
-    /// certificates reach storage, both gates release and both recipients
-    /// read them.
+    /// the relationship is opened and established, two sends cross, both
+    /// apply, both finalize on the joined tip, both certificates reach
+    /// storage, both gates release and both recipients read them.
     #[test]
     fn replays_the_crossing_witness_through_both_certificates() {
         let states = parse_trace_states(include_str!(
             "../fixtures/dsm_crossing_settles_witness.trace"
         ))
         .expect("parse the witness");
-        assert_eq!(states.len(), 14, "the witness's thirteen steps");
+        assert_eq!(states.len(), 15, "the witness's fourteen steps");
         let failures = replay_dsm_trace(&states);
         assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+        assert_eq!(actions(&states)[..2], ["create_relationship", "establish"]);
     }
 
     /// The same simulation with the recipient credited one more than the

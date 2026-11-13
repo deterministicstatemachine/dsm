@@ -62,7 +62,7 @@ STATE_1 ==
 /\ djteSeed = 0
 /\ net = {}
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
+\* <Next of module DSM>
 STATE_2 == 
 /\ devices = (g1 :> {})
 /\ deviceRoots = (d1 :> 1 @@ d2 :> 1)
@@ -86,8 +86,8 @@ STATE_2 ==
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 1, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 1, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 1, state |-> "opened"] @@
+  <<d2, d1>> :> [tip |-> 1, state |-> "opened"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
 /\ step = 1
 /\ ledger = {}
@@ -125,22 +125,14 @@ STATE_2 ==
 /\ djteSeed = 0
 /\ net = {}
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
+\* <Next of module DSM>
 STATE_3 == 
 /\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 1 @@ d2 :> 1)
-/\ deviceBalance = (d1 :> 1 @@ d2 :> 0)
+/\ deviceRoots = (d1 :> 2 @@ d2 :> 2)
+/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
 /\ emissionIndex = 0
 /\ shardTree = 0
-/\ outbox = { [ id |-> 2,
-    from |-> d2,
-    to |-> d1,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    fin |-> FALSE ] }
+/\ outbox = {}
 /\ activatedDevices = {}
 /\ journal = {}
 /\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
@@ -150,15 +142,15 @@ STATE_3 ==
 /\ consumedProofs = {}
 /\ actCount = (d1 :> 0 @@ d2 :> 0)
 /\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 1) @@ d2 :> ({d1, d2} :> 1))
+/\ smtState = (d1 :> ({d1, d2} :> 2) @@ d2 :> ({d1, d2} :> 2))
 /\ phase = 0
 /\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
 /\ certs = {}
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 1, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 1, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 2, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 2, state |-> "active"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
 /\ step = 2
 /\ ledger = {}
@@ -172,18 +164,18 @@ STATE_3 ==
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d1, d2>> :>
-      [ prev |-> 0,
-        local |-> 1,
-        lin |-> 1,
-        pin |-> 1,
+      [ prev |-> 1,
+        local |-> 2,
+        lin |-> 2,
+        pin |-> 2,
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d2, d1>> :>
-      [ prev |-> 0,
+      [ prev |-> 1,
         local |-> 2,
         lin |-> 2,
-        pin |-> 1,
-        gate |-> 2,
+        pin |-> 2,
+        gate |-> 0,
         awaits |-> 0 ] @@
   <<d2, d2>> :>
       [ prev |-> 0,
@@ -194,41 +186,22 @@ STATE_3 ==
         awaits |-> 0 ] )
 /\ spentJaps = {}
 /\ djteSeed = 0
-/\ net = { [ id |-> 2,
-    copy |-> 2,
-    kind |-> "transfer",
-    from |-> d2,
-    to |-> d1,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    dupLeft |-> 0 ] }
+/\ net = {}
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
+\* <Next of module DSM>
 STATE_4 == 
 /\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 1 @@ d2 :> 1)
-/\ deviceBalance = (d1 :> 0 @@ d2 :> 0)
+/\ deviceRoots = (d1 :> 2 @@ d2 :> 2)
+/\ deviceBalance = (d1 :> 1 @@ d2 :> 0)
 /\ emissionIndex = 0
 /\ shardTree = 0
-/\ outbox = { [ id |-> 2,
+/\ outbox = { [ id |-> 3,
     from |-> d2,
     to |-> d1,
     payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    fin |-> FALSE ],
-  [ id |-> 3,
-    from |-> d1,
-    to |-> d2,
-    payload |-> 1,
-    sp |-> 1,
+    sp |-> 2,
     sc |-> 3,
-    pp |-> 1,
+    pp |-> 2,
     pc |-> 3,
     fin |-> FALSE ] }
 /\ activatedDevices = {}
@@ -240,15 +213,15 @@ STATE_4 ==
 /\ consumedProofs = {}
 /\ actCount = (d1 :> 0 @@ d2 :> 0)
 /\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 1) @@ d2 :> ({d1, d2} :> 1))
+/\ smtState = (d1 :> ({d1, d2} :> 2) @@ d2 :> ({d1, d2} :> 2))
 /\ phase = 0
 /\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
 /\ certs = {}
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 1, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 1, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 2, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 2, state |-> "active"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
 /\ step = 3
 /\ ledger = {}
@@ -262,327 +235,19 @@ STATE_4 ==
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d1, d2>> :>
-      [ prev |-> 0,
-        local |-> 3,
-        lin |-> 3,
-        pin |-> 1,
-        gate |-> 3,
-        awaits |-> 0 ] @@
-  <<d2, d1>> :>
-      [ prev |-> 0,
-        local |-> 2,
-        lin |-> 2,
-        pin |-> 1,
-        gate |-> 2,
-        awaits |-> 0 ] @@
-  <<d2, d2>> :>
-      [ prev |-> 0,
-        local |-> 0,
-        lin |-> 0,
-        pin |-> 0,
-        gate |-> 0,
-        awaits |-> 0 ] )
-/\ spentJaps = {}
-/\ djteSeed = 0
-/\ net = { [ id |-> 2,
-    copy |-> 2,
-    kind |-> "transfer",
-    from |-> d2,
-    to |-> d1,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    dupLeft |-> 0 ],
-  [ id |-> 3,
-    copy |-> 3,
-    kind |-> "transfer",
-    from |-> d1,
-    to |-> d2,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 3,
-    pp |-> 1,
-    pc |-> 3,
-    dupLeft |-> 0 ] }
-
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
-STATE_5 == 
-/\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 2 @@ d2 :> 1)
-/\ deviceBalance = (d1 :> 1 @@ d2 :> 0)
-/\ emissionIndex = 0
-/\ shardTree = 0
-/\ outbox = { [ id |-> 2,
-    from |-> d2,
-    to |-> d1,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    fin |-> FALSE ],
-  [ id |-> 3,
-    from |-> d1,
-    to |-> d2,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 3,
-    pp |-> 1,
-    pc |-> 3,
-    fin |-> FALSE ] }
-/\ activatedDevices = {}
-/\ journal = {[id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2]}
-/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {}
-/\ sourceRemaining = 1
-/\ nextMsgId = 6
-/\ consumedProofs = {}
-/\ actCount = (d1 :> 0 @@ d2 :> 0)
-/\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 2) @@ d2 :> ({d1, d2} :> 1))
-/\ phase = 0
-/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {}
-/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
-/\ vaults = (d1 :> {} @@ d2 :> {})
-/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 2, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 1, state |-> "active"] @@
-  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
-/\ step = 4
-/\ ledger = {[rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2]}
-/\ storageNodes = {}
-/\ spentProofs = {}
-/\ online = ( <<d1, d1>> :>
-      [ prev |-> 0,
-        local |-> 0,
-        lin |-> 0,
-        pin |-> 0,
-        gate |-> 0,
-        awaits |-> 0 ] @@
-  <<d1, d2>> :>
       [ prev |-> 1,
         local |-> 2,
-        lin |-> 4,
-        pin |-> 2,
-        gate |-> 3,
-        awaits |-> 2 ] @@
-  <<d2, d1>> :>
-      [ prev |-> 0,
-        local |-> 2,
         lin |-> 2,
-        pin |-> 1,
-        gate |-> 2,
-        awaits |-> 0 ] @@
-  <<d2, d2>> :>
-      [ prev |-> 0,
-        local |-> 0,
-        lin |-> 0,
-        pin |-> 0,
-        gate |-> 0,
-        awaits |-> 0 ] )
-/\ spentJaps = {}
-/\ djteSeed = 0
-/\ net = { [ id |-> 2,
-    copy |-> 4,
-    kind |-> "delta",
-    from |-> d1,
-    to |-> d2,
-    payload |-> 0,
-    sp |-> 3,
-    sc |-> 4,
-    pp |-> 1,
-    pc |-> 2,
-    dupLeft |-> 0 ],
-  [ id |-> 3,
-    copy |-> 3,
-    kind |-> "transfer",
-    from |-> d1,
-    to |-> d2,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 3,
-    pp |-> 1,
-    pc |-> 3,
-    dupLeft |-> 0 ] }
-
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
-STATE_6 == 
-/\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 2 @@ d2 :> 2)
-/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
-/\ emissionIndex = 0
-/\ shardTree = 0
-/\ outbox = { [ id |-> 2,
-    from |-> d2,
-    to |-> d1,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    fin |-> FALSE ],
-  [ id |-> 3,
-    from |-> d1,
-    to |-> d2,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 3,
-    pp |-> 1,
-    pc |-> 3,
-    fin |-> FALSE ] }
-/\ activatedDevices = {}
-/\ journal = { [id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2],
-  [id |-> 3, from |-> d2, to |-> d1, sp |-> 2, sc |-> 6, pp |-> 1, pc |-> 3] }
-/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {}
-/\ sourceRemaining = 1
-/\ nextMsgId = 8
-/\ consumedProofs = {}
-/\ actCount = (d1 :> 0 @@ d2 :> 0)
-/\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 2) @@ d2 :> ({d1, d2} :> 3))
-/\ phase = 0
-/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {}
-/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
-/\ vaults = (d1 :> {} @@ d2 :> {})
-/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 2, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 3, state |-> "active"] @@
-  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
-/\ step = 5
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2] }
-/\ storageNodes = {}
-/\ spentProofs = {}
-/\ online = ( <<d1, d1>> :>
-      [ prev |-> 0,
-        local |-> 0,
-        lin |-> 0,
-        pin |-> 0,
-        gate |-> 0,
-        awaits |-> 0 ] @@
-  <<d1, d2>> :>
-      [ prev |-> 1,
-        local |-> 2,
-        lin |-> 4,
         pin |-> 2,
-        gate |-> 3,
-        awaits |-> 2 ] @@
+        gate |-> 0,
+        awaits |-> 0 ] @@
   <<d2, d1>> :>
       [ prev |-> 1,
         local |-> 3,
-        lin |-> 6,
-        pin |-> 3,
-        gate |-> 2,
-        awaits |-> 3 ] @@
-  <<d2, d2>> :>
-      [ prev |-> 0,
-        local |-> 0,
-        lin |-> 0,
-        pin |-> 0,
-        gate |-> 0,
-        awaits |-> 0 ] )
-/\ spentJaps = {}
-/\ djteSeed = 0
-/\ net = { [ id |-> 2,
-    copy |-> 4,
-    kind |-> "delta",
-    from |-> d1,
-    to |-> d2,
-    payload |-> 0,
-    sp |-> 3,
-    sc |-> 4,
-    pp |-> 1,
-    pc |-> 2,
-    dupLeft |-> 0 ],
-  [ id |-> 3,
-    copy |-> 6,
-    kind |-> "delta",
-    from |-> d2,
-    to |-> d1,
-    payload |-> 0,
-    sp |-> 2,
-    sc |-> 6,
-    pp |-> 1,
-    pc |-> 3,
-    dupLeft |-> 0 ] }
-
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
-STATE_7 == 
-/\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 2 @@ d2 :> 3)
-/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
-/\ emissionIndex = 0
-/\ shardTree = 0
-/\ outbox = { [ id |-> 2,
-    from |-> d2,
-    to |-> d1,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    fin |-> TRUE ],
-  [ id |-> 3,
-    from |-> d1,
-    to |-> d2,
-    payload |-> 1,
-    sp |-> 1,
-    sc |-> 3,
-    pp |-> 1,
-    pc |-> 3,
-    fin |-> FALSE ] }
-/\ activatedDevices = {}
-/\ journal = { [id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2],
-  [id |-> 3, from |-> d2, to |-> d1, sp |-> 2, sc |-> 6, pp |-> 1, pc |-> 3] }
-/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {[hi |-> 3, lo |-> 2, tip |-> 8, parent |-> 1]}
-/\ sourceRemaining = 1
-/\ nextMsgId = 9
-/\ consumedProofs = {}
-/\ actCount = (d1 :> 0 @@ d2 :> 0)
-/\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 2) @@ d2 :> ({d1, d2} :> 8))
-/\ phase = 0
-/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {}
-/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
-/\ vaults = (d1 :> {} @@ d2 :> {})
-/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 2, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
-/\ step = 6
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 3, newTip |-> 4],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2] }
-/\ storageNodes = {}
-/\ spentProofs = {}
-/\ online = ( <<d1, d1>> :>
-      [ prev |-> 0,
-        local |-> 0,
-        lin |-> 0,
-        pin |-> 0,
-        gate |-> 0,
-        awaits |-> 0 ] @@
-  <<d1, d2>> :>
-      [ prev |-> 1,
-        local |-> 2,
-        lin |-> 4,
+        lin |-> 3,
         pin |-> 2,
         gate |-> 3,
-        awaits |-> 2 ] @@
-  <<d2, d1>> :>
-      [ prev |-> 3,
-        local |-> 8,
-        lin |-> 6,
-        pin |-> 4,
-        gate |-> 2,
-        awaits |-> 3 ] @@
+        awaits |-> 0 ] @@
   <<d2, d2>> :>
       [ prev |-> 0,
         local |-> 0,
@@ -593,67 +258,63 @@ STATE_7 ==
 /\ spentJaps = {}
 /\ djteSeed = 0
 /\ net = { [ id |-> 3,
-    copy |-> 6,
-    kind |-> "delta",
+    copy |-> 3,
+    kind |-> "transfer",
     from |-> d2,
     to |-> d1,
-    payload |-> 0,
+    payload |-> 1,
     sp |-> 2,
-    sc |-> 6,
-    pp |-> 1,
+    sc |-> 3,
+    pp |-> 2,
     pc |-> 3,
     dupLeft |-> 0 ] }
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
-STATE_8 == 
+\* <Next of module DSM>
+STATE_5 == 
 /\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 3 @@ d2 :> 3)
-/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
+/\ deviceRoots = (d1 :> 2 @@ d2 :> 2)
+/\ deviceBalance = (d1 :> 0 @@ d2 :> 0)
 /\ emissionIndex = 0
 /\ shardTree = 0
-/\ outbox = { [ id |-> 2,
+/\ outbox = { [ id |-> 3,
     from |-> d2,
     to |-> d1,
     payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    fin |-> TRUE ],
-  [ id |-> 3,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> FALSE ],
+  [ id |-> 4,
     from |-> d1,
     to |-> d2,
     payload |-> 1,
-    sp |-> 1,
-    sc |-> 3,
-    pp |-> 1,
-    pc |-> 3,
-    fin |-> TRUE ] }
+    sp |-> 2,
+    sc |-> 4,
+    pp |-> 2,
+    pc |-> 4,
+    fin |-> FALSE ] }
 /\ activatedDevices = {}
-/\ journal = { [id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2],
-  [id |-> 3, from |-> d2, to |-> d1, sp |-> 2, sc |-> 6, pp |-> 1, pc |-> 3] }
+/\ journal = {}
 /\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {[hi |-> 3, lo |-> 2, tip |-> 8, parent |-> 1]}
+/\ joins = {}
 /\ sourceRemaining = 1
-/\ nextMsgId = 10
+/\ nextMsgId = 5
 /\ consumedProofs = {}
 /\ actCount = (d1 :> 0 @@ d2 :> 0)
 /\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 8) @@ d2 :> ({d1, d2} :> 8))
+/\ smtState = (d1 :> ({d1, d2} :> 2) @@ d2 :> ({d1, d2} :> 2))
 /\ phase = 0
 /\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
 /\ certs = {}
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 8, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 2, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 2, state |-> "active"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
-/\ step = 7
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 3, newTip |-> 4],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 6] }
+/\ step = 4
+/\ ledger = {}
 /\ storageNodes = {}
 /\ spentProofs = {}
 /\ online = ( <<d1, d1>> :>
@@ -664,19 +325,19 @@ STATE_8 ==
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d1, d2>> :>
-      [ prev |-> 2,
-        local |-> 8,
+      [ prev |-> 1,
+        local |-> 4,
         lin |-> 4,
-        pin |-> 6,
-        gate |-> 3,
-        awaits |-> 2 ] @@
+        pin |-> 2,
+        gate |-> 4,
+        awaits |-> 0 ] @@
   <<d2, d1>> :>
-      [ prev |-> 3,
-        local |-> 8,
-        lin |-> 6,
-        pin |-> 4,
-        gate |-> 2,
-        awaits |-> 3 ] @@
+      [ prev |-> 1,
+        local |-> 3,
+        lin |-> 3,
+        pin |-> 2,
+        gate |-> 3,
+        awaits |-> 0 ] @@
   <<d2, d2>> :>
       [ prev |-> 0,
         local |-> 0,
@@ -686,142 +347,75 @@ STATE_8 ==
         awaits |-> 0 ] )
 /\ spentJaps = {}
 /\ djteSeed = 0
-/\ net = {}
-
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
-STATE_9 == 
-/\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 3 @@ d2 :> 3)
-/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
-/\ emissionIndex = 0
-/\ shardTree = 0
-/\ outbox = { [ id |-> 2,
+/\ net = { [ id |-> 3,
+    copy |-> 3,
+    kind |-> "transfer",
     from |-> d2,
     to |-> d1,
     payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    fin |-> TRUE ],
-  [ id |-> 3,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    dupLeft |-> 0 ],
+  [ id |-> 4,
+    copy |-> 4,
+    kind |-> "transfer",
     from |-> d1,
     to |-> d2,
     payload |-> 1,
-    sp |-> 1,
-    sc |-> 3,
-    pp |-> 1,
-    pc |-> 3,
-    fin |-> TRUE ] }
-/\ activatedDevices = {}
-/\ journal = { [id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2],
-  [id |-> 3, from |-> d2, to |-> d1, sp |-> 2, sc |-> 6, pp |-> 1, pc |-> 3] }
-/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {[hi |-> 3, lo |-> 2, tip |-> 8, parent |-> 1]}
-/\ sourceRemaining = 1
-/\ nextMsgId = 10
-/\ consumedProofs = {}
-/\ actCount = (d1 :> 0 @@ d2 :> 0)
-/\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 8) @@ d2 :> ({d1, d2} :> 8))
-/\ phase = 0
-/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {2}
-/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
-/\ vaults = (d1 :> {} @@ d2 :> {})
-/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
-/\ step = 8
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 3, newTip |-> 4],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 6] }
-/\ storageNodes = {}
-/\ spentProofs = {}
-/\ online = ( <<d1, d1>> :>
-      [ prev |-> 0,
-        local |-> 0,
-        lin |-> 0,
-        pin |-> 0,
-        gate |-> 0,
-        awaits |-> 0 ] @@
-  <<d1, d2>> :>
-      [ prev |-> 2,
-        local |-> 8,
-        lin |-> 4,
-        pin |-> 6,
-        gate |-> 3,
-        awaits |-> 2 ] @@
-  <<d2, d1>> :>
-      [ prev |-> 3,
-        local |-> 8,
-        lin |-> 6,
-        pin |-> 4,
-        gate |-> 2,
-        awaits |-> 3 ] @@
-  <<d2, d2>> :>
-      [ prev |-> 0,
-        local |-> 0,
-        lin |-> 0,
-        pin |-> 0,
-        gate |-> 0,
-        awaits |-> 0 ] )
-/\ spentJaps = {}
-/\ djteSeed = 0
-/\ net = {}
+    sp |-> 2,
+    sc |-> 4,
+    pp |-> 2,
+    pc |-> 4,
+    dupLeft |-> 0 ] }
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
-STATE_10 == 
+\* <Next of module DSM>
+STATE_6 == 
 /\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 3 @@ d2 :> 3)
-/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
+/\ deviceRoots = (d1 :> 3 @@ d2 :> 2)
+/\ deviceBalance = (d1 :> 1 @@ d2 :> 0)
 /\ emissionIndex = 0
 /\ shardTree = 0
-/\ outbox = { [ id |-> 2,
+/\ outbox = { [ id |-> 3,
     from |-> d2,
     to |-> d1,
     payload |-> 1,
-    sp |-> 1,
-    sc |-> 2,
-    pp |-> 1,
-    pc |-> 2,
-    fin |-> TRUE ],
-  [ id |-> 3,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> FALSE ],
+  [ id |-> 4,
     from |-> d1,
     to |-> d2,
     payload |-> 1,
-    sp |-> 1,
-    sc |-> 3,
-    pp |-> 1,
-    pc |-> 3,
-    fin |-> TRUE ] }
+    sp |-> 2,
+    sc |-> 4,
+    pp |-> 2,
+    pc |-> 4,
+    fin |-> FALSE ] }
 /\ activatedDevices = {}
-/\ journal = { [id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2],
-  [id |-> 3, from |-> d2, to |-> d1, sp |-> 2, sc |-> 6, pp |-> 1, pc |-> 3] }
+/\ journal = {[id |-> 3, from |-> d1, to |-> d2, sp |-> 4, sc |-> 5, pp |-> 2, pc |-> 3]}
 /\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {[hi |-> 3, lo |-> 2, tip |-> 8, parent |-> 1]}
+/\ joins = {}
 /\ sourceRemaining = 1
-/\ nextMsgId = 10
+/\ nextMsgId = 7
 /\ consumedProofs = {}
 /\ actCount = (d1 :> 0 @@ d2 :> 0)
 /\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 8) @@ d2 :> ({d1, d2} :> 8))
+/\ smtState = (d1 :> ({d1, d2} :> 3) @@ d2 :> ({d1, d2} :> 2))
 /\ phase = 0
 /\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {2, 3}
+/\ certs = {}
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 8, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 3, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 2, state |-> "active"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
-/\ step = 9
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 3, newTip |-> 4],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 6] }
+/\ step = 5
+/\ ledger = {[rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3]}
 /\ storageNodes = {}
 /\ spentProofs = {}
 /\ online = ( <<d1, d1>> :>
@@ -833,18 +427,18 @@ STATE_10 ==
         awaits |-> 0 ] @@
   <<d1, d2>> :>
       [ prev |-> 2,
-        local |-> 8,
-        lin |-> 4,
-        pin |-> 6,
-        gate |-> 3,
-        awaits |-> 2 ] @@
-  <<d2, d1>> :>
-      [ prev |-> 3,
-        local |-> 8,
-        lin |-> 6,
-        pin |-> 4,
-        gate |-> 2,
+        local |-> 3,
+        lin |-> 5,
+        pin |-> 3,
+        gate |-> 4,
         awaits |-> 3 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 1,
+        local |-> 3,
+        lin |-> 3,
+        pin |-> 2,
+        gate |-> 3,
+        awaits |-> 0 ] @@
   <<d2, d2>> :>
       [ prev |-> 0,
         local |-> 0,
@@ -854,49 +448,434 @@ STATE_10 ==
         awaits |-> 0 ] )
 /\ spentJaps = {}
 /\ djteSeed = 0
-/\ net = {}
+/\ net = { [ id |-> 3,
+    copy |-> 5,
+    kind |-> "delta",
+    from |-> d1,
+    to |-> d2,
+    payload |-> 0,
+    sp |-> 4,
+    sc |-> 5,
+    pp |-> 2,
+    pc |-> 3,
+    dupLeft |-> 0 ],
+  [ id |-> 4,
+    copy |-> 4,
+    kind |-> "transfer",
+    from |-> d1,
+    to |-> d2,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 4,
+    pp |-> 2,
+    pc |-> 4,
+    dupLeft |-> 0 ] }
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
-STATE_11 == 
+\* <Next of module DSM>
+STATE_7 == 
 /\ devices = (g1 :> {})
 /\ deviceRoots = (d1 :> 3 @@ d2 :> 3)
 /\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
 /\ emissionIndex = 0
 /\ shardTree = 0
 /\ outbox = { [ id |-> 3,
+    from |-> d2,
+    to |-> d1,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> FALSE ],
+  [ id |-> 4,
     from |-> d1,
     to |-> d2,
     payload |-> 1,
-    sp |-> 1,
+    sp |-> 2,
+    sc |-> 4,
+    pp |-> 2,
+    pc |-> 4,
+    fin |-> FALSE ] }
+/\ activatedDevices = {}
+/\ journal = { [id |-> 3, from |-> d1, to |-> d2, sp |-> 4, sc |-> 5, pp |-> 2, pc |-> 3],
+  [id |-> 4, from |-> d2, to |-> d1, sp |-> 3, sc |-> 7, pp |-> 2, pc |-> 4] }
+/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
+/\ joins = {}
+/\ sourceRemaining = 1
+/\ nextMsgId = 9
+/\ consumedProofs = {}
+/\ actCount = (d1 :> 0 @@ d2 :> 0)
+/\ offlineSessions = {}
+/\ smtState = (d1 :> ({d1, d2} :> 3) @@ d2 :> ({d1, d2} :> 4))
+/\ phase = 0
+/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
+/\ certs = {}
+/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
+/\ vaults = (d1 :> {} @@ d2 :> {})
+/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
+  <<d1, d2>> :> [tip |-> 3, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 4, state |-> "active"] @@
+  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
+/\ step = 6
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3] }
+/\ storageNodes = {}
+/\ spentProofs = {}
+/\ online = ( <<d1, d1>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] @@
+  <<d1, d2>> :>
+      [ prev |-> 2,
+        local |-> 3,
+        lin |-> 5,
+        pin |-> 3,
+        gate |-> 4,
+        awaits |-> 3 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 2,
+        local |-> 4,
+        lin |-> 7,
+        pin |-> 4,
+        gate |-> 3,
+        awaits |-> 4 ] @@
+  <<d2, d2>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] )
+/\ spentJaps = {}
+/\ djteSeed = 0
+/\ net = { [ id |-> 3,
+    copy |-> 5,
+    kind |-> "delta",
+    from |-> d1,
+    to |-> d2,
+    payload |-> 0,
+    sp |-> 4,
+    sc |-> 5,
+    pp |-> 2,
+    pc |-> 3,
+    dupLeft |-> 0 ],
+  [ id |-> 4,
+    copy |-> 7,
+    kind |-> "delta",
+    from |-> d2,
+    to |-> d1,
+    payload |-> 0,
+    sp |-> 3,
+    sc |-> 7,
+    pp |-> 2,
+    pc |-> 4,
+    dupLeft |-> 0 ] }
+
+\* <Next of module DSM>
+STATE_8 == 
+/\ devices = (g1 :> {})
+/\ deviceRoots = (d1 :> 3 @@ d2 :> 4)
+/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
+/\ emissionIndex = 0
+/\ shardTree = 0
+/\ outbox = { [ id |-> 3,
+    from |-> d2,
+    to |-> d1,
+    payload |-> 1,
+    sp |-> 2,
     sc |-> 3,
-    pp |-> 1,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> TRUE ],
+  [ id |-> 4,
+    from |-> d1,
+    to |-> d2,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 4,
+    pp |-> 2,
+    pc |-> 4,
+    fin |-> FALSE ] }
+/\ activatedDevices = {}
+/\ journal = { [id |-> 3, from |-> d1, to |-> d2, sp |-> 4, sc |-> 5, pp |-> 2, pc |-> 3],
+  [id |-> 4, from |-> d2, to |-> d1, sp |-> 3, sc |-> 7, pp |-> 2, pc |-> 4] }
+/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
+/\ joins = {[hi |-> 4, lo |-> 3, tip |-> 9, parent |-> 2]}
+/\ sourceRemaining = 1
+/\ nextMsgId = 10
+/\ consumedProofs = {}
+/\ actCount = (d1 :> 0 @@ d2 :> 0)
+/\ offlineSessions = {}
+/\ smtState = (d1 :> ({d1, d2} :> 3) @@ d2 :> ({d1, d2} :> 9))
+/\ phase = 0
+/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
+/\ certs = {}
+/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
+/\ vaults = (d1 :> {} @@ d2 :> {})
+/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
+  <<d1, d2>> :> [tip |-> 3, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
+/\ step = 7
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 4, newTip |-> 5],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3] }
+/\ storageNodes = {}
+/\ spentProofs = {}
+/\ online = ( <<d1, d1>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] @@
+  <<d1, d2>> :>
+      [ prev |-> 2,
+        local |-> 3,
+        lin |-> 5,
+        pin |-> 3,
+        gate |-> 4,
+        awaits |-> 3 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 4,
+        local |-> 9,
+        lin |-> 7,
+        pin |-> 5,
+        gate |-> 3,
+        awaits |-> 4 ] @@
+  <<d2, d2>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] )
+/\ spentJaps = {}
+/\ djteSeed = 0
+/\ net = { [ id |-> 4,
+    copy |-> 7,
+    kind |-> "delta",
+    from |-> d2,
+    to |-> d1,
+    payload |-> 0,
+    sp |-> 3,
+    sc |-> 7,
+    pp |-> 2,
+    pc |-> 4,
+    dupLeft |-> 0 ] }
+
+\* <Next of module DSM>
+STATE_9 == 
+/\ devices = (g1 :> {})
+/\ deviceRoots = (d1 :> 4 @@ d2 :> 4)
+/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
+/\ emissionIndex = 0
+/\ shardTree = 0
+/\ outbox = { [ id |-> 3,
+    from |-> d2,
+    to |-> d1,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> TRUE ],
+  [ id |-> 4,
+    from |-> d1,
+    to |-> d2,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 4,
+    pp |-> 2,
+    pc |-> 4,
+    fin |-> TRUE ] }
+/\ activatedDevices = {}
+/\ journal = { [id |-> 3, from |-> d1, to |-> d2, sp |-> 4, sc |-> 5, pp |-> 2, pc |-> 3],
+  [id |-> 4, from |-> d2, to |-> d1, sp |-> 3, sc |-> 7, pp |-> 2, pc |-> 4] }
+/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
+/\ joins = {[hi |-> 4, lo |-> 3, tip |-> 9, parent |-> 2]}
+/\ sourceRemaining = 1
+/\ nextMsgId = 11
+/\ consumedProofs = {}
+/\ actCount = (d1 :> 0 @@ d2 :> 0)
+/\ offlineSessions = {}
+/\ smtState = (d1 :> ({d1, d2} :> 9) @@ d2 :> ({d1, d2} :> 9))
+/\ phase = 0
+/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
+/\ certs = {}
+/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
+/\ vaults = (d1 :> {} @@ d2 :> {})
+/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
+  <<d1, d2>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
+/\ step = 8
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 4, newTip |-> 5],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 3, newTip |-> 7] }
+/\ storageNodes = {}
+/\ spentProofs = {}
+/\ online = ( <<d1, d1>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] @@
+  <<d1, d2>> :>
+      [ prev |-> 3,
+        local |-> 9,
+        lin |-> 5,
+        pin |-> 7,
+        gate |-> 4,
+        awaits |-> 3 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 4,
+        local |-> 9,
+        lin |-> 7,
+        pin |-> 5,
+        gate |-> 3,
+        awaits |-> 4 ] @@
+  <<d2, d2>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] )
+/\ spentJaps = {}
+/\ djteSeed = 0
+/\ net = {}
+
+\* <Next of module DSM>
+STATE_10 == 
+/\ devices = (g1 :> {})
+/\ deviceRoots = (d1 :> 4 @@ d2 :> 4)
+/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
+/\ emissionIndex = 0
+/\ shardTree = 0
+/\ outbox = { [ id |-> 3,
+    from |-> d2,
+    to |-> d1,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> TRUE ],
+  [ id |-> 4,
+    from |-> d1,
+    to |-> d2,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 4,
+    pp |-> 2,
+    pc |-> 4,
+    fin |-> TRUE ] }
+/\ activatedDevices = {}
+/\ journal = { [id |-> 3, from |-> d1, to |-> d2, sp |-> 4, sc |-> 5, pp |-> 2, pc |-> 3],
+  [id |-> 4, from |-> d2, to |-> d1, sp |-> 3, sc |-> 7, pp |-> 2, pc |-> 4] }
+/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
+/\ joins = {[hi |-> 4, lo |-> 3, tip |-> 9, parent |-> 2]}
+/\ sourceRemaining = 1
+/\ nextMsgId = 11
+/\ consumedProofs = {}
+/\ actCount = (d1 :> 0 @@ d2 :> 0)
+/\ offlineSessions = {}
+/\ smtState = (d1 :> ({d1, d2} :> 9) @@ d2 :> ({d1, d2} :> 9))
+/\ phase = 0
+/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
+/\ certs = {4}
+/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
+/\ vaults = (d1 :> {} @@ d2 :> {})
+/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
+  <<d1, d2>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
+/\ step = 9
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 4, newTip |-> 5],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 3, newTip |-> 7] }
+/\ storageNodes = {}
+/\ spentProofs = {}
+/\ online = ( <<d1, d1>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] @@
+  <<d1, d2>> :>
+      [ prev |-> 3,
+        local |-> 9,
+        lin |-> 5,
+        pin |-> 7,
+        gate |-> 4,
+        awaits |-> 3 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 4,
+        local |-> 9,
+        lin |-> 7,
+        pin |-> 5,
+        gate |-> 3,
+        awaits |-> 4 ] @@
+  <<d2, d2>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] )
+/\ spentJaps = {}
+/\ djteSeed = 0
+/\ net = {}
+
+\* <Next of module DSM>
+STATE_11 == 
+/\ devices = (g1 :> {})
+/\ deviceRoots = (d1 :> 4 @@ d2 :> 4)
+/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
+/\ emissionIndex = 0
+/\ shardTree = 0
+/\ outbox = { [ id |-> 3,
+    from |-> d2,
+    to |-> d1,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
     pc |-> 3,
     fin |-> TRUE ] }
 /\ activatedDevices = {}
-/\ journal = { [id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2],
-  [id |-> 3, from |-> d2, to |-> d1, sp |-> 2, sc |-> 6, pp |-> 1, pc |-> 3] }
+/\ journal = { [id |-> 3, from |-> d1, to |-> d2, sp |-> 4, sc |-> 5, pp |-> 2, pc |-> 3],
+  [id |-> 4, from |-> d2, to |-> d1, sp |-> 3, sc |-> 7, pp |-> 2, pc |-> 4] }
 /\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {[hi |-> 3, lo |-> 2, tip |-> 8, parent |-> 1]}
+/\ joins = {[hi |-> 4, lo |-> 3, tip |-> 9, parent |-> 2]}
 /\ sourceRemaining = 1
-/\ nextMsgId = 10
+/\ nextMsgId = 11
 /\ consumedProofs = {}
 /\ actCount = (d1 :> 0 @@ d2 :> 0)
 /\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 8) @@ d2 :> ({d1, d2} :> 8))
+/\ smtState = (d1 :> ({d1, d2} :> 9) @@ d2 :> ({d1, d2} :> 9))
 /\ phase = 0
 /\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {2, 3}
+/\ certs = {4}
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 8, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 9, state |-> "active"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
 /\ step = 10
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 3, newTip |-> 4],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 6] }
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 4, newTip |-> 5],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 3, newTip |-> 7] }
 /\ storageNodes = {}
 /\ spentProofs = {}
 /\ online = ( <<d1, d1>> :>
@@ -907,19 +886,19 @@ STATE_11 ==
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d1, d2>> :>
-      [ prev |-> 2,
-        local |-> 8,
-        lin |-> 4,
-        pin |-> 6,
-        gate |-> 3,
-        awaits |-> 2 ] @@
-  <<d2, d1>> :>
       [ prev |-> 3,
-        local |-> 8,
-        lin |-> 6,
-        pin |-> 4,
+        local |-> 9,
+        lin |-> 5,
+        pin |-> 7,
         gate |-> 0,
         awaits |-> 3 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 4,
+        local |-> 9,
+        lin |-> 7,
+        pin |-> 5,
+        gate |-> 3,
+        awaits |-> 4 ] @@
   <<d2, d2>> :>
       [ prev |-> 0,
         local |-> 0,
@@ -931,39 +910,46 @@ STATE_11 ==
 /\ djteSeed = 0
 /\ net = {}
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
+\* <Next of module DSM>
 STATE_12 == 
 /\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 3 @@ d2 :> 3)
+/\ deviceRoots = (d1 :> 4 @@ d2 :> 4)
 /\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
 /\ emissionIndex = 0
 /\ shardTree = 0
-/\ outbox = {}
+/\ outbox = { [ id |-> 3,
+    from |-> d2,
+    to |-> d1,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> TRUE ] }
 /\ activatedDevices = {}
-/\ journal = { [id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2],
-  [id |-> 3, from |-> d2, to |-> d1, sp |-> 2, sc |-> 6, pp |-> 1, pc |-> 3] }
+/\ journal = {[id |-> 3, from |-> d1, to |-> d2, sp |-> 4, sc |-> 5, pp |-> 2, pc |-> 3]}
 /\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {[hi |-> 3, lo |-> 2, tip |-> 8, parent |-> 1]}
+/\ joins = {[hi |-> 4, lo |-> 3, tip |-> 9, parent |-> 2]}
 /\ sourceRemaining = 1
-/\ nextMsgId = 10
+/\ nextMsgId = 11
 /\ consumedProofs = {}
 /\ actCount = (d1 :> 0 @@ d2 :> 0)
 /\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 8) @@ d2 :> ({d1, d2} :> 8))
+/\ smtState = (d1 :> ({d1, d2} :> 9) @@ d2 :> ({d1, d2} :> 9))
 /\ phase = 0
 /\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {2, 3}
+/\ certs = {4}
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 8, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 9, state |-> "active"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
 /\ step = 11
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 3, newTip |-> 4],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 6] }
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 4, newTip |-> 5],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 3, newTip |-> 7] }
 /\ storageNodes = {}
 /\ spentProofs = {}
 /\ online = ( <<d1, d1>> :>
@@ -974,19 +960,19 @@ STATE_12 ==
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d1, d2>> :>
-      [ prev |-> 2,
-        local |-> 8,
-        lin |-> 4,
-        pin |-> 6,
-        gate |-> 0,
-        awaits |-> 2 ] @@
-  <<d2, d1>> :>
       [ prev |-> 3,
-        local |-> 8,
-        lin |-> 6,
-        pin |-> 4,
+        local |-> 9,
+        lin |-> 5,
+        pin |-> 7,
         gate |-> 0,
         awaits |-> 3 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 4,
+        local |-> 9,
+        lin |-> 7,
+        pin |-> 5,
+        gate |-> 3,
+        awaits |-> 0 ] @@
   <<d2, d2>> :>
       [ prev |-> 0,
         local |-> 0,
@@ -998,38 +984,46 @@ STATE_12 ==
 /\ djteSeed = 0
 /\ net = {}
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
+\* <Next of module DSM>
 STATE_13 == 
 /\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 3 @@ d2 :> 3)
+/\ deviceRoots = (d1 :> 4 @@ d2 :> 4)
 /\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
 /\ emissionIndex = 0
 /\ shardTree = 0
-/\ outbox = {}
+/\ outbox = { [ id |-> 3,
+    from |-> d2,
+    to |-> d1,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> TRUE ] }
 /\ activatedDevices = {}
-/\ journal = {[id |-> 2, from |-> d1, to |-> d2, sp |-> 3, sc |-> 4, pp |-> 1, pc |-> 2]}
+/\ journal = {[id |-> 3, from |-> d1, to |-> d2, sp |-> 4, sc |-> 5, pp |-> 2, pc |-> 3]}
 /\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {[hi |-> 3, lo |-> 2, tip |-> 8, parent |-> 1]}
+/\ joins = {[hi |-> 4, lo |-> 3, tip |-> 9, parent |-> 2]}
 /\ sourceRemaining = 1
-/\ nextMsgId = 10
+/\ nextMsgId = 11
 /\ consumedProofs = {}
 /\ actCount = (d1 :> 0 @@ d2 :> 0)
 /\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 8) @@ d2 :> ({d1, d2} :> 8))
+/\ smtState = (d1 :> ({d1, d2} :> 9) @@ d2 :> ({d1, d2} :> 9))
 /\ phase = 0
 /\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {2, 3}
+/\ certs = {3, 4}
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 8, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 9, state |-> "active"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
 /\ step = 12
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 3, newTip |-> 4],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 6] }
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 4, newTip |-> 5],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 3, newTip |-> 7] }
 /\ storageNodes = {}
 /\ spentProofs = {}
 /\ online = ( <<d1, d1>> :>
@@ -1040,18 +1034,18 @@ STATE_13 ==
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d1, d2>> :>
-      [ prev |-> 2,
-        local |-> 8,
-        lin |-> 4,
-        pin |-> 6,
-        gate |-> 0,
-        awaits |-> 2 ] @@
-  <<d2, d1>> :>
       [ prev |-> 3,
-        local |-> 8,
-        lin |-> 6,
-        pin |-> 4,
+        local |-> 9,
+        lin |-> 5,
+        pin |-> 7,
         gate |-> 0,
+        awaits |-> 3 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 4,
+        local |-> 9,
+        lin |-> 7,
+        pin |-> 5,
+        gate |-> 3,
         awaits |-> 0 ] @@
   <<d2, d2>> :>
       [ prev |-> 0,
@@ -1064,10 +1058,84 @@ STATE_13 ==
 /\ djteSeed = 0
 /\ net = {}
 
-\* <Next line 1099, col 5 to line 1099, col 50 of module DSM>
+\* <Next of module DSM>
 STATE_14 == 
 /\ devices = (g1 :> {})
-/\ deviceRoots = (d1 :> 3 @@ d2 :> 3)
+/\ deviceRoots = (d1 :> 4 @@ d2 :> 4)
+/\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
+/\ emissionIndex = 0
+/\ shardTree = 0
+/\ outbox = { [ id |-> 3,
+    from |-> d2,
+    to |-> d1,
+    payload |-> 1,
+    sp |-> 2,
+    sc |-> 3,
+    pp |-> 2,
+    pc |-> 3,
+    fin |-> TRUE ] }
+/\ activatedDevices = {}
+/\ journal = {}
+/\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
+/\ joins = {[hi |-> 4, lo |-> 3, tip |-> 9, parent |-> 2]}
+/\ sourceRemaining = 1
+/\ nextMsgId = 11
+/\ consumedProofs = {}
+/\ actCount = (d1 :> 0 @@ d2 :> 0)
+/\ offlineSessions = {}
+/\ smtState = (d1 :> ({d1, d2} :> 9) @@ d2 :> ({d1, d2} :> 9))
+/\ phase = 0
+/\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
+/\ certs = {3, 4}
+/\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
+/\ vaults = (d1 :> {} @@ d2 :> {})
+/\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
+  <<d1, d2>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
+/\ step = 13
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 4, newTip |-> 5],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 3, newTip |-> 7] }
+/\ storageNodes = {}
+/\ spentProofs = {}
+/\ online = ( <<d1, d1>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] @@
+  <<d1, d2>> :>
+      [ prev |-> 3,
+        local |-> 9,
+        lin |-> 5,
+        pin |-> 7,
+        gate |-> 0,
+        awaits |-> 0 ] @@
+  <<d2, d1>> :>
+      [ prev |-> 4,
+        local |-> 9,
+        lin |-> 7,
+        pin |-> 5,
+        gate |-> 3,
+        awaits |-> 0 ] @@
+  <<d2, d2>> :>
+      [ prev |-> 0,
+        local |-> 0,
+        lin |-> 0,
+        pin |-> 0,
+        gate |-> 0,
+        awaits |-> 0 ] )
+/\ spentJaps = {}
+/\ djteSeed = 0
+/\ net = {}
+
+\* <Next of module DSM>
+STATE_15 == 
+/\ devices = (g1 :> {})
+/\ deviceRoots = (d1 :> 4 @@ d2 :> 4)
 /\ deviceBalance = (d1 :> 1 @@ d2 :> 1)
 /\ emissionIndex = 0
 /\ shardTree = 0
@@ -1075,27 +1143,27 @@ STATE_14 ==
 /\ activatedDevices = {}
 /\ journal = {}
 /\ keys = (d1 :> [sphincs |-> 0, kyber |-> 0] @@ d2 :> [sphincs |-> 0, kyber |-> 0])
-/\ joins = {[hi |-> 3, lo |-> 2, tip |-> 8, parent |-> 1]}
+/\ joins = {[hi |-> 4, lo |-> 3, tip |-> 9, parent |-> 2]}
 /\ sourceRemaining = 1
-/\ nextMsgId = 10
+/\ nextMsgId = 11
 /\ consumedProofs = {}
 /\ actCount = (d1 :> 0 @@ d2 :> 0)
 /\ offlineSessions = {}
-/\ smtState = (d1 :> ({d1, d2} :> 8) @@ d2 :> ({d1, d2} :> 8))
+/\ smtState = (d1 :> ({d1, d2} :> 9) @@ d2 :> ({d1, d2} :> 9))
 /\ phase = 0
 /\ shardLists = (0 :> <<>> @@ 1 :> <<>>)
-/\ certs = {2, 3}
+/\ certs = {3, 4}
 /\ vaultState = (v1 :> [owner |-> d1, balance |-> 0, locked |-> FALSE, condition |-> 0])
 /\ vaults = (d1 :> {} @@ d2 :> {})
 /\ relationships = ( <<d1, d1>> :> [tip |-> 0, state |-> "inactive"] @@
-  <<d1, d2>> :> [tip |-> 8, state |-> "active"] @@
-  <<d2, d1>> :> [tip |-> 8, state |-> "active"] @@
+  <<d1, d2>> :> [tip |-> 9, state |-> "active"] @@
+  <<d2, d1>> :> [tip |-> 9, state |-> "active"] @@
   <<d2, d2>> :> [tip |-> 0, state |-> "inactive"] )
-/\ step = 13
-/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 1, newTip |-> 3],
-  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 3, newTip |-> 4],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 1, newTip |-> 2],
-  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 6] }
+/\ step = 14
+/\ ledger = { [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 2, newTip |-> 4],
+  [rel |-> {d1, d2}, signer |-> d1, oldTip |-> 4, newTip |-> 5],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 2, newTip |-> 3],
+  [rel |-> {d1, d2}, signer |-> d2, oldTip |-> 3, newTip |-> 7] }
 /\ storageNodes = {}
 /\ spentProofs = {}
 /\ online = ( <<d1, d1>> :>
@@ -1106,17 +1174,17 @@ STATE_14 ==
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d1, d2>> :>
-      [ prev |-> 2,
-        local |-> 8,
-        lin |-> 4,
-        pin |-> 6,
+      [ prev |-> 3,
+        local |-> 9,
+        lin |-> 5,
+        pin |-> 7,
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d2, d1>> :>
-      [ prev |-> 3,
-        local |-> 8,
-        lin |-> 6,
-        pin |-> 4,
+      [ prev |-> 4,
+        local |-> 9,
+        lin |-> 7,
+        pin |-> 5,
         gate |-> 0,
         awaits |-> 0 ] @@
   <<d2, d2>> :>
