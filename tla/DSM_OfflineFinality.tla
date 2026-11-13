@@ -94,13 +94,17 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 
   PaysOnlyLoaded (owner, 2026-11-07: an offline payment needs a board on both
   sides, the money received lands in the receiver's own offline balance, and
-  it is paid on only once it has been unloaded): a device that has received
-  offline proposes no offline payment of its own until a boundary carries the
-  receive online: Boundary(d), a load or an unload, taken with no step in
+  it is paid on only once it has been unloaded): a device pays offline from
+  what it held at its last boundary online, less what it has paid since.
+  What it received since that boundary is not in it, until a boundary carries
+  the receive online: Boundary(d), a load or an unload, taken with no step in
   flight, as the code takes one (`offline_spend_in_flight`). `cut` records
-  where each device's boundaries fell in its chain. The code refuses the
-  proposal (`account_received_since_boundary`) and, again, the release
-  (`own_offline_spend_chain`). NothingReceivedIsPaidOn holds it.
+  where each device's boundaries fell in its chain. A device that received
+  goes on paying from what it loaded (owner, 2026-11-13: "That is not a
+  rule"): the code draws a spend from the allocation alone
+  (`OfflineAccount::step`, "a spend takes more than the offline allocation
+  holds"), and a receiver takes the payer's receives among its steps
+  (`verify_account_hops`). NothingReceivedIsPaidOn holds it.
 ***************************************************************************)
 
 CONSTANTS
@@ -166,11 +170,13 @@ Balance(d) ==
       - Cardinality({i \in 1..Len(chain[d]) : Proposer(chain[d][i]) = d})
       + Cardinality({i \in 1..Len(chain[d]) : Proposer(chain[d][i]) # d})
 InFlight(d) == \E s \in Step : phase[d][s] \in InFlightPhase
-\* d has received nothing offline since its last boundary: every step it holds
-\* past that boundary is its own.
+\* What d has paid, and what it has received, in the first n steps of its chain.
+Own(d, n) == Cardinality({i \in 1..n : Proposer(chain[d][i]) = d})
+Received(d, n) == Cardinality({i \in 1..n : Proposer(chain[d][i]) # d})
+\* What d may still pay offline: what it held at its last boundary online, less
+\* what it has paid since. What it received since that boundary is not in it.
 LastCut(d) == CHOOSE k \in cut[d] \cup {0} : \A n \in cut[d] \cup {0} : n <= k
-ReceivedNothing(d) ==
-    \A i \in (LastCut(d) + 1)..Len(chain[d]) : Proposer(chain[d][i]) = d
+Loaded(d) == INITIAL_BALANCE + Received(d, LastCut(d)) - Own(d, Len(chain[d]))
 
 \* A frame leaves only while the devices are linked; one that cannot leave
 \* is still owed by the phase that produced it.
@@ -198,7 +204,7 @@ Propose(s) ==
     /\ parent[s] = NoParent
     /\ ~InFlight(d)
     /\ Balance(d) >= 1
-    /\ PaysOnlyLoaded => ReceivedNothing(d)
+    /\ PaysOnlyLoaded => Loaded(d) >= 1
     /\ phase' = [phase EXCEPT ![d][s] = "Prepared"]
     /\ parent' = [parent EXCEPT ![s] = Tip(d)]
     /\ Emit("prepare", s)
@@ -542,12 +548,16 @@ TokenConservation ==
 
 BalancesNonNegative == \A d \in Device : Balance(d) >= 0
 
-\* Money received offline is never paid on offline: no device commits a step of
-\* its own after one it received unless a boundary online fell between them.
+\* Money received offline is never paid on offline: at each step of its own a
+\* device has paid, that step included, no more than it held at its last
+\* boundary online before the step.
+CutBefore(d, j) ==
+    CHOOSE k \in {n \in cut[d] \cup {0} : n < j} :
+        \A n \in {m \in cut[d] \cup {0} : m < j} : n <= k
 NothingReceivedIsPaidOn ==
-    \A d \in Device : \A i, j \in 1..Len(chain[d]) :
-        (i < j /\ Proposer(chain[d][i]) # d /\ Proposer(chain[d][j]) = d)
-            => \E k \in cut[d] : i <= k /\ k < j
+    \A d \in Device : \A j \in 1..Len(chain[d]) :
+        Proposer(chain[d][j]) = d
+            => Own(d, j) <= INITIAL_BALANCE + Received(d, CutBefore(d, j))
 
 \* The durable boundary, frame by frame: a confirm in the air was sent by a
 \* proposer whose ConfirmPending is durable; an ack by a receiver whose

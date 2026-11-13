@@ -481,8 +481,8 @@ impl TlaRunner {
                 "NoHalfCommit",
             ),
             // Money received offline paid on before a boundary carries it online (owner,
-            // 2026-11-07): without the rule, a device commits a payment of its own after one it
-            // received, with no boundary between.
+            // 2026-11-07): without the rule, a device that has paid out what it loaded pays again
+            // with what it received, with no boundary between.
             expect_violation(
                 "OfflineFinality/pays-received",
                 "DSM_OfflineFinality.tla",

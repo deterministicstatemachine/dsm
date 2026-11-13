@@ -441,9 +441,10 @@ pub struct BearerOrigin<'a> {
     /// The sender's anchor: its bundle and the keys it commits, as this device
     /// pins it, or admits it from a disclosure whose bundle recomputes.
     pub anchor: crate::types::offline_chain::ChainAnchor,
-    /// The sender's spends since the recorded account, as the confirm carries
-    /// them (SA-116).
-    pub chain: &'a [crate::types::offline_chain::SpendHop],
+    /// The steps of the sender's account since the recorded one, as the confirm
+    /// carries them: its spends (SA-116), the receives its own board committed
+    /// and the unloads of what it received.
+    pub chain: &'a [crate::types::offline_chain::AccountHop],
     /// Where this device last accepted a spend from the sender to leave its
     /// account — the frontier and the counter — if it ever has.
     pub accepted: Option<([u8; 32], u64)>,
@@ -480,7 +481,7 @@ impl VerifiedConfirm {
 
     /// For an offline-bearer step, the account its spend starts from as this
     /// device established it: its recorded account carried forward by the
-    /// sender's verified chain of spends, at the counter and frontier the
+    /// sender's verified steps since, at the counter and frontier the
     /// release starts from.
     pub fn bearer_start(&self) -> &crate::types::offline_chain::AccountPoint {
         &self.bearer_start
@@ -489,13 +490,18 @@ impl VerifiedConfirm {
 
 /// The owner's receive rule (2026-10-22): an offline-bearer spend is taken
 /// only from the offline account its receiver validated itself, from the
-/// sender's online history — carried forward, when the sender has paid offline
-/// since, by the sender's chain of spends (SA-116).
+/// sender's online history — carried forward by the steps of the sender's
+/// account since: its spends (SA-116), and the receives its own board committed
+/// and the unloads of what it received. A sender that received offline goes on
+/// paying offline from what it loaded (owner, 2026-11-13: "That is not a rule";
+/// "That's why both ... sign"): each receive in the chain is its board's signed
+/// advance, σ^chip and σ^host both, and adds nothing to what its spends draw
+/// from.
 ///
 /// The recorded account must be the sender's, under the spend's bundle, and
 /// the anchor the chain is verified under must be that bundle's. The chain is
-/// verified hop by hop from the recorded account
-/// ([`crate::types::offline_chain::verify_spend_chain`]); the receipt's
+/// verified step by step from the recorded account
+/// ([`crate::types::offline_chain::verify_account_hops`]); the receipt's
 /// offline-account write names the account the spend started from (its
 /// pre-root, which `verify_receipt_state` folds under the sender's device
 /// root), and that must be the account the chain leaves, at the counter and
@@ -514,7 +520,7 @@ pub fn spend_starts_at_the_record(
     sender_genesis: &[u8; 32],
     origin: &BearerOrigin<'_>,
 ) -> Result<crate::types::offline_chain::AccountPoint, DsmError> {
-    use crate::types::offline_chain::{chain_end, verify_spend_chain, AccountPoint};
+    use crate::types::offline_chain::{verify_account_hops, AccountHop, AccountPoint};
     let recorded = origin.recorded.as_ref().ok_or_else(|| {
         DsmError::invalid_operation(
             "offline-bearer confirm: this device has validated none of the sender's offline \
@@ -531,8 +537,12 @@ pub fn spend_starts_at_the_record(
              spend's anchor bundle",
         ));
     }
-    let payments = verify_spend_chain(recorded.account_root(), &origin.anchor, origin.chain)?;
-    let carried = chain_end(recorded.account_root(), &payments);
+    let (_spends, carried) = verify_account_hops(
+        recorded.account_root(),
+        &origin.anchor,
+        recorded.device_id(),
+        origin.chain,
+    )?;
     let started_from = receipt
         .step_writes
         .iter()
@@ -549,19 +559,20 @@ pub fn spend_starts_at_the_record(
     if started_from != carried {
         return Err(DsmError::invalid_operation(
             "offline-bearer spend: it does not start from the offline account this device \
-             validated online for the sender, carried forward by the sender's chain of spends",
+             validated online for the sender, carried forward by the steps of the sender's account since",
         ));
     }
     if let Some((frontier, counter)) = origin.accepted {
-        let recorded_counter = match payments.first() {
-            Some(first) => first.before.counter,
-            None => leaves.counter,
-        };
-        let passes_through = payments
+        // The points the sender's board signed a step from, in order, then the one this spend
+        // starts from. An unload of a received payment moves neither the counter nor the frontier.
+        let points: Vec<(u64, [u8; 32])> = origin
+            .chain
             .iter()
-            .map(|p| (p.before.counter, p.before.frontier))
+            .filter_map(AccountHop::starts_at)
             .chain([(leaves.counter, leaves.frontier)])
-            .any(|point| point == (counter, frontier));
+            .collect();
+        let recorded_counter = points.first().map_or(leaves.counter, |first| first.0);
+        let passes_through = points.contains(&(counter, frontier));
         if counter >= recorded_counter && !passes_through {
             return Err(DsmError::invalid_operation(
                 "offline-bearer spend: it does not extend the spend this device last accepted \
@@ -2619,7 +2630,7 @@ mod receive_rule_tests {
     fn origin<'a>(
         recorded: &PeerOfflineAccount,
         payer: &Payer,
-        chain: &'a [crate::types::offline_chain::SpendHop],
+        chain: &'a [crate::types::offline_chain::AccountHop],
         accepted: Option<([u8; 32], u64)>,
     ) -> BearerOrigin<'a> {
         BearerOrigin {
@@ -2640,6 +2651,7 @@ mod receive_rule_tests {
         let mut payer = Payer::loaded(0x41, 40);
         let recorded = record(&payer);
         let (first, first_receipt, first_leaves) = payer.spend(OTHER, 10);
+        let first = crate::types::offline_chain::AccountHop::Spend(first);
         let (_, second_receipt, second_leaves) = payer.spend(RECEIVER, 5);
         let start = spend_starts_at_the_record(
             &second_receipt,
@@ -2663,7 +2675,7 @@ mod receive_rule_tests {
                 &payer.genesis,
                 &origin(&recorded, &payer, &[], None),
             ),
-            "carried forward by the sender's chain of spends",
+            "carried forward by the steps of the sender's account since",
         );
     }
 
@@ -2675,7 +2687,9 @@ mod receive_rule_tests {
         let other = Payer::loaded(0x43, 40);
         let recorded = record(&payer);
         let (first, _, _) = payer.spend(OTHER, 10);
+        let first = crate::types::offline_chain::AccountHop::Spend(first);
         let (second, _, _) = payer.spend(OTHER, 3);
+        let second = crate::types::offline_chain::AccountHop::Spend(second);
         let (_, receipt, leaves) = payer.spend(RECEIVER, 5);
         refused(
             spend_starts_at_the_record(
@@ -2684,7 +2698,7 @@ mod receive_rule_tests {
                 &payer.genesis,
                 &origin(&recorded, &payer, std::slice::from_ref(&first), None),
             ),
-            "carried forward by the sender's chain of spends",
+            "carried forward by the steps of the sender's account since",
         );
         let both = [first.clone(), second.clone()];
         let mut foreign = origin(&recorded, &payer, &both, None);
@@ -2715,6 +2729,7 @@ mod receive_rule_tests {
         let mut payer = Payer::loaded(0x44, 40);
         let recorded = record(&payer);
         let (first, first_receipt, first_leaves) = payer.spend(RECEIVER, 10);
+        let first = crate::types::offline_chain::AccountHop::Spend(first);
         let (_, second_receipt, second_leaves) = payer.spend(RECEIVER, 5);
         let after_first = Some((first_leaves.next_frontier, first_leaves.counter + 1));
         spend_starts_at_the_record(

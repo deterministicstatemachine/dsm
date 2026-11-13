@@ -12974,13 +12974,14 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
   anchorDisclosure?: AnchorDisclosure;
 
   /**
-   * The sender's offline spends since the boundary of its online history that left the account
-   * its receivers recorded, in order, ending where this spend starts (SA-116). Empty when this
-   * spend starts at that account.
+   * The steps of the sender's offline account since the boundary of its online history that left
+   * the account its receivers recorded, in order, ending where this spend starts: its spends
+   * (SA-116), the receives its own board committed and the unloads of what it received. Empty
+   * when this spend starts at that account.
    *
-   * @generated from field: dsm.OfflineSpendChain offline_spend_chain = 16;
+   * @generated from field: dsm.OfflineAccountChain offline_account_chain = 17;
    */
-  offlineSpendChain?: OfflineSpendChain;
+  offlineAccountChain?: OfflineAccountChain;
 
   constructor(data?: PartialMessage<BilateralConfirmRequest>) {
     super();
@@ -12997,7 +12998,7 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
     { no: 8, name: "pre_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "offline_release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 15, name: "anchor_disclosure", kind: "message", T: AnchorDisclosure },
-    { no: 16, name: "offline_spend_chain", kind: "message", T: OfflineSpendChain },
+    { no: 17, name: "offline_account_chain", kind: "message", T: OfflineAccountChain },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralConfirmRequest {
@@ -13728,45 +13729,6 @@ export class OfflineSpendHop extends Message<OfflineSpendHop> {
 }
 
 /**
- * An offline account's spends, in order.
- *
- * @generated from message dsm.OfflineSpendChain
- */
-export class OfflineSpendChain extends Message<OfflineSpendChain> {
-  /**
-   * @generated from field: repeated dsm.OfflineSpendHop hops = 1;
-   */
-  hops: OfflineSpendHop[] = [];
-
-  constructor(data?: PartialMessage<OfflineSpendChain>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.OfflineSpendChain";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "hops", kind: "message", T: OfflineSpendHop, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSpendChain {
-    return new OfflineSpendChain().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineSpendChain {
-    return new OfflineSpendChain().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineSpendChain {
-    return new OfflineSpendChain().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined, b: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined): boolean {
-    return proto3.util.equals(OfflineSpendChain, a, b);
-  }
-}
-
-/**
  * One offline-bearer receive into an offline account as the receiver's board committed it: its
  * receive commit's release (dsm.anchor.OfflineRelease, its offline-state proofs attached), which
  * is the acknowledgement the payer kept, the receive's account witness, and what it received.
@@ -13940,6 +13902,45 @@ export class OfflineAccountHop extends Message<OfflineAccountHop> {
 
   static equals(a: OfflineAccountHop | PlainMessage<OfflineAccountHop> | undefined, b: OfflineAccountHop | PlainMessage<OfflineAccountHop> | undefined): boolean {
     return proto3.util.equals(OfflineAccountHop, a, b);
+  }
+}
+
+/**
+ * An offline account's steps since one of its boundaries, in order.
+ *
+ * @generated from message dsm.OfflineAccountChain
+ */
+export class OfflineAccountChain extends Message<OfflineAccountChain> {
+  /**
+   * @generated from field: repeated dsm.OfflineAccountHop hops = 1;
+   */
+  hops: OfflineAccountHop[] = [];
+
+  constructor(data?: PartialMessage<OfflineAccountChain>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineAccountChain";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "hops", kind: "message", T: OfflineAccountHop, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineAccountChain {
+    return new OfflineAccountChain().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineAccountChain {
+    return new OfflineAccountChain().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineAccountChain {
+    return new OfflineAccountChain().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineAccountChain | PlainMessage<OfflineAccountChain> | undefined, b: OfflineAccountChain | PlainMessage<OfflineAccountChain> | undefined): boolean {
+    return proto3.util.equals(OfflineAccountChain, a, b);
   }
 }
 
