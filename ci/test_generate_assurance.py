@@ -160,6 +160,17 @@ class AssuranceRecord(unittest.TestCase):
         self.assertEqual(ga.formal_tla_status(shorthand, results, "pass"), "incomplete")
         self.assertEqual(ga.formal_tla_status("TLA `DSM.tla` (`_tiny.cfg`)", results, "pass"), "fail")
 
+    def test_a_matrix_rows_pointers_into_the_conformance_file_are_left_out(self):
+        clean = generator().without_pointers
+        self.assertEqual(clean("held once, by the receiver's own transition (SA-116, SA-91; §6.103)"), "held once, by the receiver's own transition")
+        self.assertEqual(clean("answered with the same confirm (SA-112); a lost acknowledgment"), "answered with the same confirm; a lost acknowledgment")
+        self.assertEqual(clean('both sides (owner, 2026-11-07: "they have to have boards"; CONFORMANCE_GAPS 6.153): a phone'), 'both sides (owner, 2026-11-07: "they have to have boards"): a phone')
+        self.assertEqual(clean("Error mapping removed → red (2026-09-24, deleted by §6.99)"), "Error mapping removed → red (2026-09-24, deleted)")
+        self.assertEqual(clean("the flow test red. Their own controls are in §6.120."), "the flow test red.")
+        self.assertEqual(clean("junk under predictable keys (SA-87 to SA-89) is refused"), "junk under predictable keys is refused")
+        # A sentence with no pointer is returned as it was.
+        self.assertEqual(clean("Gate removed → red (2026-09-24). Restored → green."), "Gate removed → red (2026-09-24). Restored → green.")
+
     def test_without_a_board_log_no_named_test_is_reported_passed(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
@@ -171,16 +182,31 @@ class AssuranceRecord(unittest.TestCase):
             self.assertFalse([e for e in tests if e["status"] == "pass"])
             self.assertEqual(ev["ev-board"]["status"], "incomplete")
 
-    def test_skipped_checks_say_skipped_and_hardware_says_not_run(self):
+    def test_skipped_checks_say_skipped_and_nothing_is_read_from_the_conformance_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             self.assertEqual(generate(run).returncode, 0)
             doc, ev = evidence(run)
-            for check in ("lean", "conformance-evidence", "real-code-guard", "sphincs-map", "tla"):
+            for check in ("lean", "real-code-guard", "sphincs-map", "tla"):
                 self.assertEqual(ev[f"ev-check-{check}"]["status"], "skipped", check)
-            hardware = [e for ref, e in ev.items() if ref.startswith("ev-hw-")]
-            self.assertEqual(len(hardware), 6)
-            self.assertEqual({e["status"] for e in hardware}, {"not-run"})
+            # The assessment of DSM is the external audit's. The record carries no internal
+            # audit finding, no conformance status and no hardware claim: only what a run
+            # executes, the verification matrix's gates, and the appliance's parts.
+            self.assertFalse([ref for ref in ev if ref.startswith(("ev-sa-", "ev-hw-"))])
+            self.assertNotIn("ev-check-conformance-evidence", ev)
+            identifiers = [r["identifier"] for r in doc["definitions"]["standards"][0]["requirements"]]
+            self.assertTrue(identifiers)
+            self.assertFalse([i for i in identifiers if i.startswith(("SA-", "HW-"))])
+            report = (run / "assurance-report.md").read_text()
+            record = (run / "assurance.cdx.json").read_text()
+            for text, name in ((report, "the report"), (record, "the record")):
+                for word in ("CONFORMANCE_GAPS", "Internal security audit", "hardware stage has not started", "Violated", "SA-0", "SA-1"):
+                    self.assertNotIn(word, text, f"{name} names {word}")
+            # Every part the appliance is said to depend on is a part the record lists.
+            listed = {c["bom-ref"] for c in doc["components"]}
+            for dep in doc["dependencies"]:
+                for ref in dep["dependsOn"]:
+                    self.assertIn(ref, listed, ref)
             self.assertEqual(doc["specVersion"], "1.7")
             self.assertEqual({c["type"] for c in doc["components"]}, {"application", "device", "firmware"})
             for e in ev.values():

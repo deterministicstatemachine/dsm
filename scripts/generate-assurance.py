@@ -7,18 +7,19 @@ SBOM run directory:
 
 - the offline appliance's hardware and firmware (an HBOM), each firmware named
   by the git tree hash of its source at the commit under assessment;
-- every requirement the repository maps to a gate (VERIFICATION_MATRIX), every
-  internal security-audit finding (CONFORMANCE_GAPS, SA-*), the conformance
-  status of each requirement, and the hardware properties the appliance must
-  show on silicon;
+- every requirement the repository maps to a gate (VERIFICATION_MATRIX);
 - the evidence for each: what this run executed (with its command, exit code,
-  log and the log's SHA-256), and what the repository records (named as a
-  record, never as a result of this run).
+  log and the log's SHA-256), and what the verification matrix records (named
+  as a record, never as a result of this run).
+
+It carries no finding and no status of its own making: the assessment of DSM
+is the independent external audit's, and this record states what a release run
+executed. It reads nothing from specs/requirements/CONFORMANCE_GAPS.md.
 
 Statuses: pass, fail (this run executed it), skipped (this run was told not
-to), incomplete (named, but nothing in this run decides it), not-run (never
-executed, such as a property of hardware not yet on the bench), recorded (the
-repository records an earlier observation; this run did not repeat it).
+to), incomplete (named, but nothing in this run decides it), not-run (the
+matrix records that it was never executed), recorded (the matrix records an
+earlier observation; this run did not repeat it).
 """
 
 import argparse
@@ -33,7 +34,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MATRIX = ROOT / "specs/requirements/VERIFICATION_MATRIX.md"
-GAPS = ROOT / "specs/requirements/CONFORMANCE_GAPS.md"
 
 # The offline appliance, as its firmware crates and README describe it.
 HARDWARE = [
@@ -65,20 +65,7 @@ FIRMWARE = [
     ("fw-nonsecure-app", "crates/dsm-anchor-nonsecure-app", "TrustZone-M Non-secure world: USB-CDC, protobuf and transport; reaches the Secure world only through the Secure Gateway."),
 ]
 
-# What the appliance must show on silicon. Each stays not-run until a bench
-# run records it.
-HARDWARE_PROPERTIES = [
-    ("HW-01", "Secure-element authentication: the appliance opens an authenticated session with its TROPIC01 and its certificate chain is checked."),
-    ("HW-02", "Counter behaviour: the monotonic counter moves exactly once per committed transfer and never backwards."),
-    ("HW-03", "Anti-cloning: a second device cannot present the same identity or reuse the counter."),
-    ("HW-04", "Recovery after power loss: every crash point in prepare and commit recovers to one of the recovery table's outcomes."),
-    ("HW-05", "Replay rejection: a transfer already committed is refused when presented again."),
-    ("HW-06", "Completed offline transfers between two appliances over Bluetooth, settled online afterwards."),
-]
-HARDWARE_REASON = (
-    "Not run on silicon. The hardware stage has not started; the Secure monitor's own manifest "
-    "records full-crypto silicon validation as pending a clean TROPIC power cycle."
-)
+
 
 
 def git(*args):
@@ -98,6 +85,34 @@ def text_of(cell):
     return re.sub(r"\s+", " ", cell).strip()
 
 
+# A matrix row cites the internal audit rows and the sections of
+# CONFORMANCE_GAPS.md it came from, by number. They point into a file this
+# record does not draw on; the sentence stands without them.
+POINTER = re.compile(
+    r"SA-\d+(?:\s*(?:,|;|/|and|to|–|-)\s*SA-\d+)*"
+    r"|(?:\b(?:of|by)\s+)?(?:CONFORMANCE_GAPS(?:\.md)?\s*)?§+\s?6\.\d+(?:\s*(?:,|and|to|–|-)\s*§?\s?6\.\d+)*"
+    r"|CONFORMANCE_GAPS(?:\.md)?(?:\s+6\.\d+)?"
+)
+
+
+# A sentence that only says where in that file something is recorded goes whole.
+POINTER_SENTENCE = re.compile(r"(?:^|(?<=[.;]))[^.;]*\b(?:is|are) in (?:CONFORMANCE_GAPS(?:\.md)?\s*)?§\s?6\.\d+\.?")
+
+
+def without_pointers(text):
+    out = POINTER.sub("", POINTER_SENTENCE.sub("", text))
+    before = None
+    while before != out:
+        before = out
+        out = re.sub(r"\(\s*(?:[;,:]|and\b|see\b)\s*", "(", out)
+        out = re.sub(r"\s*(?:[;,:]|\band|\bsee)\s*\)", ")", out)
+        out = re.sub(r"([;,])\s*(?=[;,)])", "", out)
+        out = re.sub(r"\s*\(\s*\)", "", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([.,;:)])", r"\1", out)
+    return out.strip()
+
+
 def named_tests(cell):
     return [t for t in re.findall(r"`([A-Za-z_][\w:]*::[\w:]+)`", cell) if "::" in t]
 
@@ -112,37 +127,8 @@ def matrix_rows():
         if len(c) < 5 or (c[0] == "Requirement" and c[1] == "Gate"):
             continue
         ids = re.findall(r"MR-[A-Z]+-\d{4}", c[0].split(":")[0])
-        rows.append({"ids": ids, "text": text_of(c[0]), "gate": text_of(c[1]), "tests": named_tests(c[2]), "mutation": text_of(c[3]), "formal": text_of(c[4])})
+        rows.append({"ids": ids, "text": without_pointers(text_of(c[0])), "gate": without_pointers(text_of(c[1])), "tests": named_tests(c[2]), "mutation": without_pointers(text_of(c[3])), "formal": text_of(c[4])})
     return rows
-
-
-def audit_rows():
-    rows = []
-    for line in GAPS.read_text().splitlines():
-        if not line.startswith("| SA-"):
-            continue
-        c = cells(line)
-        status = text_of(c[-1])
-        head = status.split("(")[0].strip().lower()
-        if head.startswith("duplicate of"):
-            state = "duplicate"
-        elif head.startswith("fixed in part") or head.startswith("partial"):
-            state = "partial"
-        elif head.startswith("fixed") or head.startswith("closed"):
-            state = "closed"
-        else:
-            state = "open"
-        rows.append({"id": c[0], "where": text_of(c[1]), "finding": text_of(c[2])[:400], "status": status, "state": state})
-    return rows
-
-
-def requirement_statuses():
-    statuses = {}
-    for line in GAPS.read_text().splitlines():
-        m = re.match(r"\| (MR-[A-Z]+-\d{4}) \| (Met|Partial|Missing|Deferred|Violated|Not applicable|Superseded)\b", line)
-        if m:
-            statuses[m.group(1)] = m.group(2)
-    return statuses
 
 
 TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")
@@ -433,7 +419,6 @@ def main():
     tla_per_spec = tla_results(tla["log"] if tla and tla.get("log") else None)
     tla_ref, tla_status = executed("tla", "TLA+ model checking of every registered configuration", ["cargo", "run", "-p", "dsm_vertical_validation", "--", "tla-check"], tla, tla_why)
     lean_ref, lean_status = executed("lean", "Lean 4 kernel check of every module, sorry-free, warnings as errors", ["lean", "-DwarningAsError=true", "lean4/*.lean"], lean_check(logs) if executing else None)
-    conf_ref, _ = executed("conformance-evidence", "Every requirement row names code and tests that exist", ["python3", "ci/conformance_evidence.py"], run_check("conformance-evidence", [sys.executable, "ci/conformance_evidence.py"], logs) if executing else None)
     guard_ref, _ = executed("real-code-guard", "No placeholder, fabricated result or boolean literal outside the baseline", ["python3", "scripts/real_code_guard.py"], run_check("real-code-guard", [sys.executable, "scripts/real_code_guard.py"], logs) if executing else None)
     sphincs_ref, _ = executed("sphincs-map", "Every SPHINCS+ signer and verifier is in the reviewed caller inventory", ["python3", "scripts/sphincs_source_map.py", "--check"], run_check("sphincs-map", [sys.executable, "scripts/sphincs_source_map.py", "--check"], logs) if executing else None)
     board_ref = bom.add_evidence(
@@ -445,7 +430,6 @@ def main():
     )
 
     # ── Software: every gate the verification matrix maps ────────────────────
-    statuses = requirement_statuses()
     software_rows = []
     for i, row in enumerate(matrix_rows(), start=1):
         ident = ", ".join(row["ids"]) or f"row {i}"
@@ -467,24 +451,9 @@ def main():
             else:
                 formal_state = "recorded"
             evidence.append(bom.add_evidence(f"ev-formal-{i}", f"Formal artifact for {ident}", formal_state, "this-run" if formal_state in ("pass", "fail", "skipped") else "recorded", artifact=row["formal"]))
-        conformance = [statuses.get(x, "unrecorded") for x in row["ids"]]
         states = [s for s in test_states] + [mutation_state]
-        bom.add_requirement(f"req-{i}", ident, row["text"], "dsm-software", evidence, score(states), f"conformance per CONFORMANCE_GAPS: {', '.join(conformance)}; gate: {row['gate'][:300]}")
-        software_rows.append((ident, test_states, mutation_state, formal_state, conformance))
-
-    # ── Internal security audit ──────────────────────────────────────────────
-    audit = audit_rows()
-    # A finding recorded twice is one finding: the duplicate names the original and is not counted.
-    duplicates = [row for row in audit if row["state"] == "duplicate"]
-    audit = [row for row in audit if row["state"] != "duplicate"]
-    for row in audit:
-        ref = bom.add_evidence(f"ev-{row['id'].lower()}", f"{row['id']}: {row['finding'][:200]}", "recorded", "recorded", audit_status=row["status"], location=row["where"], source="specs/requirements/CONFORMANCE_GAPS.md")
-        bom.add_requirement(f"req-{row['id'].lower()}", row["id"], row["finding"], "dsm-software", [ref], {"closed": 1, "partial": 0.5}.get(row["state"], 0), f"internal audit status: {row['status']}")
-
-    # ── Hardware: the appliance on silicon ───────────────────────────────────
-    for ident, text in HARDWARE_PROPERTIES:
-        ref = bom.add_evidence(f"ev-{ident.lower()}", text, "not-run", "never", reason=HARDWARE_REASON)
-        bom.add_requirement(f"req-{ident.lower()}", ident, text, "hw-pico2w", [ref], 0, HARDWARE_REASON)
+        bom.add_requirement(f"req-{i}", ident, row["text"], "dsm-software", evidence, score(states), f"gate: {row['gate'][:300]}")
+        software_rows.append((ident, test_states, mutation_state, formal_state))
 
     # ── The document ─────────────────────────────────────────────────────────
     firmware = []
@@ -525,16 +494,16 @@ def main():
             *firmware,
         ],
         "dependencies": [
-            {"ref": "hw-pico2w", "dependsOn": ["hw-rp2350", "hw-tropic01", "fw-anchor-pico", "fw-secure-monitor", "fw-nonsecure-app"]},
+            {"ref": "hw-pico2w", "dependsOn": ["hw-rp2350", "hw-tropic01", *[ref for ref, _, _ in FIRMWARE]]},
         ],
         "definitions": {"standards": [{
             "bom-ref": "std-dsm", "name": "DSM security requirements", "version": commit[:12],
-            "description": "Gates from specs/requirements/VERIFICATION_MATRIX.md, internal audit findings from specs/requirements/CONFORMANCE_GAPS.md, and the appliance's hardware properties.",
+            "description": "Gates from specs/requirements/VERIFICATION_MATRIX.md.",
             "requirements": bom.requirements,
         }]},
         "declarations": {
-            "assessors": [{"bom-ref": "assessor-dsm", "organization": {"name": "DSM (internal assessment)"}}],
-            "attestations": [{"summary": f"DSM internal assurance at {commit[:12]}: {attested} requirements, each with its evidence and status.", "assessor": "assessor-dsm", "map": bom.map}],
+            "assessors": [{"bom-ref": "assessor-dsm", "organization": {"name": "DSM (release run)"}}],
+            "attestations": [{"summary": f"What a release run of DSM executed at {commit[:12]}: {attested} requirements mapped to a gate, each with its evidence and status. The assessment of DSM is the independent external audit's.", "assessor": "assessor-dsm", "map": bom.map}],
             "claims": bom.claims,
             "evidence": bom.evidence,
         },
@@ -549,10 +518,7 @@ def main():
         for s in states:
             out[s] = out.get(s, 0) + 1
         return ", ".join(f"{n} {s}" for s, n in sorted(out.items())) or "none"
-    all_tests = [s for _, ts, _, _, _ in software_rows for s in ts]
-    conformance_counts = {}
-    for status in statuses.values():
-        conformance_counts[status] = conformance_counts.get(status, 0) + 1
+    all_tests = [s for _, ts, _, _ in software_rows for s in ts]
     lines = [
         f"# DSM Security Assurance and Verification",
         "",
@@ -577,21 +543,9 @@ def main():
         f"- Requirements mapped to a gate: {len(software_rows)} rows (`specs/requirements/VERIFICATION_MATRIX.md`).",
         f"- The cargo board of this commit: {board_status(results)}, `{bom.rel(args.board_log)}` ({sha256_file(args.board_log)[:16]}…)." if args.board_log else "- The cargo board of this commit: incomplete; no board log was given.",
         f"- Named negative tests: {len(all_tests)} ({count(all_tests)}){'' if results else '; no board log was given, so none is decided by this record'}.",
-        f"- Mutation controls: {count([m for _, _, m, _, _ in software_rows])}.",
-        f"- Formal artifacts named by a row: {count([f for _, _, _, f, _ in software_rows if f != 'not-run'])}.",
-        f"- Conformance of every requirement (`CONFORMANCE_GAPS.md` §8): {', '.join(f'{n} {s}' for s, n in sorted(conformance_counts.items()))}.",
-        "",
-        "## Internal security audit",
-        "",
-        f"- Findings: {len(audit)} ({count([r['state'] for r in audit])})"
-        + (f"; {len(duplicates)} more rows repeat an earlier finding ({', '.join(r['id'] + ' = ' + r['status'].split('of', 1)[1].strip() for r in duplicates)})." if duplicates else "."),
-        "",
-        "| Finding | Status |",
-        "|---|---|",
+        f"- Mutation controls: {count([m for _, _, m, _ in software_rows])}.",
+        f"- Formal artifacts named by a row: {count([f for _, _, _, f in software_rows if f != 'not-run'])}.",
     ]
-    for row in audit:
-        if row["state"] != "closed":
-            lines.append(f"| {row['id']}: {row['finding'][:160]} | {row['status']} |")
     lines += [
         "",
         "## Hardware and firmware",
@@ -604,10 +558,7 @@ def main():
     for f in firmware:
         tree = next(p["value"] for p in f["properties"] if p["name"] == "dsm:source:git-tree")
         lines.append(f"| {f['name']} {f['version']} | firmware | source tree `{tree}`; not built in this run |")
-    lines += ["", "| Property | Status |", "|---|---|"]
-    for ident, text in HARDWARE_PROPERTIES:
-        lines.append(f"| {ident}: {text} | not-run |")
-    lines += ["", HARDWARE_REASON, ""]
+    lines += [""]
     (run_dir / "assurance-report.md").write_text("\n".join(lines))
     print(f"assurance: {attested} requirements, {len(bom.evidence)} evidence entries, checks: " + ", ".join(f"{n}={s}" for n, _, s, _ in checks))
 
