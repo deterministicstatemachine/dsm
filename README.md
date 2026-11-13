@@ -85,8 +85,8 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 |---|---|---|
 | Identity and genesis (mnemonic-rooted, self-attested, published to the fleet) | proven on real devices | 4 Android phones wiped and re-created against the live fleet 2026-09-13, each identity accepted by all 5 nodes |
 | Bilateral transfers, offline cash load/unload | proven on real devices | two Android phones end to end 2026-08-24; byte-identical state on both sides |
-| SoFi: DLV markets, routing, routed unlock, reconcile, close, receipts | proven on real devices | full lifecycle on 4 Android phones 2026-09-13, see [Sovereign Finance](#sovereign-finance-sofi) |
-| Token surface: create, mint, burn, adopt, policy; faucet | proven on real devices | same run; capped issuance stays fenced in beta |
+| SoFi: vaults, route finding, trades, resolve, close; escrow vaults | proven on real devices | a vault created, traded against in one hop and closed, and an escrow locked and released, on 2 Android phones 2026-11-13, see [Sovereign Finance](#sovereign-finance-sofi) |
+| Token surface: create, burn, adopt, policy; faucet | proven on real devices | a token created, adopted by its anchor on a second phone and sent, same run; the supply set at creation is the whole supply |
 | DSM Connect: an app's own account; wallets connect under a grant; send, owns, login, accept and give, trade, match | checked in CI | the `Developer path` job runs each of these end to end on a local storage set; [the guide](https://deterministicstatemachine.github.io/dsm/) shows each command's output from a run on the beta fleet with terminal wallets, 2026-11-11 |
 | Storage fleet: 5 nodes, quorum 3 of 5, write-once registers | proven on real devices | the live fleet every run above wrote to; `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members |
 | Offline protocol: appliance core, verifier, SPHINCS+, RP2350 firmware, TrustZone monitor, TROPIC01 | proven on real devices | the three-signature release produced on the RP2350 + TROPIC01 appliance and accepted on an Android phone; silicon proof log in [docs/bench-proofs/](docs/bench-proofs/) |
@@ -99,8 +99,8 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 ```
 dsm/
 ├── dsm_client/deterministic_state_machine/
-│   ├── dsm/            core: state machine, crypto, bilateral, dlv, economic, ccb, vault, emissions, connect   (member)
-│   └── dsm_sdk/        SDK and route handlers: identity, tokens, dlv.*, route.*, connect.*, storage, faucet, bitcoin   (member)
+│   ├── dsm/            core: state machine, crypto, bilateral, sofi, dlv, economic, ccb, vault, emissions, connect   (member)
+│   └── dsm_sdk/        SDK and route handlers: identity, tokens, sofi.*, escrow.*, connect.*, storage, faucet, bitcoin   (member)
 ├── dsm_storage_node/   index-only persistence over PostgreSQL; write-once registers; Terraform + deploy   (member, excluded from the Rust board)
 ├── dsm_client/android/ Kotlin container: WebView + JNI bridge, BLE, USB anchor transport
 ├── dsm_client/ios/     Swift container for the same SDK and screens
@@ -144,26 +144,25 @@ Membership is declared in the root [Cargo.toml](Cargo.toml). The default workspa
 
 ## Sovereign Finance (SoFi)
 
-SoFi is an AMM market that runs on the participants' own devices. A liquidity provider owns a **DLV** (a deterministic liquidity vault): a constant-product pool over two adopted tokens, created from the owner's own balances, anchored in the owner's SMT, and advertised to the storage fleet. A trader finds the vault, binds a route, and settles a swap against it with evidence that both sides and any later verifier can check. There is no order book, no operator, and no pool contract; the vault is the owner's state, and the swap is a bilateral transition with a settlement bundle attached.
+SoFi is an AMM market that runs on the participants' own devices. A liquidity provider owns a **vault**: a constant-product market over two adopted tokens with a fee in basis points, created from the owner's own balances and found by other devices through the storage fleet. A trader finds a route through one or two vaults, each hop is priced at its vault's current head, and the trade settles through the Core transition. There is no order book and no operator, and nothing is pooled: the vault is its owner's state. The routes assemble what a trade needs; Core decides.
 
 **Lifecycle, by route name.**
 
-1. `token.create` registers a token under a policy and adopts it for the creator; creation charges a fee in ERA (the builtin asset), read from `tokens.getFeeSchedule`. `token.mint` credits supply under an authorized-issuance operation (op `0x0029`); `token.burn` is its inverse; an adoption is permanent. `token.adoptionQr` and `tokens.addByAnchor` let another device adopt the token, which commits an `AdoptToken` advance on that device.
-2. `faucet.claim` credits 100 ERA to a fresh device from the beta emission schedule so it can pay fees.
-3. `dlv.create` funds the vault. The reserves leave the owner's projected balances at commit; the owner's wallet shows the debit immediately.
-4. `route.publishRoutingAdvertisement` publishes the pair, reserves, and fee to the fleet; `dlv.listOwnedAmmVaults` lists what this device runs.
-5. A trader calls `route.syncVaultsForPair`, `route.listAdvertisementsForPair`, and `route.findAndBindBestPath` to bind a path and a quote.
-6. `route.signRouteCommit` signs the route. The final hop's output token must already be adopted on the signing device. If it is not, the route is refused locally and nothing is committed or published for it: no external commitment, no vault-pending pointer, no storage write. **Adoption precedes receipt** is the rule the whole surface follows.
-7. `route.publishExternalCommitment` publishes the trader's commitment to the fleet; `route.computeExternalCommitment` and `route.isExternalCommitmentVisible` let either side check it.
-8. `dlv.unlockRouted` executes the swap against the vault. It applies the adoption gate again and binds the unlocker's key, so a device that has not adopted the output asset is refused here even if it somehow holds a route.
-9. `dlv.reconcile` lets the owner catch up on every settled swap in order, materializing the new reserves and a fresh owner baseline. `storage.sync` runs the same engine.
-10. `dlv.close`, `dlv.claim`, `dlv.invalidate`, `dlv.composeVault`, and `dlv.lineageQuarantine` are the terminal and containment paths: close derives every close fact from the composed history; quarantine contains a lineage after a temporal trigger without clearing it.
+1. `token.create` registers a token under a policy and adopts it for the creator; creation charges a fee in ERA (the builtin asset), read from `tokens.getFeeSchedule`. The supply entered at creation is the whole supply: nothing is minted afterwards. `token.burn` removes supply. `token.adoptionQr` and `tokens.addByAnchor` let another device adopt the token, and an adoption is permanent. **Adoption precedes receipt** is the rule the whole surface follows: a device is never credited a token it has not adopted.
+2. `faucet.claim` credits 100 ERA to a fresh account so it can pay fees.
+3. `sofi.createVault` creates a vault over two tokens with its reserves and its fee. Both reserves leave the owner's balances in one step. `sofi.vaults` lists the owner's vaults with their live reserves, fee, generation and status.
+4. `sofi.findRoute` finds the routes for a pair among the vaults the fleet holds and prices each at its vaults' current heads. A vault whose head cannot be established is left out, and the search says it was partial.
+5. `sofi.trade` and `sofi.route` carry a trade out through the vaults it names, in hop order, at most two hops (`ROUTE_MAX_LEGS`).
+6. `sofi.resolve` finishes this device's pending trade from what storage holds, and may be repeated. `sofi.relay` lets another device carry a trader's pending trade forward; it needs nothing from the trader.
+7. `sofi.close` is the owner's full close: both reserves return to the owner and the vault is retired.
 
-**Evidence objects.** A swap produces a settlement bundle (Definition 6.14), a receipt (Definition 14.2, never gating release), a quorum bind that ties the settlement to the fleet's write-once settlement slot, and a trader fence that prevents a second settlement against the same slot. All of these are canonical commit bytes; all are foreign-verifiable from the bundle alone.
+**Escrow vaults** (`escrow.*`, SoFi Amendment S21). An amount is locked under named outcomes, each naming who decides it and whom it pays. Once an outcome is decided, the vault is released by that verdict. A computed escrow is decided by a pinned program over a signed transcript instead of by signers; Wildstate's staked arena match is settled this way.
 
-**Proven on hardware, 2026-09-13.** On a wiped five-node fleet with four phones: each device created its identity (accepted 5 of 5) and claimed the faucet; the owner created a token, minted supply, and funded a vault at 30 bps; two traders adopted the token and swapped, each landing the expected output; a third device that had never adopted the token was refused at `dlv.unlockRouted`; the owner reconciled through three vault generations; a second swap by the first trader settled against the reconciled reserves; the owner's wallet showed the vault's reserves debited from the start.
+The objects a trade writes and the predicates Core checks before it accepts one are in [specs/SoFi_Settlement_Specification.md](specs/SoFi_Settlement_Specification.md).
 
-Code: the vault, routing, settlement, and receipt objects live in [dsm/src/dlv/](dsm_client/deterministic_state_machine/dsm/src/dlv/) and [dsm/src/economic/](dsm_client/deterministic_state_machine/dsm/src/economic/); the routes in [dlv_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/dlv_routes.rs), [route_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/route_routes.rs), [token_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/token_routes.rs), and [faucet_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/faucet_routes.rs).
+**Run on real Android devices, 2026-11-13.** On the five-node beta fleet with two phones: one created a token and an ERA/token vault at 30 bps; the other adopted the token, was quoted a one-hop route and traded; the owner's vault list showed the new reserves; the owner closed the vault and both reserves came back. In the same run one phone locked 2 ERA in an escrow under two outcomes and decided one, and the phone that outcome pays released it.
+
+Code: the vault, route, resolution and escrow objects live in [dsm/src/sofi/](dsm_client/deterministic_state_machine/dsm/src/sofi/); the routes in [sofi_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sofi_routes.rs), [escrow_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/escrow_routes.rs), [token_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/token_routes.rs), and [faucet_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/faucet_routes.rs).
 
 ## dBTC
 

@@ -9,112 +9,160 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-### Breaking — requires a device state wipe
+---
 
-- **Vault rehydration fails closed on funded heads that predate the vault-state leaf.**
-  `advance` began deriving a vault-state leaf on every funding and settlement in
-  `607ec24f` (2026-08-19), but reserve mutations had existed since `05c16b99`
-  (2026-07-31). A head funded in that window holds reserve legs with **no**
-  vault-state leaf. Rehydration now checks the vault record against that leaf,
-  so such a vault is refused everywhere it is read: omitted from the vault list,
-  not quotable, and **not closable** — reserves encumbered in that window are
-  unreachable on that device.
+## [0.1.0-beta.4] — 2026-11-13
 
-  The persistence codec does not catch this. `DEVICE_STATE_VERSION` was last
-  raised in `80c9f3f6` (2026-08-12), before the leaf derivation landed, so an
-  affected head still decodes cleanly and reaches rehydration looking valid.
+Beta.4 is a clean cut from beta.3. Nothing is migrated: uninstall any earlier
+beta before installing this one, and create a new wallet. The network id is
+still `dsm-testnet`, and the faucet funds each new account. This release is
+for developer onboarding and feedback; it is not for holding value.
 
-  **There is no migration, deliberately.** The missing leaf is never
-  synthesized: writing a commitment the device did not make is exactly the class
-  of fabricated state this line of work exists to remove, and a migration would
-  create compatibility logic for a state shape we do not want to preserve. Beta
-  runs on `dsm-testnet` and carries no production user state, so the remedy is a
-  state wipe — reinstall or clear application data, then re-fund. Today's funded
-  create cannot produce such a head, so only a device still carrying state from
-  that window is affected.
+### Breaking
 
-  This option disappears once production persistence matters; at that point the
-  same boundary would need a real migration or an explicit terminal state.
+- **No state from beta.3 is read.** The device state, the client database, the
+  wire formats and the storage fleet all changed, and no migration is
+  provided, deliberately: beta carries no production user state, so the remedy
+  is a wipe.
+- **Identity is rooted in the recovery phrase.** A wallet's genesis is derived
+  from its BIP39 phrase, self-attested and published to the fleet (#514). The
+  hardware-binding scheme of earlier betas (C-DBRW) and the MPC genesis are
+  removed (#514, #992, #1148).
+- **A new storage fleet.** Five nodes with a quorum of three, pinned in the
+  client. A node stores and serves bytes and keeps write-once registers; it
+  validates no protocol rule (#932).
+- **SoFi's routes are replaced.** The `dlv.*` and `route.*` routes are gone.
+  A vault is created, traded against, resolved and closed through `sofi.*`,
+  and every decision is Core's.
+- **A token's supply is fixed when it is created.** There is no mint after
+  creation.
+- **ERA has two decimals** (#1095).
+- **Online messages are removed** (#1050).
+- **dBTC is being replaced and does not function in this release.** Its code
+  stays in the tree and nothing runs it; see the README's dBTC section.
 
-- **Every DLV's creator signature now covers its DLV-policy digest — pre-existing
-  vault signatures stop verifying.** `LimboVault::parameters_hash`, the preimage
-  the creator signs at birth, now folds the vault's `policy_digest` (presence-
-  tagged). `LimboVault::verify` recomputes that preimage from the vault's fields,
-  so a vault created before this change carries a signature over a preimage that
-  no longer matches and is refused as unverifiable — everywhere it is read.
+### Added
 
-  **No migration, no re-signing, deliberately.** Those signatures were made over
-  a different statement. Re-signing, synthesising, or translating them would
-  preserve exactly the historical accommodation this line of work exists to
-  remove. Beta runs on `dsm-testnet` with no production user state, so the
-  remedy is the same wipe as above.
-
-  Alongside it, `DlvSpecV1.policy_digest` changes meaning and contract for AMM
-  DLVs: it is the AMM DLV-policy digest - a derived view of the release and fee
-  policy the creator-signed vault state already commits - not a CPTA/token
-  anchor. AMM `dlv.create` now derives it (leave the field empty) and refuses
-  any other supplied value; the LiquidityScreen's "policy anchor" paste box is
-  gone. Non-AMM DLVs have no `ReleasePolicy`/`FeePolicy` object to derive from,
-  so their supplied 32-byte digest remains caller-supplied but creator-signed.
-  That non-AMM semantic gap is follow-up debt, not solved in this release.
-
-### Security
-
-- **The owner's settlement fold proves the trade from the state it owns.**
-  `dlv.reconcile` used to copy `input_amount`/`output_amount` out of the
-  trader's receipt into the signed `DlvOwnerApplyV2` and fold them; the receipt
-  witnesses what the trader committed, not what the owner's reserves pay, and
-  nothing on the owner's side re-ran the curve. Now, in the core
-  `ApplySettlement` arm of `advance` (the security boundary, sufficient by
-  itself), the owner re-derives the transition from its own commitment: the
-  vault-state leaf at `parent_sequence` must commit exactly the pair, fee and
-  reserves being consumed; the signed `parent_binding` must be the commitment of
-  a parent `VaultStateV2` whose vault, generation, reserves, pair, fee and owner
-  equal those leaves; the input reserve is the leaf of the asset the trader
-  paid (by asset identity, never by pair order); and the ONE canonical
-  `constant_product_output` over those reserves must equal the proposed output
-  exactly. Any other fold is refused by name and moves nothing.
-  `VaultReserveMutation::ApplySettlement` gains `parent_state` (the parent
-  `CCB(V_n)` bytes, bound by the signed `parent_binding`). `dlv.reconcile`
-  mirrors the same check BEFORE signing, sourcing pair, fee, reserves and the
-  binding from the verified composition rather than the SQLite record, so the
-  owner never signs settlement arithmetic it has not checked. Every owner-apply
-  fixture that folded an off-curve literal is re-rooted to the curve. No
-  persisted format changes; no wipe: the vault-state leaf this relies on has
-  been required since the rehydration gate.
-
-- **Client database schema 12 → 13: the AMM vault record gains a reserve-proof
-  locator, and beta does not migrate.** `amm_vault_records` now carries
-  `economic_proof_addr` and `economic_proof_position` — the content address of
-  the `EconomicProofArtifactV1` the admitted create publishes for the vault's
-  reserve leaves, and the economic position whose registered root that proof
-  names. `CREATE TABLE IF NOT EXISTS` does not add columns to an existing file,
-  so an older database is structurally invalid and `enforce_schema_version`
-  refuses it by design: wipe the app database and re-provision from the wallet
-  seed. Beta runs on `dsm-testnet` with no production user state.
-
-  The routing advertisement carries the same pair, which is what lets a trader
-  find the proof at all. Both are LOCATORS on an unsigned object: a reader
-  resolves the position's root from the owner's own write-once register cell
-  and recomputes every inclusion path against it, so a wrong address or
-  position can only make a lookup fail, never make one succeed against a root
-  the owner did not register.
+- **Plug your app into DSM (DSM Connect, DSM Amendment A11).** An app keeps
+  its own server and language, gets a DSM account of its own, and its users
+  connect their wallets to it under a grant they approve. The app asks a
+  wallet for a payment, a proof of what it owns, a sign-in, an item given or
+  accepted, a trade or a match (#1112, #1118, #1121). Shipped with it:
+  - `dsm-app-host`, prebuilt for Linux (x86-64, ARM64) and macOS (arm64,
+    x86-64), installed by `install.sh`, which checks every download against
+    `SHA256SUMS`;
+  - the TypeScript and Python clients, the Connect starter, and terminal
+    wallets for development;
+  - the guide, published as pages, and `BUILDING_APPS.md`;
+  - an app's account on the beta network by default (`make app-dev`), or on a
+    local storage set (`make app-dev-local`);
+  - application cells, contributions and a state scope, as generic facilities
+    for applications.
+- **Offline payments with the appliance.** A phone with the DSM board (RP2350
+  with the TROPIC01 secure element) pays another phone with a board over
+  Bluetooth with no network. Each offline release carries three signatures
+  over the same step: the wallet's, the chip's and the board firmware's. The
+  receiver's board takes part too: it checks the payment and commits the
+  receive, so a payment is received once. Money is loaded into and unloaded
+  from an offline account, money received offline is kept apart until it is
+  moved to the balance, and a phone that received offline goes on paying
+  offline from what it loaded (#1148, #1226). Installing a board is never
+  automatic and is tried first (DSM Amendment A32).
+- **SoFi on the device.** A vault is a constant-product market over two
+  adopted tokens with a fee in basis points, created from its owner's own
+  balances (`sofi.createVault`). A trader finds and prices a route
+  (`sofi.findRoute`) and trades through one or two vaults (`sofi.trade`,
+  `sofi.route`); a trade interrupted before it finished is completed from what
+  storage holds (`sofi.resolve`, `sofi.relay`); the owner closes the vault and
+  takes both reserves back (`sofi.close`).
+- **Escrow vaults (SoFi Amendment S21).** An amount is locked under named
+  outcomes, each naming who decides it and whom it pays, and is released by
+  the verdict (#1114). A computed escrow is decided by a pinned program over a
+  signed transcript instead of by signers (#1118).
+- **Tokens.** Create a token under a policy for a fee in ERA, with coin
+  artwork; share it by QR code or anchor; adopt it; burn it. Adoption precedes
+  receipt: a device is never credited a token it has not adopted (#871,
+  #1110).
+- **The faucet.** A new account claims 100 ERA, and the claim is listed in the
+  wallet's history (#1018).
+- **Wallet.**
+  - The recovery phrase is shown when a wallet is created and checked before
+    the wallet exists (#1088).
+  - Every screen is on the StateBoy frame, with gold, zebra and leopard skins
+    (#1028, #1036); the Modern and DGen looks and Simple mode (DSM Amendment
+    A17).
+  - Contact cards and email receipts (DSM Amendment A17).
+  - A hands-on guided tour in practice mode (#973).
+  - A debug report through the share sheet (#1107), and a count on the app
+    icon of money received and not yet looked at (#1151).
+- **iOS app.** The same Rust SDK and the same screens in a Swift container,
+  for the Simulator and for a device. It has no board link, so it makes no
+  offline payments.
+- **Storage nodes.** Long-poll for waiting clients (#1108), arrival records
+  and byte commitments (#974), each operator's own certificate authority, and
+  one-line setup for a public node.
+- **Formal models, checked in CI.** Lean 4 and TLA+ models of the core, SoFi
+  and the offline protocol; a formal proof for SPHINCS+ over BLAKE3 (#1120);
+  and a Lean proof that no counterfeit value is accepted, online or offline
+  (#1149).
+- **Build gates.** The build refuses placeholders, fabricated results and
+  hidden errors (#1045); every tracked `Cargo.lock` is audited (#889); a
+  tagged release runs the full tests and a newcomer's first run on a clean
+  machine before it publishes.
 
 ### Changed
 
-- **The 0x0026 reserve-consumption evidence bundle names the generic proof
-  artifact instead of carrying its own leaves.**
-  `ReserveConsumptionEvidenceV1` dropped `reserve_a_state`,
-  `reserve_a_siblings`, `reserve_b_state` and `reserve_b_siblings` (fields 3–6,
-  now reserved) in favour of `economic_proof_addr`. The verifier fetches that
-  artifact, re-hashes it to the named address, verifies it against the owner,
-  economic position and validated root the verifier itself derived, and then
-  selects exactly the two reserve leaves for this vault at this generation.
+- **Acceptance is one hop (DSM Amendment A14).** A receiver validates a peer's
+  step from that step's own parent and reads nothing behind it.
+  `ci/acceptance_lock.py` enforces this in CI.
+- **One device state.** The per-device state and its sparse Merkle tree
+  replace the hash chain and the state number, which are deleted.
+- **Online payments.** The signed operation is the only authority, with one
+  ingestion boundary (#1048); a send is kept in a durable outbox and finalized
+  atomically; a payment settles in seconds (#1107).
+- **Bluetooth and USB carry offline payments only.** The radio, its addresses
+  and pairing belong to the native layer; the frontend renders what Rust
+  reports (#1021, #1023, #1030).
+- **The frontend renders only.** The wallet's decisions (app lock, pair order,
+  token fields) moved into Rust.
+- **One pinned Rust toolchain,** enforced in CI.
 
-  Carrying the leaves in the bundle was a second representation of what the
-  artifact already proves, and two representations of one fact can disagree.
-  No migration is needed and no state is affected: nothing had ever produced
-  one of these bundles, so none exist.
+### Removed
+
+- C-DBRW hardware binding, and its fields on the wire (#514, #1148).
+- The MPC genesis (#992).
+- The hash chain, the state number and the legacy state machine API.
+- The earlier secure-element relay design for offline payments, replaced by
+  the appliance.
+- SoFi's pre-signed fallback and slippage floors, and the earlier `dlv.*` and
+  `route.*` settlement paths.
+- The PaidK gate (#965).
+- Online messages (#1050).
+- Code that reported success without doing the work (#964, #966, #992).
+
+### Security
+
+- **Security audits of 2026-10-15, 2026-10-18 and 2026-11-12,** with their
+  fixes (#1139, #1142, #1152).
+- **A transfer's memo, ticker and nonce are in no public object** (#1102).
+- **The ML-KEM key delivered over Bluetooth is authenticated** against the
+  pinned identity key before it is cached.
+- **Storage node:** every `/admin` endpoint is behind the admin token, and the
+  admin and gossip tokens fail closed when unset (#421, #422).
+- **Hostile input is bounded:** over-long proofs, trailing bytes in decoders
+  and oversized Bluetooth reassembly are refused (#428, #429, #430, #431,
+  #450).
+- **Builtin ERA cannot be issued** at the accepting transition.
+- **Dependency advisories fixed:** rustls (#887), quinn-proto and quinn-udp
+  (#889, #1227), ctutils (#1155), crypto-bigint (#1148).
+
+### Not in this release
+
+- dBTC (being replaced).
+- Offline payments on iOS (no board link).
+- Token emissions beyond the faucet: the schedule is in Core only.
+- The Android APK is not built by the release workflow; the maintainer signs
+  and uploads it.
 
 ---
 
