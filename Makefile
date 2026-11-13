@@ -260,6 +260,12 @@ build: ## Build the full Rust workspace
 build-release: ## Build Rust workspace in release mode
 	cargo build --locked --workspace --all-features --release
 
+# The pinned toolchain's cargo ahead of any other on PATH, for the Android
+# builds (RUST_PIN_BIN is defined with `lint`, below). A Homebrew cargo ahead of
+# rustup's builds with a rustc that has no Android or thumbv8m target, and the
+# build stops at "can't find crate for `core`". Empty where rustup is absent.
+PINNED_CARGO_PATH = $(if $(RUST_PIN_BIN),PATH="$(RUST_PIN_BIN):$$PATH",)
+
 .PHONY: android-libs
 android-libs: ## Build native .so libs for all Android ABIs (requires NDK)
 	@echo "==> Building Android native libs..."
@@ -273,7 +279,7 @@ android-libs: ## Build native .so libs for all Android ABIs (requires NDK)
 	          $(REPO_JNILIBS_DIR)/armeabi-v7a \
 	          $(REPO_JNILIBS_DIR)/x86_64
 	cd $(NDK_DIR) && \
-		DSM_PROTO_ROOT=$(REPO_ROOT)/proto \
+		$(PINNED_CARGO_PATH) DSM_PROTO_ROOT=$(REPO_ROOT)/proto \
 		cargo ndk \
 			-t arm64-v8a -t armeabi-v7a -t x86_64 \
 			-o $(JNILIBS_DIR) \
@@ -356,7 +362,11 @@ android: android-sdk-config android-libs frontend ## Build fresh debug APK (nati
 	@echo "==> APK: $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"
 
 .PHONY: android-release
-android-release: android-sdk-config android-libs frontend ## Build fresh release APK
+android-release: android-sdk-config android-libs frontend ## Build fresh release APK, with the board firmware a phone sets a board up from
+	@# After `frontend`, never before: the frontend build regenerates the assets
+	@# folder, and an APK assembled between the two is signed with no board firmware.
+	@echo "==> Staging the board firmware into the app's assets..."
+	$(PINNED_CARGO_PATH) bash scripts/anchor-release-into-app.sh
 	@echo "==> Assembling fresh Android release APK..."
 	bash scripts/fast_deploy_android_release.sh --build-only
 	@echo "==> APK: $(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk"

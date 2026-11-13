@@ -17,6 +17,7 @@ SKIP_UNINSTALL=1
 START_APP=1
 LOCAL_DEV=0
 NEW_KEYSTORE=0
+BOARD_FIRMWARE=1
 
 usage() {
   cat <<'USAGE'
@@ -27,6 +28,8 @@ Options:
   --build-only       Build the signed release APK, then exit without adb install
   --uninstall        Uninstall app before install (clears data)
   --new-keystore     Make a new signing keystore first (the old one is kept as <path>.<time>.bak)
+  --no-board-firmware  Build an APK that carries no board firmware: its wallet cannot set a board up.
+                     Without this, a build stops when the firmware is not staged in the app's assets.
   --no-start         Don't launch MainActivity
   --local            Local dev mode: push localhost env config override + adb reverse ports
 
@@ -163,12 +166,34 @@ check_keystore() {
   echo "[fast_deploy_release] Keystore opened; signing with key '$DSM_KEY_ALIAS'."
 }
 
+# A release APK carries the firmware its wallet sets a board up from, staged by
+# scripts/anchor-release-into-app.sh. The frontend build regenerates the assets
+# folder, so an APK assembled after a frontend build and before the staging is
+# signed without it, and nothing in the build says so. Checked before the
+# keystore is asked for.
+require_board_firmware() {
+  local dir="$ANDROID_DIR/app/src/main/assets/anchor-release"
+  local missing=()
+  local f
+  for f in signed.elf ns_app.bin mu-enrolled.bin bootkey0.bin lock-pages.elf prepare-chip.elf trial.elf; do
+    [[ -s "$dir/$f" ]] || missing+=("$f")
+  done
+  if [[ ${#missing[@]} -ne 0 ]]; then
+    echo "[fast_deploy_release] ERROR: the board firmware is not staged in the app's assets." >&2
+    echo "[fast_deploy_release]   missing from $dir: ${missing[*]}" >&2
+    echo "[fast_deploy_release]   Run scripts/anchor-release-into-app.sh after the frontend build (make android-release does both)," >&2
+    echo "[fast_deploy_release]   or pass --no-board-firmware for an APK whose wallet cannot set a board up." >&2
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-build) SKIP_BUILD=1; shift ;;
     --build-only) BUILD_ONLY=1; shift ;;
     --uninstall) SKIP_UNINSTALL=0; shift ;;
     --new-keystore) NEW_KEYSTORE=1; shift ;;
+    --no-board-firmware) BOARD_FIRMWARE=0; shift ;;
     --no-start) START_APP=0; shift ;;
     --local) LOCAL_DEV=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -177,6 +202,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
+  if [[ $BOARD_FIRMWARE -eq 1 ]]; then
+    require_board_firmware
+  else
+    echo "[fast_deploy_release] --no-board-firmware: this APK's wallet cannot set a board up."
+  fi
   resolve_keystore_path
   for attempt in 1 2 3; do
     prompt_keystore_password
