@@ -141,8 +141,8 @@ dsm_client/deterministic_state_machine/dsm/src/bilateral/cert_resync.rs	471	sphi
 dsm_client/deterministic_state_machine/dsm/src/bilateral/cert_resync.rs	545	let forged = sphincs_sign(&ak(0x55).secret_key, &statement).expect("sign");
 dsm_client/deterministic_state_machine/dsm/src/bilateral/cert_resync.rs	624	let sig = sphincs_sign(&signer.secret_key, &statement).expect("sign");
 dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	53	if !sphincs::sphincs_verify(signing_public_key, &digest, binding_sig)? {
-dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	854	let binding_sig = crate::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	875	crate::crypto::sphincs::sphincs_sign(self.party.signing_secret_key(), message)
+dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	865	let binding_sig = crate::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	886	crate::crypto::sphincs::sphincs_sign(self.party.signing_secret_key(), message)
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	21	/// SPHINCS+ SPX256f, construction version 2 (`dsm_sphincs`: the FIPS 205
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	130	use crate::crypto::sphincs::{public_key_bytes, SphincsVariant, CONSTRUCTION_VERSION};
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	139	Some(public_key_bytes(SphincsVariant::SPX256f))
@@ -368,22 +368,22 @@ dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4707	let si
 dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4858	use crate::crypto::sphincs::sphincs_sign;
 dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4874	let sign = |message: &[u8]| sphincs_sign(&keys.secret_key, message).expect("signs");
 dsm_client/deterministic_state_machine/dsm/src/types/error.rs	1980	let err = DsmError::crypto_op("sphincs_sign", "signature failed", Some("oops"));
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	66	crate::crypto::sphincs::verify(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	67	crate::crypto::sphincs::SphincsVariant::SPX128f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	726	let kp = crate::crypto::sphincs::generate_keypair_from_seed(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	727	crate::crypto::sphincs::SphincsVariant::SPX128f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	734	Ok(crate::crypto::sphincs::sign(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	735	crate::crypto::sphincs::SphincsVariant::SPX128f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	743	crate::crypto::sphincs::verify(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	744	crate::crypto::sphincs::SphincsVariant::SPX128f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	754	crate::crypto::sphincs::verify(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	755	crate::crypto::sphincs::SphincsVariant::SPX256f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	764	let kp = crate::crypto::sphincs::generate_keypair_from_seed(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	765	crate::crypto::sphincs::SphincsVariant::SPX256f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	772	Ok(crate::crypto::sphincs::sign(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	773	crate::crypto::sphincs::SphincsVariant::SPX256f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	1054	let signature = crate::crypto::sphincs::sign(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	1055	crate::crypto::sphincs::SphincsVariant::SPX256f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	73	crate::crypto::sphincs::verify(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	74	crate::crypto::sphincs::SphincsVariant::SPX128f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	752	let kp = crate::crypto::sphincs::generate_keypair_from_seed(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	753	crate::crypto::sphincs::SphincsVariant::SPX128f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	760	Ok(crate::crypto::sphincs::sign(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	761	crate::crypto::sphincs::SphincsVariant::SPX128f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	769	crate::crypto::sphincs::verify(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	770	crate::crypto::sphincs::SphincsVariant::SPX128f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	780	crate::crypto::sphincs::verify(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	781	crate::crypto::sphincs::SphincsVariant::SPX256f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	790	let kp = crate::crypto::sphincs::generate_keypair_from_seed(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	791	crate::crypto::sphincs::SphincsVariant::SPX256f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	798	Ok(crate::crypto::sphincs::sign(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	799	crate::crypto::sphincs::SphincsVariant::SPX256f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	1080	let signature = crate::crypto::sphincs::sign(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	1081	crate::crypto::sphincs::SphincsVariant::SPX256f,
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2369	match crate::crypto::sphincs::sphincs_verify(
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3613	use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3631	generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");

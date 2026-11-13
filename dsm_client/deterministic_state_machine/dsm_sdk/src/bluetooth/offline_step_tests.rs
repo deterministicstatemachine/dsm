@@ -5169,13 +5169,10 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
     let sigma =
         dsm::core::bilateral_transaction_manager::compute_precommit(&held, &op_bytes, &entropy)
             .expect("the step's precommit");
-    let chain = crate::storage::client_db::offline_spends::own_offline_spend_chain(&leaves.bundle)
-        .expect("A's unexposed spends")
+    let chain = crate::storage::client_db::offline_spends::own_offline_hops(&leaves.bundle)
+        .expect("A's unexposed steps")
         .iter()
-        .map(|hop| {
-            crate::generated::OfflineSpendHop::decode(hop.to_proto().encode_to_vec().as_slice())
-                .expect("a hop")
-        })
+        .map(|hop| crate::generated::OfflineAccountHop::decode(hop.as_slice()).expect("a hop"))
         .collect();
     let confirm = crate::bluetooth::bilateral_ble_handler::confirm_envelope(
         &a.device.device_id,
@@ -5195,7 +5192,7 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
             pre_entropy: entropy.to_vec(),
             offline_release: release,
             anchor_disclosure: None,
-            offline_spend_chain: Some(crate::generated::OfflineSpendChain { hops: chain }),
+            offline_account_chain: Some(crate::generated::OfflineAccountChain { hops: chain }),
         },
     )
     .expect("the confirm's envelope");

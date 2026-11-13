@@ -7496,7 +7496,7 @@ Later the same day the owner said, in words the session that started this work r
 | What stops a payment being received twice | "Yes, challenge": the challenge the receiver's board drew, used up by the receive. |
 | Who checks the payer's signatures | "Board checks": the receiver's board, before it commits anything. |
 | What the payer does with the acknowledgement | "Phone checks it": the payer's phone verifies it under the receiver's board and keeps it. |
-| Paying on what was received, before going online | "Not until unloaded". |
+| Paying on what was received, before going online | "Not until unloaded". What was built from it stopped more than that, and was narrowed on 2026-11-13 (§6.162). |
 | Where received money is held | "Its own place": a leaf of its own in the offline account, apart from the allocation loaded for paying. |
 | How received money reaches the online balance | "One tap, all ready": one action moves every received payment whose payer has been back online. Nothing moves at sync. |
 | The firmware's Secure stack, which the board's check did not fit beside | "Stack 64→60 KiB (Recommended)". |
@@ -7739,6 +7739,26 @@ The owner, 2026-11-12, on a game whose faction base is funded by its members' ow
 ### 6.161 Readers that ask for one object together ask the members once (2026-11-12)
 
 Main's run on 647b4d1d0 was red at `one_resolution_asks_each_node_for_a_final_cell_or_an_object_once`: one node was asked twice for one immutable object in one resolution. The same test had failed once that morning on a branch cut from 1705ee076, so it is not from the day's changes. An object is kept once it is read (§6.60), but looking in the store, asking the members and keeping what they served were three steps, and a resolution's reads overlap (§6.61): two readers that both looked before either had kept both asked. Now a reader takes a turn at the address (`final_reads::read_turn`) across the three, for the objects one member's bytes establish (`fetch_immutable`) and for the ones read `Stored` (`read_stored_bytes_kept`) alike; a second reader of the same address waits and finds the object kept, and readers of other addresses do not wait. Test, on the node's own code on Postgres: `readers_asking_together_ask_the_members_once`, eight readers of one object; with a turn that waits on nobody it counts 40 requests where one reader makes 5.
+
+### 6.162 A phone that received offline goes on paying offline from what it loaded (owner, 2026-11-13)
+
+Found on the two production boards on 2026-11-13. Green paid yellow 1 ERA offline. Yellow's payment back was refused at its own door: "this phone received money offline ... since it was last online; it pays offline again once it has been back online and loaded or unloaded". Yellow held 5 ERA it had loaded itself. Shown that refusal as a rule, the owner, 2026-11-13: "No, that rule's not okay. A phone that has received offline can't pay offline until it has been online. No, why?", then "That is not a rule. You can spend as much as you want." and "That's why both ... sign. There's supposed to be two signatures."
+
+**What §6.153 had built.** The 2026-11-07 answer "Not until unloaded" was to paying on what was received. The code stopped every offline payment by a phone that had received since its last boundary online, in two places. The phone's own door refused the proposal (`account_received_since_boundary`) and the release (`own_offline_spend_chain`). A contact refused any payment whose chain of steps since the account it recorded held a receive (`verify_spend_chain`).
+
+**What is built.**
+- The confirm carries every step of the payer's account since the boundary its receivers recorded: its spends (SA-116), the receives its own board committed and the unloads of what it received (`BilateralConfirmRequest.offline_account_chain`, field 17, an `OfflineAccountChain`; the spends-only field 16 is reserved).
+- The receiver verifies them as the boundary check already does (`verify_account_hops`): a receive is the payer's own board's signed advance, σ^chip and σ^host, from the account the steps stand at, by the account's owner, and folds into the account's received amount. The spend is taken from where the steps leave the account (`spend_starts_at_the_record`). The forward-only check reads the point of every step the payer's board signed.
+- The phone's two refusals are removed.
+- Unchanged: a spend draws from the allocation alone (`OfflineAccount::step`, "a spend takes more than the offline allocation holds"), and what was received leaves the account only by its unload. "Not until unloaded" holds for the received money itself.
+
+**Not built.** Paying on the received money itself before its unload. It is the rule `lean4/DSMNoCounterfeitValue.lean` models (`offSpend` draws from the offline account loaded online, and a receipt is pending until validated online), and it is the owner's to decide whether "You can spend as much as you want" reaches it. That file is untouched.
+
+**The model.** `tla/DSM_OfflineFinality.tla`: `Propose` is guarded by `Loaded(d) >= 1`, what the device held at its last boundary online less what it has paid since, in place of "received nothing since the boundary". `NothingReceivedIsPaidOn` now states that at each step of its own a device has paid no more than it held at its last boundary before that step. TLC on the model config: 381,785 states, no error. `DSM_OfflineFinality_PaysReceived.cfg` (the guard off, two steps each way so a device can pay, receive and pay again): `NothingReceivedIsPaidOn` violated. The eight other falsification and reachability configs give the invariants their registry entries name.
+
+**Tests.** `dsm` `types::offline_chain`, `bilateral::offline` and `economic::offline_boundary`: 35 passed, 0 failed. The real-protocol test `a_phone_that_received_offline_goes_on_paying_offline_from_what_it_loaded` (B, loaded, receives A's payment and pays A back at once with no boundary; what B received still waits for its unload; a payment larger than B's allocation is refused although B holds more with what it received). The three model-correspondence tests no longer cross a boundary before a proposal and pass. Mutation controls: Not run.
+
+**On the two boards, 2026-11-13.** The wallet built from `52430f6ed` (APK `3c86fb4a…`, its native library the `dsm-android-anchor` build of that commit, the firmware files unchanged) was installed in place on both phones; both wallets kept their data and read their anchors at counter 2. Green's wallet (8XK) held 1.00 ERA received offline from yellow, not unloaded, and had crossed no boundary since. It paid yellow 1.00 ERA offline: sealed on both phones at 04:31:32 ET, green's offline allocation 5.00 to 4.00, the received 1.00 still waiting. Yellow's wallet (9FF), having just received, paid green 1.00 ERA back at once: sealed 04:34:06 ET, yellow's allocation 5.00 to 4.00. On the build before, the same payment back was refused at yellow's door.
 
 ## 7 Totals
 

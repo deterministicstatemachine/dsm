@@ -6,11 +6,13 @@
 //! online history left it. Between boundaries the account moves by spends, by
 //! its board's receive commits and by the unloads of payments received (owner,
 //! 2026-11-07), and the next boundary carries every one of them, in order, as
-//! its ancestry. A confirm carries the spends since that boundary (SA-116): a
-//! payer whose account received offline since pays offline again only once a
-//! boundary has carried the receive online. A step is recorded in the
-//! transaction that commits it, and the boundary that next carries the steps
-//! online takes them out with its own admission.
+//! its ancestry. A confirm carries the steps since that boundary, the spends
+//! (SA-116) and the receives and unloads among them, and its receiver verifies
+//! each as the account's own: a payer that received offline since goes on
+//! paying offline from what it loaded (owner, 2026-11-13: "That is not a
+//! rule"). A step is recorded in the transaction that commits it, and the
+//! boundary that next carries the steps online takes them out with its own
+//! admission.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Transaction};
@@ -56,61 +58,6 @@ pub fn own_offline_hops_in_tx(tx: &Transaction<'_>, bundle: &[u8; 32]) -> Result
         .query_map(params![bundle.as_slice()], |r| r.get::<_, Vec<u8>>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(hops)
-}
-
-/// The spends a confirm carries from the account this device's contacts recorded (SA-116): every
-/// step since the last boundary, which must all be spends. A receive since then is refused here,
-/// before anything is staged: money received offline is paid on only once it has been unloaded, so
-/// a contact takes no offline payment whose account history holds a receive (owner, 2026-11-07).
-pub fn own_offline_spend_chain(
-    bundle: &[u8; 32],
-) -> Result<Vec<dsm::types::offline_chain::SpendHop>, dsm::types::error::DsmError> {
-    use dsm::types::offline_chain::AccountHop;
-    let hops = own_offline_hops(bundle).map_err(|e| {
-        dsm::types::error::DsmError::storage(
-            format!("this device's offline steps: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    hops.iter()
-        .map(|bytes| match AccountHop::from_bytes(bytes)? {
-            AccountHop::Spend(spend) => Ok(spend),
-            AccountHop::Receive(_) | AccountHop::Settle(_) => {
-                Err(dsm::types::error::DsmError::invalid_operation(
-                    "this phone received money offline since it was last online: it pays offline \
-                     again once it has been back online and loaded or unloaded",
-                ))
-            }
-        })
-        .collect()
-}
-
-/// The bundle of an offline account of this device's that received offline since its last boundary,
-/// if one did: its next boundary has not yet carried the receive online.
-pub fn account_received_since_boundary() -> Result<Option<[u8; 32]>> {
-    use dsm::types::offline_chain::AccountHop;
-    let rows: Vec<(Vec<u8>, Vec<u8>)> = {
-        let binding = get_connection()?;
-        let conn = binding
-            .lock()
-            .map_err(|e| anyhow!("the client database lock: {e}"))?;
-        let mut stmt = conn.prepare("SELECT bundle, hop FROM own_offline_hop ORDER BY seq ASC")?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    for (bundle, hop) in rows {
-        let hop = AccountHop::from_bytes(&hop).map_err(|e| anyhow!("an offline step: {e}"))?;
-        if !hop.is_spend() {
-            let bundle = <[u8; 32]>::try_from(bundle.as_slice())
-                .map_err(|e| anyhow!("an offline step's bundle: {e}"))?;
-            return Ok(Some(bundle));
-        }
-    }
-    Ok(None)
 }
 
 /// The boundary that carries `bundle`'s steps online exposes them: they leave the record, in the

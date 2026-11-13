@@ -1961,10 +1961,12 @@ message BilateralConfirmRequest {
   // release. B pins it TOFU on the first transfer (already-verified contact, bound to this
   // transfer) and verifies same-anchor on every subsequent one. Absent for ordinary transfers.
   AnchorDisclosure anchor_disclosure = 15;
-  // The sender's offline spends since the boundary of its online history that left the account
-  // its receivers recorded, in order, ending where this spend starts (SA-116). Empty when this
-  // spend starts at that account.
-  OfflineSpendChain offline_spend_chain = 16;
+  reserved 16; // removed: the sender's spends alone (OfflineSpendChain); its receives ride with them
+  // The steps of the sender's offline account since the boundary of its online history that left
+  // the account its receivers recorded, in order, ending where this spend starts: its spends
+  // (SA-116), the receives its own board committed and the unloads of what it received. Empty
+  // when this spend starts at that account.
+  OfflineAccountChain offline_account_chain = 17;
 }
 
 // Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)
@@ -2136,11 +2138,6 @@ message OfflineSpendHop {
   uint64 amount = 4;
 }
 
-// An offline account's spends, in order.
-message OfflineSpendChain {
-  repeated OfflineSpendHop hops = 1;
-}
-
 // One offline-bearer receive into an offline account as the receiver's board committed it: its
 // receive commit's release (dsm.anchor.OfflineRelease, its offline-state proofs attached), which
 // is the acknowledgement the payer kept, the receive's account witness, and what it received.
@@ -2168,6 +2165,11 @@ message OfflineAccountHop {
     OfflineReceiveHop receive = 2;
     OfflineSettleHop settle = 3;
   }
+}
+
+// An offline account's steps since one of its boundaries, in order.
+message OfflineAccountChain {
+  repeated OfflineAccountHop hops = 1;
 }
 
 // Bilateral event notifications for frontend

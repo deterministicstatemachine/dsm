@@ -96,7 +96,7 @@ fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
         pre_entropy: Vec::new(),
         offline_release: Vec::new(),
         anchor_disclosure: Some(disclosure),
-        offline_spend_chain: None,
+        offline_account_chain: None,
     };
     let confirm2 = BilateralConfirmRequest::decode(confirm.encode_to_vec().as_slice()).unwrap();
     let d = confirm2.anchor_disclosure.unwrap();

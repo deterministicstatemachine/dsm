@@ -472,15 +472,17 @@ async fn an_acknowledgement_that_is_not_the_receivers_board_commit_is_refused_an
     assert_committed_on_both(&a, &b, &commitment);
 }
 
-/// What a phone received offline is not paid on before a boundary (owner, 2026-11-07: "Not until
-/// unloaded"): B, its own allocation loaded, receives A's payment, and its next offline payment is
-/// refused at B's door. B's load carries the receive online; A takes it at its sync; then B pays A
-/// from its allocation, and what B received stays where it was received until its unload.
-/// MUTATION CONTROL: the sender's door not refusing a payer that received since its boundary lets B
-/// propose: red.
+/// A phone that received offline goes on paying offline (owner, 2026-11-13: "That is not a rule";
+/// "That's why both ... sign"): B, its own allocation loaded, receives A's payment and pays A back
+/// at once, with no boundary online between. A takes B's payment from B's account as B's steps since
+/// leave it, B's board's signed receive among them. What B received stays where it was received
+/// until its unload, and no spend draws from it: B's payment came out of its allocation, to the
+/// unit.
+/// MUTATION CONTROL: a receiver that takes a payer's steps as spends alone
+/// (`verify_spend_chain` over them in `spend_starts_at_the_record`) refuses B's payment: red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_phone_that_received_offline_pays_offline_again_only_after_a_boundary() {
+async fn a_phone_that_received_offline_goes_on_paying_offline_from_what_it_loaded() {
     let (pair, a, b, appliance, payment) = loaded_pair(100, 100).await;
     b.device.enter();
     let loaded = offline_cash(&b, "wallet.loadOffline", "20.00").await;
@@ -490,30 +492,23 @@ async fn a_phone_that_received_offline_pays_offline_again_only_after_a_boundary(
     assert_committed_on_both(&a, &b, &first);
 
     b.device.enter();
-    let refused = b
-        .propose(&a, bearer_transfer(&a, 3))
-        .await
-        .expect_err("B pays offline on what it received before a boundary");
-    assert!(
-        refused.to_string().contains("received money offline"),
-        "{refused}"
-    );
-
-    let boundary = offline_cash(&b, "wallet.loadOffline", "1.00").await;
-    assert!(
-        boundary.success,
-        "B's boundary: {:?}",
-        boundary.error_message
-    );
-    pair.a.sync().await;
+    let era = crate::policy::resolve_policy_commit_strict(b"ERA").expect("ERA");
+    let loaded = account_of(&b, &appliance.receiver)
+        .allocation(&era)
+        .expect("B's allocation before its payment");
     let paid = bearer_payment_over_ble(&b, &a, &bearer_transfer(&a, 3)).await;
     assert_committed_on_both(&b, &a, &paid);
     b.device.enter();
-    let era = crate::policy::resolve_policy_commit_strict(b"ERA").expect("ERA");
+    let account = account_of(&b, &appliance.receiver);
     assert_eq!(
-        account_of(&b, &appliance.receiver).received(&era),
+        account.received(&era),
         Some(7),
         "what B received waits for its unload"
+    );
+    assert_eq!(
+        account.allocation(&era),
+        Some(loaded - 3),
+        "B's payment came out of what it loaded"
     );
 }
 

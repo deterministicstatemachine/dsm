@@ -1291,28 +1291,6 @@ impl BilateralBleHandler {
                 "bilateral prepare refused: {reason}"
             )));
         }
-        // Money received offline is paid on only once it has been unloaded, and a contact takes no
-        // offline payment whose account history holds a receive (owner, 2026-11-07): a device whose
-        // account received offline since its last boundary proposes no offline payment, before any
-        // receiver's board draws a challenge for it.
-        if let Some(bundle) =
-            crate::storage::client_db::offline_spends::account_received_since_boundary().map_err(
-                |e| {
-                    DsmError::storage(
-                        format!("this device's offline steps: {e}"),
-                        None::<std::io::Error>,
-                    )
-                },
-            )?
-        {
-            return Err(DsmError::invalid_operation(format!(
-                "bilateral prepare refused: this phone received money offline (into its account \
-                 under {}) since it was last online; it pays offline again once it has been back \
-                 online and loaded or unloaded",
-                bytes_to_base32(&bundle[..8])
-            )));
-        }
-
         // A step whose anchor release was left unfinished is settled first, so
         // the anchor holds no release the new step would wait behind.
         self.settle_releasing_steps().await?;
@@ -3106,11 +3084,6 @@ impl BilateralBleHandler {
             terms,
             r_r,
         )?;
-        // Nothing has moved on the anchor yet: a receive since the account's last boundary refuses
-        // the release here (owner, 2026-11-07).
-        crate::storage::client_db::offline_spends::own_offline_spend_chain(
-            &staged.staged.pin.bundle,
-        )?;
         let offline_spend = staged.spend;
         // Sender deltas are ALWAYS empty on this transport: bearer value moves via the
         // allocation debit (`offline_spend`), and nothing else here moves value.
@@ -3487,38 +3460,25 @@ impl BilateralBleHandler {
                     proofs.parent.clone(),
                     proofs.child.clone(),
                 )?;
-                // The spends no boundary has exposed yet, before this one: the chain this
-                // confirm carries from the account the receiver recorded (SA-116). This spend
-                // joins them in the same transaction.
-                // Every one a spend: a receive since the last boundary was refused before the
-                // anchor moved (`own_offline_spend_chain`, at the proposal and at the stage).
+                // The steps no boundary has exposed yet, before this one: the chain this confirm
+                // carries from the account the receiver recorded, its spends (SA-116) and the
+                // receives and unloads among them. This spend joins them in the same transaction.
                 let chain = crate::storage::client_db::offline_spends::own_offline_hops_in_tx(
                     tx,
                     &offline_spend.anchor_bundle_b,
                 )
                 .map_err(|e| storage("this device's unexposed offline steps", e))?
                 .iter()
-                .map(
-                    |hop| match dsm::types::offline_chain::AccountHop::from_bytes(hop)? {
-                        dsm::types::offline_chain::AccountHop::Spend(spend) => {
-                            generated::OfflineSpendHop::decode(
-                                spend.to_proto().encode_to_vec().as_slice(),
-                            )
-                            .map_err(|e| {
-                                DsmError::serialization_error(
-                                    "OfflineSpendHop",
-                                    "protobuf",
-                                    Some(e.to_string()),
-                                    Some(e),
-                                )
-                            })
-                        }
-                        _ => Err(DsmError::invalid_operation(
-                            "sender commit: the account received offline since its last boundary, \
-                         which this step's stage refuses",
-                        )),
-                    },
-                )
+                .map(|hop| {
+                    generated::OfflineAccountHop::decode(hop.as_slice()).map_err(|e| {
+                        DsmError::serialization_error(
+                            "OfflineAccountHop",
+                            "protobuf",
+                            Some(e.to_string()),
+                            Some(e),
+                        )
+                    })
+                })
                 .collect::<Result<Vec<_>, DsmError>>()?;
                 let witness = own
                     .step_writes
@@ -3559,7 +3519,7 @@ impl BilateralBleHandler {
                     pre_entropy: entropy.to_vec(),
                     offline_release: release,
                     anchor_disclosure: Some(anchor_disclosure.clone()),
-                    offline_spend_chain: Some(generated::OfflineSpendChain { hops: chain }),
+                    offline_account_chain: Some(generated::OfflineAccountChain { hops: chain }),
                 };
                 let confirm = confirm_envelope(&local_device_id, &genesis_hash, &confirm_request)?;
                 let mut awaiting = session.clone();
@@ -4554,10 +4514,11 @@ impl BilateralBleHandler {
         .map_err(|r| r.into_dsm_error())?;
         // The owner's receive rule (2026-10-22): the sender's offline account
         // under the release's bundle as this device last validated it from the
-        // sender's online history, carried forward by the sender's chain of
-        // spends since (SA-116); Core takes the spend only from there, and
-        // only forward of the last spend this device accepted from the sender.
-        let sender_chain = match confirm_request.offline_spend_chain.clone() {
+        // sender's online history, carried forward by the steps of the sender's
+        // account since (its spends, SA-116, and its receives and unloads); Core
+        // takes the spend only from there, and only forward of the last spend
+        // this device accepted from the sender.
+        let sender_chain = match confirm_request.offline_account_chain.clone() {
             Some(chain) => dsm::types::offline_chain::chain_from_bytes(&chain.encode_to_vec())?,
             None => Vec::new(),
         };

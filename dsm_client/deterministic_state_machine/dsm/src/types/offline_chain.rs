@@ -25,6 +25,13 @@
 //! account a payer's last boundary left takes a spend from wherever the
 //! payer's chain of spends since then has brought the account (SA-116), and
 //! nothing a hop states is taken on trust: each is folded and signed.
+//!
+//! An account also takes what its owner receives offline, and gives it up at
+//! its unload. Each receive is the owner's own board's signed advance, as each
+//! spend is, and folds into the account's received amount, which no spend
+//! draws from. A payer that received since its last boundary carries those
+//! steps with its spends ([`verify_account_hops`]), and its receiver takes its
+//! spend from where they all leave the account.
 
 use anchor_core::accept::verify_cert_frontier_and_sigs;
 use anchor_core::root_advance::{transition_digest, OfflineRelease};
@@ -168,31 +175,31 @@ impl SpendHop {
     }
 }
 
-/// The hops of a chain's wire form.
+/// The steps of an account chain's wire form.
 pub fn chain_from_proto(
-    chain: crate::types::proto::OfflineSpendChain,
-) -> Result<Vec<SpendHop>, DsmError> {
+    chain: crate::types::proto::OfflineAccountChain,
+) -> Result<Vec<AccountHop>, DsmError> {
     if chain.hops.len() > MAX_CHAIN_HOPS {
         return Err(DsmError::invalid_operation(format!(
-            "a chain of {} spends; at most {MAX_CHAIN_HOPS} are carried",
+            "{} steps of an offline account; at most {MAX_CHAIN_HOPS} are carried",
             chain.hops.len()
         )));
     }
-    chain.hops.into_iter().map(SpendHop::from_proto).collect()
+    chain.hops.into_iter().map(AccountHop::from_proto).collect()
 }
 
-/// The hops of a chain's canonical bytes.
-pub fn chain_from_bytes(bytes: &[u8]) -> Result<Vec<SpendHop>, DsmError> {
+/// The steps of an account chain's canonical bytes.
+pub fn chain_from_bytes(bytes: &[u8]) -> Result<Vec<AccountHop>, DsmError> {
     chain_from_proto(
-        crate::types::proto::OfflineSpendChain::decode(bytes)
-            .map_err(|e| DsmError::invalid_operation(format!("an offline spend chain: {e}")))?,
+        crate::types::proto::OfflineAccountChain::decode(bytes)
+            .map_err(|e| DsmError::invalid_operation(format!("an offline account chain: {e}")))?,
     )
 }
 
-/// A chain's wire form.
-pub fn chain_to_proto(hops: &[SpendHop]) -> crate::types::proto::OfflineSpendChain {
-    crate::types::proto::OfflineSpendChain {
-        hops: hops.iter().map(SpendHop::to_proto).collect(),
+/// An account chain's wire form.
+pub fn chain_to_proto(hops: &[AccountHop]) -> crate::types::proto::OfflineAccountChain {
+    crate::types::proto::OfflineAccountChain {
+        hops: hops.iter().map(AccountHop::to_proto).collect(),
     }
 }
 
@@ -270,13 +277,10 @@ pub fn verify_spend_chain(
         if cert.anchor_bundle != anchor.bundle || cert.anchor_id != anchor.anchor_id {
             return Err(refused("it is not the pinned anchor's"));
         }
-        // A chain of spends holds spends only: money received offline is paid on only once it has
-        // been unloaded, so a receive in a payer's chain is refused (owner, 2026-11-07).
+        // A spend is the anchor's transfer. A receive is its own kind of step, verified as one
+        // ([`verify_account_hops`]), and is never read as a spend.
         if t.action_type != anchor_core::receive::ACTION_TRANSFER {
-            return Err(refused(
-                "it is not a spend: the payer received offline since its account was last \
-                 recorded, and pays offline again only once it has been back online",
-            ));
+            return Err(refused("it is not a spend"));
         }
         // The release's transition is the certificate's advance, and the
         // certificate's digest is the transition's.
@@ -376,8 +380,19 @@ pub struct SettleHop {
     settlement_id: [u8; 32],
 }
 
+impl core::fmt::Debug for ReceiveHop {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ReceiveHop")
+            .field("release_message", &self.release.cert.root_advance_message)
+            .field("anchor_counter", &self.release.cert.anchor_counter)
+            .field("asset", &self.asset)
+            .field("amount", &self.amount)
+            .finish()
+    }
+}
+
 /// One step of an offline account between two of its boundaries.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum AccountHop {
     Spend(SpendHop),
     Receive(ReceiveHop),
@@ -454,9 +469,15 @@ impl AccountHop {
 
     /// The hop a wire form's canonical bytes state.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
+        Self::from_proto(
+            crate::types::proto::OfflineAccountHop::decode(bytes)
+                .map_err(|e| DsmError::invalid_operation(format!("an offline account hop: {e}")))?,
+        )
+    }
+
+    /// The hop a wire form states.
+    pub fn from_proto(p: crate::types::proto::OfflineAccountHop) -> Result<Self, DsmError> {
         use crate::types::proto::offline_account_hop::Hop;
-        let p = crate::types::proto::OfflineAccountHop::decode(bytes)
-            .map_err(|e| DsmError::invalid_operation(format!("an offline account hop: {e}")))?;
         match p.hop {
             Some(Hop::Spend(s)) => SpendHop::from_proto(s).map(Self::Spend),
             Some(Hop::Receive(r)) => Ok(Self::Receive(ReceiveHop::new(
@@ -495,9 +516,14 @@ impl AccountHop {
         }
     }
 
-    /// Whether the hop is a spend: what a payer's chain of spends may hold.
-    pub fn is_spend(&self) -> bool {
-        matches!(self, Self::Spend(_))
+    /// The counter and the frontier the step started from, for a step its board signed (a spend or
+    /// a receive). An unload of a received payment moves neither.
+    pub fn starts_at(&self) -> Option<(u64, [u8; 32])> {
+        match self {
+            Self::Spend(s) => Some((s.witness.pre_counter, s.witness.pre_frontier)),
+            Self::Receive(r) => Some((r.witness.pre_counter, r.witness.pre_frontier)),
+            Self::Settle(_) => None,
+        }
     }
 
     /// The frontier the step started from, for a step that moves it (a spend or a receive).
@@ -1161,13 +1187,12 @@ mod tests {
             Vec::new(),
             "an empty chain stands at its start"
         );
-        let round_trip = chain_from_proto(chain_to_proto(&[first])).expect("the wire form");
-        assert_eq!(
-            verify_spend_chain(&start, &payer.pin, &round_trip)
-                .expect("decoded")
-                .len(),
-            1
-        );
+        let round_trip =
+            chain_from_proto(chain_to_proto(&[AccountHop::Spend(first)])).expect("the wire form");
+        let (decoded, _end) =
+            verify_account_hops(&start, &payer.pin, &payer.head.devid(), &round_trip)
+                .expect("decoded");
+        assert_eq!(decoded.len(), 1);
     }
 
     /// Owner question 9, offline: the sender's Core refuses its own bearer
@@ -1216,14 +1241,14 @@ mod tests {
         );
     }
 
-    /// What a payer received offline is not paid on before a boundary (owner,
-    /// 2026-11-07: "Not until unloaded"): a contact refuses a chain of spends
-    /// holding any advance of the payer's anchor that is not a spend — its
-    /// receive among them — before anything else of the hop is read.
+    /// A receive is never read as a spend: an advance of the payer's anchor
+    /// that is not a transfer is refused as a spend hop before anything else
+    /// of it is read. A payer's receives are verified as receives
+    /// (`verify_account_hops`).
     /// MUTATION CONTROL: dropping the action check lets the hop on to the
     /// certificate's binding, which refuses it for another reason: red.
     #[test]
-    fn a_chain_holding_a_receive_is_refused_as_no_chain_of_spends() {
+    fn a_receive_is_never_read_as_a_spend() {
         let mut payer = Payer::loaded(0x36, 40);
         let start = payer.account_root();
         let (first, _, _) = payer.spend(B, 10);
@@ -1231,7 +1256,7 @@ mod tests {
         received.release.transition.action_type = anchor_core::receive::ACTION_RECEIVE;
         refused(
             verify_spend_chain(&start, &payer.pin, &[first, received]),
-            "the offline spend chain's hop 1: it is not a spend: the payer received offline",
+            "the offline spend chain's hop 1: it is not a spend",
         );
     }
 
