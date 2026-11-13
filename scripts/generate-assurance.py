@@ -65,20 +65,55 @@ FIRMWARE = [
     ("fw-nonsecure-app", "crates/dsm-anchor-nonsecure-app", "TrustZone-M Non-secure world: USB-CDC, protobuf and transport; reaches the Secure world only through the Secure Gateway."),
 ]
 
-# What the appliance must show on silicon. Each stays not-run until a bench
-# run records it.
+# What the appliance must show on a board. A property is `recorded` only where
+# the repository holds the record of a run on boards that showed it, named by
+# its section of CONFORMANCE_GAPS.md. Otherwise it is `not-run`. Each note says
+# what the records hold and what they do not.
+GAPS_PATH = "specs/requirements/CONFORMANCE_GAPS.md"
 HARDWARE_PROPERTIES = [
-    ("HW-01", "Secure-element authentication: the appliance opens an authenticated session with its TROPIC01 and its certificate chain is checked."),
-    ("HW-02", "Counter behaviour: the monotonic counter moves exactly once per committed transfer and never backwards."),
-    ("HW-03", "Anti-cloning: a second device cannot present the same identity or reuse the counter."),
-    ("HW-04", "Recovery after power loss: every crash point in prepare and commit recovers to one of the recovery table's outcomes."),
-    ("HW-05", "Replay rejection: a transfer already committed is refused when presented again."),
-    ("HW-06", "Completed offline transfers between two appliances over Bluetooth, settled online afterwards."),
+    (
+        "HW-01",
+        "Secure-element authentication: the appliance opens an authenticated session with its TROPIC01 and its certificate chain is checked.",
+        "not-run",
+        [],
+        "A session with the TROPIC01 opens on a board in every try-run (§6.152, §6.158). The chip's certificate chain is not checked: internal audit finding SA-26, open.",
+    ),
+    (
+        "HW-02",
+        "Counter behaviour: the monotonic counter moves exactly once per committed transfer and never backwards.",
+        "recorded",
+        ["6.158", "6.162"],
+        "The try-run's counter step passed on both boards (§6.158), and both production boards read counter 2 before the payments of §6.162. Not in those records: an attempt to move the counter backwards.",
+    ),
+    (
+        "HW-03",
+        "Anti-cloning: a second device cannot present the same identity or reuse the counter.",
+        "not-run",
+        [],
+        "The repository records no run on boards that presented a second device under the same identity.",
+    ),
+    (
+        "HW-04",
+        "Recovery after power loss: every crash point in prepare and commit recovers to one of the recovery table's outcomes.",
+        "not-run",
+        [],
+        "The try-run's recovery step passed on both boards (§6.158). The repository records no run that cut a board's power at each crash point of prepare and commit.",
+    ),
+    (
+        "HW-05",
+        "Replay rejection: a transfer already committed is refused when presented again.",
+        "not-run",
+        [],
+        "The repository records no run that presented an already committed transfer to a board a second time.",
+    ),
+    (
+        "HW-06",
+        "Completed offline transfers between two appliances over Bluetooth, settled online afterwards.",
+        "recorded",
+        ["6.162"],
+        "Two phones, each with its production board, paid each other offline, both ways, on 2026-11-13 (§6.162). Not in that record: the unload online afterwards.",
+    ),
 ]
-HARDWARE_REASON = (
-    "Not run on silicon. The hardware stage has not started; the Secure monitor's own manifest "
-    "records full-crypto silicon validation as pending a clean TROPIC power cycle."
-)
 
 
 def git(*args):
@@ -137,9 +172,19 @@ def audit_rows():
 
 
 def requirement_statuses():
+    """Each requirement's status, from §8 alone (the per-requirement results).
+
+    Tables earlier in the file show what a row was before a change and what it
+    became; a row read from one of them would be reported at a status it no
+    longer has.
+    """
+    parts = GAPS.read_text().split("\n## 8 ", 1)
+    if len(parts) != 2:
+        raise SystemExit(f"{GAPS}: no section 8 (per-requirement results) to read statuses from")
+    results = parts[1].split("\n## ", 1)[0]
     statuses = {}
-    for line in GAPS.read_text().splitlines():
-        m = re.match(r"\| (MR-[A-Z]+-\d{4}) \| (Met|Partial|Missing|Deferred|Violated|Not applicable|Superseded)\b", line)
+    for line in results.splitlines():
+        m = re.match(r"\| (MR-[A-Z]+-\d{4}) \| (Met|Partial|Missing|Deferred|Violated|Not code|Not applicable|Superseded)\b", line)
         if m:
             statuses[m.group(1)] = m.group(2)
     return statuses
@@ -482,9 +527,12 @@ def main():
         bom.add_requirement(f"req-{row['id'].lower()}", row["id"], row["finding"], "dsm-software", [ref], {"closed": 1, "partial": 0.5}.get(row["state"], 0), f"internal audit status: {row['status']}")
 
     # ── Hardware: the appliance on silicon ───────────────────────────────────
-    for ident, text in HARDWARE_PROPERTIES:
-        ref = bom.add_evidence(f"ev-{ident.lower()}", text, "not-run", "never", reason=HARDWARE_REASON)
-        bom.add_requirement(f"req-{ident.lower()}", ident, text, "hw-pico2w", [ref], 0, HARDWARE_REASON)
+    for ident, text, state, sections, note in HARDWARE_PROPERTIES:
+        ref = bom.add_evidence(
+            f"ev-{ident.lower()}", text, state, {"recorded": "recorded"}.get(state, "never"),
+            reason=note, source=GAPS_PATH if sections else "", record=", ".join(f"§{n}" for n in sections),
+        )
+        bom.add_requirement(f"req-{ident.lower()}", ident, text, "hw-pico2w", [ref], {"recorded": 0.5}.get(state, 0), note)
 
     # ── The document ─────────────────────────────────────────────────────────
     firmware = []
@@ -604,10 +652,10 @@ def main():
     for f in firmware:
         tree = next(p["value"] for p in f["properties"] if p["name"] == "dsm:source:git-tree")
         lines.append(f"| {f['name']} {f['version']} | firmware | source tree `{tree}`; not built in this run |")
-    lines += ["", "| Property | Status |", "|---|---|"]
-    for ident, text in HARDWARE_PROPERTIES:
-        lines.append(f"| {ident}: {text} | not-run |")
-    lines += ["", HARDWARE_REASON, ""]
+    lines += ["", f"Section numbers are those of `{GAPS_PATH}`.", "", "| Property | Status | What the repository records |", "|---|---|---|"]
+    for ident, text, state, _, note in HARDWARE_PROPERTIES:
+        lines.append(f"| {ident}: {text} | {state} | {note} |")
+    lines += [""]
     (run_dir / "assurance-report.md").write_text("\n".join(lines))
     print(f"assurance: {attested} requirements, {len(bom.evidence)} evidence entries, checks: " + ", ".join(f"{n}={s}" for n, _, s, _ in checks))
 
