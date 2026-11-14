@@ -2,7 +2,13 @@
 
 Plug your app into DSM: a client for a `dsm-app-host`'s local ingress, which is your app's own DSM account. Node.js 20+.
 
-Its protobuf types (`src/generated/dsm_app_pb.ts`) are committed, so it builds with `tsc` alone and no protoc. From a release, `install.sh` puts its package in `~/.local/share/dsm/clients`; install it into your app:
+Its protobuf types (`src/generated/dsm_app_pb.ts`) are committed, so it builds with `tsc` alone and no protoc. Install it into your app from npm, at the version of the `dsm-app-host` you run:
+
+```bash
+npm install dsm-app-client@0.1.0-beta.4
+```
+
+From a release, `install.sh` also puts the package in `~/.local/share/dsm/clients`, for a machine that has run it:
 
 ```bash
 npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.0-beta.4.tgz
@@ -18,4 +24,4 @@ From the repo root, `make clients` runs `npm ci` and `tsc`; after a change to `p
 
 Two command-line tools come with it: `dsm-app` (your app's account: `dsm-app up` starts it with the `dsm-app-host` on PATH) and `dsm-dev-wallet` (a terminal wallet; `DSM_WALLET_NAME=wallet2` for the second). `install.sh` puts both on PATH. From the repo root, `make app ARGS=...`, `make wallet ARGS=...` and `make wallet2 ARGS=...` run them.
 
-The guide: [BUILDING_APPS.md](../../BUILDING_APPS.md).
+The guide: [https://deterministicstatemachine.github.io/dsm/](https://deterministicstatemachine.github.io/dsm/), and on one page, [BUILDING_APPS.md](https://github.com/deterministicstatemachine/dsm/blob/main/BUILDING_APPS.md).
