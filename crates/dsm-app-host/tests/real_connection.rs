@@ -48,14 +48,27 @@ fn era_decimals() -> u32 {
     }
 }
 
-fn free_port() -> u16 {
-    let probe = match std::net::TcpListener::bind("127.0.0.1:0") {
+/// Two free ports, both held until both are known: two probes made one after
+/// the other can be handed the same port, and a host given one port for its
+/// ingress and its relay exits as it starts.
+fn free_ports() -> (u16, u16) {
+    let probe = || match std::net::TcpListener::bind("127.0.0.1:0") {
         Ok(probe) => probe,
         Err(e) => panic!("a free port: {e}"),
     };
-    match probe.local_addr() {
+    let port = |probe: &std::net::TcpListener| match probe.local_addr() {
         Ok(address) => address.port(),
         Err(e) => panic!("its address: {e}"),
+    };
+    let (first, second) = (probe(), probe());
+    (port(&first), port(&second))
+}
+
+/// What a host's process wrote to its log, for a failure to say why.
+fn said(log: &Path) -> String {
+    match std::fs::read_to_string(log) {
+        Ok(text) => text,
+        Err(e) => format!("(its log {}: {e})", log.display()),
     }
 }
 
@@ -140,7 +153,7 @@ struct Host {
 
 impl Host {
     fn new(name: &'static str, root: &Path, config: &Path) -> Self {
-        let (game, relay) = (free_port(), free_port());
+        let (game, relay) = free_ports();
         let args = vec![
             "--data-dir".to_string(),
             root.join(name).display().to_string(),
@@ -217,7 +230,11 @@ impl Host {
             };
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    panic!("{} exited ({status}): see {}", self.name, path.display())
+                    panic!(
+                        "{} exited ({status}) as it started; it logged:\n{}",
+                        self.name,
+                        said(&path)
+                    )
                 }
                 Ok(None) => {}
                 Err(e) => panic!("{}: the process's state: {e}", self.name),
@@ -247,10 +264,10 @@ impl Host {
             };
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "{} did not come up within {} s ({why}): see {}",
+                "{} did not come up within {} s ({why}); it logged:\n{}",
                 self.name,
                 STEP.as_secs(),
-                path.display()
+                said(&path)
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
