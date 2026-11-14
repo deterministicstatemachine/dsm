@@ -58,16 +58,16 @@ Your app stays what it is, in the language you already use. It gets its own DSM 
 
 ## Beta testers
 
-**The APK is temporarily unavailable** while it is migrated to v4 (`v0.1.0-beta.4`). It will be back shortly on the [releases page](https://github.com/deterministicstatemachine/dsm/releases). Do not install an earlier beta in the meantime.
-
-When it is back:
+The Android wallet is `dsm-wallet-v0.1.0-beta.4.apk` on the [`v0.1.0-beta.4` release page](https://github.com/deterministicstatemachine/dsm/releases/tag/v0.1.0-beta.4).
 
 1. **Uninstall any previous beta.** Beta releases are clean cuts; there is no state migration between them.
 2. Download the APK from the release page to your Android device.
 3. Enable **Install from unknown sources** if prompted.
 4. Open the file to install, then launch the DSM Wallet.
 
-CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK is signed and uploaded by the maintainer.
+To check the download, its SHA-256 is `3e7ac0d2e2c2978b5c7c13a5e2884ac9e4c50e151d1a493156ef0ce568d40c21`.
+
+CI publishes the storage-node binary, the app-host binaries, the frontend bundle, and the SBOM; the APK is signed and uploaded by the maintainer.
 
 > **Early beta.** This release exists for developer onboarding and community feedback. It contains novel cryptographic protocols and is not ready for production use or for holding value. The app talks to a beta storage fleet on the `dsm-testnet` network id; any wallet or app account may join it, and the faucet funds each new account. If you want to test with real devices, open a [support](SUPPORT.md) thread first.
 
