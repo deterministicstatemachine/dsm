@@ -20,6 +20,7 @@ use std::sync::Once;
 
 use dsm::utils::text_id;
 
+use dsm_storage_node::api::transport::b0x::WAIT_LOOKS;
 use dsm_storage_node::{db, AppState};
 
 #[derive(Parser, Debug)]
@@ -52,6 +53,9 @@ struct ServerConfig {
     /// a request's headers.
     header_read_timeout_secs: usize,
     database_url: String,
+    /// `[database] max_connections`: connections the node's pool holds to
+    /// Postgres at most.
+    database_max_connections: usize,
     /// `[[storage_set.members]]` — each member's id and register incarnation.
     storage_set_members: Vec<(String, [u8; 32])>,
     /// `endpoint` and `ca_cert` on `[[storage_set.members]]` — where each
@@ -102,6 +106,18 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     let tls_cert_path = required(&settings, "tls.cert_path")?;
     let tls_key_path = required(&settings, "tls.key_path")?;
     let database_url = required(&settings, "database.url")?;
+    // A node on a server of its own takes the whole pool. Nodes that share a
+    // server are each given their share of it (`db::pool_share`). Waits on
+    // spools read the store through up to `WAIT_LOOKS` of these, and every
+    // other route needs the rest.
+    let database_max_connections =
+        optional_positive(&settings, "database.max_connections", db::POOL_MAX_SIZE)?;
+    if database_max_connections <= WAIT_LOOKS {
+        anyhow::bail!(
+            "`database.max_connections` is {database_max_connections}; it must be more than \
+             the {WAIT_LOOKS} connections waits on spools may hold"
+        );
+    }
 
     // The canonical storage set this node is a member of:
     //
@@ -195,6 +211,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         request_timeout_secs,
         header_read_timeout_secs,
         database_url,
+        database_max_connections,
         storage_set_members,
         storage_set_mates,
     })
@@ -244,8 +261,11 @@ async fn async_main() -> Result<()> {
     // Initialize database
     info!("Initializing database connection pool...");
     let db_pool = Arc::new(
-        db::create_pool(&server_config.database_url, db::POOL_MAX_SIZE)
-            .context("failed to create database connection pool")?,
+        db::create_pool(
+            &server_config.database_url,
+            server_config.database_max_connections,
+        )
+        .context("failed to create database connection pool")?,
     );
 
     info!("Initializing database schema...");
@@ -450,6 +470,28 @@ url = "postgresql://127.0.0.1:5432/node"
             err.contains("/nonexistent/dsm-node-config.toml") && err.contains("not found"),
             "the refusal names the missing file: {err}"
         );
+    }
+
+    /// A node on a server of its own holds the whole pool; one told its share
+    /// of a server it shares holds that. A share that leaves nothing beside
+    /// the connections waits on spools may hold is refused by name.
+    #[test]
+    fn the_pool_is_the_stated_share_of_the_server_or_the_whole_pool() {
+        use dsm_storage_node::db::POOL_MAX_SIZE;
+        let whole = load(WHOLE_CONFIG).expect("the whole config loads");
+        assert_eq!(whole.database_max_connections, POOL_MAX_SIZE);
+        let stated = |n: usize| {
+            WHOLE_CONFIG.replace("[database]", &format!("[database]\nmax_connections = {n}"))
+        };
+        let shared = load(&stated(19)).expect("a stated share loads");
+        assert_eq!(shared.database_max_connections, 19);
+        let least = load(&stated(super::WAIT_LOOKS + 1)).expect("one beside the waits loads");
+        assert_eq!(least.database_max_connections, super::WAIT_LOOKS + 1);
+        let err = match load(&stated(super::WAIT_LOOKS)) {
+            Ok(_) => panic!("a pool the waits may hold whole is refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("database.max_connections"), "{err}");
     }
 
     /// A setting with a stated default takes the default only when it is

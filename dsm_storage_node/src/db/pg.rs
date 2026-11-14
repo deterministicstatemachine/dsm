@@ -824,6 +824,50 @@ pub fn create_pool(database_url: &str, max_size: usize) -> anyhow::Result<DBPool
         .build()?)
 }
 
+/// The connections each node's pool may hold when the nodes on the databases
+/// `databases` names share one Postgres server, read over `admin`, a pool on
+/// that server.
+///
+/// A deployed node runs on a Postgres server of its own (the sibling
+/// container in `dsm_storage_node/deploy/docker-compose.node.yml`), which
+/// grants every connection its pool asks for: [`POOL_MAX_SIZE`]. Nodes that
+/// share a server (a developer's own set, the test harness's) ask it together
+/// for more than it admits: five pools of `POOL_MAX_SIZE` ask a server that
+/// admits 100 for 160. Past its limit the server refuses the connection, the
+/// node answers the request it was serving with a 500, and a reader then holds
+/// less evidence than the cell does: a claim final at every seat reads as not
+/// final yet. Each node takes an equal share of what the server admits beyond
+/// the connections other clients hold, and never more than a deployed node's
+/// pool. A server with no connection for each node is an error.
+pub async fn pool_share(admin: &DBPool, databases: &[String]) -> anyhow::Result<usize> {
+    if databases.is_empty() {
+        return Err(anyhow!("no node's database is named"));
+    }
+    let client = admin.get().await?;
+    let row = client
+        .query_one(
+            "SELECT current_setting('max_connections')::bigint
+                  - (SELECT COALESCE(SUM(setting::bigint), 0)::bigint FROM pg_settings
+                      WHERE name IN ('superuser_reserved_connections', 'reserved_connections'))
+                  - (SELECT count(*) FROM pg_stat_activity
+                      WHERE backend_type = 'client backend'
+                        AND NOT datname::text = ANY($1::text[]))",
+            &[&databases],
+        )
+        .await?;
+    let admits: i64 = row.get(0);
+    let share = usize::try_from(admits)
+        .map_err(|e| anyhow!("the server admits {admits} more connections: {e}"))?
+        / databases.len();
+    if share == 0 {
+        return Err(anyhow!(
+            "the server admits {admits} more connections: not one for each of {} nodes",
+            databases.len()
+        ));
+    }
+    Ok(share.min(POOL_MAX_SIZE))
+}
+
 // ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
 
 /// Keep `value` for `(namespace, key)`, after anything already held there,

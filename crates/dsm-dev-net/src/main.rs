@@ -278,8 +278,23 @@ fn ca_cert(dir: &Path, m: &Member) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
 }
 
+/// The connections each node's pool may hold on the one server `pg` names,
+/// which every node of the set shares (`db::pool_share`).
+async fn pool_share(pg: &str, members: &[Member]) -> Result<usize, String> {
+    let admin = admin_client(pg).await?;
+    let databases: Vec<String> = members.iter().map(|m| m.database.clone()).collect();
+    db::pool_share(&admin, &databases)
+        .await
+        .map_err(|e| format!("each node's share of the server's connections: {e:#}"))
+}
+
 /// Each node's config: the binary's own, naming every member of the set.
-fn write_node_configs(dir: &Path, pg: &str, members: &[Member]) -> Result<(), String> {
+fn write_node_configs(
+    dir: &Path,
+    pg: &str,
+    members: &[Member],
+    connections: usize,
+) -> Result<(), String> {
     let mut set = String::new();
     for m in members {
         writeln!(
@@ -299,7 +314,9 @@ fn write_node_configs(dir: &Path, pg: &str, members: &[Member]) -> Result<(), St
              [node]\nid = \"{id}\"\n\n\
              [network]\nlisten_addr = \"{host}\"\nport = {port}\n\n\
              [tls]\ncert_path = \"{cert}\"\nkey_path = \"{key}\"\n\n\
-             [database]\nurl = \"{url}\"\n{set}",
+             # The set's nodes share one Postgres server: each holds its share of\n\
+             # the connections that server admits.\n\
+             [database]\nurl = \"{url}\"\nmax_connections = {connections}\n{set}",
             id = m.id,
             host = m.host,
             port = m.port,
@@ -361,7 +378,8 @@ async fn run(command: Command) -> Result<(), String> {
             let members = members(first_port)?;
             prepare_databases(&pg, &members).await?;
             write_tls(&dir, &members)?;
-            write_node_configs(&dir, &pg, &members)?;
+            let connections = pool_share(&pg, &members).await?;
+            write_node_configs(&dir, &pg, &members, connections)?;
             write_client_config(&dir, &members)?;
             for m in &members {
                 println!(
@@ -372,6 +390,9 @@ async fn run(command: Command) -> Result<(), String> {
                     encode_base32_crockford(&m.incarnation)
                 );
             }
+            println!(
+                "[dev-net] each node holds {connections} connections to the server they share"
+            );
             println!(
                 "[dev-net] client config: {}",
                 dir.join("dsm_env_config.toml").display()
