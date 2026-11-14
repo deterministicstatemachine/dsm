@@ -16,6 +16,8 @@ name: Release
 #   • frontend bundle (built React assets, tar.gz)
 #   • SBOM bundle (CycloneDX 1.5, with TLA validation evidence)
 #   • GitHub Release entry with release notes
+#   • the TypeScript and Python clients, the same two files the developer
+#     archive holds: staged on npm for a maintainer to approve, published on PyPI
 #
 # Out of scope (separate workflows, tracked separately if/when needed):
 #   • Android NDK cross-builds (`.so` files for aarch64-linux-android,
@@ -40,6 +42,9 @@ on:
 # Every job reads the repository and nothing more, except `publish`, the one
 # job that creates the GitHub Release: no build or test step — which runs
 # build scripts and tests from every dependency — holds a token that writes.
+# `stage-npm` and `publish-pypi` add `id-token: write` and nothing else:
+# each registry trusts this workflow file in this repository, so neither job
+# holds a stored secret.
 permissions:
   contents: read
 
@@ -573,3 +578,119 @@ jobs:
             dist/dsm-sbom-*.tar.gz
             dist/dsm-sbom-*.tar.gz.sha256
             dist/SHA256SUMS
+
+  # --------------------------------------------------------------------------
+  # The clients on npm and PyPI. Each job takes its file out of this release's
+  # developer archive, after the archive is checked against SHA256SUMS, so what
+  # `npm install dsm-app-client` and `pip install dsm-app-client` fetch is byte
+  # for byte what install.sh unpacks. They run only once the GitHub Release is
+  # published.
+  #
+  # npm is staged, never published from here: this workflow's trust on npm
+  # allows `npm stage publish` and nothing else, so the version waits on npm
+  # until a maintainer approves it there with their second factor. PyPI has no
+  # such step and is published.
+  #
+  # A registry takes a version once and never again. A version it already
+  # holds, published or waiting, is left as it is, so a tag pushed a second
+  # time sends nothing here and does not fail.
+  #
+  # Neither job holds a stored secret: npm and PyPI each trust this workflow
+  # file in this repository (trusted publishing). PyPI's publisher names the
+  # `pypi` environment, so that job runs in it.
+  # --------------------------------------------------------------------------
+  stage-npm:
+    name: Stage the TypeScript client on npm
+    runs-on: ubuntu-latest
+    needs: [validate-tag, publish]
+    permissions:
+      contents: read
+      id-token: write   # npm trusted publishing
+    steps:
+      - name: Download this release's developer files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: developer-release
+          path: release-files
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # `npm stage publish` needs npm 11.15.0 or later and Node 22.14 or later;
+      # Node 22's own npm is older.
+      - name: An npm that stages
+        run: npm install --global npm@11.15.0
+
+      - name: Take the client out of the checked archive
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          grep -qF "  dsm-developer-$VERSION.tar.gz" release-files/SHA256SUMS
+          (cd release-files && sha256sum --check --ignore-missing SHA256SUMS)
+          tar -xzf "release-files/dsm-developer-$VERSION.tar.gz" -C "$RUNNER_TEMP"
+          test -f "$RUNNER_TEMP/dsm-developer-$VERSION/clients/dsm-app-client-$VERSION.tgz"
+
+      # Every release so far is a beta, and `latest` is what a plain
+      # `npm install dsm-app-client` fetches, so each release takes it. A
+      # staged version keeps the tag it was staged with.
+      #
+      # npm answers a version it already holds, published or waiting, with a
+      # conflict (E409, or "cannot publish over"). That and nothing else is
+      # read as "already there"; every other failure fails the job.
+      - name: Stage
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          held="$(npm view "dsm-app-client@$VERSION" version 2>/dev/null || echo)"
+          if [ "$held" = "$VERSION" ]; then
+            echo "npm already holds dsm-app-client $VERSION; nothing to stage"
+            exit 0
+          fi
+          if npm stage publish "$RUNNER_TEMP/dsm-developer-$VERSION/clients/dsm-app-client-$VERSION.tgz" --access public --tag latest >stage.log 2>&1; then
+            cat stage.log
+            echo "::notice::dsm-app-client $VERSION is staged on npm. Approve it there to publish it."
+            exit 0
+          fi
+          cat stage.log
+          if grep -qE 'E409|cannot publish over' stage.log; then
+            echo "::notice::npm already holds dsm-app-client $VERSION, published or waiting for approval; nothing to stage"
+            exit 0
+          fi
+          exit 1
+
+  publish-pypi:
+    name: Publish the Python client to PyPI
+    runs-on: ubuntu-latest
+    needs: [validate-tag, publish]
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write   # PyPI trusted publishing
+    steps:
+      - name: Download this release's developer files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: developer-release
+          path: release-files
+
+      - name: Take the client out of the checked archive
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          grep -qF "  dsm-developer-$VERSION.tar.gz" release-files/SHA256SUMS
+          (cd release-files && sha256sum --check --ignore-missing SHA256SUMS)
+          tar -xzf "release-files/dsm-developer-$VERSION.tar.gz" -C "$RUNNER_TEMP"
+          mkdir pypi-dist
+          cp "$RUNNER_TEMP/dsm-developer-$VERSION"/clients/dsm_app_client-*-py3-none-any.whl pypi-dist/
+          ls -la pypi-dist
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: pypi-dist
+          skip-existing: true

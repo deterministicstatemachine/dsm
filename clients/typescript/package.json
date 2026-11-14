@@ -1,9 +1,22 @@
 {
   "name": "dsm-app-client",
   "version": "0.1.0-beta.4",
-  "description": "A client for a dsm-app-host's local ingress: an application's own DSM account (DSM Connect, Amendment A11), and the terminal dev wallet",
+  "description": "Plug your app into DSM: your app's own DSM account, wallet connections, payments, proofs of ownership and sign-in, from TypeScript or JavaScript.",
   "license": "MIT OR Apache-2.0",
-  "private": true,
+  "homepage": "https://deterministicstatemachine.github.io/dsm/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deterministicstatemachine/dsm.git",
+    "directory": "clients/typescript"
+  },
+  "keywords": [
+    "dsm",
+    "wallet",
+    "payments",
+    "passwordless",
+    "sign-in",
+    "post-quantum"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
