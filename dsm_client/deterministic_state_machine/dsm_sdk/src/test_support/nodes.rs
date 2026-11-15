@@ -144,54 +144,18 @@ async fn fresh_database(database: &str, connections: usize) -> db::DBPool {
 }
 
 /// The connections each node's pool may hold, when the nodes run on the
-/// databases `databases` names.
-///
-/// A deployed node runs on a Postgres server of its own (the sibling
-/// container in `dsm_storage_node/deploy/docker-compose.node.yml`), which
-/// grants every connection its pool asks for: `db::POOL_MAX_SIZE`. Here every
-/// node of a set runs on the one server `DSM_TEST_DATABASE_URL` names, and
-/// five pools of `POOL_MAX_SIZE` ask it for more than it admits — CI's
-/// Postgres admits 100. Past its limit the server refuses the connection, the
-/// node answers the request it was serving with a 500, and a reader then holds
-/// less evidence than the cell does: a claim final at every seat reads as not
-/// final yet. Each node takes an equal share of what the server admits beyond
-/// the connections other clients hold, and never more than a deployed node's
-/// pool.
+/// databases `databases` names: every node of a set runs on the one server
+/// `DSM_TEST_DATABASE_URL` names, so each takes its share of what that server
+/// admits ([`db::pool_share`]).
 async fn pool_share(databases: &[String]) -> usize {
     let admin = match db::create_pool(&server_url(), 1) {
         Ok(pool) => pool,
         Err(e) => panic!("admin pool: {e}"),
     };
-    let client = match admin.get().await {
-        Ok(client) => client,
-        Err(e) => panic!("admin connection: {e}"),
-    };
-    let row = match client
-        .query_one(
-            "SELECT current_setting('max_connections')::bigint
-                  - (SELECT COALESCE(SUM(setting::bigint), 0)::bigint FROM pg_settings
-                      WHERE name IN ('superuser_reserved_connections', 'reserved_connections'))
-                  - (SELECT count(*) FROM pg_stat_activity
-                      WHERE backend_type = 'client backend'
-                        AND NOT datname::text = ANY($1::text[]))",
-            &[&databases],
-        )
-        .await
-    {
-        Ok(row) => row,
-        Err(e) => panic!("the connections the server admits: {e}"),
-    };
-    let admits: i64 = row.get(0);
-    let share = match usize::try_from(admits) {
-        Ok(admits) => admits / databases.len(),
-        Err(e) => panic!("the server admits {admits} more connections: {e}"),
-    };
-    assert!(
-        share > 0,
-        "the server admits {admits} more connections: not one for each of {} nodes",
-        databases.len()
-    );
-    share.min(db::POOL_MAX_SIZE)
+    match db::pool_share(&admin, databases).await {
+        Ok(share) => share,
+        Err(e) => panic!("each node's share of the server's connections: {e:#}"),
+    }
 }
 
 /// Put the member's pinned incarnation in the node's register before the node

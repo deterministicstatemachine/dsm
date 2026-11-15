@@ -99,8 +99,20 @@
     "webpack-dev-server": "^5.2.7"
   },
   "overrides": {
-    "minimatch": ">=10.0.0",
-    "test-exclude": "^8.0.0",
+    "minimatch": ">=11.0.1",
+    "@jest/reporters": {
+      "glob": ">=14.0.2"
+    },
+    "jest-config": {
+      "glob": ">=14.0.2"
+    },
+    "jest-runtime": {
+      "glob": ">=14.0.2"
+    },
+    "test-exclude": {
+      ".": "^8.0.0",
+      "glob": ">=14.0.2"
+    },
     "undici": ">=7.10.0",
     "serialize-javascript": ">=7.0.5",
     "lodash": ">=4.17.22",

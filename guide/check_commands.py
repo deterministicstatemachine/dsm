@@ -23,8 +23,10 @@ For each ```bash block in guide/src/*.md:
     make targets run, so each is read as its make twin (`dsm-app send $S ERA
     0.05` is `make app ARGS="send $S ERA 0.05"`, `dsm-dev-wallet up` is `make
     dev-wallet`) and held to everything above;
-  - every install.sh URL and client package path names the version
-    scripts/install.sh installs.
+  - every install.sh URL, client package path and client version asked of
+    npm or PyPI (`dsm-app-client@...`, `dsm-app-client==...`) names the
+    version scripts/install.sh installs. The clients' own READMEs, which are
+    their pages on npm and PyPI, are held to this too.
 
 And the guide's whole programs (guide/examples) are valid as written:
 `node --check` for the JavaScript, a compile for the Python.
@@ -110,9 +112,15 @@ def main() -> int:
 
     problems: list[str] = []
     blocks = 0
-    pages = sorted((ROOT / "guide/src").glob("*.md")) + [ROOT / "BUILDING_APPS.md", ROOT / "QUICKSTART.md"]
+    pages = sorted((ROOT / "guide/src").glob("*.md")) + [
+        ROOT / "BUILDING_APPS.md",
+        ROOT / "QUICKSTART.md",
+        ROOT / "clients/typescript/README.md",
+        ROOT / "clients/python/README.md",
+    ]
     for page in pages:
         text = page.read_text()
+        shown = str(page.relative_to(ROOT))
         for named in re.findall(r"releases/download/v([^/\s]+)/install\.sh", text):
             if named != version:
                 problems.append(f"{page.name}: install.sh of v{named}, but scripts/install.sh installs {version}")
@@ -122,6 +130,12 @@ def main() -> int:
         for named in re.findall(r"dsm_app_client-(\d[^\s/-]*)-py3", text):
             if named != py_version:
                 problems.append(f"{page.name}: dsm_app_client-{named}, but the release's wheel is {py_version}")
+        for named in re.findall(r"dsm-app-client@(\d[0-9A-Za-z.+-]*[0-9A-Za-z])", text):
+            if named != version:
+                problems.append(f"{shown}: dsm-app-client@{named} asked of npm, but the release is {version}")
+        for named in re.findall(r"dsm-app-client==(\d[0-9A-Za-z.+-]*[0-9A-Za-z])", text):
+            if named != py_version:
+                problems.append(f"{shown}: dsm-app-client=={named} asked of PyPI, but the release's wheel is {py_version}")
         if page.parent.name != "src":
             continue
         for block in re.findall(r"```bash\n(.*?)```", text, re.S):

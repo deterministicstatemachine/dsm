@@ -90,6 +90,8 @@ npm init -y
 npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.0-beta.4.tgz
 ```
 
+The same package is on npm, for a machine `install.sh` has not run on, such as the server your app deploys to: `npm install dsm-app-client@0.1.0-beta.4`.
+
 Then the starter app, from your app's folder. It keeps running: open http://127.0.0.1:3000, and use a second terminal (in the same folder, with the same `PATH`) for the commands below.
 
 ```bash
@@ -176,7 +178,7 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.0b4-py3-none-any.whl
 ```
 
-From a clone, `pip install -e clients/python` instead.
+The same package is on PyPI, for a machine `install.sh` has not run on: `pip install dsm-app-client==0.1.0b4`. From a clone, `pip install -e clients/python` instead.
 
 ```python
 from dsm_app_client import local_app, grant, ask
