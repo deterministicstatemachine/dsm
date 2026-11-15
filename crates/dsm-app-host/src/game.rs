@@ -6,8 +6,11 @@
 //! - `POST /ingress`: an `IngressRequest`, answered with the SDK's
 //!   `IngressResponse`; an invoke is recorded.
 //! - `POST /ingress/quiet`: the same, never recorded (what the application
-//!   polls).
+//!   reads with).
 //! - `GET /activity/{after}`: the record after `after` (`AppHostActivityV1`).
+//! - `GET /activity/{after}/wait`: the same, held until the record has an
+//!   entry after `after` or the hold runs out, so the application waits on
+//!   one request instead of asking again and again.
 //!
 //! On `connect.app.offer` the host names its own relay: the endpoint and the
 //! certificate pin are its own, never the application's to choose.
@@ -39,6 +42,8 @@ pub struct State {
     pub sdk: Sdk,
     pub record: Arc<Record>,
     pub requests_changed: Arc<tokio::sync::Notify>,
+    /// How long a held read of the record waits for a new entry.
+    pub activity_hold: std::time::Duration,
     pub relay_endpoint: String,
     pub relay_pin: [u8; 32],
 }
@@ -147,6 +152,7 @@ pub fn router(state: State, caller: Caller) -> Router {
         .route("/ingress", post(recorded))
         .route("/ingress/quiet", post(quiet))
         .route("/activity/{after}", get(activity))
+        .route("/activity/{after}/wait", get(held_activity))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
             Arc::new(caller),
@@ -236,6 +242,15 @@ async fn activity(Extract(state): Extract<State>, Path(after): Path<u64>) -> Res
     }
 }
 
+/// The record after `after`, answered once it holds an entry after `after`,
+/// or empty when the hold runs out: the caller asks again from where it is.
+async fn held_activity(Extract(state): Extract<State>, Path(after): Path<u64>) -> Response {
+    match state.record.newer_than(after, state.activity_hold).await {
+        Ok(()) => activity(Extract(state), Path(after)).await,
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,18 +265,90 @@ mod tests {
     /// The ingress on `127.0.0.1:8787`, and the receiving end of its SDK
     /// queue: a call that gets past the guard lands there.
     fn ingress() -> (Router, Receiver<crate::dispatch::Job>) {
+        let (app, queue, _record) = ingress_and_record();
+        (app, queue)
+    }
+
+    /// The same ingress, and the record it reads.
+    fn ingress_and_record() -> (Router, Receiver<crate::dispatch::Job>, Arc<Record>) {
         let (sdk, queue) = Sdk::with_queue(4);
+        let record = Arc::new(Record::new(crate::identity::Account {
+            device_id: [0x11; 32],
+        }));
         let state = State {
             sdk,
-            record: Arc::new(Record::new(crate::identity::Account {
-                device_id: [0x11; 32],
-            })),
+            record: record.clone(),
             requests_changed: Arc::new(tokio::sync::Notify::new()),
+            activity_hold: Duration::from_secs(2),
             relay_endpoint: "https://127.0.0.1:8443".into(),
             relay_pin: [0x22; 32],
         };
         let bind = std::net::SocketAddr::from(([127, 0, 0, 1], 8787));
-        (router(state, Caller::new(SECRET, bind)), queue)
+        (router(state, Caller::new(SECRET, bind)), queue, record)
+    }
+
+    /// A read of the record after `after` at `path`, as the application
+    /// sends it, and the feed it is answered with.
+    async fn feed(app: Router, path: String) -> Result<pb::AppHostActivityV1, String> {
+        let request = Request::get(path)
+            .header("host", "127.0.0.1:8787")
+            .header("authorization", format!("Bearer {SECRET}"))
+            .body(Body::empty())
+            .map_err(|e| format!("request: {e}"))?;
+        let answer = app
+            .oneshot(request)
+            .await
+            .map_err(|e| format!("the ingress answers: {e}"))?;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(answer.into_body(), 1 << 20)
+            .await
+            .map_err(|e| format!("the feed: {e}"))?;
+        pb::AppHostActivityV1::decode(bytes.as_ref()).map_err(|e| format!("the feed: {e}"))
+    }
+
+    /// A held read of the record is answered when an entry is added, with
+    /// that entry, and not before. One with nothing to wait for is answered
+    /// at once; one nothing is added for is answered empty when its hold
+    /// (two seconds here) runs out, naming where the record stands.
+    #[test]
+    fn a_held_read_of_the_record_is_answered_by_the_next_entry() -> Result<(), String> {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("the runtime: {e}"))?
+            .block_on(async {
+                crate::activity::test_store()?;
+                let (app, _queue, record) = ingress_and_record();
+                let held = tokio::spawn(feed(app.clone(), "/activity/0/wait".into()));
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                assert!(!held.is_finished(), "a held read waits for an entry");
+                record.relay(
+                    "relay: answer",
+                    "the wallet answered request #1".into(),
+                    Ok("a signed notification".into()),
+                );
+                let woken = tokio::time::timeout(Duration::from_secs(1), held)
+                    .await
+                    .map_err(|e| format!("the entry did not wake the held read: {e}"))?
+                    .map_err(|e| format!("task: {e}"))??;
+                let seqs: Vec<u64> = woken.entries.iter().map(|e| e.seq).collect();
+                assert_eq!((seqs, woken.next), (vec![1], 2));
+
+                // The entry is already there for a reader still at 0.
+                let at_once = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    feed(app.clone(), "/activity/0/wait".into()),
+                )
+                .await
+                .map_err(|e| format!("a read with an entry waiting was held: {e}"))??;
+                assert_eq!(at_once.entries.len(), 1);
+
+                let asked = std::time::Instant::now();
+                let empty = feed(app.clone(), "/activity/1/wait".into()).await?;
+                assert!(asked.elapsed() >= Duration::from_millis(1900));
+                assert_eq!((empty.entries.len(), empty.next), (0, 2));
+                Ok(())
+            })
     }
 
     /// An invoke of `wallet.sendSmart`, what a hostile page would send.

@@ -56,8 +56,8 @@ crates/dsm-anchor-core/tests/integration.rs	167	dsm_sphincs::CryptoFailure::Empt
 crates/dsm-anchor-core/tests/integration.rs	168	| dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
 crates/dsm-anchor-core/tests/integration.rs	170	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
 crates/dsm-anchor-core/tests/integration.rs	901	dsm_sphincs::signature_bytes(dsm_sphincs::SphincsVariant::SPX256f)
-crates/dsm-app-host/src/activity.rs	483	signature_bytes: dsm::crypto::sphincs::signature_bytes(
-crates/dsm-app-host/src/activity.rs	484	dsm::crypto::sphincs::SphincsVariant::SPX256f,
+crates/dsm-app-host/src/activity.rs	503	signature_bytes: dsm::crypto::sphincs::signature_bytes(
+crates/dsm-app-host/src/activity.rs	504	dsm::crypto::sphincs::SphincsVariant::SPX256f,
 crates/dsm-receipt-service/src/lib.rs	126	match dsm::crypto::sphincs::sphincs_verify(
 crates/dsm-receipt-service/tests/no_address_in_logs.rs	119	let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair()
 crates/dsm-receipt-service/tests/no_address_in_logs.rs	133	request.signature = dsm::crypto::sphincs::sphincs_sign(&sk, &signing_digest(&request))

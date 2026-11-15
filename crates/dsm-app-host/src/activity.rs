@@ -73,6 +73,9 @@ fn position(s: &Snapshot) -> Option<u64> {
 pub struct Record {
     account: Account,
     entries: Mutex<(u64, VecDeque<pb::AppHostActivityEntryV1>)>,
+    /// The newest entry's number, 0 before the first: what a held read
+    /// waits on ([`Record::newer_than`]).
+    newest: tokio::sync::watch::Sender<u64>,
 }
 
 fn short(bytes: &[u8]) -> String {
@@ -367,6 +370,20 @@ impl Record {
         Self {
             account,
             entries: Mutex::new((1, VecDeque::new())),
+            newest: tokio::sync::watch::Sender::new(0),
+        }
+    }
+
+    /// Wait until the record holds an entry after `after`, or `bound` has
+    /// passed: a transport bound, as the relay's held read has. Returns at
+    /// once when such an entry is already there.
+    pub async fn newer_than(&self, after: u64, bound: std::time::Duration) -> Result<(), String> {
+        let mut newest = self.newest.subscribe();
+        tokio::select! {
+            seen = newest.wait_for(|seq| *seq > after) => seen
+                .map(|seq| log::debug!("[host] a held read of the record sees entry {}", *seq))
+                .map_err(|closed| format!("the activity record's signal: {closed}")),
+            () = tokio::time::sleep(bound) => Ok(()),
         }
     }
 
@@ -455,11 +472,14 @@ impl Record {
             Ok(mut guard) => {
                 let (next, entries) = &mut *guard;
                 entry.seq = *next;
+                let entry_seq = entry.seq;
                 *next += 1;
                 entries.push_back(entry);
                 while entries.len() > KEPT {
                     entries.pop_front();
                 }
+                // Told while the entry is held, so a reader woken by it finds it.
+                self.newest.send_replace(entry_seq);
             }
             Err(poisoned) => log::error!("[host] the activity record is poisoned: {poisoned}"),
         }
@@ -485,6 +505,28 @@ impl Record {
             ) as u32,
         })
     }
+}
+
+/// A directory of this test process's own for the SDK's store and the
+/// network's config, set once: recording an entry reads this account's
+/// state, and reading the record names the pinned storage set.
+#[cfg(test)]
+pub(crate) fn test_store() -> Result<(), String> {
+    static DIR: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("dsm-app-host-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        // The beta network's config this binary carries: the record names
+        // the pinned storage set it reads from.
+        let config = dir.join(crate::BETA_ENV_CONFIG_FILE);
+        std::fs::write(&config, crate::BETA_ENV_CONFIG)
+            .map_err(|e| format!("{}: {e}", config.display()))?;
+        dsm_sdk::network::set_env_config_path(config.display().to_string());
+        dsm_sdk::storage_utils::set_storage_base_dir(dir)
+            .map(|_first| ())
+            .map_err(|e| format!("the SDK's storage directory: {e}"))
+    })
+    .clone()
 }
 
 #[cfg(test)]

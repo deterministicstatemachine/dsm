@@ -16,7 +16,7 @@ What an offer asks the player to let your app do without asking again:
 
 `ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that move nothing run without asking, up to the offer's `freeRequests` (64 unless the offer says otherwise); past that, each waits for the player. A payment inside the grant's caps keeps running past that count until one fails; from then on, every request waits for the player.
 
-The wallet answers a connection's requests in order: a request that waits for the player holds up every later one on that connection. On the beta network a request settles in a few seconds to about half a minute; `wait` (in the clients) polls until it has.
+The wallet answers a connection's requests in order: a request that waits for the player holds up every later one on that connection. On the beta network a request settles in a few seconds to about half a minute; `wait` (in the clients) holds one read on the host's record until it has: the host records the wallet's answer, then establishes the fact itself and records that, and each entry ends the read.
 
 ## Outcomes and facts
 
@@ -124,7 +124,7 @@ The routes your app's account uses:
 
 And a wallet's: `connect.preview` (query), `connect.approve`, `connect.sync`, `connect.list` (query), `connect.pending` (query), `connect.respond`, `connect.log` (query), `connect.disconnect`.
 
-`GET /activity/{after}` returns `AppHostActivityV1`: your account's identity, and a record of each call and each wallet's visit to the relay. Every plain result keeps the wire's message as `raw`, and `pb` exports every generated message, for anything the plain fields leave out.
+`GET /activity/{after}` returns `AppHostActivityV1`: your account's identity, and a record of each call and each wallet's visit to the relay. `GET /activity/{after}/wait` returns the same once the record has an entry after `after`, or empty after twenty seconds. Every plain result keeps the wire's message as `raw`, and `pb` exports every generated message, for anything the plain fields leave out.
 
 ## Offline
 

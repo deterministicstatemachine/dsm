@@ -317,6 +317,9 @@ def _vault_of(v: pb.SofiOwnedVaultV1) -> Vault:
 Decision = Literal["A", "B", "void"]
 _DECISIONS = {"A": b"a-wins", "B": b"b-wins", "void": b"void"}
 
+# A read of the record after its last possible entry: no entries, only where the record stands.
+NO_ENTRY_AFTER = 0xFFFF_FFFF_FFFF_FFFF
+
 
 class AppAccount(Account):
     """Your application's own account."""
@@ -367,8 +370,15 @@ class AppAccount(Account):
         return result_of(ref, connect_reply(route, self.ingress.call("invoke", route, request, quiet=True), "status"))
 
     def wait(self, ref: RequestRef, until: Literal["fact", "answered"] = "fact", timeout: float = 240.0) -> Result:
-        """Wait for a request to settle: a fact, a declined or failed answer, or (until="answered") any answer."""
+        """Wait for a request to settle: a fact, a declined or failed answer, or (until="answered") any answer.
+
+        Nothing is asked again and again: the host records the wallet's answer and the fact it
+        then establishes itself, and this waits on the host's record for the next entry.
+        """
         deadline = time.monotonic() + timeout
+        # Where the record stands before the first look, so an entry added between a look and
+        # the wait that follows it ends that wait at once.
+        seen = self.ingress.activity(NO_ENTRY_AFTER).next - 1
         while True:
             r = self.result(ref)
             if until == "answered":
@@ -377,9 +387,12 @@ class AppAccount(Account):
                 done = r.fact != "none" or r.outcome in ("declined", "failed") or (r.answered and r.price is not None)
             if done:
                 return r
-            if time.monotonic() > deadline:
+            left = deadline - time.monotonic()
+            if left <= 0:
                 raise TimeoutError(f"request {ref.seq} did not settle: {r.outcome}, {r.reason or r.detail}")
-            time.sleep(0.5)
+            feed = self.ingress.next_activity(seen, left)
+            if feed is not None:
+                seen = feed.next - 1
 
     def issue(
         self,

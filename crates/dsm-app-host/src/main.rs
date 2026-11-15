@@ -16,10 +16,15 @@
 //!   transport, never evidence.
 //!
 //! The host decides nothing. Every route is the SDK's own; every check a
-//! connection needs is in the SDK's `connect` module.
+//! connection needs is in the SDK's `connect` module. It acts on its own in
+//! one place: once a wallet has answered a request, it calls the SDK's
+//! `connect.app.status` for that request until the route settles it, and
+//! records what the route said (`established`), so an application waits on
+//! the record instead of asking again and again.
 
 mod activity;
 mod dispatch;
+mod established;
 mod game;
 mod identity;
 mod relay;
@@ -232,6 +237,10 @@ fn main() -> Result<(), String> {
 const SDK_WORKERS: usize = 16;
 const SDK_QUEUED: usize = 256;
 
+/// How long a held read of the record waits for a new entry before it is
+/// answered empty: a transport bound, the length of the relay's own hold.
+const ACTIVITY_HOLD: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// The file this launch's ingress secret is written to, in the secret's own
 /// directory (`--ingress-secret-dir`), readable by the operator
 /// alone: the application reads it and sends it with every call.
@@ -300,10 +309,16 @@ async fn serve(
         sdk: sdk.clone(),
         record: record.clone(),
         requests_changed: requests_changed.clone(),
+        activity_hold: ACTIVITY_HOLD,
         relay_endpoint: args.relay_endpoint.clone(),
         relay_pin: relay_tls.pin,
     };
     let relay_state = relay::State {
+        establishing: established::Establishing::new(
+            sdk.clone(),
+            record.clone(),
+            established::Pace::DEPLOYED,
+        ),
         sdk,
         record,
         requests_changed,

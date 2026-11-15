@@ -71,8 +71,8 @@ pub struct Done {
 }
 
 pub(crate) struct Job {
-    call: Call,
-    reply: tokio::sync::oneshot::Sender<Done>,
+    pub(crate) call: Call,
+    pub(crate) reply: tokio::sync::oneshot::Sender<Done>,
 }
 
 /// The worker pool in front of the SDK.
