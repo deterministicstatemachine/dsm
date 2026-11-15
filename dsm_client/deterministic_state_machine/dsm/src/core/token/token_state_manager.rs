@@ -99,8 +99,186 @@ pub fn derive_canonical_balance_key(
 pub use crate::core::token::era_policy::era_policy_commit;
 
 /// The tickers of the tokens Core builds in. No token a device creates or
-/// adopts may carry one, in any letter case (SA-104, SA-145).
+/// adopts may carry one, in any letter case, nor a ticker a person reads as
+/// one (SA-104, SA-145).
 pub const BUILTIN_TICKERS: [&str; 2] = ["ERA", "dBTC"];
+
+/// The first character of `ticker` a person does not see: a format or
+/// zero-width character, a variation selector, a combining mark or a tag.
+/// A ticker is read by a person, so none belongs in one.
+pub fn ticker_invisible_char(ticker: &str) -> Option<char> {
+    ticker.chars().find(|c| {
+        matches!(
+            *c as u32,
+            0x00AD
+                | 0x034F
+                | 0x061C
+                | 0x115F..=0x1160
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180F
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x206F
+                | 0x3164
+                | 0xFE00..=0xFE0F
+                | 0xFEFF
+                | 0xFFA0
+                | 0xFFF0..=0xFFF8
+                | 0x0300..=0x036F
+                | 0x1AB0..=0x1AFF
+                | 0x1DC0..=0x1DFF
+                | 0x20D0..=0x20FF
+                | 0xFE20..=0xFE2F
+                | 0x1D173..=0x1D17A
+                | 0xE0000..=0xE0FFF
+        ) || c.is_control()
+            || c.is_whitespace()
+    })
+}
+
+/// The ASCII letter or digit a person reads `c` as, when `c` is drawn like
+/// one: full-width and mathematical forms, and the Cyrillic and Greek letters
+/// that share a Latin letter's shape. Any other character reads as itself.
+fn reads_as_ascii(c: char) -> char {
+    let code = c as u32;
+    let drawn_as = if (0xFF01..=0xFF5E).contains(&code) {
+        // Full-width forms of the printable ASCII range.
+        Some(code - 0xFEE0)
+    } else if (0x1D400..=0x1D6A3).contains(&code) {
+        // Mathematical alphanumeric letters: 52 letters a style, A to Z then
+        // a to z.
+        let at = (code - 0x1D400) % 52;
+        Some(if at < 26 {
+            u32::from(b'A') + at
+        } else {
+            u32::from(b'a') + at - 26
+        })
+    } else if (0x1D7CE..=0x1D7FF).contains(&code) {
+        // Mathematical digits: 10 digits a style.
+        Some(u32::from(b'0') + (code - 0x1D7CE) % 10)
+    } else {
+        None
+    };
+    if let Some(ascii) = drawn_as.and_then(char::from_u32) {
+        return ascii;
+    }
+    match c {
+        // Cyrillic capitals.
+        '\u{0410}' => 'A',
+        '\u{0412}' => 'B',
+        '\u{0415}' => 'E',
+        '\u{041A}' => 'K',
+        '\u{041C}' => 'M',
+        '\u{041D}' => 'H',
+        '\u{041E}' => 'O',
+        '\u{0420}' => 'P',
+        '\u{0421}' => 'C',
+        '\u{0422}' => 'T',
+        '\u{0423}' => 'Y',
+        '\u{0425}' => 'X',
+        '\u{0405}' => 'S',
+        '\u{0406}' => 'I',
+        '\u{0408}' => 'J',
+        '\u{04C0}' => 'I',
+        '\u{051A}' => 'Q',
+        '\u{051C}' => 'W',
+        '\u{0417}' => '3',
+        '\u{0400}' => 'E',
+        '\u{0401}' => 'E',
+        // Cyrillic small letters.
+        '\u{0430}' => 'a',
+        '\u{0435}' => 'e',
+        '\u{043E}' => 'o',
+        '\u{0440}' => 'p',
+        '\u{0441}' => 'c',
+        '\u{0443}' => 'y',
+        '\u{0445}' => 'x',
+        '\u{0455}' => 's',
+        '\u{0456}' => 'i',
+        '\u{0458}' => 'j',
+        '\u{04BB}' => 'h',
+        '\u{0501}' => 'd',
+        '\u{051B}' => 'q',
+        '\u{051D}' => 'w',
+        '\u{0432}' => 'b',
+        '\u{043A}' => 'k',
+        '\u{043C}' => 'm',
+        '\u{043D}' => 'h',
+        '\u{0442}' => 't',
+        // Greek capitals.
+        '\u{0391}' => 'A',
+        '\u{0392}' => 'B',
+        '\u{0395}' => 'E',
+        '\u{0396}' => 'Z',
+        '\u{0397}' => 'H',
+        '\u{0399}' => 'I',
+        '\u{039A}' => 'K',
+        '\u{039C}' => 'M',
+        '\u{039D}' => 'N',
+        '\u{039F}' => 'O',
+        '\u{03A1}' => 'P',
+        '\u{03A4}' => 'T',
+        '\u{03A5}' => 'Y',
+        '\u{03A7}' => 'X',
+        '\u{03F9}' => 'C',
+        '\u{037F}' => 'J',
+        // Greek small letters.
+        '\u{03B1}' => 'a',
+        '\u{03BF}' => 'o',
+        '\u{03BD}' => 'v',
+        '\u{03C1}' => 'p',
+        '\u{03C5}' => 'u',
+        '\u{03B9}' => 'i',
+        '\u{03BA}' => 'k',
+        '\u{03C7}' => 'x',
+        '\u{03F2}' => 'c',
+        '\u{03F3}' => 'j',
+        // Latin letters drawn like others.
+        '\u{0131}' => 'i',
+        '\u{01C0}' => 'l',
+        '\u{2160}' => 'I',
+        '\u{2164}' => 'V',
+        '\u{2169}' => 'X',
+        '\u{216C}' => 'L',
+        '\u{216D}' => 'C',
+        '\u{216E}' => 'D',
+        '\u{216F}' => 'M',
+        '\u{212A}' => 'K',
+        '\u{212B}' => 'A',
+        '\u{2102}' => 'C',
+        '\u{210D}' => 'H',
+        '\u{2115}' => 'N',
+        '\u{2119}' => 'P',
+        '\u{211A}' => 'Q',
+        '\u{211D}' => 'R',
+        '\u{2124}' => 'Z',
+        '\u{212C}' => 'B',
+        '\u{2130}' => 'E',
+        '\u{2131}' => 'F',
+        '\u{210B}' => 'H',
+        '\u{2110}' => 'I',
+        '\u{2112}' => 'L',
+        '\u{2133}' => 'M',
+        '\u{211B}' => 'R',
+        '\u{0BE6}' => '0',
+        other => other,
+    }
+}
+
+/// The built-in ticker a person reads `ticker` as, letter case aside: each
+/// character as the ASCII letter or digit it is drawn like, the characters a
+/// person does not see left out. `None` when it reads as none of them.
+pub fn builtin_ticker_read_in(ticker: &str) -> Option<&'static str> {
+    let read: String = ticker
+        .chars()
+        .filter(|c| ticker_invisible_char(&c.to_string()).is_none())
+        .map(reads_as_ascii)
+        .collect();
+    BUILTIN_TICKERS
+        .iter()
+        .find(|builtin| builtin.eq_ignore_ascii_case(&read))
+        .copied()
+}
 
 /// Deterministic policy_commit lookup for builtin token types.
 /// Used by state machine core to apply token operations deterministically.
@@ -158,7 +336,52 @@ pub fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], DsmError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_canonical_balance_key, resolve_policy_commit};
+    use super::{
+        builtin_ticker_read_in, derive_canonical_balance_key, resolve_policy_commit,
+        ticker_invisible_char,
+    };
+
+    /// A ticker a person reads as a built-in one is read as it (SA-104,
+    /// SA-145): look-alike Cyrillic, Greek, full-width and mathematical
+    /// letters, in any case, with invisible characters left out. Tickers that
+    /// only share letters with one, or differ by a letter a person sees, are
+    /// not.
+    #[test]
+    fn a_ticker_drawn_like_a_builtin_reads_as_it() {
+        for read_as_era in [
+            "ERA",
+            "era",
+            "\u{0415}RA",
+            "ER\u{0410}",
+            "\u{0395}RA",
+            "\u{0435}r\u{0430}",
+            "\u{FF25}\u{FF32}\u{FF21}",
+            "\u{1D404}\u{1D411}\u{1D400}",
+            "ERA\u{200B}",
+            "E\u{200D}RA",
+        ] {
+            assert_eq!(
+                builtin_ticker_read_in(read_as_era),
+                Some("ERA"),
+                "{read_as_era:?} reads as ERA"
+            );
+        }
+        assert_eq!(builtin_ticker_read_in("dBTC"), Some("dBTC"));
+        assert_eq!(builtin_ticker_read_in("\u{0501}BTC"), Some("dBTC"));
+        for other in ["ERAS", "ERB", "GOLD", "\u{0416}RA", "E R"] {
+            assert_eq!(builtin_ticker_read_in(other), None, "{other:?} is no built-in");
+        }
+    }
+
+    /// A character a person does not see is named; one they see is not.
+    #[test]
+    fn an_invisible_character_in_a_ticker_is_named() {
+        assert_eq!(ticker_invisible_char("ERA\u{200B}"), Some('\u{200B}'));
+        assert_eq!(ticker_invisible_char("E\u{FEFF}X"), Some('\u{FEFF}'));
+        assert_eq!(ticker_invisible_char("E\u{0301}X"), Some('\u{0301}'));
+        assert_eq!(ticker_invisible_char("GOLD"), None);
+        assert_eq!(ticker_invisible_char("\u{0415}RA"), None);
+    }
 
     /// The built-in commitments, pinned when the SDK's copy of this lookup was
     /// deleted (§6.118): ERA's, derived from its committed policy bytes, and
