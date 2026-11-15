@@ -422,6 +422,9 @@ function vaultOf(v: SofiOwnedVaultV1): Vault {
 /** Who a match pays: side A, side B, or nobody (each stake back to its owner). */
 export type Decision = "A" | "B" | "void";
 
+/** A read of the record after its last possible entry: no entries, only where the record stands. */
+const NO_ENTRY_AFTER = 0xffff_ffff_ffff_ffffn;
+
 const DECISIONS: Record<Decision, string> = { A: "a-wins", B: "b-wins", void: "void" };
 
 /** Your application's own account. */
@@ -485,9 +488,16 @@ export class AppAccount extends Account {
    * Wait for a request to settle: a fact established, a declined or failed
    * answer, or (with `until: "answered"`) any answer, a held request included.
    * Throws after `timeoutMs` (default four minutes).
+   *
+   * Nothing is asked again and again: the host records the wallet's answer
+   * and the fact it then establishes itself, and this waits on the host's
+   * record for the next entry.
    */
   async wait(ref: RequestRef, options: { until?: "fact" | "answered"; timeoutMs?: number } = {}): Promise<Result> {
     const deadline = Date.now() + (options.timeoutMs ?? 240_000);
+    // Where the record stands before the first look, so an entry added
+    // between a look and the wait that follows it ends that wait at once.
+    let seen = (await this.ingress.activity(NO_ENTRY_AFTER)).next - 1n;
     for (;;) {
       const r = await this.result(ref);
       const done =
@@ -495,10 +505,12 @@ export class AppAccount extends Account {
           ? r.answered || r.outcome === "awaiting_approval"
           : r.fact !== "none" || r.outcome === "declined" || r.outcome === "failed" || (r.answered && r.price !== undefined);
       if (done) return r;
-      if (Date.now() > deadline) {
+      const left = deadline - Date.now();
+      if (left <= 0) {
         throw new Error(`request ${ref.seq} did not settle: ${r.outcome}, ${r.reason || r.detail}`);
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const feed = await this.ingress.nextActivity(seen, left);
+      if (feed !== undefined) seen = feed.next - 1n;
     }
   }
 

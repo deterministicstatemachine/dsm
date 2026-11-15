@@ -42,6 +42,8 @@ pub struct State {
     pub sdk: Sdk,
     pub record: Arc<Record>,
     pub requests_changed: Arc<tokio::sync::Notify>,
+    /// What the host establishes itself once a wallet has answered.
+    pub establishing: Arc<crate::established::Establishing>,
 }
 
 /// How many times a request read with nothing to answer waits, and how long
@@ -529,10 +531,10 @@ async fn requests(Extract(state): Extract<State>, body: Bytes) -> Response {
 }
 
 async fn respond(Extract(state): Extract<State>, body: Bytes) -> Response {
-    let summary = match pb::AppResponseV1::decode(body.as_ref())
+    let answer = pb::AppResponseV1::decode(body.as_ref())
         .map_err(|e| e.to_string())
-        .and_then(|r| pb::AppResponseBodyV1::decode(r.body.as_slice()).map_err(|e| e.to_string()))
-    {
+        .and_then(|r| pb::AppResponseBodyV1::decode(r.body.as_slice()).map_err(|e| e.to_string()));
+    let summary = match &answer {
         Ok(b) => format!(
             "the wallet answered request #{}: {:?}{}",
             b.seq,
@@ -556,6 +558,12 @@ async fn respond(Extract(state): Extract<State>, body: Bytes) -> Response {
                 summary,
                 Ok("a signed notification, kept; it establishes nothing about DSM".into()),
             );
+            // The account took the answer: what DSM holds for the request is
+            // the host's to establish now, not the application's to keep
+            // asking after.
+            if let Ok(answer) = &answer {
+                state.establishing.after_answer(answer);
+            }
             protobuf(r.encode_to_vec())
         }
         Ok(other) => refused(
@@ -580,11 +588,17 @@ mod tests {
     /// request's SDK call waits there for as long as the test runs.
     fn state() -> (State, std::sync::mpsc::Receiver<crate::dispatch::Job>) {
         let (sdk, untaken) = Sdk::with_queue(8);
+        let record = Arc::new(Record::new(crate::identity::Account {
+            device_id: [0x11; 32],
+        }));
         let state = State {
+            establishing: crate::established::Establishing::new(
+                sdk.clone(),
+                record.clone(),
+                crate::established::Pace::DEPLOYED,
+            ),
             sdk,
-            record: Arc::new(Record::new(crate::identity::Account {
-                device_id: [0x11; 32],
-            })),
+            record,
             requests_changed: Arc::new(tokio::sync::Notify::new()),
         };
         (state, untaken)

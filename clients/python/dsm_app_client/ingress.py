@@ -3,8 +3,11 @@
 
     POST /ingress          an IngressRequest, answered with an IngressResponse;
                            a call that changes the account is recorded
-    POST /ingress/quiet    the same, never recorded (what you poll)
+    POST /ingress/quiet    the same, never recorded (what you read with)
     GET  /activity/{after} the record after `after` (AppHostActivityV1)
+    GET  /activity/{after}/wait
+                           the same, held until the record has an entry after
+                           `after` or the host's hold runs out (what you wait on)
 
 It listens on a loopback address only. Every request carries the secret the
 host wrote for this launch, as `Authorization: Bearer <secret>`. Keep the
@@ -15,6 +18,7 @@ This module carries bytes. Every rule is the SDK's, in Rust.
 
 from __future__ import annotations
 
+import socket
 import urllib.error
 import urllib.request
 from typing import Literal, Optional
@@ -55,7 +59,7 @@ class Ingress:
             raise ValueError(f"{secret_file} is empty: is the host running?")
         return cls(url, secret)
 
-    def _send(self, path: str, route: str, body: Optional[bytes]) -> bytes:
+    def _send(self, path: str, route: str, body: Optional[bytes], timeout: float = 120) -> bytes:
         headers = {"Authorization": f"Bearer {self._secret}"}
         if body is not None:
             headers["Content-Type"] = "application/x-protobuf"
@@ -66,7 +70,7 @@ class Ingress:
             method="POST" if body is not None else "GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.read()
         except urllib.error.HTTPError as e:
             raise IngressError(route, e.code, e.read().decode("utf-8", "replace")) from e
@@ -109,6 +113,22 @@ class Ingress:
         """The record of what calls and wallets did to this account, after `after`."""
         path = f"/activity/{after}"
         return pb.AppHostActivityV1.FromString(self._send(path, path, None))
+
+    def next_activity(self, after: int, timeout: float = 120) -> Optional[pb.AppHostActivityV1]:
+        """The record after `after`, held by the host until it has an entry after `after`.
+
+        The host answers it empty when its own hold (twenty seconds) runs out:
+        read again from `next - 1`. Answers None when `timeout` seconds pass first.
+        """
+        path = f"/activity/{after}/wait"
+        try:
+            return pb.AppHostActivityV1.FromString(self._send(path, path, None, timeout))
+        except socket.timeout:
+            return None
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, socket.timeout):
+                return None
+            raise
 
 
 def payload(route: str, envelope: pb.Envelope, expected: str) -> Message:

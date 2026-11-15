@@ -85,13 +85,14 @@ Your app can read the activity too, from any point. That is how it learns what h
 
 ## 3. The ingress
 
-Three routes make the ingress:
+Four routes make the ingress:
 
 | Route | What it does |
 |---|---|
 | `POST /ingress` | Makes a call, and records it in the account's activity. |
-| `POST /ingress/quiet` | Makes a call that is not recorded: what your app polls with. |
+| `POST /ingress/quiet` | Makes a call that is not recorded: what your app reads with. |
 | `GET /activity/{after}` | Reads what was recorded after that point. |
+| `GET /activity/{after}/wait` | The same, held until something is recorded after that point: what your app waits on. |
 
 Every call carries the launch's secret as `Authorization: Bearer <secret>`, must name the ingress as its `Host`, and may come from no other web origin. A web page in a browser on the same machine can neither read the secret nor send it. The clients wrap all of this; you will not write these requests by hand.
 

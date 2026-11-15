@@ -4,8 +4,11 @@
 //
 //   POST /ingress          an IngressRequest, answered with an IngressResponse;
 //                          a call that changes the account is recorded
-//   POST /ingress/quiet    the same, never recorded (what you poll)
+//   POST /ingress/quiet    the same, never recorded (what you read with)
 //   GET  /activity/{after} the record after `after` (AppHostActivityV1)
+//   GET  /activity/{after}/wait
+//                          the same, held until the record has an entry after
+//                          `after` or the host's hold runs out (what you wait on)
 //
 // It listens on a loopback address only. Every request carries the secret the
 // host wrote for this launch, as `Authorization: Bearer <secret>`. Keep the
@@ -144,6 +147,29 @@ export class Ingress {
   async activity(after: bigint = 0n): Promise<AppHostActivityV1> {
     const path = `/activity/${after}`;
     const response = await fetch(this.url + path, { headers: this.#headers(undefined) });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!response.ok) {
+      throw new IngressError(path, response.status, new TextDecoder().decode(bytes));
+    }
+    return AppHostActivityV1.fromBinary(bytes);
+  }
+
+  /**
+   * The record after `after`, held by the host until it has an entry after
+   * `after`. The host answers it empty when its own hold (twenty seconds) runs
+   * out: read again from `next - 1`. Answers nothing when `timeoutMs` passes
+   * first.
+   */
+  async nextActivity(after: bigint, timeoutMs?: number): Promise<AppHostActivityV1 | undefined> {
+    const path = `/activity/${after}/wait`;
+    const signal = timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(this.url + path, { headers: this.#headers(undefined), signal });
+    } catch (e) {
+      if (signal?.aborted) return undefined;
+      throw e;
+    }
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (!response.ok) {
       throw new IngressError(path, response.status, new TextDecoder().decode(bytes));
