@@ -369,7 +369,11 @@ mod tests {
         assert_eq!(builtin_ticker_read_in("dBTC"), Some("dBTC"));
         assert_eq!(builtin_ticker_read_in("\u{0501}BTC"), Some("dBTC"));
         for other in ["ERAS", "ERB", "GOLD", "\u{0416}RA", "E R"] {
-            assert_eq!(builtin_ticker_read_in(other), None, "{other:?} is no built-in");
+            assert_eq!(
+                builtin_ticker_read_in(other),
+                None,
+                "{other:?} is no built-in"
+            );
         }
     }
 
