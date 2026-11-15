@@ -675,6 +675,37 @@ pub fn store_contact_device_tree_root(
     Ok(())
 }
 
+/// Keep the first-inbox lock `device_id`'s directory entry publishes (DSM
+/// Amendment A37), replacing one kept from an older entry.
+pub fn store_contact_first_inbox_lock(device_id: &[u8; 32], lock_public_key: &[u8]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    conn.execute(
+        "INSERT INTO contact_first_inbox_lock(device_id, lock_public_key) VALUES (?1, ?2)
+         ON CONFLICT(device_id) DO UPDATE SET lock_public_key = excluded.lock_public_key",
+        params![device_id.as_slice(), lock_public_key],
+    )?;
+    Ok(())
+}
+
+/// The first-inbox lock kept for the contact `device_id`: `None` when none
+/// is kept, so its first inbox cannot be addressed yet.
+pub fn contact_first_inbox_lock(device_id: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT lock_public_key FROM contact_first_inbox_lock WHERE device_id = ?1",
+            params![device_id.as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?)
+}
+
 fn require_device_id(device_id: &[u8]) -> Result<()> {
     if device_id.len() != 32 {
         return Err(anyhow!(

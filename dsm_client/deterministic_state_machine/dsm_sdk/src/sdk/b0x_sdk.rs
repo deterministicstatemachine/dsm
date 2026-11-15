@@ -3133,10 +3133,15 @@ mod tests {
             device.fleet.endpoints(),
         )
         .expect("the device's spool client");
-        // An open inbox address (DSM Amendment A34): a write proves it from
-        // its route digest.
+        // An inbox address bound to a writer's own lock, as a relationship's
+        // first inbox is (DSM Amendment A37): a write proves it from its route
+        // digest and that key.
+        let writer =
+            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+                .expect("a writer's key");
         let route_digest: [u8; 32] = rand::random();
-        let route = dsm::crypto::spool_address::open_inbox_address(&route_digest);
+        let route =
+            dsm::crypto::spool_address::locked_inbox_address(&route_digest, &writer.public_key);
         for endpoint in device.fleet.endpoints() {
             assert_eq!(
                 b0x_consumed::read_position(&route, &endpoint).expect("the position"),
@@ -3174,12 +3179,11 @@ mod tests {
         }
         .encode_to_vec();
         let id = encode_base32_crockford(&message_id);
-        // A write under a key of the writer's own, the first at this route
-        // (DSM Amendment A34).
-        let writer =
-            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
-                .expect("a writer's key");
-        let address = dsm::crypto::spool_address::open_inbox_address_bytes(&route_digest);
+        // A write under that key, lock and write key at once.
+        let address = dsm::crypto::spool_address::locked_inbox_address_bytes(
+            &route_digest,
+            &writer.public_key,
+        );
         let write = dsm::core::relationship_write_grant::self_granted_spool_write(
             &writer,
             &[0x5A; 32],

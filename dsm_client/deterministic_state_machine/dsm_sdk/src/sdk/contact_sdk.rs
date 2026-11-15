@@ -60,8 +60,8 @@ impl ContactManager {
     }
 
     /// Add the counterparty a directory read proved: its genesis, device id,
-    /// AK and Kyber key exactly as its own entry signs them, with the members
-    /// of the pinned set that hold that entry.
+    /// AK, Kyber key and first-inbox lock exactly as its own entry signs them,
+    /// with the members of the pinned set that hold that entry.
     pub async fn add_contact_from_directory(
         &mut self,
         alias: &str,
@@ -118,6 +118,13 @@ impl ContactManager {
         };
         crate::storage::client_db::store_contact(&record).map_err(|e| {
             ContactError::InvalidContactData(format!("SQLite persistence failed: {e}"))
+        })?;
+        crate::storage::client_db::store_contact_first_inbox_lock(
+            &device_id,
+            &entry.body.first_inbox_lock_public_key,
+        )
+        .map_err(|e| {
+            ContactError::InvalidContactData(format!("keeping the first-inbox lock: {e}"))
         })?;
         let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
             counterparty_device_id: device_id,

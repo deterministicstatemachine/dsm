@@ -23,11 +23,10 @@ use syn::visit::Visit;
 const FRAMING: &[&str] = &["storage_cell", "storage_object", "merkle", "types", "utils"];
 
 /// The items of Core's relationship write grants a node may name: the one
-/// check every node runs on a write (DSM Amendment A34), which verifies a
-/// write's proof against the address it names and signs nothing, and the
-/// kind of inbox that check answers with. Nothing that makes a key, a grant
-/// or a write.
-const WRITE_CHECK: &[&str] = &["verify_spool_write", "InboxKind"];
+/// check every node runs on a write (DSM Amendments A34 and A37), which
+/// verifies a write's proof against the address it names and signs nothing.
+/// Nothing that makes a key, a grant or a write.
+const WRITE_CHECK: &[&str] = &["verify_spool_write"];
 
 /// Whether the Core path `dsm::<rest>` is one a storage node may name: the
 /// framing modules; the storage set's id and members; the domain-separated

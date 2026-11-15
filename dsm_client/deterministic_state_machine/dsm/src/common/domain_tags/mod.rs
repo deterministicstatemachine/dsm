@@ -222,7 +222,10 @@ mod tests {
     // digest and the locked address.
     // +5 with application cells (DSM Amendment A35): the writer set, the
     // cell, its seed, a write's statement and the step.
-    const EXPECTED_TAG_COUNT: usize = 452;
+    // -1 with the first inbox bound to its writer's published lock (DSM
+    // Amendment A37): the open address's `DSM/b0x` is gone, and the first
+    // inbox's key seed is now the first-inbox lock's.
+    const EXPECTED_TAG_COUNT: usize = 451;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

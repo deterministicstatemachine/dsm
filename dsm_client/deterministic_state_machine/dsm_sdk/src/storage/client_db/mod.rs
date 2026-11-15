@@ -630,7 +630,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// receiver keeps each payer's last proven state and checks the payer's steps
 /// from it forward (the owner's ruling of 2026-11-15, specs/README.md). A
 /// database made at 47 is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 48;
+///
+/// v49: `contact_first_inbox_lock`, the first-inbox lock each contact's
+/// directory entry publishes, which the relationship's first inbox from that
+/// contact is bound to (DSM Amendment A37). A database made at 48 is refused
+/// at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 49;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1200,6 +1205,16 @@ fn create_schema(conn: &Connection) -> Result<()> {
             chain_tip_commitment        BLOB
         );
 
+        -- The first-inbox lock a contact's directory entry publishes: the
+        -- relationship's first inbox from that contact is its route bound to
+        -- this key, so only the contact writes there (DSM Amendment A37).
+        -- Written when the contact is added from its entry, and again from a
+        -- newer entry.
+        CREATE TABLE IF NOT EXISTS contact_first_inbox_lock(
+            device_id        BLOB PRIMARY KEY,  -- 32B
+            lock_public_key  BLOB NOT NULL      -- 64B
+        );
+
         -- Where each relationship stands on this device (DSM Amendment A33):
         -- opened when the contact is added, proposed while this device's
         -- ESTABLISH awaits the countersignature, established once held, ending
@@ -1231,14 +1246,15 @@ fn create_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (counterparty_device_id, direction)
         );
 
-        -- Each inbox address this device writes to (DSM Amendment A34): the
-        -- route digest it was derived from, and the recipient's lock it is
-        -- bound to (NULL for a relationship's first inbox, the open address
-        -- of its route). A write proves its address from these.
+        -- Each inbox address this device writes to (DSM Amendments A34 and
+        -- A37): the route digest it was derived from, and the lock it is
+        -- bound to (this device's own first-inbox lock at a relationship's
+        -- first inbox, the recipient's write lock at every later one). A
+        -- write proves its address from these.
         CREATE TABLE IF NOT EXISTS inbox_route(
             address          TEXT PRIMARY KEY,
             route_digest     BLOB NOT NULL CHECK (length(route_digest) = 32),
-            lock_public_key  BLOB
+            lock_public_key  BLOB NOT NULL
         );
 
         -- Storage-node auth tokens are gone with writer authorization

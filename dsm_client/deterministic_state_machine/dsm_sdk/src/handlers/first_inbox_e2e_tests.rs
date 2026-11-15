@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A relationship's first inbox against someone who is neither of its two
-//! devices (DSM Amendment A34), on storage nodes.
+//! devices (DSM Amendments A34 and A37), on storage nodes.
 //!
-//! The first inbox of a relationship is the open address of a route digest
-//! that the two devices' public identities derive: each one's genesis and
-//! device id, and the relationship's first tip, a hash of the same four
-//! values. A member fixes the address's key from the first write stored
-//! there. Everything here is a production route on the device that takes it,
-//! and the third party uses the member's own submit route, as any client.
+//! The route of a relationship's first inbox comes from the two devices'
+//! public identities: each one's genesis and device id, and the relationship's
+//! first tip, a hash of the same four values. Its address is that route bound
+//! to the writer's first-inbox lock, the key the writer's directory entry
+//! publishes, so a third party can compute it too, from public bytes alone.
+//! Everything here is a production route on the device that takes it, and the
+//! third party reads the directory and uses the member's own submit route, as
+//! any client.
 
 use dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip;
 use dsm::core::relationship_write_grant::self_granted_spool_write;
 use dsm::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
-use dsm::crypto::spool_address::{inbox_route_digest, open_inbox_address_bytes};
+use dsm::crypto::spool_address::{inbox_route_digest, locked_inbox_address_bytes};
 use serial_test::serial;
 
 use crate::storage::client_db::RelationshipState;
@@ -48,7 +50,8 @@ async fn submit(
 /// One write, under a key of the third party's own, at the first inbox
 /// `recipient` reads on its relationship with `writer`, put at every member
 /// of the set. The address comes from the two devices' genesis and device
-/// ids alone. What each member answered.
+/// ids and the first-inbox lock `writer`'s directory entry publishes, all
+/// public. What each member answered.
 async fn write_first_at_the_first_inbox(
     set: &crate::sdk::storage_set::StorageSet,
     recipient: &TestDevice,
@@ -56,6 +59,14 @@ async fn write_first_at_the_first_inbox(
 ) -> Vec<reqwest::StatusCode> {
     let own_key = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x66; 32])
         .expect("a key of the third party's own");
+    let published =
+        crate::sdk::device_directory::read_entry(set, &writer.genesis, &writer.device_id)
+            .await
+            .expect("the directory read")
+            .expect("the writer's published entry")
+            .entry
+            .body
+            .first_inbox_lock_public_key;
     let first_tip = initial_relationship_chain_tip(
         &recipient.device_id,
         &recipient.genesis,
@@ -63,7 +74,7 @@ async fn write_first_at_the_first_inbox(
         &writer.genesis,
     );
     let route = inbox_route_digest(&recipient.genesis, &recipient.device_id, &first_tip);
-    let address = open_inbox_address_bytes(&route);
+    let address = locked_inbox_address_bytes(&route, &published);
     let message_id = [0x66u8; 16];
     let write = self_granted_spool_write(
         &own_key,
@@ -82,13 +93,15 @@ async fn write_first_at_the_first_inbox(
 }
 
 /// Two devices that have never been contacts must be able to become
-/// contacts, whatever anyone else wrote first.
+/// contacts, whatever anyone else writes first.
 ///
 /// A and B establish a relationship on the set, as the harness boots them.
 /// C and D boot on the same set and have not added each other. A third
-/// party, holding no key of either and knowing only the genesis and device
-/// id of each, writes once at C's first inbox for D and once at D's first
-/// inbox for C, under a key of its own. Then C and D add each other.
+/// party, holding no key of either and knowing only their public directory
+/// entries, writes at C's first inbox for D and at D's first inbox for C,
+/// under a key of its own: every member refuses it, by derivation alone,
+/// since the address is bound to a key the third party does not hold (DSM
+/// Amendment A37). Then C and D add each other and establish.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_third_partys_first_write_does_not_keep_two_devices_from_becoming_contacts() {
@@ -116,8 +129,8 @@ async fn a_third_partys_first_write_does_not_keep_two_devices_from_becoming_cont
         at_ds_inbox
             .iter()
             .chain(&at_cs_inbox)
-            .all(|answer| *answer == reqwest::StatusCode::NO_CONTENT),
-        "the members did not all store the third party's writes: {at_ds_inbox:?} / {at_cs_inbox:?}"
+            .all(|answer| *answer == reqwest::StatusCode::FORBIDDEN),
+        "a member stored a third party's write at a first inbox: {at_ds_inbox:?} / {at_cs_inbox:?}"
     );
 
     c.add_contact(&d).await;
@@ -138,8 +151,7 @@ async fn a_third_partys_first_write_does_not_keep_two_devices_from_becoming_cont
             RelationshipState::Established,
             RelationshipState::Established
         ),
-        "one write from a third party at each first inbox kept C and D from becoming contacts. \
-         Their last syncs said: {}",
+        "C and D did not become contacts. Their last syncs said: {}",
         said.join(" | ")
     );
 }

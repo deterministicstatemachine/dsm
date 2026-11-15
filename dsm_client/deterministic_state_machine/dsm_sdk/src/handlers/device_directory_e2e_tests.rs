@@ -13,7 +13,7 @@
 
 use dsm::core::identity::directory::{
     directory_cell_key, DirectoryEntry, DirectoryEntryBody, AK_PUBLIC_KEY_LEN, DIRECTORY_NAMESPACE,
-    KYBER_PUBLIC_KEY_LEN,
+    FIRST_INBOX_LOCK_LEN, KYBER_PUBLIC_KEY_LEN,
 };
 use serial_test::serial;
 
@@ -38,6 +38,7 @@ fn entries_nobody_signed(device: &TestDevice, over: usize) -> Vec<Vec<u8>> {
                 ak_public_key: vec![0x5A; AK_PUBLIC_KEY_LEN],
                 att_a: [0x5A; 32],
                 kyber_public_key: vec![0x5A; KYBER_PUBLIC_KEY_LEN],
+                first_inbox_lock_public_key: vec![0x5A; FIRST_INBOX_LOCK_LEN],
                 counter: made.len() as u64,
                 authority_position: [0x5A; 32],
                 authority_evidence: vec![0xEE; 320 * 1024],

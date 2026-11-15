@@ -13,18 +13,18 @@
 //! and changes every step: a hash of the recipient's genesis, the
 //! recipient's device id and the relationship's current chain tip (owner,
 //! 2026-09-23), each first hashed on its own axis into the route digest.
-//! The relationship's first inbox is the open address of its route digest;
-//! every later inbox binds the digest to the recipient's write lock (owner,
-//! 2026-11-11, DSM Amendment A34), so a node checks a write against the lock
-//! the two wallets established, and learns no identity:
+//! Every inbox binds the route digest to a lock, so a node checks a write
+//! against the key its address is bound to, and nothing else: the
+//! relationship's first inbox to the first-inbox lock its writer publishes in
+//! its directory entry (DSM Amendment A37), every later inbox to the
+//! recipient's write lock (owner, 2026-11-11, DSM Amendment A34):
 //!
 //! ```text
 //! h_g = H(DSM/b0x-G ‖ genesis)
 //! h_d = H(DSM/b0x-D ‖ device id)
 //! h_t = H(DSM/b0x-T ‖ tip)
 //! route = H(DSM/b0x-route/v1 ‖ h_g ‖ h_d ‖ h_t)
-//! first inbox = Base32Crockford(H(DSM/b0x ‖ route))
-//! later inbox = Base32Crockford(H(DSM/b0x-locked/v1 ‖ route ‖ lock public key))
+//! inbox = Base32Crockford(H(DSM/b0x-locked/v1 ‖ route ‖ lock public key))
 //! ```
 //!
 //! A transfer is spooled under an id its receipt commitment names, and each
@@ -33,11 +33,10 @@
 //! consumes only those ids.
 
 use crate::common::domain_tags::{
-    TAG_DSM_B0X, TAG_DSM_B0X_ARTIFACT_SUBMISSION_ID, TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID,
-    TAG_DSM_B0X_D, TAG_DSM_B0X_ENVELOPE_CONTENT, TAG_DSM_B0X_G, TAG_DSM_B0X_LOCKED,
-    TAG_DSM_B0X_REPLY_MESSAGE_ID, TAG_DSM_B0X_ROUTE, TAG_DSM_B0X_SUBMISSION_ID, TAG_DSM_B0X_T,
-    TAG_DSM_RECEIPT_EVIDENCE_A, TAG_DSM_RECEIPT_EVIDENCE_B,
-    TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
+    TAG_DSM_B0X_ARTIFACT_SUBMISSION_ID, TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID, TAG_DSM_B0X_D,
+    TAG_DSM_B0X_ENVELOPE_CONTENT, TAG_DSM_B0X_G, TAG_DSM_B0X_LOCKED, TAG_DSM_B0X_REPLY_MESSAGE_ID,
+    TAG_DSM_B0X_ROUTE, TAG_DSM_B0X_SUBMISSION_ID, TAG_DSM_B0X_T, TAG_DSM_RECEIPT_EVIDENCE_A,
+    TAG_DSM_RECEIPT_EVIDENCE_B, TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
 };
 use crate::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher};
 use crate::crypto::domain::TaggedHashDomain;
@@ -66,19 +65,9 @@ pub fn inbox_route_digest(
     *h.finalize().as_bytes()
 }
 
-/// The open address of a route digest, as 32 bytes: a relationship's first
-/// inbox.
-pub fn open_inbox_address_bytes(route_digest: &[u8; 32]) -> [u8; 32] {
-    component(TAG_DSM_B0X, route_digest)
-}
-
-/// The open address of a route digest: a relationship's first inbox.
-pub fn open_inbox_address(route_digest: &[u8; 32]) -> String {
-    encode_base32_crockford(&open_inbox_address_bytes(route_digest))
-}
-
-/// The address of a route digest bound to the recipient's write lock, as 32
-/// bytes: every inbox of a relationship after its first.
+/// The address of a route digest bound to a lock, as 32 bytes: a
+/// relationship's first inbox under its writer's first-inbox lock, every
+/// later inbox under the recipient's write lock.
 pub fn locked_inbox_address_bytes(route_digest: &[u8; 32], lock_public_key: &[u8]) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_B0X_LOCKED);
     h.update(route_digest);
@@ -86,7 +75,7 @@ pub fn locked_inbox_address_bytes(route_digest: &[u8; 32], lock_public_key: &[u8
     *h.finalize().as_bytes()
 }
 
-/// The address of a route digest bound to the recipient's write lock.
+/// The address of a route digest bound to a lock.
 pub fn locked_inbox_address(route_digest: &[u8; 32], lock_public_key: &[u8]) -> String {
     encode_base32_crockford(&locked_inbox_address_bytes(route_digest, lock_public_key))
 }
@@ -243,9 +232,8 @@ mod tests {
         }
     }
 
-    /// The route digest is the documented formula over the three axes, the
-    /// first inbox its open address, and every later inbox the digest bound
-    /// to a lock (DSM Amendment A34).
+    /// The route digest is the documented formula over the three axes, and
+    /// every inbox the digest bound to a lock (DSM Amendments A34 and A37).
     #[test]
     fn the_inbox_addresses_are_the_domain_hashed_formulas() {
         let (genesis, device, tip) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32]);
@@ -255,10 +243,6 @@ mod tests {
         h.update(&component(TAG_DSM_B0X_T, &tip));
         let route = *h.finalize().as_bytes();
         assert_eq!(inbox_route_digest(&genesis, &device, &tip), route);
-        assert_eq!(
-            open_inbox_address(&route),
-            encode_base32_crockford(&component(TAG_DSM_B0X, &route))
-        );
         let lock = [0x77u8; 64];
         let mut h = dsm_domain_hasher(TAG_DSM_B0X_LOCKED);
         h.update(&route);
@@ -266,10 +250,6 @@ mod tests {
         assert_eq!(
             locked_inbox_address(&route, &lock),
             encode_base32_crockford(h.finalize().as_bytes())
-        );
-        assert_ne!(
-            open_inbox_address(&route),
-            locked_inbox_address(&route, &lock)
         );
         assert_ne!(
             locked_inbox_address(&route, &lock),

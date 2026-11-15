@@ -406,9 +406,9 @@ impl AppRouterImpl {
                     continue;
                 }
             };
-            // Under the counterparty's lock once its grant is held; until
-            // then on the relationship's first inbox, under this device's own
-            // key there (DSM Amendment A34).
+            // Under the counterparty's lock once its grant is held (DSM
+            // Amendment A34); until then on the relationship's first inbox,
+            // bound to this device's own first-inbox lock (DSM Amendment A37).
             let route = match crate::sdk::spool_write::holds_grant(&counterparty) {
                 Ok(held) if held => contact_relationship_tip(&contact).and_then(|tip| {
                     <[u8; 32]>::try_from(contact.genesis_hash.as_slice())

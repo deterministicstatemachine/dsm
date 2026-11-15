@@ -54,12 +54,17 @@ pub fn build_own_entry(
             inputs,
             expected_g,
         )?;
+    let first_inbox_lock = dsm::core::relationship_write_grant::derive_first_inbox_lock_keypair(
+        &crate::init::smaster_of(wallet_seed, &genesis.g, &genesis.devid),
+        &genesis.devid,
+    )?;
     let body = DirectoryEntryBody {
         genesis: genesis.g,
         device_id: genesis.devid,
         ak_public_key: genesis.ak_public.clone(),
         att_a: derive_atta(wallet_seed, &genesis.g, inputs.device_slot),
         kyber_public_key,
+        first_inbox_lock_public_key: first_inbox_lock.public_key.clone(),
         counter,
         authority_position,
         authority_evidence,

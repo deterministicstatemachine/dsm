@@ -19421,6 +19421,15 @@ export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBody
    */
   authorityEvidence = new Uint8Array(0);
 
+  /**
+   * DSM Amendment A37: the device's first-inbox lock (SPHINCS+, never the AK).
+   * Every relationship's first inbox this device writes is the route bound to
+   * it, so only this device writes there.
+   *
+   * @generated from field: bytes first_inbox_lock_public_key = 9;
+   */
+  firstInboxLockPublicKey = new Uint8Array(0);
+
   constructor(data?: PartialMessage<DeviceDirectoryEntryBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -19437,6 +19446,7 @@ export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBody
     { no: 6, name: "counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 7, name: "authority_position", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "authority_evidence", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "first_inbox_lock_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceDirectoryEntryBodyV1 {
@@ -24535,10 +24545,10 @@ export class RelationshipWriteAuthorizationV1 extends Message<RelationshipWriteA
  * grant of the writer's key, the writer's signature over BLAKE3 under
  * DSM/spool-write/v1 of the address (32 bytes), the message id (16 bytes)
  * and BLAKE3 under DSM/spool-write-envelope/v1 of the envelope, and the
- * inbox's route digest. The address is the route digest bound to the key
- * (every inbox after a relationship's first) or the digest's open address
- * (the first inbox, whose key its first write fixes). The node stores the
- * envelope alone.
+ * inbox's route digest. The address is the route digest bound to the key:
+ * the writer's published first-inbox lock at a relationship's first inbox
+ * (DSM Amendment A37), the recipient's write lock at every later one. The
+ * node stores the envelope alone.
  *
  * @generated from message dsm.SpoolWriteV1
  */

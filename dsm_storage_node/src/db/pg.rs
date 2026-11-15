@@ -208,7 +208,12 @@ pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
 /// older, newer or unversioned database is refused, and is reprovisioned, not
 /// transformed. The schema version is its own axis — not the protocol version,
 /// and not the register incarnation, which names this node's register history.
-pub const SCHEMA_VERSION: i32 = 3;
+///
+/// 4: no key is kept per inbox address. Every inbox address, a relationship's
+/// first included, is its route bound to the key a write carries, so the
+/// check is derivation alone (DSM Amendment A37), and the `spool_key` table of
+/// 3 is gone. A database at 3 is refused and reprovisioned.
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// The DDL of [`SCHEMA_VERSION`], run once, on an empty database, in one
 /// transaction with the version row.
@@ -261,15 +266,6 @@ const SCHEMA_DDL: &str = r#"
         seq_num    BIGINT NOT NULL
     );
     CREATE UNIQUE INDEX idx_inbox_spool_device_seq ON inbox_spool (device_id, seq_num);
-
-    -- Each open inbox address's key (DSM Amendment A34): the key a
-    -- relationship's first inbox's first write carried. Immutable: never
-    -- replaced, moved or removed. A locked inbox's key is its own by
-    -- derivation and is not kept here.
-    CREATE TABLE spool_key (
-        device_id       TEXT PRIMARY KEY,
-        lock_public_key BYTEA NOT NULL
-    );
 
     -- The immutable object store, keyed by the content address addr(N, P);
     -- write-once: no UPDATE and no DELETE statement exists against it.
@@ -386,13 +382,6 @@ pub const SCHEMA_LAYOUT: &[(&str, &[ExpectedColumn])] = &[
         "schema_version",
         &[("only_row", "int2", NotNull), ("version", "int4", NotNull)],
     ),
-    (
-        "spool_key",
-        &[
-            ("device_id", "text", NotNull),
-            ("lock_public_key", "bytea", NotNull),
-        ],
-    ),
 ];
 
 /// Every index of [`SCHEMA_VERSION`], the implicit ones of primary keys and
@@ -411,7 +400,6 @@ pub const SCHEMA_INDEXES: &[&str] = &[
     "own_bytecommits_pkey",
     "register_incarnation_pkey",
     "schema_version_pkey",
-    "spool_key_pkey",
 ];
 
 /// Advisory-lock key serialising schema initialisation on one database.
@@ -643,9 +631,10 @@ pub async fn get_immutable_object(
 
 // ===================== b0x inbox spool =====================
 
-/// Append `envelope` to a locked inbox's spool at `device_id`, whose key is
-/// its own by derivation (DSM Amendment A34): no key to fix or compare.
-pub async fn spool_append(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<LockedAppend> {
+/// Append `envelope` to the inbox spool at `device_id`, whose key is its own
+/// by derivation (DSM Amendments A34 and A37): no key to fix or compare. The
+/// sequence number it was appended at.
+pub async fn spool_append(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<i64> {
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
     tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&device_id])
@@ -662,63 +651,7 @@ pub async fn spool_append(pool: &Pool, device_id: &str, envelope: &[u8]) -> Resu
         .await?;
     let seq_num: i64 = tx.query_one(&stmt, &[&device_id, &envelope]).await?.get(0);
     tx.commit().await?;
-    Ok(LockedAppend::Appended(seq_num))
-}
-
-/// What appending a verified write came to (DSM Amendment A34).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LockedAppend {
-    /// Appended at this sequence number.
-    Appended(i64),
-    /// The address's key is another one: nothing was written.
-    NotTheAddressKey,
-}
-
-/// Append `envelope` to the spool at `device_id` when `lock_public_key` is
-/// that address's key, in one transaction: the first write at an address
-/// fixes its key, and the key is never replaced. A write carrying another key
-/// writes nothing.
-pub async fn spool_insert_locked(
-    pool: &Pool,
-    device_id: &str,
-    lock_public_key: &[u8],
-    envelope: &[u8],
-) -> Result<LockedAppend> {
-    let mut client = pool.get().await?;
-    let tx = begin_durable_write(&mut client).await?;
-    // Serialize the key fix and seq_num assignment per spool key.
-    tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&device_id])
-        .await?;
-    tx.execute(
-        "INSERT INTO spool_key(device_id, lock_public_key) VALUES ($1, $2)
-         ON CONFLICT (device_id) DO NOTHING",
-        &[&device_id, &lock_public_key],
-    )
-    .await?;
-    let fixed: Vec<u8> = tx
-        .query_one(
-            "SELECT lock_public_key FROM spool_key WHERE device_id = $1",
-            &[&device_id],
-        )
-        .await?
-        .get(0);
-    if fixed.as_slice() != lock_public_key {
-        tx.rollback().await?;
-        return Ok(LockedAppend::NotTheAddressKey);
-    }
-    let stmt = tx
-        .prepare_cached(
-            "INSERT INTO inbox_spool(device_id, envelope, seq_num)
-             VALUES ($1, $2, COALESCE(
-               (SELECT MAX(seq_num) + 1 FROM inbox_spool WHERE device_id = $1),
-               1
-             ))
-             RETURNING seq_num",
-        )
-        .await?;
-    let seq_num: i64 = tx.query_one(&stmt, &[&device_id, &envelope]).await?.get(0);
-    tx.commit().await?;
-    Ok(LockedAppend::Appended(seq_num))
+    Ok(seq_num)
 }
 
 /// Every envelope in a spool from a sequence number on, in order, limited.

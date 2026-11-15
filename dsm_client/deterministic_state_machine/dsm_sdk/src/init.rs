@@ -77,7 +77,6 @@ fn app_state_u32_bytes(
 /// persisted and re-derives on demand; anti-clone is the fused anchor, not Smaster.
 /// Fails closed when the wallet is locked. Wiped when the caller lets go of it.
 pub fn current_smaster() -> Result<zeroize::Zeroizing<[u8; 32]>, dsm::types::error::DsmError> {
-    use dsm::core::identity::genesis_v2::{derive_s0, derive_smaster};
     let g = app_state_u32_bytes(
         crate::sdk::app_state::AppState::get_genesis_hash(),
         "genesis_hash (G)",
@@ -92,11 +91,20 @@ pub fn current_smaster() -> Result<zeroize::Zeroizing<[u8; 32]>, dsm::types::err
                 "wallet seed unavailable for Smaster re-derivation (wallet locked)".into(),
             )
         })?;
+    Ok(smaster_of(&wallet_seed, &g, &devid))
+}
+
+/// `Smaster` of the device `devid` under the genesis `g`, from the wallet
+/// seed: the one derivation [`current_smaster`] runs for the unlocked wallet.
+pub fn smaster_of(
+    wallet_seed: &[u8],
+    g: &[u8; 32],
+    devid: &[u8; 32],
+) -> zeroize::Zeroizing<[u8; 32]> {
+    use dsm::core::identity::genesis_v2::{derive_s0, derive_smaster};
     let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
-    let s0 = zeroize::Zeroizing::new(derive_s0(&wallet_seed, &g, 0, &aph));
-    Ok(zeroize::Zeroizing::new(derive_smaster(
-        &s0, &g, &devid, &aph,
-    )))
+    let s0 = zeroize::Zeroizing::new(derive_s0(wallet_seed, g, 0, &aph));
+    zeroize::Zeroizing::new(derive_smaster(&s0, g, devid, &aph))
 }
 
 /// Derive the AEAD key for per-relationship chain-head SK storage at rest.

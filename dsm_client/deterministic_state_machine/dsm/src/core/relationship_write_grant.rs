@@ -15,13 +15,16 @@
 //!
 //! A **write** to an inbox address carries the lock's public key, the grant,
 //! and the writer's signature over the address, the write's message id and the
-//! commitment of the envelope written. The first write stored at an address
-//! fixes its key; a node stores a later write there only when it carries that
-//! key, a grant that verifies under it and a write signature that verifies
-//! under the granted key ([`verify_spool_write`]). At a relationship's first
-//! inbox, before either side holds a lock for it, the writer fixes a key of
-//! its own ([`derive_first_inbox_keypair`]): its key there is lock and write
-//! key at once.
+//! commitment of the envelope written. Every address is its route bound to
+//! one lock, so a node stores a write only when the address is its route bound
+//! to the key it carries, the grant verifies under that key and the write
+//! signature under the granted key ([`verify_spool_write`]); no arrival order
+//! enters it. At a relationship's first inbox, before either side holds a lock
+//! for it, the address is bound to the writer's own **first-inbox lock**
+//! ([`derive_first_inbox_lock_keypair`]), the key its directory entry
+//! publishes, so the recipient derives the same address from the entry it
+//! added the writer from, and nobody else can write there (DSM Amendment
+//! A37). That key is lock and write key at once.
 //!
 //! An offer carries two signatures over one body: the sender's AK binds the
 //! key, and the key proves possession. An offered key that is the sender's AK
@@ -31,11 +34,11 @@
 //! re-encoding to the same bytes.
 
 use crate::common::domain_tags::{
-    TAG_DSM_RELATIONSHIP_FIRST_INBOX_KEY, TAG_DSM_RELATIONSHIP_INSTANCE,
-    TAG_DSM_RELATIONSHIP_WRITE_GRANT, TAG_DSM_RELATIONSHIP_WRITE_GRANT_ID,
-    TAG_DSM_RELATIONSHIP_WRITE_KEY, TAG_DSM_RELATIONSHIP_WRITE_KEY_BINDING,
-    TAG_DSM_RELATIONSHIP_WRITE_KEY_POSSESSION, TAG_DSM_RELATIONSHIP_WRITE_LOCK,
-    TAG_DSM_RELATIONSHIP_WRITE_LOCK_BINDING, TAG_DSM_SPOOL_WRITE, TAG_DSM_SPOOL_WRITE_ENVELOPE,
+    TAG_DSM_FIRST_INBOX_LOCK, TAG_DSM_RELATIONSHIP_INSTANCE, TAG_DSM_RELATIONSHIP_WRITE_GRANT,
+    TAG_DSM_RELATIONSHIP_WRITE_GRANT_ID, TAG_DSM_RELATIONSHIP_WRITE_KEY,
+    TAG_DSM_RELATIONSHIP_WRITE_KEY_BINDING, TAG_DSM_RELATIONSHIP_WRITE_KEY_POSSESSION,
+    TAG_DSM_RELATIONSHIP_WRITE_LOCK, TAG_DSM_RELATIONSHIP_WRITE_LOCK_BINDING, TAG_DSM_SPOOL_WRITE,
+    TAG_DSM_SPOOL_WRITE_ENVELOPE,
 };
 use crate::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher, dsm_domain_hasher_keyed};
 use crate::crypto::sphincs::{
@@ -137,28 +140,17 @@ pub fn derive_write_lock_keypair(
     )
 }
 
-/// The key `writer` fixes at `recipient`'s first inbox on the relationship
-/// `relationship_key` opened at `first_tip`, before either side holds a lock
-/// for it: SPHINCS+ key generation from `keyed-BLAKE3(Smaster,
-/// "DSM/relationship-first-inbox-key/v1" ‖ relationship key ‖ first tip ‖
-/// writer ‖ recipient)`. It is lock and write key at once.
-pub fn derive_first_inbox_keypair(
+/// The first-inbox lock of `device_id`: the key its directory entry
+/// publishes, and the one every relationship's first inbox it writes is bound
+/// to (DSM Amendment A37). SPHINCS+ key generation from
+/// `keyed-BLAKE3(Smaster, "DSM/first-inbox-lock/v1" ‖ device id)`: one per
+/// device, never the AK, and nothing secret stored. It is lock and write key
+/// at once.
+pub fn derive_first_inbox_lock_keypair(
     s_master: &[u8; 32],
-    relationship_key: &[u8; 32],
-    first_tip: &[u8; 32],
-    writer_device_id: &[u8; 32],
-    recipient_device_id: &[u8; 32],
+    device_id: &[u8; 32],
 ) -> Result<SphincsKeyPair, DsmError> {
-    keypair_from(
-        TAG_DSM_RELATIONSHIP_FIRST_INBOX_KEY,
-        s_master,
-        &[
-            relationship_key,
-            first_tip,
-            writer_device_id,
-            recipient_device_id,
-        ],
-    )
+    keypair_from(TAG_DSM_FIRST_INBOX_LOCK, s_master, &[device_id])
 }
 
 /// Why an offer, a lock, a grant or a write is not what it must be. Each
@@ -714,9 +706,9 @@ pub fn signed_spool_write(
     .encode_to_vec())
 }
 
-/// One write under a key that is lock and write key at once: the key a
-/// writer fixes at a relationship's first inbox, granting itself for
-/// `relationship_instance_id`.
+/// One write under a key that is lock and write key at once: a writer's
+/// first-inbox lock at a relationship's first inbox, granting itself for
+/// `relationship_instance_id` (DSM Amendment A37).
 pub fn self_granted_spool_write(
     key: &SphincsKeyPair,
     relationship_instance_id: &[u8; 32],
@@ -744,35 +736,21 @@ pub fn self_granted_spool_write(
     )
 }
 
-/// A write that verified: the key it carries (which the node compares with,
-/// or fixes as, the address's key) and the envelope it stores.
+/// A write that verified: the key its address is bound to, and the envelope
+/// it stores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedSpoolWrite {
     pub lock_public_key: Vec<u8>,
     pub envelope: Vec<u8>,
-    /// Which kind of inbox address the write proved it is for.
-    pub inbox: InboxKind,
-}
-
-/// The two kinds of inbox address (DSM Amendment A34).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InboxKind {
-    /// The address is the route digest bound to the key the write carries:
-    /// the key is the address's own, by derivation. Every inbox of a
-    /// relationship after its first.
-    Locked,
-    /// The address is the route digest's open address: a relationship's
-    /// first inbox, whose key its first write fixes.
-    Open,
 }
 
 /// The node's check of one write, for `address` under `message_id`: the
 /// write is strict wire; the address is the write's route digest bound to the
-/// key it carries ([`InboxKind::Locked`]: the key is the address's by
-/// derivation) or the digest's open address ([`InboxKind::Open`]: the key is
-/// the caller's comparison with what the address's first write fixed); the
-/// grant verifies under the key, and the granted key signed this address,
-/// this id and these bytes. Nothing here names or reveals an identity.
+/// key it carries, so the key is the address's own by derivation; the grant
+/// verifies under the key, and the granted key signed this address, this id
+/// and these bytes. No arrival order and no stored key enters it, so every
+/// node reaches the same answer from the bytes alone (DSM Amendments A34 and
+/// A37). Nothing here names an identity.
 pub fn verify_spool_write(
     bytes: &[u8],
     address: &[u8; INBOX_ADDRESS_LEN],
@@ -780,17 +758,13 @@ pub fn verify_spool_write(
 ) -> Result<VerifiedSpoolWrite, WriteAuthorizationRefusal> {
     let write = decode_spool_write_wire(bytes)?;
     let route_digest = arr32(&write.route_digest)?;
-    let inbox = if crate::crypto::spool_address::locked_inbox_address_bytes(
+    if crate::crypto::spool_address::locked_inbox_address_bytes(
         &route_digest,
         &write.lock_public_key,
-    ) == *address
+    ) != *address
     {
-        InboxKind::Locked
-    } else if crate::crypto::spool_address::open_inbox_address_bytes(&route_digest) == *address {
-        InboxKind::Open
-    } else {
         return Err(WriteAuthorizationRefusal::WrongAddress);
-    };
+    }
     let grant_wire = decode_write_grant_wire(&write.grant)?;
     let grant = verify_write_grant_signature(&grant_wire, &write.lock_public_key)?;
     verified(
@@ -802,7 +776,6 @@ pub fn verify_spool_write(
     Ok(VerifiedSpoolWrite {
         lock_public_key: write.lock_public_key,
         envelope: write.envelope,
-        inbox,
     })
 }
 
@@ -1021,9 +994,9 @@ mod tests {
             derive_write_keypair(&s_a, &[0x6B; 32], &a, &b)?.public_key
         );
         // A's lock over its inbox toward B is neither A's write key toward B
-        // nor A's first-inbox key.
+        // nor A's first-inbox lock.
         let lock = derive_write_lock_keypair(&s_a, &INSTANCE, &a, &b)?;
-        let first = derive_first_inbox_keypair(&s_a, &[0x11; 32], &[0x22; 32], &a, &b)?;
+        let first = derive_first_inbox_lock_keypair(&s_a, &a)?;
         assert_ne!(lock.public_key, ab.public_key);
         assert_ne!(first.public_key, ab.public_key);
         assert_ne!(first.public_key, lock.public_key);
@@ -1199,7 +1172,6 @@ mod tests {
         let held = verify_spool_write(&bytes, &address, &MESSAGE_ID)?;
         assert_eq!(held.lock_public_key, lock.public_key);
         assert_eq!(held.envelope, b"sealed".to_vec());
-        assert_eq!(held.inbox, InboxKind::Locked);
         // The same write presented at another address, or under another id.
         assert_eq!(
             verify_spool_write(&bytes, &[0xAE; 32], &MESSAGE_ID),
@@ -1253,10 +1225,12 @@ mod tests {
         Ok(())
     }
 
-    /// A locked address is its route bound to the recipient's lock: a
-    /// stranger's own lock, however well it grants and signs, yields another
-    /// address, so its write is refused at this one, by derivation alone. A
-    /// write presenting the route's open address never fits a locked one.
+    /// An address is its route bound to one lock: a stranger's own lock,
+    /// however well it grants and signs, yields another address, so its write
+    /// is refused at this one, by derivation alone. That holds at a
+    /// relationship's first inbox too, bound to its writer's first-inbox lock
+    /// (DSM Amendment A37): a stranger who computes the route from the two
+    /// devices' ids still cannot write there.
     #[test]
     fn a_locked_address_takes_only_its_own_lock() -> Result<(), DsmError> {
         let lock = generate_keypair(WRITE_KEY_VARIANT)?;
@@ -1269,14 +1243,30 @@ mod tests {
             verify_spool_write(&own, &locked, &MESSAGE_ID),
             Err(Refusal::WrongAddress)
         );
-        // The open address of the same route takes a self-granted key: the
-        // relationship's first inbox.
-        let open = crate::crypto::spool_address::open_inbox_address_bytes(&ROUTE);
-        let first =
-            self_granted_spool_write(&stranger, &INSTANCE, &ROUTE, &open, &MESSAGE_ID, b"first")?;
+        // The writer's own first-inbox lock writes at the address bound to
+        // it, and the stranger's self-granted write does not.
+        let first_lock = derive_first_inbox_lock_keypair(&[0x5A; 32], &[0x0A; 32])?;
+        let first = crate::crypto::spool_address::locked_inbox_address_bytes(
+            &ROUTE,
+            &first_lock.public_key,
+        );
+        let written = self_granted_spool_write(
+            &first_lock,
+            &INSTANCE,
+            &ROUTE,
+            &first,
+            &MESSAGE_ID,
+            b"establish",
+        )?;
         assert_eq!(
-            verify_spool_write(&first, &open, &MESSAGE_ID)?.inbox,
-            InboxKind::Open
+            verify_spool_write(&written, &first, &MESSAGE_ID)?.lock_public_key,
+            first_lock.public_key
+        );
+        let squatted =
+            self_granted_spool_write(&stranger, &INSTANCE, &ROUTE, &first, &MESSAGE_ID, b"first")?;
+        assert_eq!(
+            verify_spool_write(&squatted, &first, &MESSAGE_ID),
+            Err(Refusal::WrongAddress)
         );
         Ok(())
     }

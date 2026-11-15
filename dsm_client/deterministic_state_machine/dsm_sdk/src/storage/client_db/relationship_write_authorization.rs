@@ -375,12 +375,13 @@ pub fn mark_write_authorization_delivered(
     })
 }
 
-/// An inbox address's route digest and, for a locked inbox, the recipient's
-/// lock it is bound to (DSM Amendment A34).
+/// An inbox address's route digest and the lock it is bound to: the
+/// writer's first-inbox lock at a relationship's first inbox (DSM Amendment
+/// A37), the recipient's write lock at every later one (DSM Amendment A34).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxRoute {
     pub route_digest: [u8; 32],
-    pub lock_public_key: Option<Vec<u8>>,
+    pub lock_public_key: Vec<u8>,
 }
 
 /// Remember how `address` was derived. The same address is always the same
