@@ -336,25 +336,18 @@ impl VerdictCell {
     }
 
     /// What a reader keeps of a seat's log at this cell: the copies of
-    /// verdicts whose `Y` and table derive its key. Those its reading counts
-    /// are among them, and so is every verdict for this cell it passes over
-    /// and says why (`VerdictCellRead::passed_over`); bytes that are no
-    /// verdict for this cell are no object naming its key, and never count
-    /// (storage spec §9, route chains, rule 3).
+    /// verdicts that prove their authority for it, the values its reading
+    /// recognizes ([`Self::recognizes`]). A reader keeps the first of them at
+    /// the leader and only copies of that one at later seats, so a verdict
+    /// that proves nothing must not be what it keeps first (storage spec §9,
+    /// route chains, rule 3).
     pub fn keeps(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
-        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
-            EscrowVerdict::decode(bytes).is_ok_and(|verdict| {
-                verdict_cell_key(
-                    verdict.external_commitment(),
-                    &table_digest(verdict.table()),
-                ) == self.key
-            })
-        })
+        self.recognizes()
     }
 
     /// The copies of verdicts that prove their authority for this cell: the
-    /// values its reading recognizes ([`verdict_resolution`]), narrower than
-    /// what [`Self::keeps`] keeps. What a writer reads as first at the
+    /// values its reading recognizes ([`verdict_resolution`]). What a writer
+    /// reads as first at the
     /// leader, so it records the cell taken only for a value that holds it.
     pub fn recognizes(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
         crate::route_chain::recognized_copies(&self.cell, move |bytes| {

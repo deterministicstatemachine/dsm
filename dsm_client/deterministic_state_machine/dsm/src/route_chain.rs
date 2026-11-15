@@ -887,16 +887,18 @@ pub fn recognized_copies<'c>(
     }
 }
 
-/// The verdicts one keeper reached, by the exact value bytes.
-type Verdicts = std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, bool>>;
+/// The verdicts one keeper reached, by the entry digest of the exact value
+/// bytes: a keeper holds 32 bytes for each value it judged, never the value.
+type Verdicts = std::sync::Mutex<std::collections::BTreeMap<[u8; 32], bool>>;
 
 /// `recognized`'s verdict on `value`, reached once per keeper. The lock is not
 /// held while the recognizer runs, so seats folded in parallel recognize
 /// different values in parallel.
 fn recognized_once(verdicts: &Verdicts, recognized: &impl Fn(&[u8]) -> bool, value: &[u8]) -> bool {
+    let digest = entry_digest(value);
     let held = match verdicts.lock() {
-        Ok(verdicts) => verdicts.get(value).copied(),
-        Err(poisoned) => poisoned.into_inner().get(value).copied(),
+        Ok(verdicts) => verdicts.get(&digest).copied(),
+        Err(poisoned) => poisoned.into_inner().get(&digest).copied(),
     };
     match held {
         Some(verdict) => verdict,
@@ -906,7 +908,7 @@ fn recognized_once(verdicts: &Verdicts, recognized: &impl Fn(&[u8]) -> bool, val
                 Ok(verdicts) => verdicts,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            verdicts.insert(value.to_vec(), verdict);
+            verdicts.insert(digest, verdict);
             verdict
         }
     }

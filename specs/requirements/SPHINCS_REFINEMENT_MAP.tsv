@@ -97,9 +97,9 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/core_bridge_adapters
 dsm_client/deterministic_state_machine/dsm/src/connect.rs	114	statement	WrapperInjective.lean: connect_signing_injective / signing_domain_separation	9d10f603184127243bfd203ff9c4e45908f954da
 dsm_client/deterministic_state_machine/dsm/src/connect.rs	120	verify	sphincs_verify on statement; unproved	9d10f603184127243bfd203ff9c4e45908f954da
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	16	sign_own	AK sphincs_sign on dsm::connect::statement; unproved	7a29b33e781803d3373406aff3af4bb27d4ec669
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	WrapperInjective.lean: escrow_statement_injective / signing_domain_separation	b88c48793f371ead186b2df61c2ed13063e2fdc3
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	b88c48793f371ead186b2df61c2ed13063e2fdc3
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	b88c48793f371ead186b2df61c2ed13063e2fdc3
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	WrapperInjective.lean: escrow_statement_injective / signing_domain_separation	6a10e3a84868f97fb6225ce7a564192da160e845
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	6a10e3a84868f97fb6225ce7a564192da160e845
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	6a10e3a84868f97fb6225ce7a564192da160e845
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_flow.rs	1	module boundary	unproved	6344bcb9ceebf6f759010c47af73a3764aa4cf35
 crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	89b34b568b22b0e2f317672312c8886db5bb7334
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	1	module boundary	unproved	4b576a53c9b2537abc36542e6b30cc489dee4765

@@ -234,6 +234,81 @@ pub fn names_directory_entry(genesis: &[u8; 32], device_id: &[u8; 32], bytes: &[
         .is_ok_and(|entry| &entry.body.genesis == genesis && &entry.body.device_id == device_id)
 }
 
+/// What became of one value offered to a [`BestProvenEntry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Offered {
+    /// It names the device, ranks above the best proven so far, and proves
+    /// itself: it is the best now.
+    Taken,
+    /// It is not an entry, or names another genesis or device.
+    NotThisDevice,
+    /// It does not rank above the best proven so far, so it was not proven.
+    Outranked,
+    /// It ranks above the best so far and does not prove itself.
+    Unproven(String),
+}
+
+/// The best entry proven so far among the values read at a device's cell
+/// from one member, ranked as [`select_entry`] ranks (highest counter, then
+/// smallest encoding). A value is proven only when it ranks above the best so
+/// far, so what a reader holds of a member is one entry, however many values
+/// the member holds, and junk under the predictable key costs its decoding
+/// and, at most, one check of each value that outranks the best (SA-67,
+/// SA-142).
+#[derive(Debug, Clone)]
+pub struct BestProvenEntry {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    best: Option<(u64, Vec<u8>)>,
+}
+
+impl BestProvenEntry {
+    pub fn new(genesis: &[u8; 32], device_id: &[u8; 32]) -> Self {
+        Self {
+            genesis: *genesis,
+            device_id: *device_id,
+            best: None,
+        }
+    }
+
+    /// Offer the member's next value. `proves` is the entry's proof of
+    /// itself.
+    pub fn offer<E: core::fmt::Display>(
+        &mut self,
+        bytes: &[u8],
+        proves: impl Fn(&DirectoryEntry) -> Result<(), E>,
+    ) -> Offered {
+        let entry = match DirectoryEntry::decode(bytes) {
+            Ok(entry)
+                if entry.body.genesis == self.genesis && entry.body.device_id == self.device_id =>
+            {
+                entry
+            }
+            Ok(_other_device) => return Offered::NotThisDevice,
+            Err(_not_an_entry) => return Offered::NotThisDevice,
+        };
+        let counter = entry.body.counter;
+        let outranks = self.best.as_ref().is_none_or(|(best, held)| {
+            counter > *best || (counter == *best && bytes < held.as_slice())
+        });
+        if !outranks {
+            return Offered::Outranked;
+        }
+        match proves(&entry) {
+            Ok(()) => {
+                self.best = Some((counter, bytes.to_vec()));
+                Offered::Taken
+            }
+            Err(why) => Offered::Unproven(why.to_string()),
+        }
+    }
+
+    /// The exact bytes of the best entry proven so far.
+    pub fn best(&self) -> Option<&[u8]> {
+        self.best.as_ref().map(|(_, bytes)| bytes.as_slice())
+    }
+}
+
 /// From everything read at a device's cell, across every member, the entry to
 /// use: one that names this genesis and device and proves itself, with the
 /// highest counter. Ties (only the device itself could sign two) go to the

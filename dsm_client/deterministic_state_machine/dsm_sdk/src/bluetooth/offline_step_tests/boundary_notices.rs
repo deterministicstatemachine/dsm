@@ -232,9 +232,11 @@ async fn a_contact_checks_a_load_one_hop_and_reads_nothing_behind_it() {
 }
 
 /// Every boundary since a contact was last told reaches it in order, each
-/// continuing the account the one before it left. A contact added after them is
-/// told at the payer's next sync of the latest alone, which validates with nothing
-/// behind it recorded. Once told, a contact is owed nothing more. MUTATION CONTROL:
+/// continuing the account the one before it left. A contact added after them
+/// walks the payer when it adds it (DSM Amendment A36), recording every
+/// boundary on the way, and is told at the payer's next sync of the latest,
+/// which continues the account the walk recorded. Once told, a contact is owed
+/// nothing more. MUTATION CONTROL:
 /// a sync that does not tell contacts leaves C with no record and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
@@ -285,11 +287,13 @@ async fn each_contact_is_told_what_it_is_owed_of_a_payers_boundaries() {
     let recorded = recorded_by(&c, &pair.a, &appliance).expect("C recorded the unload");
     assert_eq!(recorded.economic_position(), unloaded_at);
     c.enter();
-    assert!(
-        offline_account_below(&pair.a.genesis, &pair.a.device_id, &bundle, unloaded_at)
-            .expect("the store reads")
-            .is_none(),
-        "C was told of the latest alone"
+    let walked = offline_account_below(&pair.a.genesis, &pair.a.device_id, &bundle, unloaded_at)
+        .expect("the store reads")
+        .expect("C's walk of A at the add recorded the load");
+    assert_eq!(
+        walked.economic_position(),
+        loaded_at,
+        "C walked A when it added it, through the load"
     );
 }
 

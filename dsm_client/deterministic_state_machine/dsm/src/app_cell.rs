@@ -532,15 +532,14 @@ impl AppCell {
     }
 
     /// What a reader keeps of a seat's log at this cell: the copies of
-    /// writes whose own bytes derive its key. Those its reading counts are
-    /// among them, and so is every write for this cell it passes over and
-    /// says why ([`AppCellRead::passed_over`]); bytes that are no write for
-    /// this cell are no object naming its key, and never count (storage spec
-    /// §9, route chains, rule 3).
+    /// writes that prove their authority for it, the values its reading
+    /// recognizes ([`Self::recognizes`]). A reader keeps the first of them at
+    /// the leader and only copies of that one at later seats, so a write
+    /// that proves nothing must not be what it keeps first: an unsigned
+    /// write first at the leader would leave the cell read open for good
+    /// (storage spec §9, route chains, rule 3).
     pub fn keeps(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
-        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
-            AppCellWrite::decode(bytes).is_ok_and(|write| write.cell() == self.key)
-        })
+        self.recognizes()
     }
 
     /// The copies of writes that prove their authority for this cell: the
@@ -1017,13 +1016,14 @@ mod tests {
             ]
         ));
 
-        // A reader's own keeper drops the noise and keeps the forgery to say
-        // why; its recognizer keeps only the write that holds the cell.
+        // A reader's own keeper keeps only what its reading recognizes: the
+        // noise and the forgery are dropped as they are read, so neither can
+        // be the first value it keeps at the leader.
         let keeps = cell.keeps();
         let recognizes = cell.recognizes();
         let copy = |value: &[u8]| crate::route_chain::leader_copy(cell.routed(), value);
         assert!(!keeps(&copy(b"noise")));
-        assert!(keeps(&copy(&forged)));
+        assert!(!keeps(&copy(&forged)));
         assert!(keeps(&copy(&good)));
         assert!(!recognizes(&copy(&forged)));
         assert!(recognizes(&copy(&good)));

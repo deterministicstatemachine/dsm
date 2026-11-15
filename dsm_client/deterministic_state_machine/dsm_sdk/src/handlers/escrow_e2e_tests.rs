@@ -538,13 +538,14 @@ async fn a_verdict_outside_the_authority_cannot_occupy_the_cell() {
     .expect("a verdict's bytes");
     write_to_cell(&p.b, &m, &misplaced).await;
 
-    // The verdict for this cell signed by the wrong party is passed over and
-    // named; the verdict for another cell is no object naming this one, and
-    // the read keeps nothing of it (storage spec §9, route chains, rule 3).
+    // Neither holds the cell: the verdict for this cell signed by the wrong
+    // party proves no authority for it, and the verdict for another cell is
+    // no object naming this one. A reader keeps only what proves its
+    // authority, so it keeps nothing of either (storage spec §9, route
+    // chains, rule 3) and names nothing it passed over.
     let open = verdict(&p.a, &m.a_vault).await;
     assert_eq!(open.state, generated::EscrowVerdictState::None as i32);
-    assert_eq!(open.passed_over.len(), 1, "{:?}", open.passed_over);
-    assert!(open.passed_over[0].contains("NotTheOutcomesSigners"));
+    assert!(open.passed_over.is_empty(), "{:?}", open.passed_over);
     refused_release(&p.b, &m.b_vault, "no verdict holds the cell yet").await;
 
     let decided = verdict_of(
@@ -552,7 +553,7 @@ async fn a_verdict_outside_the_authority_cannot_occupy_the_cell() {
         "escrow.adjudicate",
     );
     final_on(&decided, &m, b"a-wins");
-    assert_eq!(decided.passed_over.len(), 1);
+    assert!(decided.passed_over.is_empty(), "{:?}", decided.passed_over);
     realized_through(&p.a, "escrow.release", release_request(&m.b_vault)).await;
     assert_eq!(balance(&p.a, &m.era), whole_era(100));
 }
