@@ -64,11 +64,14 @@ def read(root, path, problems):
 def check_identifiers(root, problems):
     pattern = re.compile(r"\b(" + "|".join(FORBIDDEN_IDENTIFIERS) + r")\b")
     for tree in SOURCE_TREES:
-        for file in sorted((root / tree).rglob("*.rs")):
+        directory = root / tree
+        files = sorted(directory.rglob("*.rs")) if directory.is_dir() else []
+        if not files:
+            problems.append(f"{tree}: no Rust sources found; the identifier lock cannot be checked")
+        for file in files:
             text = file.read_text(encoding="utf-8", errors="replace")
             for number, line in enumerate(text.splitlines(), 1):
-                found = pattern.search(line)
-                if found:
+                for found in pattern.finditer(line):
                     where = file.relative_to(root)
                     problems.append(f"{where}:{number}: {found.group(1)}")
 
