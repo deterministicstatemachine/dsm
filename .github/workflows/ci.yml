@@ -146,9 +146,10 @@ jobs:
           python3 scripts/real_code_guard.py --self-test
           python3 scripts/real_code_guard.py --reference origin/main
 
-  # One-hop acceptance (DSM Amendment A14) is locked (owner, 2026-11-04). This job runs on every
-  # change, whatever layers it touches: no A19 frontier, no A31 walk, and the tests that fail when
-  # a check reads behind the step it was asked about stay. See specs/README.md.
+  # The acceptance lock (owner, 2026-11-04; changed by the owner, 2026-11-15): a receiver keeps
+  # each payer's last proven state and validates each step as DSM Amendment A14 states. This job
+  # runs on every change: no A31 walk, no A28 first-spend exception, A14 stays in the explainer,
+  # and the lock changes only on the owner's words. See specs/README.md.
   acceptance-lock:
     name: Acceptance lock
     runs-on: ubuntu-latest
@@ -156,7 +157,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Fetch main, the lock's reference
         run: git fetch --no-tags --depth=1 origin main
-      - name: Refuse an ancestry walk, a frontier or a lost one-hop test
+      - name: Refuse the A31 walk, A28's exception and a lock changed without the owner
         run: python3 ci/acceptance_lock.py --reference origin/main
 
   rust-gates:
