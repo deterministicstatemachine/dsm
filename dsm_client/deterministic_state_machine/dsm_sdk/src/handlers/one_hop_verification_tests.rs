@@ -433,12 +433,13 @@ async fn a_credits_source_is_checked_from_what_the_receiver_kept() {
     );
 }
 
-/// A contact with a history is read from its start once (the owner's ruling of
-/// 2026-11-15). C is funded before B adds it; when C pays B, B reads C from its
-/// start; when C pays B again, B reads C's new position alone.
+/// A contact with a history is walked when it is added (the owner's ruling of
+/// 2026-11-15). C is funded before B adds it. B's add walks C to its head and
+/// keeps what it proved, so when C pays B, B reads C's paying position alone,
+/// and the same when C pays B again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_contact_with_a_history_is_read_from_its_start_once() {
+async fn a_contact_with_a_history_is_walked_when_it_is_added() {
     let p = Pair::boot(100, 0).await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
@@ -453,8 +454,8 @@ async fn a_contact_with_a_history_is_read_from_its_start_once() {
     assert_eq!(p.b.era_balance(), 10);
     assert_eq!(
         read_of(&asked, &c, paid_at + 1),
-        (1..=paid_at).collect::<Vec<_>>(),
-        "B read C from its start to its paying position"
+        vec![paid_at],
+        "B walked C when it added it, and read C's paying position alone"
     );
 
     let sent = c.send(&p.b, 10).await;
@@ -901,7 +902,8 @@ async fn a_payment_after_the_payers_dealings_with_others_is_accepted() {
 /// The same payment is accepted, with the same committed effect, whichever
 /// receiver takes it (plan R06). D adds A after A's funding; B added A before.
 /// A pays D, then pays B the same amount. Both accept, both admit their credit
-/// as their first position, and each, holding nothing of A, walks A from its
+/// as their first position. D's add walked A through its funding, so D reads
+/// A's payment alone; B added A before it was funded, so B reads A from its
 /// start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
@@ -933,8 +935,8 @@ async fn every_receiver_walks_the_payer_from_what_it_kept() {
     );
     assert_eq!(
         d_read,
-        (1..=to_d_at).collect::<Vec<_>>(),
-        "D walks A from its start"
+        vec![to_d_at],
+        "D walked A when it added it, and reads A's payment alone"
     );
     assert_eq!(
         b_read,

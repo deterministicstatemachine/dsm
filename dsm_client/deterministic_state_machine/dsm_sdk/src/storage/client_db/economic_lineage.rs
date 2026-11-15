@@ -391,7 +391,10 @@ pub fn kept_state_below(
     let conn = binding
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
-    let below = i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?;
+    // Every stored position fits an i64, so a bound above that range is the
+    // whole store: a walk to a peer's head asks below the largest position.
+    let below = i64::try_from(position.min(i64::MAX.unsigned_abs()))
+        .map_err(|e| anyhow!("position overflow: {e}"))?;
     let row = conn
         .query_row(
             "SELECT economic_position, economic_root, accepted_kind, accepted_ref

@@ -529,6 +529,49 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     record_established("step", peer_devid, peer_economic_position, checked)
 }
 
+/// Walk a contact from the state this device kept of it toward its head (the
+/// owner's ruling of 2026-11-15, specs/README.md), and keep every state it
+/// proves, so the contact's first payment reads only what is new. A walk that
+/// stops short keeps what it proved; a step that is not valid is the answer.
+pub(crate) async fn walk_contact(genesis: [u8; 32], device_id: [u8; 32]) -> Result<(), String> {
+    let network_id = crate::sdk::economic_admission_flow::committed_network_id()
+        .map_err(|e| format!("the committed network: {e}"))?;
+    let set = crate::sdk::storage_set::canonical_set(&network_id)
+        .map_err(|e| format!("the register set: {e}"))?;
+    let runtime = tokio::runtime::Handle::current();
+    let walk = tokio::task::spawn_blocking(move || {
+        let live = LiveRegisterResolver {
+            set: &set,
+            runtime,
+            expected_network_id: network_id.clone(),
+        };
+        let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
+            .map_err(|e| format!("SoFi reads: {e}"))?;
+        let checked = dsm::economic::peer_lineage::walk_peer_to_head(
+            &live,
+            &network_id,
+            &genesis,
+            &device_id,
+            dsm::economic::peer_lineage::KEPT_WALK_POSITIONS,
+            &StoredOfflineRecords,
+            &StoredKeptStates,
+            &sofi.peer_position_resolver(),
+        )
+        .map_err(|e| e.to_string())?;
+        let reached = checked.answer().reached();
+        record_established("walk", &device_id, reached, checked).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("the contact's walk did not finish: {e}"))??;
+    log::info!(
+        "[kept state] contact {} proved to position {}: {:?}",
+        text_id::encode_base32_crockford(&device_id),
+        walk.reached(),
+        walk.stop()
+    );
+    Ok(())
+}
+
 /// The root a trader selected at a position and the reference a later `P`
 /// names it by (`SofiReads::trader_root_at`), validated one hop (DSM
 /// Amendment A14).
