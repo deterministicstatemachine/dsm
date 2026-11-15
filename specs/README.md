@@ -2,18 +2,28 @@
 
 This folder is the authoritative engineering source for the DSM protocol architecture currently in scope. Specifications are kept as ordinary Markdown (`.md`) files so they are easy to diff, search, cite, and convert into implementation requirements.
 
-## Acceptance architecture lock (owner, 2026-11-04)
+## Acceptance architecture lock (owner, 2026-11-04; changed by the owner, 2026-11-15)
 
-**DSM Amendment A14 is the authority: a receiver validates a peer's step from that step's own parent and reads nothing behind it. No ancestry walk and no frontier, under any name.**
+**A receiver keeps each payer's last proven state and checks the payer's steps from that state forward. Each step is validated as DSM Amendment A14 states, from its own parent, with the same predicate any device runs.**
+
+The owner changed the lock on 2026-11-15, after four runs on real storage nodes, through the production routes, credited payments standing on a payer's old state, on the payer's own unseen step, on a state no registered step installed, and on a balance no step paid for. Asked twice, as its own yes-or-no question, whether a receiver may keep the last proven state of each payer it checks:
+
+> "Think your statement here is accurate because it's not like they need it to go back. They're aware of the history and what things need to look like. They have their own copy, essentially."
+>
+> "Yes, lift it"
+
+Then, on changing this lock and `ci/acceptance_lock.py`: "Okay, I'm giving you permission to change it."
+
+What a receiver keeps is the payer's committed state and step number from their last dealing; since Amendment A33 every payer is a contact, so every receiver has such a state from relationship setup ("What Charlie holds", explainer §9; the owner's paper, Definition 57). The 2026-11-04 rule "No ancestry walk and no frontier, under any name" no longer holds for this. It is not a licence for any other change.
 
 - No agent changes the acceptance architecture without the owner's own words naming that change. A hypothetical exploit is no reason to.
 - A claimed finding against it comes with a reproducible, end-to-end attack through the actual production protocol, from its very start, showing exactly which check fails. State built by a test harness is not that.
 - Even a demonstrated finding is a report to the owner, never a rewrite. The owner decides.
 - Anything that goes against a position the owner has held is said first, in bold, as its own yes-or-no question, and is not done until the owner has said yes more than once.
 - Nothing is labelled an owner request or ruling without the owner's quoted words and date.
-- **Holes in A14, if there are any, are the external auditor's, not any agent's.** Owner, 2026-11-04: "It's already been decided that the external auditor will handle A14 if there are any holes, not you guys. You just leave it and make notes that agents do not go back on this. They just move on, and I will identify it myself to the auditor." An agent leaves it: no going back on it, no test or run aimed at it, no raising it again. It moves on. The owner raises it with the auditor.
+- **Holes in A14, if there are any, are the external auditor's, not any agent's.** Owner, 2026-11-04: "It's already been decided that the external auditor will handle A14 if there are any holes, not you guys. You just leave it and make notes that agents do not go back on this. They just move on, and I will identify it myself to the auditor." An agent leaves it: no going back on it, no test or run aimed at it, no raising it again. It moves on. The owner raises it with the auditor. On 2026-11-15 the owner lifted this for one session ("You can check out A14 too.", then "You can still test it. I'm saying you can. Don't change anything on your own."); the runs above came from it, and the change above is his.
 
-The independent audit assesses A14 as specified. `ci/acceptance_lock.py` enforces this in CI.
+The independent audit assesses acceptance as specified. `ci/acceptance_lock.py` enforces what stays locked in CI.
 
 ## Current normative scope
 
