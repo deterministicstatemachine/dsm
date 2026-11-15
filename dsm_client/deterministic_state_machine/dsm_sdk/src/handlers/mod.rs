@@ -46,7 +46,11 @@ mod counterfeit_acceptance_tests;
 mod escrow_e2e_tests;
 pub mod escrow_routes;
 #[cfg(test)]
+mod device_directory_e2e_tests;
+#[cfg(test)]
 mod faucet_flow_tests;
+#[cfg(test)]
+mod first_inbox_e2e_tests;
 pub mod faucet_routes;
 pub mod identity_routes;
 pub mod inbox_routes;
@@ -88,7 +92,13 @@ pub mod system_routes;
 mod token_adoption_tests;
 #[cfg(test)]
 pub(crate) mod token_create_tests;
+#[cfg(test)]
+mod reserve_head_e2e_tests;
+#[cfg(test)]
+mod second_spend_e2e_tests;
 pub mod token_routes;
+#[cfg(test)]
+mod token_ticker_e2e_tests;
 pub mod transfer_helpers;
 pub mod wallet_routes;
 pub use recovery_impl::RecoveryImpl;
