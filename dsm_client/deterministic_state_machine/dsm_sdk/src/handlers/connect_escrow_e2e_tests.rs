@@ -1333,7 +1333,7 @@ pub(super) async fn put_at_the_leader(
         batch_bytes += entry.2.len();
         batch.push(entry);
     }
-    if let Some(..) = batch.first() {
+    if !batch.is_empty() {
         leader
             .put_cells(&batch)
             .await

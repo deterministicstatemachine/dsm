@@ -66,7 +66,7 @@ async fn no_created_token_carries_a_ticker_that_reads_as_era() {
     let mut created = Vec::new();
     for (ticker, how) in READ_AS_ERA {
         let refused = refused_fields(&p.a, ticker).await;
-        if let Some(..) = refused.first() {
+        if !refused.is_empty() {
             continue;
         }
         let policy_commit = create_token(&p.a, ticker, 1_000_000).await;

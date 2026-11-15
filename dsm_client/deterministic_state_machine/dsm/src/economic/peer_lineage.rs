@@ -322,6 +322,12 @@ pub trait KeptPeerStates {
     ) -> Result<Option<KeptPeerState>, PeerLineageFailure>;
 }
 
+/// What a receiver recorded of its peers that a check walks from: their
+/// offline accounts, and the states of them it proved and kept.
+pub trait ReceiverRecords: OfflineRecords + KeptPeerStates {}
+
+impl<T: OfflineRecords + KeptPeerStates> ReceiverRecords for T {}
+
 /// An offline boundary continues the account its previous boundary left, where
 /// this receiver recorded that one (the owner's funding ancestry). Where it
 /// recorded none, nothing behind the step is read to find it (DSM Amendment
@@ -495,8 +501,7 @@ pub fn validate_peer_step(
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     target_position: u64,
-    records: &dyn OfflineRecords,
-    kept: &dyn KeptPeerStates,
+    records: &dyn ReceiverRecords,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<Checked<ValidatedPeerTransition>, PeerLineageFailure> {
     if target_position == 0 {
@@ -504,8 +509,8 @@ pub fn validate_peer_step(
             "position 0 is the activation root; it has no transition to validate",
         ));
     }
-    let verifier = Verifier::new(fetcher, expected_network_id, records, conditional)?
-        .keeping(kept);
+    let verifier =
+        Verifier::new(fetcher, expected_network_id, records, conditional)?.keeping(records);
     let answer = verifier.step_at(peer_genesis, peer_devid, target_position, StepRole::Offered)?;
     Ok(verifier.checked(answer))
 }
@@ -553,20 +558,18 @@ impl PeerWalk {
 /// kept of them. Run when a contact is added, so that the contact's first
 /// payment reads only what is new. A position that is not decided yet ends the
 /// walk short, keeping what it proved; a step that is not valid is `Invalid`.
-#[allow(clippy::too_many_arguments)]
 pub fn walk_peer_to_head(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     positions: u64,
-    records: &dyn OfflineRecords,
-    kept: &dyn KeptPeerStates,
+    records: &dyn ReceiverRecords,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<Checked<PeerWalk>, PeerLineageFailure> {
-    let verifier = Verifier::new(fetcher, expected_network_id, records, conditional)?
-        .keeping(kept);
-    let answer = verifier.toward_head(kept, peer_genesis, peer_devid, positions)?;
+    let verifier =
+        Verifier::new(fetcher, expected_network_id, records, conditional)?.keeping(records);
+    let answer = verifier.toward_head(records, peer_genesis, peer_devid, positions)?;
     Ok(verifier.checked(answer))
 }
 
@@ -901,6 +904,13 @@ struct Located {
     claim: RegisteredEconomicClaim,
 }
 
+/// A peer, by its genesis and device id.
+type PeerKey = ([u8; 32], [u8; 32]);
+
+/// The states of each peer a check proved, by position.
+type ProvedStates =
+    std::collections::BTreeMap<PeerKey, std::collections::BTreeMap<u64, KeptPeerState>>;
+
 struct Verifier<'a> {
     fetcher: &'a dyn PeerEvidenceFetcher,
     expected_network_id: &'a [u8],
@@ -922,13 +932,13 @@ struct Verifier<'a> {
     /// one position alone.
     kept: Option<&'a dyn KeptPeerStates>,
     /// Every state of a peer this check proved, by peer and position.
-    proved: std::cell::RefCell<std::collections::BTreeMap<([u8; 32], [u8; 32]), std::collections::BTreeMap<u64, KeptPeerState>>>,
+    proved: std::cell::RefCell<ProvedStates>,
     /// The peers this check is walking now: a credit's source that leads back
     /// into one of these walks past where it has reached is circular.
     walking: std::cell::RefCell<std::collections::BTreeSet<([u8; 32], [u8; 32])>>,
     /// The steps this check is validating now: a step that is, through its
     /// credits' sources, its own source is circular.
-    validating: std::cell::RefCell<std::collections::BTreeSet<([u8; 32], [u8; 32], u64)>>,
+    validating: std::cell::RefCell<std::collections::BTreeSet<(PeerKey, u64)>>,
 }
 
 /// A claim's identity at its cell: the entry digest the register recognizes
@@ -1089,7 +1099,10 @@ impl Verifier<'_> {
         )
         .map_err(|e| incomplete(format!("root cell at {position}: {e:?}")))?;
         let evidence = self.fetcher.register_cell(&cell)?;
-        Ok(!matches!(read_root_cell(&cell, &evidence), Ok(CellReading::Open)))
+        Ok(!matches!(
+            read_root_cell(&cell, &evidence),
+            Ok(CellReading::Open)
+        ))
     }
 
     /// Authenticate a single-root claim: its manifest by content address,
@@ -1817,7 +1830,8 @@ impl Verifier<'_> {
                     if !held {
                         return Ok(None);
                     }
-                    self.step_after(genesis, device_id, position, &point).map(Some)
+                    self.step_after(genesis, device_id, position, &point)
+                        .map(Some)
                 });
             point = match stepped {
                 Ok(Some(next)) => next,
@@ -1854,35 +1868,37 @@ impl Verifier<'_> {
         position: u64,
         point: &ChainPoint,
     ) -> Result<ChainPoint, PeerLineageFailure> {
-        Ok(match self.claim_after(genesis, device_id, position, point)? {
-            RegisteredEconomicClaim::SingleRoot(claim) => {
-                let step = self.walked_full_step(
-                    genesis,
-                    device_id,
-                    position,
-                    point,
-                    &claim,
-                    StepRole::Offered,
-                )?;
-                ChainPoint {
-                    root: *step.validated_root(),
-                    accepted: Some(ParentClaimRef::SingleRoot {
-                        claim_ref: step.accepted_claim().claim_ref(),
-                    }),
+        Ok(
+            match self.claim_after(genesis, device_id, position, point)? {
+                RegisteredEconomicClaim::SingleRoot(claim) => {
+                    let step = self.walked_full_step(
+                        genesis,
+                        device_id,
+                        position,
+                        point,
+                        &claim,
+                        StepRole::Offered,
+                    )?;
+                    ChainPoint {
+                        root: *step.validated_root(),
+                        accepted: Some(ParentClaimRef::SingleRoot {
+                            claim_ref: step.accepted_claim().claim_ref(),
+                        }),
+                    }
                 }
-            }
-            RegisteredEconomicClaim::ConditionalSofi(held) => {
-                self.count(|c| c.conditional_hops += 1);
-                let (root, _) =
-                    self.resolve_conditional(genesis, device_id, position, point, &held)?;
-                ChainPoint {
-                    root,
-                    accepted: Some(ParentClaimRef::Conditional {
-                        fulfillment_id: held.fulfillment_id,
-                    }),
+                RegisteredEconomicClaim::ConditionalSofi(held) => {
+                    self.count(|c| c.conditional_hops += 1);
+                    let (root, _) =
+                        self.resolve_conditional(genesis, device_id, position, point, &held)?;
+                    ChainPoint {
+                        root,
+                        accepted: Some(ParentClaimRef::Conditional {
+                            fulfillment_id: held.fulfillment_id,
+                        }),
+                    }
                 }
-            }
-        })
+            },
+        )
     }
 
     /// [`Self::full_step`] inside a walk, refused when the same step is already
@@ -1897,7 +1913,7 @@ impl Verifier<'_> {
         claim: &VerifiedEconomicRootClaim,
         role: StepRole,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        let step = (*genesis, *device_id, position);
+        let step = ((*genesis, *device_id), position);
         if !self.validating.borrow_mut().insert(step) {
             return Err(invalid(format!(
                 "peer {}/{} at position {position}: the step is, through its credits' sources, \
@@ -2459,7 +2475,6 @@ mod tests {
             &PEER_G,
             &peer_d(),
             position,
-            &NoneRecorded,
             &KeptAt {
                 position: position - 1,
                 root: [0x30; 32],
@@ -2644,7 +2659,6 @@ mod tests {
                 &PEER_G,
                 &peer_d(),
                 position,
-                &NoneRecorded,
                 &KeptAt {
                     position: position - 1,
                     root: [0x30; 32],
@@ -2768,7 +2782,6 @@ mod tests {
             &PEER_G,
             &peer_d(),
             position,
-            &NoneRecorded,
             &NoneRecorded,
             &NoResolution,
         )
@@ -3084,6 +3097,18 @@ mod tests {
         root: [u8; 32],
     }
 
+    impl OfflineRecords for KeptAt {
+        fn offline_account_below(
+            &self,
+            _genesis: &[u8; 32],
+            _device_id: &[u8; 32],
+            _bundle: &[u8; 32],
+            _position: u64,
+        ) -> Result<Option<PeerOfflineAccount>, PeerLineageFailure> {
+            Ok(None)
+        }
+    }
+
     impl KeptPeerStates for KeptAt {
         fn kept_below(
             &self,
@@ -3091,15 +3116,17 @@ mod tests {
             device_id: &[u8; 32],
             position: u64,
         ) -> Result<Option<KeptPeerState>, PeerLineageFailure> {
-            Ok((position > self.position).then_some(KeptPeerState::rehydrate_kept(
-                *genesis,
-                *device_id,
-                self.position,
-                self.root,
-                ParentClaimRef::SingleRoot {
-                    claim_ref: [0xC0; 32],
-                },
-            )))
+            Ok(
+                (position > self.position).then_some(KeptPeerState::rehydrate_kept(
+                    *genesis,
+                    *device_id,
+                    self.position,
+                    self.root,
+                    ParentClaimRef::SingleRoot {
+                        claim_ref: [0xC0; 32],
+                    },
+                )),
+            )
         }
     }
 
@@ -3192,7 +3219,6 @@ mod tests {
                 &PEER_G,
                 &peer_d(),
                 position,
-                &NoneRecorded,
                 &KeptAt {
                     position: position - 1,
                     root: [0x41; 32],

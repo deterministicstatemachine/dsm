@@ -43,15 +43,15 @@ pub mod contacts_routes;
 #[cfg(test)]
 mod counterfeit_acceptance_tests;
 #[cfg(test)]
+mod device_directory_e2e_tests;
+#[cfg(test)]
 mod escrow_e2e_tests;
 pub mod escrow_routes;
 #[cfg(test)]
-mod device_directory_e2e_tests;
-#[cfg(test)]
 mod faucet_flow_tests;
+pub mod faucet_routes;
 #[cfg(test)]
 mod first_inbox_e2e_tests;
-pub mod faucet_routes;
 pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
@@ -81,7 +81,11 @@ pub mod relationship_status;
 pub mod relationship_write_authorization;
 #[cfg(test)]
 mod relationship_write_authorization_tests;
+#[cfg(test)]
+mod reserve_head_e2e_tests;
 pub mod response_helpers;
+#[cfg(test)]
+mod second_spend_e2e_tests;
 #[cfg(test)]
 mod sender_admission_tests;
 pub mod session_routes;
@@ -92,10 +96,6 @@ pub mod system_routes;
 mod token_adoption_tests;
 #[cfg(test)]
 pub(crate) mod token_create_tests;
-#[cfg(test)]
-mod reserve_head_e2e_tests;
-#[cfg(test)]
-mod second_spend_e2e_tests;
 pub mod token_routes;
 #[cfg(test)]
 mod token_ticker_e2e_tests;

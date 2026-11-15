@@ -446,9 +446,7 @@ impl OfflineRecords for StoredOfflineRecords {
 
 /// The states of its peers this receiver proved and kept, as its store holds
 /// them (the owner's ruling of 2026-11-15, specs/README.md).
-pub struct StoredKeptStates;
-
-impl dsm::economic::peer_lineage::KeptPeerStates for StoredKeptStates {
+impl dsm::economic::peer_lineage::KeptPeerStates for StoredOfflineRecords {
     fn kept_below(
         &self,
         genesis: &[u8; 32],
@@ -523,7 +521,6 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
         peer_devid,
         peer_economic_position,
         &StoredOfflineRecords,
-        &StoredKeptStates,
         conditional,
     )?;
     record_established("step", peer_devid, peer_economic_position, checked)
@@ -554,7 +551,6 @@ pub(crate) async fn walk_contact(genesis: [u8; 32], device_id: [u8; 32]) -> Resu
             &device_id,
             dsm::economic::peer_lineage::KEPT_WALK_POSITIONS,
             &StoredOfflineRecords,
-            &StoredKeptStates,
             &sofi.peer_position_resolver(),
         )
         .map_err(|e| e.to_string())?;
