@@ -209,12 +209,38 @@ pub fn record_validated(
     offline_accounts: &[dsm::economic::peer_lineage::PeerOfflineAccount],
     offline_exposures: &[dsm::economic::peer_lineage::PeerOfflineExposure],
     ek_steps: &[dsm::economic::peer_acceptance::VerifiedEkStep],
+    kept_states: &[dsm::economic::peer_lineage::KeptPeerState],
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
     let tx = conn.transaction()?;
+    // Each state of a peer the check proved: the next check of that peer
+    // starts from the highest of them (the owner's ruling of 2026-11-15).
+    for state in kept_states {
+        let (kind, reference) = match state.accepted() {
+            dsm::sofi::wire::ParentClaimRef::SingleRoot { claim_ref } => (1i64, *claim_ref),
+            dsm::sofi::wire::ParentClaimRef::Conditional { fulfillment_id } => {
+                (2i64, *fulfillment_id)
+            }
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO peer_kept_state(
+                 peer_genesis, peer_devid, economic_position, economic_root, accepted_kind,
+                 accepted_ref)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                state.genesis().as_slice(),
+                state.device_id().as_slice(),
+                i64::try_from(state.economic_position())
+                    .map_err(|e| anyhow!("position overflow: {e}"))?,
+                state.economic_root().as_slice(),
+                kind,
+                reference.as_slice(),
+            ],
+        )?;
+    }
     for account in offline_accounts {
         record_offline_account_in_tx(&tx, account)?;
     }
@@ -354,6 +380,57 @@ pub fn offline_exposure(
 
 /// The peer's offline account under `bundle` as the latest boundary this
 /// receiver recorded strictly below `position` left it.
+/// The state of `(peer_genesis, peer_devid)` this receiver kept at the highest
+/// position strictly below `position`, or `None` when it kept none there.
+pub fn kept_state_below(
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    position: u64,
+) -> Result<Option<dsm::economic::peer_lineage::KeptPeerState>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let below = i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?;
+    let row = conn
+        .query_row(
+            "SELECT economic_position, economic_root, accepted_kind, accepted_ref
+             FROM peer_kept_state
+             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND economic_position < ?3
+             ORDER BY economic_position DESC LIMIT 1",
+            params![peer_genesis.as_slice(), peer_devid.as_slice(), below],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(at, root, kind, reference)| {
+        let reference = digest32(reference, "kept state's accepted claim")?;
+        let accepted = match kind {
+            1 => dsm::sofi::wire::ParentClaimRef::SingleRoot {
+                claim_ref: reference,
+            },
+            2 => dsm::sofi::wire::ParentClaimRef::Conditional {
+                fulfillment_id: reference,
+            },
+            other => return Err(anyhow!("a kept state names claim kind {other}")),
+        };
+        Ok(dsm::economic::peer_lineage::KeptPeerState::rehydrate_kept(
+            *peer_genesis,
+            *peer_devid,
+            u64::try_from(at).map_err(|e| anyhow!("kept state position {at}: {e}"))?,
+            digest32(root, "kept state root")?,
+            accepted,
+        ))
+    })
+    .transpose()
+}
+
 pub fn offline_account_below(
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
@@ -1144,6 +1221,7 @@ mod admitted_row_tests {
                 addr,
                 ek_pk: b"walked key".to_vec(),
             }],
+            &[],
         )
         .expect("record the walk");
         assert_eq!(

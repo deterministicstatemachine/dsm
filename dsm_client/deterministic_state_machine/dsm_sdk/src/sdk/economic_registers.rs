@@ -444,6 +444,24 @@ impl OfflineRecords for StoredOfflineRecords {
     }
 }
 
+/// The states of its peers this receiver proved and kept, as its store holds
+/// them (the owner's ruling of 2026-11-15, specs/README.md).
+pub struct StoredKeptStates;
+
+impl dsm::economic::peer_lineage::KeptPeerStates for StoredKeptStates {
+    fn kept_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<dsm::economic::peer_lineage::KeptPeerState>, PeerLineageFailure> {
+        crate::storage::client_db::economic_lineage::kept_state_below(genesis, device_id, position)
+            .map_err(|e| {
+                PeerLineageFailure::Incomplete(format!("the kept state store is unreadable: {e}"))
+            })
+    }
+}
+
 /// What one check of a peer's step cost, logged where it ran (DSM Amendment
 /// A14): every count is bounded by a constant, whatever the position.
 fn log_cost(what: &str, devid: &[u8; 32], position: u64, cost: &StepCost) {
@@ -475,6 +493,7 @@ fn record_established<T>(
         checked.offline_accounts(),
         checked.offline_exposures(),
         checked.ek_steps(),
+        checked.kept_states(),
     )
     .map_err(|e| {
         PeerLineageFailure::Incomplete(format!("recording what this check validated: {e}"))
@@ -504,6 +523,7 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
         peer_devid,
         peer_economic_position,
         &StoredOfflineRecords,
+        &StoredKeptStates,
         conditional,
     )?;
     record_established("step", peer_devid, peer_economic_position, checked)
