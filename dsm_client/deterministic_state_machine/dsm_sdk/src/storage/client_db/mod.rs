@@ -62,6 +62,7 @@ pub mod token_registry;
 mod tokens;
 mod transactions;
 pub mod types;
+mod upgrade;
 mod vault_records;
 mod vaults;
 mod withdrawals;
@@ -201,7 +202,7 @@ pub fn init_database() -> Result<()> {
             info!("[DSM_SDK] Created parent directory: {:?}", parent);
         }
 
-        let conn = Connection::open(&db_path)?;
+        let mut conn = Connection::open(&db_path)?;
         info!("[DSM_SDK] Database connection opened successfully");
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
         // Write-ahead logging: a commit appends to the log and syncs it once,
@@ -213,6 +214,9 @@ pub fn init_database() -> Result<()> {
         let journal: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         conn.execute_batch("PRAGMA synchronous = FULL;")?;
         info!("[DSM_SDK] Database journal mode: {journal}");
+        // The one in-place upgrade beta makes (from 0.1.0-beta.4's database),
+        // before the version is judged: see `upgrade`.
+        upgrade::upgrade_in_place(&mut conn)?;
         create_schema(&conn)?;
         sofi_vault_head::drop_superseded_baselines(&conn)?;
         {
@@ -686,8 +690,9 @@ fn enforce_schema_version(conn: &Connection) -> Result<()> {
     if found != CLIENT_DB_SCHEMA_VERSION {
         return Err(anyhow!(
             "SCHEMA RESET REQUIRED: client database is version {found}, this build expects \
-             {CLIENT_DB_SCHEMA_VERSION}. DSM beta does not migrate — wipe the app database \
-             and re-provision from the wallet seed."
+             {CLIENT_DB_SCHEMA_VERSION} and upgrades in place only from 0.1.0-beta.4's (47) or \
+             48. DSM beta does not migrate any other version — wipe the app database and \
+             re-provision from the wallet seed."
         ));
     }
     Ok(())
