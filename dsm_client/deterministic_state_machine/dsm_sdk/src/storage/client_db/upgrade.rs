@@ -216,12 +216,12 @@ fn genesis_head_of(conn: &Connection) -> Result<RealizedHead> {
 fn carried_offline_account(
     account: &dsm::types::offline_account::OfflineAccount,
 ) -> Result<Option<([u8; 32], u64)>> {
-    let held: u64 = account.allocations().values().sum();
-    if held > 0 {
+    // The log says that value was dropped, never how much: a balance is not
+    // written to a log.
+    if account.allocations().values().any(|amount| *amount > 0) {
         log::warn!(
-            "[client_db] upgrade: a board's offline account at counter {} held {held}; it is \
-             reopened empty there",
-            account.counter()
+            "[client_db] upgrade: a board's offline account held value; it is reopened empty at \
+             the board's counter"
         );
     }
     Ok(Some((account.frontier(), account.counter())))
