@@ -86,6 +86,30 @@ pub(crate) async fn read_stored_bytes(
     })
 }
 
+/// A writer's read-back of an object it put for `set`: the bytes `Stored`
+/// holds for at its address, read from the members. When they are not exactly
+/// `payload`, the writer puts it at every member itself, relying on no
+/// member's copying, and reads again (§5 rule 7, §21).
+pub(crate) async fn read_back_or_repair(
+    set: &StorageSet,
+    namespace: TaggedHashDomain<'_>,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, DsmError> {
+    let addr = dsm::storage_object::immutable_addr(namespace, payload);
+    let first = read_stored_bytes(set, &addr).await?;
+    if first.as_deref() == Some(payload) {
+        return Ok(first);
+    }
+    let took = SetClient::new(set)?
+        .put_immutable_at_every_member(namespace, payload)
+        .await;
+    log::debug!(
+        "immutable put: short of Stored, repaired at {took}/{} members",
+        set.len()
+    );
+    read_stored_bytes(set, &addr).await
+}
+
 /// [`read_stored_bytes`] for a reader: the bytes at `addr` once this process
 /// read them `Stored`, which never changes what they are (§5: an address is
 /// its bytes, and there is no overwrite path), and read from the members
@@ -337,6 +361,7 @@ mod tests {
     use crate::economic_fixtures::NETWORK;
     use crate::sdk::storage_set::canonical_set;
     use crate::test_support::one_device::Fleet;
+    use dsm::sofi::storage::ObjectRead;
 
     const NAMESPACE: TaggedHashDomain<'static> =
         dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST;
@@ -732,6 +757,117 @@ mod tests {
             Discovered::Partial(objects) => {
                 panic!("every candidate is Stored, yet the scan is partial: {objects:?}")
             }
+        }
+    }
+
+    /// The positions, in member order, of the members that return bytes for
+    /// the object at `addr`.
+    async fn holders(set: &StorageSet, addr: &[u8; 32]) -> Vec<usize> {
+        SetClient::new(set)
+            .expect("the set's members")
+            .get_immutable(addr)
+            .await
+            .iter()
+            .enumerate()
+            .filter(|(_, read)| matches!(read, ObjectRead::Bytes { .. }))
+            .map(|(at, _)| at)
+            .collect()
+    }
+
+    /// Storage spec §5 rule 7: the members distribute an object among
+    /// themselves. A put for the set reaches every member, and the object is
+    /// `Stored`. A put at one member alone, marked so, stays at that member.
+    /// On the storage node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn the_members_copy_an_object_put_for_the_set_to_each_other() {
+        let _fleet = Fleet::start();
+        crate::sdk::final_reads::forget_everything();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        let payload = b"object: put for the set".to_vec();
+        let (addr, took) = put_immutable(&set, NAMESPACE, &payload)
+            .await
+            .expect("the put");
+        assert_eq!(took as usize, set.len(), "every member took it");
+        assert_eq!(
+            holders(&set, &addr).await,
+            (0..set.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            read_stored_bytes(&set, &addr).await.expect("the read-back"),
+            Some(payload)
+        );
+
+        let alone = b"object: at one member alone".to_vec();
+        SetClient::new(&set).expect("the set's members").members()[3]
+            .put_immutable(NAMESPACE, &alone)
+            .await
+            .expect("the member keeps it");
+        let at = dsm::storage_object::immutable_addr(NAMESPACE, &alone);
+        assert_eq!(holders(&set, &at).await, vec![3]);
+    }
+
+    /// A set-mate that does not take its copy is found without the object
+    /// when the writer asks, and the writer's own put there is taken: every
+    /// member holds it. On the storage node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_copy_a_set_mate_did_not_take_is_put_there_by_the_writer() {
+        let fleet = Fleet::start();
+        crate::sdk::final_reads::forget_everything();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        let payload = b"object: one copy refused".to_vec();
+        let addr = dsm::storage_object::immutable_addr(NAMESPACE, &payload);
+        let missed = (usize::from(addr[0]) + 1) % set.len();
+        let member = set.members()[missed].member_id.clone();
+        fleet.nodes().refuse_next_object_write(&member).await;
+        let (_, took) = put_immutable(&set, NAMESPACE, &payload)
+            .await
+            .expect("the put");
+        fleet.nodes().accept_object_writes(&[member]).await;
+        assert_eq!(took as usize, set.len(), "every member took it");
+        assert_eq!(
+            holders(&set, &addr).await,
+            (0..set.len()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A member that refuses every write leaves the object `Stored` at the
+    /// rest, whether it is a set-mate of the member the address asks first or
+    /// that member itself, which then passes the put to the next. On the
+    /// storage node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_member_that_refuses_the_object_leaves_it_stored_at_the_rest() {
+        let fleet = Fleet::start();
+        crate::sdk::final_reads::forget_everything();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        // A set-mate of the member asked first refuses; then the member
+        // asked first refuses.
+        for (case, beside_first) in [(1u8, 2usize), (2, 0)] {
+            let payload = vec![0x5E, case];
+            let addr = dsm::storage_object::immutable_addr(NAMESPACE, &payload);
+            let refusing = (usize::from(addr[0]) + beside_first) % set.len();
+            let member = set.members()[refusing].member_id.clone();
+            fleet
+                .nodes()
+                .refuse_object_writes(std::slice::from_ref(&member))
+                .await;
+            let (addr, took) = put_immutable(&set, NAMESPACE, &payload)
+                .await
+                .expect("the put");
+            let held = holders(&set, &addr).await;
+            assert_eq!(took as usize, set.len() - 1, "four took it");
+            assert!(
+                !held.contains(&refusing),
+                "the refusing member holds nothing"
+            );
+            assert_eq!(held.len(), set.len() - 1);
+            assert_eq!(
+                read_stored_bytes(&set, &addr).await.expect("the read-back"),
+                Some(payload)
+            );
+            fleet.nodes().accept_object_writes(&[member]).await;
         }
     }
 }

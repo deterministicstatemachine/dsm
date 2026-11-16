@@ -11,6 +11,49 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.1.1-beta.4] — 2026-11-15
+
+A replacement for 0.1.0-beta.4, cut the same way: nothing is migrated.
+Uninstall any earlier beta, create a new wallet, and expect the storage nodes
+to be reprovisioned (node schema 4, client database 49). The network id is
+still `dsm-testnet`.
+
+### Security
+
+- **A receiver keeps each payer's last proven state (DSM Amendment A36).** A
+  payment is checked from the state the receiver last proved for that payer,
+  through every step the payer made since, each from its own parent; a
+  credit's source is checked the same way. Four second-spend runs on real
+  nodes (an old state, an unseen own step, a state no step installed, a
+  balance no step paid) are refused. A contact's history is walked when it is
+  added. This is the receiver-side check of the original paper (§10.4).
+- **A relationship's first inbox is bound to its writer's published key
+  (DSM Amendment A37).** Each directory entry carries a first-inbox lock; a
+  third party who computes the first inbox from two devices' ids can no
+  longer write there first and keep them from becoming contacts. Nodes keep
+  no key per inbox address.
+- **A storage cell can no longer be jammed past a reader's budget.** A reader
+  keeps the leader's first recognized value and copies of it only, so junk
+  written at an application cell, an escrow verdict cell, the device
+  directory or the ERA reserve head no longer makes it unreadable.
+- **Look-alike tickers are refused.** A ticker that reads as `ERA` or `dBTC`
+  to a person (Cyrillic, Greek, full-width or mathematical letters, or any
+  invisible character) is refused at creation.
+
+### Changed
+
+- **The storage nodes distribute an object among themselves** (storage spec
+  §5 rule 7). A writer uploads an object once; the member that takes it
+  copies it to its set-mates, and the writer checks every member holds it
+  and fills any gap itself.
+
+### Noted for after beta
+
+- Storage-node misbehaviour evidence, stake burning, the operator registry
+  and seat reassignment (storage spec §24 item 16). Not built.
+
+---
+
 ## [0.1.0-beta.4] — 2026-11-13
 
 Beta.4 is a clean cut from beta.3. Nothing is migrated: uninstall any earlier

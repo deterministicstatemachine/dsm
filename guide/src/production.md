@@ -7,7 +7,7 @@
 The install from [Set up your machine](setup.md) put it in `~/.local/bin`. On a server, install it where your service manager runs it from; `DSM_PREFIX` names the place (`/usr/local/bin/dsm-app-host` here):
 
 ```bash
-curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.4/install.sh
+curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.1-beta.4/install.sh
 sudo DSM_PREFIX=/usr/local sh install.sh
 ```
 

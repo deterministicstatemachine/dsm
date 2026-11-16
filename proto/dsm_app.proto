@@ -3068,6 +3068,10 @@ message DeviceDirectoryEntryBodyV1 {
   // the device's inclusion proof). Bounded by the directory cell's value budget.
   bytes  authority_position = 7 [(dsm_fixed_len)=32];
   bytes  authority_evidence = 8;
+  // DSM Amendment A37: the device's first-inbox lock (SPHINCS+, never the AK).
+  // Every relationship's first inbox this device writes is the route bound to
+  // it, so only this device writes there.
+  bytes  first_inbox_lock_public_key = 9 [(dsm_fixed_len)=64];
 }
 message DeviceDirectoryEntryV1 {
   DeviceDirectoryEntryBodyV1 body = 1;
@@ -3998,10 +4002,10 @@ message RelationshipWriteAuthorizationV1 {
 // grant of the writer's key, the writer's signature over BLAKE3 under
 // DSM/spool-write/v1 of the address (32 bytes), the message id (16 bytes)
 // and BLAKE3 under DSM/spool-write-envelope/v1 of the envelope, and the
-// inbox's route digest. The address is the route digest bound to the key
-// (every inbox after a relationship's first) or the digest's open address
-// (the first inbox, whose key its first write fixes). The node stores the
-// envelope alone.
+// inbox's route digest. The address is the route digest bound to the key:
+// the writer's published first-inbox lock at a relationship's first inbox
+// (DSM Amendment A37), the recipient's write lock at every later one. The
+// node stores the envelope alone.
 message SpoolWriteV1 {
   bytes envelope        = 1 [(dsm_max_len)=131072]; // the spool envelope cap
   bytes lock_public_key = 2 [(dsm_fixed_len)=64];

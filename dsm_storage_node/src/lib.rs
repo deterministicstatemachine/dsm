@@ -42,12 +42,17 @@ pub struct AppState {
 }
 
 /// One set-mate, as this node's own configuration names it: where it is
-/// reached, and the client pinned to the CA that set-mate's operator holds.
+/// reached, the client pinned to the CA that set-mate's operator holds, and
+/// the copies (storage spec §5 rule 7) this node may have in flight to it.
 #[derive(Debug, Clone)]
 pub struct SetMate {
     pub member: String,
     pub endpoint: String,
     pub client: reqwest::Client,
+    /// [`set_client::SET_MATE_COPIES_IN_FLIGHT`] permits: a copy that finds
+    /// none free is not made, and the writer puts that copy itself, so copies
+    /// never take more of a set-mate's request share than this.
+    pub copies: Arc<tokio::sync::Semaphore>,
 }
 
 /// This node's view of the canonical storage set it belongs to.
@@ -176,6 +181,9 @@ impl NodeStorageSet {
                 member,
                 endpoint,
                 client,
+                copies: Arc::new(tokio::sync::Semaphore::new(
+                    set_client::SET_MATE_COPIES_IN_FLIGHT,
+                )),
             });
         }
         self.set_mates = set_mates;

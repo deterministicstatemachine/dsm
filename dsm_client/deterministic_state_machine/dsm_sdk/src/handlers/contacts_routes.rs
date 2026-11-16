@@ -18,6 +18,27 @@ use super::relationship_status::derive_local_send_status_for_contact;
 use super::response_helpers::{err, pack_envelope_ok};
 use crate::sdk::contact_profile;
 
+/// Walk a new contact toward its head beside the add, which does not wait for
+/// it (the owner's ruling of 2026-11-15): its first payment then reads only
+/// what is new. The two-device test harness holds background work off, as it
+/// does the poller, so there it runs before the add returns.
+async fn walk_new_contact(genesis: [u8; 32], device_id: [u8; 32]) {
+    let walk = async move {
+        if let Err(e) = crate::sdk::economic_registers::walk_contact(genesis, device_id).await {
+            log::warn!(
+                "[contacts.add] the contact was not walked yet: {e}; a payment from it walks \
+                 it when it arrives"
+            );
+        }
+    };
+    #[cfg(test)]
+    if crate::sdk::inbox_poller::background_held() {
+        walk.await;
+        return;
+    }
+    crate::runtime::get_runtime().spawn(walk);
+}
+
 impl AppRouterImpl {
     /// Add the counterparty a directory read proved, and establish the
     /// relationship before any step on it (§26). The one path a contact is
@@ -78,6 +99,7 @@ impl AppRouterImpl {
         self.begin_establishment(device_id)
             .await
             .map_err(|e| format!("contacts.add: {e}"))?;
+        walk_new_contact(resolved.entry.body.genesis, device_id).await;
 
         #[cfg(feature = "bluetooth")]
         {

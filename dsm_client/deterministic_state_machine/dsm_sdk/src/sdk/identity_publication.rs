@@ -58,14 +58,21 @@ impl DirectoryPublication {
 }
 
 /// This device's own directory entry: the one it signed before, while it still
-/// names this identity and this device's current Kyber key; otherwise a new
-/// one at the next counter, re-derived from the wallet seed and kept.
+/// names this identity, this device's current Kyber key and its first-inbox
+/// lock (DSM Amendment A37); otherwise a new one at the next counter,
+/// re-derived from the wallet seed and kept.
 fn own_entry(
     network_id: &[u8],
     genesis: &[u8; 32],
     device_id: &[u8; 32],
 ) -> Result<DirectoryEntry, DsmError> {
     let kyber_public_key = crate::sdk::kyber_identity::local_kyber_public_key()?;
+    let first_inbox_lock = dsm::core::relationship_write_grant::derive_first_inbox_lock_keypair(
+        &*crate::init::current_smaster()?,
+        device_id,
+    )?
+    .public_key
+    .clone();
     let previous = match crate::storage::client_db::own_directory_entry::load()
         .map_err(|e| storage_err("own directory entry", e))?
     {
@@ -79,7 +86,8 @@ fn own_entry(
         Some(entry)
             if entry.body.genesis == *genesis
                 && entry.body.device_id == *device_id
-                && entry.body.kyber_public_key == kyber_public_key =>
+                && entry.body.kyber_public_key == kyber_public_key
+                && entry.body.first_inbox_lock_public_key == first_inbox_lock =>
         {
             return Ok(entry.clone())
         }

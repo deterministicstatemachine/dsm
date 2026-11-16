@@ -4,7 +4,6 @@
 
 use crate::crypto::domain::TaggedHashDomain;
 
-pub const TAG_DSM_B0X: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/b0x");
 /// An inbox address's genesis axis (`crypto::spool_address`).
 pub const TAG_DSM_B0X_G: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-G");
 /// An inbox address's device axis.
@@ -70,7 +69,6 @@ pub const TAG_DSM_SDK_BILATERAL_ENTRY_V1: TaggedHashDomain<'static> =
 
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
-    TAG_DSM_B0X,
     TAG_DSM_B0X_G,
     TAG_DSM_B0X_D,
     TAG_DSM_B0X_T,

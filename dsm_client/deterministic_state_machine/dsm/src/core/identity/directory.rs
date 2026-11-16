@@ -46,6 +46,9 @@ pub const AK_PUBLIC_KEY_LEN: usize = 64;
 /// A Kyber (ML-KEM-768) public key.
 pub const KYBER_PUBLIC_KEY_LEN: usize = 1184;
 
+/// A first-inbox lock public key (SPHINCS+ SPX256f, DSM Amendment A37).
+pub const FIRST_INBOX_LOCK_LEN: usize = crate::core::relationship_write_grant::WRITE_PUBLIC_KEY_LEN;
+
 /// The cell a device's entries live in: one per (genesis, device).
 pub fn directory_cell_key(genesis: &[u8; 32], device_id: &[u8; 32]) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_DEVICE_DIRECTORY_KEY);
@@ -62,6 +65,11 @@ pub struct DirectoryEntryBody {
     pub ak_public_key: Vec<u8>,
     pub att_a: [u8; 32],
     pub kyber_public_key: Vec<u8>,
+    /// The device's first-inbox lock: every relationship's first inbox this
+    /// device writes is bound to it, so a contact added from this entry
+    /// derives that address and nobody else can write there (DSM Amendment
+    /// A37). Never the AK.
+    pub first_inbox_lock_public_key: Vec<u8>,
     /// Higher replaces lower. Only the device can sign one.
     pub counter: u64,
     /// The transition `t` the evidence's chain reaches: the position P0–P6
@@ -85,6 +93,7 @@ impl DirectoryEntryBody {
             counter: self.counter,
             authority_position: self.authority_position.to_vec(),
             authority_evidence: self.authority_evidence.clone(),
+            first_inbox_lock_public_key: self.first_inbox_lock_public_key.clone(),
         }
     }
 
@@ -181,6 +190,7 @@ impl DirectoryEntry {
                 counter: b.counter,
                 authority_position: d32(&b.authority_position)?,
                 authority_evidence: b.authority_evidence,
+                first_inbox_lock_public_key: b.first_inbox_lock_public_key,
             },
             signature: p.signature,
         })
@@ -203,6 +213,8 @@ impl DirectoryEntry {
         let b = &self.body;
         if b.ak_public_key.len() != AK_PUBLIC_KEY_LEN
             || b.kyber_public_key.len() != KYBER_PUBLIC_KEY_LEN
+            || b.first_inbox_lock_public_key.len() != FIRST_INBOX_LOCK_LEN
+            || b.first_inbox_lock_public_key == b.ak_public_key
         {
             return Err(DirectoryError::KeyLength);
         }
@@ -232,6 +244,81 @@ impl DirectoryEntry {
 pub fn names_directory_entry(genesis: &[u8; 32], device_id: &[u8; 32], bytes: &[u8]) -> bool {
     DirectoryEntry::decode(bytes)
         .is_ok_and(|entry| &entry.body.genesis == genesis && &entry.body.device_id == device_id)
+}
+
+/// What became of one value offered to a [`BestProvenEntry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Offered {
+    /// It names the device, ranks above the best proven so far, and proves
+    /// itself: it is the best now.
+    Taken,
+    /// It is not an entry, or names another genesis or device.
+    NotThisDevice,
+    /// It does not rank above the best proven so far, so it was not proven.
+    Outranked,
+    /// It ranks above the best so far and does not prove itself.
+    Unproven(String),
+}
+
+/// The best entry proven so far among the values read at a device's cell
+/// from one member, ranked as [`select_entry`] ranks (highest counter, then
+/// smallest encoding). A value is proven only when it ranks above the best so
+/// far, so what a reader holds of a member is one entry, however many values
+/// the member holds, and junk under the predictable key costs its decoding
+/// and, at most, one check of each value that outranks the best (SA-67,
+/// SA-142).
+#[derive(Debug, Clone)]
+pub struct BestProvenEntry {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    best: Option<(u64, Vec<u8>)>,
+}
+
+impl BestProvenEntry {
+    pub fn new(genesis: &[u8; 32], device_id: &[u8; 32]) -> Self {
+        Self {
+            genesis: *genesis,
+            device_id: *device_id,
+            best: None,
+        }
+    }
+
+    /// Offer the member's next value. `proves` is the entry's proof of
+    /// itself.
+    pub fn offer<E: core::fmt::Display>(
+        &mut self,
+        bytes: &[u8],
+        proves: impl Fn(&DirectoryEntry) -> Result<(), E>,
+    ) -> Offered {
+        let entry = match DirectoryEntry::decode(bytes) {
+            Ok(entry)
+                if entry.body.genesis == self.genesis && entry.body.device_id == self.device_id =>
+            {
+                entry
+            }
+            Ok(_other_device) => return Offered::NotThisDevice,
+            Err(_not_an_entry) => return Offered::NotThisDevice,
+        };
+        let counter = entry.body.counter;
+        let outranks = self.best.as_ref().is_none_or(|(best, held)| {
+            counter > *best || (counter == *best && bytes < held.as_slice())
+        });
+        if !outranks {
+            return Offered::Outranked;
+        }
+        match proves(&entry) {
+            Ok(()) => {
+                self.best = Some((counter, bytes.to_vec()));
+                Offered::Taken
+            }
+            Err(why) => Offered::Unproven(why.to_string()),
+        }
+    }
+
+    /// The exact bytes of the best entry proven so far.
+    pub fn best(&self) -> Option<&[u8]> {
+        self.best.as_ref().map(|(_, bytes)| bytes.as_slice())
+    }
 }
 
 /// From everything read at a device's cell, across every member, the entry to
@@ -383,6 +470,7 @@ pub(crate) mod test_identities {
             ak_public_key: genesis.ak_public.clone(),
             att_a,
             kyber_public_key: vec![counter as u8; KYBER_PUBLIC_KEY_LEN],
+            first_inbox_lock_public_key: vec![0xF1; FIRST_INBOX_LOCK_LEN],
             counter,
             authority_position: t0.digest(),
             authority_evidence: evidence.encode_to_vec(),

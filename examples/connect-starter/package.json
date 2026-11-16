@@ -1,6 +1,6 @@
 {
   "name": "dsm-connect-starter",
-  "version": "0.1.0-beta.4",
+  "version": "0.1.1-beta.4",
   "description": "A Web2 application with its own DSM account: show a connect code, see connected wallets, ask them to pay and to prove holdings",
   "license": "MIT OR Apache-2.0",
   "private": true,

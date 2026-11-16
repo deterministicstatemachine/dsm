@@ -343,9 +343,13 @@ async fn a_write_into_an_inbox_under_another_key_is_refused_by_every_node() {
     let derived = client_db::inbox_route(&route)
         .expect("the route store")
         .expect("A derived the route");
-    assert!(
-        derived.lock_public_key.is_some(),
-        "the payment's inbox is bound to B's lock"
+    assert_ne!(
+        derived.lock_public_key,
+        crate::sdk::spool_write::own_first_inbox_lock()
+            .expect("A's first-inbox lock")
+            .public_key
+            .clone(),
+        "the payment's inbox is bound to B's lock, not to A's first-inbox lock"
     );
     let address = <[u8; 32]>::try_from(
         crate::util::text_id::decode_base32_crockford(&route)

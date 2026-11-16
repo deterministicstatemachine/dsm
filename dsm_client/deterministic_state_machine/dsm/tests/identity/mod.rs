@@ -12,7 +12,9 @@ use dsm::ccb::{
     DeviceTreeRootTransition, GenesisParamsV3, RootProgressionDelegation,
 };
 use dsm::common::device_tree::DeviceTree;
-use dsm::core::identity::directory::{DirectoryEntry, DirectoryEntryBody, KYBER_PUBLIC_KEY_LEN};
+use dsm::core::identity::directory::{
+    DirectoryEntry, DirectoryEntryBody, FIRST_INBOX_LOCK_LEN, KYBER_PUBLIC_KEY_LEN,
+};
 use dsm::core::identity::genesis_v2::{derive_atta, genesis_authority_policy_hash};
 use dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested;
 use dsm::crypto::sphincs;
@@ -97,6 +99,7 @@ pub fn identity(seed: u8) -> Identity {
         ak_public_key: genesis.ak_public.clone(),
         att_a,
         kyber_public_key: vec![seed; KYBER_PUBLIC_KEY_LEN],
+        first_inbox_lock_public_key: vec![seed ^ 0xF1; FIRST_INBOX_LOCK_LEN],
         counter: 1,
         authority_position: t0.digest(),
         authority_evidence: evidence.encode_to_vec(),

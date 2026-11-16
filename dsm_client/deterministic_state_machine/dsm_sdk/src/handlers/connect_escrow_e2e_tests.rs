@@ -1225,3 +1225,374 @@ async fn the_first_members_write_holds_a_cell_and_a_second_members_never_does() 
         .expect("a write the wallet cannot sign is refused, with the reason");
     assert!(why.contains("not one of the cell's writers"), "{why}");
 }
+
+// ── a stranger's bytes at an application cell (storage spec §9, rule 3) ─────
+
+/// What this device keeps of one seat's log at a cell at most
+/// (`route_seats::HELD_LOG_BUDGET`).
+const ONE_SEATS_LOG: usize = 8 * 1024 * 1024;
+
+/// What someone holding no key of a cell can put at it: writes whose own
+/// bytes derive the cell, carrying bytes no writer signed where the
+/// signature goes. Everything they are built from is public: the
+/// application's genesis, the cell's name and the writers' public keys.
+/// Distinct ones, each as large as a write may be, until they pass `over`
+/// bytes in all.
+fn a_strangers_writes(
+    application: [u8; 32],
+    name: &[u8],
+    writers: &dsm::app_cell::WriterSet,
+    over: usize,
+) -> Vec<Vec<u8>> {
+    let unsigned = vec![0xA5; dsm::app_cell::MAX_SIGNATURE_BYTES];
+    let mut made = Vec::new();
+    let mut bytes = 0usize;
+    while bytes <= over {
+        let mut payload = vec![0x5A; dsm::app_cell::MAX_PAYLOAD_BYTES];
+        payload[..8].copy_from_slice(&(made.len() as u64).to_be_bytes());
+        let write = dsm::app_cell::AppCellWrite::new(
+            application,
+            name,
+            writers.clone(),
+            0,
+            &payload,
+            &unsigned,
+        )
+        .expect("bytes within a write's bounds")
+        .encode();
+        bytes += write.len();
+        made.push(write);
+    }
+    made
+}
+
+/// As many bytes as `like`, the same sizes, that are no write at all.
+fn bytes_that_are_no_write(like: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    like.iter()
+        .enumerate()
+        .map(|(n, write)| {
+            let mut bytes = vec![0xEE; write.len()];
+            bytes[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            bytes
+        })
+        .collect()
+}
+
+/// The cell `application` names `name` for `writers`, derived from public
+/// values alone, over the network's pinned set.
+fn cell_from_public_values(
+    set: &crate::sdk::storage_set::StorageSet,
+    application: &[u8; 32],
+    name: &[u8],
+    writers: &dsm::app_cell::WriterSet,
+) -> dsm::app_cell::AppCell {
+    let key = crate::sdk::app_cell_flow::cell_of(application, name, writers);
+    dsm::app_cell::AppCell::new(
+        &key,
+        &crate::sdk::storage_set::as_ccb_members(set).expect("the set's members"),
+        &set.id(),
+    )
+    .expect("the cell over the pinned set")
+}
+
+/// Put `values` at `cell`'s leader the way any client of the set can: the
+/// member's cell route, which asks for no key and no signature.
+pub(super) async fn put_at_the_leader(
+    set: &crate::sdk::storage_set::StorageSet,
+    routed: &dsm::route_chain::RoutedCell,
+    values: &[Vec<u8>],
+) {
+    let client = crate::sdk::storage_node_sdk::SetClient::new(set).expect("a client of the set");
+    let leader = client
+        .member(routed.route().leader())
+        .expect("the leader is a member of the set");
+    let entries: Vec<crate::sdk::route_seats::CellPut> = values
+        .iter()
+        .map(|value| {
+            let entry = dsm::route_chain::RouteEntry::at_leader(
+                routed.namespace().to_vec(),
+                *routed.key(),
+                value.clone(),
+                routed.route(),
+            );
+            (routed.namespace().to_vec(), *routed.key(), entry.encode())
+        })
+        .collect();
+    // A member takes at most 1 MiB a request.
+    let mut batch: Vec<crate::sdk::route_seats::CellPut> = Vec::new();
+    let mut batch_bytes = 0usize;
+    for entry in entries {
+        if batch_bytes + entry.2.len() > 900 * 1024 {
+            leader
+                .put_cells(&batch)
+                .await
+                .expect("a member keeps any bytes it is given at a cell");
+            batch.clear();
+            batch_bytes = 0;
+        }
+        batch_bytes += entry.2.len();
+        batch.push(entry);
+    }
+    if !batch.is_empty() {
+        leader
+            .put_cells(&batch)
+            .await
+            .expect("a member keeps any bytes it is given at a cell");
+    }
+}
+
+/// Storage spec §9, route chains, rule 3: bytes at a seat that are no
+/// recognized object naming the cell never count, and block nothing.
+///
+/// A stranger to a faction, holding no key of its cells, derives the cell of
+/// the faction's next step from public values and puts a little over one
+/// seat's log budget of well-formed writes there that no writer signed,
+/// through the node's ordinary cell route. A member's wallet then writes the
+/// step through its grant. The step must hold the cell, final, exactly as it
+/// does at a cell where the stranger put as many bytes that are no write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_strangers_unsigned_writes_at_a_cell_block_no_members_write() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let code_a = state_offer(&r, &relay).await;
+    let sid_a = connect_shown(&r, &p.a, &relay, &code_a, STATE_LINE).await;
+    let code_b = state_offer(&r, &relay).await;
+    let sid_b = connect_shown(&r, &p.b, &relay, &code_b, STATE_LINE).await;
+    let as_a = player_of(&r, &sid_a).await;
+    let as_b = player_of(&r, &sid_b).await;
+    let members = [&as_a, &as_b];
+
+    // What the stranger knows: the game's genesis, the two wallets' public
+    // keys, and the names the game gives its cells.
+    r.enter();
+    let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+        .expect("the pinned set");
+    let writers = crate::sdk::app_cell_flow::writers(&[
+        as_a.peer_signing_key.clone(),
+        as_b.peer_signing_key.clone(),
+    ])
+    .expect("the faction's writers");
+
+    // Step 1, untouched: held and final, at the cell the stranger derives.
+    let first = request(
+        &r,
+        &relay,
+        &sid_a,
+        cell_write(b"faction 4 / step 1", &members, b"place watchtower at 4,9"),
+    )
+    .await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    let held = status(&r, &sid_a, first).await;
+    assert_eq!(
+        fact(&held),
+        generated::ConnectFact::AppCellHeld,
+        "{}",
+        held.fact_detail
+    );
+    assert_eq!(
+        held.app_cell,
+        cell_from_public_values(&set, &r.genesis, b"faction 4 / step 1", &writers)
+            .key()
+            .to_vec(),
+        "public values derive the faction's cell"
+    );
+
+    // Step 3's cell: the stranger puts bytes that are no write. They block
+    // nothing.
+    let unsigned = a_strangers_writes(r.genesis, b"faction 4 / step 2", &writers, ONE_SEATS_LOG);
+    let third_cell = cell_from_public_values(&set, &r.genesis, b"faction 4 / step 3", &writers);
+    put_at_the_leader(
+        &set,
+        third_cell.routed(),
+        &bytes_that_are_no_write(&unsigned),
+    )
+    .await;
+    let third = request(
+        &r,
+        &relay,
+        &sid_a,
+        cell_write(b"faction 4 / step 3", &members, b"raise gate at 1,1"),
+    )
+    .await;
+    let third_sync = sync(&p.a, &r, &relay).await;
+    let third_status = status(&r, &sid_a, third).await;
+    assert_eq!(
+        fact(&third_status),
+        generated::ConnectFact::AppCellHeld,
+        "bytes that are no write blocked a member: sync {third_sync:?}; {}",
+        third_status.fact_detail
+    );
+
+    // Step 2's cell: the stranger puts as many bytes, as writes for the cell
+    // that no writer signed.
+    let second_cell = cell_from_public_values(&set, &r.genesis, b"faction 4 / step 2", &writers);
+    put_at_the_leader(&set, second_cell.routed(), &unsigned).await;
+    let second = request(
+        &r,
+        &relay,
+        &sid_b,
+        cell_write(b"faction 4 / step 2", &members, b"place wall at 2,2"),
+    )
+    .await;
+    let second_sync = sync(&p.b, &r, &relay).await;
+    let wallet = wallet_log(&p.b, &sid_b, second).await;
+    let second_status = status(&r, &sid_b, second).await;
+    assert_eq!(
+        fact(&second_status),
+        generated::ConnectFact::AppCellHeld,
+        "{} unsigned writes ({} bytes) from a stranger at the cell's leader blocked a member's \
+         write. The wallet's sync: {second_sync:?}. The wallet's log: {} / {}. The game's \
+         reading: {}",
+        unsigned.len(),
+        unsigned.iter().map(Vec::len).sum::<usize>(),
+        wallet.summary,
+        wallet.detail,
+        second_status.fact_detail
+    );
+}
+
+// ── a losing player's bytes at a match's verdict cell ───────────────────────
+
+/// What a player of a match can put at its verdict cell without the game's
+/// key: verdicts whose `Y` and outcome table derive the cell, carrying bytes
+/// nobody signed where the signatures go, under keys that decide nothing.
+/// The player's own wallet built the terms, so it holds `Y` and the table.
+/// Distinct ones, each as large as a verdict may be, until they pass `over`
+/// bytes in all.
+fn a_players_unsigned_verdicts(terms: &dsm::sofi::wire::EscrowTerms, over: usize) -> Vec<Vec<u8>> {
+    let mut made = Vec::new();
+    let mut bytes = 0usize;
+    while bytes <= over {
+        let signatures = (1..=dsm::sofi::wire::ESCROW_MAX_SIGNERS as u8)
+            .map(|n| {
+                let signer = crate::sdk::connect::wager::signer(&[n; 64]).expect("a key's width");
+                let mut unsigned = vec![0xA5; 64 * 1024];
+                unsigned[..8].copy_from_slice(&(made.len() as u64).to_be_bytes());
+                dsm::sofi::wire::VerdictSignature::new(signer, &unsigned)
+                    .expect("bytes within a signature's bounds")
+            })
+            .collect();
+        let verdict = dsm::sofi::wire::EscrowVerdict::new(
+            *terms.external_commitment(),
+            terms.outcome_table(),
+            crate::sdk::connect::wager::B_WINS,
+            signatures,
+        )
+        .expect("bytes within a verdict's bounds")
+        .encode();
+        bytes += verdict.len();
+        made.push(verdict);
+    }
+    made
+}
+
+/// Storage spec §9, route chains, rule 3, at a verdict cell (SoFi §19.9):
+/// bytes that are no recognized verdict never count, and block nothing.
+///
+/// Two players stake a match the game referees. B, who expects to lose,
+/// derives the match's verdict cell from the terms its own wallet built and
+/// puts a little over one seat's log budget of well-formed verdicts there
+/// that nobody signed, through the node's ordinary cell route. The game then
+/// decides `a-wins` and A collects. A must be paid both stakes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_losing_players_unsigned_verdicts_do_not_keep_the_winner_from_the_stakes() {
+    use crate::sdk::connect::grant::Side;
+    use crate::sdk::connect::wager;
+
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let code_a = offer(&r, &relay).await;
+    let sid_a = connect(&r, &p.a, &relay, &code_a).await;
+    let code_b = offer(&r, &relay).await;
+    let sid_b = connect(&r, &p.b, &relay, &code_b).await;
+    let (as_a, as_b) = (player_of(&r, &sid_a).await, player_of(&r, &sid_b).await);
+    let stake = whole_era(25);
+    let external = b"arena match 9: A v B";
+
+    let lock_a = request(&r, &relay, &sid_a, lock(external, stake, 1, &as_b, None)).await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    carried_out(&p.a, &sid_a, lock_a).await;
+    let (a_vault, cell) = locked(&r, &sid_a, lock_a, stake).await;
+    let lock_b = request(
+        &r,
+        &relay,
+        &sid_b,
+        lock(external, stake, 2, &as_a, Some(&a_vault)),
+    )
+    .await;
+    assert_eq!(sync(&p.b, &r, &relay).await, "");
+    carried_out(&p.b, &sid_b, lock_b).await;
+    let (b_vault, b_cell) = locked(&r, &sid_b, lock_b, stake).await;
+    assert_eq!(b_cell, cell);
+    assert_eq!(balance(&p.a, &era()), whole_era(100) - stake);
+    assert_eq!(balance(&p.b, &era()), whole_era(100) - stake);
+
+    // B's wallet built these terms for its own stake: the match, the two
+    // players and the game's key.
+    let player = |s: &generated::ConnectSessionV1| wager::Player {
+        genesis: s.peer_genesis.as_slice().try_into().expect("a genesis"),
+        device_id: s.peer_device_id.as_slice().try_into().expect("a device"),
+        signer: wager::signer(&s.peer_signing_key).expect("a player's key"),
+    };
+    let referee = wager::Referee {
+        device_id: r.device_id,
+        signer: wager::signer(&r.ak_pk).expect("the game's key"),
+    };
+    let terms = wager::terms(
+        external,
+        era(),
+        Side::B,
+        &player(&as_b),
+        &player(&as_a),
+        &referee,
+    )
+    .expect("the match template");
+    let verdict_cell = dsm::sofi::escrow::verdict_cell_of(&terms);
+    assert_eq!(
+        verdict_cell.to_vec(),
+        cell,
+        "the terms B's wallet built derive the match's verdict cell"
+    );
+
+    r.enter();
+    let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+        .expect("the pinned set");
+    let routed = dsm::sofi::escrow::VerdictCell::new(
+        &verdict_cell,
+        &crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members"),
+        &set.id(),
+    )
+    .expect("the verdict cell over the pinned set");
+    let unsigned = a_players_unsigned_verdicts(&terms, ONE_SEATS_LOG);
+    put_at_the_leader(&set, routed.routed(), &unsigned).await;
+
+    // The game decides, and the winner collects.
+    let decided = invoke(
+        &r,
+        "escrow.adjudicate",
+        args(&generated::EscrowOutcomeRequest {
+            vault_id: a_vault.clone(),
+            outcome: b"a-wins".to_vec(),
+        }),
+    )
+    .await;
+    let collect_a = request(&r, &relay, &sid_a, collect(&[&a_vault, &b_vault])).await;
+    let collect_sync = sync(&p.a, &r, &relay).await;
+    let wallet = wallet_log(&p.a, &sid_a, collect_a).await;
+    let collected = status(&r, &sid_a, collect_a).await;
+    assert_eq!(
+        balance(&p.a, &era()),
+        whole_era(100) + stake,
+        "{} unsigned verdicts ({} bytes) from the losing player at the verdict cell's leader          kept the winner from the stakes. The game's adjudication answered: {:?}. The winner's          sync: {collect_sync:?}. The winner's log: {} / {}. The game's reading: {}",
+        unsigned.len(),
+        unsigned.iter().map(Vec::len).sum::<usize>(),
+        decided.error_message,
+        wallet.summary,
+        wallet.detail,
+        collected.fact_detail
+    );
+}

@@ -30,12 +30,14 @@ pub(crate) type ParsedTokenPolicy = dsm::economic::token_policy::TokenPolicy;
 const TICKER_CHARS: std::ops::RangeInclusive<usize> = 2..=8;
 
 /// Why `ticker` is no token's ticker, if it is not. A token created or
-/// adopted on this device carries 2 to 8 characters (SoFi §47), never a
-/// built-in token's ticker in any letter case, so no token is shown or
-/// picked as ERA or dBTC (SA-104, SA-145). The policy commit stays the
-/// asset's identity; this keeps the ticker that names it locally from
-/// naming another.
+/// adopted on this device carries 2 to 8 characters (SoFi §47), each one a
+/// person sees, and never a built-in token's ticker as a person reads it: in
+/// any letter case, or drawn in look-alike Cyrillic, Greek, full-width or
+/// mathematical letters. So no token is shown or picked as ERA or dBTC
+/// (SA-104, SA-145). The policy commit stays the asset's identity; this keeps
+/// the ticker that names it locally from naming another.
 fn ticker_refusal(ticker: &str) -> Option<String> {
+    use dsm::core::token::token_state_manager::{builtin_ticker_read_in, ticker_invisible_char};
     let chars = ticker.chars().count();
     if !TICKER_CHARS.contains(&chars) {
         return Some(format!(
@@ -44,10 +46,13 @@ fn ticker_refusal(ticker: &str) -> Option<String> {
             TICKER_CHARS.end()
         ));
     }
-    dsm::core::token::token_state_manager::BUILTIN_TICKERS
-        .iter()
-        .find(|builtin| builtin.eq_ignore_ascii_case(ticker))
-        .map(|builtin| format!("{builtin} is a protocol asset's ticker"))
+    if let Some(invisible) = ticker_invisible_char(ticker) {
+        return Some(format!(
+            "a ticker holds only characters a person sees, not U+{:04X}",
+            invisible as u32
+        ));
+    }
+    builtin_ticker_read_in(ticker).map(|builtin| format!("{builtin} is a protocol asset's ticker"))
 }
 /// The most decimals a token may carry.
 const DECIMALS_MAX: u32 = 18;
@@ -382,8 +387,7 @@ async fn publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> P
     if let Err(e) = crate::sdk::storage_io::put_immutable(&set, tag, body).await {
         return PublishOutcome::NotStoredYet(format!("put: {e}"));
     }
-    let addr = dsm::storage_object::immutable_addr_from_inner(tag, expected_anchor);
-    match crate::sdk::storage_io::read_stored_bytes(&set, &addr).await {
+    match crate::sdk::storage_io::read_back_or_repair(&set, tag, body).await {
         Ok(Some(stored)) if stored == body => PublishOutcome::Stored,
         Ok(Some(..) | None) => {
             PublishOutcome::NotStoredYet("fewer than three members return the bytes yet".into())

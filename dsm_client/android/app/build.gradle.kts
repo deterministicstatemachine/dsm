@@ -66,8 +66,8 @@ android {
         applicationId = "com.dsm.wallet"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.1.0-beta.4"
+        versionCode = 5
+        versionName = "0.1.1-beta.4"
 
         // Instrumentation runner for androidTest
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

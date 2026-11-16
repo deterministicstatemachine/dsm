@@ -524,9 +524,14 @@ mod tests {
         let client =
             crate::sdk::storage_node_sdk::member_client(&member.member_id, &member.endpoint)
                 .expect("a member client");
-        // An open inbox address (DSM Amendment A34): a write proves it from
-        // its route digest.
-        let address = dsm::crypto::spool_address::open_inbox_address(&[0x7Au8; 32]);
+        // An inbox address bound to a writer's own lock, as a relationship's
+        // first inbox is (DSM Amendment A37): a write proves it from its route
+        // digest and that key.
+        let writer =
+            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+                .expect("a writer's key");
+        let address =
+            dsm::crypto::spool_address::locked_inbox_address(&[0x7Au8; 32], &writer.public_key);
 
         let waiting = {
             let (client, endpoint, marks) = (
@@ -544,17 +549,16 @@ mod tests {
             "the wait was answered before anything landed"
         );
 
-        // A write under a key of the writer's own, the first at this address
-        // (DSM Amendment A34).
-        let writer =
-            dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
-                .expect("a writer's key");
+        // A write under that key, lock and write key at once.
         let message_id = [0x7Bu8; 16];
         let write = dsm::core::relationship_write_grant::self_granted_spool_write(
             &writer,
             &[0x5A; 32],
             &[0x7Au8; 32],
-            &dsm::crypto::spool_address::open_inbox_address_bytes(&[0x7Au8; 32]),
+            &dsm::crypto::spool_address::locked_inbox_address_bytes(
+                &[0x7Au8; 32],
+                &writer.public_key,
+            ),
             &message_id,
             &[0x0Au8, 0x01, 0x03],
         )

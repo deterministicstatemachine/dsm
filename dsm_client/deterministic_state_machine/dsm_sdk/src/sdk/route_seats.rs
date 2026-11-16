@@ -196,7 +196,16 @@ async fn read_leader<S: RouteSeats>(
 ) -> LeaderLog {
     let copy = dsm::route_chain::leader_copy(cell, value);
     let own = dsm::route_chain::copies_of(&copy);
-    let keep = |entry: &RouteEntry| recognized(entry) || own(entry);
+    // Only the first recognized position-0 copy and the first copy of this
+    // value can decide what the writer does here, so nothing after either is
+    // kept: a leader's log full of other values costs the writer its hashes
+    // and nothing it holds (storage spec §9, route chains, rule 3).
+    let first_recognized = FirstValue::new(recognized);
+    let own_first: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let keep = |entry: &RouteEntry| {
+        first_recognized.at_leader(entry)
+            || (own_first.get().is_none() && own(entry) && own_first.set(()) == Ok(()))
+    };
     let log = HeldLog::new(cell.namespace(), cell.key());
     let Some(log) = fold_seat(seats, cell.route().leader(), log, &keep, None).await else {
         return LeaderLog::Unread;
@@ -1031,12 +1040,71 @@ pub(crate) async fn read_cell_within<S: RouteSeats>(
     read_cell_in(seats, cell, keep, Some(window)).await
 }
 
+/// What a reader keeps of a cell's seats (storage spec §9, route chains,
+/// rules 3 and 4): at the leader, the first position-0 copy `keep` keeps and
+/// nothing after it; at each later seat, only copies for that seat's position
+/// of that same value. The leader's first recognized value is the only value
+/// that can hold the cell, so nothing else is kept, and a seat's log written
+/// full of other values costs a reader its hashes and nothing it holds.
+struct FirstValue<'k> {
+    keep: &'k (dyn Fn(&RouteEntry) -> bool + Sync),
+    first: std::sync::OnceLock<[u8; 32]>,
+}
+
+impl<'k> FirstValue<'k> {
+    fn new(keep: &'k (dyn Fn(&RouteEntry) -> bool + Sync)) -> Self {
+        Self {
+            keep,
+            first: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The digest of the value first at the leader, once the leader's log
+    /// showed one.
+    fn first(&self) -> Option<[u8; 32]> {
+        self.first.get().copied()
+    }
+
+    /// Whether the leader's fold keeps `entry`: the first position-0 copy
+    /// `keep` keeps, and none after it.
+    fn at_leader(&self, entry: &RouteEntry) -> bool {
+        entry.position == 0 && self.first.get().is_none() && (self.keep)(entry) && {
+            let digest = dsm::storage_cell::entry_digest(&entry.value);
+            *self.first.get_or_init(|| digest) == digest
+        }
+    }
+
+    /// Whether the fold of the seat at `position` keeps `entry`: a copy for
+    /// that position of the value first at the leader.
+    fn at_later(&self, position: usize, entry: &RouteEntry) -> bool {
+        entry.position == position
+            && self.first() == Some(dsm::storage_cell::entry_digest(&entry.value))
+            && (self.keep)(entry)
+    }
+}
+
 async fn read_cell_in<S: RouteSeats>(
     seats: &S,
     cell: &RoutedCell,
     keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
     window: Option<&ReadWindow>,
 ) -> CellEvidence {
+    let first_value = FirstValue::new(keep);
+    let at_leader = |entry: &RouteEntry| first_value.at_leader(entry);
+    let at_later: Vec<Box<dyn Fn(&RouteEntry) -> bool + Sync + Send + '_>> =
+        (0..cell.route().seats().len())
+            .map(|position| {
+                let first_value = &first_value;
+                Box::new(move |entry: &RouteEntry| first_value.at_later(position, entry))
+                    as Box<dyn Fn(&RouteEntry) -> bool + Sync + Send + '_>
+            })
+            .collect();
+    let keep_at = |position: usize| -> &(dyn Fn(&RouteEntry) -> bool + Sync) {
+        match position {
+            0 => &at_leader,
+            later => at_later[later].as_ref(),
+        }
+    };
     let (route, namespace, key) = (cell.route(), cell.namespace(), cell.key());
     // Each phase logs where it ends; the log's own timestamps time it. The
     // cell is named by its key's first five bytes (eight characters).
@@ -1044,16 +1112,38 @@ async fn read_cell_in<S: RouteSeats>(
     // Every seat is asked at once, and the answers stay in route order: a
     // seat that does not answer costs one timeout, not one per seat. The
     // cycle each seat last closed is asked for in the same round.
-    let (logs, latest): (Vec<Option<HeldLog>>, Vec<Option<u64>>) = futures::future::join(
-        futures::future::join_all(
-            route
-                .seats()
-                .iter()
-                .map(|seat| fold_seat(seats, seat, HeldLog::new(namespace, key), keep, window)),
+    // The leader's log is folded first: what a later seat keeps is decided by
+    // the value first at the leader. A later seat folded without the leader's
+    // log is not a read of it.
+    let (leader_log, latest): (Option<HeldLog>, Vec<Option<u64>>) = futures::future::join(
+        fold_seat(
+            seats,
+            route.leader(),
+            HeldLog::new(namespace, key),
+            keep_at(0),
+            window,
         ),
         futures::future::join_all(route.seats().iter().map(|seat| seats.latest_cycle(seat))),
     )
     .await;
+    let later_logs: Vec<Option<HeldLog>> = if leader_log.is_some() {
+        futures::future::join_all(route.seats().iter().enumerate().skip(1).map(
+            |(position, seat)| {
+                fold_seat(
+                    seats,
+                    seat,
+                    HeldLog::new(namespace, key),
+                    keep_at(position),
+                    window,
+                )
+            },
+        ))
+        .await
+    } else {
+        route.seats().iter().skip(1).map(|_| None).collect()
+    };
+    let first_folded = first_value.first();
+    let logs: Vec<Option<HeldLog>> = std::iter::once(leader_log).chain(later_logs).collect();
     log::info!(
         "route read {short}: values from {} of {} seats",
         logs.iter().filter(|v| v.is_some()).count(),
@@ -1139,7 +1229,7 @@ async fn read_cell_in<S: RouteSeats>(
                     log.want(*index);
                 }
                 if wanted.iter().any(|index| *index > log.count()) {
-                    fold_seat(seats, seat, log, keep, window).await
+                    fold_seat(seats, seat, log, keep_at(position), window).await
                 } else {
                     Some(log)
                 }
@@ -1147,6 +1237,17 @@ async fn read_cell_in<S: RouteSeats>(
         },
     ))
     .await;
+    // A value that reached the leader only in its read-on was not known when
+    // the later seats were folded: their logs kept nothing of it, and are not
+    // reads of them.
+    let logs: Vec<Option<HeldLog>> = if first_value.first() == first_folded {
+        logs
+    } else {
+        logs.into_iter()
+            .enumerate()
+            .map(|(position, log)| if position == 0 { log } else { None })
+            .collect()
+    };
     let evidence = seat_evidence(logs, committed);
     log::info!(
         "route read {short}: committed state from {} seats",
@@ -2583,8 +2684,9 @@ mod tests {
         let (_nodes, _config, set, cell) = pinned(0x39).await;
         let seats = NodeSeats::new(&set).expect("seats");
         // Each value is written under a rule that recognizes it alone, so
-        // none is taken at the leader and each reaches every seat; the
-        // reader's rule below keeps all six.
+        // none is taken at the leader and each reaches every seat. The
+        // reader's rule below recognizes all six, and a reader keeps the
+        // first at the leader and only copies of it at the later seats.
         for n in 0..VALUES {
             let mut value = vec![0x57u8; VALUE_BYTES];
             value[1] = n as u8;
@@ -2613,8 +2715,10 @@ mod tests {
         let whole: Vec<usize> = alone.iter().flatten().copied().collect();
         assert_eq!(whole.len(), alone.len(), "read alone, every seat is read");
         assert!(
-            whole.iter().all(|bytes| *bytes >= VALUES * VALUE_BYTES),
-            "each seat keeps every value"
+            whole
+                .iter()
+                .all(|bytes| *bytes >= VALUE_BYTES && *bytes < 2 * VALUE_BYTES),
+            "each seat keeps the leader's first value alone, not all {VALUES}"
         );
         let ample = ReadWindow::new(whole.iter().sum());
         let within_ample = read_cell_within(&seats, &cell, &keep, &ample).await;

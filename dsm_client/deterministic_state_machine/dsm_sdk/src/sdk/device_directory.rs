@@ -54,12 +54,17 @@ pub fn build_own_entry(
             inputs,
             expected_g,
         )?;
+    let first_inbox_lock = dsm::core::relationship_write_grant::derive_first_inbox_lock_keypair(
+        &crate::init::smaster_of(wallet_seed, &genesis.g, &genesis.devid),
+        &genesis.devid,
+    )?;
     let body = DirectoryEntryBody {
         genesis: genesis.g,
         device_id: genesis.devid,
         ak_public_key: genesis.ak_public.clone(),
         att_a: derive_atta(wallet_seed, &genesis.g, inputs.device_slot),
         kyber_public_key,
+        first_inbox_lock_public_key: first_inbox_lock.public_key.clone(),
         counter,
         authority_position,
         authority_evidence,
@@ -106,21 +111,56 @@ pub async fn read_entry(
     let key = directory_cell_key(genesis, device_id);
     let seats = crate::sdk::route_seats::NodeSeats::new(set)?;
     let members = seats.members();
-    // Only an entry naming this device under this genesis is a candidate;
-    // whether one proves itself is decided over the candidates, best first
-    // (`select_entry`). Anything else a member holds costs the read and is
-    // not kept, so junk under the predictable key wedges nothing (SA-67).
-    let names_device = |bytes: &[u8]| {
-        dsm::core::identity::directory::names_directory_entry(genesis, device_id, bytes)
+    // Of each member's values a reader keeps only an entry that names this
+    // device, outranks every entry proven before it there, and proves
+    // itself, ranked as `select_entry` ranks: what it holds of a member is
+    // the entries that were best in turn, never everything the member holds,
+    // so junk under the predictable key wedges nothing (SA-67). Each distinct
+    // value is proven once across the members (SA-142).
+    let verdicts: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Result<(), String>>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let proves = |entry: &DirectoryEntry| -> Result<(), String> {
+        let digest = dsm::storage_cell::entry_digest(&entry.encode());
+        let held = verdicts
+            .lock()
+            .map_err(|e| format!("the directory verdicts: {e}"))?
+            .get(&digest)
+            .cloned();
+        let verdict = match held {
+            Some(verdict) => verdict,
+            None => entry.verify().map_err(|why| why.to_string()),
+        };
+        verdicts
+            .lock()
+            .map_err(|e| format!("the directory verdicts: {e}"))?
+            .insert(digest, verdict.clone());
+        verdict
     };
     let reads = futures::future::join_all(members.iter().map(|member| {
-        crate::sdk::route_seats::kept_values(
-            &seats,
-            member,
-            DIRECTORY_NAMESPACE,
-            &key,
-            &names_device,
-        )
+        let best = std::sync::Mutex::new(dsm::core::identity::directory::BestProvenEntry::new(
+            genesis, device_id,
+        ));
+        let (proves, seats, key) = (&proves, &seats, &key);
+        async move {
+            let keeps_best = |bytes: &[u8]| match best.lock() {
+                Ok(mut best) => matches!(
+                    best.offer(bytes, proves),
+                    dsm::core::identity::directory::Offered::Taken
+                ),
+                Err(poisoned) => matches!(
+                    poisoned.into_inner().offer(bytes, proves),
+                    dsm::core::identity::directory::Offered::Taken
+                ),
+            };
+            crate::sdk::route_seats::kept_values(
+                seats,
+                member,
+                DIRECTORY_NAMESPACE,
+                key,
+                &keeps_best,
+            )
+            .await
+        }
     }))
     .await;
     let values: Vec<&[u8]> = reads

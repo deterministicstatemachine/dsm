@@ -2,7 +2,7 @@ name: Release
 
 # Tag-triggered release pipeline (Issue #13).
 #
-# Triggers only on annotated/lightweight semver tags `v*` (e.g. v0.1.0-beta.4).
+# Triggers only on annotated/lightweight semver tags `v*` (e.g. v0.1.1-beta.4).
 # Builds the canonical shippable artifacts, runs the full test suite as a
 # gate, generates the SBOM bundle, and publishes a GitHub Release with
 # every artifact attached.

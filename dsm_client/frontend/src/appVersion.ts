@@ -11,7 +11,7 @@ export function appVersion(): string {
   return version;
 }
 
-/** How the app names itself: "DSM v0.1.0-beta.4 Pre-release". A SemVer pre-release version says so. */
+/** How the app names itself: "DSM v0.1.1-beta.4 Pre-release". A SemVer pre-release version says so. */
 export function versionLabel(): string {
   const version = appVersion();
   return `DSM v${version}${version.includes('-') ? ' Pre-release' : ''}`;

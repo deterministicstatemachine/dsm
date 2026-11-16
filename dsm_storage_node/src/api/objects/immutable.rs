@@ -31,6 +31,19 @@
 //! that refuses; no such code. Idempotent replay of the identical tuple
 //! re-acks; a different tuple at the same address is surfaced as corruption,
 //! unreachable without a hash collision or a damaged store.
+//!
+//! ## The members distribute an object among themselves
+//!
+//! A writer puts an object at one member. That member, once it holds the
+//! object, puts it at each of its set-mates before it answers, at the
+//! endpoint its own configuration names for each, under the set-mate's
+//! pinned CA, with [`SET_COPY_HEADER`] (storage spec §5 rule 7; owner,
+//! 2026-11-15). A set-mate takes the copy by the same address check as any
+//! put and passes it on to no one. Each copy is bounded in time and in how
+//! many are in flight to one set-mate; one not made is the writer's to make.
+//! Nothing here is reported or trusted: the writer asks each other member
+//! whether it holds the object and puts it itself wherever one does not, and
+//! `Stored` is read back from the members (§5 rule 6).
 
 use axum::{
     body::Bytes,
@@ -48,6 +61,11 @@ use dsm::storage_object::{immutable_addr, MAX_IMMUTABLE_PAYLOAD_BYTES};
 
 /// Namespace tag cap — tags are short ASCII domain strings.
 const MAX_NAMESPACE_BYTES: usize = 128;
+
+/// Marks a put as a set-mate's copy of an object it took: the member stores
+/// it and passes it on to no one. Anyone may send it; it only spares the
+/// member the copying, which the writer's read-back covers.
+pub const SET_COPY_HEADER: &str = "x-dsm-set-copy";
 
 pub fn create_read_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
@@ -145,7 +163,57 @@ async fn put_immutable(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("text/plain"),
     );
+    if !headers.contains_key(SET_COPY_HEADER) {
+        copy_to_set_mates(&state, &ns_raw, &addr_b32, &body).await;
+    }
     Ok((status, resp_headers, addr_b32))
+}
+
+/// Put the object this member holds at each set-mate, all at once, marked
+/// as a set-mate's copy, each at the endpoint this node's own configuration
+/// names, over the client pinned to that set-mate's CA, within
+/// [`crate::set_client::SET_MATE_COPY_TIMEOUT`]. A set-mate with
+/// [`crate::set_client::SET_MATE_COPIES_IN_FLIGHT`] copies already in flight
+/// gets none. A copy not made is logged for the operator; the writer, which
+/// asks each member whether it holds the object, makes it.
+async fn copy_to_set_mates(state: &AppState, namespace: &[u8], addr_b32: &str, payload: &Bytes) {
+    let Some(set) = state.storage_set.as_ref() else {
+        return;
+    };
+    let copies = set.set_mates.iter().filter_map(|mate| {
+        let Ok(permit) = mate.copies.clone().try_acquire_owned() else {
+            log::warn!(
+                "immutable put: {} has {} copies in flight; {addr_b32} is not copied there",
+                mate.member,
+                crate::set_client::SET_MATE_COPIES_IN_FLIGHT
+            );
+            return None;
+        };
+        let request = mate
+            .client
+            .post(format!("{}/api/v2/immutable/put", mate.endpoint))
+            .timeout(crate::set_client::SET_MATE_COPY_TIMEOUT)
+            .header("x-namespace", namespace)
+            .header("x-expected-addr", addr_b32)
+            .header(SET_COPY_HEADER, "1")
+            .body(payload.clone());
+        Some(async move {
+            let answer = request.send().await.map(|r| r.status());
+            drop(permit);
+            (mate, answer)
+        })
+    });
+    for (mate, answer) in futures::future::join_all(copies).await {
+        let why = match answer {
+            Ok(status) if status.is_success() => continue,
+            Ok(status) => format!("answered {status}"),
+            Err(e) => format!("unreachable: {e}"),
+        };
+        log::warn!(
+            "immutable put: {} did not take the copy of {addr_b32}: {why}",
+            mate.member
+        );
+    }
 }
 
 async fn get_immutable(

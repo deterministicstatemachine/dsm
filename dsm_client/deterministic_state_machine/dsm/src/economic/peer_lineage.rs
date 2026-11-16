@@ -249,6 +249,85 @@ pub trait OfflineRecords {
     ) -> Result<Option<PeerOfflineAccount>, PeerLineageFailure>;
 }
 
+/// A state of a peer this receiver proved itself and keeps (the owner's ruling
+/// of 2026-11-15, specs/README.md): the root the peer's step at
+/// `economic_position` installed, as this receiver validated it from the state
+/// it kept before, and the claim accepted there. The next check of that peer
+/// starts here and validates every step after it, each from the state before
+/// it; nothing the peer states takes its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptPeerState {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    economic_position: u64,
+    economic_root: [u8; 32],
+    accepted: ParentClaimRef,
+}
+
+impl KeptPeerState {
+    /// A state this device kept, read back from its own store.
+    ///
+    /// **Only the receiver's store may call this**, with exactly the fields
+    /// of a state this module produced and the receiver recorded.
+    pub fn rehydrate_kept(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        economic_position: u64,
+        economic_root: [u8; 32],
+        accepted: ParentClaimRef,
+    ) -> Self {
+        Self {
+            genesis,
+            device_id,
+            economic_position,
+            economic_root,
+            accepted,
+        }
+    }
+
+    pub fn genesis(&self) -> &[u8; 32] {
+        &self.genesis
+    }
+    pub fn device_id(&self) -> &[u8; 32] {
+        &self.device_id
+    }
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+    pub fn economic_root(&self) -> &[u8; 32] {
+        &self.economic_root
+    }
+    /// The claim accepted at this state's position.
+    pub fn accepted(&self) -> &ParentClaimRef {
+        &self.accepted
+    }
+
+    fn point(&self) -> ChainPoint {
+        ChainPoint {
+            root: authenticated_root(self.economic_position, self.economic_root),
+            accepted: Some(self.accepted),
+        }
+    }
+}
+
+/// The states of its peers this receiver proved and kept.
+pub trait KeptPeerStates {
+    /// The state of `(genesis, device_id)` this receiver kept at the highest
+    /// position strictly below `position`, or `None` when it kept none there.
+    fn kept_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<KeptPeerState>, PeerLineageFailure>;
+}
+
+/// What a receiver recorded of its peers that a check walks from: their
+/// offline accounts, and the states of them it proved and kept.
+pub trait ReceiverRecords: OfflineRecords + KeptPeerStates {}
+
+impl<T: OfflineRecords + KeptPeerStates> ReceiverRecords for T {}
+
 /// An offline boundary continues the account its previous boundary left, where
 /// this receiver recorded that one (the owner's funding ancestry). Where it
 /// recorded none, nothing behind the step is read to find it (DSM Amendment
@@ -365,9 +444,17 @@ pub struct Checked<T> {
     offline_accounts: Vec<PeerOfflineAccount>,
     offline_exposures: Vec<PeerOfflineExposure>,
     ek_steps: Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
+    kept_states: Vec<KeptPeerState>,
 }
 
 impl<T> Checked<T> {
+    /// Every state of a peer this check proved, each from the state before
+    /// it: what the receiver keeps, so its next check of that peer starts
+    /// from the last of them.
+    pub fn kept_states(&self) -> &[KeptPeerState] {
+        &self.kept_states
+    }
+
     pub fn answer(&self) -> &T {
         &self.answer
     }
@@ -399,17 +486,22 @@ impl<T> Checked<T> {
     }
 }
 
-/// A peer's step at `target_position`, validated from its own parent (DSM
-/// Amendment A14). The step's credits' sources are each validated the same
-/// way, one hop. A conditional claim at the target is `Unresolved`: the peer
-/// is mid-route, and no single transition can be validated there yet.
+/// A peer's step at `target_position`, validated from the state this receiver
+/// kept of that peer (the owner's ruling of 2026-11-15, specs/README.md):
+/// every step after the kept state, up to and including the target, is read
+/// at the cell routed from the root this receiver proved before it and
+/// validated from that root with the predicate any device runs (DSM Amendment
+/// A14). With nothing kept, the walk starts at the activation root. A credit's
+/// source is validated the same way, from the state kept of the source. A
+/// conditional claim at the target is `Unresolved`: the peer is mid-route, and
+/// no single transition can be validated there yet.
 pub fn validate_peer_step(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     target_position: u64,
-    records: &dyn OfflineRecords,
+    records: &dyn ReceiverRecords,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<Checked<ValidatedPeerTransition>, PeerLineageFailure> {
     if target_position == 0 {
@@ -417,8 +509,67 @@ pub fn validate_peer_step(
             "position 0 is the activation root; it has no transition to validate",
         ));
     }
-    let verifier = Verifier::new(fetcher, expected_network_id, records, conditional)?;
+    let verifier =
+        Verifier::new(fetcher, expected_network_id, records, conditional)?.keeping(records);
     let answer = verifier.step_at(peer_genesis, peer_devid, target_position, StepRole::Offered)?;
+    Ok(verifier.checked(answer))
+}
+
+/// How many positions of a peer one [`walk_peer_to_head`] reads at most. A
+/// walk that stops at this bound keeps what it proved, and the next one goes on
+/// from there.
+pub const KEPT_WALK_POSITIONS: u64 = 4096;
+
+/// How far a walk of a peer toward its head went.
+#[derive(Debug)]
+pub struct PeerWalk {
+    reached: u64,
+    stop: HeadStop,
+}
+
+/// Why a walk of a peer toward its head stopped.
+#[derive(Debug)]
+pub enum HeadStop {
+    /// No claim holds the peer's next cell: the walk reached the peer's head.
+    Head,
+    /// The walk read the positions one walk may read.
+    Bound,
+    /// A position is not decided yet. What the walk proved before it stands.
+    Short(String),
+}
+
+impl PeerWalk {
+    /// The last position the walk proved; the position it started from when
+    /// it proved none.
+    pub fn reached(&self) -> u64 {
+        self.reached
+    }
+
+    /// Why the walk stopped.
+    pub fn stop(&self) -> &HeadStop {
+        &self.stop
+    }
+}
+
+/// Walk a peer from the state this receiver kept of it toward its head, as far
+/// as `positions` (the owner's ruling of 2026-11-15, specs/README.md). Each
+/// step is read at the cell routed from the root proved before it and
+/// validated from that root, with its credits' sources checked from the states
+/// kept of them. Run when a contact is added, so that the contact's first
+/// payment reads only what is new. A position that is not decided yet ends the
+/// walk short, keeping what it proved; a step that is not valid is `Invalid`.
+pub fn walk_peer_to_head(
+    fetcher: &dyn PeerEvidenceFetcher,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    positions: u64,
+    records: &dyn ReceiverRecords,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<Checked<PeerWalk>, PeerLineageFailure> {
+    let verifier =
+        Verifier::new(fetcher, expected_network_id, records, conditional)?.keeping(records);
+    let answer = verifier.toward_head(records, peer_genesis, peer_devid, positions)?;
     Ok(verifier.checked(answer))
 }
 
@@ -707,6 +858,7 @@ impl Register {
 /// The parent a step is validated from: the root at the position before, and
 /// the claim accepted there when it was read for a conditional claim to name
 /// (`None` otherwise, and always at the activation root).
+#[derive(Clone, Copy)]
 struct ChainPoint {
     root: ValidatedEconomicRoot,
     accepted: Option<ParentClaimRef>,
@@ -752,6 +904,13 @@ struct Located {
     claim: RegisteredEconomicClaim,
 }
 
+/// A peer, by its genesis and device id.
+type PeerKey = ([u8; 32], [u8; 32]);
+
+/// The states of each peer a check proved, by position.
+type ProvedStates =
+    std::collections::BTreeMap<PeerKey, std::collections::BTreeMap<u64, KeptPeerState>>;
+
 struct Verifier<'a> {
     fetcher: &'a dyn PeerEvidenceFetcher,
     expected_network_id: &'a [u8],
@@ -768,6 +927,18 @@ struct Verifier<'a> {
     /// Every EK step a step this check validated fetched and verified; a later
     /// step of the same check holds them.
     ek_steps: std::cell::RefCell<Vec<crate::economic::peer_acceptance::VerifiedEkStep>>,
+    /// The states this receiver kept of its peers, when the check walks from
+    /// them (the owner's ruling of 2026-11-15). `None` for a check that reads
+    /// one position alone.
+    kept: Option<&'a dyn KeptPeerStates>,
+    /// Every state of a peer this check proved, by peer and position.
+    proved: std::cell::RefCell<ProvedStates>,
+    /// The peers this check is walking now: a credit's source that leads back
+    /// into one of these walks past where it has reached is circular.
+    walking: std::cell::RefCell<std::collections::BTreeSet<([u8; 32], [u8; 32])>>,
+    /// The steps this check is validating now: a step that is, through its
+    /// credits' sources, its own source is circular.
+    validating: std::cell::RefCell<std::collections::BTreeSet<(PeerKey, u64)>>,
 }
 
 /// A claim's identity at its cell: the entry digest the register recognizes
@@ -806,7 +977,18 @@ impl<'a> Verifier<'a> {
             offline_accounts: std::cell::RefCell::new(Vec::new()),
             offline_exposures: std::cell::RefCell::new(Vec::new()),
             ek_steps: std::cell::RefCell::new(Vec::new()),
+            kept: None,
+            proved: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            walking: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            validating: std::cell::RefCell::new(std::collections::BTreeSet::new()),
         })
+    }
+
+    /// This check walks every peer it validates from the state this receiver
+    /// kept of it.
+    fn keeping(mut self, kept: &'a dyn KeptPeerStates) -> Self {
+        self.kept = Some(kept);
+        self
     }
 }
 
@@ -819,6 +1001,12 @@ impl Verifier<'_> {
             offline_accounts: self.offline_accounts.into_inner(),
             offline_exposures: self.offline_exposures.into_inner(),
             ek_steps: self.ek_steps.into_inner(),
+            kept_states: self
+                .proved
+                .into_inner()
+                .into_values()
+                .flat_map(|states| states.into_values())
+                .collect(),
         }
     }
 
@@ -889,6 +1077,32 @@ impl Verifier<'_> {
                 "position {position}: the root cell is not decided yet: {missing:?}"
             ))),
         }
+    }
+
+    /// Whether any claim holds `position`'s root cell routed from `previous`.
+    /// An open cell is the peer's head; the claim's state is left to
+    /// [`Self::final_claim`].
+    fn cell_is_held(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+        previous: &ValidatedEconomicRoot,
+    ) -> Result<bool, PeerLineageFailure> {
+        let cell = RootCell::new(
+            genesis,
+            device_id,
+            position,
+            &previous.economic_root(),
+            &self.register.set,
+            &self.register.profile.storage_set_id,
+        )
+        .map_err(|e| incomplete(format!("root cell at {position}: {e:?}")))?;
+        let evidence = self.fetcher.register_cell(&cell)?;
+        Ok(!matches!(
+            read_root_cell(&cell, &evidence),
+            Ok(CellReading::Open)
+        ))
     }
 
     /// Authenticate a single-root claim: its manifest by content address,
@@ -1492,8 +1706,9 @@ impl Verifier<'_> {
         Ok(parents)
     }
 
-    /// The single-root step at `position`, validated from its own parent in
-    /// `role`.
+    /// The single-root step at `position`, validated in `role`: from the
+    /// state this receiver kept of the peer, walking every step after it,
+    /// when this check keeps states; otherwise from its own parent.
     fn step_at(
         &self,
         genesis: &[u8; 32],
@@ -1501,6 +1716,9 @@ impl Verifier<'_> {
         position: u64,
         role: StepRole,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        if let Some(kept) = self.kept {
+            return self.walked_step(kept, genesis, device_id, position, role);
+        }
         let conditional_at = match role {
             StepRole::Offered => ConditionalAt::Unresolved,
             StepRole::Source => ConditionalAt::Invalid,
@@ -1514,6 +1732,265 @@ impl Verifier<'_> {
             ))
         })?;
         self.full_step(genesis, device_id, position, &at.parent, claim, role)
+    }
+
+    /// The state of `(genesis, device_id)` this receiver proved at the highest
+    /// position strictly below `position`: one this check proved, or one the
+    /// receiver kept, or the activation root.
+    fn proved_below(
+        &self,
+        kept: &dyn KeptPeerStates,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<(u64, ChainPoint), PeerLineageFailure> {
+        let in_check = self
+            .proved
+            .borrow()
+            .get(&(*genesis, *device_id))
+            .and_then(|states| states.range(..position).next_back().map(|(_, s)| *s));
+        let stored = kept.kept_below(genesis, device_id, position)?;
+        if let Some(state) = stored {
+            if state.genesis != *genesis
+                || state.device_id != *device_id
+                || state.economic_position >= position
+            {
+                return Err(incomplete(format!(
+                    "the kept state store answered for another coordinate below position {position}"
+                )));
+            }
+        }
+        let best = match (in_check, stored) {
+            (Some(a), Some(b)) if b.economic_position > a.economic_position => Some(b),
+            (Some(a), _) => Some(a),
+            (None, b) => b,
+        };
+        Ok(match best {
+            Some(state) => (state.economic_position, state.point()),
+            None => (
+                0,
+                ChainPoint {
+                    root: authenticated_root(0, crate::economic::tree::empty_economic_root()),
+                    accepted: None,
+                },
+            ),
+        })
+    }
+
+    /// Keep `point` as the state of `(genesis, device_id)` proved at `position`.
+    fn prove(&self, genesis: &[u8; 32], device_id: &[u8; 32], position: u64, point: &ChainPoint) {
+        let Some(accepted) = point.accepted else {
+            return;
+        };
+        self.proved
+            .borrow_mut()
+            .entry((*genesis, *device_id))
+            .or_default()
+            .insert(
+                position,
+                KeptPeerState {
+                    genesis: *genesis,
+                    device_id: *device_id,
+                    economic_position: position,
+                    economic_root: point.root.economic_root(),
+                    accepted,
+                },
+            );
+    }
+
+    /// The claim final at `position` at the cell routed from `point`'s root,
+    /// counted as one routed read.
+    fn claim_after(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+        point: &ChainPoint,
+    ) -> Result<RegisteredEconomicClaim, PeerLineageFailure> {
+        self.count(|c| c.routed_reads += 1);
+        self.final_claim(genesis, device_id, position, &point.root)
+    }
+
+    /// The walk behind [`walk_peer_to_head`].
+    fn toward_head(
+        &self,
+        kept: &dyn KeptPeerStates,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        positions: u64,
+    ) -> Result<PeerWalk, PeerLineageFailure> {
+        let (start, mut point) = self.proved_below(kept, genesis, device_id, u64::MAX)?;
+        let mut reached = start;
+        let end = start.saturating_add(positions);
+        while reached < end {
+            let position = reached + 1;
+            let stepped = self
+                .cell_is_held(genesis, device_id, position, &point.root)
+                .and_then(|held| {
+                    if !held {
+                        return Ok(None);
+                    }
+                    self.step_after(genesis, device_id, position, &point)
+                        .map(Some)
+                });
+            point = match stepped {
+                Ok(Some(next)) => next,
+                Ok(None) => {
+                    return Ok(PeerWalk {
+                        reached,
+                        stop: HeadStop::Head,
+                    })
+                }
+                Err(PeerLineageFailure::Incomplete(m) | PeerLineageFailure::Unresolved(m)) => {
+                    return Ok(PeerWalk {
+                        reached,
+                        stop: HeadStop::Short(m),
+                    })
+                }
+                Err(other) => return Err(other),
+            };
+            self.prove(genesis, device_id, position, &point);
+            reached = position;
+        }
+        Ok(PeerWalk {
+            reached,
+            stop: HeadStop::Bound,
+        })
+    }
+
+    /// The state the peer's step at `position` installed, validated from
+    /// `point`, the state proved before it; a conditional position is resolved
+    /// from it.
+    fn step_after(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+        point: &ChainPoint,
+    ) -> Result<ChainPoint, PeerLineageFailure> {
+        Ok(
+            match self.claim_after(genesis, device_id, position, point)? {
+                RegisteredEconomicClaim::SingleRoot(claim) => {
+                    let step = self.walked_full_step(
+                        genesis,
+                        device_id,
+                        position,
+                        point,
+                        &claim,
+                        StepRole::Offered,
+                    )?;
+                    ChainPoint {
+                        root: *step.validated_root(),
+                        accepted: Some(ParentClaimRef::SingleRoot {
+                            claim_ref: step.accepted_claim().claim_ref(),
+                        }),
+                    }
+                }
+                RegisteredEconomicClaim::ConditionalSofi(held) => {
+                    self.count(|c| c.conditional_hops += 1);
+                    let (root, _) =
+                        self.resolve_conditional(genesis, device_id, position, point, &held)?;
+                    ChainPoint {
+                        root,
+                        accepted: Some(ParentClaimRef::Conditional {
+                            fulfillment_id: held.fulfillment_id,
+                        }),
+                    }
+                }
+            },
+        )
+    }
+
+    /// [`Self::full_step`] inside a walk, refused when the same step is already
+    /// being validated by this check: a step whose credits' sources lead back to
+    /// itself is circular, and no honest pair of steps is.
+    fn walked_full_step(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+        point: &ChainPoint,
+        claim: &VerifiedEconomicRootClaim,
+        role: StepRole,
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        let step = ((*genesis, *device_id), position);
+        if !self.validating.borrow_mut().insert(step) {
+            return Err(invalid(format!(
+                "peer {}/{} at position {position}: the step is, through its credits' sources, \
+                 its own source",
+                encode_base32_crockford(genesis),
+                encode_base32_crockford(device_id)
+            )));
+        }
+        let validated = self.full_step(genesis, device_id, position, point, claim, role);
+        self.validating.borrow_mut().remove(&step);
+        validated
+    }
+
+    /// The single-root step at `target`, validated in `role` from the state this
+    /// receiver kept of the peer: every step after that state is read at the
+    /// cell routed from the root proved before it and validated from that root
+    /// (the owner's ruling of 2026-11-15, specs/README.md). A conditional
+    /// position on the way is resolved from the state before it.
+    fn walked_step(
+        &self,
+        kept: &dyn KeptPeerStates,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        target: u64,
+        role: StepRole,
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        let key = (*genesis, *device_id);
+        let (start, mut point) = self.proved_below(kept, genesis, device_id, target)?;
+        if self.walking.borrow().contains(&key) && start + 1 < target {
+            return Err(invalid(format!(
+                "peer {}/{} at position {target}: a credit's source leads back into the walk of \
+                 the same peer before that walk reached it",
+                encode_base32_crockford(genesis),
+                encode_base32_crockford(device_id)
+            )));
+        }
+        let entered = self.walking.borrow_mut().insert(key);
+        let walked = (|| {
+            for position in (start + 1)..target {
+                point = self.step_after(genesis, device_id, position, &point)?;
+                self.prove(genesis, device_id, position, &point);
+            }
+            let claim = self.claim_after(genesis, device_id, target, &point)?;
+            let claim = match claim.single_root() {
+                Ok(claim) => claim.clone(),
+                Err(conditional) => {
+                    return Err(match role {
+                        StepRole::Offered => PeerLineageFailure::Unresolved(format!(
+                            "peer {}/{} at position {target}: {conditional}",
+                            encode_base32_crockford(genesis),
+                            encode_base32_crockford(device_id)
+                        )),
+                        StepRole::Source => invalid(format!(
+                            "position {target}: the credit's source is a conditional position, \
+                             not an online transfer"
+                        )),
+                    })
+                }
+            };
+            let step = self.walked_full_step(genesis, device_id, target, &point, &claim, role)?;
+            self.prove(
+                genesis,
+                device_id,
+                target,
+                &ChainPoint {
+                    root: *step.validated_root(),
+                    accepted: Some(ParentClaimRef::SingleRoot {
+                        claim_ref: step.accepted_claim().claim_ref(),
+                    }),
+                },
+            );
+            Ok(step)
+        })();
+        if entered {
+            self.walking.borrow_mut().remove(&key);
+        }
+        walked
     }
 
     /// `positions` of a peer, each read by register key, with only its offline boundaries validated (the owner's receive rule,
@@ -1998,7 +2475,10 @@ mod tests {
             &PEER_G,
             &peer_d(),
             position,
-            &NoneRecorded,
+            &KeptAt {
+                position: position - 1,
+                root: [0x30; 32],
+            },
             &NoResolution,
         )
         .expect_err("a conditional position cannot produce a validated transition");
@@ -2179,14 +2659,17 @@ mod tests {
                 &PEER_G,
                 &peer_d(),
                 position,
-                &NoneRecorded,
+                &KeptAt {
+                    position: position - 1,
+                    root: [0x30; 32],
+                },
                 &NoResolution,
             )
         };
         assert!(
             matches!(
                 check(vec![signed_conditional(foreign, &other).expect("its own C_q")]),
-                Err(PeerLineageFailure::Incomplete(ref m)) if m.contains("no claim of this peer")
+                Err(PeerLineageFailure::Incomplete(ref m)) if m.contains("no claim holds the root cell")
             ),
             "a key holding only a foreign claim holds nothing of this peer"
         );
@@ -2596,6 +3079,57 @@ mod tests {
     /// A receiver that has recorded nothing of this peer.
     struct NoneRecorded;
 
+    impl KeptPeerStates for NoneRecorded {
+        fn kept_below(
+            &self,
+            _genesis: &[u8; 32],
+            _device_id: &[u8; 32],
+            _position: u64,
+        ) -> Result<Option<KeptPeerState>, PeerLineageFailure> {
+            Ok(None)
+        }
+    }
+
+    /// A receiver that kept the peer's state at `position`, with `root`: a
+    /// check of a later step starts there, and reads only that step.
+    struct KeptAt {
+        position: u64,
+        root: [u8; 32],
+    }
+
+    impl OfflineRecords for KeptAt {
+        fn offline_account_below(
+            &self,
+            _genesis: &[u8; 32],
+            _device_id: &[u8; 32],
+            _bundle: &[u8; 32],
+            _position: u64,
+        ) -> Result<Option<PeerOfflineAccount>, PeerLineageFailure> {
+            Ok(None)
+        }
+    }
+
+    impl KeptPeerStates for KeptAt {
+        fn kept_below(
+            &self,
+            genesis: &[u8; 32],
+            device_id: &[u8; 32],
+            position: u64,
+        ) -> Result<Option<KeptPeerState>, PeerLineageFailure> {
+            Ok(
+                (position > self.position).then_some(KeptPeerState::rehydrate_kept(
+                    *genesis,
+                    *device_id,
+                    self.position,
+                    self.root,
+                    ParentClaimRef::SingleRoot {
+                        claim_ref: [0xC0; 32],
+                    },
+                )),
+            )
+        }
+    }
+
     impl OfflineRecords for NoneRecorded {
         fn offline_account_below(
             &self,
@@ -2685,7 +3219,10 @@ mod tests {
                 &PEER_G,
                 &peer_d(),
                 position,
-                &NoneRecorded,
+                &KeptAt {
+                    position: position - 1,
+                    root: [0x41; 32],
+                },
                 &NoResolution,
             );
             assert!(

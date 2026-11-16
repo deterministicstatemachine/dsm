@@ -195,7 +195,15 @@ impl AppRouterImpl {
         // pure, I/O-free function. `store_contact` below is UNREACHABLE unless it returns
         // `Repaired`, so a future refactor cannot slip a persist ahead of the guard/verify: the only
         // way to reach persistence is for the decision to have already accepted the material.
-        match repair_contact_decision(contact_record, entry)? {
+        let decided = repair_contact_decision(contact_record, entry)?;
+        // The entry passed the AK guard: the first-inbox lock it publishes is
+        // the contact's (DSM Amendment A37).
+        crate::storage::client_db::store_contact_first_inbox_lock(
+            &entry.body.device_id,
+            &entry.body.first_inbox_lock_public_key,
+        )
+        .map_err(|e| format!("keeping the contact's first-inbox lock: {e}"))?;
+        match decided {
             ContactRepair::Unchanged(record) => Ok(record),
             ContactRepair::Repaired(record) => {
                 log::warn!(
@@ -3102,9 +3110,19 @@ mod tests {
     /// The addresses `collect_tagged_inbox_addresses` names, in its order.
     /// Store each contact as adding one does, so it has the relationship row
     /// every polled contact has.
+    /// The first-inbox lock every test contact's directory entry publishes
+    /// (DSM Amendment A37).
+    const CONTACT_FIRST_INBOX_LOCK: [u8; 64] = [0x4C; 64];
+
     fn stored(contacts: &[ContactRecord]) {
         for contact in contacts {
             crate::storage::client_db::store_contact(contact).expect("store the contact");
+            let device = <[u8; 32]>::try_from(contact.device_id.as_slice()).expect("a device id");
+            crate::storage::client_db::store_contact_first_inbox_lock(
+                &device,
+                &CONTACT_FIRST_INBOX_LOCK,
+            )
+            .expect("keep the contact's first-inbox lock");
         }
     }
 
@@ -3140,8 +3158,8 @@ mod tests {
         init_test_db();
         let genesis = [0x66u8; 32];
         let device = [0x77u8; 32];
-        // The relationship's first tip: its first inbox is the open address
-        // of its route (DSM Amendment A34).
+        // The relationship's first tip: its first inbox is its route bound to
+        // the contact's first-inbox lock (DSM Amendment A37).
         let stored_tip = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
             &device,
             &genesis,
@@ -3167,8 +3185,9 @@ mod tests {
         };
 
         let addresses = inbox_addresses(genesis, device, &[contact]);
-        let expected = dsm::crypto::spool_address::open_inbox_address(
+        let expected = dsm::crypto::spool_address::locked_inbox_address(
             &dsm::crypto::spool_address::inbox_route_digest(&genesis, &device, &stored_tip),
+            &CONTACT_FIRST_INBOX_LOCK,
         );
 
         assert_eq!(addresses, vec![expected]);
@@ -3322,12 +3341,13 @@ mod tests {
         };
 
         let recipient_addresses = inbox_addresses(bob_genesis, bob_device, &[alice_as_bob_contact]);
-        let sender_route = dsm::crypto::spool_address::open_inbox_address(
+        let sender_route = dsm::crypto::spool_address::locked_inbox_address(
             &dsm::crypto::spool_address::inbox_route_digest(
                 &bob_genesis,
                 &bob_device,
                 &initial_tip,
             ),
+            &CONTACT_FIRST_INBOX_LOCK,
         );
 
         assert!(
@@ -3477,15 +3497,17 @@ mod tests {
             previous_chain_tip: Some(first_tip.to_vec()),
         };
 
-        // The previous tip is the relationship's first: its open inbox is read.
+        // The previous tip is the relationship's first: its inbox, bound to the
+        // contact's first-inbox lock (DSM Amendment A37), is read.
         // The current tip's inbox is bound to the lock this device issues its
         // contact (DSM Amendment A34); none issued, nothing can be there yet,
         // and it is not read.
         let strings = inbox_addresses(genesis, device, &[contact]);
         assert_eq!(
             strings,
-            vec![dsm::crypto::spool_address::open_inbox_address(
+            vec![dsm::crypto::spool_address::locked_inbox_address(
                 &dsm::crypto::spool_address::inbox_route_digest(&genesis, &device, &first_tip),
+                &CONTACT_FIRST_INBOX_LOCK,
             )]
         );
     }

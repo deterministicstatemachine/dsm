@@ -66,7 +66,7 @@ You need Node.js 20 or later, Python 3 with `venv` for the Python client, `curl`
 DSM's tools, prebuilt for Linux (x86-64, ARM64) and macOS (Apple silicon, Intel). The install script checks every download against the release's `SHA256SUMS` before it unpacks anything, and installs into `~/.local`:
 
 ```bash
-curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.4/install.sh
+curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.1-beta.4/install.sh
 sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
@@ -87,10 +87,10 @@ The TypeScript client, into your app (its protobuf types are inside the package)
 
 ```bash
 npm init -y
-npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.0-beta.4.tgz
+npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.1-beta.4.tgz
 ```
 
-The same package is on npm, for a machine `install.sh` has not run on, such as the server your app deploys to: `npm install dsm-app-client@0.1.0-beta.4`.
+The same package is on npm, for a machine `install.sh` has not run on, such as the server your app deploys to: `npm install dsm-app-client@0.1.1-beta.4`.
 
 Then the starter app, from your app's folder. It keeps running: open http://127.0.0.1:3000, and use a second terminal (in the same folder, with the same `PATH`) for the commands below.
 
@@ -175,10 +175,10 @@ if (login.fact === "signed") console.log(`${player.peer} signed in`);
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.0b4-py3-none-any.whl
+pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.1b4-py3-none-any.whl
 ```
 
-The same package is on PyPI, for a machine `install.sh` has not run on: `pip install dsm-app-client==0.1.0b4`. From a clone, `pip install -e clients/python` instead.
+The same package is on PyPI, for a machine `install.sh` has not run on: `pip install dsm-app-client==0.1.1b4`. From a clone, `pip install -e clients/python` instead.
 
 ```python
 from dsm_app_client import local_app, grant, ask

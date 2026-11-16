@@ -6,7 +6,7 @@ DSM is a state and identity layer in which every participant verifies state tran
 
 DSM is not a blockchain, a rollup, or a payment-channel network. Storage nodes hold bytes and never decide anything. Applications plug into DSM: an app keeps its own server and logic, gets a DSM account of its own, and its users connect their wallets to it ([Apps plugged into DSM](#apps-plugged-into-dsm)). DSM's own three product surfaces are **Sovereign Finance (SoFi)**, an on-device AMM market with no counterparty and no operator; the **offline anchor appliance**, a hardware identity for offline bearer transfer of any DSM asset, built on an RP2350 and a TROPIC01 secure element; and **dBTC**, Bitcoin-backed DSM state whose withdrawal is a consumption of live DSM state rather than a custodian's decision.
 
-This README is the map for release `v0.1.0-beta.4`. Every claim below carries one of four status tags: **proven on real devices** (exercised end to end on real Android phones, and for the offline protocol on the anchor appliance, against the live fleet), **checked in CI** (models and proofs that run in the pipeline), **fenced** (code present, refused by a named guard), or **core-only** (implemented in the core crate, not wired to a route).
+This README is the map for release `v0.1.1-beta.4`. Every claim below carries one of four status tags: **proven on real devices** (exercised end to end on real Android phones, and for the offline protocol on the anchor appliance, against the live fleet), **checked in CI** (models and proofs that run in the pipeline), **fenced** (code present, refused by a named guard), or **core-only** (implemented in the core crate, not wired to a route).
 
 ## Contents
 
@@ -58,7 +58,7 @@ Your app stays what it is, in the language you already use. It gets its own DSM 
 
 ## Beta testers
 
-The Android wallet is `dsm-wallet-v0.1.0-beta.4.apk` on the [`v0.1.0-beta.4` release page](https://github.com/deterministicstatemachine/dsm/releases/tag/v0.1.0-beta.4).
+The Android wallet is `dsm-wallet-v0.1.1-beta.4.apk` on the [`v0.1.1-beta.4` release page](https://github.com/deterministicstatemachine/dsm/releases/tag/v0.1.1-beta.4).
 
 1. **Uninstall any previous beta.** Beta releases are clean cuts; there is no state migration between them.
 2. Download the APK from the release page to your Android device.
