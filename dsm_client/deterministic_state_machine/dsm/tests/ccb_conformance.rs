@@ -556,7 +556,10 @@ fn the_decoder_round_trips_and_refuses_burned_schemas() {
     burned[2..4].copy_from_slice(&2u16.to_be_bytes());
     assert_eq!(
         decode_vault_state(&burned),
-        Err(DecodeError::BurnedSchema { got: 2 }),
+        Err(DecodeError::BurnedSchema {
+            class: dsm::ccb::class::VAULT_STATE_V2,
+            got: 2
+        }),
         "schema 2 must be named as burned — no upgrade path"
     );
 

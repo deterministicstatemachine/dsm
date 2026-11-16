@@ -68,14 +68,14 @@ use crate::types::offline_account::{
 struct LoadBody;
 impl CcbObject for LoadBody {
     const CLASS: u16 = class::OFFLINE_LOAD_BOUNDARY_BODY;
-    const SCHEMA: u16 = 3;
+    const SCHEMA: u16 = 4;
 }
 
 /// Envelope of an unload body.
 struct UnloadBody;
 impl CcbObject for UnloadBody {
     const CLASS: u16 = class::OFFLINE_UNLOAD_BOUNDARY_BODY;
-    const SCHEMA: u16 = 3;
+    const SCHEMA: u16 = 4;
 }
 
 /// The anchor an offline account belongs to, as its bundle `B` commits it:
@@ -96,9 +96,12 @@ pub struct BoundaryAnchor {
 /// Where an offline account stood since its last boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundarySince {
-    /// The account's first boundary: it was opened empty, at this frontier,
-    /// counter zero.
-    Opened { frontier: [u8; 32] },
+    /// The account's first boundary: it was opened empty, at this frontier
+    /// and counter. An account opens at its board's origin (counter zero),
+    /// or, for a wallet upgraded in place from 0.1.0-beta.4, empty at the
+    /// counter its board already stood at (owner, 2026-11-15: "Change Core
+    /// tonight"); nothing before that counter is spendable from it.
+    Opened { frontier: [u8; 32], counter: u64 },
     /// The account the previous boundary left.
     Previous { account_root: [u8; 32] },
 }
@@ -381,9 +384,10 @@ impl OfflineBoundaryBody {
         push_digest32(&mut out, &anchor.birth_commitment); // 14
         match &self.ancestry.since {
             // 15
-            BoundarySince::Opened { frontier } => {
+            BoundarySince::Opened { frontier, counter } => {
                 out.push(SINCE_OPENED);
                 push_digest32(&mut out, frontier);
+                push_u64(&mut out, *counter);
             }
             BoundarySince::Previous { account_root } => {
                 out.push(SINCE_PREVIOUS);
@@ -405,7 +409,7 @@ impl OfflineBoundaryBody {
         Ok(out)
     }
 
-    /// Decode a body, strictly: its class, schema 1, every field, nothing after.
+    /// Decode a body, strictly: its class, its live schema, every field, nothing after.
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
         let kind = match c.peek_class()? {
@@ -445,6 +449,7 @@ impl OfflineBoundaryBody {
         let since = match c.u8()? {
             SINCE_OPENED => BoundarySince::Opened {
                 frontier: c.digest32()?,
+                counter: c.u64()?,
             },
             SINCE_PREVIOUS => BoundarySince::Previous {
                 account_root: c.digest32()?,
@@ -849,11 +854,12 @@ fn verify_ancestry(
         .iter()
         .map(|hop| crate::types::offline_chain::AccountHop::from_bytes(hop))
         .collect::<Result<Vec<_>, DsmError>>()?;
-    // An account's first boundary starts from the account opened empty. Nothing can be spent before
-    // a load funds it, but its board may have received offline since it opened (owner, 2026-11-07).
+    // An account's first boundary starts from the account opened empty, at the frontier and counter
+    // it opened at. Nothing can be spent before a load funds it, but its board may have received
+    // offline since it opened (owner, 2026-11-07).
     let start = match (&body.ancestry.since, body.pre_funding_chain) {
-        (BoundarySince::Opened { frontier }, None) => {
-            crate::types::offline_account::OfflineAccount::open(*frontier, 0).root()
+        (BoundarySince::Opened { frontier, counter }, None) => {
+            crate::types::offline_account::OfflineAccount::open(*frontier, *counter).root()
         }
         (BoundarySince::Previous { account_root }, Some(_)) => *account_root,
         (BoundarySince::Opened { .. }, Some(_)) => return Err(DsmError::invalid_operation(
@@ -980,7 +986,10 @@ mod tests {
             &dev,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened { frontier: OPENED },
+            BoundarySince::Opened {
+                frontier: OPENED,
+                counter: 0,
+            },
         );
         let verified = verify(&dev, &bytes).expect("the load verifies");
         assert_eq!(verified.operation_id(), load.operation_id);
@@ -1033,7 +1042,10 @@ mod tests {
             &dev,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened { frontier: OPENED },
+            BoundarySince::Opened {
+                frontier: OPENED,
+                counter: 0,
+            },
         );
         let funded = load.new_device_state;
         let (_, bytes) = body_of(
@@ -1085,7 +1097,10 @@ mod tests {
             &dev,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened { frontier: OPENED },
+            BoundarySince::Opened {
+                frontier: OPENED,
+                counter: 0,
+            },
         );
         refused(
             OfflineBoundaryBody::verify(&bytes, &dev.genesis(), &dev.devid(), &[0x0F; 64]),
@@ -1110,13 +1125,19 @@ mod tests {
             &dev,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened { frontier: OPENED },
+            BoundarySince::Opened {
+                frontier: OPENED,
+                counter: 0,
+            },
         );
         let (_, second) = body_of(
             &load.new_device_state,
             OfflineBoundaryKind::Load,
             5,
-            BoundarySince::Opened { frontier: OPENED },
+            BoundarySince::Opened {
+                frontier: OPENED,
+                counter: 0,
+            },
         );
         refused(
             verify(&dev, &second),
@@ -1128,6 +1149,7 @@ mod tests {
             30,
             BoundarySince::Opened {
                 frontier: [0x02; 32],
+                counter: 0,
             },
         );
         refused(
@@ -1192,7 +1214,10 @@ mod tests {
             &dev,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened { frontier: OPENED },
+            BoundarySince::Opened {
+                frontier: OPENED,
+                counter: 0,
+            },
         );
         let mut trailing = bytes.clone();
         trailing.push(0);
@@ -1421,6 +1446,47 @@ mod tests {
         refused(
             OfflineSettlementBody::verify(&carried, &[0x0C; 32], &receiver, &exposure),
             "is not the transfer the payer's anchor signed",
+        );
+    }
+
+    /// An account reopened at a board's counter (a wallet upgraded with its
+    /// board already used) starts there: its first boundary names that
+    /// counter, and receivers rebuild the start from it. Owner, 2026-11-15:
+    /// "Change Core tonight". A boundary naming any other counter is refused.
+    /// MUTATION CONTROL: `verify_ancestry` rebuilding the start at counter 0
+    /// turns the first half red; ignoring the counter turns the second red.
+    #[test]
+    fn a_first_boundary_starts_at_the_counter_the_account_opened_at() {
+        let dev = crate::types::device_state::tests::fresh_device(0xE1)
+            .created_token(ASSET, 100)
+            .expect("token created");
+        let bundle = bundle_of(&dev);
+        let dev = dev
+            .open_offline_account(&bundle, OPENED, 4)
+            .expect("account opened at the board's counter");
+        let (load, bytes) = body_of(
+            &dev,
+            OfflineBoundaryKind::Load,
+            30,
+            BoundarySince::Opened {
+                frontier: OPENED,
+                counter: 4,
+            },
+        );
+        let verified = verify(&dev, &bytes).expect("the load verifies from counter 4");
+        assert_eq!(verified.operation_id(), load.operation_id);
+        let (_, from_zero) = body_of(
+            &dev,
+            OfflineBoundaryKind::Load,
+            30,
+            BoundarySince::Opened {
+                frontier: OPENED,
+                counter: 0,
+            },
+        );
+        refused(
+            verify(&dev, &from_zero),
+            "the boundary's account is not the one its steps since the last boundary leave",
         );
     }
 }

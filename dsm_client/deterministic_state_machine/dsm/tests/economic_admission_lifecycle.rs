@@ -1365,6 +1365,7 @@ fn boundary(
     let since = match account.funding_chain() {
         None => dsm::economic::offline_boundary::BoundarySince::Opened {
             frontier: account.frontier(),
+            counter: account.counter(),
         },
         Some(_) => dsm::economic::offline_boundary::BoundarySince::Previous {
             account_root: account.root(),

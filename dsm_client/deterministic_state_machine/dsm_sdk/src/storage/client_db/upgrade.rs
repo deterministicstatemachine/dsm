@@ -21,7 +21,7 @@
 
 use anyhow::{anyhow, Result};
 use dsm::types::device_state::{DeviceState, RealizedHead};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 /// The versions this build upgrades in place.
 const UPGRADED_FROM: [i64; 2] = [47, 48];
@@ -47,6 +47,12 @@ const REWRITTEN: [&str; 3] = ["bcr_device_heads", "identity_publication", "recov
 /// The one `recovery_prefs` key the wallet keeps: its hardware-sealed seed.
 const SEALED_SEED_KEY: &str = "encrypted_wallet_seed";
 
+/// The phases of an offline step its board may hold a record of: a sender's
+/// release being driven, a receiver's board committing the receive, and a
+/// confirmed step whose board frontier may not have advanced. A restart
+/// settles each from its `bilateral_sessions` row, and nothing else can.
+const BOARD_STEP_PHASES: [&str; 3] = ["releasing", "receiving", "confirm_pending"];
+
 /// Upgrade the database on `conn` in place when it is at a version this build
 /// upgrades from; leave any other file untouched for `create_schema` to judge.
 pub(crate) fn upgrade_in_place(conn: &mut Connection) -> Result<()> {
@@ -67,7 +73,15 @@ pub(crate) fn upgrade_in_place(conn: &mut Connection) -> Result<()> {
 }
 
 fn rewrite(conn: &mut Connection) -> Result<()> {
-    let tx = conn.transaction()?;
+    // Two opens at once both see the old version; the write lock taken here
+    // lets one upgrade, and the other reads the version again under it and
+    // finds nothing left to do.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let found: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if !UPGRADED_FROM.contains(&found) {
+        return Ok(());
+    }
+    refuse_a_board_step_in_flight(&tx)?;
     let head = genesis_head_of(&tx)?;
     let tables: Vec<String> = {
         let mut stmt = tx.prepare(
@@ -111,15 +125,51 @@ fn rewrite(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+/// Refuse the upgrade while an offline step is unfinished on a board. Its
+/// session row is the only thing that can settle the board's record of it, and
+/// the upgrade empties that table, so upgrading now would leave the board
+/// unable to stage or receive again. Left at its old version, the file opens on
+/// the build that started the step, which finishes it at its next start.
+fn refuse_a_board_step_in_flight(conn: &Connection) -> Result<()> {
+    let has_sessions: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'bilateral_sessions'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_sessions == 0 {
+        return Ok(());
+    }
+    let in_flight: i64 = conn.query_row(
+        "SELECT count(*) FROM bilateral_sessions WHERE phase IN (?1, ?2, ?3)",
+        params![
+            BOARD_STEP_PHASES[0],
+            BOARD_STEP_PHASES[1],
+            BOARD_STEP_PHASES[2]
+        ],
+        |r| r.get(0),
+    )?;
+    if in_flight > 0 {
+        return Err(anyhow!(
+            "upgrade: {in_flight} offline step(s) are unfinished on a board; open this wallet on \
+             the build that started them and let them finish before upgrading"
+        ));
+    }
+    Ok(())
+}
+
 /// The device's head, started again from its genesis: the same genesis, device
 /// id and public key, and nothing the old network held. Its own boards'
 /// offline accounts are carried as [`carried_offline_account`] says.
 fn genesis_head_of(conn: &Connection) -> Result<RealizedHead> {
-    // The genesis record names the device in Base32 text.
+    // The genesis record names the device in Base32 text. Several records can
+    // stand side by side; the device is the newest, as the runtime reads it
+    // (`genesis::get_verified_genesis_record`).
     let named: String = conn
-        .query_row("SELECT device_id FROM genesis_records LIMIT 1", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT device_id FROM genesis_records ORDER BY rowid DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
         .optional()?
         .ok_or_else(|| anyhow!("upgrade: the database holds no genesis record"))?;
     let decoded = crate::util::text_id::decode_base32_crockford(&named)
@@ -285,6 +335,76 @@ mod tests {
             .query_row("SELECT count(*) FROM contacts", [], |r| r.get(0))
             .expect("contacts");
         assert_eq!(contacts, 1);
+    }
+
+    /// A board step left unfinished by beta.4 refuses the upgrade, and the file
+    /// is left exactly as it was, so the build that started the step can
+    /// settle it. A step that ended does not hold the upgrade back.
+    /// MUTATION CONTROL: dropping the check upgrades the first database and
+    /// empties its session row.
+    #[test]
+    fn a_board_step_in_flight_holds_the_upgrade_back() {
+        for phase in BOARD_STEP_PHASES {
+            let mut conn = beta4_database();
+            conn.execute(
+                "INSERT INTO bilateral_sessions(commitment_hash, counterparty_device_id, \
+                 operation_bytes, phase) VALUES (x'01', x'02', x'03', ?1)",
+                params![phase],
+            )
+            .expect("the session");
+            let refused = upgrade_in_place(&mut conn).expect_err("a board step in flight");
+            assert!(
+                refused.to_string().contains("unfinished on a board"),
+                "{phase}: {refused}"
+            );
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .expect("the version");
+            assert_eq!(version, 47, "{phase}");
+            let sessions: i64 = conn
+                .query_row("SELECT count(*) FROM bilateral_sessions", [], |r| r.get(0))
+                .expect("sessions");
+            assert_eq!(sessions, 1, "{phase}");
+        }
+        let mut conn = beta4_database();
+        conn.execute(
+            "INSERT INTO bilateral_sessions(commitment_hash, counterparty_device_id, \
+             operation_bytes, phase) VALUES (x'01', x'02', x'03', 'committed')",
+            [],
+        )
+        .expect("the session");
+        upgrade_in_place(&mut conn).expect("an ended step does not hold it back");
+    }
+
+    /// With two genesis records, the upgrade rebuilds the newest one's device,
+    /// the one the runtime reads, and keeps its board.
+    /// MUTATION CONTROL: reading the oldest record finds no head for its
+    /// device and refuses.
+    #[test]
+    fn the_newest_genesis_record_names_the_device() {
+        let mut conn = beta4_database();
+        conn.execute_batch("DELETE FROM genesis_records;")
+            .expect("clear");
+        for (id, device) in [("OLD", [0x01; 32]), ("NEW", DEVICE)] {
+            conn.execute(
+                "INSERT INTO genesis_records(genesis_id, device_id, device_birth_binding, \
+                 merkle_root, chain_tip, publication_hash, entropy_hash, protocol_version) \
+                 VALUES (?1, ?2, 'b', 'm', 'c', 'p', 'e', 'v')",
+                params![id, crate::util::text_id::encode_base32_crockford(&device)],
+            )
+            .expect("a genesis record");
+        }
+        upgrade_in_place(&mut conn).expect("the newest record's device upgrades");
+        let bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT head_bytes FROM bcr_device_heads WHERE device_id = ?1",
+                params![DEVICE.as_slice()],
+                |r| r.get(0),
+            )
+            .expect("the head");
+        let (head, _) = super::super::bcr::decode_device_state(&bytes, None).expect("decoded");
+        let account = head.offline_account(&BUNDLE).expect("the board's account");
+        assert_eq!((account.counter(), account.frontier()), (4, FRONTIER));
     }
 
     /// A database with no head for its genesis record's device is refused

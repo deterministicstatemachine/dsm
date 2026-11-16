@@ -36,8 +36,8 @@ use super::{class, family, schema, CcbError, CcbObject};
 pub enum DecodeError {
     /// Wrong object class in the envelope.
     WrongClass { got: u16 },
-    /// A burned schema version — refused, never upgraded.
-    BurnedSchema { got: u16 },
+    /// A burned schema version of `class` — refused, never upgraded.
+    BurnedSchema { class: u16, got: u16 },
     /// An unknown (never-assigned) schema version.
     UnknownSchema { got: u16 },
     /// The bytes ended before the layout did.
@@ -54,9 +54,9 @@ impl core::fmt::Display for DecodeError {
             DecodeError::WrongClass { got } => {
                 write!(f, "unexpected object class {got:#06x}")
             }
-            DecodeError::BurnedSchema { got } => write!(
+            DecodeError::BurnedSchema { class, got } => write!(
                 f,
-                "VaultStateV2 schema {got} is burned; there is no upgrade path — reprovision"
+                "class {class:#06x} schema {got} is burned; there is no upgrade path — reprovision"
             ),
             DecodeError::UnknownSchema { got } => write!(f, "unknown schema {got}"),
             DecodeError::Truncated => write!(f, "payload ends before the layout does"),
@@ -131,7 +131,7 @@ impl<'a> Cursor<'a> {
         }
         if s != want_schema {
             if schema::is_burned(c, s) {
-                return Err(DecodeError::BurnedSchema { got: s });
+                return Err(DecodeError::BurnedSchema { class: c, got: s });
             }
             return Err(DecodeError::UnknownSchema { got: s });
         }
@@ -327,7 +327,10 @@ pub(crate) fn vault_state_at(c: &mut Cursor<'_>) -> Result<VaultStateV2, DecodeE
     }
     if sch != VaultStateV2::SCHEMA {
         if schema::is_burned(cls, sch) {
-            return Err(DecodeError::BurnedSchema { got: sch });
+            return Err(DecodeError::BurnedSchema {
+                class: cls,
+                got: sch,
+            });
         }
         return Err(DecodeError::UnknownSchema { got: sch });
     }

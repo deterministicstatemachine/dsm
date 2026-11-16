@@ -706,7 +706,7 @@ fn every_class() -> Vec<Shown> {
     ] {
         all.push(shown(
             boundary_class,
-            3,
+            4,
             ok(boundary(kind).encode(), "offline boundary"),
             Read::Parsed(|b| re(OfflineBoundaryBody::decode(b).map_err(text)?.encode())),
         ));
