@@ -16,7 +16,7 @@ use dsm::types::error::DsmError;
 use dsm::types::proto as generated;
 use prost::Message;
 
-use crate::sdk::storage_io::{append_to_index, put_immutable, read_stored_bytes, resolve_locator_all};
+use crate::sdk::storage_io::{append_to_index, put_immutable, resolve_locator_all};
 use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
@@ -91,7 +91,7 @@ pub async fn publish(set: &StorageSet, topic: &D32, payload: &[u8]) -> Result<Pu
         &address,
     )
     .await?;
-    let stored = read_stored_bytes(set, &address)
+    let stored = crate::sdk::storage_io::read_back_or_repair(set, TAG_DSM_AUTHORED_OBJECT, &bytes)
         .await?
         .is_some_and(|read| read == bytes);
     Ok(Published {

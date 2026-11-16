@@ -4,7 +4,8 @@
 //! set-mate's CA, which that set-mate's operator holds: a certificate from any
 //! other member's CA is refused, so no member can pose as another. A node
 //! reaches a set-mate only to mirror its ByteCommits (storage spec §14, mirror
-//! sync), at the endpoint its own configuration names for it, and nowhere else: a redirect is an answer, never followed,
+//! sync) and to copy it an object the node took (§5 rule 7), at the endpoint
+//! its own configuration names for it, and nowhere else: a redirect is an answer, never followed,
 //! so a set-mate's endpoint cannot send the node to fetch from another
 //! address (storage spec §14, mirror provenance 1).
 
@@ -24,6 +25,18 @@ use std::time::Duration;
 /// spec §1 rule 4).
 pub const SET_MATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const SET_MATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long one copy of an object to a set-mate (storage spec §5 rule 7) may
+/// take, connection included: a slow or unreachable set-mate holds the put
+/// that copies to it no longer than this. A copy past it is not made, and the
+/// writer, finding that set-mate without the object, puts it there itself. A
+/// transport liveness bound: no protocol fact depends on it (§1 rule 4).
+pub const SET_MATE_COPY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The most copies a node has in flight to one set-mate at once. A set-mate
+/// holds at most a quarter of its requests for any one peer, its mirror sync
+/// included; copies take at most this many of them, so the rest stay free.
+pub const SET_MATE_COPIES_IN_FLIGHT: usize = 8;
 
 /// A client pinned to `set_mate_ca_pem`, the CA certificate of one set-mate.
 pub fn pinned_set_client(set_mate_ca_pem: &[u8]) -> anyhow::Result<Client> {

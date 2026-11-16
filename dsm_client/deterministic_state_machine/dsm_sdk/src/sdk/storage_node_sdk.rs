@@ -26,6 +26,31 @@ use crate::sdk::bounded_read::{self, Bound, Budget};
 use crate::sdk::storage_set::StorageSet;
 use crate::util::text_id::encode_base32_crockford;
 
+/// On a put: store the object at this member and copy it to no one (§5
+/// rule 7). Every put at one chosen member carries it; a put for the set does
+/// not.
+const SET_COPY_HEADER: &str = "x-dsm-set-copy";
+
+/// What a member said when asked whether it holds an object (§5 rule 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Holding {
+    /// It answered that it holds it.
+    Holds,
+    /// It answered, and not that it holds it: how.
+    Lacks(String),
+    /// It was not reached: why.
+    Unreached(String),
+}
+
+/// Whether a put asks the member to copy the object to its set-mates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Copying {
+    /// A put for the set: the member copies it to each set-mate (§5 rule 7).
+    ToTheSet,
+    /// A put at this member alone.
+    HereOnly,
+}
+
 // ── The HTTP client ─────────────────────────────────────────────────────────
 
 /// The CA material a storage client is built from: the resolved env-config
@@ -616,33 +641,78 @@ impl MemberClient {
         &self.endpoint
     }
 
-    /// Put an immutable object (§5). The member computes the address; the
-    /// address this client computed travels as a check the member applies.
+    /// Put an immutable object (§5) at this member alone: the member stores
+    /// it and copies it to no one ([`SET_COPY_HEADER`]). The member computes
+    /// the address; the address this client computed travels as a check the
+    /// member applies.
     pub async fn put_immutable(
         &self,
         namespace: TaggedHashDomain<'_>,
         payload: &[u8],
     ) -> Result<(), String> {
+        self.put_object(namespace, payload, Copying::HereOnly).await
+    }
+
+    /// Put an immutable object for the whole set (§5 rule 7): the member
+    /// stores it and copies it to each of its set-mates before it answers.
+    /// What it says of the copies is not asked: the caller asks each member
+    /// whether it holds the object ([`MemberClient::holds_immutable`]).
+    pub async fn put_immutable_for_the_set(
+        &self,
+        namespace: TaggedHashDomain<'_>,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        self.put_object(namespace, payload, Copying::ToTheSet).await
+    }
+
+    async fn put_object(
+        &self,
+        namespace: TaggedHashDomain<'_>,
+        payload: &[u8],
+        copying: Copying,
+    ) -> Result<(), String> {
         let addr =
             encode_base32_crockford(&dsm::storage_object::immutable_addr(namespace, payload));
         // The member answers with the address it computed, in Base32.
         let addr_limit = Bound::Limit(addr.len());
-        answer(
-            self.client
-                .post(format!("{}/api/v2/immutable/put", self.endpoint))
-                .header("x-namespace", namespace_header(namespace.source_bytes())?)
-                .header("x-expected-addr", addr)
-                .body(payload.to_vec()),
-            addr_limit,
-        )
-        .await
-        .map(|body| {
-            log::debug!(
-                "immutable put at {}: {} bytes answered",
-                self.member_id,
-                body.map_or(0, |b| b.len())
-            )
-        })
+        let mut request = self
+            .client
+            .post(format!("{}/api/v2/immutable/put", self.endpoint))
+            .header("x-namespace", namespace_header(namespace.source_bytes())?)
+            .header("x-expected-addr", addr);
+        if copying == Copying::HereOnly {
+            request = request.header(SET_COPY_HEADER, "1");
+        }
+        answer(request.body(payload.to_vec()), addr_limit)
+            .await
+            .map(|body| {
+                log::debug!(
+                    "immutable put at {}: {} bytes answered",
+                    self.member_id,
+                    body.map_or(0, |b| b.len())
+                )
+            })
+    }
+
+    /// What the member says of an object at `addr`, as it answers a `HEAD`
+    /// of the object: the status alone, no bytes. Untrusted, as every answer
+    /// is: it decides only where this device puts the object itself, and
+    /// `Stored` is read from the bytes (§5 rule 6).
+    pub async fn holds_immutable(&self, addr: &[u8; 32]) -> Holding {
+        let sent = self
+            .client
+            .head(format!(
+                "{}/api/v2/immutable/{}",
+                self.endpoint,
+                encode_base32_crockford(addr)
+            ))
+            .send()
+            .await;
+        match sent {
+            Ok(response) if response.status() == reqwest::StatusCode::OK => Holding::Holds,
+            Ok(response) => Holding::Lacks(format!("answered HTTP {}", response.status())),
+            Err(e) => Holding::Unreached(with_causes(&e)),
+        }
     }
 
     /// The `(namespace, payload)` the member holds at `addr`, untrusted until
@@ -1133,22 +1203,106 @@ impl SetClient {
     // in member order: a phone pays one network latency for the set, not
     // one per member, and nothing a member answers changes.
 
-    /// Put an immutable object at every member. Returns how many members
-    /// took it; `Stored` is Core's reading of the members afterwards, never
-    /// this count.
+    /// Put an immutable object for the set. The members distribute it among
+    /// themselves (§5 rule 7): it goes to one member, which copies it to every
+    /// set-mate before answering. Then this device asks each other member
+    /// whether it holds the object, all at once, and puts it itself, marked
+    /// for that member alone, wherever one does not say so: no member's word
+    /// about another decides where the object goes. The member asked first
+    /// is the one the address picks, so writers spread over the set; one that
+    /// does not take it passes the put to the next. Returns how many members
+    /// took it, as their own answers say; `Stored` is Core's reading of the
+    /// members afterwards, never this count.
     pub async fn put_immutable(&self, namespace: TaggedHashDomain<'_>, payload: &[u8]) -> u32 {
-        let answers = futures::future::join_all(
-            self.members
-                .iter()
-                .map(|member| member.put_immutable(namespace, payload)),
-        )
-        .await;
-        let mut took = 0u32;
-        for (member, answer) in self.members.iter().zip(answers) {
+        let addr = dsm::storage_object::immutable_addr(namespace, payload);
+        let n = self.members.len();
+        let first = usize::from(addr[0]) % n.max(1);
+        let mut asked = Vec::new();
+        for member in self.members.iter().cycle().skip(first).take(n) {
+            match member.put_immutable_for_the_set(namespace, payload).await {
+                Ok(()) => return self.put_where_not_held(namespace, payload, member).await,
+                Err(e) => asked.push(format!("{}: {e}", member.member_id)),
+            }
+        }
+        log::warn!("immutable put: no member took it: {}", asked.join("; "));
+        0
+    }
+
+    /// After `took` took an object: ask every other member whether it holds
+    /// it, all at once, and put it at each that answers without saying it
+    /// does. A member that is not reached is not sent the object in the same
+    /// put: it would cost the wait again, and `Stored` needs three of five,
+    /// read back and repaired by the writer (§21). How many members took it:
+    /// `took`, those that hold it, and those this device's own put reached.
+    async fn put_where_not_held(
+        &self,
+        namespace: TaggedHashDomain<'_>,
+        payload: &[u8],
+        took: &MemberClient,
+    ) -> u32 {
+        let addr = dsm::storage_object::immutable_addr(namespace, payload);
+        let others: Vec<&MemberClient> = self
+            .members
+            .iter()
+            .filter(|m| m.member_id != took.member_id)
+            .collect();
+        let held = futures::future::join_all(others.iter().map(|m| m.holds_immutable(&addr))).await;
+        let mut holding = 1usize;
+        let mut missing = Vec::new();
+        let mut unreached = Vec::new();
+        for (member, answer) in others.into_iter().zip(held) {
+            match answer {
+                Holding::Holds => holding += 1,
+                Holding::Lacks(_) => missing.push(member),
+                Holding::Unreached(why) => unreached.push(format!("{}: {why}", member.member_id)),
+            }
+        }
+        if !unreached.is_empty() {
+            log::warn!(
+                "immutable put: members not reached: {}",
+                unreached.join("; ")
+            );
+        }
+        holding += self.put_at(namespace, payload, &missing).await;
+        holding as u32
+    }
+
+    /// Put an immutable object at every member, this device's own put at
+    /// each: the repair of an object whose read-back fell short (§21), which
+    /// does not rely on any member's copying. Returns how many took it.
+    pub async fn put_immutable_at_every_member(
+        &self,
+        namespace: TaggedHashDomain<'_>,
+        payload: &[u8],
+    ) -> u32 {
+        let everyone: Vec<&MemberClient> = self.members.iter().collect();
+        self.put_at(namespace, payload, &everyone).await as u32
+    }
+
+    /// Put an object at each of `members` alone, all at once: how many took
+    /// it.
+    async fn put_at(
+        &self,
+        namespace: TaggedHashDomain<'_>,
+        payload: &[u8],
+        members: &[&MemberClient],
+    ) -> usize {
+        let answers =
+            futures::future::join_all(members.iter().map(|m| m.put_immutable(namespace, payload)))
+                .await;
+        let mut took = 0usize;
+        let mut refused = Vec::new();
+        for (member, answer) in members.iter().zip(answers) {
             match answer {
                 Ok(()) => took += 1,
-                Err(e) => log::warn!("immutable put: {} did not take it: {e}", member.member_id),
+                Err(e) => refused.push(format!("{}: {e}", member.member_id)),
             }
+        }
+        if !refused.is_empty() {
+            log::warn!(
+                "immutable put: members that did not take it: {}",
+                refused.join("; ")
+            );
         }
         took
     }
@@ -1385,14 +1539,15 @@ mod tests {
         crate::sdk::storage_set::StorageSet::new(members).expect("the relayed set")
     }
 
-    /// A set-wide read or write asks every member at once. On the rig a
-    /// trade's settle spent most of its minute fetching objects member after
-    /// member: five round trips per object over a phone's network. Each
-    /// member here sits behind a relay that answers only once every member
-    /// has been asked, so a client that waits for one member before asking
-    /// the next is never answered. The object put directly is read through
-    /// the relays from every member, and a put through them is taken by every
-    /// member. On the storage node's own app, on Postgres.
+    /// A set-wide read asks every member at once. On the rig a trade's
+    /// settle spent most of its minute fetching objects member after member:
+    /// five round trips per object over a phone's network. Each member here
+    /// sits behind a relay that answers only once every member has been
+    /// asked, so a client that waits for one member before asking the next
+    /// is never answered. An object put for the set, which the members copy
+    /// among themselves (§5 rule 7), is held by every member and read through
+    /// the relays from every member; a repair put at every member goes
+    /// through them too. On the storage node's own app, on Postgres.
     #[test]
     #[serial_test::serial]
     fn a_set_asks_every_member_at_once() {
@@ -1406,7 +1561,8 @@ mod tests {
             let direct = super::SetClient::new(&set).expect("a client");
             assert_eq!(
                 direct.put_immutable(ns, b"held by every member").await as usize,
-                everyone
+                everyone,
+                "one member took the put and copied it to every set-mate"
             );
             let addr = dsm::storage_object::immutable_addr(ns, b"held by every member");
 
@@ -1424,11 +1580,11 @@ mod tests {
             );
             let took = super::SetClient::new(&relayed(&set).await)
                 .expect("a client")
-                .put_immutable(ns, b"put through the relays")
+                .put_immutable_at_every_member(ns, b"put at every member through the relays")
                 .await;
             assert_eq!(
                 took as usize, everyone,
-                "every member took the put, each asked while the others were"
+                "a repair put at every member asks each while the others are asked"
             );
         });
     }

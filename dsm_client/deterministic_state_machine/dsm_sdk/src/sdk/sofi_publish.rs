@@ -36,9 +36,7 @@ use dsm::types::error::DsmError;
 /// Candidates one locator scan may examine before it is `Unavailable`.
 pub const LOCATOR_BUDGET: usize = 64;
 use crate::sdk::sofi_sdk::{Produced, ToPublish};
-use crate::sdk::storage_io::{
-    append_to_index, put_immutable, read_stored_bytes, resolve_locator, resolve_locator_all,
-};
+use crate::sdk::storage_io::{append_to_index, put_immutable, resolve_locator, resolve_locator_all};
 use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
@@ -77,8 +75,11 @@ pub async fn publish(set: &StorageSet, object: &Publication<'_>) -> Result<Publi
             },
         ))
         .await?;
-    // The fact, from the members' answers — never from the fanout.
-    let stored = read_stored_bytes(set, &addr).await?.is_some();
+    // The fact, from the members' answers — never from the fanout; a short
+    // read-back is repaired at every member first (§21).
+    let stored = crate::sdk::storage_io::read_back_or_repair(set, object.namespace(), &bytes)
+        .await?
+        .is_some();
     Ok(Published {
         addr,
         stored,

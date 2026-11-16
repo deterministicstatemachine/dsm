@@ -7767,9 +7767,9 @@ Found on the two production boards on 2026-11-13. Green paid yellow 1 ERA offlin
 | DSM high-level (MR-DSM) | 368 | 240 | 47 | 16 | 0 | 38 | 27 |
 | SoFi (MR-SOFI) | 431 | 387 | 13 | 10 | 1 | 17 | 3 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 159 | 78 | 13 | 40 | 0 | 18 | 10 |
+| Storage node (MR-STOR) | 160 | 79 | 13 | 40 | 0 | 18 | 10 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
-| **All** | **1104** | **716** | **73** | **66** | **1** | **73** | **175** |
+| **All** | **1105** | **717** | **73** | **66** | **1** | **73** | **175** |
 
 ## 8 Per-requirement results
 
@@ -8753,6 +8753,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0157 | Met | `dsm::route_chain::completion_digest` | `dsm::route_chain::tests::the_completion_digest_is_the_proofs_fields` | The digest is computed from the proof's fields under DSM/storage/route-completion/v1. |
 | MR-STOR-0158 | Met | `dsm_sdk::sdk::route_seats::keep_completion`; `dsm_sdk::storage::client_db::completion_proofs::keep`; `dsm_sdk::storage::client_db::completion_proofs::get` | `dsm_sdk::handlers::node_e2e_tests::a_final_vault_key_is_relied_on_only_through_a_proof_fresh_reads_hold` | §6.94 (2026-10-24): the client keeps the proof of every final it relies on, keyed by the cell's whole route and the value, and never replaces a kept one; nothing else stores or commits it (no node or wire field holds one). |
 | MR-STOR-0159 | Met | `dsm::core::relationship_write_grant::verify_spool_write`; `dsm_storage_node::db::pg::spool_append` | `dsm_storage_node::api::transport::b0x::tests::a_locked_inbox_takes_only_its_own_lock_even_from_the_first_write`; `dsm_sdk::handlers::first_inbox_e2e_tests::a_third_partys_first_write_does_not_keep_two_devices_from_becoming_contacts`; `dsm_sdk::handlers::relationship_write_authorization_tests::a_write_into_an_inbox_under_another_key_is_refused_by_every_node` | DSM Amendment A34 (§6.156), built 2026-11-11; the first inbox by DSM Amendment A37, built 2026-11-15. |
+| MR-STOR-0160 | Met | `dsm_storage_node::api::objects::immutable::copy_to_set_mates`; `dsm_storage_node::api::objects::immutable::SET_COPY_HEADER`; `dsm_storage_node::set_client::SET_MATE_COPY_TIMEOUT`; `dsm_storage_node::set_client::SET_MATE_COPIES_IN_FLIGHT`; `dsm_sdk::sdk::storage_node_sdk::SetClient::put_immutable`; `dsm_sdk::sdk::storage_node_sdk::MemberClient::holds_immutable`; `dsm_sdk::sdk::storage_node_sdk::SetClient::put_immutable_at_every_member`; `dsm_sdk::sdk::storage_io::read_back_or_repair` | `dsm_storage_node::object_copies::a_member_copies_what_it_takes_to_each_set_mate`; `dsm_storage_node::object_copies::a_set_mate_that_does_not_take_its_copy_fails_no_put`; `dsm_storage_node::object_copies::a_member_answers_a_head_with_whether_it_holds_the_object`; `dsm_storage_node::object_copies::a_set_mate_passes_a_copy_on_to_no_one`; `dsm_storage_node::object_copies::a_stalled_set_mate_holds_a_put_no_longer_than_the_copy_deadline`; `dsm_storage_node::object_copies::copies_in_flight_to_one_set_mate_stay_under_the_cap`; `dsm_sdk::sdk::storage_io::tests::the_members_copy_an_object_put_for_the_set_to_each_other`; `dsm_sdk::sdk::storage_io::tests::a_copy_a_set_mate_did_not_take_is_put_there_by_the_writer`; `dsm_sdk::sdk::storage_io::tests::a_member_that_refuses_the_object_leaves_it_stored_at_the_rest`; `dsm_sdk::sdk::storage_node_sdk::tests::a_set_asks_every_member_at_once` | Storage §5 rule 7, built 2026-11-15 on the owner's direction ("The nodes handling the distribution"): a writer puts an object at one member, which copies it to its set-mates; the writer asks each other member whether it holds it and puts it where one does not. Run on real nodes over HTTPS on Postgres. |
 
 ### 8.5 Storage §14 lines added after the pin
 

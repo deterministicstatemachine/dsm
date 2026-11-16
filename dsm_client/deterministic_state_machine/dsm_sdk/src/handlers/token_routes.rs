@@ -387,8 +387,7 @@ async fn publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> P
     if let Err(e) = crate::sdk::storage_io::put_immutable(&set, tag, body).await {
         return PublishOutcome::NotStoredYet(format!("put: {e}"));
     }
-    let addr = dsm::storage_object::immutable_addr_from_inner(tag, expected_anchor);
-    match crate::sdk::storage_io::read_stored_bytes(&set, &addr).await {
+    match crate::sdk::storage_io::read_back_or_repair(&set, tag, body).await {
         Ok(Some(stored)) if stored == body => PublishOutcome::Stored,
         Ok(Some(..) | None) => {
             PublishOutcome::NotStoredYet("fewer than three members return the bytes yet".into())

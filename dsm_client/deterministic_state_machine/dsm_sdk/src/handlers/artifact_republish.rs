@@ -110,8 +110,9 @@ pub(crate) async fn continue_route_writes() -> Result<u32, String> {
         .map_err(|e| format!("route-chain writes not continued: {e}"))
 }
 
-/// Put `payload` at every member of `set` and read it back: `Ok(true)` once
-/// `Stored` holds for exactly these bytes.
+/// Put `payload` for `set` and read it back, repairing at every member once
+/// if the read-back falls short: whether `Stored` then holds for exactly
+/// these bytes.
 async fn put_and_confirm(
     set: &StorageSet,
     namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
@@ -128,7 +129,7 @@ async fn put_and_confirm(
         "[artifact republish] {took}/{} members took the object",
         set.len()
     );
-    let stored = crate::sdk::storage_io::read_stored_bytes(set, addr)
+    let stored = crate::sdk::storage_io::read_back_or_repair(set, namespace, payload)
         .await
         .map_err(|e| e.to_string())?;
     Ok(stored.as_deref() == Some(payload))

@@ -826,6 +826,28 @@ impl NodeSet {
         }
     }
 
+    /// The named member's object store refuses its next object write and
+    /// takes every one after it. The count is a sequence, which a refused
+    /// write's rollback does not undo.
+    pub async fn refuse_next_object_write(&self, member_id: &str) {
+        self.ddl(
+            member_id,
+            "DROP SEQUENCE IF EXISTS object_writes_seen;
+             CREATE SEQUENCE object_writes_seen;
+             CREATE OR REPLACE FUNCTION refuse_object_write() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN \
+               IF nextval('object_writes_seen') = 1 THEN \
+                 RAISE EXCEPTION 'the store refused the write'; \
+               END IF; \
+               RETURN NEW; \
+             END $$;
+             DROP TRIGGER IF EXISTS refuse_object_write ON immutable_objects;
+             CREATE TRIGGER refuse_object_write BEFORE INSERT ON immutable_objects
+                 FOR EACH ROW EXECUTE FUNCTION refuse_object_write();",
+        )
+        .await;
+    }
+
     /// Each named member's object store takes writes again.
     pub async fn accept_object_writes(&self, member_ids: &[String]) {
         for member_id in member_ids {
