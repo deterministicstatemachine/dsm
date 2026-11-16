@@ -6,7 +6,8 @@
 //! veneer → this handler).
 //!
 //! STATUS: SRAM-resident TCB + runtime boundary + REAL appliance, wired. The chip side runs against
-//! Tropic Square's model (`dsm-anchor-chip`); the full round trip has not run on silicon.
+//! Tropic Square's model (`dsm-anchor-chip`) in CI, and on silicon on two installed boards, which paid
+//! each other offline on 2026-11-13.
 //!  * The whole Secure TCB runs from SRAM: the boot-block `LOAD_MAP` (linker-emitted) instructs the
 //!    bootrom to copy the SRAM-VMA payload out of mutable external flash before entry;
 //!    `scripts/check-secure-no-xip.sh` PASSES. (Cryptographic verification of that flash image is a
