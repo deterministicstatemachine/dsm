@@ -5,8 +5,7 @@ host-signing secret lives in OTP readable only by Secure firmware.
 
 > ⚠️ **THE BURNS HERE ARE IRREVERSIBLE.** OTP is One-Time-Programmable: fuses only ever go 0→1. A
 > wrong value permanently bricks the board or locks you out. Provisioning the anchor afterwards
-> also burns the TROPIC01 (below). New boards are limited: **this procedure has not yet run on a
-> chip.** Rehearse it on a spent board first, then stop and look after the first new one.
+> also burns the TROPIC01 (below).
 
 Requires: `picotool` v2.2+, `openssl`, `b3sum`, `arm-none-eabi-nm`, `arm-none-eabi-objcopy`, `clang`,
 the built firmware ELF, and the board in BOOTSEL. The TROPIC01 driver is pinned by commit in the
@@ -21,6 +20,18 @@ export RUSTC="$HOME/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc"
 The trial image and the production image build to one path, so build the one you mean just before
 you use it. A build must name one of them, and `sign.sh` signs only a production image.
 
+## What has run on silicon
+
+Two boards have gone through the whole procedure, every step from an Android phone, and are installed
+to wallets: one on 2026-11-11 and 2026-11-12, the other on 2026-11-12 and 2026-11-13. Both are an RP2350
+A2 with a TR01-C2P-T103 on chip firmware 0.3.1, and on both the secret page was already sealed by an
+earlier procedure, so Step 4 was skipped. On each: the chip was prepared, the trial image's try-run
+passed every step, the digest and the boot key's hash were burned, the digest and rollback pages were
+locked by the lock image in Step 6's place (the A2 bootrom refuses those rows from BOOTSEL), the
+lockdown was burned, a changed copy of the signed image was refused, the first secure boot recorded the
+rollback version, the boot pages were locked, the production image's try-run passed all 26 steps, and
+the install closed the chip's birth. On 2026-11-13 the two paid each other offline, both ways.
+
 ## What has run without a chip
 
 `crates/dsm-anchor-chip/tests` runs the firmware's chip code against Tropic Square's TROPIC01 model
@@ -31,8 +42,8 @@ access privileges and latches them at a reboot. It does not model timing or tear
 tests do), it answers as firmware 2.0.0, and nothing about the RP2350 runs there: secure boot, the OTP
 locks, the boundary, the measured window and USB are this runbook's to prove, on silicon.
 
-`scripts/stack-bound.py` walks the production image's call graph, and CI holds the 64 KiB Secure stack to
-it. It gives about 53 KiB at the heaviest, with a fault on top.
+`scripts/stack-bound.py` walks the production image's call graph, and CI holds the 59 KiB (60,416-byte)
+Secure stack to it. It gave 55,336 bytes at the heaviest, with a fault on top, on 2026-11-12.
 
 ## Which chip this is, before anything is written to it
 
@@ -59,9 +70,9 @@ openssl verify -CAfile tropicsquare_root_ca_certificate_sn_301.pem -untrusted <d
   <dir>/t01_ese_cert.pem
 ```
 
-The first board read this way (2026-11-06) carried a TR01-C2P-T103 on chip firmware 0.3.1, with
-`CFG_START_UP` at `0xFFFFFFFF` (the PTRNG untested, as the table below says of a T103), its chain verifying
-to Tropic Square Root CA v1 (revocation lists not fetched), on an RP2350 A2.
+Both boards read this way (2026-11-06 and 2026-11-11) carried a TR01-C2P-T103 on chip firmware 0.3.1,
+with `CFG_START_UP` at `0xFFFFFFFF` (the PTRNG untested, as the table below says of a T103), their chains
+verifying to Tropic Square Root CA v1 (revocation lists not fetched), on an RP2350 A2.
 
 The parts:
 
@@ -383,9 +394,12 @@ will be kept: a wallet wiped or created anew afterward cannot use this anchor.
   σ^DSM, the three-factor release is three independent factors on a provisioned device.
 - **Does not (by itself):** defend against physical OTP extraction or fault injection on the
   RP2350 (an MCU, not a certified SE); the paper's residual (Thm 8 exposure bound) still applies.
-- **Has not been observed on silicon:** the TRNG path, the Non-secure MPU, the grants dropped at the first
-  crossing, the reset after a fault, the chip check, the prepare image and the rollback version are each
-  read and built, not run. The stack bound is read from the image, not measured. The trial image runs the first
-  three on a real board at no cost. A fault's reset can be seen by making the Non-secure side touch a
-  revoked peripheral in a throwaway trial build.
+- **Run on silicon, on both installed boards:** the TRNG path (every session and nonce draws from it), core 1
+  held off, the chip check passing, the prepare image, the refusal of a changed image, and the rollback version
+  recorded at the first secure boot.
+- **Not yet observed on silicon:** that the Non-secure MPU and the grants dropped at the first crossing stop
+  what they are meant to stop (they are set up at every boot; nothing has tried to get past them), the reset
+  after a fault, and the chip check refusing an unprepared part. The stack bound is read from the image, not
+  measured. A fault's reset can be seen by making the Non-secure side touch a revoked peripheral in a
+  throwaway trial build.
   `secure_exe()` is only an Arm Secure-state marker; the enforcement is the burns above.

@@ -238,7 +238,7 @@ const CORE1_OFF_READS: u32 = 1_000_000;
 /// design). On top of that, the power-on state machine is told to hold core 1's power domain off
 /// (`PSM.FRCE_OFF.PROC1`), and the force-off is read back and the domain seen off (`PSM.DONE.PROC1`
 /// clear) before the boundary is configured. A board that does not confirm both is refused here,
-/// before anything Non-secure runs. Built for the RP2350; not yet run on silicon.
+/// before anything Non-secure runs. Every image that has booted on a board has passed it.
 pub fn contain_core1() -> Result<(), Core1NotContained> {
     let psm = unsafe { &*hal::pac::PSM::ptr() };
     psm.frce_off().modify(|_, w| w.proc1().set_bit());
