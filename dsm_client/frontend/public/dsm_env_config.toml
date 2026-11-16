@@ -5,9 +5,10 @@
 # The fleet was provisioned 2026-11-10 on OVHcloud Public Cloud (Beauharnois,
 # the owner's own hosting) after the GCP set went down, and reprovisioned on
 # 2026-11-11 (UTC) for the storage node's schema 3 (DSM Amendment A34's write
-# lock): every database was wiped, every member minted a new register
+# lock), and again on 2026-11-16 (UTC; 2026-11-15 ET) for schema 4 and release
+# 0.1.1-beta.4: every database was wiped, every member minted a new register
 # incarnation into its fresh one, and the committed set id every member logs is
-#   1ANV2W9VPSMZ5AT643FZE664H5TEF02CM2BTSEMZDA5Z6PJTJNS0
+#   RDAWE9EY5YBPZ6RCK8K43ET3GVX44QSWS7DTGZKYJNX8N976ZAJ0
 # which is the id core pins (dsm::economic::register), so this list must stay
 # exactly the pinned pairs: `dsm_sdk::sdk::storage_set::tests::
 # the_bundled_env_config_resolves_the_pinned_beta_set` refuses anything else.
@@ -36,7 +37,7 @@ mempool_api_url = "https://mempool.space"
 [[nodes]]
 name = "dsm-node-1"
 endpoint = "https://148.113.157.16:8080"
-register_incarnation = "RPVADMF7BBRX3AYNB3574ZPF6MQK64YXN0T218XNNHS9DCH9BC40"
+register_incarnation = "0QPZ94TB89JPNGX76440WXDV81XC4R1TR23FFF6RN8GTDP8EN0D0"
 ca_cert = """
 -----BEGIN CERTIFICATE-----
 MIIFSTCCAzGgAwIBAgIUOeBVAVMR2zmh4EtFCeJYmocSQ68wDQYJKoZIhvcNAQEL
@@ -74,7 +75,7 @@ z5YOPTWcM5j1FJxV0w==
 [[nodes]]
 name = "dsm-node-2"
 endpoint = "https://167.114.146.179:8080"
-register_incarnation = "C0HXKDS32SH8ENM2RQXVBYZBMQ8GRDA4KCR18Z3HK12EPWM8EDZG"
+register_incarnation = "QMDAD603AW1JT2YZ952NBCY09297N2T9JBRAPEDPREP35E146EQ0"
 ca_cert = """
 -----BEGIN CERTIFICATE-----
 MIIFSTCCAzGgAwIBAgIUOeBVAVMR2zmh4EtFCeJYmocSQ68wDQYJKoZIhvcNAQEL
@@ -112,7 +113,7 @@ z5YOPTWcM5j1FJxV0w==
 [[nodes]]
 name = "dsm-node-3"
 endpoint = "https://167.114.146.40:8080"
-register_incarnation = "E1506XS1P0FGZBD4QEZ839V7YEWWCZ5SS9KJB31CANJ4JDN69BJ0"
+register_incarnation = "DBXCR5SP5V4AWQZZRDJ8XEFZZX2JJGBANN03312XWEM31BBVRM0G"
 ca_cert = """
 -----BEGIN CERTIFICATE-----
 MIIFSTCCAzGgAwIBAgIUOeBVAVMR2zmh4EtFCeJYmocSQ68wDQYJKoZIhvcNAQEL
@@ -150,7 +151,7 @@ z5YOPTWcM5j1FJxV0w==
 [[nodes]]
 name = "dsm-node-4"
 endpoint = "https://148.113.157.129:8080"
-register_incarnation = "ND9XN683KNZ44FAVMN0TWMHG8E5XPVHZX8G3J31B465X875CX300"
+register_incarnation = "NNFTW6W886JT8K27ZAAQ62W2NVPB3R6GQCKKEVY4FKAGSYCCPVB0"
 ca_cert = """
 -----BEGIN CERTIFICATE-----
 MIIFSTCCAzGgAwIBAgIUOeBVAVMR2zmh4EtFCeJYmocSQ68wDQYJKoZIhvcNAQEL
@@ -188,7 +189,7 @@ z5YOPTWcM5j1FJxV0w==
 [[nodes]]
 name = "dsm-node-5"
 endpoint = "https://167.114.146.6:8080"
-register_incarnation = "84EH2HRM9TKXSS7GSRTF8HNFBPVKMEYJRVY1D0G0JPRC4F93EDBG"
+register_incarnation = "39BT7HZAAQ777X6YYV5QP7DN8WMAVEECB2VN0D2X3ZDRK058PQ10"
 ca_cert = """
 -----BEGIN CERTIFICATE-----
 MIIFSTCCAzGgAwIBAgIUOeBVAVMR2zmh4EtFCeJYmocSQ68wDQYJKoZIhvcNAQEL
