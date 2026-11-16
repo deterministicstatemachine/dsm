@@ -63,7 +63,7 @@ import sys, zipfile
 names = zipfile.ZipFile(sys.argv[1]).namelist()
 if "dsm_app_client/generated/dsm_app_pb2.py" not in names:
     sys.exit("the wheel has no dsm_app_client/generated/dsm_app_pb2.py")
-# 0.1.0-beta.4 is 0.1.0b4 in Python's spelling.
+# 0.1.1-beta.4 is 0.1.1b4 in Python's spelling.
 want = sys.argv[2].replace("-beta.", "b").replace("-alpha.", "a").replace("-rc.", "rc")
 if f"dsm_app_client-{want}-py3-none-any.whl" not in sys.argv[1]:
     sys.exit(f"the wheel {sys.argv[1]} is not version {want}")

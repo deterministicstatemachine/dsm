@@ -31,7 +31,7 @@ set -eu
 main() {
 
 # This script installs the release it is part of.
-DSM_VERSION="0.1.0-beta.4"
+DSM_VERSION="0.1.1-beta.4"
 
 BASE="${DSM_RELEASE_URL:-https://github.com/deterministicstatemachine/dsm/releases/download/v$DSM_VERSION}"
 PREFIX="${DSM_PREFIX:-$HOME/.local}"
