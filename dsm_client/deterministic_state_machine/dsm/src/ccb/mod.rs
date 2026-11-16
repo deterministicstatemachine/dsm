@@ -557,6 +557,12 @@ pub mod schema {
         // and by the unload of what it received.
         (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 2),
         (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 2),
+        // Schema 3 named an account's opening by its frontier alone, so a
+        // first boundary was taken to start at counter 0. Schema 4 also names
+        // the counter it opened at, so an account reopened at a board's
+        // counter starts there (owner, 2026-11-15: "Change Core tonight").
+        (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 3),
+        (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 3),
         // Schema 1 of the offline settlement did not carry the transfer its
         // payment was, so it named its recipient by device id alone. Schema 2
         // carries it, re-hashed to the payload the anchor signed (SA-133).

@@ -730,16 +730,18 @@ fn own_boundary_ancestry(
     let since = match (funded, &first) {
         // An account's first boundary: the account as it opened, at the frontier the first of its
         // board's steps started from, or, with none, the one it stands at.
-        (None, Some(hop)) => BoundarySince::Opened {
-            frontier: hop.starts_at_frontier().ok_or_else(|| {
+        (None, Some(hop)) => {
+            let (counter, frontier) = hop.starts_at().ok_or_else(|| {
                 DsmError::invalid_operation(
                     "offline boundary: the account's first step is the unload of a payment it \
                      never received",
                 )
-            })?,
-        },
+            })?;
+            BoundarySince::Opened { frontier, counter }
+        }
         (None, None) => BoundarySince::Opened {
             frontier: boundary.account_move.account.frontier(),
+            counter: boundary.account_move.account.counter(),
         },
         (Some(_), Some(hop)) => BoundarySince::Previous {
             account_root: hop.starts_from(),

@@ -3159,6 +3159,7 @@ mod tests {
         continues_the_account(
             BoundarySince::Opened {
                 frontier: [0x06; 32],
+                counter: 0,
             },
             None,
         )
@@ -3182,7 +3183,8 @@ mod tests {
         assert!(matches!(
             continues_the_account(
                 BoundarySince::Opened {
-                    frontier: [0x06; 32]
+                    frontier: [0x06; 32],
+                    counter: 0
                 },
                 Some(&previous)
             ),

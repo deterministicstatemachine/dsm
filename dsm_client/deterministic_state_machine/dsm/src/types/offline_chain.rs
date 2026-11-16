@@ -525,15 +525,6 @@ impl AccountHop {
             Self::Settle(_) => None,
         }
     }
-
-    /// The frontier the step started from, for a step that moves it (a spend or a receive).
-    pub fn starts_at_frontier(&self) -> Option<[u8; 32]> {
-        match self {
-            Self::Spend(s) => Some(s.witness.pre_frontier),
-            Self::Receive(r) => Some(r.witness.pre_frontier),
-            Self::Settle(_) => None,
-        }
-    }
 }
 
 /// Verify `hops` as the steps of the offline account of `anchor`'s bundle, owned by
