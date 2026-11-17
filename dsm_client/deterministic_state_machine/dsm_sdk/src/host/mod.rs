@@ -98,10 +98,20 @@ pub fn host() -> Result<&'static dyn HostBridge, String> {
 /// refused it. For producers whose work stands whether or not the page heard
 /// of it (a registry write, an inbox pull).
 pub fn post_event(topic: &str, payload: &[u8]) {
-    if let Err(e) = host().and_then(|host| host.post_event(topic, payload)) {
-        log::warn!("[host] {topic} did not reach the page: {e}");
+    match host() {
+        // A process with no page (an app host) has none for good: said once,
+        // not at every sync.
+        Err(e) => NO_HOST_SAID.call_once(|| log::warn!("[host] events do not reach a page: {e}")),
+        Ok(host) => {
+            if let Err(e) = host.post_event(topic, payload) {
+                log::warn!("[host] {topic} did not reach the page: {e}");
+            }
+        }
     }
 }
+
+/// Logs the missing page, once per process.
+static NO_HOST_SAID: std::sync::Once = std::sync::Once::new();
 
 /// A local answer for the page, framed as it reads one: `0x03 ‖ Envelope`
 /// with no sender headers and no message id. Encoding an in-memory message

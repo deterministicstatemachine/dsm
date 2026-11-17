@@ -217,7 +217,7 @@ impl AppState {
                 ),
             });
         }
-        log::info!("AppState: state saved ({:?}, {} bytes)", path, buf.len());
+        log::debug!("AppState: state saved ({:?}, {} bytes)", path, buf.len());
         Ok(())
     }
 

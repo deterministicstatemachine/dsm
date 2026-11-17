@@ -139,7 +139,9 @@ impl NetworkConfigLoader {
             ));
         };
 
-        log::info!(
+        // Read at every call that needs the set, many per payment: debug, or a
+        // host that loops on it fills its disk.
+        log::debug!(
             "NetworkConfigLoader: reading env config TOML from {}",
             p.display()
         );
@@ -176,7 +178,7 @@ pub(crate) fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmErro
     // Validate and normalize nodes
     config.nodes = validate_and_normalize_nodes(config.nodes, config.allow_localhost)?;
 
-    log::info!(
+    log::debug!(
         "NetworkConfigLoader: parsed {} nodes from TOML",
         config.nodes.len()
     );
