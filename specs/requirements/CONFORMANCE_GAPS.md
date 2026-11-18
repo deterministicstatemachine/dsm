@@ -7760,6 +7760,21 @@ Found on the two production boards on 2026-11-13. Green paid yellow 1 ERA offlin
 
 **On the two boards, 2026-11-13.** The wallet built from `52430f6ed` (APK `3c86fb4a…`, its native library the `dsm-android-anchor` build of that commit, the firmware files unchanged) was installed in place on both phones; both wallets kept their data and read their anchors at counter 2. Green's wallet (8XK) held 1.00 ERA received offline from yellow, not unloaded, and had crossed no boundary since. It paid yellow 1.00 ERA offline: sealed on both phones at 04:31:32 ET, green's offline allocation 5.00 to 4.00, the received 1.00 still waiting. Yellow's wallet (9FF), having just received, paid green 1.00 ERA back at once: sealed 04:34:06 ET, yellow's allocation 5.00 to 4.00. On the build before, the same payment back was refused at yellow's door.
 
+### 6.163 Path search finds a pair's vault through either token's index (SoFi Amendment S16; owner, 2026-11-17)
+
+Found on the developer storage set, 2026-11-17, by Sennite's shop suite (`test/real-dsm/shop.test.ts`): a wallet asked to trade ERA for a game's token answered "no route among the vaults searched" although the game's account had just opened an ERA/token vault with reserves. The same suite traded through the same kind of vault on 2026-11-14. The wallet's log shows the cause: its route search took 65 candidate vaults, 64 of them from ERA's index and one from the token's, and walked none.
+
+**What the code did.** `sofi.findRoute` reads at most `LOCATOR_BUDGET` (64) candidates of an index (§11, item 12i). On a shared set ERA's index outgrows that bound first: every market of a new token is an ERA market. `find_route` took the vaults that pair the two tokens directly from the input token's index only, in `route_legs` (what it walks) and in its direct candidates (what it prices). Paying ERA for a token whose vault was appended past ERA's first 64, no direct route was found, though the token's own index named the vault.
+
+**What S16 says.** Path search "reads the token index of the input token and of the output token. It takes the vaults that pair them directly". A vault that pairs the two tokens is a direct vault whichever index named it.
+
+**What is built.** `route_legs` walks a vault of the output token's index that pairs the input token, once, as it walks one of the input token's; `find_route` takes the direct candidates from both indexes, each vault once.
+
+**Not built.** Item 12i's flood of `vault_token_locator(t)` itself: a token whose own index is filled past its bound before its honest vault is appended still hides that vault from both reads. That needs the design decision 12i names, and is untouched.
+
+**Tests.** `dsm_sdk::sdk::sofi_flow::tests::a_direct_vault_found_only_by_the_output_tokens_index_is_walked` (ERA's read stopped before the ERA/token vault; the token's index names it; it is walked, once). `a_route_search_walks_only_the_vaults_a_route_can_use` keeps its case of a chain missing its second leg and now expects the direct WILD/ERA vault ERA's index names, which the old code left out. Mutation control: the new walk of the output token's direct vaults removed, both tests red; restored byte for byte. `sofi_flow` tests: 8 passed, 0 failed. End to end on the developer storage set (nodes at `2d109bb58`, `dsm-app-host` at `2d109bb58` with this change applied, as the nodes do not run `main`'s wire): Sennite's shop suite 7 of 7, the ERA-for-token trade included; the same suite with `dsm-app-host` at `2d109bb58` unchanged fails at that trade.
+
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
