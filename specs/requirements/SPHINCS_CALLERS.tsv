@@ -90,10 +90,10 @@ crates/dsm-board-stamp/src/main.rs	40	use dsm_sphincs::SphincsVariant;
 crates/dsm-board-stamp/src/main.rs	44	const SCHEME: SphincsVariant = SphincsVariant::SPX128f;
 crates/dsm-board-stamp/src/main.rs	71	matches!(dsm_sphincs::verify(SCHEME, pk, message, sig), Ok(valid) if valid)
 crates/dsm-board-stamp/src/main.rs	218	let pair = dsm_sphincs::generate_keypair_from_seed(SCHEME, &seed)
-crates/dsm-board-stamp/src/main.rs	309	let signature = dsm_sphincs::sign(SCHEME, &secret, &message)
-crates/dsm-board-stamp/src/main.rs	512	) -> Result<(Vec<u8>, dsm_sphincs::SphincsKeyPair), String> {
-crates/dsm-board-stamp/src/main.rs	513	let pair = dsm_sphincs::generate_keypair_from_seed(SCHEME, &[seed; SEED_LEN])
-crates/dsm-board-stamp/src/main.rs	582	let stamp = dsm_sphincs::sign(SCHEME, &secret, &board_stamp_message(board.identity()))
+crates/dsm-board-stamp/src/main.rs	311	let signature = dsm_sphincs::sign(SCHEME, &secret, &message)
+crates/dsm-board-stamp/src/main.rs	514	) -> Result<(Vec<u8>, dsm_sphincs::SphincsKeyPair), String> {
+crates/dsm-board-stamp/src/main.rs	515	let pair = dsm_sphincs::generate_keypair_from_seed(SCHEME, &[seed; SEED_LEN])
+crates/dsm-board-stamp/src/main.rs	587	let stamp = dsm_sphincs::sign(SCHEME, &secret, &board_stamp_message(board.identity()))
 crates/dsm-receipt-service/src/lib.rs	126	match dsm::crypto::sphincs::sphincs_verify(
 crates/dsm-receipt-service/tests/no_address_in_logs.rs	119	let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair()
 crates/dsm-receipt-service/tests/no_address_in_logs.rs	133	request.signature = dsm::crypto::sphincs::sphincs_sign(&sk, &signing_digest(&request))

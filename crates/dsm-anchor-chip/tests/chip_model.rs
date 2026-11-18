@@ -61,15 +61,15 @@ pub fn stamp_board(anchor: &mut Served) -> Vec<u8> {
 }
 
 /// A board set up as the owner sets one up before it ships (DSM Amendment A38): stamped, then
-/// installed for good. Its status reports the stamp it kept.
+/// installed for good. Its identity reports the stamp it kept, as a phone reads it.
 fn stamped_and_provisioned(model: &ModelServer) -> Served {
     let mut anchor = booted(model);
     let stamp = stamp_board(&mut anchor);
     let answer = rehearse(&mut anchor, &provision_request());
     assert!(answer.ok, "provisioning refused: error {}", answer.error);
-    let status = support::served(anchor.bare(pb::Op::Status), "status");
+    let identity = support::served(anchor.bare(pb::Op::BoardIdentity), "the board's identity");
     assert_eq!(
-        status.board_stamp, stamp,
+        identity.board_stamp, stamp,
         "the installed board reports the stamp it kept"
     );
     assert_eq!(stamp.len(), anchor_core::stamp::BOARD_STAMP_BYTES);

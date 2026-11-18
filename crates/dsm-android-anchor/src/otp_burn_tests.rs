@@ -184,7 +184,10 @@ fn a_board_is_burned_from_the_phone_in_the_runbooks_order_and_seals_its_own_secr
         assert!(
             matches!(model.secret_at_boot, Some(Ok(_secret))),
             "the board sealed its own secret: {:?}",
-            model.secret_at_boot
+            model
+                .secret_at_boot
+                .as_ref()
+                .map(|read| read.as_ref().err())
         );
         assert_eq!(model.raw[usize::from(lock1(SECRET_PAGE))], SECRET_LOCK);
     }

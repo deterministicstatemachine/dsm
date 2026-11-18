@@ -223,7 +223,9 @@ fn genkey(key_path: &Path, public_path: &Path) -> Result<(), String> {
         .try_into()
         .map_err(|e| format!("the public key is {} bytes: {e}", pair.public_key.len()))?;
     if pair.secret_key.len() != SECRET_KEY_LEN {
-        return Err(format!("the secret key is {} bytes", pair.secret_key.len()));
+        return Err(format!(
+            "the secret key is not the {SECRET_KEY_LEN} bytes an SPX128f key is"
+        ));
     }
 
     let mut salt = [0u8; SALT_LEN];
@@ -513,8 +515,11 @@ mod tests {
         let pair = dsm_sphincs::generate_keypair_from_seed(SCHEME, &[seed; SEED_LEN])
             .map_err(|e| format!("{e:?}"))?;
         let (memory, passes, lanes) = (64u32, 1u32, 1u32);
-        let salt = [seed; SALT_LEN];
-        let nonce = [seed; NONCE_LEN];
+        // Drawn as `genkey` draws them.
+        let mut salt = [0u8; SALT_LEN];
+        let mut nonce = [0u8; NONCE_LEN];
+        getrandom::fill(&mut salt).map_err(|e| format!("the system's randomness: {e}"))?;
+        getrandom::fill(&mut nonce).map_err(|e| format!("the system's randomness: {e}"))?;
         let mut header = Vec::new();
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&memory.to_le_bytes());

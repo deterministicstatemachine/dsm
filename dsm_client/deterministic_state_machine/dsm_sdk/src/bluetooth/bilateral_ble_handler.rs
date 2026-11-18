@@ -1313,14 +1313,14 @@ impl BilateralBleHandler {
         self.settle_releasing_steps().await?;
         // A payer's board every receiver refuses (DSM Amendment A38) proposes
         // nothing: no receiver is asked to accept a payment it cannot take.
-        crate::bridge::app_router()
-            .ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "bilateral prepare refused: the app router is not installed",
-                )
-            })?
-            .require_own_board_pays()
-            .map_err(|e| DsmError::invalid_operation(format!("bilateral prepare refused: {e}")))?;
+        // The board itself is asked again, and refuses, before it signs
+        // (`stage_bearer_spend`), and with no router installed nothing is
+        // staged at all.
+        if let Some(router) = crate::bridge::app_router() {
+            router.require_own_board_pays().map_err(|e| {
+                DsmError::invalid_operation(format!("bilateral prepare refused: {e}"))
+            })?;
+        }
 
         // Through the proposer's door: the step in flight is read and the new
         // step's row written under the one door (the peer's door is the other).

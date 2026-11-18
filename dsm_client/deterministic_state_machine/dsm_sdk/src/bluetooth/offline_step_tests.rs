@@ -5303,18 +5303,31 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
     use dsm::types::receipt_types::ReceiptLeaf;
     use prost::Message;
 
-    let (_pair, a, b, _appliance, payment) = bearer_pair().await;
+    let (_pair, a, b, appliance, payment) = bearer_pair().await;
     // A's first payment: B pins A's anchor from its disclosure.
     offline_step(&a, &b, payment.clone()).await;
     let Operation::Transfer {
         amount,
         policy_commit,
+        authority_policy: Some(authority_policy),
         ..
     } = &payment.operation
     else {
-        panic!("a bearer payment is a transfer");
+        panic!("a bearer payment is a transfer that names its authority policy");
     };
     let (amount, asset) = (amount.value(), *policy_commit);
+    // A's anchor as A's confirm discloses it on every payment, its stamp with it (DSM Amendment A38).
+    let pin = appliance.payer.pin();
+    let disclosure = crate::generated::AnchorDisclosure {
+        bundle: pin.bundle.to_vec(),
+        anchor_id: pin.anchor_id.to_vec(),
+        enrolled_counter: pin.enrolled_counter,
+        partition_pk: pin.partition_pk.clone(),
+        policy_hash: authority_policy.policy_id.to_vec(),
+        pk_chip: pin.pk_chip.clone(),
+        birth_commitment: pin.birth_commitment.to_vec(),
+        board_stamp: pin.board_stamp.clone(),
+    };
 
     a.device.enter();
     let (prepare, commitment) = a.propose(&b, payment.clone()).await.expect("A proposes");
@@ -5475,7 +5488,7 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
             }),
             pre_entropy: entropy.to_vec(),
             offline_release: release,
-            anchor_disclosure: None,
+            anchor_disclosure: Some(disclosure),
             offline_account_chain: Some(crate::generated::OfflineAccountChain { hops: chain }),
         },
     )
