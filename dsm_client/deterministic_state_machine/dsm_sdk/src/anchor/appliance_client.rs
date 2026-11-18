@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! [`AnchorAppliance`] — the producer-side appliance interface.
+//! [`AnchorAppliance`] — the appliance interface, for the payer's side and the receiver's.
 //!
 //! Software Authority, Hardware Identity (v2): the appliance is NOT the transfer authority; it
 //! contributes exactly two identity witnesses over the DSM root-advance message `M`:
@@ -136,8 +136,8 @@ impl RehearsalOwner {
     }
 }
 
-/// Transport-agnostic producer interface to the anchor appliance: what an RP2350 USB-CDC/BLE
-/// client implements. All ops fail closed into [`DsmError`].
+/// Transport-agnostic interface to the anchor appliance, for the payer's side and the receiver's:
+/// what the RP2350 USB-CDC client implements. All ops fail closed into [`DsmError`].
 pub trait AnchorAppliance {
     /// `OP_STATUS`: the active state (no mutation).
     fn status(&mut self) -> Result<ApplianceStatus, DsmError>;

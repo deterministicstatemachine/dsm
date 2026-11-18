@@ -5,7 +5,7 @@
 
 This guide covers building the hardware anchor that DSM uses for offline bearer transfer. The appliance has two parts: an RP2350 microcontroller (on a Raspberry Pi Pico 2 W) and a TROPIC01 secure element (on a MIKROE Secure Tropic Click). They are joined by six wires and fit together in a 3D-printed case about the size of a key fob. The appliance plugs into a phone over USB-OTG.
 
-The appliance proves **device identity only**. Transfer uniqueness is a software property of the DSM state machine, and the firmware is not the transfer authority. See `crates/dsm-anchor-core` (the appliance and the anchor's states) for the authority model, and see [`docs/bench-proofs/`](../../bench-proofs/) for the silicon proof logs.
+The appliance proves **device identity only**. Transfer uniqueness is a software property of the DSM state machine, and the firmware is not the transfer authority. See `crates/dsm-anchor-core` (the appliance and the anchor's states) for the authority model, and see [`docs/bench-proofs/`](../../../docs/bench-proofs/) for the silicon proof logs.
 
 | Sheet | Contents |
 |---|---|
@@ -28,8 +28,8 @@ The appliance proves **device identity only**. Transfer uniqueness is a software
 | 3 | 6 | Wire, 28–30 AWG stranded silicone | Cut 60–80 mm per lead. Six colours make checking easier. |
 | 4 | 4 | Screw, M2 × 5 mm, self-tapping | Fixes the Pico to the standoffs (Ø1.7 pilots). |
 | 5 | 2 | Screw, M2 × 6 mm, countersunk self-tapping | Fixes the lid to the base. |
-| 6 | 1 | `enclosure/base.stl` | PETG preferred, PLA works. |
-| 7 | 1 | `enclosure/lid.stl` | PETG preferred, PLA works. |
+| 6 | 1 | `3d-print-enclosure/base.stl` | PETG preferred, PLA works. |
+| 7 | 1 | `3d-print-enclosure/lid.stl` | PETG preferred, PLA works. |
 | 8 | 1 | USB cable, micro-USB to phone (OTG) or computer | |
 
 **Tools:** a fine-tip soldering iron, flux, flush cutters, a small Phillips driver, a multimeter, and a 3D printer.
@@ -61,7 +61,7 @@ Leave GPO, every NC pad, and both rows of Click Snap pads unconnected. The MIKRO
 
 ## 3. Print the enclosure
 
-Print `enclosure/base.stl` and `enclosure/lid.stl` with 0.2 mm layers, 3 perimeters, 25 % infill, **no supports** and no brim. Both parts are already oriented flat face down. The base takes about 2 h and the lid about 1 h, using roughly 35 g of filament in total. See [`enclosure/PRINT-NOTES.txt`](enclosure/PRINT-NOTES.txt).
+Print `3d-print-enclosure/base.stl` and `3d-print-enclosure/lid.stl` with 0.2 mm layers, 3 perimeters, 25 % infill, **no supports** and no brim. Both parts are already oriented flat face down. The base takes about 2 h and the lid about 1 h, using roughly 35 g of filament in total. See [`3d-print-enclosure/PRINT-NOTES.txt`](3d-print-enclosure/PRINT-NOTES.txt).
 
 Key dimensions, measured from the STLs (Sheet 2 has the full drawing):
 
@@ -95,7 +95,7 @@ Inside the case the Click lies **under** the Pico. Sheet 1 draws the two boards 
 The firmware is two TrustZone images: the Secure monitor ([`crates/dsm-anchor-secure-monitor`](../../../crates/dsm-anchor-secure-monitor)), which holds the TROPIC01 session, the anchor and its R-memory record, and the Non-secure USB transport ([`crates/dsm-anchor-nonsecure-app`](../../../crates/dsm-anchor-nonsecure-app)), which the monitor's build embeds. Both are excluded from the host workspace (they build for thumbv8m only). In short:
 
 ```sh
-# The trial image: no OTP burned, no pairing key or access rule written, and it cannot make an install.
+# The trial image: no OTP burned, no pairing key or access rule written; its install is a trial, cleared at the next boot.
 cd crates/dsm-anchor-secure-monitor
 cargo build --release --features bench_self_enroll   # thumbv8m.main-none-eabihf; embeds the Non-secure image
 
@@ -112,7 +112,7 @@ cd ../dsm-anchor-bench && cargo build --release
 
 A production image does nothing to its chip until the board's sealed secret is in OTP (the secure-boot runbook below), and says so over USB. A started appliance stays unprovisioned, and connecting it to a phone changes nothing: the DSM app offers its try-run, shows what an install makes permanent, and installs only when told to.
 
-When it's working, the appliance enumerates over USB-CDC as **"DSM Anchor"** (VID `0x1209`, PID `0xD5A1`). The DSM Android app's USB filter (`dsm_client/android/app/src/main/res/xml/pico_device_filter.xml`) matches that ID when the appliance is plugged into a phone over USB-OTG.
+When it's working, the appliance enumerates over USB-CDC as **"DSM Anchor"** (VID `0x1209`, PID `0xD5A1`). The DSM Android app finds it by that ID (`dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/LocalPicoUsb.kt`), and its debug build's USB filter (`dsm_client/android/app/src/debug/res/xml/pico_device_filter.xml`) matches it when the appliance is plugged into a phone over USB-OTG.
 
 > [!CAUTION]
 > **Assembly, the self-test and the try-run change nothing permanent. The two steps below do,** and neither is part of building the appliance. Read each one in full, and go through the try-run on this board first.
@@ -137,12 +137,12 @@ When it's working, the appliance enumerates over USB-CDC as **"DSM Anchor"** (VI
 ## Files
 
 ```
-docs/hardware/offline-anchor/
+crates/hardware/offline-anchor/
 ├── README.md               this guide
 ├── sheet-1-wiring.svg      blueprint sheet 1
 ├── sheet-2-enclosure.svg   blueprint sheet 2
 ├── blueprint.pdf           both sheets, printable
-├── enclosure/
+├── 3d-print-enclosure/
 │   ├── base.stl            case body (Rev E)
 │   ├── lid.stl             lid (Rev E)
 │   └── PRINT-NOTES.txt     slicer settings

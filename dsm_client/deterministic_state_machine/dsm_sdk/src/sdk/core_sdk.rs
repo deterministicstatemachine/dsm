@@ -2218,12 +2218,6 @@ impl CoreSDK {
             .offline_allocation(&anchor_bundle_b, &asset)
     }
 
-    /// The offline allocation of `asset` under the bundle of the appliance
-    /// attached in this process, or `None` while none has been attached,
-    /// before genesis, or while its account holds none of `asset`. The account
-    /// is keyed by the appliance's bundle, which only the appliance states, so
-    /// a device that has not attached one cannot say what it holds offline:
-    /// that is unknown, not zero.
     /// The pin of the anchor attached in this process, checked to be
     /// provisioned for this device; `None` while none is attached.
     pub(crate) fn attached_anchor_pin(&self) -> Option<crate::anchor::AnchorPin> {
@@ -2233,6 +2227,13 @@ impl CoreSDK {
             .map(|attached| attached.pin.clone())
     }
 
+    /// The offline allocation of `asset` under the bundle of the appliance
+    /// attached in this process: `None` while none has been attached, before
+    /// genesis, or while no account is open under its bundle, and `Some(0)`
+    /// when the open account holds none of `asset`. The account is keyed by
+    /// the appliance's bundle, which only the appliance states, so a device
+    /// that has not attached one cannot say what it holds offline: that is
+    /// unknown, not zero.
     pub fn offline_allocation_of(&self, asset: &[u8; 32]) -> Option<u64> {
         let bundle = self
             .anchor_appliance
@@ -2355,7 +2356,7 @@ pub struct StagedBearerTransition {
     pub pin: crate::anchor::AnchorPin,
 }
 
-/// Read-only snapshot of the sender's anchor appliance for the `anchor.status` diagnostics route
+/// Read-only snapshot of this device's anchor appliance for the `anchor.status` diagnostics route
 /// (signal (c)). Purely observational: NO staging, NO counter move, NO device-state mutation.
 /// A disconnected snapshot (no appliance attachable) reports `connected = false` with zeroed
 /// identity — a diagnostics read must never fail the route.
@@ -2657,7 +2658,7 @@ impl CoreSDK {
     /// Read-only anchor appliance snapshot for the `anchor.status` diagnostics route (signal (c)).
     /// Binds nothing: an anchor never installed is reported as awaiting its install.
     /// Attaches (and caches) the appliance via the installed factory if not already attached, then
-    /// reads `pin()`/`status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
+    /// reads its cached pin and `status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
     /// this performs NO offline-account check and NO mutation. When no appliance can
     /// attach (no device / fail-closed) it returns a disconnected snapshot rather than an error, so
     /// the diagnostics panel can render "no anchor connected" instead of failing.
@@ -3125,7 +3126,7 @@ pub(crate) const OFFLINE_RECEIVE_NO_BOARD_MSG: &str =
 pub(crate) const OFFLINE_BEARER_NO_APPLIANCE_MSG: &str =
     "offline-bearer requires the anchor appliance; connect the anchor device (Pico) and retry (fail closed)";
 
-/// The sender-side appliance when no hardware factory is installed: none.
+/// The appliance when no hardware factory is installed: none, to pay or to receive.
 /// Offline-bearer requires the physical anchor device ("offline = chips").
 fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError>
 {

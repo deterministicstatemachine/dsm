@@ -4,12 +4,12 @@
 //! Programmed by the Secure monitor at reset BEFORE any Non-secure code is launched. Establishes the
 //! TrustZone-M address attribution (SAU) so that only the NSC veneer region is a legal NS→S entry and
 //! the Non-secure app is confined to NS SRAM; Secure SRAM (the whole TCB, host key, Secure state),
-//! the boot block, OTP, and — once wired — TROPIC01 SPI stay Secure and unreachable from NS.
+//! the boot block, OTP, and the TROPIC01 SPI bus (SPI0) stay Secure and unreachable from NS.
 //!
-//! Increment status (step 5): SAU attribution + core-1 containment land here first and are silicon-
-//! checked (the Secure monitor must keep running after `sau.enable()`). ACCESSCTRL peripheral
-//! ownership, the DMA restrictions, NVIC target state, and the config lock are added as the TROPIC/
-//! USB peripherals are wired and the Non-secure launch lands — each behind its own matrix row.
+//! SAU attribution and core-1 containment are silicon-checked (the Secure monitor keeps running
+//! after `sau.enable()`). ACCESSCTRL grants Non-secure the clock, reset, watchdog and USB blocks, is
+//! locked against core 1 and the debugger before the launch, and takes all but USB back at the first
+//! crossing. The NVIC target state is not programmed.
 
 use cortex_m::peripheral::sau::{SauError, SauRegion, SauRegionAttribute};
 use cortex_m::peripheral::SAU;

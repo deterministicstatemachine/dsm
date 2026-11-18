@@ -21,7 +21,7 @@ use pb::AnchorBoardStepKind as Kind;
 use pb::AnchorBoardStepState as State;
 
 /// What the setup needs of the phone: the board's USB link, the release and the images the app
-/// carries, the phone's own random source, and the board's link once it runs as the DSM Anchor.
+/// carries, and the board's link once it runs as the DSM Anchor.
 pub trait BoardPort: Send + Sync {
     type Link: BootselLink;
     /// The board in BOOTSEL: its link, and its chip id as its bootloader names itself (its USB serial
@@ -873,7 +873,7 @@ impl<P: BoardPort> dsm_sdk::bridge::AnchorBoardSetup for BoardSetup<P> {
 }
 
 /// The Android port: the board's link and the release through up-calls to Kotlin (`Unified`), which
-/// only moves bytes, and the phone's random source.
+/// only moves bytes.
 #[cfg(target_os = "android")]
 pub mod jni_port {
     use super::BoardPort;

@@ -39,9 +39,10 @@ pub fn install_anchor_transport() {
     log::info!("[anchor-install] board setup installed (a board's burns from the phone)");
 }
 
-/// JNI trigger: install the sender anchor transport. Returns `true` on success. Absent from the
-/// default .so (gated `on_device_installs`); Kotlin catches `UnsatisfiedLinkError` and treats the
-/// capability as unavailable (fail-closed).
+/// JNI trigger: install the anchor appliance factory and the board setup. Neither install can fail,
+/// so the call answers yes once both are in place. Absent from the default .so (gated
+/// `on_device_installs`); Kotlin catches `UnsatisfiedLinkError` and treats the capability as
+/// unavailable (fail-closed).
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_installAnchorTransport(

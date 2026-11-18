@@ -2,7 +2,7 @@
 //! genesis offline frontier `h_0`.
 //!
 //! `B` fuses the three identity factors — the online identity commitment `H(pk_on)`, the
-//! chip static identity `stpub`, the resident chip key `pk_chip` (`σ^chip`), and the
+//! anchor id `anchor_id`, the resident chip key `pk_chip` (`σ^chip`), and the
 //! partition key `pk_host` (`σ^host`) — with the enrolled counter `H0`, the device id, the
 //! policy hash, and a public birth commitment `S_birth`. The birth fuse preimage `s_birth` is
 //! never stored and is wiped once `S_birth` is computed, but each boot derives it again from the
@@ -34,7 +34,7 @@ pub struct BirthInputs<'a> {
     pub device_id: &'a [u8; 32],
     pub policy_hash: &'a [u8; 32],
     pub partition_device_id: &'a [u8; 32],
-    /// TROPIC01 stable chip identity `stpub` (the pinned anchor id).
+    /// The pinned anchor id: on the board, derived from the chip's `stpub` and its chip id.
     pub anchor_id: &'a [u8; 32],
     /// Resident non-exportable Ed25519 chip public key `pk_chip` (the `σ^chip` key).
     pub chip_pk: &'a [u8],
@@ -69,7 +69,7 @@ pub struct Birth {
     pub policy_hash: [u8; 32],
 }
 
-/// `B = H("DSM/anchor-bundle/v2" ‖ H(pk_on) ‖ stpub ‖ commit(pk_chip) ‖ commit(pk_host) ‖
+/// `B = H("DSM/anchor-bundle/v2" ‖ H(pk_on) ‖ anchor_id ‖ commit(pk_chip) ‖ commit(pk_host) ‖
 /// le32(H0) ‖ device_id ‖ policy_hash ‖ S_birth)` (§7). Variable-length keys are bound via
 /// fixed-width commitments so the preimage is unambiguous.
 #[allow(clippy::too_many_arguments)]
@@ -194,7 +194,7 @@ pub enum Install {
 /// never supplies these.
 #[derive(Clone)]
 pub struct ChipBirth {
-    /// TROPIC01 stable chip identity `stpub` (the pinned anchor id).
+    /// The pinned anchor id: on the board, derived from the chip's `stpub` and its chip id.
     pub anchor_id: [u8; 32],
     pub partition_device_id: [u8; 32],
     /// Resident chip public key `pk_chip` (`σ^chip`).

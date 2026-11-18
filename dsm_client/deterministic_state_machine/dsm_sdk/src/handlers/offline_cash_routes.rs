@@ -245,8 +245,7 @@ mod tests {
     use dsm::types::error::DsmError;
 
     /// A router on a device created as wallet creation creates it. No anchor
-    /// appliance is attached — no transport to one exists — and that absence
-    /// is the condition under test.
+    /// appliance is attached, and that absence is the condition under test.
     fn router_on_a_device() -> AppRouterImpl {
         crate::economic_fixtures::local_device(0x0A);
         AppRouterImpl::new(SdkConfig {

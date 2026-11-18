@@ -16,7 +16,7 @@ pub const PARTITION_KEY_SEED_V1: &str = "DSM/partition-key-seed/v1";
 pub const ANCHOR_COMMIT_V2: &str = "DSM/anchor/commit/v2";
 /// Online-identity commitment `H(tag ‖ pk_on)` bound into `B` — the dual-identity join point.
 pub const ONLINE_ID_COMMIT_V2: &str = "DSM/identity/online-commit/v2";
-/// Immutable anchor bundle `B` (§7): binds `H(pk_on)`, `stpub`, `commit(pk_chip)`,
+/// Immutable anchor bundle `B` (§7): binds `H(pk_on)`, `anchor_id`, `commit(pk_chip)`,
 /// `commit(pk_host)`, `H0`, `device_id`, `policy_hash`, `S_birth`.
 pub const ANCHOR_BUNDLE_V2: &str = "DSM/anchor-bundle/v2";
 /// Genesis offline frontier `h_0 = H(tag ‖ B ‖ genesis_root)`; seeds the forward-only chain.

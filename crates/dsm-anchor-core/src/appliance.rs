@@ -315,7 +315,8 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
 
     /// §12.2 Prepare: form the root-advance message `M_{i+1}` binding the DSM-supplied device
     /// roots `R_i`/`R_{i+1}`, obtain `σ^chip` (on-die) and `σ^host` (partition) over it, and
-    /// store a durable Prepared record. No counter move, no export. Refused unless Ready and
+    /// hold a Prepared record ([`crate::durable::DurableAppliance::prepare`] writes it). No counter
+    /// move, no export. Refused unless Ready and
     /// offline-ready (`active.u = H₀ − H`).
     ///
     /// `sender_device_root_before`/`_after` are the sender's device SMT roots, computed by the

@@ -151,7 +151,8 @@ wallet goes through a try-run again before it provisions.
 Freeze the firmware before the first burn.
 
 - **Any byte of the Non-secure app.** Its digest is in OTP. A later change fails the digest check
-  on that board for good: it refuses Provision, Prepare, Commit, Emit, Finalize and Recover. A monitor
+  on that board for good: it refuses Provision, TryRun, Prepare, Commit, Emit, Finalize, Recover,
+  Challenge, AuthorizationNonce, CheckPayment, BoardIdentity and Stamp. A monitor
   update must carry the same bytes: keep `build/ns_app.bin` with the signing key, and build the update
   with `DSM_ANCHOR_NS_BIN` naming it. `sign.sh` refuses an image whose Non-secure app differs from it.
 - **The rollback version's rows,** page 44, rows 0 to 2. An image is signed naming them.

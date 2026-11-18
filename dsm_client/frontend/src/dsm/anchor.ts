@@ -111,7 +111,7 @@ function statusOf(resp: pb.AnchorStatusResponse): AnchorStatus {
 }
 
 /**
- * Query the sender's anchor appliance status (`anchor.status` route). Read-only diagnostics: the
+ * Query this device's anchor appliance status (`anchor.status` route). Read-only diagnostics: the
  * Rust handler never mutates device or appliance state. A disconnected appliance returns a
  * `connected=false` snapshot rather than throwing — that is an expected, renderable state.
  */

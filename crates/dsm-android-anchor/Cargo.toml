@@ -4,7 +4,7 @@ name = "dsm-android-anchor"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "On-device glue for the DSM Software-Authority / Hardware-Identity anchor: installs the sender USB anchor appliance (UsbAnchorAppliance over the opaque Kotlin picoUsbTransceive) into the dsm_sdk bridge seam. The appliance provisions itself over OP_PROVISION; no raw SPI reaches the chip from the phone. Depends on dsm_sdk in ONE direction (no dependency cycle); built in the Android cargo-ndk pipeline."
+description = "On-device glue for the DSM Software-Authority / Hardware-Identity anchor: installs the USB anchor appliance factory (UsbAnchorAppliance over the opaque Kotlin picoUsbTransceive), for both paying and receiving offline, and the board setup from the phone (PICOBOOT) into the dsm_sdk bridge seams. The appliance provisions itself over OP_PROVISION; no raw SPI reaches the chip from the phone. Depends on dsm_sdk in ONE direction (no dependency cycle); built in the Android cargo-ndk pipeline."
 
 # Its own workspace root. The repository workspace excludes this crate, and cargo keeps
 # climbing past an excluding root: from a checkout nested under another checkout (a git
@@ -18,8 +18,8 @@ description = "On-device glue for the DSM Software-Authority / Hardware-Identity
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]
-# OFF by default. Compiles the ACCEPT-PRODUCING sender appliance-factory install (install.rs) and
-# its JNI trigger. A default build cannot produce offline-bearer releases.
+# OFF by default. Compiles the appliance-factory install for paying and receiving offline and the
+# board setup (install.rs), and its JNI trigger. A default build can neither pay nor receive offline.
 on_device_installs = []
 
 [dependencies]

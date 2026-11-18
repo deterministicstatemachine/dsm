@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! On-device glue for the DSM Software-Authority / Hardware-Identity anchor: the SENDER phone's
-//! USB link to its own RP2350/TROPIC01 appliance, installed into the `dsm_sdk` bridge seam.
+//! On-device glue for the DSM Software-Authority / Hardware-Identity anchor: the phone's USB link
+//! to its own RP2350/TROPIC01 board, for paying and for receiving offline, and the board's setup
+//! from the phone, installed into the `dsm_sdk` bridge seams.
 //!
 //! v2 removed every receiver-side hardware path — a receiver accepts a release from three
 //! signatures + the in-release SMT proofs and needs NO chip, NO relay, NO verifier slot. The one

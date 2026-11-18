@@ -4,8 +4,8 @@
 //! message `M_{i+1}` (§10), and the on-wire release artifacts.
 //!
 //! Transfer uniqueness is a software property of the DSM device SMT: one parent root
-//! `R_i` admits exactly one accepted successor per receiver (forward-only frontier);
-//! cross-receiver forks are Tripwire-exposed on reconciliation. The release binds
+//! `R_i` admits exactly one accepted successor per receiver (forward-only frontier). Across two
+//! receivers nothing detects a fork; an intact board cannot make one ([`crate`]). The release binds
 //! `M_{i+1}` under three independent signatures — `σ^DSM` (seed-derived DSM device
 //! signature over `Δ°`), `σ^chip` (a resident non-exportable Ed25519 key in TROPIC01),
 //! `σ^host` (RP2350 partition). No hardware counter read is on the acceptance path; the
@@ -111,7 +111,7 @@ pub fn anchor_root_advance(prev_frontier: &[u8; 32], d: &[u8; 32]) -> [u8; 32] {
 
 /// Root-advance message `M_{i+1}` (§10). Binds both device SMT roots `R_i`/`R_{i+1}`, both
 /// frontier roots `h_i`/`h_{i+1}`, the counter pair, the digest, the recipient, and the
-/// challenge. All three release signatures cover this exact message.
+/// challenge. `σ^chip` and `σ^host` cover this exact message.
 #[allow(clippy::too_many_arguments)]
 pub fn root_advance_message(
     bundle: &[u8; 32],

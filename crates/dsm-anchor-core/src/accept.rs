@@ -20,8 +20,10 @@
 //!
 //! Uniqueness is a software property of the DSM device SMT: one parent root `R_i` admits
 //! at most one accepted successor per receiver (the adopted frontier is forward-only, so a
-//! later release claiming an already-consumed frontier is rejected on sight). Cross-receiver
-//! forks are position collisions exposed by Tripwire on reconciliation, not prevented here.
+//! later release claiming an already-consumed frontier is rejected on sight). A receiver sees only
+//! the releases handed to it, so a fork across two receivers passes here at each of them; nothing
+//! detects it later either. Only a broken board can make one ([`crate`] says why), and the payer's
+//! next boundary carries only one of its two payments.
 
 use crate::root_advance::{
     anchor_root_advance, root_advance_message, transition_digest, Certificate, OfflineRelease,

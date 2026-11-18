@@ -6,7 +6,7 @@
 //!   setup for production stands. Writes nothing.
 //! - `anchor.tryRun` → an install gone through on the connected anchor with its permanent parts
 //!   substituted, what it found, and what installing would make permanent. Binds nothing.
-//! - `anchor.status` → read-only [`AnchorStatusResponse`] diagnostics snapshot of the sender's
+//! - `anchor.status` → read-only [`AnchorStatusResponse`] diagnostics snapshot of this device's
 //!   anchor appliance (RP2350/TROPIC01). Purely observational: no staging, no counter move, no
 //!   device-state mutation. When no appliance can attach it reports `anchor_connected=false`
 //!   rather than failing the route.

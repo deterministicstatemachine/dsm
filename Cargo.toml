@@ -18,12 +18,12 @@ members = [
 # RP2350 firmware is a thumbv8m-only binary; built separately from inside the
 # crate dir (its .cargo/config.toml sets the target). Excluded so host
 # `cargo build`/`test` over the workspace doesn't try to build it for the host.
-# dsm-android-anchor is the on-device glue that installs the sender's USB anchor appliance into
-# the SDK bridge; it is excluded (built only in the Android cargo-ndk
+# dsm-android-anchor is the on-device glue that installs the board's USB appliance (for paying and
+# receiving offline) and the board setup into the SDK bridge; it is excluded (built only in the Android cargo-ndk
 # pipeline). The default workspace stays tropic01-free (verify: `cargo tree --workspace -i tropic01`).
 exclude = [
     "crates/dsm-android-anchor",
-    # Host used-chip bench harness (native serialport dep); built directly, not in CI.
+    # Host bench tool (native serialport dep); built, linted and tested in its own CI step.
     "crates/dsm-anchor-bench",
     # The anchor's chip code; its tests need Tropic Square's model (ci/tropic01_model.sh).
     "crates/dsm-anchor-chip",

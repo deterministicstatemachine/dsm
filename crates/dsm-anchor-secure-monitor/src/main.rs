@@ -50,11 +50,11 @@ static mut SECURE_HEAP_MEM: [core::mem::MaybeUninit<u8>; SECURE_HEAP_SIZE] =
 // RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
 // `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
 // LOAD_MAP whose entries need link-time LMA/VMA/size. The linker block carries IMAGE_TYPE +
-// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20064000, zero-fill
-// Secure BSS) + explicit SRAM VECTOR_TABLE + ENTRY_POINT items, so the immutable bootrom is
-// instructed to copy the flash payload into SRAM and enter there. (Cryptographic verification of
-// that payload happens only once secure boot is enabled + validated; the LOAD_MAP itself just
-// describes the copy.)
+// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20064000, Non-secure
+// app → 0x20065000, zero-fill Secure BSS) + explicit SRAM VECTOR_TABLE + ENTRY_POINT items, so the
+// immutable bootrom is instructed to copy the flash payload into SRAM and enter there.
+// (Cryptographic verification of that payload happens only once secure boot is enabled +
+// validated; the LOAD_MAP itself just describes the copy.)
 
 // ── Secure Gateway ABI (mirror of veneer/dsm_sg_abi.h) ────────────────────────────────────────
 const SG_SLOT_INDEX: u32 = 0;
@@ -254,7 +254,7 @@ static HANDLER: AtomicU32 = AtomicU32::new(HANDLER_IDLE);
 const HANDLER_IDLE: u32 = 0;
 const HANDLER_SERVING: u32 = 1;
 
-/// Called by the `-mcmse` veneer's single NSC entry `dsm_secure_dispatch`. Secure-only.
+/// Called by the assembly veneer's single NSC entry `dsm_secure_dispatch`. Secure-only.
 ///
 /// One crossing is served at a time, and that is Secure's own doing, not a property of how the
 /// Non-secure app is written. The handler works on one request, one response and one sequence
@@ -458,7 +458,7 @@ extern "C" {
 /// means the bootrom copied the image and entered the SRAM monitor; word 1 is the appliance
 /// bring-up result (`HEARTBEAT_APPLIANCE_INSTALLED`, or the `anchor_glue::InitStage` at which
 /// `anchor_glue::init` refused; 0 = not reached). Not an authority signal — purely a boot-liveness
-/// probe removed once the NS launch (step 5) lands.
+/// probe.
 #[no_mangle]
 pub static mut DSM_SECURE_HEARTBEAT: [u32; 2] = [0; 2];
 const HEARTBEAT_SENTINEL: u32 = 0x4453_4d31; // "DSM1"
@@ -540,7 +540,7 @@ fn main() -> ! {
 
     // Step 5: configure the Secure/Non-secure boundary BEFORE any Non-secure launch. This runs from
     // Secure SRAM; if the attribution were wrong (e.g. Secure code marked NS) the Secure world would
-    // fault here and never reach the self-reboot below — so a self-reboot proves SAU enable is safe.
+    // fault here and never reach the Non-secure launch below.
     // Core 1 held off by the power-on state machine, confirmed; otherwise nothing launches.
     match boundary::contain_core1() {
         Ok(()) => {}
@@ -604,8 +604,7 @@ fn main() -> ! {
     // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
     // and SAU marks that region Non-secure; this sets MSP_NS + VTOR_NS from the NS vector table and
     // BXNS into the NS reset vector. Control leaves Secure and only re-enters through the `sg`
-    // veneer. (Step 7 replaces the bring-up stub with the measured real NS app; step 5 still owes
-    // ACCESSCTRL/DMA/NVIC/lock.) If the launch ever returns, halt fail-closed.
+    // veneer. If the launch ever returns, `udf` faults and the board resets.
     unsafe {
         launch_nonsecure(core::ptr::addr_of!(__ns_app_vector_table) as u32);
     }

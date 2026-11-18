@@ -110,7 +110,7 @@ fn main() {
     // the NSC entry for the app to resolve at the fixed NSC address.
     println!("cargo:rustc-link-arg=--undefined=dsm_secure_dispatch");
     println!("cargo:rustc-link-arg=--undefined=dsm_secure_handler");
-    // Keep the bring-up NS stub (nothing in Rust references it; the linker places it in NS SRAM and
-    // the monitor branches to its vector table by fixed address).
+    // Keep the Non-secure app image (veneer/dsm_ns_payload.S): `main` launches it through its vector
+    // table, `__ns_app_vector_table`, at the NS SRAM base.
     println!("cargo:rustc-link-arg=--undefined=__ns_app_vector_table");
 }

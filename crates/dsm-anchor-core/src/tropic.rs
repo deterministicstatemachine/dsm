@@ -269,11 +269,11 @@ pub enum PartitionError {
 }
 
 /// The RP2350 secure-partition signature scheme (the `σ^host` factor). The partition
-/// keypair is generated at appliance birth under the birth seal; `pk_host` is bound into
-/// the anchor bundle `B` and pinned by the receiver. PartSign signs the per-transfer
-/// root-advance message `M_{i+1}`; the receiver verifies with the pinned `pk_host`.
+/// keypair is derived at every boot from the secret the board sealed itself ([`crate::seal`]);
+/// `pk_host` is bound into the anchor bundle `B` and pinned by the receiver. PartSign signs the
+/// per-transfer root-advance message `M_{i+1}`; the receiver verifies with the pinned `pk_host`.
 pub trait PartitionSig {
-    /// Deterministic `(sk, pk)` from a 32-byte seed (partition birth seal).
+    /// Deterministic `(sk, pk)` from a 32-byte seed (derived from the board's sealed secret).
     fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError>;
     /// Signature over a 32-byte digest under the partition secret key.
     fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;

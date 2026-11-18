@@ -25,7 +25,8 @@ use crate::try_run::{begin, finish, Begun, TryRun, TryStep};
 
 /// An anchor and the state its firmware holds it in.
 pub enum Anchor<T: Tropic, P: PartitionSig, S: ActiveStore> {
-    /// Its store holds no record: it answers only a provisioning or a try-run.
+    /// Its store holds no record: it answers only a provisioning, a try-run, an identity read or a
+    /// stamp.
     Unprovisioned {
         chip: ChipBirth,
         tropic: T,

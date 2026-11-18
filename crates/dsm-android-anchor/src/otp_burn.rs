@@ -591,8 +591,8 @@ pub enum Burn {
     WriteBootKey,
     /// Step 8: secure boot on, debug off, boot key 0 valid and keys 1-3 invalid. LAST before boot.
     Lockdown,
-    /// Step 9b: the boot configuration and boot key pages read-only, the rollback page closed to the
-    /// bootloader. Only after the signed image has booted once.
+    /// Step 9b: the boot configuration and boot key pages read-only, the rollback page read-only to
+    /// the bootloader and Non-secure code. Only after the signed image has booted once.
     LockBootPages,
 }
 

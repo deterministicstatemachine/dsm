@@ -334,8 +334,8 @@ ASSERT(LOADADDR(.rodata) == LOADADDR(.text) + SIZEOF(.text),
 ASSERT(LOADADDR(.text) == LOADADDR(.vector_table) + SIZEOF(.vector_table),
   "BUG: a hole between .vector_table and .text in flash — picotool cannot sign the linear LOAD_MAP copy");
 
-/* §6 Secure code+rodata size ceiling (SRAM-resident budget from MEMORY_MAP.md). */
-ASSERT((__etext - _stext) <= 224K, "Secure monitor code+rodata exceeds the 224 KiB budget (MEMORY_MAP.md)");
+/* §6 Secure .text size ceiling (SRAM-resident budget from MEMORY_MAP.md). */
+ASSERT((__etext - _stext) <= 224K, "Secure monitor .text exceeds the 224 KiB budget (MEMORY_MAP.md)");
 
 /* SA-171: the measured Non-secure window is loaded image bytes, all of them: the image starts at the
  * window and runs past its end (the NS script fills the window with code, rodata and a fixed fill,

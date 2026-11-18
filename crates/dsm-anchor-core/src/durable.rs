@@ -1,11 +1,13 @@
 //! The appliance's durable record (§26): what a power cut leaves behind.
 //!
-//! The chip keeps its own monotonic counter. Everything else the appliance holds across a power
-//! cut is one record: the active frontier `h_i`, the counter `u_i` it last saw, and the prepared
-//! or committed transfer. [`DurableAppliance`] writes that record whole at every durable point of
-//! the flow — after prepare, after the committed candidate (before the counter moves), after the
-//! counter moved, after finalize, after cancel, and after a recovery that completed a commit — and
-//! restores the appliance from it at boot, before §26 recovery decides whether it may serve.
+//! The chip keeps its own monotonic counter, and the store keeps the owner's stamp apart from the
+//! record. Everything else the appliance holds across a power cut is one record: what it was
+//! provisioned for, the active frontier `h_i`, the counter `u_i` it last saw, the receive challenge
+//! it holds open, and the prepared or committed transfer. [`DurableAppliance`] writes that record
+//! whole at birth and at every durable point of the flow — after prepare, after the committed
+//! candidate (before the counter moves), after the counter moved, after finalize, after cancel,
+//! after a receive challenge is drawn, and after a recovery that completed a commit — and restores
+//! the appliance from it at boot, before §26 recovery decides whether it may serve.
 //!
 //! A store holds the last record written in full. A write the power cut short leaves the record
 //! before it. So the two crash points inside a commit are exactly the ones [`Appliance::recover`]

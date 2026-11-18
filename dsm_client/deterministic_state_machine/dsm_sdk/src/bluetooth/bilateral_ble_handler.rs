@@ -227,10 +227,6 @@ pub(crate) struct StagedBearerSpend {
     pub(crate) spend: dsm::types::device_state::OfflineSpend,
 }
 
-/// Stage `operation`, a bearer transfer to `counterparty_device_id` opened by `terms`, on this
-/// device's anchor under the receiver's challenge `receiver_challenge`, and build its account
-/// spend. The operation's asset is resolved independently from the token `terms` name (§9.5)
-/// and must be the asset the operation signs.
 /// An anchor disclosure's fields, each its exact length: the bundle, the pin
 /// keys `B` commits, the enrolled counter, the policy and the birth commitment,
 /// and the owner's stamp on the board (DSM Amendment A38), at most a stamp's
@@ -317,6 +313,10 @@ pub(crate) fn disclosed_anchor(
     })
 }
 
+/// Stage `operation`, a bearer transfer to `counterparty_device_id` opened by `terms`, on this
+/// device's anchor under the receiver's challenge `receiver_challenge`, and build its account
+/// spend. The operation's asset is resolved independently from the token `terms` name (§9.5)
+/// and must be the asset the operation signs.
 pub(crate) fn stage_bearer_spend(
     router: &dyn crate::bridge::AppRouter,
     rel_key: [u8; 32],
@@ -3724,9 +3724,6 @@ impl BilateralBleHandler {
         Ok(())
     }
 
-    /// After a restart, settle a bearer step recorded as releasing by the recovery table: back
-    /// to waiting when its anchor's counter did not move, or committed — the same release,
-    /// emitted again — when it did, with the anchor's frontier then advanced.
     /// Settle every step whose anchor release was left unfinished (a USB timeout, a power cut, a
     /// chip fault) by the recovery table, live rather than at the next restart: committed with the
     /// same release when the anchor's counter moved, back to awaiting the response when it did not.
@@ -3745,6 +3742,9 @@ impl BilateralBleHandler {
         Ok(())
     }
 
+    /// Settle a bearer step recorded as releasing by the recovery table, at a restart or live: back
+    /// to waiting when its anchor's counter did not move, or committed — the same release,
+    /// emitted again — when it did, with the anchor's frontier then advanced.
     async fn recover_releasing_step(&self, commitment_hash: &[u8; 32]) -> Result<(), DsmError> {
         let artifacts = match self.settle_unfinished_release(commitment_hash).await? {
             UnfinishedRelease::Reset => return Ok(()),
@@ -5332,11 +5332,6 @@ impl BilateralBleHandler {
         Some(session.phase.clone())
     }
 
-    /// A confirm for a step this device already committed as its receiver —
-    /// the session ended in that commit — delivered again because its ack was
-    /// lost. Core decides from the step's pinned sender's signature
-    /// (`decide_committed_confirm`); the answer is the ack the step committed,
-    /// rebuilt from the receipt in this device's history row.
     /// The step `commitment_hash`, whose receive did not commit with `failed`, taken back into memory
     /// as its durable record holds it: receiving, when its receipt was recorded before the board
     /// moved; gone, when the step committed and its session ended. Answers `failed`, or why the
@@ -5371,6 +5366,12 @@ impl BilateralBleHandler {
         }
     }
 
+    /// A confirm for a step this device already committed as its receiver —
+    /// the session ended in that commit — delivered again because its ack was
+    /// lost. Core decides from the step's pinned sender's signature
+    /// (`decide_committed_confirm`); the answer is the ack the step committed:
+    /// the receipt in this device's history row and its board's receive commit
+    /// kept with the step.
     async fn answer_committed_confirm(
         &self,
         commitment_hash: [u8; 32],

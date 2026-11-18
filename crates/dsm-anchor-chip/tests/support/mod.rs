@@ -96,7 +96,7 @@ pub struct Power {
     log: RefCell<Option<(std::fs::File, String)>>,
     /// The transactions in which the chip ran a command that changes what it stores.
     pub(crate) stores: RefCell<Vec<u64>>,
-    /// Corrupt the CRC of the answer to the next reboot, as OI_TR01_ERR_2025091800 describes.
+    /// Corrupt the CRC of the answer to every reboot from now on, as OI_TR01_ERR_2025091800 describes.
     pub(crate) garble_reboot_crc: Cell<Garble>,
     reboot_asked: Cell<Garble>,
 }

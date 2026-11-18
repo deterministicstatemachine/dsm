@@ -8,7 +8,7 @@ LED slot and the far-end lip. The inner faces of the Click ribs and the lid clam
 also pinned, so the Click is supported and clamped exactly as in Rev D. Wall material between
 the pinned faces and the moved walls is stretched, not cut.
 
-    python3 widen.py rev_d/base.stl rev_d/lid.stl out_dir/ [D]
+    python3 widen_rev_e.py rev_d/base.stl rev_d/lid.stl out_dir/ [D]
 """
 import sys
 

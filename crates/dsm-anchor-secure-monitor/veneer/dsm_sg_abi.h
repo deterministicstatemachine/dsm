@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// DSM anchor Secure Gateway ABI — shared by the C veneer, the Secure Rust handler, and (as mirrored
-// constants) the Non-secure app. The ONLY values that cross the boundary in registers are a fixed
+// DSM anchor Secure Gateway ABI — mirrored as constants by the Secure Rust handler and the
+// Non-secure app. The ONLY values that cross the boundary in registers are a fixed
 // slot index and a sequence number; everything else is the bounded request/response in the fixed
 // Non-secure SRAM slot, copied in/out by the Secure handler.
 #ifndef DSM_SG_ABI_H

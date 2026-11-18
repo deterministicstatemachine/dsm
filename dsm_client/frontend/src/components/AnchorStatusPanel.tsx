@@ -25,7 +25,7 @@ const rowStyle: React.CSSProperties = {
 
 /**
  * Read-only offline-bearer anchor status (Stage 4 Slice 3, signal c). Pure rendering: reads the
- * `anchor.status` route and displays the sender's appliance snapshot (connected state, live counter
+ * `anchor.status` route and displays this device's appliance snapshot (connected state, live counter
  * floor u, enrolled counter, anchor identity/chip-key/frontier prefixes). No protocol logic here —
  * all state comes from the Rust handler.
  */

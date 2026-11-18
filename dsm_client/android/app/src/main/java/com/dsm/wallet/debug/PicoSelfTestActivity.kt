@@ -22,7 +22,7 @@ class PicoSelfTestActivity : Activity() {
         private const val TAG = "PicoSelfTest"
 
         /**
-         * v2 reach-the-chip probe: LE32 len(2) ++ AnchorRequest{op=STATUS(6)} (field 1, varint).
+         * v2 reach-the-chip probe: LE32 len(2) ++ ApplianceRequest{op=STATUS(6)} (field 1, varint).
          * The proof that the phone reached the appliance on real silicon is a real STATUS op: a
          * serving appliance sets `ok` (field 2) to 1, an unprovisioned one answers error 105 (field 3).
          * Opaque, minimal frame.

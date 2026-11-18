@@ -29,7 +29,7 @@ message TransitionPackage {
   bytes next_root             = 6;  // 32  h_{i+1}
   uint64 anchor_counter       = 7;  //     u_i = H0 − H
   uint64 next_anchor_counter  = 8;  //     u_i+1
-  uint32 action_type          = 9;  // 0=Transfer 1=Resync 2=Cancel 3=Rotate
+  uint32 action_type          = 9;  // 0=Transfer 4=Receive (receive.rs)
   bytes action_fields         = 10; // canonical action-specific encoding
   bytes payload_hash          = 11; // 32
   bytes old_leaf_proof        = 12; // DSM SMT proof of the spent leaf at R_i
@@ -37,8 +37,8 @@ message TransitionPackage {
   bytes authority_policy_hash = 14; // 32
 }
 
-// The v2 root-advance certificate (§10, Def. 9): three independent signatures over one
-// root-advance message M_{i+1}. The chip/host public keys are NOT carried — they are pinned
+// The v2 root-advance certificate (§10, Def. 9): the two on-device signatures, σ^chip and σ^host,
+// over one root-advance message M_{i+1}. The chip/host public keys are NOT carried — they are pinned
 // in the anchor bundle B at enrollment and supplied to the receiver from its pin.
 message RootAdvanceCertificate {
   bytes anchor_bundle              = 1;  // 32  B
@@ -50,7 +50,7 @@ message RootAdvanceCertificate {
   uint64 next_anchor_counter       = 7;  //     u_i+1
   bytes transition_digest          = 8;  // 32  D
   bytes root_advance_message       = 9;  // 32  M
-  bytes anchor_id                  = 10; // 32  enrolled TROPIC01 anchor identity (stpub)
+  bytes anchor_id                  = 10; // 32  enrolled anchor id (from the chip's stpub and chip id)
   bytes sigma_chip                 = 11; // σ^chip = ChipSign(M) — resident TROPIC01 Ed25519
   bytes sigma_host                 = 12; // σ^host = HostSign(M) — RP2350 partition
   bytes receiver_challenge         = 13; // 32  r_R
@@ -160,8 +160,10 @@ message ApplianceRequest {
   // signature is not a field: on the wire it follows this message, as the frame's last
   // OWNER_AUTHORIZATION_BYTES (49,856) bytes, so the anchor verifies it from the frame it holds and
   // copies it nowhere. Any frame longer than a signature is read that way; a frame longer than
-  // REQUEST_HEAD_MAX (4 KiB) that is not one is refused unread. An OP_STAMP's stamp is read the same
-  // way: it follows the message as the frame's last BOARD_STAMP_BYTES (17,088) bytes.
+  // REQUEST_HEAD_MAX (4 KiB) that is not one is refused unread, but for an OP_CHECK_PAYMENT, decoded
+  // whole up to MAX_PAYMENT_CHECK_BYTES (56 KiB) by an appliance holding no record. An OP_STAMP's
+  // stamp is read as a signature is: it follows the message as the frame's last BOARD_STAMP_BYTES
+  // (17,088) bytes.
   bytes authorization_digest        = 8;
   // OP_TRY_RUN, OP_PROVISION: the wallet's rehearsal owner key (SPX256f), derived apart from its
   // device key: the try-run's payment is authorized under it, through the same check a real one is.

@@ -70,7 +70,7 @@ object Unified {
     // Phone->Pico USB-OTG bridge. Rust up-calls this with an OPAQUE, already-framed request
     // (LE32 length ++ protobuf); this just moves the bytes over USB to the Pico and returns the
     // response body (Rust decodes it). We understand NOTHING about the payload — no TROPIC frames,
-    // no key material. Empty return on any failure -> Rust fails closed to online recovery.
+    // no key material. Empty return on any failure -> Rust fails closed (`usb_pico::answer_over_usb`).
     // `LocalPicoUsb.init(context)` must have been called at startup.
     @Keep @JvmStatic fun picoUsbTransceive(frame: ByteArray): ByteArray =
         LocalPicoUsb.transceive(frame)

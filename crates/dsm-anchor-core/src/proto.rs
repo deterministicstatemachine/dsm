@@ -108,7 +108,7 @@ impl OwnedTransition {
     }
 }
 
-// --- RootAdvanceCertificate <-> Certificate (v2 three-signature) ---
+// --- RootAdvanceCertificate <-> Certificate (v2: σ^chip and σ^host) ---
 
 impl pb::RootAdvanceCertificate {
     pub fn to_cert(&self) -> Result<Certificate, ProtoError> {
@@ -206,11 +206,12 @@ pub fn decode_request(bytes: &[u8]) -> Result<pb::ApplianceRequest, ProtoError> 
     pb::ApplianceRequest::decode(bytes).map_err(|_| ProtoError::Decode)
 }
 
-/// A request frame as the anchor reads it: its message, and the owner's signature after it when
-/// the frame carries one. A frame longer than one signature ends in that signature (an
-/// `OP_AUTHORIZE`'s), which is verified from the frame itself and copied nowhere. A frame longer
-/// than a request's largest message that is not one, and a signature after any other op, are
-/// refused unread, so no request makes the anchor hold more than it budgets for.
+/// A request frame as the anchor reads it: its message, and the owner's signature or stamp after it
+/// when the frame carries one. A frame longer than one signature ends in that signature (an
+/// `OP_AUTHORIZE`'s), which is verified from the frame itself and copied nowhere; an `OP_STAMP` frame
+/// longer than a stamp ends in the owner's stamp (DSM Amendment A38). A message longer than a
+/// request's largest, and bytes after the message of any other op, are refused unread, so no request
+/// makes the anchor hold more than it budgets for.
 pub fn decode_frame(frame: &[u8]) -> Result<(pb::ApplianceRequest, &[u8]), ProtoError> {
     use crate::service::{MAX_FRAME_LEN, OWNER_AUTHORIZATION_BYTES, REQUEST_HEAD_MAX};
     use crate::stamp::BOARD_STAMP_BYTES;

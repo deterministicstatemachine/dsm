@@ -18,9 +18,8 @@ pub fn h(domain: &str, fields: &[&[u8]]) -> [u8; 32] {
 }
 
 /// Domain-separated KDF: keyed BLAKE3 with `secret` as the 32-byte key and
-/// `domain ‖ fields` as the message. Used for the root-advance witness key
-/// material `K`, keyed by the MACANDD output `W` (the paper's
-/// `HKDF(secret=W, context=…)`, Def. 17).
+/// `domain ‖ fields` as the message. Used to derive a board's partition-key seed,
+/// birth inputs and pairing key from its sealed secret.
 pub fn kdf(secret: &[u8; 32], domain: &str, fields: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Hasher::new_keyed(secret);
     hasher.update(domain.as_bytes());

@@ -4,8 +4,14 @@
 //! Transfer uniqueness is a **software** property of the DSM device SMT: one parent device
 //! root `Rᵢ` admits at most one accepted successor per receiver, and the offline frontier
 //! `hᵢ → hᵢ₊₁` is forward-only, so a release claiming an already-consumed frontier is
-//! rejected on sight. Cross-receiver forks are position collisions exposed by Tripwire on
-//! reconciliation (a detection bound), not prevented on the acceptance path.
+//! rejected on sight.
+//!
+//! Across two receivers, nothing detects a fork, offline or later. An intact board cannot make
+//! one: it prepares a payment only from its current frontier and releases it only once committed,
+//! which moves the frontier on ([`appliance::Appliance::prepare`], [`appliance::Appliance::emit`]).
+//! A board broken open can sign two payments from one frontier. Each receiver, checking alone
+//! offline, takes its own; the payer's next boundary carries only one of them, and the other never
+//! settles, with nothing raised about it.
 //!
 //! Hardware provides **identity**, not authority. Each root advance binds one root-advance
 //! message `Mᵢ₊₁` under three independent signatures:

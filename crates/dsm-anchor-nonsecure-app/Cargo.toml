@@ -3,7 +3,7 @@ name = "dsm-anchor-nonsecure-app"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "DSM anchor RP2350 Non-secure application (TrustZone-M Non-secure world): USB-CDC + protobuf + host transport + candidate transition/SMT-proof construction. Calls the Secure monitor ONLY through the single NSC Secure Gateway entry dsm_secure_dispatch(slot, seq); a fixed Non-secure SRAM mailbox slot carries bulk request/response bytes. Has NO access to OTP, the host key, TROPIC01, the counter, or Secure state. Not a workspace member — thumbv8m-only."
+description = "DSM anchor RP2350 Non-secure application (TrustZone-M Non-secure world): USB-CDC host transport that forwards length-prefixed request frames, undecoded. Calls the Secure monitor ONLY through the single NSC Secure Gateway entry dsm_secure_dispatch(slot, seq); a fixed Non-secure SRAM mailbox slot carries bulk request/response bytes. Has NO access to OTP, the host key, TROPIC01, the counter, or Secure state. Not a workspace member — thumbv8m-only."
 
 [[bin]]
 name = "dsm-anchor-nonsecure-app"
@@ -11,9 +11,6 @@ test = false
 bench = false
 
 [dependencies]
-# The app builds candidate transitions + SMT inclusion proofs (BLAKE3 only — NO SPHINCS+, NO
-# libtropic; those are Secure-only).
-blake3 = { version = "1", default-features = false }
 # No `binary-info`: this app is embedded in the monitor image (not flashed standalone), so it needs
 # no PICOBIN metadata / .bi_entries — the monitor carries the boot block + binary info.
 rp235x-hal = { version = "0.3", features = ["critical-section-impl", "rt"] }

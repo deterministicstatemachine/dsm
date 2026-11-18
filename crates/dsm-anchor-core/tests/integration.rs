@@ -784,14 +784,14 @@ fn an_authorization_serves_one_prepare_and_is_consumed_with_it() {
     );
 
     // A prepare refused before the owner check (here its successor frontier is not the derived
-    // one) leaves the authorization standing: nothing was signed and nothing consumed it.
+    // one) uses the authorization up too: a prepare from Ready takes it before any other check.
     authorize(&mut f.a, &t, &RCHAL, &R_I, &R_NEXT);
     assert_eq!(
         f.a.prepare(&t.as_transition(), &[0x57; 32], &R_I, &R_NEXT),
         Err(ApplianceError::NextRootMismatch)
     );
-    // Consumed by a prepare it did not allow, too: one that passes every structural check but
-    // names other device roots spends it.
+    // With it used up, a prepare that passes every structural check but names other device
+    // roots finds none.
     assert_eq!(
         f.a.prepare(&t.as_transition(), &RCHAL, &R_NEXT, &R_I),
         Err(ApplianceError::OwnerUnauthorized),

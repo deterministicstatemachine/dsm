@@ -4,16 +4,17 @@
 //!
 //! The Pico firmware runs the full `anchor_core::Appliance` on real silicon and serves the
 //! `ApplianceRequest`/`ApplianceResponse` protocol over USB-CDC (`LE32` length ++ prost body).
-//! This is the concrete `AnchorAppliance` the SDK flagged as "a real RP2350 USB-CDC/BLE client ...
-//! hardware follow-on" (`dsm_sdk::anchor::appliance_client`): each trait op is exactly one framed
-//! round-trip to the chip, over the same opaque Kotlin USB round-trip as [`crate::usb_pico`].
+//! This is the concrete `AnchorAppliance` (`dsm_sdk::anchor::appliance_client`): each trait op is
+//! one or more framed round-trips to the board (a pin reads STATUS and `OP_BOARD_IDENTITY`; a
+//! try-run or a provisioning adds the rehearsal's `OP_AUTHORIZE` when the board asks for it), over
+//! the same opaque Kotlin USB round-trip as [`crate::usb_pico`].
 //!
-//! Installing this in place of `InProcessAnchorAppliance` makes the SENDER's `OfflineRelease` come
-//! from the physical secure element: `σ^chip` is signed by the resident non-exportable Ed25519 key
-//! on the die, `σ^host` by the RP2350 partition, and the COMMIT consumes a real TROPIC01
-//! monotonic-counter step (the local double-spend floor). Every op fails CLOSED into `DsmError`
-//! (transport error, on-chip error, or malformed response) so a missing/wedged chip can never
-//! fabricate a release.
+//! It serves both sides of an offline payment. The payer's `OfflineRelease` comes from the physical
+//! secure element: `σ^chip` is signed by the resident non-exportable Ed25519 key on the die,
+//! `σ^host` by the RP2350 partition, and the COMMIT consumes a real TROPIC01 monotonic-counter step
+//! (the local double-spend floor); the receiver's board draws the challenge and checks the payment
+//! (`OP_CHALLENGE`, `OP_CHECK_PAYMENT`). Every op fails CLOSED into `DsmError` (transport error,
+//! on-chip error, or malformed response) so a missing/wedged chip can never fabricate a release.
 
 use anchor_core::appliance::RecoverOutcome;
 use anchor_core::enrollment::Install;
@@ -29,9 +30,10 @@ use dsm_sdk::anchor::{
 
 use crate::usb_pico::UsbTransceive;
 
-/// A physical-chip appliance driven over USB. The pin is self-sourced from a STATUS round-trip —
-/// the chip self-describes its enrolled identity (`B`, `anchor_id`, `H0`, `pk_host`, `pk_chip`,
-/// `S_birth`), so there is no host-side enrollment DB and the pin is always the REAL silicon's.
+/// A physical-chip appliance driven over USB. The pin is self-sourced from a STATUS round-trip and
+/// the board's `OP_BOARD_IDENTITY` answer — the board self-describes its enrolled identity (`B`,
+/// `anchor_id`, `H0`, `pk_host`, `pk_chip`, `S_birth`) and the owner's stamp it keeps (DSM Amendment
+/// A38), so there is no host-side enrollment DB and the pin is always the REAL silicon's.
 pub struct UsbAnchorAppliance {
     usb: UsbTransceive,
 }

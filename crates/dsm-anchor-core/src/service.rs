@@ -502,7 +502,7 @@ pub(crate) fn status<T: Tropic, P: PartitionSig>(
 }
 
 /// Dispatch a decoded request against the appliance. `signature` is what followed the message on
-/// the wire: an `OP_AUTHORIZE`'s owner signature, and nothing for any other op.
+/// the wire: an `OP_AUTHORIZE`'s owner signature, an `OP_STAMP`'s stamp, and nothing for any other op.
 pub fn dispatch<A: Served>(
     app: &mut A,
     req: pb::ApplianceRequest,
@@ -668,7 +668,7 @@ pub fn handle<A: Served>(app: &mut A, frame: &[u8]) -> Vec<u8> {
     // A payment check is the one request whose message is larger than a head: the payer's
     // certificate carries its σ^host. It is decoded whole, only by an appliance holding no record,
     // so its decoded copy never meets a record's in the heap. Every other frame is a head, and an
-    // authorization's signature after it ([`crate::proto::decode_frame`]).
+    // authorization's signature or an OP_STAMP's stamp after it ([`crate::proto::decode_frame`]).
     if frame.len() > REQUEST_HEAD_MAX
         && matches!(crate::proto::peek_op(frame), Ok(op) if op == pb::Op::CheckPayment as i32)
     {
