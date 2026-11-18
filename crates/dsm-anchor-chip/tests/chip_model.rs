@@ -959,8 +959,9 @@ fn trial_booted(model: &ModelServer) -> Served {
 
 /// The trial image installs with nothing permanent (owner, 2026-11-06; CONFORMANCE_GAPS §6.152). It
 /// keys a chip whose PTRNG is untested, as Tropic Square's correction waits for the last step, and its
-/// try-run says the correction is still to make. Its install passes as a trial and serves a payment
-/// the receiver verifies, yet the factory slot still opens and no pairing key or access rule moves,
+/// try-run says the correction is still to make. Its install passes as a trial and makes a release
+/// whose certificate verifies, though no receiver takes it: a trial is never stamped (DSM Amendment
+/// A38). Yet the factory slot still opens and no pairing key or access rule moves,
 /// and the next boot starts over: the record gone and the counter at its start. The production image
 /// still gives the chip nothing. MUTATION CONTROLS: closing the birth in a trial turns this red where
 /// the factory slot no longer opens; leaving the trial slots at boot turns it red at "the next boot".

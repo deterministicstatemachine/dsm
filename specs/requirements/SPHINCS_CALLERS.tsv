@@ -488,11 +488,11 @@ dsm_client/deterministic_state_machine/dsm/tests/sofi_v8_operations.rs	309	sphin
 dsm_client/deterministic_state_machine/dsm_sdk/src/anchor/appliance_client.rs	117	let kp = dsm::crypto::sphincs::generate_keypair_from_seed(
 dsm_client/deterministic_state_machine/dsm_sdk/src/anchor/appliance_client.rs	118	dsm::crypto::sphincs::SphincsVariant::SPX256f,
 dsm_client/deterministic_state_machine/dsm_sdk/src/anchor/appliance_client.rs	135	dsm::crypto::sphincs::sphincs_sign(&self.secret, digest)
-dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	28	const PARTITION_VARIANT: dsm::crypto::sphincs::SphincsVariant =
-dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	29	dsm::crypto::sphincs::SphincsVariant::SPX128f;
-dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	105	dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig),
-dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_ble_handler.rs	6844	let stranger = dsm::crypto::sphincs::generate_keypair_from_seed(
-dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_ble_handler.rs	6845	dsm::crypto::sphincs::SphincsVariant::SPX128f,
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	29	const PARTITION_VARIANT: dsm::crypto::sphincs::SphincsVariant =
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	30	dsm::crypto::sphincs::SphincsVariant::SPX128f;
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	106	dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig),
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_ble_handler.rs	6850	let stranger = dsm::crypto::sphincs::generate_keypair_from_seed(
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_ble_handler.rs	6851	dsm::crypto::sphincs::SphincsVariant::SPX128f,
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	1539	let stranger = dsm::crypto::sphincs::generate_keypair_from_seed(
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	1540	dsm::crypto::sphincs::SphincsVariant::SPX128f,
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	4259	let signature = dsm::crypto::sphincs::sphincs_sign(

@@ -3040,8 +3040,10 @@ impl BilateralBleHandler {
     /// sent to the receiver.
     ///
     /// A bearer transfer commits the sender's step here, when its anchor
-    /// commits: the receiver's acceptance it needs is already verified, and
-    /// the acknowledgment only files the receiver's countersigned receipt. The
+    /// commits: the receiver's acceptance it needs is already verified. The
+    /// acknowledgment that follows — the receiver's countersigned receipt and
+    /// its board's receive commit of this release, both checked by Core and
+    /// kept — finalizes the session ([`Self::record_commit_ack`]). The
     /// confirm's state is durable before the envelope is returned.
     async fn send_bilateral_confirm(
         &self,
@@ -3190,7 +3192,7 @@ impl BilateralBleHandler {
         )?;
 
         // A bearer step is one motion (owner ruling: the sender's step commits when its anchor
-        // commits; the acknowledgment only files the receiver's countersigned receipt):
+        // commits). The acknowledgment that follows is checked and kept, and finalizes the session:
         // 1. the step is recorded as releasing — σ_B and the challenge it signed, this device's
         //    signed receipt, the root that receipt names, the account spend, and the EK it was
         //    signed with — so a response delivered again cannot release it twice, and a restart
@@ -4250,7 +4252,8 @@ impl BilateralBleHandler {
     }
 
     /// Take the receiver's acknowledgment of the step `commitment_hash` — its
-    /// counter-signed receipt — for a session this device is committing: Core
+    /// counter-signed receipt and its board's receive commit of this device's
+    /// release — for a session this device is committing: Core
     /// verifies it, and it is written into the session before the step is
     /// finalized, so a restart finalizes a step whose ack it holds. Answers
     /// `false` for an ack of a step already committed (nothing to do).
@@ -4291,9 +4294,11 @@ impl BilateralBleHandler {
             }
         };
 
-        // Core decides on the ack: it is the receiver's counter-signed receipt,
-        // verified against the receiver's pinned identity, the Device Tree
-        // commitment kept for it and its EK chain head on this relationship.
+        // Core decides on the ack: the receiver's board's receive commit of
+        // exactly this device's release, under the receiver's pinned anchor, and
+        // the receiver's counter-signed receipt, verified against its pinned
+        // identity, the Device Tree commitment kept for it and its EK chain head
+        // on this relationship (`decide_commit_ack`).
         let (counterparty_device_id, step_operation, owed_confirm) = {
             let sessions = self.sessions.sessions.lock().await;
             sessions.get(&commitment_hash).map(|s| {
@@ -6485,7 +6490,8 @@ mod tests {
         handler.test_insert_session(session).await;
     }
 
-    /// An acknowledgment is the receiver's counter-signed receipt. One that
+    /// An acknowledgment is the receiver's counter-signed receipt and its
+    /// board's receive commit. One that
     /// does not verify is not an answer: the step stays awaiting its ack
     /// (the receiver may have committed), and nothing is finalized or failed.
     /// MUTATION CONTROL: failing the session on an ack that does not verify

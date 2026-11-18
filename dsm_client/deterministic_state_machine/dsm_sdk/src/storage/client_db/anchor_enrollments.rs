@@ -60,10 +60,12 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
     }))
 }
 
-/// The appliance root the receiver adopted from the holder's last ACCEPTED
-/// release (Def. 25 check 2), plus the anchor counter adopted with it.
-/// `None` = relationship genesis — the next release's own `prev_root` is
-/// adopted TOFU by the acceptance predicate.
+/// Where this device last accepted a spend from the holder to leave its
+/// offline account: the anchor frontier and the counter (Def. 25 check 2).
+/// Core takes no spend from before it (`BearerOrigin::accepted`). `None`
+/// when it never has; the next spend still starts from the holder's account
+/// as this device recorded it from the holder's online history, and with
+/// none recorded Core refuses the spend.
 pub fn load_accepted_anchor_root(device_id: &[u8; 32]) -> Result<Option<([u8; 32], u64)>> {
     let binding = get_connection()?;
     let conn = binding

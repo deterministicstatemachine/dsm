@@ -1,9 +1,10 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # dsm-android-anchor — on-device glue for the v2 anchor (Software-Authority / Hardware-Identity)
 
-The SENDER phone's USB link to its own RP2350/TROPIC01 appliance, plus gated device-setup ops.
-v2 needs **nothing receiver-side** (no relay, no counter reader, no verifier slot) — the one
-device install is the sender's appliance factory.
+The phone's USB link to its own RP2350/TROPIC01 board, plus gated device-setup ops. An offline
+payment needs a board on **both sides** (owner, 2026-11-07): the payer's makes the release, the
+receiver's draws the challenge, checks the release and commits the receive. One appliance factory
+serves both sides, and a phone without its own stamped board neither pays nor receives offline.
 
 Workspace-EXCLUDED (its own workspace root); built via cargo-ndk for Android. Its host tests (the board
 setup against a model of the RP2350 bootloader, the USB appliance client) run from this directory
