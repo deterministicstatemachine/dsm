@@ -3763,51 +3763,51 @@ accept.
 This is the stated boundary, and the document does not pretend otherwise: a perfect live clone of
 every factor is indistinguishable from the original by any offline-only protocol. That was true of the
 Chaum–Pedersen observer, of every smartcard purse, and of every offline CBDC design, and it is true
-here. What differs is what happens next.
+here. The same holds for a single board broken open so that it signs two payments from one frontier:
+both payments carry every check a receiver makes, the owner's stamp (Amendment A38) included, since
+the stamp names the board, not the payment.
 
 #### What happens later
-Both advances name position n + 1 under the same device identity. The first of Bob or Carol to reconnect
-registers Alice’s root at n + 1. The second finds the cell already holding a different root. The register
-refuses the second write and returns the held digest.
-At that moment the loser holds something no observer-model system provides: two witnessed state
-advances from one committed origin, each signed by the same chip-rooted identity, naming the same
-position with different roots. That is not a suspicion. It is a proof of equivocation, attributable to a
-physical device identity rather than to an anonymous key, and it is verifiable by anyone who holds both
-objects.
-What the protocol does with that proof is policy: the device identity is burned, the losing recipient
-has an attributable claim, and the value at stake was bounded in advance by the physical-device exposure
-
-
-<!-- Source PDF page 73 -->
-
-limits that the offline policy committed. What the protocol does not do is let both advances become
-realized state. Only one root occupies n + 1; only one consumption of Koffline is in any lineage.
+Both payments name position n + 1 of one offline account, from one frontier. Alice's next online step
+from that account, a load or an unload, carries the chain of payments the account made since its last
+boundary. That chain starts from the account where it stood, so it can carry only one of the two
+branches: whichever Alice's board or wallet puts in it. That payment settles. The other receiver's
+payment never settles.
+Nothing in the protocol detects the fork or reports it, offline or after either receiver reconnects.
+No proof of equivocation is assembled, no device identity is revoked, and no limit on what a broken
+board can pay is enforced beyond what its offline account held. What the protocol does not do is let
+both payments become realized state: only one root occupies n + 1, and only one consumption of
+Koffline is in Alice's lineage.
+A run on 2026-11-17, with a test harness standing in for a board that does not keep the one-release
+rule, showed this: two receivers each accepted a payment from one origin, and one boundary could carry
+only one of them.
 
 #### The two questions, answered separately
 Section 66 said offline operation poses two questions and that DSM keeps them apart. The trace shows
 why that separation is the whole design.
 Is the transition unique? Yes, by the software theorem, with the hardware deleted: two consumptions
-of one Koffline cannot both realize, and the register makes that fact durable the moment either recipient
-reconnects.
-Did it come from the enrolled device? Yes if the witness verifies and the device was not perfectly
-cloned; and if it was, the clone is detected and attributed at reconnection, with the loss bounded by
-committed exposure policy.
+of one Koffline cannot both realize. The payer's next boundary decides which one does.
+Did it come from the enrolled device? Yes if the witness verifies and the board was neither cloned nor
+broken open. If it was, nothing detects or attributes it, and the loss falls on the receiver whose
+payment never settles.
 
 #### Bitcoin Comparison
 
 An unconfirmed Bitcoin payment accepted offline is exposed until the transaction reaches the chain,
 and if a conflicting transaction is mined first, the merchant holds nothing and can prove nothing
 about who defrauded them.
-An offline DSM payment is exposed only to a perfect live clone of the payer’s enrolled device, and if
-that clone is used, the defrauded recipient holds a verifiable, device-attributable proof of equivocation
-the moment either party reconnects.
+An offline DSM payment is exposed only to a payer whose board was cloned or broken open. An intact
+board cannot sign two payments from one frontier: it prepares a payment only from its current frontier
+and releases it only once committed, which moves the frontier on. If the board was broken, one
+receiver's payment never settles, and that receiver is told nothing about why.
 #### Architectural consequence
-The offline double spend requires hardware extraction rather than a race, is detected at first
-reconnection rather than never, and produces attributable evidence rather than a silent loss.
+The offline double spend requires breaking the hardware rather than winning a race. It is not detected
+and leaves no attributable evidence; it costs one receiver the payment.
 #### Tradeoff / boundary
-Detection is not recovery. Whether the defrauded recipient is made whole is a question for the
-exposure policy and the issuer, not for the state machine. And the clone boundary is real: no
-offline-only protocol distinguishes a perfect clone, and DSM does not claim to.
+There is neither detection nor recovery. Whether that receiver is made whole is a question for the
+issuer, not for the state machine. And the clone boundary is real: no offline-only protocol
+distinguishes a perfect clone, and DSM does not claim to. The owner's stamp shows that the owner set a
+board up, not that it was never broken afterwards.
 
 > **Amendment A24 (owner, 2026-11-01) — the anchor's identity is pinned on first use, and offline acceptance claims no more than it checks.** From the security audit of 2026-10-31 (finding SA-175): the receiver's acceptance carried a flag set to "uncompromised" on every pin, a first-transfer flag set to "not genesis" on every release, so that an upgrade-certificate check never ran, and a delivery check that repeated the recipient check. Owner's words, 2026-11-01: "Delete, state TOFU", provided that "the pinned appliance identity is bound to the intended DSM account", that "subsequent identity changes cannot silently replace that binding", that "Core's existing state-continuity, authorization, and replay checks remain mandatory", and that "the specification explicitly acknowledges that offline verification cannot necessarily detect a compromise or revocation discovered elsewhere." **Superseded in part by Amendment A38 (owner, 2026-11-18):** a board is pinned only on the owner's stamp, which also attests `pk_chip`; the second to fourth points below stand.
 >
@@ -3868,7 +3868,7 @@ offline-only protocol distinguishes a perfect clone, and DSM does not claim to.
 
 > **Amendment A37 (owner, 2026-11-15) — a relationship's first inbox is bound to its writer's published key.** A run on five storage nodes, through the production routes, on 2026-11-15: a third party who knew only two devices' genesis and device ids wrote once at each one's first inbox for the other, under a key of its own; every member stored it and fixed that key there, and the two devices never became contacts, every member refusing their own writes. Asked whether to close it by publishing each sender's key in its directory entry or by letting a first inbox take many writers, the owner chose "Sender's key in directory". Each device's directory entry carries one more public key, its **first-inbox lock**: a SPHINCS+ key its wallet derives from its master seed (`keyed-BLAKE3(Smaster, "DSM/first-inbox-lock/v1" ‖ device id)`), never its AK, which the AK signs into the entry with everything else. A relationship's first inbox is its route bound to the writer's first-inbox lock, as every later inbox is bound to the recipient's write lock: the writer writes there under that key, lock and write key at once, granting itself, and the recipient derives the same address from the entry it added the writer from. A node stores a write there only when the address is the route bound to the key the write carries, the one derivation every inbox uses, so a third party who computes the address cannot write there, and nothing that arrives first fixes anything: no node keeps a key per address. What a node learns: a write at a first inbox carries the writer's first-inbox lock, which the public directory names, so a node can tell which device opened a relationship (before, it could tell only by trying pairs of devices). It supersedes A34's open first inbox and its first write's key; the rest of A34 stands.
 
-> **Amendment A38 (owner, 2026-11-18) — a board pays or is paid offline only under the owner's stamp.** Under Amendment A24 a receiver pins any anchor whose bundle recomputes, so nothing told a board the owner set up from one built and keyed by anyone else; and runs on 2026-11-17, with a test harness standing in for a board that does not keep the one-release rule, had two receivers each accept a release from one origin. Owner's words, 2026-11-18: "So I'll just set them all up with my key before they get sent out, then.", "Anyways, we'll put my stamp on it then.", and, asked again, "I told you what I wanted." and "Yes, yes." Every board is set up by the owner before it ships: his boot key is burned and the board locked down, so it runs only firmware he signed. At its first signed boot the board draws its sealed secret from its own TRNG inside the Secure firmware, writing the page's lock row, which bars Non-secure and bootloader reads, before any row of the secret; no phone or computer draws or sees it, so the partition key derived from it, `pk_host`, exists only inside the board, and a try-run checks that the board would seal while writing nothing (A32). The owner then signs the board's public identity, `H("DSM/anchor/board-stamp/v1" ‖ anchor_id ‖ commit(pk_host) ‖ commit(pk_chip))`, with his **stamp key**, a BLAKE3-SPHINCS+ SPX128f key separate from his boot key, kept encrypted under his passphrase and never on a board. The signature is the board's **stamp**; the board keeps it in its chip's memory and reports it with its status, and the wallet and the board's firmware carry the stamp key's public half. A receiver admits a payer's board only when its stamp verifies under that key over the identity `B` binds, and checks it again on every payment; a payer admits a receiver's board on the same rule; a receiving board refuses a payment whose payer's stamp does not verify; and a holder's wallet refuses to install a board whose stamp does not verify. Each refusal says the board is unstamped, never that it changed. A pin is never replaced silently, Core's checks stay mandatory, and offline acceptance still cannot learn of a compromise found elsewhere (A24's second, third and fourth points); a pin kept from before this amendment stands, and every payment under it is checked for the stamp. Online steps are unchanged: a load or unload is checked as before. A trial install's keys change at every boot, so it is never stamped and never pays or is paid offline. The stamp proves that the owner set the board up and saw this identity on it, not that the board was never broken afterwards: a physical attack on a stamped board stays outside these claims, as it is outside the measurement boundary of the owner's paper. It supersedes A24's first and fifth points: a board is pinned on its stamp, not on first use alone, and the stamp attests `pk_chip`.
+> **Amendment A38 (owner, 2026-11-18) — a board pays or is paid offline only under the owner's stamp.** Under Amendment A24 a receiver pins any anchor whose bundle recomputes, so nothing told a board the owner set up from one built and keyed by anyone else; and runs on 2026-11-17, with a test harness standing in for a board that does not keep the one-release rule, had two receivers each accept a release from one origin. Owner's words, 2026-11-18: "So I'll just set them all up with my key before they get sent out, then.", "Anyways, we'll put my stamp on it then.", and, asked again, "I told you what I wanted." and "Yes, yes." Every board is set up by the owner before it ships: his boot key is burned and the board locked down, so it runs only firmware he signed. At its first signed boot the board draws its sealed secret from its own TRNG inside the Secure firmware, writing the page's lock row, which bars Non-secure and bootloader reads, before any row of the secret; no phone or computer draws or sees it, so the partition key derived from it, `pk_host`, exists only inside the board, and a try-run checks that the board would seal while writing nothing (A32). The owner then signs the board's public identity, `H("DSM/anchor/board-stamp/v1" ‖ anchor_id ‖ commit(pk_host) ‖ commit(pk_chip))`, with his **stamp key**, a BLAKE3-SPHINCS+ SPX128f key separate from his boot key, kept encrypted under his passphrase and never on a board. The signature is the board's **stamp**; the board keeps it in its chip's memory and reports it with its identity (`OP_BOARD_IDENTITY`), and the wallet and the board's firmware carry the stamp key's public half. A receiver admits a payer's board only when its stamp verifies under that key over the identity `B` binds, and checks it again on every payment; a payer admits a receiver's board on the same rule; a receiving board refuses a payment whose payer's stamp does not verify; and a holder's wallet refuses to install a board whose stamp does not verify. Each refusal says the board is unstamped, never that it changed. A pin is never replaced silently, Core's checks stay mandatory, and offline acceptance still cannot learn of a compromise found elsewhere (A24's second, third and fourth points); a pin kept from before this amendment stands, and every payment under it is checked for the stamp. Online steps are unchanged: a load or unload is checked as before. A trial install's keys change at every boot, so it is never stamped and never pays or is paid offline. The stamp proves that the owner set the board up and saw this identity on it, not that the board was never broken afterwards: a physical attack on a stamped board stays outside these claims, as it is outside the measurement boundary of the owner's paper. It supersedes A24's first and fifth points: a board is pinned on its stamp, not on first use alone, and the stamp attests `pk_chip`.
 
 
 <!-- spec-section: DSM-HL-073 -->
