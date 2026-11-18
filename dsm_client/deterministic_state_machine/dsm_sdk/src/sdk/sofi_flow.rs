@@ -1335,6 +1335,13 @@ fn vaults_of(
 /// other vault of either token takes no part in any route, so walking its
 /// chain would decide nothing (and on a shared network, every vault of the
 /// native token is a vault of either token).
+///
+/// A vault that pairs the two tokens is taken from either token's index
+/// (Amendment S16: path search takes "the vaults that pair them directly"
+/// from the two indexes). A reader reads a bounded number of an index's
+/// candidates, and the native token's index outgrows that bound long before a
+/// new token's does: a vault the input token's read did not reach is still
+/// found through the output token's.
 fn route_legs(firsts: &[Paired], seconds: &[Paired], token_in: &D32, token_out: &D32) -> Vec<D32> {
     let middles: BTreeSet<D32> = firsts
         .iter()
@@ -1357,6 +1364,14 @@ fn route_legs(firsts: &[Paired], seconds: &[Paired], token_in: &D32, token_out: 
         })
         .map(|v| v.vault_id)
         .collect();
+    for v in seconds
+        .iter()
+        .filter(|v| v.other(token_out).as_ref() == Some(token_in))
+    {
+        if !walked.contains(&v.vault_id) {
+            walked.push(v.vault_id);
+        }
+    }
     for v in second_legs {
         if !walked.contains(&v.vault_id) {
             walked.push(v.vault_id);
@@ -1449,13 +1464,15 @@ pub async fn find_route(
     // input token alone, each chain through a vault of each token, and each
     // split across two vaults of the pair (Amendment S19).
     let mut candidates: Vec<Vec<&VaultAtHead>> = Vec::new();
-    let direct: Vec<&VaultAtHead> = firsts
-        .iter()
-        .filter_map(|id| heads.get(id))
-        .filter(
-            |vault| matches!(other_token(&vault.terms, &token_in), Some((t, ..)) if t == token_out),
-        )
-        .collect();
+    // A vault pairing the two tokens is direct whichever index found it (Amendment S16).
+    let mut direct: Vec<&VaultAtHead> = Vec::new();
+    for vault in firsts.iter().chain(&seconds).filter_map(|id| heads.get(id)) {
+        if matches!(other_token(&vault.terms, &token_in), Some((t, ..)) if t == token_out)
+            && !direct.iter().any(|known| known.vault_id == vault.vault_id)
+        {
+            direct.push(vault);
+        }
+    }
     for (i, one) in direct.iter().enumerate() {
         candidates.push(vec![one]);
         for two in &direct[i + 1..] {
@@ -3071,7 +3088,38 @@ mod tests {
             vec![[10; 32], [11; 32], [20; 32]],
             "the direct vault and the WILD→TKN→ERA legs; not ERA/OTHER, not WILD/LONE"
         );
-        assert!(route_legs(&[vault(12, wild, lone)], &seconds, &wild, &era).is_empty());
+        // a chain whose second leg is missing is never walked
+        let no_direct = [vault(20, era, tkn), vault(21, other, era)];
+        assert!(route_legs(&[vault(12, wild, lone)], &no_direct, &wild, &era).is_empty());
+        // the WILD/ERA vault ERA's index names is direct, though WILD's read did not reach it (Amendment S16)
+        assert_eq!(
+            route_legs(&[vault(12, wild, lone)], &seconds, &wild, &era),
+            vec![[10; 32]]
+        );
+    }
+
+    /// Amendment S16: a vault pairing the two tokens is found through either
+    /// token's index. The native token's index is read only to its bound, so a
+    /// new market's vault may be missing from the input token's read and named
+    /// only by the output token's; it is walked all the same, once.
+    #[test]
+    fn a_direct_vault_found_only_by_the_output_tokens_index_is_walked() {
+        let (era, dbucks, wild) = ([2u8; 32], [6u8; 32], [1u8; 32]);
+        let vault = |id: u8, a: D32, b: D32| Paired {
+            vault_id: [id; 32],
+            tokens: (a, b),
+        };
+        // ERA's read stopped at its bound before the ERA/DBUCKS vault
+        let firsts = [vault(10, wild, era), vault(11, era, wild)];
+        let seconds = [vault(30, dbucks, era)];
+        assert_eq!(
+            route_legs(&firsts, &seconds, &era, &dbucks),
+            vec![[30; 32]],
+            "the ERA/DBUCKS vault, from DBUCKS's index; not the ERA/WILD vaults, which reach no DBUCKS"
+        );
+        // found by both indexes: walked once
+        let both = [vault(30, dbucks, era), vault(10, wild, era)];
+        assert_eq!(route_legs(&both, &seconds, &era, &dbucks), vec![[30; 32]]);
     }
 
     /// MR-STOR-0021 (storage §4): a setup candidate whose bytes no member
