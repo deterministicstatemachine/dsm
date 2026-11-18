@@ -254,6 +254,24 @@ impl<M: SlotMemory> SlottedStore<M> {
         }
     }
 
+    /// The slots past the trial store's, where the board keeps the owner's stamp (DSM Amendment A38):
+    /// this store's own code, laid out for one stamp, so a stamp is replaced whole as a record is.
+    /// Neither a record's write nor a try-run's ever reaches them.
+    fn stamp_store(&mut self) -> Result<SlottedStore<&mut M>, StoreError> {
+        let trial = self.trial();
+        let first = trial.first + 2 + 2 * trial.bank_slots;
+        let bank_slots = crate::stamp::BOARD_STAMP_BYTES.div_ceil(self.memory.capacity());
+        if usize::from(first) + 2 + 2 * bank_slots > usize::from(self.memory.slots()) {
+            return Err(StoreError::TooLarge);
+        }
+        Ok(SlottedStore {
+            memory: &mut self.memory,
+            first,
+            // At most the memory's slot count, so it is a slot number.
+            bank_slots: bank_slots as u16,
+        })
+    }
+
     /// This store's own code over the slots past its banks, where no record is ever read from.
     fn trial(&mut self) -> SlottedStore<&mut M> {
         let first = self.first + 2 + 2 * self.bank_slots;
@@ -330,6 +348,14 @@ impl<M: SlotMemory> ActiveStore for SlottedStore<M> {
             trial.memory.erase(slot)?;
         }
         Ok(())
+    }
+
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError> {
+        self.stamp_store()?.write(stamp)
+    }
+
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.stamp_store()?.read()
     }
 }
 
@@ -442,6 +468,89 @@ mod tests {
 
     fn record(len: usize, fill: u8) -> Vec<u8> {
         (0..len).map(|i| fill ^ (i as u8)).collect()
+    }
+
+    /// The board's chip as the firmware lays it out: TROPIC01 R-memory's 512 slots of 444 bytes, the
+    /// record from slot 0 sized for a whole frame (`bring_up.rs`).
+    fn board_store() -> SlottedStore<Memory> {
+        ok(
+            SlottedStore::new(Memory::new(512, 444), 0, crate::service::MAX_FRAME_LEN),
+            "laid out as the board lays it out",
+        )
+    }
+
+    /// The owner's stamp is kept in the slots past the trial store's (DSM Amendment A38): it reads back
+    /// whole, and neither the record's writes, a try-run's writes nor the clearing of a try-run's
+    /// slots touch it, nor it theirs. A stamp kept again replaces it whole.
+    /// MUTATION CONTROL: laying the stamp out over the trial slots, or keeping nothing, turns this red.
+    #[test]
+    fn the_stamp_reads_back_whole_and_nothing_else_written_touches_it() {
+        let mut store = board_store();
+        let stamp = record(crate::stamp::BOARD_STAMP_BYTES, 0x5a);
+        assert_eq!(store.stamp_read(), Ok(None), "no stamp kept yet");
+        ok(store.stamp_write(&stamp), "the stamp kept");
+        assert_eq!(store.stamp_read(), Ok(Some(stamp.clone())));
+
+        let big = record(crate::service::MAX_FRAME_LEN, 0x11);
+        ok(store.write(&big), "a record as large as a frame");
+        ok(store.write(&record(9000, 0x22)), "and another");
+        ok(
+            store.trial_write(&record(20_000, 0x33)),
+            "a try-run's record",
+        );
+        ok(store.trial_clear(), "the try-run's slots cleared");
+        assert_eq!(
+            store.stamp_read(),
+            Ok(Some(stamp.clone())),
+            "the stamp stands"
+        );
+        assert_eq!(
+            store.read(),
+            Ok(Some(record(9000, 0x22))),
+            "the record stands"
+        );
+
+        let again = record(crate::stamp::BOARD_STAMP_BYTES, 0x6b);
+        ok(store.stamp_write(&again), "a stamp kept again");
+        assert_eq!(store.stamp_read(), Ok(Some(again)));
+        assert_eq!(
+            store.read(),
+            Ok(Some(record(9000, 0x22))),
+            "the record stands"
+        );
+    }
+
+    /// A power cut anywhere in keeping a stamp leaves the stamp before it or the new one, never a
+    /// mixture, and never a broken record.
+    #[test]
+    fn a_stamp_cut_short_leaves_the_one_before_it() {
+        let first = record(crate::stamp::BOARD_STAMP_BYTES, 0x01);
+        let second = record(crate::stamp::BOARD_STAMP_BYTES, 0x02);
+        for cut_after in 0..90 {
+            let mut store = board_store();
+            ok(store.stamp_write(&first), "the first stamp");
+            store.memory.budget = Some(cut_after);
+            let written = store.stamp_write(&second);
+            store.memory.budget = None;
+            let held = ok(store.stamp_read(), "the stamp reads");
+            match written {
+                Ok(()) => assert_eq!(held, Some(second.clone()), "cut after {cut_after}"),
+                Err(_cut) => assert!(
+                    held == Some(first.clone()) || held == Some(second.clone()),
+                    "cut after {cut_after}: a mixture"
+                ),
+            }
+        }
+    }
+
+    /// A chip too small for the stamp past its trial store says so, and keeps nothing.
+    #[test]
+    fn a_chip_with_no_room_for_the_stamp_refuses_it() {
+        let mut store = ok(SlottedStore::new(Memory::new(64, 100), 0, 1000), "laid out");
+        assert_eq!(
+            store.stamp_write(&record(crate::stamp::BOARD_STAMP_BYTES, 0x01)),
+            Err(StoreError::TooLarge)
+        );
     }
 
     #[test]

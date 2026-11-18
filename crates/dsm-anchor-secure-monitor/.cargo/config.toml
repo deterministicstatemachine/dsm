@@ -1,8 +1,6 @@
-# RP2350 has dual Cortex-M33 (ARM) and dual Hazard3 (RISC-V). T1 defaults to
-# ARM (the most-trodden rp235x-hal path); RISC-V is a one-flag swap.
-#   cargo build --release
-#   cargo build --release --target riscv32imac-unknown-none-elf
-# Pure Rust — no C toolchain / newlib / pico-sdk needed.
+# The Secure monitor is TrustZone-M code for the RP2350's Cortex-M33: Arm only. A build names its
+# image: `cargo build --release --features production`, or `bench_self_enroll` for the trial image.
+# build.rs needs clang, arm-none-eabi-ar and arm-none-eabi-objcopy (the veneer and the NS image).
 
 [build]
 target = "thumbv8m.main-none-eabihf"

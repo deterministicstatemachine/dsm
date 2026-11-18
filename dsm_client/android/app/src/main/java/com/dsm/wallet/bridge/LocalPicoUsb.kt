@@ -22,16 +22,16 @@ import java.util.concurrent.TimeoutException
  * OPAQUE BYTE TRANSPORT ONLY. This class understands nothing about TROPIC /
  * protobuf — Rust builds the request frame and decodes the response. All this does is: open the
  * Pico's USB-CDC endpoints and move a length-prefixed frame across. Contract with the Rust
- * `UsbPicoTransport`:
+ * `usb_pico::jni_usb_transceive`:
  *   - input `frame` = `LE32(bodyLen) ++ body` (the request, already framed by Rust). Written verbatim.
  *   - the Pico replies `LE32(bodyLen) ++ body`; we read the 4-byte length, then that many bytes, and
- *     return JUST the body (Rust decodes it). Any failure -> empty ByteArray -> Rust fails closed to
- *     online recovery. No key material passes through here.
+ *     return JUST the body (Rust decodes it). Any failure -> empty ByteArray -> Rust fails closed
+ *     (`answer_over_usb`). No key material passes through here.
  *
  * Only the DSM Anchor itself is opened: the device whose descriptor carries the anchor firmware's
  * vendor and product id. Bench tuning points (validate on the phone): the CDC-data interface +
  * bulk-endpoint discovery, USB permission (grant via requestPermission or the attach intent-filter),
- * and the read timeout. Mirrors the desktop bench `examples/shared/usb.rs::transceive`, in Kotlin.
+ * and the read timeout.
  */
 object LocalPicoUsb {
     private const val TAG = "LocalPicoUsb"
@@ -45,7 +45,7 @@ object LocalPicoUsb {
     internal const val DSM_ANCHOR_PRODUCT_ID = 0xD5A1
     private const val WRITE_TIMEOUT_MS = 2000
     // Android's USB host library (libusbhost) refuses one bulk request longer than 16 KiB, its
-    // MAX_USBFS_BUFFER_SIZE, outright: the 49,896-byte OP_AUTHORIZE frame (a 4 KiB head and the
+    // MAX_USBFS_BUFFER_SIZE, outright: the 49,896-byte OP_AUTHORIZE frame (a 40-byte head and the
     // owner's 49,856-byte SPHINCS+ signature) came back -1 on the phone, at once. A frame goes out
     // in requests no longer than that; the firmware reads a request by its length prefix, never by
     // the USB packets it arrived in.
@@ -53,7 +53,7 @@ object LocalPicoUsb {
     private const val READ_TIMEOUT_MS = 500
     private const val CONTROL_TIMEOUT_MS = 1000
     // Drain the firmware boot banner / self-test chatter off the CDC before the first transaction
-    // (mirrors the desktop bench's usb::open_and_drain). Read until quiet, bounded by poll counts.
+    // Read until quiet, bounded by poll counts.
     private const val DRAIN_TIMEOUT_MS = 200
     private const val DRAIN_QUIET_POLLS = 4   // ~800ms of silence ends the drain
     private const val DRAIN_MAX_POLLS = 40    // hard cap (~8s worst case) so boot chatter can finish

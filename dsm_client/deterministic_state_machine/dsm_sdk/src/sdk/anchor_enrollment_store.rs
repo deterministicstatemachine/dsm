@@ -4,12 +4,13 @@
 //!
 //! Implements [`AnchorEnrollmentStore`] from `dsm::crypto::anchor_enrollment` over the SDK's
 //! SQLite client database, so the receiver's pinned fused-anchor admissions survive an app
-//! restart (a restart must never re-open the first-transfer TOFU window). Mirrors
+//! restart (a restart must never let a later disclosure replace a kept pin). Mirrors
 //! [`SqliteChainTipStore`](crate::sdk::chain_tip_store::SqliteChainTipStore): a stateless wrapper
 //! delegating to `client_db` helpers.
 //!
 //! Installing this store does NOT by itself admit anyone — pins are admitted only through the
-//! offline-bearer bilateral confirm flow (first-transfer TOFU / same-anchor upgrade).
+//! offline-bearer bilateral confirm flow: on the first transfer, a board carrying the owner's stamp
+//! (DSM Amendment A38), and the same anchor after.
 
 use dsm::crypto::anchor_enrollment::{AnchorEnrollment, AnchorEnrollmentStore};
 use dsm::types::error::DsmError;

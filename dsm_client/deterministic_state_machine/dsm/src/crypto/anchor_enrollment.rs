@@ -89,14 +89,44 @@ pub fn require_bundle_of(pin: PinKeys<'_>, owner: BundleOwner<'_>) -> Result<(),
     Ok(())
 }
 
+/// A board's stamp as a disclosure carries it, and the stamp keys it is checked
+/// under (DSM Amendment A38): the owner's, compiled into the wallet.
+#[derive(Clone, Copy, Debug)]
+pub struct StampCheck<'a> {
+    /// The stamp the disclosure carries; empty when it carries none.
+    pub stamp: &'a [u8],
+    /// The stamp keys a stamp verifies under.
+    pub keys: &'a [anchor_core::stamp::StampKey],
+}
+
+/// The board `pin` names carries the owner's stamp (DSM Amendment A38): the
+/// stamp verifies under one of the stamp keys over the pin's anchor id,
+/// `pk_host` and `pk_chip`. A board built and keyed by anyone else carries
+/// none, and a stamp taken from another board names that board.
+pub fn require_board_stamp(
+    pin: &FusedAnchorPin,
+    check: StampCheck<'_>,
+) -> Result<(), anchor_core::stamp::StampRefusal> {
+    anchor_core::stamp::verify_board_stamp::<crate::types::offline_chain::SphincsHost>(
+        check.keys,
+        anchor_core::stamp::BoardIdentity {
+            anchor_id: &pin.anchor_id,
+            pk_host: &pin.partition_pk,
+            pk_chip: &pin.pk_chip,
+        },
+        check.stamp,
+    )
+}
+
 /// What a receiver does with a sender's disclosed anchor, given what it has
 /// pinned for that sender.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PinAdmitDecision {
-    /// No pin yet, and the disclosed bundle recomputes for the sender: pin the
-    /// disclosed anchor (first-transfer admission under the verified contact).
+    /// No pin yet, the disclosed bundle recomputes for the sender, and the
+    /// board carries the owner's stamp: pin the disclosed anchor.
     Admit(AnchorEnrollment),
-    /// Already pinned and the disclosure matches: keep the pin untouched.
+    /// Already pinned, the disclosure matches, and the board carries the
+    /// owner's stamp: keep the pin untouched.
     NoChange,
     /// The first disclosure's bundle does not recompute for the sender, or the
     /// disclosure CONFLICTS with the pinned anchor (anchor identity or bundle,
@@ -104,6 +134,10 @@ pub enum PinAdmitDecision {
     /// silent-substitution attack: the pinned anchor is kept, never overwritten
     /// from a transfer.
     Reject(&'static str),
+    /// The board carries no stamp, or one that does not verify under the stamp
+    /// keys over its identity (DSM Amendment A38). Nothing is pinned, and a
+    /// pin already held is kept.
+    Unstamped(anchor_core::stamp::StampRefusal),
 }
 
 /// Decide admit / no change / reject for a disclosed pin. Pure: no store, no
@@ -111,16 +145,20 @@ pub enum PinAdmitDecision {
 /// ([`require_bundle_of`]) — from the disclosed keys, enrolled counter and
 /// `birth_commitment`, the sender's pinned online key `sender_online_key`, its
 /// device id and the disclosed policy: the bundle is then the one the sender's
-/// online load named. It is pinned as disclosed, on first use (DSM Amendment
-/// A24): nothing offline can learn of a compromise of the anchor found
-/// elsewhere. Against an existing pin the disclosure must match it on
-/// the anchor identity and bundle, the policy, `H₀`, `pk_host` and `pk_chip`.
+/// online load named — and only when the board carries the owner's stamp
+/// ([`require_board_stamp`], DSM Amendment A38). Against an existing pin the
+/// disclosure must match it on the anchor identity and bundle, the policy,
+/// `H₀`, `pk_host` and `pk_chip`, so a changed anchor is refused as changed and
+/// the pin is kept (Amendment A24); a matching one must still carry the stamp,
+/// so a pin held from before A38 admits nothing unstamped. Offline acceptance
+/// still cannot learn of a compromise of the board found elsewhere.
 pub fn pin_admit_decision(
     device_id: [u8; 32],
     sender_online_key: &[u8],
     disclosed_policy: [u8; 32],
     birth_commitment: &[u8; 32],
     disclosed: &FusedAnchorPin,
+    stamp: StampCheck<'_>,
     existing: Option<&AnchorEnrollment>,
 ) -> PinAdmitDecision {
     let Some(cur) = existing else {
@@ -147,6 +185,9 @@ pub fn pin_admit_decision(
                 "the disclosed bundle does not recompute for the sender",
             );
         }
+        if let Err(refusal) = require_board_stamp(disclosed, stamp) {
+            return PinAdmitDecision::Unstamped(refusal);
+        }
         return PinAdmitDecision::Admit(AnchorEnrollment {
             device_id,
             policy_hash: disclosed_policy,
@@ -167,6 +208,9 @@ pub fn pin_admit_decision(
     }
     if cur.pin.pk_chip != disclosed.pk_chip {
         return PinAdmitDecision::Reject("disclosed pk_chip differs from the pinned one");
+    }
+    if let Err(refusal) = require_board_stamp(&cur.pin, stamp) {
+        return PinAdmitDecision::Unstamped(refusal);
     }
     PinAdmitDecision::NoChange
 }
@@ -274,6 +318,56 @@ mod tests {
         }
     }
 
+    use crate::crypto::sphincs::{SphincsKeyPair, SphincsVariant};
+    use std::sync::OnceLock;
+
+    /// The stamp key these tests stamp boards with: an SPX128f key from a
+    /// fixed seed; the owner's own key never leaves his computer.
+    fn stamp_key(seed: u8) -> SphincsKeyPair {
+        crate::crypto::sphincs::generate_keypair_from_seed(SphincsVariant::SPX128f, &[seed; 32])
+            .expect("an SPX128f stamp key")
+    }
+
+    fn the_stamp_key() -> &'static SphincsKeyPair {
+        static KEY: OnceLock<SphincsKeyPair> = OnceLock::new();
+        KEY.get_or_init(|| stamp_key(0x5A))
+    }
+
+    fn key_of(key: &SphincsKeyPair) -> anchor_core::stamp::StampKey {
+        core::array::from_fn(|i| key.public_key[i])
+    }
+
+    /// The stamp keys these tests' wallet holds.
+    fn stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
+        static KEYS: OnceLock<Vec<anchor_core::stamp::StampKey>> = OnceLock::new();
+        KEYS.get_or_init(|| vec![key_of(the_stamp_key())])
+    }
+
+    /// `key`'s stamp over the board `p` names.
+    fn stamp_by(key: &SphincsKeyPair, p: &FusedAnchorPin) -> Vec<u8> {
+        let message = anchor_core::stamp::board_stamp_message(anchor_core::stamp::BoardIdentity {
+            anchor_id: &p.anchor_id,
+            pk_host: &p.partition_pk,
+            pk_chip: &p.pk_chip,
+        });
+        crate::crypto::sphincs::sign(SphincsVariant::SPX128f, &key.secret_key, &message)
+            .expect("a stamp")
+    }
+
+    /// The stamp of the board [`pin`] names, under the test stamp key.
+    fn pin_stamp() -> &'static [u8] {
+        static STAMP: OnceLock<Vec<u8>> = OnceLock::new();
+        STAMP.get_or_init(|| stamp_by(the_stamp_key(), &pin()))
+    }
+
+    /// [`pin`]'s board, stamped.
+    fn stamped() -> StampCheck<'static> {
+        StampCheck {
+            stamp: pin_stamp(),
+            keys: stamp_keys(),
+        }
+    }
+
     #[test]
     fn admit_then_get_returns_the_pinned_fused_anchor() {
         let store = InMemoryAnchorEnrollmentStore::new();
@@ -299,10 +393,20 @@ mod tests {
 
     // --- receiver-admit fold: pin_admit_decision matrix ---
 
+    /// A first disclosure whose bundle recomputes and whose board carries the
+    /// owner's stamp is pinned as disclosed (DSM Amendment A38).
     #[test]
     fn pin_admit_decision_first_transfer_admits_under_disclosed_policy() {
         let d = pin();
-        match pin_admit_decision([0x11; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, &d, None) {
+        match pin_admit_decision(
+            [0x11; 32],
+            &ONLINE_KEY,
+            [0x9A; 32],
+            &BIRTH,
+            &d,
+            stamped(),
+            None,
+        ) {
             PinAdmitDecision::Admit(e) => {
                 assert_eq!(e.device_id, [0x11; 32]);
                 assert_eq!(e.policy_hash, [0x9A; 32]);
@@ -326,7 +430,7 @@ mod tests {
             ([0x11; 32], ONLINE_KEY.to_vec(), [0x9A; 32], [0xB8; 32]),
         ] {
             assert_eq!(
-                pin_admit_decision(device, &key, policy, &birth, &d, None),
+                pin_admit_decision(device, &key, policy, &birth, &d, stamped(), None),
                 PinAdmitDecision::Reject("the disclosed bundle does not recompute for the sender"),
             );
         }
@@ -351,15 +455,39 @@ mod tests {
         };
 
         assert_eq!(
-            pin_admit_decision([0x11; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, &d, None),
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &d,
+                stamped(),
+                None
+            ),
             PinAdmitDecision::Admit(pinned()),
         );
         assert_eq!(
-            pin_admit_decision([0x12; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, &d, None),
+            pin_admit_decision(
+                [0x12; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &d,
+                stamped(),
+                None
+            ),
             PinAdmitDecision::Reject("the disclosed bundle does not recompute for the sender"),
         );
         assert_eq!(
-            pin_admit_decision([0x11; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, &d, Some(&cur)),
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &d,
+                stamped(),
+                Some(&cur)
+            ),
             PinAdmitDecision::NoChange,
         );
         assert_eq!(
@@ -369,6 +497,7 @@ mod tests {
                 [0x9A; 32],
                 &[0xB8; 32],
                 &d,
+                stamped(),
                 Some(&cur)
             ),
             PinAdmitDecision::NoChange,
@@ -420,6 +549,7 @@ mod tests {
                     policy,
                     &BIRTH,
                     &disclosed,
+                    stamped(),
                     Some(&cur)
                 ),
                 PinAdmitDecision::Reject(reason),
@@ -438,6 +568,7 @@ mod tests {
                 [0x9A; 32],
                 &BIRTH,
                 &pin(),
+                stamped(),
                 Some(&cur)
             ),
             PinAdmitDecision::NoChange
@@ -463,7 +594,15 @@ mod tests {
         for d in [&anchor, &bundle, &h0, &host, &chip] {
             assert!(
                 matches!(
-                    pin_admit_decision([0x11; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, d, Some(&cur)),
+                    pin_admit_decision(
+                        [0x11; 32],
+                        &ONLINE_KEY,
+                        [0x9A; 32],
+                        &BIRTH,
+                        d,
+                        stamped(),
+                        Some(&cur)
+                    ),
                     PinAdmitDecision::Reject(_)
                 ),
                 "conflicting disclosure must be rejected: {d:?}"
@@ -477,9 +616,180 @@ mod tests {
                 [0x9B; 32],
                 &BIRTH,
                 &base,
+                stamped(),
                 Some(&cur)
             ),
             PinAdmitDecision::Reject(_)
         ));
+    }
+
+    /// A first disclosure is pinned only when its board carries the owner's
+    /// stamp: none, a cut one, one made by another key, or one made for another
+    /// board's `pk_host`, `pk_chip` or anchor id is refused as unstamped, and
+    /// nothing is admitted (DSM Amendment A38).
+    /// MUTATION CONTROL: admitting a first disclosure without the stamp check
+    /// turns this red.
+    #[test]
+    fn a_first_disclosure_without_the_owners_stamp_is_not_admitted() {
+        use anchor_core::stamp::StampRefusal;
+        let d = pin();
+        let stranger = stamp_key(0x5B);
+        let other_host = FusedAnchorPin {
+            partition_pk: vec![0x08; 64],
+            ..pin()
+        };
+        let other_chip = FusedAnchorPin {
+            pk_chip: vec![0x0D; 32],
+            ..pin()
+        };
+        let other_anchor = FusedAnchorPin {
+            anchor_id: [0xA2; 32],
+            ..pin()
+        };
+        let cut = &pin_stamp()[1..];
+        let by_stranger = stamp_by(&stranger, &d);
+        let for_host = stamp_by(the_stamp_key(), &other_host);
+        let for_chip = stamp_by(the_stamp_key(), &other_chip);
+        let for_anchor = stamp_by(the_stamp_key(), &other_anchor);
+        for (what, stamp, refusal) in [
+            ("no stamp", &[][..], StampRefusal::Missing),
+            ("a cut stamp", cut, StampRefusal::Length),
+            (
+                "a stamp by another key",
+                &by_stranger[..],
+                StampRefusal::NotStamped,
+            ),
+            (
+                "a stamp for another pk_host",
+                &for_host[..],
+                StampRefusal::NotStamped,
+            ),
+            (
+                "a stamp for another pk_chip",
+                &for_chip[..],
+                StampRefusal::NotStamped,
+            ),
+            (
+                "a stamp for another anchor",
+                &for_anchor[..],
+                StampRefusal::NotStamped,
+            ),
+        ] {
+            assert_eq!(
+                pin_admit_decision(
+                    [0x11; 32],
+                    &ONLINE_KEY,
+                    [0x9A; 32],
+                    &BIRTH,
+                    &d,
+                    StampCheck {
+                        stamp,
+                        keys: stamp_keys(),
+                    },
+                    None
+                ),
+                PinAdmitDecision::Unstamped(refusal),
+                "{what}"
+            );
+        }
+        // The stamp key the wallet holds decides it: under the stranger's key
+        // the stranger's stamp admits, and under no key nothing does.
+        let strangers_keys = [key_of(&stranger)];
+        assert!(matches!(
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &d,
+                StampCheck {
+                    stamp: &by_stranger,
+                    keys: &strangers_keys,
+                },
+                None
+            ),
+            PinAdmitDecision::Admit(_)
+        ));
+        assert_eq!(
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &d,
+                StampCheck {
+                    stamp: pin_stamp(),
+                    keys: &[],
+                },
+                None
+            ),
+            PinAdmitDecision::Unstamped(StampRefusal::NotStamped),
+        );
+    }
+
+    /// A pin held from before Amendment A38 admits nothing unstamped: a
+    /// matching disclosure without the stamp is refused as unstamped and the
+    /// pin is kept; with the stamp nothing changes.
+    /// MUTATION CONTROL: skipping the stamp check against an existing pin
+    /// turns this red.
+    #[test]
+    fn a_pinned_board_still_needs_its_stamp_on_every_payment() {
+        use anchor_core::stamp::StampRefusal;
+        let cur = pinned();
+        assert_eq!(
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &pin(),
+                StampCheck {
+                    stamp: &[],
+                    keys: stamp_keys(),
+                },
+                Some(&cur)
+            ),
+            PinAdmitDecision::Unstamped(StampRefusal::Missing),
+        );
+        assert_eq!(
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &pin(),
+                stamped(),
+                Some(&cur)
+            ),
+            PinAdmitDecision::NoChange,
+        );
+    }
+
+    /// Another board, stamped as it should be, is still not the pinned one: a
+    /// changed anchor is refused as changed, never as unstamped, and never
+    /// replaces the pin (Amendment A24's rule, kept by A38).
+    #[test]
+    fn a_stamped_board_never_replaces_a_pin() {
+        let cur = pinned();
+        let other = FusedAnchorPin {
+            anchor_id: [0xA2; 32],
+            ..pin()
+        };
+        let its_stamp = stamp_by(the_stamp_key(), &other);
+        assert_eq!(
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &other,
+                StampCheck {
+                    stamp: &its_stamp,
+                    keys: stamp_keys(),
+                },
+                Some(&cur)
+            ),
+            PinAdmitDecision::Reject("disclosed anchor identity differs from the pinned one"),
+        );
     }
 }

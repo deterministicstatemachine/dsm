@@ -22,7 +22,7 @@
 #   ingress/ingress-token   this launch's ingress secret (only your server reads it)
 #   ingress-url             the address the ingress listens on
 #   relay-url               the address wallets reach the relay on
-#   host.log, host.pid
+#   host.log, host.pid      the log keeps its newest 50 MB (host.log.1 holds the 10 MB before)
 #
 # Usage:
 #   scripts/app_dev.sh up <app|wallet|wallet2> [beta|local]
@@ -143,8 +143,9 @@ up() {
         --relay-bind "127.0.0.1:$RELAY_PORT" \
         --relay-endpoint "$RELAY_URL" \
         --relay-name 127.0.0.1 \
-        >"$DIR/host.log" 2>&1 &
+        >>"$DIR/host.log" 2>&1 &
     echo $! >"$DIR/host.pid"
+    keep_log_bounded "$DIR/host.log" "$!" &
     for _ in $(seq 1 240); do
         if ready; then
             show
@@ -159,6 +160,21 @@ up() {
     done
     echo "[app-dev] the $NAME host did not answer in two minutes; its log is $DIR/host.log" >&2
     return 1
+}
+
+# A host runs for days: its log keeps its newest part, never the whole of it.
+# The host appends (O_APPEND), so the log can be cut while it writes.
+LOG_CAP_BYTES=$((50 * 1024 * 1024))
+LOG_KEEP_BYTES=$((10 * 1024 * 1024))
+keep_log_bounded() {
+    local log="$1" pid="$2"
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$(wc -c <"$log" 2>/dev/null || echo 0)" -gt "$LOG_CAP_BYTES" ]; then
+            tail -c "$LOG_KEEP_BYTES" "$log" >"$log.1"
+            : >"$log"
+        fi
+        sleep 30
+    done
 }
 
 show() {

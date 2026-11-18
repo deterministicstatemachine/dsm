@@ -245,8 +245,7 @@ mod tests {
     use dsm::types::error::DsmError;
 
     /// A router on a device created as wallet creation creates it. No anchor
-    /// appliance is attached — no transport to one exists — and that absence
-    /// is the condition under test.
+    /// appliance is attached, and that absence is the condition under test.
     fn router_on_a_device() -> AppRouterImpl {
         crate::economic_fixtures::local_device(0x0A);
         AppRouterImpl::new(SdkConfig {
@@ -337,6 +336,9 @@ mod tests {
     impl crate::anchor::AnchorAppliance for OnTheCable {
         fn status(&mut self) -> Result<crate::anchor::ApplianceStatus, DsmError> {
             self.anchor.status()
+        }
+        fn board_identity(&mut self) -> Result<crate::anchor::BoardIdentityReport, DsmError> {
+            self.anchor.board_identity()
         }
         fn authorization_nonce(&mut self) -> Result<[u8; 32], DsmError> {
             self.anchor.authorization_nonce()

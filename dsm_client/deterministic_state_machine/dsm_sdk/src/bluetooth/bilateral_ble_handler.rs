@@ -227,12 +227,10 @@ pub(crate) struct StagedBearerSpend {
     pub(crate) spend: dsm::types::device_state::OfflineSpend,
 }
 
-/// Stage `operation`, a bearer transfer to `counterparty_device_id` opened by `terms`, on this
-/// device's anchor under the receiver's challenge `receiver_challenge`, and build its account
-/// spend. The operation's asset is resolved independently from the token `terms` name (§9.5)
-/// and must be the asset the operation signs.
 /// An anchor disclosure's fields, each its exact length: the bundle, the pin
-/// keys `B` commits, the enrolled counter, the policy and the birth commitment.
+/// keys `B` commits, the enrolled counter, the policy and the birth commitment,
+/// and the owner's stamp on the board (DSM Amendment A38), at most a stamp's
+/// length and empty when the board carries none.
 pub(crate) struct DisclosedAnchor {
     pub bundle: [u8; 32],
     pub anchor_id: [u8; 32],
@@ -241,9 +239,18 @@ pub(crate) struct DisclosedAnchor {
     pub pk_chip: Vec<u8>,
     pub policy: [u8; 32],
     pub birth_commitment: [u8; 32],
+    pub board_stamp: Vec<u8>,
 }
 
 impl DisclosedAnchor {
+    /// The disclosed stamp, as the wallet checks it: under the stamp keys it carries.
+    pub(crate) fn stamp(&self) -> dsm::crypto::anchor_enrollment::StampCheck<'_> {
+        dsm::crypto::anchor_enrollment::StampCheck {
+            stamp: &self.board_stamp,
+            keys: crate::anchor::board_stamp_keys(),
+        }
+    }
+
     pub(crate) fn keys(&self) -> dsm::crypto::anchor_enrollment::PinKeys<'_> {
         dsm::crypto::anchor_enrollment::PinKeys {
             bundle: &self.bundle,
@@ -289,6 +296,11 @@ pub(crate) fn disclosed_anchor(
             "an anchor disclosure's pk_chip is not 32 bytes",
         ));
     }
+    if d.board_stamp.len() > anchor_core::stamp::BOARD_STAMP_BYTES {
+        return Err(DsmError::invalid_operation(
+            "an anchor disclosure's stamp is longer than a stamp",
+        ));
+    }
     Ok(DisclosedAnchor {
         bundle: fixed(&d.bundle, "bundle")?,
         anchor_id: fixed(&d.anchor_id, "anchor id")?,
@@ -297,9 +309,14 @@ pub(crate) fn disclosed_anchor(
         pk_chip: d.pk_chip.clone(),
         policy: fixed(&d.policy_hash, "policy")?,
         birth_commitment: fixed(&d.birth_commitment, "birth commitment")?,
+        board_stamp: d.board_stamp.clone(),
     })
 }
 
+/// Stage `operation`, a bearer transfer to `counterparty_device_id` opened by `terms`, on this
+/// device's anchor under the receiver's challenge `receiver_challenge`, and build its account
+/// spend. The operation's asset is resolved independently from the token `terms` name (§9.5)
+/// and must be the asset the operation signs.
 pub(crate) fn stage_bearer_spend(
     router: &dyn crate::bridge::AppRouter,
     rel_key: [u8; 32],
@@ -1294,6 +1311,16 @@ impl BilateralBleHandler {
         // A step whose anchor release was left unfinished is settled first, so
         // the anchor holds no release the new step would wait behind.
         self.settle_releasing_steps().await?;
+        // A payer's board every receiver refuses (DSM Amendment A38) proposes
+        // nothing: no receiver is asked to accept a payment it cannot take.
+        // The board itself is asked again, and refuses, before it signs
+        // (`stage_bearer_spend`), and with no router installed nothing is
+        // staged at all.
+        if let Some(router) = crate::bridge::app_router() {
+            router.require_own_board_pays().map_err(|e| {
+                DsmError::invalid_operation(format!("bilateral prepare refused: {e}"))
+            })?;
+        }
 
         // Through the proposer's door: the step in flight is read and the new
         // step's row written under the one door (the peer's door is the other).
@@ -3013,8 +3040,10 @@ impl BilateralBleHandler {
     /// sent to the receiver.
     ///
     /// A bearer transfer commits the sender's step here, when its anchor
-    /// commits: the receiver's acceptance it needs is already verified, and
-    /// the acknowledgment only files the receiver's countersigned receipt. The
+    /// commits: the receiver's acceptance it needs is already verified. The
+    /// acknowledgment that follows — the receiver's countersigned receipt and
+    /// its board's receive commit of this release, both checked by Core and
+    /// kept — finalizes the session ([`Self::record_commit_ack`]). The
     /// confirm's state is durable before the envelope is returned.
     async fn send_bilateral_confirm(
         &self,
@@ -3163,7 +3192,7 @@ impl BilateralBleHandler {
         )?;
 
         // A bearer step is one motion (owner ruling: the sender's step commits when its anchor
-        // commits; the acknowledgment only files the receiver's countersigned receipt):
+        // commits). The acknowledgment that follows is checked and kept, and finalizes the session:
         // 1. the step is recorded as releasing — σ_B and the challenge it signed, this device's
         //    signed receipt, the root that receipt names, the account spend, and the EK it was
         //    signed with — so a response delivered again cannot release it twice, and a restart
@@ -3393,9 +3422,9 @@ impl BilateralBleHandler {
         let ek_step_set = crate::sdk::economic_admission_flow::ble_ek_step_set_id()?;
         let genesis_hash = self.bilateral_tx_manager.read().await.local_genesis_hash();
         // Receiver-admit fold: every bearer confirm discloses the fused-anchor pin material
-        // (B/anchor_id/H0/pk_host/pk_chip), bound to this transfer — never a standalone message.
-        // The receiver pins it TOFU on the first transfer and verifies same-anchor on every
-        // subsequent one.
+        // (B/anchor_id/H0/pk_host/pk_chip) and the board's stamp, bound to this transfer — never a
+        // standalone message. The receiver pins it on the first transfer only with the owner's
+        // stamp (DSM Amendment A38), and on every later one verifies the same anchor and the stamp.
         let anchor_disclosure = self.build_anchor_disclosure(&artifacts.pin, &session.operation)?;
         let parent_tip = prepared.parent_tip;
         let rel_key = prepared.rel_key;
@@ -3697,9 +3726,6 @@ impl BilateralBleHandler {
         Ok(())
     }
 
-    /// After a restart, settle a bearer step recorded as releasing by the recovery table: back
-    /// to waiting when its anchor's counter did not move, or committed — the same release,
-    /// emitted again — when it did, with the anchor's frontier then advanced.
     /// Settle every step whose anchor release was left unfinished (a USB timeout, a power cut, a
     /// chip fault) by the recovery table, live rather than at the next restart: committed with the
     /// same release when the anchor's counter moved, back to awaiting the response when it did not.
@@ -3718,6 +3744,9 @@ impl BilateralBleHandler {
         Ok(())
     }
 
+    /// Settle a bearer step recorded as releasing by the recovery table, at a restart or live: back
+    /// to waiting when its anchor's counter did not move, or committed — the same release,
+    /// emitted again — when it did, with the anchor's frontier then advanced.
     async fn recover_releasing_step(&self, commitment_hash: &[u8; 32]) -> Result<(), DsmError> {
         let artifacts = match self.settle_unfinished_release(commitment_hash).await? {
             UnfinishedRelease::Reset => return Ok(()),
@@ -3752,14 +3781,22 @@ impl BilateralBleHandler {
         advance_committed_frontier(router.as_ref(), next_frontier)
     }
 
-    /// Build the fused-anchor pin disclosure the sender attaches to EVERY bearer confirm.
-    /// `bundle/anchor_id/H0/pk_host/pk_chip` come from the driven appliance's pin; the receiver
-    /// pins it TOFU on the first transfer and verifies same-anchor on every subsequent one.
+    /// Build the fused-anchor pin disclosure the sender attaches to EVERY bearer confirm, and a
+    /// receiver to its prepare response. `bundle/anchor_id/H0/pk_host/pk_chip` and the board's stamp
+    /// come from the driven appliance's pin; the counterparty pins it on the first transfer only
+    /// with the owner's stamp (DSM Amendment A38) and checks the same anchor and the stamp on every
+    /// later one. A board that carries no stamp discloses nothing: every counterparty refuses it.
     fn build_anchor_disclosure(
         &self,
         pin: &crate::anchor::AnchorPin,
         operation: &Operation,
     ) -> Result<generated::AnchorDisclosure, DsmError> {
+        if pin.board_stamp.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "this board carries no stamp of the owner's, and every counterparty refuses an \
+                 unstamped board (DSM Amendment A38)",
+            ));
+        }
         let policy_hash =
             match operation {
                 Operation::Transfer {
@@ -3779,23 +3816,21 @@ impl BilateralBleHandler {
             policy_hash: policy_hash.to_vec(),
             pk_chip: pin.pk_chip.clone(),
             birth_commitment: pin.birth_commitment.to_vec(),
+            board_stamp: pin.board_stamp.clone(),
         })
     }
 
-    /// Receiver-admit fold: admit (pin) the sender's disclosed fused anchor, bound to a VERIFIED
-    /// contact. `pin_admit_decision` rules: a new anchor is admitted (first-transfer TOFU); a
-    /// matching disclosure is a no-op; a DIFFERING anchor is rejected and the pinned one kept
-    /// (silent substitution never succeeds via a transfer). Admission is a memory of what to
-    /// verify — it never implies acceptance. Malformed disclosures are ignored fail-closed.
     /// The anchor this device holds for `sender`: its pinned one, or on the
     /// first bearer transfer the one this confirm discloses — only for a
     /// verified contact, and only when the disclosed bundle recomputes from the
     /// disclosed keys and birth commitment, the sender's pinned online key, its
     /// device id and the offline-bearer policy (the load in the sender's online
     /// history names that bundle; the receive rule then requires this device
-    /// recorded it). Pure: the pin is written only by the step that accepts
-    /// the release ([`Self::decide_anchor_disclosure`] decides it), in that
-    /// step's transaction.
+    /// recorded it). Either way the board must carry the owner's stamp (DSM
+    /// Amendment A38), checked here on every payment, before Core decides
+    /// anything. Pure: the pin is written only by the step that accepts the
+    /// release ([`Self::decide_anchor_disclosure`] decides it), in that step's
+    /// transaction.
     async fn sender_anchor(
         &self,
         sender: [u8; 32],
@@ -3813,8 +3848,15 @@ impl BilateralBleHandler {
             // what changed. The pinned anchor is kept (SA-175: a later identity never replaces
             // the binding through a transfer). On the rig a trial anchor born again after its
             // board lost power came back under a new bundle, and its receiver saw only
-            // "the receipt's writes are not one tree's worth of paths".
-            if let Some(disclosure) = confirm_request.anchor_disclosure.as_ref() {
+            // "the receipt's writes are not one tree's worth of paths". The disclosure carries the
+            // board's stamp, checked on every payment (DSM Amendment A38), so it is required.
+            {
+                let disclosure = confirm_request.anchor_disclosure.as_ref().ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "offline-bearer confirm: the sender's anchor is pinned and this confirm \
+                         discloses none, so its board's stamp cannot be checked",
+                    )
+                })?;
                 let disclosed = disclosed_anchor(disclosure)?;
                 if disclosed.anchor_id != existing.pin.anchor_id
                     || disclosed.bundle != existing.pin.bundle
@@ -3848,6 +3890,16 @@ impl BilateralBleHandler {
                         "offline-bearer confirm refused: {reason}"
                     )));
                 }
+                if let Err(refusal) = dsm::crypto::anchor_enrollment::require_board_stamp(
+                    &existing.pin,
+                    disclosed.stamp(),
+                ) {
+                    self.announce_anchor_unstamped(sender, &commitment_hash, refusal);
+                    return Err(DsmError::invalid_operation(format!(
+                        "offline-bearer confirm refused: {}",
+                        refusal.reason()
+                    )));
+                }
             }
             return Ok(dsm::types::offline_chain::ChainAnchor::from(&existing.pin));
         }
@@ -3875,21 +3927,33 @@ impl BilateralBleHandler {
                 birth_commitment: &disclosed.birth_commitment,
             },
         )?;
-        Ok(dsm::types::offline_chain::ChainAnchor {
+        let candidate = dsm::crypto::anchor_enrollment::FusedAnchorPin {
             bundle: disclosed.bundle,
             anchor_id: disclosed.anchor_id,
-            pk_chip: disclosed.pk_chip,
-            pk_host: disclosed.partition_pk,
-        })
+            enrolled_counter: disclosed.enrolled_counter,
+            partition_pk: disclosed.partition_pk.clone(),
+            pk_chip: disclosed.pk_chip.clone(),
+        };
+        if let Err(refusal) =
+            dsm::crypto::anchor_enrollment::require_board_stamp(&candidate, disclosed.stamp())
+        {
+            self.announce_anchor_unstamped(sender, &commitment_hash, refusal);
+            return Err(DsmError::invalid_operation(format!(
+                "offline-bearer confirm refused: {}",
+                refusal.reason()
+            )));
+        }
+        Ok(dsm::types::offline_chain::ChainAnchor::from(&candidate))
     }
 
     /// The receiver's anchor for a step this device proposed (owner, 2026-11-07: an offline payment
     /// needs a board on both sides): the anchor this device pinned for the receiver, or, on the first
     /// offline step to it, the one its response discloses — only for a verified contact, under the
     /// offline-bearer policy, and only when the disclosed bundle recomputes from the disclosed keys
-    /// and birth, the receiver's pinned online key and its device id. A response that names another
-    /// anchor than the pinned one is refused, and surfaced. Answers the anchor, and its enrollment to
-    /// pin when it is new.
+    /// and birth, the receiver's pinned online key and its device id. Either way the receiver's board
+    /// must carry the owner's stamp (DSM Amendment A38). A response that names another anchor than the
+    /// pinned one, or an unstamped board, is refused before anything is released, and surfaced.
+    /// Answers the anchor, and its enrollment to pin when it is new.
     async fn receiver_anchor(
         &self,
         receiver: [u8; 32],
@@ -3951,10 +4015,18 @@ impl BilateralBleHandler {
             disclosed.policy,
             &disclosed.birth_commitment,
             &candidate,
+            disclosed.stamp(),
             existing.as_ref(),
         ) {
             dsm::crypto::anchor_enrollment::PinAdmitDecision::Admit(e) => Ok((anchor, Some(e))),
             dsm::crypto::anchor_enrollment::PinAdmitDecision::NoChange => Ok((anchor, None)),
+            dsm::crypto::anchor_enrollment::PinAdmitDecision::Unstamped(refusal) => {
+                self.announce_anchor_unstamped(receiver, &[], refusal);
+                Err(DsmError::invalid_operation(format!(
+                    "the receiver's board is refused: {}",
+                    refusal.reason()
+                )))
+            }
             dsm::crypto::anchor_enrollment::PinAdmitDecision::Reject(reason) => {
                 warn!(
                     "[BILATERAL] the receiver {} names another anchor than the pinned one ({reason}); keeping the pin",
@@ -4019,8 +4091,8 @@ impl BilateralBleHandler {
             bundle: disclosed.bundle,
             anchor_id: disclosed.anchor_id,
             enrolled_counter: disclosed.enrolled_counter,
-            partition_pk: disclosed.partition_pk,
-            pk_chip: disclosed.pk_chip,
+            partition_pk: disclosed.partition_pk.clone(),
+            pk_chip: disclosed.pk_chip.clone(),
         };
         let Some(store) = crate::bridge::anchor_enrollment_store() else {
             return AnchorAdmission::Nothing;
@@ -4032,10 +4104,16 @@ impl BilateralBleHandler {
             disclosed.policy,
             &disclosed.birth_commitment,
             &candidate,
+            disclosed.stamp(),
             existing.as_ref(),
         ) {
             dsm::crypto::anchor_enrollment::PinAdmitDecision::Admit(e) => AnchorAdmission::Pin(e),
             dsm::crypto::anchor_enrollment::PinAdmitDecision::NoChange => AnchorAdmission::Nothing,
+            dsm::crypto::anchor_enrollment::PinAdmitDecision::Unstamped(refusal) => {
+                // Refused before Core decided (`sender_anchor`); named here too, never as changed.
+                self.announce_anchor_unstamped(sender_device_id, &commitment_hash, refusal);
+                AnchorAdmission::Nothing
+            }
             dsm::crypto::anchor_enrollment::PinAdmitDecision::Reject(reason) => {
                 // A pinned anchor's identity changed on a later transfer — a security event,
                 // not a routine failure. The transfer is rejected fail-closed by the acceptance
@@ -4065,8 +4143,37 @@ impl BilateralBleHandler {
         }
     }
 
+    /// Surface a counterparty's board refused for its stamp (DSM Amendment A38): its own event,
+    /// never "changed", so the person is told the board is unstamped, not that it was swapped.
+    fn announce_anchor_unstamped(
+        &self,
+        counterparty: [u8; 32],
+        commitment_hash: &[u8],
+        refusal: anchor_core::stamp::StampRefusal,
+    ) {
+        warn!(
+            "[BILATERAL] the board of {} is refused: {}",
+            bytes_to_base32(&counterparty[..8]),
+            refusal.reason()
+        );
+        self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
+            event_type: generated::BilateralEventType::BilateralEventAnchorUnstamped.into(),
+            counterparty_device_id: counterparty.to_vec(),
+            commitment_hash: commitment_hash.to_vec(),
+            transaction_hash: None,
+            amount: None,
+            token_id: None,
+            status: "anchor_unstamped".to_string(),
+            message: refusal.reason().to_string(),
+            sender_ble_address: None,
+            failure_reason: None,
+        });
+    }
+
     /// Surface a first-transfer pin once the step that wrote it has committed, so the receiver UI
-    /// can say "trusted anchor for <contact>". The message carries the Base32 anchor id.
+    /// can say "checked and trusted the board of <contact>". The message carries the Base32 anchor id.
     fn announce_anchor_pinned(
         &self,
         sender_device_id: [u8; 32],
@@ -4074,7 +4181,7 @@ impl BilateralBleHandler {
         anchor_id: [u8; 32],
     ) {
         info!(
-            "[BILATERAL] fused anchor PINNED for {} (first-transfer TOFU admit)",
+            "[BILATERAL] fused anchor PINNED for {} (first transfer, the owner's stamp verified)",
             bytes_to_base32(&sender_device_id[..8])
         );
         self.emit_event(&generated::BilateralEventNotification {
@@ -4086,7 +4193,7 @@ impl BilateralBleHandler {
             transaction_hash: None,
             amount: None,
             token_id: None,
-            status: "anchor_pinned_first_transfer".to_string(),
+            status: "anchor_pinned_stamped".to_string(),
             message: bytes_to_base32(&anchor_id),
             sender_ble_address: None,
             failure_reason: None,
@@ -4145,7 +4252,8 @@ impl BilateralBleHandler {
     }
 
     /// Take the receiver's acknowledgment of the step `commitment_hash` — its
-    /// counter-signed receipt — for a session this device is committing: Core
+    /// counter-signed receipt and its board's receive commit of this device's
+    /// release — for a session this device is committing: Core
     /// verifies it, and it is written into the session before the step is
     /// finalized, so a restart finalizes a step whose ack it holds. Answers
     /// `false` for an ack of a step already committed (nothing to do).
@@ -4186,9 +4294,11 @@ impl BilateralBleHandler {
             }
         };
 
-        // Core decides on the ack: it is the receiver's counter-signed receipt,
-        // verified against the receiver's pinned identity, the Device Tree
-        // commitment kept for it and its EK chain head on this relationship.
+        // Core decides on the ack: the receiver's board's receive commit of
+        // exactly this device's release, under the receiver's pinned anchor, and
+        // the receiver's counter-signed receipt, verified against its pinned
+        // identity, the Device Tree commitment kept for it and its EK chain head
+        // on this relationship (`decide_commit_ack`).
         let (counterparty_device_id, step_operation, owed_confirm) = {
             let sessions = self.sessions.sessions.lock().await;
             sessions.get(&commitment_hash).map(|s| {
@@ -4736,6 +4846,7 @@ impl BilateralBleHandler {
                 device_id: session.counterparty_device_id,
                 policy_hash: disclosed.policy,
                 birth_commitment: disclosed.birth_commitment,
+                board_stamp: disclosed.board_stamp,
             }
         };
 
@@ -5226,11 +5337,6 @@ impl BilateralBleHandler {
         Some(session.phase.clone())
     }
 
-    /// A confirm for a step this device already committed as its receiver —
-    /// the session ended in that commit — delivered again because its ack was
-    /// lost. Core decides from the step's pinned sender's signature
-    /// (`decide_committed_confirm`); the answer is the ack the step committed,
-    /// rebuilt from the receipt in this device's history row.
     /// The step `commitment_hash`, whose receive did not commit with `failed`, taken back into memory
     /// as its durable record holds it: receiving, when its receipt was recorded before the board
     /// moved; gone, when the step committed and its session ended. Answers `failed`, or why the
@@ -5265,6 +5371,12 @@ impl BilateralBleHandler {
         }
     }
 
+    /// A confirm for a step this device already committed as its receiver —
+    /// the session ended in that commit — delivered again because its ack was
+    /// lost. Core decides from the step's pinned sender's signature
+    /// (`decide_committed_confirm`); the answer is the ack the step committed:
+    /// the receipt in this device's history row and its board's receive commit
+    /// kept with the step.
     async fn answer_committed_confirm(
         &self,
         commitment_hash: [u8; 32],
@@ -6378,7 +6490,8 @@ mod tests {
         handler.test_insert_session(session).await;
     }
 
-    /// An acknowledgment is the receiver's counter-signed receipt. One that
+    /// An acknowledgment is the receiver's counter-signed receipt and its
+    /// board's receive commit. One that
     /// does not verify is not an answer: the step stays awaiting its ack
     /// (the receiver may have committed), and nothing is finalized or failed.
     /// MUTATION CONTROL: failing the session on an ack that does not verify
@@ -6579,6 +6692,69 @@ mod tests {
         assert_eq!(phase_of(&malformed_commitment), "prepared");
     }
 
+    /// A board without the owner's stamp discloses nothing (DSM Amendment A38): every counterparty
+    /// refuses it, so no confirm or response is ever built on it. The same board, stamped, discloses
+    /// on the same bearer transfer, so the stamp alone decides.
+    /// MUTATION CONTROL: dropping the empty-stamp refusal in `build_anchor_disclosure` turns this red.
+    #[tokio::test]
+    async fn a_board_without_the_owners_stamp_discloses_nothing() {
+        let (_manager, handler) =
+            make_test_handler([0x61u8; 32], [0x62u8; 32], b"unstamped-disclosure");
+        let bearer = Operation::Transfer {
+            policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![1],
+                mode: TransactionMode::Bilateral,
+                memo: "bearer".to_string(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
+            to_device_id: [0x63; 32].to_vec(),
+            to_genesis: [0x6E; 32],
+            amount: Balance::amount(1),
+            signature: Vec::new(),
+            authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
+        };
+        let unstamped = crate::anchor::AnchorPin {
+            bundle: [0x01; 32],
+            anchor_id: [0x02; 32],
+            enrolled_counter: 1_000,
+            partition_pk: vec![0x03; 32],
+            pk_chip: vec![0x04; 32],
+            birth_commitment: [0x05; 32],
+            board_stamp: Vec::new(),
+        };
+        let refused = handler
+            .build_anchor_disclosure(&unstamped, &bearer)
+            .expect_err("an unstamped board discloses nothing");
+        assert!(
+            refused.to_string().contains("carries no stamp"),
+            "{refused}"
+        );
+        let stamp = crate::test_support::appliance::stamp_by(
+            crate::test_support::appliance::test_stamp_pair(),
+            anchor_core::stamp::BoardIdentity {
+                anchor_id: &unstamped.anchor_id,
+                pk_host: &unstamped.partition_pk,
+                pk_chip: &unstamped.pk_chip,
+            },
+        );
+        let stamped = crate::anchor::AnchorPin {
+            board_stamp: stamp.clone(),
+            ..unstamped
+        };
+        let disclosed = match handler.build_anchor_disclosure(&stamped, &bearer) {
+            Ok(disclosed) => disclosed,
+            Err(e) => panic!("the stamped board discloses on the same transfer: {e}"),
+        };
+        assert_eq!(
+            disclosed.board_stamp, stamp,
+            "the disclosure carries the stamp"
+        );
+    }
+
     /// Stage 4 Slice 3 (signal b): the receiver-admit path emits the right UX events.
     /// A first disclosure from a verified contact is decided as the pin to write, and deciding writes
     /// nothing; a disclosure bound to a policy other than the canonical offline-bearer policy is
@@ -6633,7 +6809,8 @@ mod tests {
         }
 
         // An anchor born for the sender under `policy`: its bundle recomputes from the sender's
-        // online key, device id and the disclosed policy, keys and birth.
+        // online key, device id and the disclosed policy, keys and birth, and its board carries the
+        // stamp of the test stamp key (DSM Amendment A38).
         let disclosure = |anchor_tag: u8, policy: [u8; 32]| generated::AnchorDisclosure {
             bundle: anchor_core::enrollment::anchor_bundle(
                 &[7u8; 32],
@@ -6652,10 +6829,39 @@ mod tests {
             policy_hash: policy.to_vec(),
             pk_chip: vec![0x0C; 32],
             birth_commitment: vec![0xB7; 32],
+            board_stamp: crate::test_support::appliance::stamp_by(
+                crate::test_support::appliance::test_stamp_pair(),
+                anchor_core::stamp::BoardIdentity {
+                    anchor_id: &[anchor_tag; 32],
+                    pk_host: &[0x07; 64],
+                    pk_chip: &[0x0C; 32],
+                },
+            ),
         };
         let canonical = dsm::types::operations::canonical_offline_bearer_policy().policy_id;
         let store = || crate::bridge::anchor_enrollment_store().expect("the store");
         let anchor_changed = generated::BilateralEventType::BilateralEventAnchorChanged as i32;
+        let anchor_unstamped = generated::BilateralEventType::BilateralEventAnchorUnstamped as i32;
+        let unstamped = |mut d: generated::AnchorDisclosure| {
+            d.board_stamp.clear();
+            d
+        };
+        let stamped_by_another_key = |mut d: generated::AnchorDisclosure| {
+            let stranger = dsm::crypto::sphincs::generate_keypair_from_seed(
+                dsm::crypto::sphincs::SphincsVariant::SPX128f,
+                &[0x5B; 32],
+            )
+            .expect("another stamp key");
+            d.board_stamp = crate::test_support::appliance::stamp_by(
+                &stranger,
+                anchor_core::stamp::BoardIdentity {
+                    anchor_id: &[0xA1; 32],
+                    pk_host: &[0x07; 64],
+                    pk_chip: &[0x0C; 32],
+                },
+            );
+            d
+        };
 
         // 1) A disclosure bound to another policy is not acted on.
         let other = handler
@@ -6667,6 +6873,32 @@ mod tests {
             )
             .await;
         assert!(matches!(other, AnchorAdmission::Nothing));
+
+        // 1b) A first disclosure whose board carries no stamp, or one made by another key, is not
+        // pinned, and is surfaced as unstamped, never as changed (DSM Amendment A38).
+        for (what, d) in [
+            ("unstamped", unstamped(disclosure(0xA1, canonical))),
+            (
+                "stamped by another key",
+                stamped_by_another_key(disclosure(0xA1, canonical)),
+            ),
+        ] {
+            let refused = handler
+                .decide_anchor_disclosure(sender, &[7u8; 32], [0x01; 32], &d)
+                .await;
+            assert!(matches!(refused, AnchorAdmission::Nothing), "{what}");
+            assert_eq!(
+                events.lock().expect("evs").last().map(|e| e.event_type),
+                Some(anchor_unstamped),
+                "{what}"
+            );
+            assert_eq!(
+                store().get(&sender).map(|e| e.pin.anchor_id),
+                None,
+                "{what}"
+            );
+        }
+        events.lock().expect("evs").clear();
 
         // 2) The first canonical disclosure is the pin to write; deciding writes nothing.
         let first = handler
@@ -6706,6 +6938,25 @@ mod tests {
             store().get(&sender).map(|e| e.pin.anchor_id),
             Some([0xA1; 32]),
             "a differing disclosure must never overwrite the pinned anchor"
+        );
+
+        // 5) The pinned anchor itself, its stamp stripped: refused as unstamped, the pin kept.
+        let stripped = handler
+            .decide_anchor_disclosure(
+                sender,
+                &[7u8; 32],
+                [0x04; 32],
+                &unstamped(disclosure(0xA1, canonical)),
+            )
+            .await;
+        assert!(matches!(stripped, AnchorAdmission::Nothing));
+        assert_eq!(
+            events.lock().expect("evs").last().map(|e| e.event_type),
+            Some(anchor_unstamped)
+        );
+        assert_eq!(
+            store().get(&sender).map(|e| e.pin.anchor_id),
+            Some([0xA1; 32])
         );
 
         crate::bridge::uninstall_anchor_enrollment_store();

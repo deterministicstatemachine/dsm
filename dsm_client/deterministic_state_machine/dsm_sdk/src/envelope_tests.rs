@@ -74,7 +74,8 @@ fn envelope_v3_validation() {
 }
 
 /// Receiver-admit fold (v2): the pin disclosure must round-trip byte-exactly on the confirm it
-/// rides, including the required `pk_chip` (resident chip Ed25519 key).
+/// rides, including the required `pk_chip` (resident chip Ed25519 key) and the board's stamp (DSM
+/// Amendment A38).
 #[test]
 fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
     use crate::generated::{AnchorDisclosure, BilateralConfirmRequest};
@@ -87,6 +88,7 @@ fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
         policy_hash: vec![0x9A; 32],
         pk_chip: vec![0xCC; 32],
         birth_commitment: vec![0xB7; 32],
+        board_stamp: vec![0x5D; anchor_core::stamp::BOARD_STAMP_BYTES],
     };
     let confirm = BilateralConfirmRequest {
         commitment_hash: None,
@@ -107,4 +109,8 @@ fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
     assert_eq!(d.policy_hash, vec![0x9A; 32]);
     assert_eq!(d.pk_chip, vec![0xCC; 32]);
     assert_eq!(d.birth_commitment, vec![0xB7; 32]);
+    assert_eq!(
+        d.board_stamp,
+        vec![0x5D; anchor_core::stamp::BOARD_STAMP_BYTES]
+    );
 }

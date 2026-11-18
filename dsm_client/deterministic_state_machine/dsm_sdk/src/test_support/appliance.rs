@@ -186,6 +186,8 @@ pub struct SoftwareRMemory {
     slot: Arc<Mutex<Option<Vec<u8>>>>,
     /// Where a try-run's records go. No read of the record looks here.
     trial: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Where the owner's stamp is kept (DSM Amendment A38).
+    stamp: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl SoftwareRMemory {
@@ -231,6 +233,53 @@ impl ActiveStore for SoftwareRMemory {
         self.on_the_supply()?;
         *held(&self.trial) = None;
         Ok(())
+    }
+
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError> {
+        self.on_the_supply()?;
+        *held(&self.stamp) = Some(stamp.to_vec());
+        Ok(())
+    }
+
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.on_the_supply()?;
+        Ok(held(&self.stamp).clone())
+    }
+}
+
+/// The stamp key the wallet's tests stamp boards with, from a fixed seed (DSM Amendment A38): the
+/// owner's key never leaves his computer, so a test build's wallet and its software boards check
+/// stamps under this one ([`crate::anchor::board_stamp_keys`]).
+pub fn test_stamp_pair() -> &'static dsm::crypto::sphincs::SphincsKeyPair {
+    static PAIR: std::sync::OnceLock<dsm::crypto::sphincs::SphincsKeyPair> =
+        std::sync::OnceLock::new();
+    PAIR.get_or_init(|| {
+        match dsm::crypto::sphincs::generate_keypair_from_seed(PARTITION_VARIANT, &[0x5A; 32]) {
+            Ok(pair) => pair,
+            Err(e) => panic!("the test stamp key: {e}"),
+        }
+    })
+}
+
+/// The stamp keys a test build checks under: the test key alone.
+pub fn test_stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
+    static KEYS: std::sync::OnceLock<[anchor_core::stamp::StampKey; 1]> =
+        std::sync::OnceLock::new();
+    KEYS.get_or_init(|| [core::array::from_fn(|i| test_stamp_pair().public_key[i])])
+}
+
+/// `pair`'s stamp over a board's identity.
+pub fn stamp_by(
+    pair: &dsm::crypto::sphincs::SphincsKeyPair,
+    board: anchor_core::stamp::BoardIdentity<'_>,
+) -> Vec<u8> {
+    match dsm::crypto::sphincs::sign(
+        PARTITION_VARIANT,
+        &pair.secret_key,
+        &anchor_core::stamp::board_stamp_message(board),
+    ) {
+        Ok(stamp) => stamp,
+        Err(e) => panic!("a stamp: {e}"),
     }
 }
 
@@ -279,6 +328,10 @@ impl PartitionSig for SphincsPartition {
             Ok(sig) => Ok(sig),
             Err(e) => panic!("the owner signs: {e}"),
         }
+    }
+
+    fn stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
+        test_stamp_keys()
     }
 }
 
@@ -353,8 +406,21 @@ impl Anchor {
             birth_entropy: self.derive_for_birth("birth entropy"),
             chip_birth_witness: self.derive_for_birth("chip birth witness"),
             host_nonce: self.derive_for_birth("host nonce"),
-            partition_key_seed: self.derive_for_birth("partition key seed"),
+            partition_key_seed: self.partition_key_seed(),
             install: self.install,
+        }
+    }
+
+    /// The partition key's seed: on a board installed for good it comes from the secret the board
+    /// sealed, so every birth on it derives the same `pk_host` and the owner's stamp names it (DSM
+    /// Amendment A38; `bring_up.rs` derives it from the sealed secret and the chip). The trial image
+    /// draws a secret of its own at every boot, so a trial's `pk_host` is new at every birth.
+    fn partition_key_seed(&self) -> [u8; 32] {
+        match self.install {
+            anchor_core::enrollment::Install::ForGood => self.derive("partition key seed"),
+            anchor_core::enrollment::Install::ForTrial => {
+                self.derive_for_birth("partition key seed")
+            }
         }
     }
 
@@ -394,9 +460,18 @@ pub fn provisioning_of(device: &TestDevice) -> Provisioning {
 }
 
 impl HostAppliance {
-    /// A chip as it leaves the factory: seeded with `chip_seed`, enrolled
-    /// with `enrolled_counter` counter steps, never provisioned.
+    /// A chip as it leaves the factory, on a board the owner set up and stamped before it shipped
+    /// (DSM Amendment A38): seeded with `chip_seed`, enrolled with `enrolled_counter` counter steps,
+    /// never provisioned, its stamp kept through the board's own `OP_STAMP` under the test key.
     pub fn unprovisioned(chip_seed: [u8; 32], enrolled_counter: u32) -> Self {
+        let appliance = Self::unstamped(chip_seed, enrolled_counter);
+        appliance.stamp(test_stamp_pair());
+        appliance
+    }
+
+    /// A chip as it leaves the factory on a board that carries no stamp of the owner's: one he did
+    /// not set up, which every counterparty refuses.
+    pub fn unstamped(chip_seed: [u8; 32], enrolled_counter: u32) -> Self {
         let board = Board(Arc::new(Mutex::new(Supply {
             power: Power::On,
             cut: Cut::Never,
@@ -408,6 +483,7 @@ impl HostAppliance {
                     board: board.clone(),
                     slot: Arc::new(Mutex::new(None)),
                     trial: Arc::new(Mutex::new(None)),
+                    stamp: Arc::new(Mutex::new(None)),
                 },
                 board,
                 counter: Arc::new(Mutex::new(enrolled_counter)),
@@ -422,11 +498,62 @@ impl HostAppliance {
     }
 
     /// A chip as it leaves the factory, on a board running the trial image: its install is a
-    /// trial, which the board's next boot clears.
+    /// trial, which the board's next boot clears. A trial's keys change at every boot, so it is
+    /// never stamped.
     pub fn unprovisioned_trial(chip_seed: [u8; 32], enrolled_counter: u32) -> Self {
-        let appliance = Self::unprovisioned(chip_seed, enrolled_counter);
+        let appliance = Self::unstamped(chip_seed, enrolled_counter);
         held(&appliance.anchor).install = anchor_core::enrollment::Install::ForTrial;
         appliance
+    }
+
+    /// Stamp this never-provisioned board with `pair` as the owner's setup does: read the identity
+    /// its `OP_BOARD_IDENTITY` reports, sign it, and have the board keep the stamp through its own
+    /// `OP_STAMP`, which verifies the stamp under the board's stamp keys before it keeps it.
+    pub fn stamp(&self, pair: &dsm::crypto::sphincs::SphincsKeyPair) {
+        let anchor = held(&self.anchor);
+        let firmware = |frame: &[u8]| -> anchor_core::proto::pb::ApplianceResponse {
+            let booted = match anchor_core::anchor::Anchor::<_, SphincsPartition, _>::boot(
+                anchor.chip_birth(),
+                anchor.chip(),
+                anchor.rmemory.clone(),
+            ) {
+                Ok(booted) => booted,
+                Err(e) => panic!("the board boots: {e:?}"),
+            };
+            let (_, answer) = booted.serve(frame);
+            match anchor_core::proto::decode_response(&answer) {
+                Ok(answer) => answer,
+                Err(e) => panic!("the board answers: {e:?}"),
+            }
+        };
+        let request = |op: anchor_core::proto::pb::Op| {
+            anchor_core::proto::encode_request(&anchor_core::proto::pb::ApplianceRequest {
+                op: op as i32,
+                ..Default::default()
+            })
+        };
+        let identity = firmware(&request(anchor_core::proto::pb::Op::BoardIdentity));
+        let anchor_id: [u8; 32] = match identity.pin_anchor_id.as_slice().try_into() {
+            Ok(id) => id,
+            Err(e) => panic!("the board's anchor id: {e}"),
+        };
+        let stamp = stamp_by(
+            pair,
+            anchor_core::stamp::BoardIdentity {
+                anchor_id: &anchor_id,
+                pk_host: &identity.pin_partition_pk,
+                pk_chip: &identity.pin_chip_pk,
+            },
+        );
+        let mut frame = request(anchor_core::proto::pb::Op::Stamp);
+        frame.extend_from_slice(&stamp);
+        let kept = firmware(&frame);
+        if !kept.ok {
+            panic!(
+                "the board keeps its stamp: error {} {}",
+                kept.error, kept.detail
+            );
+        }
     }
 
     /// The appliance provisioned for `device`, its chip seeded with
@@ -615,6 +742,64 @@ impl Drop for InstalledAppliance {
 }
 
 impl AnchorAppliance for HostAppliance {
+    /// The board's own `OP_BOARD_IDENTITY`, as its firmware answers it: from the board before an
+    /// install, from the installed appliance after.
+    fn board_identity(&mut self) -> Result<crate::anchor::BoardIdentityReport, DsmError> {
+        let request =
+            anchor_core::proto::encode_request(&anchor_core::proto::pb::ApplianceRequest {
+                op: anchor_core::proto::pb::Op::BoardIdentity as i32,
+                ..Default::default()
+            });
+        let mut anchor = held(&self.anchor);
+        let answer = match &mut anchor.served {
+            Served::Serving(d) => anchor_core::service::handle(d.as_mut(), &request),
+            Served::Unprovisioned => {
+                let booted = anchor_core::anchor::Anchor::<_, SphincsPartition, _>::boot(
+                    anchor.chip_birth(),
+                    anchor.chip(),
+                    anchor.rmemory.clone(),
+                )
+                .map_err(|e| appliance_error("boot", e))?;
+                booted.serve(&request).1
+            }
+            Served::Refused(why) => {
+                return Err(DsmError::invalid_operation(format!(
+                    "anchor appliance: boot recovery refused to serve: {why:?}"
+                )))
+            }
+        };
+        let answer = anchor_core::proto::decode_response(&answer)
+            .map_err(|e| appliance_error("identity answer", e))?;
+        if !answer.ok {
+            return Err(DsmError::invalid_operation(format!(
+                "anchor appliance: the identity read was refused (error code {}) {}",
+                answer.error, answer.detail
+            )));
+        }
+        let install = match anchor_core::proto::pb::InstallKind::try_from(answer.install) {
+            Ok(anchor_core::proto::pb::InstallKind::InstallForGood) => {
+                anchor_core::enrollment::Install::ForGood
+            }
+            Ok(anchor_core::proto::pb::InstallKind::InstallForTrial) => {
+                anchor_core::enrollment::Install::ForTrial
+            }
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "anchor appliance: its identity named no install: {other:?}"
+                )))
+            }
+        };
+        Ok(crate::anchor::BoardIdentityReport {
+            anchor_id: <[u8; 32]>::try_from(answer.pin_anchor_id.as_slice())
+                .map_err(|e| appliance_error("anchor id", e))?,
+            partition_pk: answer.pin_partition_pk,
+            pk_chip: answer.pin_chip_pk,
+            enrolled_counter: answer.pin_enrolled_counter,
+            install,
+            board_stamp: answer.board_stamp,
+        })
+    }
+
     fn status(&mut self) -> Result<ApplianceStatus, DsmError> {
         self.with(|d| {
             let a = d.appliance();
@@ -725,6 +910,14 @@ impl AnchorAppliance for HostAppliance {
         if matches!(anchor.served, Served::Unprovisioned) {
             return Ok(None);
         }
+        let board_stamp = anchor
+            .rmemory
+            .clone()
+            .stamp_read()
+            .map_err(|e| appliance_error("the stamp it keeps", e))?
+            .into_iter()
+            .flatten()
+            .collect();
         let a = anchor.serving()?.appliance();
         Ok(Some(AnchorPin {
             bundle: a.bundle,
@@ -733,6 +926,7 @@ impl AnchorAppliance for HostAppliance {
             partition_pk: a.partition_pk.clone(),
             pk_chip: a.chip_pk.clone(),
             birth_commitment: a.birth_commitment,
+            board_stamp,
         }))
     }
 

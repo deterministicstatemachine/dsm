@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! DSM anchor RP2350 **Non-secure application** (TrustZone-M Non-secure world).
 //!
-//! Owns USB-CDC, protobuf, host transport, and candidate transition / SMT-proof construction. It
+//! Owns USB-CDC and the host transport: it forwards length-prefixed request frames, undecoded. It
 //! reaches the Secure monitor ONLY through the single NSC Secure Gateway `dsm_secure_dispatch(slot,
 //! seq)`; a fixed Non-secure SRAM mailbox slot carries the bulk request/response bytes. It has NO
-//! access to OTP, the host key, TROPIC01, the counter, or Secure state — any attempt faults (SAU).
+//! access to OTP, the host key, TROPIC01, the counter, or Secure state: the SAU and ACCESSCTRL deny it.
 //!
 //! On the Non-secure side the gateway is a PLAIN function call to the veneer address: the veneer's
 //! `sg` instruction performs the NS→S transition, so no cmse intrinsics (nightly) are needed here —
 //! this crate is pure stable Rust. The veneer address is resolved by the linker (`memory.x` PROVIDE
-//! at the fixed NSC region base; the two-image integration reconciles it with the monitor's stub).
+//! at the fixed NSC region base, where the monitor's `dsm-secure-sram.x` places the veneer).
 
 #![no_std]
 #![no_main]

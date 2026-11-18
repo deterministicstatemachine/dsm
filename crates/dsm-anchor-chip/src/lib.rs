@@ -9,6 +9,11 @@
 #![no_std]
 
 extern crate alloc;
+// The model's stamp key is derived once, on the host the model runs on.
+#[cfg(feature = "model-stamp-key")]
+extern crate std;
+#[cfg(all(feature = "model-stamp-key", target_os = "none"))]
+compile_error!("a board's image carries the owner's stamp keys, never the chip model's");
 
 pub mod bring_up;
 pub mod session;
@@ -25,6 +30,10 @@ pub trait Board {
     fn alive(&self);
     /// The stepping of the board's RP2350: 2 for A2, 3 for A3, 4 for A4.
     fn silicon_revision(&self) -> u8;
+    /// Whether the board's OTP page for its own secret takes it (DSM Amendment A38): blank, or a seal
+    /// cut before any row, with Secure code free to write the page and its lock row; or sealed by the
+    /// board itself. Read with nothing written; why not, when not.
+    fn secret_page(&self) -> Result<(), alloc::string::String>;
 }
 
 /// The Secure heap the monitor gives the anchor. Its size is here so that the rehearsal holds every
@@ -33,9 +42,12 @@ pub trait Board {
 /// heap gave up 4 KiB for it. 154 KiB (owner, 2026-11-12: "Yes, from the heap"): the single-use
 /// authorization, the spare-slot check and the handler's exclusion (CONFORMANCE_GAPS 6.158) grew
 /// the image again, to 488 bytes past its 59 KiB stack's floor, and the heap gave up 2 KiB more.
-/// Its measured peak (105,456 bytes, a boot that recovers a committed record) stands under three
-/// quarters of what remains, which is what the rehearsal holds every operation to.
-pub const SECURE_HEAP_BYTES: usize = 154 * 1024;
+/// 148 KiB (owner, 2026-11-18: "Yes", then "Yes" again): the owner's stamp (DSM Amendment A38),
+/// its checks and its storage, and the board sealing its own secret grew the image 5,896 bytes past
+/// that floor, and the heap gave up 6 KiB more. Its peak measured before the stamp (105,456 bytes, a
+/// boot that recovers a committed record) stands under three quarters of what remains (113,664
+/// bytes), which is what the rehearsal holds every operation to, the stamp's included.
+pub const SECURE_HEAP_BYTES: usize = 148 * 1024;
 
 /// The largest request frame the monitor takes: a request's largest message and, after it, the
 /// owner's authorization signature when the request is one (anchor-core's frame rule,
@@ -45,7 +57,8 @@ pub const MAX_REQUEST_BYTES: usize =
     anchor_core::service::REQUEST_HEAD_MAX + anchor_core::service::OWNER_AUTHORIZATION_BYTES;
 
 /// The largest frame the monitor takes at all: a payment check, the payer's certificate with its
-/// 49,856-byte `σ^host`, one message read whole. The anchor serves a frame larger than
+/// 17,088-byte `σ^host` (SPX128f) and the payer's disclosure with its board's 17,088-byte stamp (DSM
+/// Amendment A38), one message read whole. The anchor serves a frame larger than
 /// [`MAX_REQUEST_BYTES`] only as a payment check, and only while it holds no record
 /// ([`anchor_core::service::handle`]), so its copies never meet a record's.
 pub const MAX_FRAME_BYTES: usize = anchor_core::service::MAX_PAYMENT_CHECK_BYTES;

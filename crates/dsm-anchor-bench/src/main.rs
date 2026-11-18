@@ -2,13 +2,13 @@
 //! Used-chip bench harness (host side).
 //!
 //! Drives the RP2350/TROPIC01 DSM anchor appliance over USB-CDC (the `ApplianceRequest`/
-//! `ApplianceResponse` protocol, `LE32(len) ++ prost`) to run — against an ALREADY-USED chip
-//! flashed with the `bench-adopt-existing-chip` firmware — the two SAFE phases that must pass
-//! before any counter is ever spent:
+//! `ApplianceResponse` protocol, `LE32(len) ++ prost`) to run — against an ALREADY-USED chip on a
+//! board running the trial image (`bench_self_enroll`), provisioned as a trial for the bench's own
+//! device — the two SAFE phases that must pass before any counter is ever spent:
 //!
-//!   Phase 1 (non-mutating adoption proof): STATUS reports `u = 0` (the used chip was adopted at
-//!     its live counter as H0); repeated authenticated reads are identical; nothing commits and the
-//!     counter never decrements; the adopted H0 is printed.
+//!   Phase 1 (non-mutating proof): STATUS reports `u = 0` (the trial starts the counter at H0, the
+//!     fixed birth budget); repeated reads are identical; nothing commits and the counter never
+//!     decrements; H0 is printed.
 //!   Phase 2 (prepare/cancel proof): PREPARE exposes the FROM coordinate `= H0` (u stays 0, no
 //!     counter move), CANCEL returns the appliance to Ready, a reconnect still reports `u = 0`, and
 //!     the whole thing repeats — proving an abandoned `Prepared` does not strand the appliance.
@@ -24,17 +24,29 @@
 //! permanent. It is what a new board runs before anything is burned on it, on the trial image, and it
 //! never provisions.
 //!
+//! `--board-identity <file>` and `--keep-stamp <file>` are the owner's stamping of a board before it
+//! ships (DSM Amendment A38). The first reads the board's public identity with nothing written and,
+//! for a board that installs for good, writes it to `<file>` (anchor id, `pk_host`, `pk_chip`, 96
+//! bytes) for `dsm-board-stamp stamp --identity <file>`; the second has the board keep the stamp in
+//! `<file>`, which it does only when the stamp verifies under its firmware's stamp keys over its own
+//! identity, and reads it back.
+//!
+//! `--seal-secret` tells a board to seal its own secret in its OTP, for good (`OP_SEAL_SECRET`). A
+//! board never does that because it started (owner, 2026-11-18): until this is sent it answers every
+//! request with what it found, its chip included, and writes nothing. This run prints that answer
+//! first, and sends the command only to a board that says it is waiting for its seal.
+//!
 //! `--identify` asks a board running the identify image what its chip is and holds, prints every
 //! reading, and saves the chip's four certificates under `--certs <dir>` by the names Tropic Square's
 //! `verify.sh` reads. Nothing is written to the chip or the board.
-//! RELEASE-only: a debug build refuses to run (SPHINCS+/BLE timing is invalid in debug).
+//! RELEASE-only: a debug build refuses to run (SPHINCS+ timing is invalid in debug).
 
 use std::time::Duration;
 
 use anchor_core::appliance::owner_authorization_digest;
 use anchor_core::proto::{decode_response, encode_request, pb};
 
-/// Known-good self-test transition shape (mirrors the firmware's `prepare_request`). The on-chip
+/// Known-good self-test transition shape. The on-chip
 /// PREPARE is policy-agnostic and forms the cross-bound cert without validating the DSM transition,
 /// so these fixed values are sufficient to exercise prepare/cancel. `prev_root` is overridden with
 /// the live STATUS `active_root` at call time so PREPARE always matches the appliance's active root.
@@ -56,9 +68,9 @@ struct Args {
     port: String,
     baud: u32,
     repeats: usize,
-    /// Allowed bench chip anchor-ids (Base32 Crockford, as printed by this tool). The run REFUSES
-    /// unless the connected chip's anchor-id is listed — this is what stops the harness from ever
-    /// touching the sealed clean/virgin chip.
+    /// Allowed bench chip anchor-ids (Base32 Crockford, as printed by this tool). The used-chip
+    /// phases REFUSE unless the connected chip's anchor-id is listed; the other modes do not read
+    /// this list.
     allow: Vec<String>,
     /// Explicitly denied anchor-ids (e.g. the clean fresh-birth chip). A denied chip HARD-refuses
     /// even if also allowed.
@@ -72,6 +84,8 @@ struct Args {
     fw_commit: Option<String>,
     /// Where `--identify` saves the chip's certificates.
     certs: String,
+    /// The file `--board-identity` writes, or `--keep-stamp` reads.
+    file: String,
 }
 
 /// What this run is.
@@ -85,6 +99,12 @@ enum Check {
     TryRun,
     /// What the identify image read from the chip.
     Identify,
+    /// The board's public identity, for the owner's stamp (DSM Amendment A38).
+    BoardIdentity,
+    /// The owner's stamp, for the board to keep (DSM Amendment A38).
+    KeepStamp,
+    /// The board seals its own secret, for good, because it is told to.
+    SealSecret,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -97,6 +117,7 @@ fn parse_args() -> Result<Args, String> {
     let mut label = None;
     let mut fw_commit = None;
     let mut certs = String::from("tropic01-certs");
+    let mut file = String::new();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -120,6 +141,17 @@ fn parse_args() -> Result<Args, String> {
             "--check" => check = Check::Yes,
             "--try-run" => check = Check::TryRun,
             "--identify" => check = Check::Identify,
+            "--board-identity" => {
+                check = Check::BoardIdentity;
+                file = it
+                    .next()
+                    .ok_or("--board-identity needs the file to write")?;
+            }
+            "--keep-stamp" => {
+                check = Check::KeepStamp;
+                file = it.next().ok_or("--keep-stamp needs the stamp's file")?;
+            }
+            "--seal-secret" => check = Check::SealSecret,
             "--certs" => certs = it.next().ok_or("--certs needs a directory")?,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown arg: {other}")),
@@ -135,6 +167,7 @@ fn parse_args() -> Result<Args, String> {
         check,
         fw_commit,
         certs,
+        file,
     })
 }
 
@@ -422,6 +455,133 @@ fn identify(port: &mut dyn serialport::SerialPort, certs: &str) -> Result<(), St
     Ok(())
 }
 
+/// The 96 bytes `dsm-board-stamp stamp --identity` signs: anchor id, `pk_host` and `pk_chip`.
+const IDENTITY_BYTES: usize = 96;
+
+/// `--board-identity`: the board's public identity, read with nothing written, written to `file` for
+/// the owner's stamp. Only a board that installs for good is ever stamped: a trial's keys change at
+/// every boot.
+fn board_identity(port: &mut dyn serialport::SerialPort, file: &str) -> Result<(), String> {
+    let read = roundtrip(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::BoardIdentity as i32,
+            ..Default::default()
+        },
+    )?;
+    let install = pb::InstallKind::try_from(read.install)
+        .map_err(|e| format!("the board named no install: {e}"))?;
+    println!(
+        "[STAMP] anchor id {}",
+        base32_crockford(&read.pin_anchor_id)
+    );
+    println!("[STAMP] install {install:?}");
+    println!(
+        "[STAMP] a stamp kept already: {}",
+        if read.board_stamp.is_empty() {
+            "no"
+        } else {
+            "yes"
+        }
+    );
+    if install != pb::InstallKind::InstallForGood {
+        return Err(
+            "only a board that installs for good is stamped: a trial's keys change at every boot"
+                .to_string(),
+        );
+    }
+    let identity: Vec<u8> = [
+        &read.pin_anchor_id,
+        &read.pin_partition_pk,
+        &read.pin_chip_pk,
+    ]
+    .iter()
+    .flat_map(|part| part.iter().copied())
+    .collect();
+    if identity.len() != IDENTITY_BYTES {
+        return Err(format!(
+            "the board's identity is {} bytes, not the {IDENTITY_BYTES} of an anchor id, an SPX128f \
+             pk_host and an Ed25519 pk_chip",
+            identity.len()
+        ));
+    }
+    let mut out = std::fs::File::create_new(file).map_err(|e| format!("{file}: {e}"))?;
+    std::io::Write::write_all(&mut out, &identity).map_err(|e| format!("{file}: {e}"))?;
+    println!("[STAMP] identity written to {file}: sign it with `dsm-board-stamp stamp --identity {file}`");
+    Ok(())
+}
+
+/// `--seal-secret`: the board seals its own secret in its OTP, for good. Sent only to a board that
+/// answers a status request by saying it is waiting for its seal; what it found, its chip included,
+/// is printed first. The board is unplugged and plugged back in after it.
+fn seal_secret(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    let found = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Status as i32,
+            ..Default::default()
+        },
+    )?;
+    if found.error != anchor_core::service::err::UNSEALED {
+        return Err(format!(
+            "this board is not waiting for its seal (it answered error {}): {}\nnothing was sent",
+            found.error, found.detail
+        ));
+    }
+    println!("[SEAL] the board, before the seal: {}", found.detail);
+    let sealed = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::SealSecret as i32,
+            ..Default::default()
+        },
+    )?;
+    if !sealed.ok {
+        return Err(format!(
+            "the board did not seal its secret (error {}): {}",
+            sealed.error, sealed.detail
+        ));
+    }
+    println!("[SEAL] {}", sealed.detail);
+    Ok(())
+}
+
+/// `--keep-stamp`: the board keeps the owner's stamp in `file`, which it does only when the stamp
+/// verifies under its firmware's stamp keys over its own identity, and before its install; its answer
+/// must report that very stamp.
+fn keep_stamp(port: &mut dyn serialport::SerialPort, file: &str) -> Result<(), String> {
+    let stamp = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+    if stamp.len() != anchor_core::stamp::BOARD_STAMP_BYTES {
+        return Err(format!(
+            "{file} is {} bytes, not a stamp's {}",
+            stamp.len(),
+            anchor_core::stamp::BOARD_STAMP_BYTES
+        ));
+    }
+    let kept = answer_with_tail(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Stamp as i32,
+            ..Default::default()
+        },
+        &stamp,
+    )?;
+    if !kept.ok {
+        return Err(format!(
+            "the board did not keep the stamp (error {}): {}",
+            kept.error, kept.detail
+        ));
+    }
+    if kept.board_stamp != stamp {
+        return Err("the board's answer reports another stamp than the one sent".to_string());
+    }
+    println!(
+        "[STAMP] the board keeps the owner's stamp: anchor id {}",
+        base32_crockford(&kept.pin_anchor_id)
+    );
+    Ok(())
+}
+
 /// The runbook's Step 9, read-only: what the anchor reports, and the measurement gate's verdict. A
 /// PREPARE with no transition passes the gate and is then refused, so nothing moves.
 fn check(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
@@ -679,9 +839,9 @@ fn open_retry(args: &Args) -> Result<Box<dyn serialport::SerialPort>, String> {
     Err(format!("reconnect failed after retries: {last}"))
 }
 
-/// The chip's Base32 Crockford anchor-id, read via STATUS (non-mutating). This is chip-unique and
-/// stable (derived on-chip from `stpub`+`chip_id`), so it identifies the physical chip regardless of
-/// bench-adopt vs production mode.
+/// The chip's Base32 Crockford anchor-id, read via STATUS (non-mutating). The board derives it from
+/// the chip's `stpub` and `chip_id` alone, so it identifies the physical chip under the trial and the
+/// production image alike.
 fn read_anchor_id(port: &mut dyn serialport::SerialPort) -> Result<String, String> {
     let r = roundtrip(
         port,
@@ -700,8 +860,8 @@ fn read_anchor_id(port: &mut dyn serialport::SerialPort) -> Result<String, Strin
 }
 
 /// Require the operator to type an EXACT token before proceeding (no blind 'enter'). Fails closed on
-/// EOF or mismatch. NOTE: a counter-MOVING run (Phase 3 / any COMMIT — never in this harness) must
-/// gate on a SEPARATE, second confirmation; this tool only ever runs the non-mutating Phase 1-2.
+/// EOF or mismatch. It gates only the used-chip phases 1-2, which send no COMMIT; `--check`,
+/// `--try-run`, `--identify`, `--board-identity` and `--keep-stamp` run without it.
 fn confirm(prompt: &str, expected: &str) -> Result<(), String> {
     use std::io::Write as _;
     print!("{prompt}");
@@ -780,7 +940,7 @@ fn bench_log(
             .unwrap_or("(unlabelled — pass --label)")
     );
     println!("  anchor id         : {chip_id}");
-    println!("  H0 (adopted)      : {h0}");
+    println!("  H0 (at birth)     : {h0}");
     println!("  initial u         : {u}");
     println!(
         "  bench-adopt       : {}",
@@ -821,8 +981,8 @@ fn phase1(port: &mut dyn serialport::SerialPort, repeats: usize) -> Result<(), S
     );
     if u0 != 0 {
         return Err(format!(
-            "adoption FAILED: expected u = 0 (H0 = live), got u = {u0}. Did the chip get flashed with \
-             the bench-adopt firmware?"
+            "adoption FAILED: expected u = 0 (counter at H0), got u = {u0}. Is the board running \
+             the trial image (bench_self_enroll)?"
         ));
     }
     for i in 1..=repeats {
@@ -903,10 +1063,10 @@ fn phase2(
 }
 
 fn run() -> Result<(), String> {
-    // RELEASE-ONLY. Debug SPHINCS+/BLE timing is invalid; never touch a chip from a debug build.
+    // RELEASE-ONLY. Debug SPHINCS+ timing is invalid; never touch a chip from a debug build.
     if cfg!(debug_assertions) {
         return Err(
-            "FATAL: debug build. Build and run in --release only (debug SPHINCS+/BLE timing is \
+            "FATAL: debug build. Build and run in --release only (debug SPHINCS+ timing is \
              invalid). `cargo build --release`."
                 .to_string(),
         );
@@ -914,6 +1074,9 @@ fn run() -> Result<(), String> {
     const USAGE: &str = "usage: used-chip-bench --port <serial> --check\n       \
          used-chip-bench --port <serial> --try-run\n       \
          used-chip-bench --port <serial> --identify [--certs <dir>]\n       \
+         used-chip-bench --port <serial> --board-identity <file>\n       \
+         used-chip-bench --port <serial> --keep-stamp <file>\n       \
+         used-chip-bench --port <serial> --seal-secret\n       \
          used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
                          [--deny <id> ...] [--label \"used chip A\"] [--fw-commit <hash>] \
                          [--baud 115200] [--repeats 5]\n  \
@@ -933,9 +1096,7 @@ fn run() -> Result<(), String> {
         cfg!(debug_assertions),
         harness_build()
     );
-    println!(
-        "[BENCH] used-chip harness: Phases 1-2 only (NON-mutating + prepare/cancel). No COMMIT."
-    );
+    println!("[BENCH] used-chip bench tool. It sends no COMMIT.");
     println!(
         "[BENCH] port={} baud={} repeats={}",
         args.port, args.baud, args.repeats
@@ -946,6 +1107,9 @@ fn run() -> Result<(), String> {
         Check::Yes => return check(port.as_mut()),
         Check::TryRun => return try_run(port.as_mut()),
         Check::Identify => return identify(port.as_mut(), &args.certs),
+        Check::BoardIdentity => return board_identity(port.as_mut(), &args.file),
+        Check::KeepStamp => return keep_stamp(port.as_mut(), &args.file),
+        Check::SealSecret => return seal_secret(port.as_mut()),
         Check::No => {}
     }
     // Structural guard against the one operational rule: read the chip's anchor-id and refuse unless
@@ -960,12 +1124,9 @@ fn run() -> Result<(), String> {
     phase2(port, &args, &chip_id, &keys)?;
 
     println!(
-        "\nALL SAFE PHASES PASSED. The used chip is adopted (u=0), reads are stable, and abandoned"
+        "\nALL SAFE PHASES PASSED. The trial board is at u=0, reads are stable, and abandoned"
     );
-    println!(
-        "Prepared cancels cleanly — no counter was spent. Phase 3 (first real commit) is next,"
-    );
-    println!("and only after the receiver relay reader + verifier-slot burn are in place.");
+    println!("Prepared cancels cleanly — no counter was spent.");
     Ok(())
 }
 

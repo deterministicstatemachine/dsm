@@ -5,12 +5,14 @@
 //!     [`Tropic::chip_sign`]; the key never leaves the chip. Its at-rest protection is
 //!     the die's physically unclonable function.
 //!   - [`PartitionSig`] — the RP2350 secure-partition signature scheme (the `σ^host`
-//!     factor), under a key generated at birth and sealed to the partition.
+//!     factor), under a key derived at every boot from the secret the board sealed itself
+//!     ([`crate::seal`]).
 //!
 //! Keeping these as traits lets the protocol core stay hardware- and scheme-agnostic and
-//! unit-test on the host with deterministic mocks; the firmware wires the real libtropic
-//! `ECC_Key` / `EdDSA` (chip) and `MCounter` (the counter, now a non-rewind floor), and
-//! the chosen partition signature scheme.
+//! unit-test on the host. The board's code (`dsm-anchor-chip`) wires the
+//! TROPIC01 through Tropic Square's `tropic01` driver: the resident Ed25519 key in an ECC slot
+//! (chip), the monotonic counter (now a non-rewind floor), and R-memory; and BLAKE3-SPHINCS+
+//! SPX128f as the partition scheme.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -267,11 +269,11 @@ pub enum PartitionError {
 }
 
 /// The RP2350 secure-partition signature scheme (the `σ^host` factor). The partition
-/// keypair is generated at appliance birth under the birth seal; `pk_host` is bound into
-/// the anchor bundle `B` and pinned by the receiver. PartSign signs the per-transfer
-/// root-advance message `M_{i+1}`; the receiver verifies with the pinned `pk_host`.
+/// keypair is derived at every boot from the secret the board sealed itself ([`crate::seal`]);
+/// `pk_host` is bound into the anchor bundle `B` and pinned by the receiver. PartSign signs the
+/// per-transfer root-advance message `M_{i+1}`; the receiver verifies with the pinned `pk_host`.
 pub trait PartitionSig {
-    /// Deterministic `(sk, pk)` from a 32-byte seed (partition birth seal).
+    /// Deterministic `(sk, pk)` from a 32-byte seed (derived from the board's sealed secret).
     fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError>;
     /// Signature over a 32-byte digest under the partition secret key.
     fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
@@ -288,6 +290,10 @@ pub trait PartitionSig {
     /// A signature in the owner's scheme over a 32-byte digest: the rehearsal owner's
     /// authorization of the try-run's own payment.
     fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
+    /// The stamp keys a board's stamp is checked under (DSM Amendment A38): the owner's, compiled into
+    /// the signed image. A board keeps only a stamp that verifies under one of them over its own
+    /// identity, and refuses a payment from a board whose stamp does not.
+    fn stamp_keys() -> &'static [crate::stamp::StampKey];
 }
 
 /// Verification of the partition witness `σ^host` alone: what a receiver or a walker of an

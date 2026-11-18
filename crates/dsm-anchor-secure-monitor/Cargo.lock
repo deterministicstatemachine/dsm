@@ -360,7 +360,6 @@ name = "dsm-anchor-secure-monitor"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "cc",
  "cortex-m",
  "cortex-m-rt",
  "dsm-anchor-chip",

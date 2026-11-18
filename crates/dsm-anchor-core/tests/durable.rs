@@ -21,6 +21,7 @@ use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OwnedTransition, Transition,
 };
+use anchor_core::stamp::{board_stamp_message, BoardIdentity, StampKey, StampRefusal};
 use anchor_core::tropic::{ChipLink, PartitionError, PartitionSig, Tropic, TropicError};
 use ed25519_dalek::{Signer, SigningKey};
 
@@ -219,6 +220,8 @@ struct RMemory {
     slot: Rc<RefCell<Option<Vec<u8>>>>,
     /// Where a try-run's records go. No read of the record looks here.
     trial: Rc<RefCell<Option<Vec<u8>>>>,
+    /// Where the owner's stamp is kept (DSM Amendment A38).
+    stamp: Rc<RefCell<Option<Vec<u8>>>>,
 }
 
 impl RMemory {
@@ -265,6 +268,43 @@ impl ActiveStore for RMemory {
         *self.trial.borrow_mut() = None;
         Ok(())
     }
+
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError> {
+        self.on_the_supply()?;
+        *self.stamp.borrow_mut() = Some(stamp.to_vec());
+        Ok(())
+    }
+
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.on_the_supply()?;
+        Ok(self.stamp.borrow().clone())
+    }
+}
+
+/// The stamp key these tests stamp boards with, from a fixed seed (DSM Amendment A38): the owner's key
+/// never leaves his computer, so the boards here check stamps under this one.
+fn stamp_pair() -> &'static dsm_sphincs::SphincsKeyPair {
+    static PAIR: std::sync::OnceLock<dsm_sphincs::SphincsKeyPair> = std::sync::OnceLock::new();
+    PAIR.get_or_init(|| {
+        ok(
+            dsm_sphincs::generate_keypair_from_seed(PARTITION, &[0x5A; 32]),
+            "the test stamp key",
+        )
+    })
+}
+
+/// The stamp keys the boards here check under: the test key alone.
+fn test_stamp_keys() -> &'static [StampKey] {
+    static KEYS: std::sync::OnceLock<[StampKey; 1]> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| [core::array::from_fn(|i| stamp_pair().public_key[i])])
+}
+
+/// `pair`'s stamp over `board`.
+fn stamp_by(pair: &dsm_sphincs::SphincsKeyPair, board: BoardIdentity<'_>) -> Vec<u8> {
+    ok(
+        dsm_sphincs::sign(PARTITION, &pair.secret_key, &board_stamp_message(board)),
+        "a stamp",
+    )
 }
 
 /// BLAKE3-SPHINCS+ SPX128f, as the receiver verifies `σ^host`.
@@ -295,6 +335,9 @@ impl PartitionSig for Partition {
     }
     fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
         dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest).map_err(partition_error)
+    }
+    fn stamp_keys() -> &'static [StampKey] {
+        test_stamp_keys()
     }
 }
 
@@ -420,6 +463,7 @@ impl Anchor {
                 board: board.clone(),
                 slot: Rc::new(RefCell::new(None)),
                 trial: Rc::new(RefCell::new(None)),
+                stamp: Rc::new(RefCell::new(None)),
             },
             board,
             counter: Rc::new(Cell::new(H0)),
@@ -910,6 +954,7 @@ fn a_restored_anchor_is_bound_to_the_device_it_was_provisioned_for() {
                     board: anchor.board.clone(),
                     slot: Rc::new(RefCell::new(None)),
                     trial: Rc::new(RefCell::new(None)),
+                    stamp: Rc::new(RefCell::new(None)),
                 }
             )
             .map(|d| d.appliance().bundle),
@@ -963,6 +1008,9 @@ impl PartitionSig for UnsigningPartition {
     }
     fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
         Partition::owner_sign(sk, digest)
+    }
+    fn stamp_keys() -> &'static [StampKey] {
+        Partition::stamp_keys()
     }
 }
 
@@ -1384,22 +1432,33 @@ use anchor_core::receive::{
 };
 use anchor_core::root_advance::OfflineRelease;
 
-/// What `anchor` discloses of its enrollment to a receiver.
+/// What `anchor` discloses of its enrollment to a receiver, its board stamped with the test key.
 fn disclosure(anchor: &Anchor) -> PayerDisclosure {
     let birth = ok(
         anchor.chip_birth().birth::<Partition>(&anchor.owner()),
         "the anchor is born",
     );
     let owner = anchor.owner();
+    let anchor_id = derive(&anchor.seed, "anchor id");
+    let chip_pk = anchor.resident().verifying_key().to_bytes().to_vec();
+    let board_stamp = stamp_by(
+        stamp_pair(),
+        BoardIdentity {
+            anchor_id: &anchor_id,
+            pk_host: &birth.partition_pk,
+            pk_chip: &chip_pk,
+        },
+    );
     PayerDisclosure {
         online_id_pk: owner.online_id_pk,
-        anchor_id: derive(&anchor.seed, "anchor id"),
-        chip_pk: anchor.resident().verifying_key().to_bytes().to_vec(),
+        anchor_id,
+        chip_pk,
         partition_pk: birth.partition_pk.clone(),
         enrolled_counter: H0,
         device_id: owner.device_id,
         policy_hash: owner.policy_hash,
         birth_commitment: birth.birth_commitment,
+        board_stamp,
     }
 }
 
@@ -1876,4 +1935,213 @@ fn a_large_frame_is_served_only_as_a_payment_check_on_a_ready_appliance() {
     ok(prepare(&mut b), "a release in progress");
     let answer = ok(decode_response(&handle(&mut b, &frame)), "an answer");
     assert_eq!(answer.error, anchor_core::service::err::FRAME_TOO_LARGE);
+}
+
+// --- The owner's stamp on a board (DSM Amendment A38, owner, 2026-11-18) ---
+
+/// A request frame for `op` with `trailing` after its message, as the wallet sends an `OP_STAMP`.
+fn frame_with(op: pb::Op, trailing: &[u8]) -> Vec<u8> {
+    let mut out = frame(op, None);
+    out.extend_from_slice(trailing);
+    out
+}
+
+/// `pair`'s stamp over the identity `anchor`'s board reports, its `pk_host` taken from a birth.
+fn stamp_of(anchor: &Anchor, pair: &dsm_sphincs::SphincsKeyPair) -> Vec<u8> {
+    let birth = ok(
+        anchor.chip_birth().birth::<Partition>(&anchor.owner()),
+        "the anchor is born",
+    );
+    stamp_by(
+        pair,
+        BoardIdentity {
+            anchor_id: &derive(&anchor.seed, "anchor id"),
+            pk_host: &birth.partition_pk,
+            pk_chip: &anchor.resident().verifying_key().to_bytes(),
+        },
+    )
+}
+
+/// Before any install a board reports the identity its install binds: its anchor id, the `pk_host`
+/// the install binds, its chip key, its counter and what an install makes, and no stamp yet. Nothing
+/// is written to read it, and the chip is left open.
+#[test]
+fn a_board_reports_the_identity_its_install_binds_with_nothing_written() {
+    use anchor_core::service::err;
+    let anchor = Anchor::new(0x60);
+    let (booted, identity) = served(anchor.boot(), &frame(pb::Op::BoardIdentity, None));
+    assert_eq!(identity.error, err::NONE);
+    assert!(identity.ok);
+    assert_eq!(
+        identity.pin_anchor_id,
+        derive(&anchor.seed, "anchor id").to_vec()
+    );
+    assert_eq!(
+        identity.pin_chip_pk,
+        anchor.resident().verifying_key().to_bytes().to_vec()
+    );
+    assert_eq!(identity.pin_enrolled_counter, u64::from(H0));
+    assert_eq!(identity.install, pb::InstallKind::InstallForGood as i32);
+    assert!(identity.board_stamp.is_empty());
+    assert!(anchor.rmemory.slot.borrow().is_none(), "no record");
+    assert!(anchor.rmemory.trial.borrow().is_none(), "no trial record");
+    assert!(anchor.rmemory.stamp.borrow().is_none(), "no stamp");
+    assert_eq!(anchor.cage.get(), Cage::Open);
+
+    let (_, provisioned) =
+        over_the_wire(booted, pb::Op::Provision, provisioning_pb(&anchor.owner()));
+    assert_eq!(provisioned.error, err::NONE);
+    assert_eq!(
+        provisioned.pin_partition_pk, identity.pin_partition_pk,
+        "the pk_host reported before the install is the one it binds"
+    );
+}
+
+/// A board keeps only the owner's stamp over its own identity: none, one made by another key, and
+/// another board's are each refused with nothing kept; its own is kept, read back and reported.
+/// MUTATION CONTROL: keeping a stamp without verifying it turns this red.
+#[test]
+fn a_board_keeps_only_the_owners_stamp_over_its_own_identity() {
+    use anchor_core::service::err;
+    let anchor = Anchor::new(0x61);
+    let stranger = ok(
+        dsm_sphincs::generate_keypair_from_seed(PARTITION, &[0x5B; 32]),
+        "another key",
+    );
+    let mut booted = anchor.boot();
+    for (what, stamp) in [
+        ("no stamp", Vec::new()),
+        ("a stamp by another key", stamp_of(&anchor, &stranger)),
+        (
+            "another board's stamp",
+            stamp_of(&Anchor::new(0x62), stamp_pair()),
+        ),
+    ] {
+        let (next, answer) = served(booted, &frame_with(pb::Op::Stamp, &stamp));
+        booted = next;
+        assert_eq!(answer.error, err::STAMP_REFUSED, "{what}");
+        assert!(
+            anchor.rmemory.stamp.borrow().is_none(),
+            "{what}: nothing is kept"
+        );
+    }
+    let stamp = stamp_of(&anchor, stamp_pair());
+    let (booted, kept) = served(booted, &frame_with(pb::Op::Stamp, &stamp));
+    assert_eq!(kept.error, err::NONE);
+    assert_eq!(kept.board_stamp, stamp);
+    let (_, identity) = served(booted, &frame(pb::Op::BoardIdentity, None));
+    assert_eq!(identity.board_stamp, stamp);
+    assert!(anchor.rmemory.slot.borrow().is_none(), "still no record");
+    assert_eq!(anchor.cage.get(), Cage::Open, "still not installed");
+}
+
+/// A trial install's keys change at every boot, so it is never stamped.
+/// MUTATION CONTROL: stamping a trial install turns this red.
+#[test]
+fn a_trial_board_is_never_stamped() {
+    use anchor_core::service::err;
+    let anchor = Anchor::new(0x63);
+    let mut chip = anchor.chip_birth();
+    chip.install = Install::ForTrial;
+    let booted = ok(
+        Booted::boot(chip, anchor.chip(), anchor.rmemory.clone()),
+        "booted",
+    );
+    let (booted, identity) = served(booted, &frame(pb::Op::BoardIdentity, None));
+    assert_eq!(identity.install, pb::InstallKind::InstallForTrial as i32);
+    let (_, answer) = served(
+        booted,
+        &frame_with(pb::Op::Stamp, &stamp_of(&anchor, stamp_pair())),
+    );
+    assert_eq!(answer.error, err::STAMP_REFUSED);
+    assert!(anchor.rmemory.stamp.borrow().is_none());
+}
+
+/// Once installed a board takes no stamp, and goes on reporting the one it kept before.
+#[test]
+fn an_installed_board_takes_no_stamp_and_reports_the_one_it_kept() {
+    use anchor_core::service::err;
+    let anchor = Anchor::new(0x64);
+    let stamp = stamp_of(&anchor, stamp_pair());
+    let (booted, kept) = served(anchor.boot(), &frame_with(pb::Op::Stamp, &stamp));
+    assert_eq!(kept.error, err::NONE);
+    let (booted, provisioned) =
+        over_the_wire(booted, pb::Op::Provision, provisioning_pb(&anchor.owner()));
+    assert_eq!(provisioned.error, err::NONE);
+    let (booted, again) = served(booted, &frame_with(pb::Op::Stamp, &stamp));
+    assert_eq!(again.error, err::ALREADY_PROVISIONED);
+    let (_, identity) = served(booted, &frame(pb::Op::BoardIdentity, None));
+    assert_eq!(identity.board_stamp, stamp);
+    assert_eq!(identity.pin_partition_pk, provisioned.pin_partition_pk);
+    assert_eq!(identity.pin_anchor_id, provisioned.pin_anchor_id);
+}
+
+/// Bytes after a message ride only an `OP_STAMP` (a stamp) and an `OP_AUTHORIZE` (a signature): any
+/// other request that long is refused unread.
+#[test]
+fn a_stamp_rides_only_a_stamp_request() {
+    use anchor_core::service::err;
+    let anchor = Anchor::new(0x65);
+    let stamp = stamp_of(&anchor, stamp_pair());
+    let (_, answer) = served(anchor.boot(), &frame_with(pb::Op::Status, &stamp));
+    assert_eq!(answer.error, err::FRAME_TOO_LARGE);
+    assert!(anchor.rmemory.stamp.borrow().is_none());
+}
+
+/// The receiver's board refuses a payment from a board that carries no stamp of the owner's, or one
+/// made by another key, whatever the wallet in front of it decided; nothing is held for a receive.
+/// MUTATION CONTROL: checking a payment without the payer's stamp turns this red.
+#[test]
+fn a_receiving_board_refuses_a_payer_board_without_the_owners_stamp() {
+    let payer = Anchor::new(0x66);
+    let receiver = Anchor::new(0x67);
+    let mut a = payer.born();
+    let mut b = receiver.born();
+    let me = receiver.owner().device_id;
+    let challenge = ok(b.draw_challenge(), "a challenge");
+    let release = pay(&payer, &mut a, me, &challenge);
+    let (shown, _) = pin_of(&payer);
+    let stranger = ok(
+        dsm_sphincs::generate_keypair_from_seed(PARTITION, &[0x5B; 32]),
+        "another key",
+    );
+
+    let mut unstamped = shown.clone();
+    unstamped.board_stamp = Vec::new();
+    assert!(matches!(
+        check(&mut b, &release, &unstamped),
+        Err(ApplianceError::PaymentRefused(PaymentRefusal::Unstamped(
+            StampRefusal::Missing
+        )))
+    ));
+    let mut by_stranger = shown.clone();
+    by_stranger.board_stamp = stamp_of(&payer, &stranger);
+    assert!(matches!(
+        check(&mut b, &release, &by_stranger),
+        Err(ApplianceError::PaymentRefused(PaymentRefusal::Unstamped(
+            StampRefusal::NotStamped
+        )))
+    ));
+    let mut cut = shown.clone();
+    cut.board_stamp.pop();
+    assert!(matches!(
+        check(&mut b, &release, &cut),
+        Err(ApplianceError::PaymentRefused(PaymentRefusal::Unstamped(
+            StampRefusal::Length
+        )))
+    ));
+    let t = receive_of(&receiver, &b, &release, &challenge);
+    assert!(matches!(
+        b.prepare(
+            &t.as_transition(),
+            &challenge,
+            &RECEIVER_ROOT_BEFORE,
+            &RECEIVER_ROOT_AFTER
+        ),
+        Err(DurableError::Appliance(ApplianceError::PaymentUnchecked))
+    ));
+    ok(
+        check(&mut b, &release, &shown),
+        "the stamped payer's release checks",
+    );
 }

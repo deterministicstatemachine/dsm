@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! [`AnchorAppliance`] — the producer-side appliance interface.
+//! [`AnchorAppliance`] — the appliance interface, for the payer's side and the receiver's.
 //!
 //! Software Authority, Hardware Identity (v2): the appliance is NOT the transfer authority; it
 //! contributes exactly two identity witnesses over the DSM root-advance message `M`:
@@ -43,6 +43,38 @@ pub struct AnchorPin {
     /// The public birth commitment `S_birth` `B` commits: with the keys above, the owner's online
     /// key and device id, `B` recomputes from the pin.
     pub birth_commitment: [u8; 32],
+    /// The owner's stamp the board keeps (DSM Amendment A38), as its `OP_BOARD_IDENTITY` reports it;
+    /// empty while it keeps none, and then every counterparty refuses the board.
+    pub board_stamp: Vec<u8>,
+}
+
+/// What a board reports of itself with nothing written (`OP_BOARD_IDENTITY`, DSM Amendment A38): the
+/// identity the owner's stamp names, what an install there makes, and the stamp it keeps. Before an
+/// install, `partition_pk` is the `pk_host` the install will bind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoardIdentityReport {
+    pub anchor_id: [u8; 32],
+    pub partition_pk: Vec<u8>,
+    pub pk_chip: Vec<u8>,
+    pub enrolled_counter: u64,
+    pub install: anchor_core::enrollment::Install,
+    /// Empty while the board keeps no stamp.
+    pub board_stamp: Vec<u8>,
+}
+
+impl BoardIdentityReport {
+    /// The board's stamp verifies under the wallet's stamp keys over its own identity.
+    pub fn require_stamped(&self) -> Result<(), anchor_core::stamp::StampRefusal> {
+        anchor_core::stamp::verify_board_stamp::<dsm::types::offline_chain::SphincsHost>(
+            crate::anchor::board_stamp_keys(),
+            anchor_core::stamp::BoardIdentity {
+                anchor_id: &self.anchor_id,
+                pk_host: &self.partition_pk,
+                pk_chip: &self.pk_chip,
+            },
+            &self.board_stamp,
+        )
+    }
 }
 
 /// One thing a try-run went through.
@@ -104,11 +136,14 @@ impl RehearsalOwner {
     }
 }
 
-/// Transport-agnostic producer interface to the anchor appliance: what an RP2350 USB-CDC/BLE
-/// client implements. All ops fail closed into [`DsmError`].
+/// Transport-agnostic interface to the anchor appliance, for the payer's side and the receiver's:
+/// what the RP2350 USB-CDC client implements. All ops fail closed into [`DsmError`].
 pub trait AnchorAppliance {
     /// `OP_STATUS`: the active state (no mutation).
     fn status(&mut self) -> Result<ApplianceStatus, DsmError>;
+    /// `OP_BOARD_IDENTITY`: the board's public identity and the owner's stamp it keeps (DSM Amendment
+    /// A38), read with nothing written, before an install as after it.
+    fn board_identity(&mut self) -> Result<BoardIdentityReport, DsmError>;
     /// `OP_AUTHORIZATION_NONCE`: the nonce the anchor draws for the owner's next authorization. The
     /// digest the owner signs binds it, and the anchor holds it for one prepare: an authorization
     /// recorded off the link serves that prepare and no other, ever.

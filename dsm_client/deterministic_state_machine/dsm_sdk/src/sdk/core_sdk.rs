@@ -2218,12 +2218,6 @@ impl CoreSDK {
             .offline_allocation(&anchor_bundle_b, &asset)
     }
 
-    /// The offline allocation of `asset` under the bundle of the appliance
-    /// attached in this process, or `None` while none has been attached,
-    /// before genesis, or while its account holds none of `asset`. The account
-    /// is keyed by the appliance's bundle, which only the appliance states, so
-    /// a device that has not attached one cannot say what it holds offline:
-    /// that is unknown, not zero.
     /// The pin of the anchor attached in this process, checked to be
     /// provisioned for this device; `None` while none is attached.
     pub(crate) fn attached_anchor_pin(&self) -> Option<crate::anchor::AnchorPin> {
@@ -2233,6 +2227,13 @@ impl CoreSDK {
             .map(|attached| attached.pin.clone())
     }
 
+    /// The offline allocation of `asset` under the bundle of the appliance
+    /// attached in this process: `None` while none has been attached, before
+    /// genesis, or while no account is open under its bundle, and `Some(0)`
+    /// when the open account holds none of `asset`. The account is keyed by
+    /// the appliance's bundle, which only the appliance states, so a device
+    /// that has not attached one cannot say what it holds offline: that is
+    /// unknown, not zero.
     pub fn offline_allocation_of(&self, asset: &[u8; 32]) -> Option<u64> {
         let bundle = self
             .anchor_appliance
@@ -2355,7 +2356,7 @@ pub struct StagedBearerTransition {
     pub pin: crate::anchor::AnchorPin,
 }
 
-/// Read-only snapshot of the sender's anchor appliance for the `anchor.status` diagnostics route
+/// Read-only snapshot of this device's anchor appliance for the `anchor.status` diagnostics route
 /// (signal (c)). Purely observational: NO staging, NO counter move, NO device-state mutation.
 /// A disconnected snapshot (no appliance attachable) reports `connected = false` with zeroed
 /// identity — a diagnostics read must never fail the route.
@@ -2372,6 +2373,31 @@ pub struct AnchorStatusSnapshot {
     pub enrolled_counter: u64,
     pub bundle: [u8; 32],
     pub status: String,
+}
+
+/// This device's own board carries the owner's stamp (DSM Amendment A38). Every counterparty refuses
+/// a board without it, so the board is never asked to sign a release or hold a challenge for a
+/// payment that cannot be made: checked before the board is driven, so nothing moves on it.
+fn require_own_board_stamped(pin: &crate::anchor::AnchorPin) -> Result<(), DsmError> {
+    dsm::crypto::anchor_enrollment::require_board_stamp(
+        &dsm::crypto::anchor_enrollment::FusedAnchorPin {
+            bundle: pin.bundle,
+            anchor_id: pin.anchor_id,
+            enrolled_counter: pin.enrolled_counter,
+            partition_pk: pin.partition_pk.clone(),
+            pk_chip: pin.pk_chip.clone(),
+        },
+        dsm::crypto::anchor_enrollment::StampCheck {
+            stamp: &pin.board_stamp,
+            keys: crate::anchor::board_stamp_keys(),
+        },
+    )
+    .map_err(|refusal| {
+        DsmError::invalid_operation(format!(
+            "this phone's board pays and is paid nothing offline: {} (DSM Amendment A38)",
+            refusal.reason()
+        ))
+    })
 }
 
 impl CoreSDK {
@@ -2428,6 +2454,20 @@ impl CoreSDK {
                 ));
             }
             let mut appliance = connected_appliance()?;
+            // A board installed for good must carry the owner's stamp (DSM Amendment A38): every
+            // counterparty refuses one that does not, so it is refused here, before anything is
+            // made permanent on it. A trial's keys change at every boot; it is never stamped, and
+            // it pays and is paid nothing offline.
+            let identity = appliance.board_identity()?;
+            if identity.install == anchor_core::enrollment::Install::ForGood {
+                identity.require_stamped().map_err(|refusal| {
+                    DsmError::invalid_operation(format!(
+                        "this board is not installed: {}; every counterparty refuses a board \
+                         without the owner's stamp (DSM Amendment A38)",
+                        refusal.reason()
+                    ))
+                })?;
+            }
             let pin =
                 match appliance.provision(&self.anchor_provisioning()?, &self.rehearsal_owner()?) {
                     Ok(pin) => pin,
@@ -2439,6 +2479,15 @@ impl CoreSDK {
                     },
                 };
             self.require_anchor_for_this_device(&pin)?;
+            if identity.install == anchor_core::enrollment::Install::ForGood
+                && (pin.anchor_id != identity.anchor_id
+                    || pin.partition_pk != identity.partition_pk
+                    || pin.pk_chip != identity.pk_chip)
+            {
+                return Err(DsmError::invalid_operation(
+                    "the installed board names another identity than the one its stamp names",
+                ));
+            }
             let standing = appliance.status()?;
             let lost = self.close_the_accounts_earlier_anchors_left(&pin.bundle)?;
             // The new anchor's account opens at its origin now, so the wallet knows what it holds
@@ -2609,7 +2658,7 @@ impl CoreSDK {
     /// Read-only anchor appliance snapshot for the `anchor.status` diagnostics route (signal (c)).
     /// Binds nothing: an anchor never installed is reported as awaiting its install.
     /// Attaches (and caches) the appliance via the installed factory if not already attached, then
-    /// reads `pin()`/`status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
+    /// reads its cached pin and `status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
     /// this performs NO offline-account check and NO mutation. When no appliance can
     /// attach (no device / fail-closed) it returns a disconnected snapshot rather than an error, so
     /// the diagnostics panel can render "no anchor connected" instead of failing.
@@ -2659,6 +2708,14 @@ impl CoreSDK {
         }
     }
 
+    /// This device's own board carries the owner's stamp (DSM Amendment A38): checked before a
+    /// bearer step is proposed, so no receiver is asked to accept a payment every receiver refuses.
+    pub fn require_own_board_pays(&self) -> Result<(), DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        let attached = self.anchor_for_this_device(&mut guard)?;
+        require_own_board_stamped(&attached.pin)
+    }
+
     /// v2 producer phase 1 (Software-Authority / Hardware-Identity): lazily attach the appliance,
     /// check it against the offline account — the account's software counter and frontier are the
     /// authority, and the chip must stand exactly where they do — then deterministically stage the
@@ -2693,6 +2750,8 @@ impl CoreSDK {
             // check against the offline account is made PER stage call below.
             let attached = self.anchor_for_this_device(&mut guard)?;
             let pin = attached.pin.clone();
+            // A board every counterparty refuses is never asked to sign: nothing moves on it.
+            require_own_board_stamped(&pin)?;
             let app = &mut attached.appliance;
 
             // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
@@ -2882,6 +2941,8 @@ impl CoreSDK {
         let attached = self.anchor_for_this_device(&mut guard).map_err(|e| {
             DsmError::invalid_operation(format!("{OFFLINE_RECEIVE_NO_BOARD_MSG} ({e})"))
         })?;
+        // A board every payer refuses is never asked to hold a challenge.
+        require_own_board_stamped(&attached.pin)?;
         match attached.appliance.recover()? {
             anchor_core::appliance::RecoverOutcome::Accept(_) => {}
             other => {
@@ -3065,7 +3126,7 @@ pub(crate) const OFFLINE_RECEIVE_NO_BOARD_MSG: &str =
 pub(crate) const OFFLINE_BEARER_NO_APPLIANCE_MSG: &str =
     "offline-bearer requires the anchor appliance; connect the anchor device (Pico) and retry (fail closed)";
 
-/// The sender-side appliance when no hardware factory is installed: none.
+/// The appliance when no hardware factory is installed: none, to pay or to receive.
 /// Offline-bearer requires the physical anchor device ("offline = chips").
 fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError>
 {
@@ -3675,6 +3736,42 @@ pub(crate) fn successor_child_tip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This device's own board must carry the owner's stamp over its own identity to pay or be paid
+    /// (DSM Amendment A38): with none, or with the stamp of another board, it is refused by name.
+    /// MUTATION CONTROL: `require_own_board_stamped` answering Ok without the check turns this red.
+    #[test]
+    fn an_own_board_without_its_stamp_pays_and_is_paid_nothing() {
+        let mut pin = crate::anchor::AnchorPin {
+            bundle: [0x01; 32],
+            anchor_id: [0x02; 32],
+            enrolled_counter: 1_000,
+            partition_pk: vec![0x03; 32],
+            pk_chip: vec![0x04; 32],
+            birth_commitment: [0x05; 32],
+            board_stamp: Vec::new(),
+        };
+        let refused = super::require_own_board_stamped(&pin).expect_err("no stamp");
+        assert!(
+            refused.to_string().contains("carries no stamp"),
+            "{refused}"
+        );
+        let stamp_of = |anchor_id: &[u8; 32]| {
+            crate::test_support::appliance::stamp_by(
+                crate::test_support::appliance::test_stamp_pair(),
+                anchor_core::stamp::BoardIdentity {
+                    anchor_id,
+                    pk_host: &[0x03; 32],
+                    pk_chip: &[0x04; 32],
+                },
+            )
+        };
+        pin.board_stamp = stamp_of(&[0x09; 32]);
+        let refused = super::require_own_board_stamped(&pin).expect_err("another board's stamp");
+        assert!(refused.to_string().contains("does not verify"), "{refused}");
+        pin.board_stamp = stamp_of(&[0x02; 32]);
+        super::require_own_board_stamped(&pin).expect("its own stamp");
+    }
     use crate::economic_fixtures;
     use crate::storage::client_db;
     use crate::test_support::two_device::Pair;

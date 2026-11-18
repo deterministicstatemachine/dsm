@@ -17,6 +17,8 @@ export const BilateralEventType = {
   // Stage 4 Slice 3: receiver-side anchor trust signals.
   ANCHOR_PINNED: pb.BilateralEventType.BILATERAL_EVENT_ANCHOR_PINNED,
   ANCHOR_CHANGED: pb.BilateralEventType.BILATERAL_EVENT_ANCHOR_CHANGED,
+  // DSM Amendment A38: the counterparty's board carries no stamp of the owner's.
+  ANCHOR_UNSTAMPED: pb.BilateralEventType.BILATERAL_EVENT_ANCHOR_UNSTAMPED,
 } as const;
 
 export type BilateralEventTypeValue = typeof BilateralEventType[keyof typeof BilateralEventType];

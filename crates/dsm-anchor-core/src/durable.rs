@@ -1,11 +1,13 @@
 //! The appliance's durable record (§26): what a power cut leaves behind.
 //!
-//! The chip keeps its own monotonic counter. Everything else the appliance holds across a power
-//! cut is one record: the active frontier `h_i`, the counter `u_i` it last saw, and the prepared
-//! or committed transfer. [`DurableAppliance`] writes that record whole at every durable point of
-//! the flow — after prepare, after the committed candidate (before the counter moves), after the
-//! counter moved, after finalize, after cancel, and after a recovery that completed a commit — and
-//! restores the appliance from it at boot, before §26 recovery decides whether it may serve.
+//! The chip keeps its own monotonic counter, and the store keeps the owner's stamp apart from the
+//! record. Everything else the appliance holds across a power cut is one record: what it was
+//! provisioned for, the active frontier `h_i`, the counter `u_i` it last saw, the receive challenge
+//! it holds open, and the prepared or committed transfer. [`DurableAppliance`] writes that record
+//! whole at birth and at every durable point of the flow — after prepare, after the committed
+//! candidate (before the counter moves), after the counter moved, after finalize, after cancel,
+//! after a receive challenge is drawn, and after a recovery that completed a commit — and restores
+//! the appliance from it at boot, before §26 recovery decides whether it may serve.
 //!
 //! A store holds the last record written in full. A write the power cut short leaves the record
 //! before it. So the two crash points inside a commit are exactly the ones [`Appliance::recover`]
@@ -66,6 +68,12 @@ pub trait ActiveStore {
     fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
     /// Erase whatever a try-run wrote, a power cut's remains included.
     fn trial_clear(&mut self) -> Result<(), StoreError>;
+    /// Keep the owner's stamp on this board (DSM Amendment A38), in place of any kept before. After a
+    /// power cut the store holds this stamp or the one before it, never a mixture. Apart from the
+    /// record and from what a try-run writes, so neither ever touches it.
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError>;
+    /// The stamp last kept in full; `None` while none was.
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
 }
 
 /// A store behind a `Box`, as a firmware holds it, and as a try-run drives its trial slots.
@@ -88,6 +96,12 @@ impl<S: ActiveStore + ?Sized> ActiveStore for Box<S> {
     fn trial_clear(&mut self) -> Result<(), StoreError> {
         (**self).trial_clear()
     }
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError> {
+        (**self).stamp_write(stamp)
+    }
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).stamp_read()
+    }
 }
 
 /// A store a try-run lends out for the length of one payment.
@@ -109,6 +123,12 @@ impl<S: ActiveStore + ?Sized> ActiveStore for &mut S {
     }
     fn trial_clear(&mut self) -> Result<(), StoreError> {
         (**self).trial_clear()
+    }
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError> {
+        (**self).stamp_write(stamp)
+    }
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).stamp_read()
     }
 }
 
@@ -136,6 +156,13 @@ impl<S: ActiveStore> ActiveStore for TrialRecords<S> {
     }
     fn trial_clear(&mut self) -> Result<(), StoreError> {
         self.0.trial_clear()
+    }
+    /// A trial install is never stamped: its keys change at every boot.
+    fn stamp_write(&mut self, _stamp: &[u8]) -> Result<(), StoreError> {
+        Err(StoreError::Refused)
+    }
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.stamp_read()
     }
 }
 
@@ -458,6 +485,11 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     /// The appliance's store, to read.
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    /// The owner's stamp this board keeps (DSM Amendment A38), if any.
+    pub fn board_stamp(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.store.stamp_read()
     }
 
     /// Write the active state if it changed. A write the store does not take undoes the change in

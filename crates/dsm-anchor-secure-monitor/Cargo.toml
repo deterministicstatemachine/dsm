@@ -5,8 +5,8 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "DSM anchor RP2350 Secure monitor (TrustZone-M Secure world): TROPIC01 (σ^chip), BLAKE3-SPHINCS+ partition key (σ^host), physical counter, prepare/commit/recovery state, exact-measurement seal, and the ONLY Secure Gateway (NSC veneer + fixed-slot dispatcher). SRAM-resident TCB (linker-emitted boot-block LOAD_MAP), runtime boundary (SAU/ACCESSCTRL/BFHFNMINS/watchdog), and the real appliance (anchor_core dispatch — NOT a reimplemented state machine) are wired, and run on two installed boards. Not a workspace member — thumbv8m-only, excluded in the root manifest."
 
-# Two-image TrustZone build; link the monitor FIRST to produce the CMSE import library the
-# Non-secure app links against. Build from inside this dir so .cargo/config.toml applies.
+# Two-image TrustZone build: build.rs builds the Non-secure app and embeds its image, and the app
+# calls the gateway at the fixed NSC base. Build from inside this dir so .cargo/config.toml applies.
 [[bin]]
 name = "dsm-anchor-secure-monitor"
 test = false
@@ -33,10 +33,6 @@ dsm-anchor-chip = { path = "../dsm-anchor-chip" }
 tropic01 = { git = "https://github.com/tropicsquare/libtropic-rs", rev = "0cacb5ed94e5df491bfbb39e8702cc47598f7d63" }
 embedded-hal = "1.0"
 embedded-hal-bus = "0.3"
-
-[build-dependencies]
-# Compiles the -mcmse NSC veneer and links --cmse-implib to emit the Secure Gateway import library.
-cc = "1"
 
 [features]
 # Production profile marker. A production build sets this; it FORBIDS `bench_self_enroll` (a build
@@ -88,8 +84,11 @@ opt-level = "s"
 opt-level = "s"
 [profile.release.package.aes-gcm]
 opt-level = "s"
+# SHA-2 is outside that budget: SPHINCS+ here is BLAKE3, and SHA-2 hashes a few blocks for the chip
+# session and the chip's Ed25519 signature. At "z" its SHA-512 rounds are not unrolled, which gives
+# back about 12 KB (compress512: 22,670 bytes down to 9,728).
 [profile.release.package.sha2]
-opt-level = "s"
+opt-level = "z"
 
 # Its own workspace: excluded from the root manifest.
 [workspace]

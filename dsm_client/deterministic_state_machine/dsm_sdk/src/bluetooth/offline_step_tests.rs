@@ -1315,13 +1315,14 @@ fn bearer_transfer(to: &OfflineDevice, amount: u64) -> Proposal {
 
 /// A trial install clears at the board's next boot, and the anchor comes back born again: the same
 /// identity, a new bundle, at its origin. The account that followed the earlier trial stands where
-/// its last payment left it under the old bundle: it is lost with the trial (owner, 2026-11-08).
-/// Here A's anchor is a trial, A loads 20 ERA and pays B 7 base units on it, and the board reboots.
-/// The status then offers the install again and names the ended trial; the install closes the old
-/// bundle's account, says what it held, and opens the new bundle's account at the anchor's origin,
-/// so cash in hand reads as none, not unknown. MUTATION CONTROL: dropping
-/// `close_the_accounts_earlier_anchors_left` from `anchor_install` leaves the old account standing
-/// and turns this red.
+/// it was left under the old bundle: it is lost with the trial (owner, 2026-11-08). A trial's keys
+/// change at every boot, so it is never stamped (DSM Amendment A38), and it pays nothing offline: its
+/// payment is refused before it is proposed, and nothing moves. Here A's anchor is a trial, A loads
+/// 20 ERA onto it, and the board reboots. The status then offers the install again and names the
+/// ended trial; the install closes the old bundle's account, says what it held, and opens the new
+/// bundle's account at the anchor's origin, so cash in hand reads as none, not unknown.
+/// MUTATION CONTROL: dropping `close_the_accounts_earlier_anchors_left` from `anchor_install` leaves
+/// the old account standing and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_is_gone() {
@@ -1359,19 +1360,33 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
         .await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
     pair.b.sync().await;
+
+    // The trial carries no stamp, so its payment is refused before it is proposed.
     let operation = bearer_transfer(&b, 7);
-    bearer_payment_over_ble(&a, &b, &operation).await;
     a.device.enter();
+    let refused = a
+        .adapter()
+        .create_transfer_prepare_with_commitment(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone().expect("a transfer's terms"),
+        )
+        .await
+        .expect_err("a trial board pays nothing offline");
+    assert!(
+        refused.to_string().contains("carries no stamp"),
+        "{refused}"
+    );
     let era = dsm::core::token::token_state_manager::era_policy_commit();
-    let after_payment = core
+    let loaded_account = core
         .device_head()
         .and_then(|head| head.offline_account(&bundle).cloned())
-        .expect("the account the payment moved");
-    assert_eq!(after_payment.counter(), 1, "the payment moved the account");
+        .expect("the account the load opened");
+    assert_eq!(loaded_account.counter(), 0, "nothing moved the account");
     assert_eq!(
-        after_payment.allocation(&era),
-        Some(1993),
-        "20.00 ERA less 7 base units"
+        loaded_account.allocation(&era),
+        Some(2000),
+        "the 20.00 ERA loaded"
     );
 
     // The board loses power: the trial is over, and the anchor comes back unborn.
@@ -1401,7 +1416,7 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     assert!(
         again
             .status
-            .contains("What that account held is gone: 19.93 ERA"),
+            .contains("What that account held is gone: 20.00 ERA"),
         "{}",
         again.status
     );
@@ -1437,90 +1452,359 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
     let standing = core.anchor_appliance_status();
     assert!(standing.connected, "{}", standing.status);
     assert!(!standing.status.contains("gone"), "{}", standing.status);
+}
 
-    // A payment from the new trial, to the receiver that pinned the first: A loads 10 ERA onto it
-    // and pays B 5 base units. B pinned A's first anchor on the first transfer (A24, SA-175) and
-    // the chip came back under a new bundle, so B refuses the confirm — by name, before the
-    // receipt is read under the pinned bundle, where a changed bundle only fails the paths — and
-    // keeps its pin. A's side committed the step with its anchor before B answered: the step's
-    // confirm stays owed, and what it moved is at neither device. What a receiver does with a
-    // sender's anchor born again is the owner's call; this records what stands.
+/// `confirm` with the stamp its anchor disclosure carries replaced by `stamp`, as a payer's modified
+/// wallet would send it.
+fn with_board_stamp(confirm: &[u8], stamp: Vec<u8>) -> Vec<u8> {
+    use prost::Message;
+    let mut envelope = crate::envelope::from_canonical_bytes(confirm).expect("the confirm decodes");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload.as_mut()
+    else {
+        panic!("a confirm is a universal transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut() else {
+        panic!("a confirm invokes bilateral.confirm");
+    };
+    let args = invoke.args.as_mut().expect("the confirm's arguments");
+    let mut request =
+        crate::generated::BilateralConfirmRequest::decode(args.body.as_slice()).expect("decodes");
+    request
+        .anchor_disclosure
+        .as_mut()
+        .expect("a bearer confirm discloses its anchor")
+        .board_stamp = stamp;
+    args.body = request.encode_to_vec();
+    envelope.encode_to_vec()
+}
+
+/// `confirm` with the bundle its anchor disclosure carries replaced by `bundle`: the same chip named
+/// under another bundle, as a board born again discloses itself.
+fn with_disclosed_bundle(confirm: &[u8], bundle: [u8; 32]) -> Vec<u8> {
+    use prost::Message;
+    let mut envelope = crate::envelope::from_canonical_bytes(confirm).expect("the confirm decodes");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload.as_mut()
+    else {
+        panic!("a confirm is a universal transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut() else {
+        panic!("a confirm invokes bilateral.confirm");
+    };
+    let args = invoke.args.as_mut().expect("the confirm's arguments");
+    let mut request =
+        crate::generated::BilateralConfirmRequest::decode(args.body.as_slice()).expect("decodes");
+    request
+        .anchor_disclosure
+        .as_mut()
+        .expect("a bearer confirm discloses its anchor")
+        .bundle = bundle.to_vec();
+    args.body = request.encode_to_vec();
+    envelope.encode_to_vec()
+}
+
+/// `response` with the stamp its receiver's anchor disclosure carries replaced by `stamp`, as a
+/// receiver's modified wallet would send it.
+fn with_receiver_stamp(response: &[u8], stamp: Vec<u8>) -> Vec<u8> {
+    use prost::Message;
+    let mut envelope =
+        crate::envelope::from_canonical_bytes(response).expect("the response decodes");
+    let Some(crate::generated::envelope::Payload::BilateralPrepareResponse(resp)) =
+        envelope.payload.as_mut()
+    else {
+        panic!("a response is a BilateralPrepareResponse");
+    };
+    resp.receiver_anchor
+        .as_mut()
+        .expect("a bearer response names the receiver's board")
+        .board_stamp = stamp;
+    envelope.encode_to_vec()
+}
+
+/// A payer whose board carries no stamp of the owner's, or one made by another key, is refused by
+/// name at the receiver's confirm, before Core decides anything (DSM Amendment A38): nothing is
+/// pinned, the receiver's board commits no receive, and the receiver holds nothing. The payer's own
+/// wallet never sends such a confirm, so it is an honest one with its stamp taken out or replaced, as
+/// a modified wallet would send it. The honest confirm is then taken and the payer pinned; on its
+/// next payment a confirm without the stamp is refused again, as is one naming the same chip under
+/// another bundle (a board born again), each by name, the pin kept; the honest one is taken.
+/// MUTATION CONTROL: skipping either stamp check in `sender_anchor` (the first payment's or a pinned
+/// payer's) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payer_board_without_the_owners_stamp_is_refused_at_the_receivers_confirm() {
+    use crate::anchor::AnchorAppliance;
+    let (_pair, a, b, appliance, payment) = bearer_pair().await;
+    let receiver_before = appliance.receiver.clone().status().expect("B's board");
+    let (commitment, confirm) = to_the_confirm(&a, &b, payment).await;
+    let stranger = dsm::crypto::sphincs::generate_keypair_from_seed(
+        dsm::crypto::sphincs::SphincsVariant::SPX128f,
+        &[0x5B; 32],
+    )
+    .expect("another stamp key");
+    let payer_pin = appliance.payer.pin();
+    let by_stranger = crate::test_support::appliance::stamp_by(
+        &stranger,
+        anchor_core::stamp::BoardIdentity {
+            anchor_id: &payer_pin.anchor_id,
+            pk_host: &payer_pin.partition_pk,
+            pk_chip: &payer_pin.pk_chip,
+        },
+    );
+    let pinned_bundle = || {
+        crate::bridge::anchor_enrollment_store()
+            .expect("the enrollment store")
+            .get(&a.device.device_id)
+            .map(|pinned| pinned.pin.bundle)
+    };
+    b.device.enter();
+    for (stamp, why) in [
+        (Vec::new(), "carries no stamp"),
+        (by_stranger, "does not verify under the stamp key"),
+    ] {
+        let refused = b
+            .handler
+            .handle_confirm_request(&with_board_stamp(&confirm, stamp))
+            .await
+            .expect_err("an unstamped payer's confirm is refused");
+        assert!(refused.to_string().contains(why), "{why}: {refused}");
+        assert_eq!(pinned_bundle(), None, "{why}: B pinned the payer's board");
+        assert!(!history_row_exists(&commitment), "{why}: B kept the step");
+        assert_eq!(pending_era(), 0, "{why}: B holds a payment");
+        assert_eq!(
+            appliance
+                .receiver
+                .clone()
+                .status()
+                .expect("B's board")
+                .anchor_counter,
+            receiver_before.anchor_counter,
+            "{why}: B's board committed a receive"
+        );
+    }
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("the stamped payer's confirm commits");
+    assert!(history_row_exists(&commitment), "B holds the step");
+    assert_eq!(
+        pinned_bundle(),
+        Some(payer_pin.bundle),
+        "B pinned A's board"
+    );
+    let answered = delivered_over_ble(&b, &a, BleFrameType::BilateralCommitResponse, &ack).await;
+    assert!(answered.is_empty(), "the acknowledgment ends the step");
+
+    // A's next payment, to the B that pinned its board.
+    let (second, confirm) = to_the_confirm(&a, &b, bearer_transfer(&b, 3)).await;
+    b.device.enter();
+    for (bent, why) in [
+        (with_board_stamp(&confirm, Vec::new()), "carries no stamp"),
+        (
+            with_disclosed_bundle(&confirm, [0x77; 32]),
+            "born again under a new bundle",
+        ),
+    ] {
+        let refused = b
+            .handler
+            .handle_confirm_request(&bent)
+            .await
+            .expect_err("a pinned payer's bent confirm is refused");
+        assert!(refused.to_string().contains(why), "{why}: {refused}");
+        assert_eq!(
+            pinned_bundle(),
+            Some(payer_pin.bundle),
+            "{why}: the pin kept"
+        );
+        assert!(!history_row_exists(&second), "{why}: B kept the step");
+    }
+    b.handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("the stamped payer's second confirm commits");
+    assert!(history_row_exists(&second), "B holds the second step");
+}
+
+/// A receiver whose own board carries no stamp of the owner's takes no offline payment (DSM Amendment
+/// A38): its board holds no challenge for a payment every payer refuses, so its acceptance is refused
+/// before anything is drawn. A trial board carries none either.
+/// MUTATION CONTROL: skipping the check in `board_to_receive` turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receiver_board_without_the_owners_stamp_takes_no_payment() {
+    use crate::anchor::AnchorAppliance;
+    let pair = Pair::boot(100, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let mut unstamped = crate::test_support::appliance::HostAppliance::unstamped([0xB7; 32], 16);
+    unstamped
+        .provision(
+            &crate::test_support::appliance::provisioning_of(&pair.b),
+            &crate::test_support::appliance::rehearsal_owner_of(&pair.b),
+        )
+        .expect("B's board provisions");
+    let _boards = crate::test_support::appliance::HostAppliance::install_pair(
+        &pair.a,
+        crate::test_support::appliance::HostAppliance::birth(&pair.a, [0xC7; 32], 16),
+        &pair.b,
+        unstamped.clone(),
+    );
+    a.device.enter();
     let loaded = a
         .device
         .invoke(
             "wallet.loadOffline",
             &crate::generated::OfflineCashRequest {
                 token_id: "ERA".to_string(),
-                amount: "10.00".to_string(),
+                amount: "20.00".to_string(),
             },
         )
         .await;
-    assert!(
-        loaded.success,
-        "the second load: {:?}",
-        loaded.error_message
-    );
+    assert!(loaded.success, "the load: {:?}", loaded.error_message);
     pair.b.sync().await;
-    let second = bearer_transfer(&b, 5);
+    let operation = bearer_transfer(&b, 7);
     a.device.enter();
     let (prepare, commitment) = a
-        .adapter()
-        .create_transfer_prepare_with_commitment(
-            b.device.device_id,
-            second.operation.clone(),
-            second.terms.clone().expect("a transfer's terms"),
-        )
+        .handler
+        .prepare_bilateral_step(b.device.device_id, operation.operation, operation.terms)
         .await
-        .expect("A prepares the payment");
-    let answered = delivered_over_ble(&a, &b, BleFrameType::BilateralPrepare, &prepare).await;
-    assert!(answered.is_empty(), "the proposal waits for B's user");
+        .expect("A, whose board is stamped, proposes");
     b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal to its user");
+    assert!(answer.is_empty(), "the proposal waits for B's user");
+    let refused = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect_err("B's unstamped board takes nothing");
+    assert!(
+        refused.to_string().contains("carries no stamp"),
+        "{refused}"
+    );
+    assert_eq!(
+        unstamped
+            .clone()
+            .status()
+            .expect("B's board")
+            .open_challenge,
+        None,
+        "B's board holds no challenge"
+    );
+}
+
+/// A payer refuses a receiver's board that carries no stamp of the owner's (DSM Amendment A38), before
+/// anything is released: its own board signs nothing and moves no counter, and nothing is pinned. The
+/// receiver's own wallet never sends such a response, so it is an honest one with its stamp taken
+/// out, as a modified wallet would send it.
+/// MUTATION CONTROL: taking `PinAdmitDecision::Unstamped` as admitted in `receiver_anchor` turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payer_refuses_a_receiver_board_without_the_owners_stamp() {
+    let (_pair, a, b, appliance, payment) = bearer_pair().await;
+    let before = chip(&appliance);
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_step(b.device.device_id, payment.operation, payment.terms)
+        .await
+        .expect("A proposes");
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    assert!(answer.is_empty(), "the proposal waits for B's user");
     let response = b
-        .adapter()
+        .handler
         .create_prepare_accept_envelope(commitment)
         .await
         .expect("B's user accepts");
-    let confirm =
-        match delivered_over_ble(&b, &a, BleFrameType::BilateralPrepareResponse, &response)
-            .await
-            .as_slice()
-        {
-            [outbound] if outbound.frame_type == BleFrameType::BilateralConfirm => {
-                outbound.payload.clone()
-            }
-            other => panic!("A answers the acceptance with its confirm, not {other:?}"),
-        };
-    let carried = over_ble(&a, &b, BleFrameType::BilateralConfirm, &confirm).await;
-    b.device.enter();
-    let refused = b
+    a.device.enter();
+    let refused = a
         .handler
-        .handle_confirm_request(&carried.payload)
+        .handle_prepare_response(&with_receiver_stamp(&response, Vec::new()))
         .await
-        .expect_err("B pinned the first anchor and refuses the one born again");
+        .expect_err("A refuses an unstamped receiver board");
     assert!(
-        refused
-            .to_string()
-            .contains("the pinned chip born again under a new bundle"),
+        refused.to_string().contains("carries no stamp"),
+        "{refused}"
+    );
+    assert_eq!(
+        chip(&appliance).anchor_counter,
+        before.anchor_counter,
+        "A's board moved its counter"
+    );
+    assert!(
+        crate::bridge::anchor_enrollment_store()
+            .expect("the enrollment store")
+            .get(&b.device.device_id)
+            .is_none(),
+        "A pinned B's board"
+    );
+}
+
+/// A payer's own board without the owner's stamp proposes nothing (DSM Amendment A38): the payment
+/// is refused before it is proposed, so no receiver is asked. And a wallet never installs a board for
+/// good that carries no stamp: nothing is made permanent on it.
+/// MUTATION CONTROL: skipping the check in `require_own_board_pays`, or the one before an install in
+/// `anchor_install`, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_unstamped_board_neither_pays_nor_installs() {
+    use crate::anchor::AnchorAppliance;
+    let pair = Pair::boot(100, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let unstamped = crate::test_support::appliance::HostAppliance::unstamped([0xC6; 32], 16);
+    let _boards = crate::test_support::appliance::HostAppliance::install_each(vec![
+        (pair.a.device_id, unstamped.clone()),
+        (
+            pair.b.device_id,
+            crate::test_support::appliance::HostAppliance::birth(&pair.b, [0xB6; 32], 16),
+        ),
+    ]);
+    a.device.enter();
+    let core = a.device.router().core_sdk.clone();
+    let refused = core
+        .anchor_install()
+        .expect_err("an unstamped board is not installed for good");
+    assert!(
+        refused.to_string().contains("carries no stamp"),
         "{refused}"
     );
     assert!(
-        !refused.to_string().contains("not one tree"),
-        "refused by name, not by the receipt's paths: {refused}"
+        unstamped.provisioned().is_none(),
+        "nothing was made permanent on the board"
     );
+
+    // Provisioned anyway, as a modified wallet would: it still pays nothing.
+    let mut board = unstamped.clone();
+    board
+        .provision(
+            &crate::test_support::appliance::provisioning_of(&pair.a),
+            &crate::test_support::appliance::rehearsal_owner_of(&pair.a),
+        )
+        .expect("the board provisions");
+    let operation = bearer_transfer(&b, 7);
     a.device.enter();
-    let after = core
-        .device_head()
-        .and_then(|head| head.offline_account(&again.bundle).cloned())
-        .expect("the new account");
-    assert_eq!(
-        after.counter(),
-        1,
-        "A committed the step with its anchor before B answered"
-    );
-    assert_eq!(
-        after.allocation(&era),
-        Some(995),
-        "10.00 ERA less the 5 base units B refused"
+    let refused = a
+        .adapter()
+        .create_transfer_prepare_with_commitment(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone().expect("a transfer's terms"),
+        )
+        .await
+        .expect_err("an unstamped board proposes nothing");
+    assert!(
+        refused.to_string().contains("carries no stamp"),
+        "{refused}"
     );
 }
 
@@ -5019,18 +5303,31 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
     use dsm::types::receipt_types::ReceiptLeaf;
     use prost::Message;
 
-    let (_pair, a, b, _appliance, payment) = bearer_pair().await;
+    let (_pair, a, b, appliance, payment) = bearer_pair().await;
     // A's first payment: B pins A's anchor from its disclosure.
     offline_step(&a, &b, payment.clone()).await;
     let Operation::Transfer {
         amount,
         policy_commit,
+        authority_policy: Some(authority_policy),
         ..
     } = &payment.operation
     else {
-        panic!("a bearer payment is a transfer");
+        panic!("a bearer payment is a transfer that names its authority policy");
     };
     let (amount, asset) = (amount.value(), *policy_commit);
+    // A's anchor as A's confirm discloses it on every payment, its stamp with it (DSM Amendment A38).
+    let pin = appliance.payer.pin();
+    let disclosure = crate::generated::AnchorDisclosure {
+        bundle: pin.bundle.to_vec(),
+        anchor_id: pin.anchor_id.to_vec(),
+        enrolled_counter: pin.enrolled_counter,
+        partition_pk: pin.partition_pk.clone(),
+        policy_hash: authority_policy.policy_id.to_vec(),
+        pk_chip: pin.pk_chip.clone(),
+        birth_commitment: pin.birth_commitment.to_vec(),
+        board_stamp: pin.board_stamp.clone(),
+    };
 
     a.device.enter();
     let (prepare, commitment) = a.propose(&b, payment.clone()).await.expect("A proposes");
@@ -5191,7 +5488,7 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
             }),
             pre_entropy: entropy.to_vec(),
             offline_release: release,
-            anchor_disclosure: None,
+            anchor_disclosure: Some(disclosure),
             offline_account_chain: Some(crate::generated::OfflineAccountChain { hops: chain }),
         },
     )

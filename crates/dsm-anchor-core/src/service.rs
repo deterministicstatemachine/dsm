@@ -59,6 +59,17 @@ pub mod err {
     // 203 was the trial image's refusal of an install; its install is a trial now, and binds nothing.
     /// This image reads the chip and says what it is and holds (`OP_IDENTIFY`). It serves nothing else.
     pub const IDENTIFY_IMAGE: u32 = 204;
+    /// `OP_STAMP` refused: the stamp does not verify under this firmware's stamp keys over this
+    /// board's identity, or the board's install is a trial, whose keys change at every boot. Nothing
+    /// was written; `detail` says which (DSM Amendment A38).
+    pub const STAMP_REFUSED: u32 = 109;
+    /// The board's own secret is not sealed yet, so it has no identity to serve under. Nothing was
+    /// written, and nothing is until `OP_SEAL_SECRET` asks; `detail` says what the board found,
+    /// its chip included.
+    pub const UNSEALED: u32 = 205;
+    /// `OP_SEAL_SECRET` refused: the secret is sealed already, the page is one this procedure never
+    /// leaves, the board's randomness failed, or the OTP refused. `detail` says which.
+    pub const SEAL_REFUSED: u32 = 206;
 }
 
 /// Protocol-level ceiling on a request frame, a backstop against absurd inputs before prost
@@ -77,8 +88,9 @@ pub const OWNER_AUTHORIZATION_BYTES: usize = 49_856;
 /// wire ([`crate::proto::decode_frame`]) and is read in place.
 pub const REQUEST_HEAD_MAX: usize = 4 * 1024;
 
-/// The largest payment check: the payer's certificate, whose `σ^host` alone is 49,856 bytes, with
-/// its transition and the payer's disclosure. Unlike an authorization, whose signature follows its
+/// The largest payment check: the payer's certificate, whose `σ^host` alone is 17,088 bytes (SPX128f),
+/// with its transition and the payer's disclosure, which carries its board's 17,088-byte stamp (DSM
+/// Amendment A38). Unlike an authorization, whose signature follows its
 /// head and is read in place, a payment check is one message: it is decoded whole, only by an
 /// appliance holding no record, and held once while it is checked.
 pub const MAX_PAYMENT_CHECK_BYTES: usize = 56 * 1024;
@@ -156,6 +168,7 @@ fn base(op: i32) -> pb::ApplianceResponse {
         install: pb::InstallKind::InstallUnspecified as i32,
         receiver_challenge: Vec::new(),
         open_challenge: Vec::new(),
+        board_stamp: Vec::new(),
     }
 }
 
@@ -286,6 +299,15 @@ pub fn refusal(op: i32, code: u32, detail: &str) -> Vec<u8> {
     })
 }
 
+/// The board's answer to a seal command it carried out (`OP_SEAL_SECRET`): its own secret is sealed,
+/// and `detail` says what comes next. From the board's firmware, as [`refusal`] is.
+pub fn sealed_answer(detail: &str) -> Vec<u8> {
+    encode_response(&pb::ApplianceResponse {
+        detail: alloc::string::String::from(detail),
+        ..ok(pb::Op::SealSecret as i32)
+    })
+}
+
 /// An appliance the wire drives: each operation, its failure as the wire's code and detail, and the
 /// appliance to read for a status.
 pub trait Served {
@@ -315,6 +337,8 @@ pub trait Served {
         cert: &crate::receive::PaymentCert,
         payer: &crate::receive::PayerDisclosure,
     ) -> Result<(), ApplianceError>;
+    /// The owner's stamp this board keeps (DSM Amendment A38), if any.
+    fn board_stamp(&mut self) -> Result<Option<Vec<u8>>, Refusal>;
 }
 
 impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
@@ -365,6 +389,10 @@ impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
         payer: &crate::receive::PayerDisclosure,
     ) -> Result<(), ApplianceError> {
         Appliance::check_payment(self, t, cert, payer)
+    }
+    /// An appliance alone has no store, so it keeps no stamp.
+    fn board_stamp(&mut self) -> Result<Option<Vec<u8>>, Refusal> {
+        Ok(None)
     }
 }
 
@@ -419,6 +447,12 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Served for DurableAppliance<T, 
     ) -> Result<(), ApplianceError> {
         DurableAppliance::check_payment(self, t, cert, payer)
     }
+    fn board_stamp(&mut self) -> Result<Option<Vec<u8>>, Refusal> {
+        DurableAppliance::board_stamp(self).map_err(|e| Refusal {
+            code: err::STORE,
+            detail: alloc::format!("the stamp this board keeps did not read: {e:?}"),
+        })
+    }
 }
 
 /// A recovery outcome on the wire: its kind, and the frontier it names (the active frontier for
@@ -434,6 +468,27 @@ fn recovery_wire(outcome: RecoverOutcome) -> (pb::Recovery, Vec<u8>) {
             (pb::Recovery::AcceptPreparedCanComplete, Vec::new())
         }
         RecoverOutcome::OnlineCancelOrResolve => (pb::Recovery::OnlineCancelOrResolve, Vec::new()),
+    }
+}
+
+/// A board's public identity as `OP_BOARD_IDENTITY` answers it (DSM Amendment A38): what the owner's
+/// stamp signs, what an install makes, and the stamp the board keeps, empty while it keeps none.
+pub(crate) fn board_identity(
+    op: i32,
+    board: crate::stamp::BoardIdentity<'_>,
+    enrolled_counter: u32,
+    install: crate::enrollment::Install,
+    stamp: Option<Vec<u8>>,
+) -> pb::ApplianceResponse {
+    pb::ApplianceResponse {
+        pin_anchor_id: board.anchor_id.to_vec(),
+        pin_enrolled_counter: u64::from(enrolled_counter),
+        pin_partition_pk: board.pk_host.to_vec(),
+        pin_chip_pk: board.pk_chip.to_vec(),
+        install: install_kind(install),
+        // The stamp's bytes; none while the board keeps none.
+        board_stamp: stamp.into_iter().flatten().collect(),
+        ..ok(op)
     }
 }
 
@@ -463,10 +518,10 @@ pub(crate) fn status<T: Tropic, P: PartitionSig>(
 }
 
 /// Dispatch a decoded request against the appliance. `signature` is what followed the message on
-/// the wire: an `OP_AUTHORIZE`'s owner signature, and nothing for any other op.
+/// the wire: an `OP_AUTHORIZE`'s owner signature, an `OP_STAMP`'s stamp, and nothing for any other op.
 pub fn dispatch<A: Served>(
     app: &mut A,
-    req: &pb::ApplianceRequest,
+    req: pb::ApplianceRequest,
     signature: &[u8],
 ) -> pb::ApplianceResponse {
     let op = req.op;
@@ -561,11 +616,33 @@ pub fn dispatch<A: Served>(
             Err(refusal) => refused(op, refusal),
         },
         Ok(pb::Op::CheckPayment) => check_payment_request(app, req),
+        Ok(pb::Op::BoardIdentity) => {
+            let stamp = match app.board_stamp() {
+                Ok(stamp) => stamp,
+                Err(refusal) => return refused(op, refusal),
+            };
+            let view = app.view();
+            board_identity(
+                op,
+                crate::stamp::BoardIdentity {
+                    anchor_id: &view.anchor_id,
+                    pk_host: &view.partition_pk,
+                    pk_chip: &view.chip_pk,
+                },
+                view.h0,
+                view.install,
+                stamp,
+            )
+        }
         // An appliance exists only once its anchor is provisioned, and an anchor is provisioned
-        // once: provisioning it again is refused.
-        Ok(pb::Op::Provision | pb::Op::TryRun) => fail(op, err::ALREADY_PROVISIONED),
+        // once: provisioning it again is refused, and so is a stamp, which is kept before the install
+        // (DSM Amendment A38).
+        Ok(pb::Op::Provision | pb::Op::TryRun | pb::Op::Stamp) => {
+            fail(op, err::ALREADY_PROVISIONED)
+        }
         // Only the identify image reads a chip for whoever asks (`identify`); an anchor does not.
-        Ok(pb::Op::Identify) => fail(op, err::BAD_OP),
+        // The seal command is the board's firmware's to answer, before any anchor is asked.
+        Ok(pb::Op::Identify | pb::Op::SealSecret) => fail(op, err::BAD_OP),
         Ok(pb::Op::Unspecified) | Err(_) => fail(op, err::BAD_OP),
     }
 }
@@ -575,10 +652,10 @@ pub fn dispatch<A: Served>(
 #[inline(never)]
 fn check_payment_request<A: Served>(
     app: &mut A,
-    req: &pb::ApplianceRequest,
+    req: pb::ApplianceRequest,
 ) -> pb::ApplianceResponse {
     let op = req.op;
-    let (Some(payment), Some(payer)) = (&req.payment, &req.payer) else {
+    let (Some(payment), Some(payer)) = (req.payment, req.payer) else {
         return fail(op, err::MISSING_FIELD);
     };
     let (Some(transition), Some(cert)) = (&payment.transition, &payment.cert) else {
@@ -592,7 +669,7 @@ fn check_payment_request<A: Served>(
         Ok(c) => c,
         Err(e) => return fail(op, proto_code(e)),
     };
-    let payer = match payer.to_disclosure() {
+    let payer = match (*payer).into_disclosure() {
         Ok(p) => p,
         Err(e) => return fail(op, proto_code(e)),
     };
@@ -608,7 +685,7 @@ pub fn handle<A: Served>(app: &mut A, frame: &[u8]) -> Vec<u8> {
     // A payment check is the one request whose message is larger than a head: the payer's
     // certificate carries its σ^host. It is decoded whole, only by an appliance holding no record,
     // so its decoded copy never meets a record's in the heap. Every other frame is a head, and an
-    // authorization's signature after it ([`crate::proto::decode_frame`]).
+    // authorization's signature or an OP_STAMP's stamp after it ([`crate::proto::decode_frame`]).
     if frame.len() > REQUEST_HEAD_MAX
         && matches!(crate::proto::peek_op(frame), Ok(op) if op == pb::Op::CheckPayment as i32)
     {
@@ -621,14 +698,14 @@ pub fn handle<A: Served>(app: &mut A, frame: &[u8]) -> Vec<u8> {
         // this size.
         return match crate::proto::decode_request(frame) {
             Ok(req) if req.op == pb::Op::CheckPayment as i32 => {
-                encode_response(&dispatch(app, &req, &[]))
+                encode_response(&check_payment_request(app, req))
             }
             Ok(req) => encode_response(&fail(req.op, err::FRAME_TOO_LARGE)),
             Err(e) => encode_response(&fail(0, proto_code(e))),
         };
     }
     match decode_frame(frame) {
-        Ok((req, signature)) => encode_response(&dispatch(app, &req, signature)),
+        Ok((req, signature)) => encode_response(&dispatch(app, req, signature)),
         Err(e) => encode_response(&fail(0, proto_code(e))),
     }
 }

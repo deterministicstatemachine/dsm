@@ -60,10 +60,12 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
     }))
 }
 
-/// The appliance root the receiver adopted from the holder's last ACCEPTED
-/// release (Def. 25 check 2), plus the anchor counter adopted with it.
-/// `None` = relationship genesis — the next release's own `prev_root` is
-/// adopted TOFU by the acceptance predicate.
+/// Where this device last accepted a spend from the holder to leave its
+/// offline account: the anchor frontier and the counter (Def. 25 check 2).
+/// Core takes no spend from before it (`BearerOrigin::accepted`). `None`
+/// when it never has; the next spend still starts from the holder's account
+/// as this device recorded it from the holder's online history, and with
+/// none recorded Core refuses the spend.
 pub fn load_accepted_anchor_root(device_id: &[u8; 32]) -> Result<Option<([u8; 32], u64)>> {
     let binding = get_connection()?;
     let conn = binding
@@ -110,8 +112,9 @@ pub fn store_accepted_anchor_root_with_conn(
 
 /// Admit (pin) a fused anchor. INSERT OR REPLACE: re-admission overwrites, matching the
 /// [`AnchorEnrollmentStore`](dsm::crypto::anchor_enrollment::AnchorEnrollmentStore) contract —
-/// the CALLER owns the authority rules (first-transfer TOFU / same-anchor upgrade only; a
-/// differing anchor is rejected before ever reaching this write).
+/// the CALLER owns the authority rules (a first transfer from a board carrying the owner's stamp,
+/// DSM Amendment A38, and the same anchor after; a differing or unstamped anchor is rejected before
+/// ever reaching this write).
 pub fn admit_anchor_enrollment(e: &AnchorEnrollment) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding

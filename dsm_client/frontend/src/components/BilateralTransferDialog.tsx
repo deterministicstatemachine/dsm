@@ -148,8 +148,23 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
             break;
 
           case BilateralEventType.ANCHOR_PINNED:
-            // Stage 4 Slice 3 (signal b): first-transfer TOFU trust established.
-            notifyToast('success', `Trusted the offline anchor for ${aliasFor(event.counterpartyDeviceId)}.`);
+            // Stage 4 Slice 3 (signal b): the counterparty's board, its stamp checked, pinned on its
+            // first offline payment (DSM Amendment A38).
+            notifyToast('success', `Checked and trusted the offline board of ${aliasFor(event.counterpartyDeviceId)}.`);
+            break;
+
+          case BilateralEventType.ANCHOR_UNSTAMPED:
+            // DSM Amendment A38: the counterparty's board carries no stamp of the owner's, or one that
+            // does not verify. The payment is already refused and nothing was pinned; say why, and
+            // never call it a changed or cloned board.
+            notifyToast(
+              'error',
+              `The offline board of ${aliasFor(event.counterpartyDeviceId)} carries no valid DSM stamp, so the payment was refused.`,
+              // A refusal stays on screen until it is read.
+              { persistent: event.eventType === BilateralEventType.ANCHOR_UNSTAMPED }
+            );
+            setIncomingTransfer(null);
+            setOutgoingTransfer(null);
             break;
 
           case BilateralEventType.ANCHOR_CHANGED:

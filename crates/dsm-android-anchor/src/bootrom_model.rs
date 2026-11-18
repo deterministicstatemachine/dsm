@@ -8,15 +8,21 @@
 //! from each page's Secure lock advanced by its bootloader lock; a refused read or write answers
 //! `PICOBOOT_NOT_PERMITTED`, as the boards in hand answer for their sealed secret page. Flash is erased
 //! by sector and written by page, and a reboot into a signed image records its rollback version, as
-//! the bootrom's first boot of one does.
+//! the bootrom's first boot of one does. The signed image reads page 49 at each boot and writes
+//! nothing; it seals the board's own secret there through `anchor_core::seal` only when the seal
+//! command is sent ([`BootromModel::seal_command`]), as Secure code at a normal boot may write there
+//! (DSM Amendment A38; owner, 2026-11-18: no write because the board started).
 
 use crate::board_setup::Carried;
 use crate::otp_burn::{
     lock0, lock1, BOOTROM_HEADER, BOOT_FLAGS0_ROW, DIGEST_ROW, LOCK_IMAGE_ROWS, PAGES, PAGE_ROWS,
-    ROLLBACK_ROW, ROWS,
+    ROLLBACK_ROW, ROWS, SECRET_PAGE, SECRET_ROW,
 };
 use crate::picoboot::{BootselLink, COMMAND_BYTES, MAGIC, NOT_PERMITTED, RAW_ROW_MASK};
 use crate::release::FLASH_BASE;
+
+/// What a row never written reads as through the bootrom's error correction.
+const UNWRITTEN_ECC_ROW: u16 = 0;
 
 const UNSUPPORTED_MODIFICATION: u32 = 17;
 const INVALID_ADDRESS: u32 = 4;
@@ -86,6 +92,9 @@ pub struct BootromModel {
     /// Which of those two the board runs as the DSM Anchor since its last start: none after a start on
     /// anything else.
     pub running: Option<Carried>,
+    /// What the signed image's last boot read of the board's own secret (DSM Amendment A38): the
+    /// secret once it is sealed, none while the page waits for the seal command.
+    pub secret_at_boot: Option<Result<Option<[u8; 32]>, anchor_core::seal::SealError>>,
 }
 
 /// How a reboot went.
@@ -146,6 +155,7 @@ impl BootromModel {
             prepare_image: None,
             trial_image: None,
             running: None,
+            secret_at_boot: None,
         }
     }
 
@@ -274,7 +284,7 @@ impl BootromModel {
                 let addr = u32::from_le_bytes([args[0], args[1], args[2], args[3]]);
                 let size = u32::from_le_bytes([args[4], args[5], args[6], args[7]]) as usize;
                 match flash_offset(addr, size) {
-                    Some(at) if at % 4096 == 0 && size % 4096 == 0 => {
+                    Some(at) if at.is_multiple_of(4096) && size.is_multiple_of(4096) => {
                         self.flash[at..at + size].fill(0xff);
                         self.pending = Pending::AckIn;
                     }
@@ -329,7 +339,30 @@ impl BootromModel {
             for copy in 0..3 {
                 self.raw[usize::from(BOOT_FLAGS0_ROW) + copy] |= ROLLBACK_REQUIRED;
             }
+            // The signed image, at every boot: its own secret read, and nothing written.
+            self.secret_at_boot = Some(anchor_core::seal::read_if_sealed(
+                &mut SecurePage49::at_boot(self),
+            ));
         }
+    }
+
+    /// The seal command, sent to the signed image while it runs (`OP_SEAL_SECRET`): the one thing
+    /// that seals the board's own secret.
+    pub fn seal_command(&mut self) -> Result<(), anchor_core::seal::SealError> {
+        anchor_core::seal::seal_on_command(&mut SecurePage49::at_boot(self), || Some([0x5e; 32]))
+    }
+
+    /// The Secure lock (`LOCK_S`) a page's lock row gives at reset, by majority, and whether an access
+    /// key is registered for it: what Secure code at a normal boot is held to.
+    fn secure_lock_at_reset(&self, page: u16) -> (u32, bool) {
+        let majority = |row: u32| {
+            let (a, b, c) = (row & 0xff, (row >> 8) & 0xff, (row >> 16) & 0xff);
+            (a & b) | (b & c) | (a & c)
+        };
+        (
+            majority(self.raw[usize::from(lock1(page))]) & 0x3,
+            majority(self.raw[usize::from(lock0(page))]) & 0x3f != 0,
+        )
     }
 
     fn otp_read(&mut self, args: &[u8; 16], len: usize) {
@@ -376,7 +409,7 @@ impl BootromModel {
                 // Row by row, as the bootrom checks them: a write may stop part-way at a row its
                 // guarding page bars.
                 if args[4] != 0 {
-                    for (at, word) in (row..).zip(data.chunks_exact(2)) {
+                    for (at, word) in (row..).zip(data.as_chunks::<2>().0) {
                         let r = usize::from(at);
                         if let Err(status) = self.bootloader_may(at, WRITE_BARRED) {
                             return self.refuse(status);
@@ -389,13 +422,12 @@ impl BootromModel {
                         self.raw[r] = u32::from(value) | if value == 0 { 0 } else { ECC_MARKER };
                     }
                 } else {
-                    for (at, word) in (row..).zip(data.chunks_exact(4)) {
+                    for (at, word) in (row..).zip(data.as_chunks::<4>().0) {
                         let r = usize::from(at);
                         if let Err(status) = self.bootloader_may(at, WRITE_BARRED) {
                             return self.refuse(status);
                         }
-                        let value =
-                            u32::from_le_bytes([word[0], word[1], word[2], word[3]]) & RAW_ROW_MASK;
+                        let value = u32::from_le_bytes(*word) & RAW_ROW_MASK;
                         if self.raw[r] & !value != 0 {
                             return self.refuse(UNSUPPORTED_MODIFICATION);
                         }
@@ -406,7 +438,7 @@ impl BootromModel {
             _ => {
                 let addr = u32::from_le_bytes([args[0], args[1], args[2], args[3]]);
                 match flash_offset(addr, data.len()) {
-                    Some(at) if at % 256 == 0 && data.len() % 256 == 0 => {
+                    Some(at) if at.is_multiple_of(256) && data.len().is_multiple_of(256) => {
                         for (i, byte) in data.iter().enumerate() {
                             self.flash[at + i] &= byte;
                         }
@@ -500,3 +532,95 @@ impl BootselLink for BootromModel {
         Ok(())
     }
 }
+
+/// Page 49 as the signed image's Secure code reaches it at one boot: each page's Secure lock as
+/// reset left it, advanced only by the image itself, a row guarded as this bootrom guards it, and
+/// bits only ever set.
+struct SecurePage49<'a> {
+    model: &'a mut BootromModel,
+    /// The page's Secure lock for this boot, and whether a key bars Secure writes there.
+    page_lock: u32,
+    page_keyed: bool,
+    /// The same for the page guarding its lock row.
+    lock_row_lock: u32,
+    lock_row_keyed: bool,
+}
+
+impl<'a> SecurePage49<'a> {
+    fn at_boot(model: &'a mut BootromModel) -> Self {
+        let (page_lock, page_keyed) = model.secure_lock_at_reset(SECRET_PAGE);
+        let guard = model.guarding_page(lock1(SECRET_PAGE));
+        let (lock_row_lock, lock_row_keyed) = model.secure_lock_at_reset(guard);
+        Self {
+            model,
+            page_lock,
+            page_keyed,
+            lock_row_lock,
+            lock_row_keyed,
+        }
+    }
+}
+
+impl anchor_core::seal::SecretOtp for SecurePage49<'_> {
+    fn lock_row(&mut self) -> Result<u32, anchor_core::seal::OtpFault> {
+        Ok(self.model.raw[usize::from(lock1(SECRET_PAGE))])
+    }
+    fn raw_rows(
+        &mut self,
+    ) -> Result<[u32; anchor_core::seal::SECRET_ROWS], anchor_core::seal::OtpFault> {
+        Ok(core::array::from_fn(|i| {
+            self.model.raw[usize::from(SECRET_ROW) + i]
+        }))
+    }
+    fn write_lock_row(&mut self, value: u32) -> Result<(), anchor_core::seal::OtpFault> {
+        if self.lock_row_lock & WRITE_BARRED != 0 || self.lock_row_keyed {
+            return Err(anchor_core::seal::OtpFault::Refused(NOT_PERMITTED_ROM));
+        }
+        let row = &mut self.model.raw[usize::from(lock1(SECRET_PAGE))];
+        if *row & !value != 0 {
+            return Err(anchor_core::seal::OtpFault::Refused(
+                UNSUPPORTED_MODIFICATION_ROM,
+            ));
+        }
+        *row = value;
+        Ok(())
+    }
+    fn write_secret(
+        &mut self,
+        words: &[u16; anchor_core::seal::SECRET_ROWS],
+    ) -> Result<(), anchor_core::seal::OtpFault> {
+        if self.page_lock & WRITE_BARRED != 0 || self.page_keyed {
+            return Err(anchor_core::seal::OtpFault::Refused(NOT_PERMITTED_ROM));
+        }
+        for (i, word) in words.iter().enumerate() {
+            let at = usize::from(SECRET_ROW) + i;
+            if self.model.raw[at] != 0 {
+                return Err(anchor_core::seal::OtpFault::Refused(
+                    UNSUPPORTED_MODIFICATION_ROM,
+                ));
+            }
+            self.model.ecc[at] = Some(*word);
+            self.model.raw[at] = u32::from(*word) | ECC_MARKER;
+        }
+        Ok(())
+    }
+    fn read_secret(
+        &mut self,
+    ) -> Result<[u16; anchor_core::seal::SECRET_ROWS], anchor_core::seal::OtpFault> {
+        // A row never written reads back as zero through the error correction, as on the chip.
+        Ok(core::array::from_fn(|i| {
+            match self.model.ecc[usize::from(SECRET_ROW) + i] {
+                Some(word) => word,
+                None => UNWRITTEN_ECC_ROW,
+            }
+        }))
+    }
+    fn bar_non_secure(&mut self) {}
+    fn make_read_only(&mut self) {
+        self.page_lock |= WRITE_BARRED;
+    }
+}
+
+/// The bootrom's own refusals, as `otp_access` returns them.
+const NOT_PERMITTED_ROM: i32 = -4;
+const UNSUPPORTED_MODIFICATION_ROM: i32 = -18;

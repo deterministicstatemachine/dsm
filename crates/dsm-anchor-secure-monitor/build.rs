@@ -17,14 +17,35 @@ fn main() {
         eprintln!("{refusal}");
         std::process::exit(1);
     }
+    if let Err(why) = build() {
+        eprintln!("{why}");
+        std::process::exit(1);
+    }
+}
+
+/// A command's run, or why it did not run or did not succeed.
+fn run(what: &str, command: &mut Command) -> Result<(), String> {
+    let status = command
+        .status()
+        .map_err(|e| format!("{what}: did not start: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{what}: {status}"))
+    }
+}
+
+fn build() -> Result<(), String> {
     println!("cargo:rerun-if-changed=veneer/dsm_sg_veneer.S");
     println!("cargo:rerun-if-changed=veneer/dsm_ns_payload.S");
     println!("cargo:rerun-if-changed=veneer/dsm_sg_abi.h");
     println!("cargo:rerun-if-changed=memory.x");
     println!("cargo:rerun-if-changed=dsm-secure-sram.x");
 
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let out = PathBuf::from(env::var("OUT_DIR").map_err(|e| format!("OUT_DIR: {e}"))?);
+    let manifest = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").map_err(|e| format!("CARGO_MANIFEST_DIR: {e}"))?,
+    );
     let lib = out.join("libdsm_sg_veneer.a");
 
     // ── Build the real Non-secure app and objcopy its SRAM image into ns_app.bin (OUT_DIR), which
@@ -43,74 +64,87 @@ fn main() {
     let ns_bin = out.join("ns_app.bin");
     if let Some(kept) = env::var_os("DSM_ANCHOR_NS_BIN") {
         println!("cargo:rerun-if-changed={}", PathBuf::from(&kept).display());
-        std::fs::copy(&kept, &ns_bin).expect("copy the kept Non-secure image");
+        std::fs::copy(&kept, &ns_bin)
+            .map_err(|e| format!("copy the kept Non-secure image: {e}"))?;
     } else {
         let ns_target = out.join("ns-app-target");
         let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let status = Command::new(&cargo)
-            .current_dir(&ns_crate)
-            .args(["build", "--release", "--target-dir"])
-            .arg(&ns_target)
-            // Do not inherit this monitor build's RUSTFLAGS/target; the NS crate's .cargo/config sets
-            // its own (dsm-ns-sram.x). Clear the vars cargo would otherwise propagate.
-            .env_remove("RUSTFLAGS")
-            .env_remove("CARGO_ENCODED_RUSTFLAGS")
-            .env_remove("CARGO_BUILD_TARGET")
-            .status()
-            .expect("build dsm-anchor-nonsecure-app");
-        assert!(status.success(), "Non-secure app build failed");
+        run(
+            "build dsm-anchor-nonsecure-app",
+            Command::new(&cargo)
+                .current_dir(&ns_crate)
+                .args(["build", "--release", "--target-dir"])
+                .arg(&ns_target)
+                // Do not inherit this monitor build's RUSTFLAGS/target; the NS crate's .cargo/config
+                // sets its own (dsm-ns-sram.x). Clear the vars cargo would otherwise propagate.
+                .env_remove("RUSTFLAGS")
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env_remove("CARGO_BUILD_TARGET"),
+        )?;
         let ns_elf = ns_target.join("thumbv8m.main-none-eabihf/release/dsm-anchor-nonsecure-app");
-        let status = Command::new("arm-none-eabi-objcopy")
-            .args(["-O", "binary"])
-            .arg(&ns_elf)
-            .arg(&ns_bin)
-            .status()
-            .expect("objcopy the Non-secure app image");
-        assert!(status.success(), "objcopy of the Non-secure app failed");
+        run(
+            "objcopy the Non-secure app image",
+            Command::new("arm-none-eabi-objcopy")
+                .args(["-O", "binary"])
+                .arg(&ns_elf)
+                .arg(&ns_bin),
+        )?;
     }
 
     // Assemble the reviewed asm (NSC veneer + the NS payload) with clang for ARMv8-M, archive both
     // into one static lib linked into the monitor. `-I <OUT_DIR>` lets the payload `.incbin ns_app.bin`.
     let mut objs = Vec::new();
     for src in ["veneer/dsm_sg_veneer.S", "veneer/dsm_ns_payload.S"] {
-        let obj = out.join(format!("{}.o", src.rsplit('/').next().unwrap()));
-        let status = Command::new("clang")
-            .args([
-                "--target=arm-none-eabi",
-                "-mcpu=cortex-m33",
-                "-mfloat-abi=hard",
-                "-mfpu=fpv5-sp-d16",
-                "-I",
-            ])
-            .arg(&out)
-            .args(["-c", src, "-o"])
-            .arg(&obj)
-            .status()
-            .unwrap_or_else(|_| panic!("clang assemble {src}"));
-        assert!(status.success(), "assembly failed: {src}");
+        let name = PathBuf::from(src)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| format!("{src} names no file"))?;
+        let obj = out.join(format!("{name}.o"));
+        run(
+            &format!("clang assemble {src}"),
+            Command::new("clang")
+                .args([
+                    "--target=arm-none-eabi",
+                    "-mcpu=cortex-m33",
+                    "-mfloat-abi=hard",
+                    "-mfpu=fpv5-sp-d16",
+                    "-I",
+                ])
+                .arg(&out)
+                .args(["-c", src, "-o"])
+                .arg(&obj),
+        )?;
         objs.push(obj);
     }
 
-    let _ = std::fs::remove_file(&lib);
+    // A stale archive would keep members `ar crs` does not replace: it starts from none.
+    match std::fs::remove_file(&lib) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("remove the old veneer archive: {e}")),
+    }
     let mut ar = Command::new("arm-none-eabi-ar");
     ar.arg("crs").arg(&lib);
     for obj in &objs {
         ar.arg(obj);
     }
-    assert!(ar.status().expect("ar").success(), "ar failed");
+    run("ar the veneer archive", &mut ar)?;
 
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=dsm_sg_veneer");
     println!(
         "cargo:rustc-link-search={}",
-        env::current_dir().unwrap().display()
+        env::current_dir()
+            .map_err(|e| format!("the build's directory: {e}"))?
+            .display()
     );
     // The monitor does not CALL the gateway (the separate Non-secure app image does), so force the
     // veneer (and, transitively, the Secure handler it references) to be linked + kept, and export
     // the NSC entry for the app to resolve at the fixed NSC address.
     println!("cargo:rustc-link-arg=--undefined=dsm_secure_dispatch");
     println!("cargo:rustc-link-arg=--undefined=dsm_secure_handler");
-    // Keep the bring-up NS stub (nothing in Rust references it; the linker places it in NS SRAM and
-    // the monitor branches to its vector table by fixed address).
+    // Keep the Non-secure app image (veneer/dsm_ns_payload.S): `main` launches it through its vector
+    // table, `__ns_app_vector_table`, at the NS SRAM base.
     println!("cargo:rustc-link-arg=--undefined=__ns_app_vector_table");
+    Ok(())
 }

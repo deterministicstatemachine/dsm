@@ -108,7 +108,7 @@ impl OwnedTransition {
     }
 }
 
-// --- RootAdvanceCertificate <-> Certificate (v2 three-signature) ---
+// --- RootAdvanceCertificate <-> Certificate (v2: σ^chip and σ^host) ---
 
 impl pb::RootAdvanceCertificate {
     pub fn to_cert(&self) -> Result<Certificate, ProtoError> {
@@ -206,29 +206,39 @@ pub fn decode_request(bytes: &[u8]) -> Result<pb::ApplianceRequest, ProtoError> 
     pb::ApplianceRequest::decode(bytes).map_err(|_| ProtoError::Decode)
 }
 
-/// A request frame as the anchor reads it: its message, and the owner's signature after it when
-/// the frame carries one. A frame longer than one signature ends in that signature (an
-/// `OP_AUTHORIZE`'s), which is verified from the frame itself and copied nowhere. A frame longer
-/// than a request's largest message that is not one, and a signature after any other op, are
-/// refused unread, so no request makes the anchor hold more than it budgets for.
+/// A request frame as the anchor reads it: its message, and the owner's signature or stamp after it
+/// when the frame carries one. A frame longer than one signature ends in that signature (an
+/// `OP_AUTHORIZE`'s), which is verified from the frame itself and copied nowhere; an `OP_STAMP` frame
+/// longer than a stamp ends in the owner's stamp (DSM Amendment A38). A message longer than a
+/// request's largest, and bytes after the message of any other op, are refused unread, so no request
+/// makes the anchor hold more than it budgets for.
 pub fn decode_frame(frame: &[u8]) -> Result<(pb::ApplianceRequest, &[u8]), ProtoError> {
     use crate::service::{MAX_FRAME_LEN, OWNER_AUTHORIZATION_BYTES, REQUEST_HEAD_MAX};
+    use crate::stamp::BOARD_STAMP_BYTES;
     if frame.len() > MAX_FRAME_LEN {
         return Err(ProtoError::FrameTooLarge);
     }
-    let (head, signature) = if frame.len() > OWNER_AUTHORIZATION_BYTES {
-        frame.split_at(frame.len() - OWNER_AUTHORIZATION_BYTES)
+    // What follows the message: an authorization's signature, after any frame longer than one; an
+    // `OP_STAMP`'s stamp, after a frame that names that op first and is longer than a stamp
+    // (DSM Amendment A38); nothing after any other.
+    let (trailing, op) = if frame.len() > OWNER_AUTHORIZATION_BYTES {
+        (OWNER_AUTHORIZATION_BYTES, pb::Op::Authorize)
+    } else if frame.len() > BOARD_STAMP_BYTES
+        && matches!(peek_op(frame), Ok(op) if op == pb::Op::Stamp as i32)
+    {
+        (BOARD_STAMP_BYTES, pb::Op::Stamp)
     } else {
-        frame.split_at(frame.len())
+        (0, pb::Op::Unspecified)
     };
+    let (head, after) = frame.split_at(frame.len() - trailing);
     if head.len() > REQUEST_HEAD_MAX {
         return Err(ProtoError::FrameTooLarge);
     }
     let req = decode_request(head)?;
-    if !signature.is_empty() && req.op != pb::Op::Authorize as i32 {
+    if !after.is_empty() && req.op != op as i32 {
         return Err(ProtoError::Decode);
     }
-    Ok((req, signature))
+    Ok((req, after))
 }
 
 /// Encode an `ApplianceResponse` (firmware/secure-core side).
@@ -285,22 +295,26 @@ impl pb::RootAdvanceCertificate {
 pub const MAX_DISCLOSED_KEY: usize = 1024;
 
 impl pb::PayerDisclosure {
-    pub fn to_disclosure(&self) -> Result<crate::receive::PayerDisclosure, ProtoError> {
+    /// The disclosure, its fields moved out of the message: the stamp is the largest of them, and a
+    /// payment check holds it once.
+    pub fn into_disclosure(self) -> Result<crate::receive::PayerDisclosure, ProtoError> {
         bounded(&self.online_id_pk, MAX_DISCLOSED_KEY)?;
         bounded(&self.chip_pk, MAX_DISCLOSED_KEY)?;
         bounded(&self.partition_pk, MAX_DISCLOSED_KEY)?;
+        bounded(&self.board_stamp, crate::stamp::BOARD_STAMP_BYTES)?;
         if self.online_id_pk.is_empty() || self.chip_pk.is_empty() || self.partition_pk.is_empty() {
             return Err(ProtoError::MissingField);
         }
         Ok(crate::receive::PayerDisclosure {
-            online_id_pk: self.online_id_pk.clone(),
             anchor_id: arr32(&self.anchor_id)?,
-            chip_pk: self.chip_pk.clone(),
-            partition_pk: self.partition_pk.clone(),
-            enrolled_counter: self.enrolled_counter,
             device_id: arr32(&self.device_id)?,
             policy_hash: arr32(&self.policy_hash)?,
             birth_commitment: arr32(&self.birth_commitment)?,
+            online_id_pk: self.online_id_pk,
+            chip_pk: self.chip_pk,
+            partition_pk: self.partition_pk,
+            enrolled_counter: self.enrolled_counter,
+            board_stamp: self.board_stamp,
         })
     }
 }
@@ -316,6 +330,7 @@ impl crate::receive::PayerDisclosure {
             device_id: self.device_id.to_vec(),
             policy_hash: self.policy_hash.to_vec(),
             birth_commitment: self.birth_commitment.to_vec(),
+            board_stamp: self.board_stamp.clone(),
         }
     }
 }

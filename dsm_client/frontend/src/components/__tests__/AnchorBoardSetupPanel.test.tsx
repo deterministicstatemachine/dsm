@@ -43,12 +43,11 @@ const S = pb.AnchorBoardStepState;
 
 const NAMES = new Map<pb.AnchorBoardStepKind, string>([
   [K.LOAD_IMAGE, 'Load the signed image into flash'],
-  [K.SEAL_SECRET, "Write the board's secret and lock its page"],
   [K.WRITE_DIGEST, 'Burn the firmware digest'],
   [K.LOCK_DIGEST, 'Lock the digest page'],
   [K.WRITE_BOOT_KEY, "Burn the boot key's hash"],
   [K.LOCKDOWN, 'Lock down: secure boot on, debug off'],
-  [K.BOOT, 'Start the signed image once'],
+  [K.BOOT, 'Start the signed image once: it records its version, nothing else'],
   [K.LOCK_BOOT_PAGES, 'Lock the boot pages'],
 ]);
 
@@ -76,7 +75,7 @@ function offer(kind: pb.AnchorBoardStepKind): pb.AnchorBoardStep {
  * the trial image while the firmware digest is not burned, the changed-image check at the first boot.
  */
 function boardWith(next: pb.AnchorBoardStepKind, written: string[]): pb.AnchorBoardResponse {
-  const order = [K.LOAD_IMAGE, K.SEAL_SECRET, K.WRITE_DIGEST, K.LOCK_DIGEST, K.WRITE_BOOT_KEY, K.LOCKDOWN, K.BOOT, K.LOCK_BOOT_PAGES];
+  const order = [K.LOAD_IMAGE, K.WRITE_DIGEST, K.LOCK_DIGEST, K.WRITE_BOOT_KEY, K.LOCKDOWN, K.BOOT, K.LOCK_BOOT_PAGES];
   const at = order.indexOf(next);
   const board = new pb.AnchorBoardResponse({
     chipId: CHIP,
@@ -85,7 +84,7 @@ function boardWith(next: pb.AnchorBoardStepKind, written: string[]): pb.AnchorBo
       (kind, i) =>
         new pb.AnchorBoardStep({
           kind,
-          state: i < at || kind === K.SEAL_SECRET ? S.DONE : i === at ? S.NEXT : S.LATER,
+          state: i < at ? S.DONE : i === at ? S.NEXT : S.LATER,
           name: nameOf(kind),
         }),
     ),
@@ -125,7 +124,8 @@ describe('a board set up from the phone', () => {
     await waitFor(() => expect(screen.getByTestId('anchor-board-chip')).toHaveTextContent(CHIP));
     const steps = screen.getByTestId('anchor-board-steps');
     expect(steps).toHaveTextContent('NEXT: Load the signed image into flash');
-    expect(steps).toHaveTextContent("DONE: Write the board's secret and lock its page");
+    expect(steps).not.toHaveTextContent("secret and lock its page");
+    expect(steps).toHaveTextContent('Start the signed image once: it records its version, nothing else');
     expect(steps).toHaveTextContent('LATER: Burn the firmware digest');
     expect(screen.getByTestId('anchor-board-found')).toHaveTextContent('0x40404');
   });
@@ -202,13 +202,13 @@ describe('a board set up from the phone', () => {
   });
 
   it('says the lock image restarts the board and asks for Allow again, and sends it once typed back', async () => {
-    const order = [K.LOAD_IMAGE, K.SEAL_SECRET, K.WRITE_DIGEST, K.LOCK_PAGES, K.WRITE_BOOT_KEY, K.LOCKDOWN, K.BOOT, K.LOCK_BOOT_PAGES];
+    const order = [K.LOAD_IMAGE, K.WRITE_DIGEST, K.LOCK_PAGES, K.WRITE_BOOT_KEY, K.LOCKDOWN, K.BOOT, K.LOCK_BOOT_PAGES];
     const board = boardWith(K.WRITE_DIGEST, []);
     board.steps = order.map(
       (kind, i) =>
         new pb.AnchorBoardStep({
           kind,
-          state: i < 3 ? S.DONE : i === 3 ? S.NEXT : S.LATER,
+          state: i < 2 ? S.DONE : i === 2 ? S.NEXT : S.LATER,
           permanent: kind !== K.LOAD_IMAGE,
           name: kind === K.LOCK_PAGES ? 'Lock the digest and rollback pages, from a one-time image' : nameOf(kind),
         }),

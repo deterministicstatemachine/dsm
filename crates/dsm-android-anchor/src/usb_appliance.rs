@@ -4,16 +4,17 @@
 //!
 //! The Pico firmware runs the full `anchor_core::Appliance` on real silicon and serves the
 //! `ApplianceRequest`/`ApplianceResponse` protocol over USB-CDC (`LE32` length ++ prost body).
-//! This is the concrete `AnchorAppliance` the SDK flagged as "a real RP2350 USB-CDC/BLE client ...
-//! hardware follow-on" (`dsm_sdk::anchor::appliance_client`): each trait op is exactly one framed
-//! round-trip to the chip, over the same opaque Kotlin USB round-trip as [`crate::usb_pico`].
+//! This is the concrete `AnchorAppliance` (`dsm_sdk::anchor::appliance_client`): each trait op is
+//! one or more framed round-trips to the board (a pin reads STATUS and `OP_BOARD_IDENTITY`; a
+//! try-run or a provisioning adds the rehearsal's `OP_AUTHORIZE` when the board asks for it), over
+//! the same opaque Kotlin USB round-trip as [`crate::usb_pico`].
 //!
-//! Installing this in place of `InProcessAnchorAppliance` makes the SENDER's `OfflineRelease` come
-//! from the physical secure element: `σ^chip` is signed by the resident non-exportable Ed25519 key
-//! on the die, `σ^host` by the RP2350 partition, and the COMMIT consumes a real TROPIC01
-//! monotonic-counter step (the local double-spend floor). Every op fails CLOSED into `DsmError`
-//! (transport error, on-chip error, or malformed response) so a missing/wedged chip can never
-//! fabricate a release.
+//! It serves both sides of an offline payment. The payer's `OfflineRelease` comes from the physical
+//! secure element: `σ^chip` is signed by the resident non-exportable Ed25519 key on the die,
+//! `σ^host` by the RP2350 partition, and the COMMIT consumes a real TROPIC01 monotonic-counter step
+//! (the local double-spend floor); the receiver's board draws the challenge and checks the payment
+//! (`OP_CHALLENGE`, `OP_CHECK_PAYMENT`). Every op fails CLOSED into `DsmError` (transport error,
+//! on-chip error, or malformed response) so a missing/wedged chip can never fabricate a release.
 
 use anchor_core::appliance::RecoverOutcome;
 use anchor_core::enrollment::Install;
@@ -23,14 +24,16 @@ use anchor_core::service::err;
 use anchor_core::try_run::Requirement;
 use dsm::types::error::DsmError;
 use dsm_sdk::anchor::{
-    AnchorAppliance, AnchorPin, ApplianceStatus, RehearsalOwner, TryRunReport, TryRunStep,
+    AnchorAppliance, AnchorPin, ApplianceStatus, BoardIdentityReport, RehearsalOwner, TryRunReport,
+    TryRunStep,
 };
 
 use crate::usb_pico::UsbTransceive;
 
-/// A physical-chip appliance driven over USB. The pin is self-sourced from a STATUS round-trip —
-/// the chip self-describes its enrolled identity (`B`, `anchor_id`, `H0`, `pk_host`, `pk_chip`,
-/// `S_birth`), so there is no host-side enrollment DB and the pin is always the REAL silicon's.
+/// A physical-chip appliance driven over USB. The pin is self-sourced from a STATUS round-trip and
+/// the board's `OP_BOARD_IDENTITY` answer — the board self-describes its enrolled identity (`B`,
+/// `anchor_id`, `H0`, `pk_host`, `pk_chip`, `S_birth`) and the owner's stamp it keeps (DSM Amendment
+/// A38), so there is no host-side enrollment DB and the pin is always the REAL silicon's.
 pub struct UsbAnchorAppliance {
     usb: UsbTransceive,
 }
@@ -144,9 +147,36 @@ impl UsbAnchorAppliance {
         Ok(Self { usb })
     }
 
-    /// The pin STATUS discloses ([`pin_of`]).
+    /// The pin STATUS discloses ([`pin_of`]), with the owner's stamp the board keeps (DSM Amendment
+    /// A38).
     fn status_pin(&self) -> Result<AnchorPin, DsmError> {
-        pin_of(&self.roundtrip(bare(pb::Op::Status))?)
+        let status = self.roundtrip(bare(pb::Op::Status))?;
+        self.pin_with_stamp(&status)
+    }
+
+    /// The pin a STATUS answer discloses, with the stamp the board's identity answer reports. That
+    /// answer must name the same board as the STATUS, key for key.
+    fn pin_with_stamp(&self, status: &pb::ApplianceResponse) -> Result<AnchorPin, DsmError> {
+        let identity = self.identity()?;
+        let pin = pin_of(status, identity.board_stamp)?;
+        if identity.anchor_id != pin.anchor_id
+            || identity.partition_pk != pin.partition_pk
+            || identity.pk_chip != pin.pk_chip
+        {
+            return Err(DsmError::invalid_operation(
+                "anchor appliance: its identity answer names another board than its STATUS",
+            ));
+        }
+        Ok(pin)
+    }
+
+    /// `OP_BOARD_IDENTITY` ([`identity_of`]).
+    fn identity(&self) -> Result<BoardIdentityReport, DsmError> {
+        let resp = exchange(&self.usb, bare(pb::Op::BoardIdentity))?;
+        if !resp.ok {
+            return Err(refused(&resp));
+        }
+        identity_of(&resp)
     }
 
     fn roundtrip(&self, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
@@ -154,10 +184,24 @@ impl UsbAnchorAppliance {
     }
 }
 
-/// The pin a STATUS answer discloses. Fails closed if it omits any pin material (pre-v2 firmware,
-/// or firmware without the birth commitment) — an appliance whose identity cannot be checked
-/// against its owner must never produce releases.
-fn pin_of(s: &pb::ApplianceResponse) -> Result<AnchorPin, DsmError> {
+/// What a board's `OP_BOARD_IDENTITY` answer reports (DSM Amendment A38).
+fn identity_of(r: &pb::ApplianceResponse) -> Result<BoardIdentityReport, DsmError> {
+    Ok(BoardIdentityReport {
+        anchor_id: arr32(&r.pin_anchor_id)?,
+        partition_pk: r.pin_partition_pk.clone(),
+        pk_chip: r.pin_chip_pk.clone(),
+        enrolled_counter: r.pin_enrolled_counter,
+        install: install_of(r).ok_or_else(|| {
+            DsmError::invalid_operation("anchor appliance: its identity answer named no install")
+        })?,
+        board_stamp: r.board_stamp.clone(),
+    })
+}
+
+/// The pin a STATUS answer discloses, with the stamp the board keeps. Fails closed if it omits any
+/// pin material (pre-v2 firmware, or firmware without the birth commitment) — an appliance whose
+/// identity cannot be checked against its owner must never produce releases.
+fn pin_of(s: &pb::ApplianceResponse, board_stamp: Vec<u8>) -> Result<AnchorPin, DsmError> {
     let pin = AnchorPin {
         bundle: arr32(&s.anchor_bundle)?,
         anchor_id: arr32(&s.pin_anchor_id)?,
@@ -165,6 +209,7 @@ fn pin_of(s: &pb::ApplianceResponse) -> Result<AnchorPin, DsmError> {
         partition_pk: s.pin_partition_pk.clone(),
         pk_chip: s.pin_chip_pk.clone(),
         birth_commitment: arr32(&s.pin_birth_commitment)?,
+        board_stamp,
     };
     if pin.partition_pk.is_empty() || pin.pk_chip.len() != 32 {
         return Err(DsmError::invalid_operation(
@@ -197,6 +242,10 @@ fn install_of(r: &pb::ApplianceResponse) -> Option<Install> {
 }
 
 impl AnchorAppliance for UsbAnchorAppliance {
+    fn board_identity(&mut self) -> Result<BoardIdentityReport, DsmError> {
+        self.identity()
+    }
+
     fn status(&mut self) -> Result<ApplianceStatus, DsmError> {
         let r = self.roundtrip(bare(pb::Op::Status))?;
         Ok(ApplianceStatus {
@@ -316,7 +365,7 @@ impl AnchorAppliance for UsbAnchorAppliance {
         if !status.ok {
             return Err(refused(&status));
         }
-        pin_of(&status).map(Some)
+        self.pin_with_stamp(&status).map(Some)
     }
 
     fn try_run(
@@ -449,9 +498,32 @@ mod tests {
         })
     }
 
+    /// The board's `OP_BOARD_IDENTITY` answer: `anchor_id` and the stamp it keeps (DSM Amendment A38).
+    fn identity_response(anchor_id: u8) -> Vec<u8> {
+        let status = decode_response(&status_response(0)).expect("the status answer");
+        anchor_core::proto::encode_response(&pb::ApplianceResponse {
+            op: pb::Op::BoardIdentity as i32,
+            pin_anchor_id: vec![anchor_id; 32],
+            board_stamp: vec![0x5D; anchor_core::stamp::BOARD_STAMP_BYTES],
+            ..status
+        })
+    }
+
+    /// A board that answers STATUS with `status` and its identity with `identity`.
+    fn board(status: Vec<u8>, identity: Vec<u8>) -> UsbTransceive {
+        Arc::new(move |frame| {
+            let req = anchor_core::proto::decode_request(&frame[4..]).expect("a request");
+            if req.op == pb::Op::BoardIdentity as i32 {
+                Ok(identity.clone())
+            } else {
+                Ok(status.clone())
+            }
+        })
+    }
+
     #[test]
     fn connect_self_sources_the_full_v2_pin_from_status() {
-        let usb: UsbTransceive = Arc::new(|_frame| Ok(status_response(0)));
+        let usb = board(status_response(0), identity_response(0xA1));
         let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
         let pin = app
             .provisioned_pin()
@@ -463,25 +535,35 @@ mod tests {
         assert_eq!(pin.enrolled_counter, 1_000);
         assert_eq!(pin.partition_pk, vec![0x07; 64]);
         assert_eq!(pin.pk_chip, vec![0x0C; 32]);
+        assert_eq!(
+            pin.board_stamp,
+            vec![0x5D; anchor_core::stamp::BOARD_STAMP_BYTES],
+            "the stamp the board's identity answer reports"
+        );
+    }
+
+    /// A board whose identity answer names another board than its STATUS gives no pin.
+    #[test]
+    fn an_identity_answer_naming_another_board_gives_no_pin() {
+        let usb = board(status_response(0), identity_response(0xA2));
+        let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
+        let refused = app
+            .provisioned_pin()
+            .expect_err("the identity names another board");
+        assert!(refused.to_string().contains("another board"), "{refused}");
     }
 
     #[test]
     fn connect_fails_closed_without_pk_chip() {
-        let usb: UsbTransceive = Arc::new(|_frame| {
-            Ok(anchor_core::proto::encode_response(
-                &pb::ApplianceResponse {
-                    op: pb::Op::Status as i32,
-                    ok: true,
-                    active_root: vec![0x11; 32],
-                    anchor_bundle: vec![0xB1; 32],
-                    pin_anchor_id: vec![0xA1; 32],
-                    pin_enrolled_counter: 1_000,
-                    pin_partition_pk: vec![0x07; 64],
-                    pin_chip_pk: Vec::new(), // pre-v2 firmware
-                    ..Default::default()
-                },
-            ))
-        });
+        let status = decode_response(&status_response(0)).expect("the status answer");
+        let usb = board(
+            anchor_core::proto::encode_response(&pb::ApplianceResponse {
+                pin_chip_pk: Vec::new(), // pre-v2 firmware
+                pin_birth_commitment: Vec::new(),
+                ..status
+            }),
+            identity_response(0xA1),
+        );
         let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
         let refused = app
             .provisioned_pin()

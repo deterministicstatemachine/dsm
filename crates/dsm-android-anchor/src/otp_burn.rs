@@ -8,12 +8,15 @@
 //! for the rows picotool's JSON load writes (the boot key's hash, the lockdown flags) that is more
 //! than picotool does.
 //!
-//! One departure from the script, for a board whose secret page is blank: the phone writes the
-//! secret and locks its page in one step. The script locks it at Step 6, and its own Step 6 stops on
-//! a page written and not yet locked; a page left so between steps is also one another procedure
-//! could have written. A page found written and unlocked therefore stops here, as the script says
-//! of any page it did not seal. The boards in hand were sealed by an earlier procedure, and their
-//! secrets are kept.
+//! The phone never draws or writes the board's secret (DSM Amendment A38, owner, 2026-11-18): the
+//! signed image seals it itself, from the board's TRNG, in page 49, its lock row before any row of
+//! it (`anchor_core::seal`). It does that only when the seal command is sent to it
+//! (`OP_SEAL_SECRET`), never because it started (owner, 2026-11-18: "fix the image so it doesn't
+//! auto-write"): no step here makes it happen, and a board's first boot leaves the page blank. Step 0
+//! requires that page blank, with no access key and Secure code free to write it and its lock row;
+//! once the board has sealed it the page reads sealed, or, on an A3 or A4 bootrom, closed to the
+//! bootloader altogether. Page 48 held a secret drawn on a
+//! computer by an earlier procedure on the boards burned before A38; nothing here reads or writes it.
 
 use crate::picoboot::{BootselError, BootselLink, Picoboot, NOT_PERMITTED, RAW_ROW_MASK};
 use crate::release::{Release, FLASH_BASE};
@@ -25,8 +28,10 @@ pub const ROWS: u16 = PAGES * PAGE_ROWS;
 /// The last pages, whose permissions the bootloader applies row by row: picotool reads them so.
 const SPECIAL_PAGES: u16 = 3;
 
-/// Page 48, row 0: the board's sealed secret. MUST equal `SEALED_SECRET_ROW` in the monitor.
-pub const SECRET_ROW: u16 = 48 * PAGE_ROWS;
+/// The page the board seals its own secret in. MUST equal `SEALED_SECRET_PAGE` in the monitor.
+pub const SECRET_PAGE: u16 = 49;
+/// Page 49, row 0: the board's sealed secret.
+pub const SECRET_ROW: u16 = SECRET_PAGE * PAGE_ROWS;
 /// Page 46, row 0: the Non-secure app's digest. MUST equal `MU_ROW` in the monitor.
 pub const DIGEST_ROW: u16 = 46 * PAGE_ROWS;
 /// Page 44, rows 0-2: the rollback version. MUST equal `ROLLBACK_ROW` in sign.sh.
@@ -76,7 +81,11 @@ pub const fn lock_row_value(secure: u32, non_secure: u32, bootloader: u32) -> u3
     let byte = secure | (non_secure << 2) | (bootloader << 4);
     byte * 0x0001_0101
 }
-/// Secure reads and nothing writes; Non-secure and the bootloader have no access.
+/// The board's own seal begun: Non-secure and the bootloader barred, Secure still writing. MUST equal
+/// `anchor_core::seal::SEAL_BEGUN`.
+pub const SEAL_BEGUN: u32 = lock_row_value(READ_WRITE, INACCESSIBLE, INACCESSIBLE);
+/// The board's own seal done: Secure reads and nothing writes; Non-secure and the bootloader have no
+/// access. MUST equal `anchor_core::seal::SEALED`.
 pub const SECRET_LOCK: u32 = lock_row_value(READ_ONLY, INACCESSIBLE, INACCESSIBLE);
 /// Secure reads; the bootloader may read back the digest, which is public; Non-secure has no access.
 pub const DIGEST_LOCK: u32 = lock_row_value(READ_ONLY, INACCESSIBLE, READ_ONLY);
@@ -319,21 +328,33 @@ impl OtpReading {
 /// What the board's secret page holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecretPage {
-    /// Nothing, and its lock row unburned.
+    /// Nothing, and its lock row unburned: the board seals its own secret when the seal command
+    /// tells it to.
     Blank,
-    /// A secret, burned and locked exactly as this procedure seals one: the board keeps it.
+    /// The board's own seal begun and not finished: the next seal command finishes a seal cut before
+    /// any row, and the board refuses one cut after.
+    Begun,
+    /// Sealed by the board itself: it keeps its secret.
     Sealed,
+    /// The page's lock row is closed to the bootloader: on an A3 or A4 bootrom the page guards its own
+    /// lock row, so once the board has begun its seal nothing of the page reads from BOOTSEL. Its
+    /// answer as the DSM Anchor says whether it sealed.
+    Closed,
 }
 
-/// The secret page, read fresh: blank or sealed, and anything else stops the procedure, as
-/// `provision-otp.sh`'s `secret_page` does. The lock row decides: once it holds the sealed value the
-/// bootloader has no access to the page, so its rows say nothing here.
+/// The secret page, read fresh, as `provision-otp.sh`'s `secret_page` does: blank, the board's seal
+/// begun or done, or closed to the bootloader; anything else stops the procedure. The lock row
+/// decides: once the board has begun its seal the bootloader has no access to the page, so its rows
+/// say nothing here.
 pub fn secret_page(otp: &OtpReading) -> Result<SecretPage, String> {
-    let lock = otp
-        .row(lock1(48))
-        .ok_or("the secret page's lock row cannot be read through the bootloader")?;
+    let Some(lock) = otp.row(lock1(SECRET_PAGE)) else {
+        return Ok(SecretPage::Closed);
+    };
     if lock == SECRET_LOCK {
         return Ok(SecretPage::Sealed);
+    }
+    if lock == SEAL_BEGUN {
+        return Ok(SecretPage::Begun);
     }
     let rows = otp.rows_in(SECRET_ROW, HASH_ROWS)?;
     let written: Vec<String> = (SECRET_ROW..SECRET_ROW + HASH_ROWS)
@@ -345,25 +366,51 @@ pub fn secret_page(otp: &OtpReading) -> Result<SecretPage, String> {
         return Ok(SecretPage::Blank);
     }
     Err(format!(
-        "the secret page is neither blank nor sealed as this procedure seals it: rows written \
-         {written:?}, lock row {lock:#x} (expected 0 or {SECRET_LOCK:#x}). Another procedure wrote \
-         this board, or a secret was written and never locked; nothing here goes on with it"
+        "the secret page is neither blank nor sealed as the board seals it: rows written \
+         {written:?}, lock row {lock:#x} (expected 0, {SEAL_BEGUN:#x} or {SECRET_LOCK:#x}). Someone \
+         other than the board wrote it; nothing here goes on with it"
     ))
+}
+
+/// Whether the board's own seal can be written where it goes (DSM Amendment A38): Secure code at a
+/// normal boot may write page 49 and its lock row with no access key, by this board's bootrom's rule
+/// (on A2 a lock row is guarded by page 63, where it sits; on A3 and A4 by page 49 itself). A board
+/// whose page would refuse it is never started: it would lock down and never seal.
+pub fn secret_page_takes_the_boards_seal(otp: &OtpReading, bootrom: Bootrom) -> Result<(), String> {
+    for page in [SECRET_PAGE, bootrom.guarding_page(lock1(SECRET_PAGE))] {
+        let access = BootloaderAccess::of(otp, page)?;
+        if !access.secure_may_write() {
+            return Err(format!(
+                "the board could not seal its own secret: Secure code may not write page {page} \
+                 ({})",
+                access.words()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// What the read-only check found, beyond the board being blank where the procedure writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlankBoard {
-    pub secret: SecretPage,
     /// Lock rows already holding bits, every one of them within what the procedure burns there.
     pub locks_already_set: Vec<String>,
 }
 
-/// Step 0, READ-ONLY: every row the procedure writes is still zero, except a secret page an earlier
-/// procedure sealed as this one seals it; and every lock row it burns holds no bit outside what it
-/// burns there. `provision-otp.sh --check-blank`, row for row.
+/// Step 0, READ-ONLY: every row the procedure writes is still zero, the secret page blank for the
+/// board to seal itself; and every lock row it burns holds no bit outside what it burns there.
+/// `provision-otp.sh --check-blank`, row for row.
 pub fn check_blank(otp: &OtpReading) -> Result<BlankBoard, String> {
-    let secret = secret_page(otp)?;
+    match secret_page(otp)? {
+        SecretPage::Blank => {}
+        other => {
+            return Err(format!(
+                "page {SECRET_PAGE}, where the board seals its own secret, is not blank before \
+                 anything is burned ({other:?}): someone else wrote it, so the board could not seal \
+                 a secret no one else has seen"
+            ))
+        }
+    }
     let mut watched: Vec<(&str, Vec<u16>)> = vec![
         ("digest", (DIGEST_ROW..DIGEST_ROW + HASH_ROWS).collect()),
         (
@@ -385,22 +432,19 @@ pub fn check_blank(otp: &OtpReading) -> Result<BlankBoard, String> {
         ),
         (
             "page locks' access keys",
-            vec![lock0(1), lock0(2), lock0(44), lock0(46), lock0(48)],
+            vec![lock0(1), lock0(2), lock0(44), lock0(46), lock0(SECRET_PAGE)],
         ),
     ];
-    let mut locks: Vec<(&str, u16, u32)> = vec![
+    let locks: Vec<(&str, u16, u32)> = vec![
         ("boot configuration page lock", lock1(1), BOOT_PAGES_LOCK),
         ("boot key page lock", lock1(2), BOOT_PAGES_LOCK),
         ("rollback page lock", lock1(44), ROLLBACK_LOCK),
         ("digest page lock", lock1(46), DIGEST_LOCK),
     ];
-    if secret == SecretPage::Blank {
-        watched.push((
-            "sealed secret",
-            (SECRET_ROW..SECRET_ROW + HASH_ROWS).collect(),
-        ));
-        locks.push(("secret page lock", lock1(48), SECRET_LOCK));
-    }
+    watched.push((
+        "the board's own secret",
+        (SECRET_ROW..SECRET_ROW + HASH_ROWS).collect(),
+    ));
     let mut used = Vec::new();
     for (name, span) in &watched {
         let mut found = Vec::new();
@@ -441,10 +485,7 @@ pub fn check_blank(otp: &OtpReading) -> Result<BlankBoard, String> {
             })
         })
         .collect();
-    Ok(BlankBoard {
-        secret,
-        locks_already_set,
-    })
+    Ok(BlankBoard { locks_already_set })
 }
 
 /// A 32-byte value kept in sixteen rows with error correction.
@@ -546,8 +587,6 @@ impl Standing {
 /// is flash, and comes before them ([`load_image`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Burn {
-    /// Step 4 with the secret half of Step 6: a blank board's secret, written and locked.
-    SealSecret,
     /// Step 5: the Non-secure app's digest, page 46.
     WriteDigest,
     /// Step 6: the digest page locked.
@@ -556,8 +595,8 @@ pub enum Burn {
     WriteBootKey,
     /// Step 8: secure boot on, debug off, boot key 0 valid and keys 1-3 invalid. LAST before boot.
     Lockdown,
-    /// Step 9b: the boot configuration and boot key pages read-only, the rollback page closed to the
-    /// bootloader. Only after the signed image has booted once.
+    /// Step 9b: the boot configuration and boot key pages read-only, the rollback page read-only to
+    /// the bootloader and Non-secure code. Only after the signed image has booted once.
     LockBootPages,
 }
 
@@ -566,19 +605,18 @@ pub enum Burn {
 pub enum Next {
     /// A burn, the next in order.
     Burn(Burn),
-    /// Step 9: reboot into the signed image, so its first boot records its rollback version. The
-    /// board comes back as the anchor; Step 9b needs it in BOOTSEL again.
+    /// Step 9: reboot into the signed image, so its first boot records its rollback version. That
+    /// boot writes nothing else: the board's own secret waits for the seal command. The board comes
+    /// back as the anchor; Step 9b needs it in BOOTSEL again.
     Boot,
-    /// Every burn is done: the board goes on to its install from the wallet.
+    /// Every burn the phone makes is done. The board's own seal is the owner's command
+    /// (`OP_SEAL_SECRET`), then his stamp, then its install from the wallet.
     Done,
 }
 
 /// The next step for a board that stands so, burned toward `release`. A value burned that is not the
 /// release's stops the procedure: it is another release's board.
 pub fn next(standing: &Standing, release: &Release) -> Result<Next, String> {
-    if standing.secret == SecretPage::Blank {
-        return Ok(Next::Burn(Burn::SealSecret));
-    }
     match standing.digest {
         Hash32::Blank => return Ok(Next::Burn(Burn::WriteDigest)),
         Hash32::Holds(d) if d != release.digest => {
@@ -606,8 +644,18 @@ pub fn next(standing: &Standing, release: &Release) -> Result<Next, String> {
         return Ok(Next::Burn(Burn::Lockdown));
     }
     if !standing.rollback_recorded {
+        // The secret page stays blank until the signed image, running, is told to seal it.
+        if standing.secret != SecretPage::Blank {
+            return Err(format!(
+                "page {SECRET_PAGE} was written before the signed image ever booted on this board \
+                 ({:?}): the board did not seal it",
+                standing.secret
+            ));
+        }
         return Ok(Next::Boot);
     }
+    // Whether the board has sealed its own secret decides nothing here: no boot seals it, and no
+    // step of this procedure does. It waits for the seal command, before or after Step 9b.
     if !standing.boot_pages_locked {
         return Ok(Next::Burn(Burn::LockBootPages));
     }
@@ -615,8 +663,7 @@ pub fn next(standing: &Standing, release: &Release) -> Result<Next, String> {
 }
 
 /// The burns in the runbook's order.
-const BURNS: [Burn; 6] = [
-    Burn::SealSecret,
+const BURNS: [Burn; 5] = [
     Burn::WriteDigest,
     Burn::LockDigestPage,
     Burn::WriteBootKey,
@@ -636,7 +683,6 @@ pub fn burns_left(standing: &Standing, release: &Release) -> Result<Vec<Burn>, S
 /// The lock rows a burn sets, each with the value it burns there.
 fn lock_rows(burn: Burn) -> Vec<(u16, u32)> {
     match burn {
-        Burn::SealSecret => vec![(lock1(48), SECRET_LOCK)],
         Burn::LockDigestPage => vec![(lock1(46), DIGEST_LOCK)],
         Burn::LockBootPages => vec![
             (lock1(1), BOOT_PAGES_LOCK),
@@ -650,9 +696,6 @@ fn lock_rows(burn: Burn) -> Vec<(u16, u32)> {
 /// The OTP rows a burn writes.
 fn rows_written(burn: Burn) -> Vec<u16> {
     match burn {
-        Burn::SealSecret => (SECRET_ROW..SECRET_ROW + HASH_ROWS)
-            .chain([lock1(48)])
-            .collect(),
         Burn::WriteDigest => (DIGEST_ROW..DIGEST_ROW + HASH_ROWS).collect(),
         Burn::WriteBootKey => (BOOTKEY0_ROW..BOOTKEY0_ROW + HASH_ROWS).collect(),
         Burn::Lockdown => (BOOT_FLAGS1_ROW..BOOT_FLAGS1_ROW + FLAG_COPIES)
@@ -863,13 +906,12 @@ fn write_hash<L: BootselLink>(
 }
 
 /// Burn one step, only the one the board needs next ([`next`]), and read back every row it wrote.
-/// `secret` is the phone's own random source, drawn from only by [`Burn::SealSecret`]; what it gives
-/// is never kept: once locked, the board holds the only copy.
+/// No step draws or writes the board's secret: the board seals its own when the seal command tells
+/// it to, which is no step of this procedure.
 pub fn burn<L: BootselLink>(
     pb: &mut Picoboot<L>,
     release: &Release,
     step: Burn,
-    secret: impl FnOnce() -> Result<[u8; 32], String>,
 ) -> Result<Burned, String> {
     let otp = OtpReading::read(pb).map_err(|e| e.to_string())?;
     let standing = Standing::read(pb, &otp)?;
@@ -881,19 +923,14 @@ pub fn burn<L: BootselLink>(
             ))
         }
     }
-    bootloader_may_write(&otp, Bootrom::read(pb)?, &[step])?;
+    let bootrom = Bootrom::read(pb)?;
+    bootloader_may_write(&otp, bootrom, &[step])?;
     let rows = match step {
-        Burn::SealSecret => {
-            check_blank(&otp)?;
-            let drawn = secret()?;
-            vec![
-                write_hash(pb, SECRET_ROW, &drawn)?,
-                set_raw_row(pb, lock1(48), SECRET_LOCK)?,
-            ]
-        }
-        // The first burn on a board whose secret is sealed: Step 0's check stands before it.
+        // The first burn: Step 0's check stands before it, and the board's own seal must be able to
+        // go where it goes.
         Burn::WriteDigest => {
             check_blank(&otp)?;
+            secret_page_takes_the_boards_seal(&otp, bootrom)?;
             require_image(pb, release)?;
             vec![write_hash(pb, DIGEST_ROW, &release.digest)?]
         }

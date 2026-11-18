@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
-"""Sheet 2 — enclosure (REV E) & stack-up. Geometry is traced from ../enclosure/{base,lid}.stl.
+"""Sheet 2 — enclosure (REV E) & stack-up. Geometry is traced from ../3d-print-enclosure/{base,lid}.stl.
 
 Requires: pip install trimesh numpy   ·   Run: python3 sheet2.py
 """

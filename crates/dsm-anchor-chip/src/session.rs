@@ -718,6 +718,10 @@ impl<SPI: SpiDevice, CS: OutputPin, B: Board> ChipSession<SPI, CS, B> {
             "the chip tests its PTRNG at start-up",
             self.randomness_tested(),
         ));
+        steps.push(TryStep::production(
+            "the board's OTP page takes the secret the board draws itself",
+            self.board.secret_page(),
+        ));
         steps.push(TryStep::new(
             "the chip's counter moves one step and is set back to its start",
             self.rehearse_counter(h0),

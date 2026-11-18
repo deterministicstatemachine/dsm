@@ -1161,6 +1161,10 @@ impl AppRouterImpl {
                 .device_head()
                 .and_then(|h| h.pending_economic_admission().cloned());
             if let Some(pending) = pending {
+                // The reason is the resume's own: an unreachable member, or a
+                // step that can never finish, says so itself. Every later
+                // step waits for this position, so nothing was sent.
+                let position = pending.economic_position;
                 if let Err(e) = crate::sdk::economic_admission_flow::resume_pending_admission(
                     &self.core_sdk,
                     &econ_network,
@@ -1169,8 +1173,8 @@ impl AppRouterImpl {
                 .await
                 {
                     return OnlineSent::NotDebited(err(format!(
-                        "wallet.send: a pending economic admission could not be finished — \
-                         retry once storage is reachable: {e}"
+                        "wallet.send: nothing was sent: this wallet's step at economic position \
+                         {position} is not finished, and every later step waits for it: {e}"
                     )));
                 }
             }
@@ -2716,6 +2720,10 @@ impl AppRouter for AppRouterImpl {
             deltas,
             offline,
         )
+    }
+
+    fn require_own_board_pays(&self) -> Result<(), dsm::types::error::DsmError> {
+        self.core_sdk.require_own_board_pays()
     }
 
     fn stage_offline_bearer_transition(

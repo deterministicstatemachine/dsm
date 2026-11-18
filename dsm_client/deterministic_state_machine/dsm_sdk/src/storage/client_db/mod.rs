@@ -2208,8 +2208,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- pinned admission of a counterparty's fused anchor, keyed by the counterparty device id —
         -- the persistent backing for `dsm::crypto::anchor_enrollment::AnchorEnrollmentStore`
         -- (v2 FusedAnchorPin shape, `pk_chip` = resident chip Ed25519 key). Must persist so a
-        -- restart cannot drop the pinned identity (which would re-open the first-transfer TOFU
-        -- window).
+        -- restart cannot drop the pinned identity (which would let a later disclosure replace it).
         CREATE TABLE IF NOT EXISTS anchor_enrollments(
             device_id          BLOB NOT NULL PRIMARY KEY,
             policy_hash        BLOB NOT NULL,

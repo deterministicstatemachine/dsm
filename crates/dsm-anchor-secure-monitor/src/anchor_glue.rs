@@ -33,7 +33,7 @@ const INSTALL: Install = Install::ForTrial;
 const INSTALL: Install = Install::ForGood;
 use anchor_chip::bring_up::{BringUpFailure, Measurement};
 use anchor_chip::Board;
-use anchor_core::proto::decode_request;
+use anchor_core::proto::{decode_request, pb, peek_op};
 use anchor_core::service::{err, refusal};
 
 use embedded_hal_bus::spi::ExclusiveDevice;
@@ -64,6 +64,11 @@ enum Monitor {
     /// Why the anchor did not come up, for the answer to any request: with debug disabled this is
     /// the only way to learn it from a locked board. Names steps and chip faults, never a secret.
     Refused(String),
+    /// The board's own secret is not sealed yet, and this boot wrote nothing: every request hears
+    /// what the board found, its chip included, and only `OP_SEAL_SECRET` seals it (owner,
+    /// 2026-11-18).
+    #[cfg(not(feature = "bench_self_enroll"))]
+    Unsealed(String),
 }
 
 /// The RP2350 as the chip session's board.
@@ -105,7 +110,29 @@ impl<R: core::borrow::Borrow<hal::rosc::RingOscillator<hal::rosc::Enabled>>> Boa
     fn silicon_revision(&self) -> u8 {
         unsafe { core::ptr::read_volatile(BOOTROM_VERSION_BYTE as *const u8) }
     }
+
+    fn secret_page(&self) -> Result<(), String> {
+        sealed::secret_page_takes_a_seal(self.silicon_revision())
+    }
 }
+
+/// The board's own secret, drawn when the seal command asks (DSM Amendment A38): TRNG blocks that
+/// each passed the block's health tests, under a context of its own, never the session keys'. `None`
+/// when the TRNG fails: nothing is then written.
+#[cfg(not(feature = "bench_self_enroll"))]
+fn sealed_secret_entropy() -> Option<[u8; 32]> {
+    let mut hasher = blake3::Hasher::new_derive_key("DSM/anchor/sealed-secret/v1");
+    for _block in 0..SEALED_SECRET_TRNG_BLOCKS {
+        let mut block = trng_block()?;
+        hasher.update(&block);
+        crate::zeroize(&mut block);
+    }
+    Some(*hasher.finalize().as_bytes())
+}
+
+/// TRNG blocks of 192 bits behind the board's own secret.
+#[cfg(not(feature = "bench_self_enroll"))]
+const SEALED_SECRET_TRNG_BLOCKS: usize = 4;
 
 /// Where the bootrom keeps its version.
 const BOOTROM_VERSION_BYTE: usize = 0x0000_0013;
@@ -146,7 +173,7 @@ fn trng_block() -> Option<[u8; 24]> {
                 ];
                 trng.rnd_source_enable().write(|w| unsafe { w.bits(0) });
                 let mut block = [0u8; 24];
-                for (bytes, word) in block.chunks_exact_mut(4).zip(words) {
+                for (bytes, word) in block.as_chunks_mut::<4>().0.iter_mut().zip(words) {
                     bytes.copy_from_slice(&word.to_le_bytes());
                 }
                 return Some(block);
@@ -184,6 +211,9 @@ pub enum InitStage {
     /// The `prepare_chip` image has done the one thing it does.
     #[cfg(feature = "prepare_chip")]
     Prepared = 13,
+    /// The board's own secret is not sealed yet: it waits for the seal command, nothing written.
+    #[cfg(not(feature = "bench_self_enroll"))]
+    Unsealed = 14,
 }
 
 /// Why [`init`] refused to install the anchor: the failing stage and the cause it reported.
@@ -197,6 +227,10 @@ pub enum InitFailure {
     /// The `prepare_chip` image configured this chip: what it now says it is.
     #[cfg(feature = "prepare_chip")]
     Prepared(anchor_chip::session::ChipFacts),
+    /// The board's own secret is not sealed yet, and nothing was written: what its chip said of
+    /// itself, read only.
+    #[cfg(not(feature = "bench_self_enroll"))]
+    Unsealed(String),
 }
 
 impl InitFailure {
@@ -212,6 +246,8 @@ impl InitFailure {
             Self::BringUp(BringUpFailure::Unfit(_)) => InitStage::Unfit,
             #[cfg(feature = "prepare_chip")]
             Self::Prepared(_) => InitStage::Prepared,
+            #[cfg(not(feature = "bench_self_enroll"))]
+            Self::Unsealed(_) => InitStage::Unsealed,
             Self::BringUp(BringUpFailure::Enroll(_)) => InitStage::Enroll,
             Self::BringUp(BringUpFailure::Layout(_)) => InitStage::Layout,
             Self::BringUp(BringUpFailure::Recovery(_)) => InitStage::Recovery,
@@ -226,6 +262,13 @@ impl core::fmt::Debug for InitFailure {
             Self::Entropy => write!(f, "the TRNG did not pass its health tests"),
             Self::Sealed(cause) => write!(f, "Sealed: {cause:?}"),
             Self::BringUp(cause) => write!(f, "{cause:?}"),
+            #[cfg(not(feature = "bench_self_enroll"))]
+            Self::Unsealed(chip) => write!(
+                f,
+                "this board's own secret is not sealed yet: OTP page 49 is blank, and starting the \
+                 board wrote nothing to it or to its chip. Only the seal command (OP_SEAL_SECRET) \
+                 seals it, for good. Its chip, read only: {chip}"
+            ),
             #[cfg(feature = "prepare_chip")]
             Self::Prepared(facts) => write!(
                 f,
@@ -240,7 +283,12 @@ impl core::fmt::Debug for InitFailure {
 ///
 /// SAFETY: single-threaded reset context, before the Non-secure launch.
 pub unsafe fn keep_refusal(failure: &InitFailure) {
-    *core::ptr::addr_of_mut!(MONITOR_APP) = Monitor::Refused(format!("{failure:?}"));
+    let said = format!("{failure:?}");
+    *core::ptr::addr_of_mut!(MONITOR_APP) = match failure {
+        #[cfg(not(feature = "bench_self_enroll"))]
+        InitFailure::Unsealed(_) => Monitor::Unsealed(said),
+        _ => Monitor::Refused(said),
+    };
 }
 
 /// Bring up the TROPIC01 from Secure and install the anchor in `MONITOR_APP`. Fail-closed: any
@@ -287,9 +335,11 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     #[cfg(feature = "production")]
     sealed::assert_secure_context().map_err(InitFailure::Sealed)?;
 
-    // The board's sealed secret: without it the anchor has no identity to serve under.
+    // The board's own secret (DSM Amendment A38): read when it is sealed. A boot never seals it and
+    // writes nothing (owner, 2026-11-18): a board whose page is blank goes on to read its chip, says
+    // what it found to every request, and waits for the seal command.
     #[cfg(not(feature = "bench_self_enroll"))]
-    let mut sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
+    let sealed = sealed::read_secret_if_sealed().map_err(InitFailure::Sealed)?;
     // A board locked for production is a finished unit, and the trial and the prepare image stand
     // down on it. Any other board, its secret page blank or written by an earlier procedure, takes
     // either under a secret of this boot held nowhere: the page is neither used nor written. The
@@ -355,6 +405,20 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         cortex_m::asm::delay(150_000_000); // ~1 s @150 MHz
     }
 
+    // No secret sealed yet: the chip is read, with nothing written to it, and the board waits.
+    #[cfg(not(feature = "bench_self_enroll"))]
+    let mut sealed = match sealed {
+        Some(secret) => secret,
+        None => {
+            return Err(InitFailure::Unsealed(
+                anchor_chip::bring_up::chip_before_seal(
+                    Tropic01::new(spi_dev),
+                    Rp2350Board { rosc },
+                ),
+            ));
+        }
+    };
+
     // This image does one thing, and every request then hears how it went.
     #[cfg(feature = "prepare_chip")]
     {
@@ -411,6 +475,10 @@ pub unsafe fn init() -> Result<(), InitFailure> {
 /// SAFETY: single-threaded Secure context; the SG handler is the only caller.
 pub unsafe fn service_request(frame: Vec<u8>, _measurement: Measurement) -> Vec<u8> {
     let slot = &mut *core::ptr::addr_of_mut!(MONITOR_APP);
+    // The seal command is the firmware's own to answer, whatever the slot holds.
+    if matches!(peek_op(&frame), Ok(op) if op == SEAL_SECRET) {
+        return seal_on_command(slot, _measurement);
+    }
     match core::mem::replace(slot, Monitor::NotBroughtUp) {
         #[cfg(not(any(feature = "prepare_chip", feature = "identify_chip")))]
         Monitor::Up(anchor) => {
@@ -431,8 +499,69 @@ pub unsafe fn service_request(frame: Vec<u8>, _measurement: Measurement) -> Vec<
             *slot = Monitor::Refused(reason);
             answer
         }
+        #[cfg(not(feature = "bench_self_enroll"))]
+        Monitor::Unsealed(found) => {
+            let answer = match decode_request(&frame) {
+                Ok(req) => refusal(req.op, err::UNSEALED, &found),
+                Err(_undecodable) => refusal(0, err::UNSEALED, &found),
+            };
+            *slot = Monitor::Unsealed(found);
+            answer
+        }
         Monitor::NotBroughtUp => not_up(&frame, "the anchor was not brought up"),
     }
+}
+
+const SEAL_SECRET: i32 = pb::Op::SealSecret as i32;
+
+/// `OP_SEAL_SECRET`: the one request that seals the board's own secret, for good. It is carried out
+/// only on a board waiting for its seal (locked for production, its page blank: `init` put it
+/// there), running the Non-secure image burned for it. The board then says it is sealed to every
+/// request until it is restarted, when it reads its secret and brings its anchor up. Anything else
+/// is refused with nothing written.
+#[cfg(not(feature = "bench_self_enroll"))]
+fn seal_on_command(slot: &mut Monitor, measurement: Measurement) -> Vec<u8> {
+    if !matches!(slot, Monitor::Unsealed(_)) {
+        return refusal(
+            SEAL_SECRET,
+            err::SEAL_REFUSED,
+            "this board is not waiting for its seal: nothing was written",
+        );
+    }
+    if measurement != Measurement::Matches {
+        return refusal(
+            SEAL_SECRET,
+            err::MEASUREMENT,
+            "the Non-secure image does not match the enrolled digest: nothing was written",
+        );
+    }
+    match sealed::seal_secret(sealed_secret_entropy) {
+        Ok(()) => {
+            let done = "this board's own secret is sealed in OTP page 49, for good. Unplug the \
+                        board and plug it back in: it starts under its secret";
+            *slot = Monitor::Refused(String::from(done));
+            anchor_core::service::sealed_answer(done)
+        }
+        Err(cause) => {
+            let why = format!(
+                "the seal did not finish: {cause:?}. Unplug the board and plug it back in: it \
+                 says what its page now holds"
+            );
+            let answer = refusal(SEAL_SECRET, err::SEAL_REFUSED, &why);
+            *slot = Monitor::Refused(why);
+            answer
+        }
+    }
+}
+
+/// The trial, prepare and identify images never seal a board's secret.
+#[cfg(feature = "bench_self_enroll")]
+fn seal_on_command(_slot: &mut Monitor, _measurement: Measurement) -> Vec<u8> {
+    refusal(
+        SEAL_SECRET,
+        err::SEAL_REFUSED,
+        "only the production image seals a board's secret: nothing was written",
+    )
 }
 
 /// Whether a request frame of `total` bytes may be taken in now: any request's, a head with an

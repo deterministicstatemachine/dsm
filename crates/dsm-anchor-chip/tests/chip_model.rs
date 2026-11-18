@@ -48,6 +48,34 @@ fn provisioned(model: &ModelServer) -> Served {
     anchor
 }
 
+/// Stamp this never-installed board as the owner stamps one: read the identity it reports, sign it,
+/// and have the board keep the stamp through its own `OP_STAMP`, which verifies it first. The stamp
+/// the board answers with is returned.
+pub fn stamp_board(anchor: &mut Served) -> Vec<u8> {
+    let identity = support::served(anchor.bare(pb::Op::BoardIdentity), "the board's identity");
+    let kept = support::served(
+        anchor.frame(support::stamp_frame(&identity), Measurement::Matches),
+        "the board keeps its stamp",
+    );
+    kept.board_stamp
+}
+
+/// A board set up as the owner sets one up before it ships (DSM Amendment A38): stamped, then
+/// installed for good. Its identity reports the stamp it kept, as a phone reads it.
+fn stamped_and_provisioned(model: &ModelServer) -> Served {
+    let mut anchor = booted(model);
+    let stamp = stamp_board(&mut anchor);
+    let answer = rehearse(&mut anchor, &provision_request());
+    assert!(answer.ok, "provisioning refused: error {}", answer.error);
+    let identity = support::served(anchor.bare(pb::Op::BoardIdentity), "the board's identity");
+    assert_eq!(
+        identity.board_stamp, stamp,
+        "the installed board reports the stamp it kept"
+    );
+    assert_eq!(stamp.len(), anchor_core::stamp::BOARD_STAMP_BYTES);
+    anchor
+}
+
 /// The board's own pairing key, derived here from the labels the monitor derives it with.
 fn own_pairing_key(chip: &mut ModelChip) -> StaticSecret {
     let chip_id = match chip.get_info_chip_id() {
@@ -804,6 +832,33 @@ fn a_part_whose_randomness_is_untested_is_given_nothing() {
     assert_eq!(moved(&factory, &chip_state(&model)), Vec::<String>::new());
 }
 
+/// A board whose own secret is not sealed yet reads its chip and says what it found, with nothing
+/// written to the chip: a part fit for an install, and a test part whose PTRNG was never configured.
+/// Nobody has to seal a board to learn its chip is not fit (owner, 2026-11-18).
+/// MUTATION CONTROL: a report that brings the anchor up generates the key and turns this red.
+#[test]
+fn a_board_waiting_for_its_seal_reports_its_chip_and_writes_nothing_to_it() {
+    for (model, says) in [
+        (ModelServer::start(), "It may be given a key and a counter"),
+        (
+            ModelServer::start_as(Part::TestPart),
+            "It does not test its PTRNG at start-up",
+        ),
+    ] {
+        let factory = chip_state(&model);
+        let report = anchor_chip::bring_up::chip_before_seal(model.power_cycle(), HostBoard);
+        assert!(
+            report.contains("TR01-C2S-T200") && report.contains(says),
+            "the report: {report}"
+        );
+        assert_eq!(
+            moved(&factory, &chip_state(&model)),
+            Vec::<String>::new(),
+            "what the report changed on the chip"
+        );
+    }
+}
+
 /// Tropic Square's correction for that part takes on the chip, once, and the chip is then an
 /// ordinary new one. Only this image's one command writes anything.
 #[test]
@@ -931,8 +986,9 @@ fn trial_booted(model: &ModelServer) -> Served {
 
 /// The trial image installs with nothing permanent (owner, 2026-11-06; CONFORMANCE_GAPS §6.152). It
 /// keys a chip whose PTRNG is untested, as Tropic Square's correction waits for the last step, and its
-/// try-run says the correction is still to make. Its install passes as a trial and serves a payment
-/// the receiver verifies, yet the factory slot still opens and no pairing key or access rule moves,
+/// try-run says the correction is still to make. Its install passes as a trial and makes a release
+/// whose certificate verifies, though no receiver takes it: a trial is never stamped (DSM Amendment
+/// A38). Yet the factory slot still opens and no pairing key or access rule moves,
 /// and the next boot starts over: the record gone and the counter at its start. The production image
 /// still gives the chip nothing. MUTATION CONTROLS: closing the birth in a trial turns this red where
 /// the factory slot no longer opens; leaving the trial slots at boot turns it red at "the next boot".
@@ -969,8 +1025,12 @@ fn the_trial_image_installs_with_nothing_permanent() {
         run.try_run
     );
     assert_eq!(
-        production, unmet,
-        "the PTRNG step is a production requirement"
+        production,
+        [
+            "the chip tests its PTRNG at start-up",
+            "the board's OTP page takes the secret the board draws itself"
+        ],
+        "the PTRNG step and the board's secret page are production requirements"
     );
     assert_eq!(
         run.permanent, TRIAL_PERMANENT,
@@ -1390,8 +1450,9 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
         check_of, disclosure_of, prepare_of, receive_of, self_payment, served, thirty_two,
     };
     let model = ModelServer::start();
-    let mut anchor = provisioned(&model);
+    let mut anchor = stamped_and_provisioned(&model);
     let status = served(anchor.bare(pb::Op::Status), "status");
+    let identity = served(anchor.bare(pb::Op::BoardIdentity), "the board's identity");
     let challenge = thirty_two(
         &served(anchor.bare(pb::Op::Challenge), "a challenge").receiver_challenge,
         "the challenge",
@@ -1430,7 +1491,7 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
     let unchecked = anchor.request(&prepare_of(&t, &challenge, [0x71; 32], [0x72; 32]));
     assert_eq!(unchecked.error, err::PAYMENT_UNCHECKED);
     served(
-        anchor.request(&check_of(&release, &disclosure_of(&status))),
+        anchor.request(&check_of(&release, &disclosure_of(&status, &identity))),
         "the check",
     );
     served(
@@ -1466,7 +1527,7 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
         done.active_anchor_counter, 2,
         "a payment and a receive, one counter step each"
     );
-    let twice = anchor.request(&check_of(&release, &disclosure_of(&status)));
+    let twice = anchor.request(&check_of(&release, &disclosure_of(&status, &identity)));
     assert_eq!(
         twice.error,
         err::NO_OPEN_CHALLENGE,

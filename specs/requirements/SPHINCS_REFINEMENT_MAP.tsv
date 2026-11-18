@@ -101,5 +101,5 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	Wrap
 dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	6a10e3a84868f97fb6225ce7a564192da160e845
 dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	6a10e3a84868f97fb6225ce7a564192da160e845
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_flow.rs	1	module boundary	unproved	bc8612eb7e47065a0a4aa9a175f0acfc42d8fd79
-crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	89b34b568b22b0e2f317672312c8886db5bb7334
-dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	1	module boundary	unproved	4b576a53c9b2537abc36542e6b30cc489dee4765
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	92266cfc2bc9c4949f287c7c9c01a10413dd3d90
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	1	module boundary	unproved	a9448185250e167fc745c9ef0e7ed09f64b82c7d

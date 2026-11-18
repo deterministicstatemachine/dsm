@@ -70,7 +70,7 @@ object Unified {
     // Phone->Pico USB-OTG bridge. Rust up-calls this with an OPAQUE, already-framed request
     // (LE32 length ++ protobuf); this just moves the bytes over USB to the Pico and returns the
     // response body (Rust decodes it). We understand NOTHING about the payload — no TROPIC frames,
-    // no key material. Empty return on any failure -> Rust fails closed to online recovery.
+    // no key material. Empty return on any failure -> Rust fails closed (`usb_pico::answer_over_usb`).
     // `LocalPicoUsb.init(context)` must have been called at startup.
     @Keep @JvmStatic fun picoUsbTransceive(frame: ByteArray): ByteArray =
         LocalPicoUsb.transceive(frame)
@@ -95,10 +95,10 @@ object Unified {
     // The production release the app carries (the signing's public outputs, from its assets).
     @Keep @JvmStatic fun anchorReleaseFile(path: String): ByteArray? = BootselUsb.releaseFile(path)
 
-    // GATED sender-transport install (only in on_device_installs-feature .so; absent otherwise):
-    // installs the USB anchor appliance factory so offline-bearer sends drive the phone's own
-    // physical RP2350/TROPIC01 (v2: the receiver needs NO hardware — this is the entire device
-    // install story). Fail-closed: without it every offline-bearer send errors ("offline = chips").
+    // GATED anchor install (only in on_device_installs-feature .so; absent otherwise): installs
+    // the USB anchor appliance factory and the board setup, so offline-bearer sends AND receives
+    // drive the phone's own physical RP2350/TROPIC01 (a board on both sides, owner 2026-11-07).
+    // Fail-closed: without it every offline send and receive errors ("offline = chips").
     // `DsmInitProvider` registers it once at app start. Catch UnsatisfiedLinkError.
     @Keep @JvmStatic external fun installAnchorTransport(): Boolean
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =

@@ -21,6 +21,20 @@ x25519-dalek = { version = "2", default-features = false, features = ["static_se
 ed25519-dalek = { version = "2", default-features = false }
 embedded-hal = "1.0"
 
+[features]
+# The chip model's stamp key in place of the owner's (DSM Amendment A38), so the rehearsal can stamp
+# its chip as the owner stamps a board. Host builds only: a board's image refuses to compile with it.
+model-stamp-key = []
+
+# The rehearsal stamps its chip, so it runs only with the model's stamp key.
+[[test]]
+name = "chip_model"
+required-features = ["model-stamp-key"]
+
+[[test]]
+name = "secure_heap"
+required-features = ["model-stamp-key"]
+
 [dev-dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 prost = { version = "0.14", default-features = false, features = ["derive"] }

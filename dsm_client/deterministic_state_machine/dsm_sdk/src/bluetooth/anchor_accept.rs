@@ -6,8 +6,9 @@
 //! The DSM app supplies three adapters and NEVER reimplements anchor crypto:
 //!   - [`DsmStateVerifier`] (`DsmVerifier`): that `R_i`/`R_{i+1}` commit the sender's offline
 //!     account at the release's frontier and counter (the account's leaf in the device SMT, and
-//!     its counter and frontier leaves in its own SMT), the DSM transition (handler-gated),
-//!     delivery, and the genesis upgrade cert (dormant in Stage 3).
+//!     its counter and frontier leaves in its own SMT), and the DSM transition: the stitched
+//!     receipt Core verified spends exactly the release's counter and frontiers. Delivery is the
+//!     DSM receipt's, which Core checks before the predicate runs.
 //!   - [`Ed25519ChipSig`] (`ChipSig`): the resident-chip signature `σ^chip`, verified with the
 //!     enrolled `pk_chip` via `dsm::crypto::classical_verify::verify_ed25519`.
 //!   - SPHINCS+ `PartitionSig` (`σ^host`): reuses `dsm::crypto::sphincs` under the pinned `pk_host`.

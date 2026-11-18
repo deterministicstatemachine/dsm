@@ -6,7 +6,8 @@
 //! crosses the boundary. Every failure (USB down, timeout, an op the chip refused, a malformed
 //! response) is fail-closed to a `DsmError`.
 //!
-//! Consumer: [`crate::usb_appliance::UsbAnchorAppliance`] (the sender's release producer).
+//! Consumers: [`crate::usb_appliance::UsbAnchorAppliance`] (both sides of an offline payment) and the
+//! board setup's `OP_STATUS` to the board running as the DSM Anchor (`board_setup::jni_port`).
 
 use std::sync::Arc;
 

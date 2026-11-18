@@ -4,9 +4,9 @@
 
 use crate::bootrom_model::{BootromModel, LastBoot};
 use crate::otp_burn::{
-    burn, check_blank, load_image, lock0, lock1, next, Burn, Hash32, Next, OtpReading, SecretPage,
-    Standing, BOOT_PAGES_LOCK, CRIT1_ROW, DIGEST_LOCK, DIGEST_ROW, ROLLBACK_LOCK, SECRET_LOCK,
-    SECRET_ROW,
+    burn, check_blank, load_image, lock0, lock1, next, secret_page, Burn, Hash32, Next, OtpReading,
+    SecretPage, Standing, BOOT_PAGES_LOCK, CRIT1_ROW, DIGEST_LOCK, DIGEST_ROW, ROLLBACK_LOCK,
+    SEAL_BEGUN, SECRET_LOCK, SECRET_PAGE, SECRET_ROW,
 };
 use crate::picoboot::{BootselError, Picoboot};
 use crate::release::{flatten_elf, Release, FLASH_BASE};
@@ -61,12 +61,14 @@ fn standing(pb: &mut Picoboot<BootromModel>) -> Standing {
     Standing::read(pb, &otp).expect("where the board stands")
 }
 
-const SECRET: [u8; 32] = [0x5c; 32];
-
 #[test]
 fn the_lock_values_are_the_scripts() {
-    // provision-otp.sh: the secret page's lock 0x3d3d3d, the boot pages' 0x151515 (RUNBOOK Step 0).
+    // provision-otp.sh: the board's own seal begun 0x3c3c3c and done 0x3d3d3d, as anchor-core seals it
+    // (DSM Amendment A38); the boot pages' 0x151515 (RUNBOOK Step 0).
+    assert_eq!(SEAL_BEGUN, 0x3c_3c3c);
     assert_eq!(SECRET_LOCK, 0x3d_3d3d);
+    assert_eq!(SEAL_BEGUN, anchor_core::seal::SEAL_BEGUN);
+    assert_eq!(SECRET_LOCK, anchor_core::seal::SEALED);
     assert_eq!(BOOT_PAGES_LOCK, 0x15_1515);
     assert_eq!(DIGEST_LOCK, 0x1d_1d1d);
     assert_eq!(ROLLBACK_LOCK, 0x14_1414);
@@ -104,16 +106,18 @@ fn a_release_whose_digest_is_not_its_apps_is_refused() {
     );
 }
 
+/// The boards in hand hold, in page 48, a secret drawn on a computer by an earlier procedure: nothing
+/// reads or uses it (DSM Amendment A38). Their page 49 is blank, for the board to seal its own.
 #[test]
-fn the_boards_in_hand_check_blank_with_their_secret_sealed() {
+fn the_boards_in_hand_check_blank_with_their_old_secret_page_left_alone() {
     let mut pb = Picoboot::connect(BootromModel::sealed_board()).expect("connect");
     let otp = OtpReading::read(&mut pb).expect("read");
     assert!(
         otp.unreadable_pages.contains(&48),
-        "the sealed page is the bootloader's to read: none"
+        "the old sealed page is the bootloader's to read: none"
     );
     let blank = check_blank(&otp).expect("blank where the procedure writes");
-    assert_eq!(blank.secret, SecretPage::Sealed);
+    assert_eq!(secret_page(&otp), Ok(SecretPage::Blank), "page 49 is blank");
     assert_eq!(
         blank.locks_already_set.len(),
         2,
@@ -123,8 +127,13 @@ fn the_boards_in_hand_check_blank_with_their_secret_sealed() {
     assert!(blank.locks_already_set[0].contains("0x40404"));
 }
 
+/// A board is burned from the phone in the runbook's order, and the phone writes nothing of its secret.
+/// Nor does a boot of the signed image: page 49 stays blank through it. Only the seal command, sent to
+/// the running image, seals the board's own secret, lock row first (DSM Amendment A38; owner,
+/// 2026-11-18: "fix the image so it doesn't auto-write").
+/// MUTATION CONTROL: a boot that seals the page turns this red.
 #[test]
-fn a_sealed_board_is_burned_from_the_phone_in_the_runbooks_order() {
+fn a_board_is_burned_from_the_phone_in_the_runbooks_order_and_seals_only_on_command() {
     let release = release();
     let mut pb = Picoboot::connect(BootromModel::sealed_board()).expect("connect");
     assert_eq!(
@@ -133,7 +142,7 @@ fn a_sealed_board_is_burned_from_the_phone_in_the_runbooks_order() {
     );
 
     // The digest waits for the image: Step 3 comes first.
-    let early = burn(&mut pb, &release, Burn::WriteDigest, || Ok(SECRET))
+    let early = burn(&mut pb, &release, Burn::WriteDigest)
         .expect_err("the digest burned before its image is in flash");
     assert!(early.contains("load the image first"), "{early}");
     assert_eq!(
@@ -149,8 +158,7 @@ fn a_sealed_board_is_burned_from_the_phone_in_the_runbooks_order() {
         Burn::WriteBootKey,
         Burn::Lockdown,
     ] {
-        let done =
-            burn(&mut pb, &release, step, || Ok(SECRET)).expect("the step burns and reads back");
+        let done = burn(&mut pb, &release, step).expect("the step burns and reads back");
         assert!(!done.rows.is_empty());
     }
     let after = standing(&mut pb);
@@ -160,16 +168,54 @@ fn a_sealed_board_is_burned_from_the_phone_in_the_runbooks_order() {
     assert_eq!(next(&after, &release), Ok(Next::Boot));
 
     // Step 9b waits for the signed image's first boot, which records its rollback version.
-    let early = burn(&mut pb, &release, Burn::LockBootPages, || Ok(SECRET))
+    let early = burn(&mut pb, &release, Burn::LockBootPages)
         .expect_err("the boot pages locked before the first boot");
     assert!(early.contains("it needs Boot"), "{early}");
+    {
+        let model = pb_model(&mut pb);
+        assert_eq!(
+            model.raw[usize::from(lock1(SECRET_PAGE))],
+            0,
+            "the phone wrote nothing of the secret's page"
+        );
+        assert!((SECRET_ROW..SECRET_ROW + 16).all(|r| model.raw[usize::from(r)] == 0));
+    }
     crate::otp_burn::boot(&mut pb, &release).expect("Step 9");
     assert_eq!(pb_model(&mut pb).rebooted, 1);
+    {
+        let model = pb_model(&mut pb);
+        assert_eq!(
+            model.secret_at_boot,
+            Some(Ok(None)),
+            "the first boot read a blank page"
+        );
+        assert_eq!(
+            model.raw[usize::from(lock1(SECRET_PAGE))],
+            0,
+            "the first boot wrote nothing of the secret's page"
+        );
+        assert!((SECRET_ROW..SECRET_ROW + 16).all(|r| model.raw[usize::from(r)] == 0));
+    }
+    assert_eq!(standing(&mut pb).secret, SecretPage::Blank);
     assert_eq!(
         next(&standing(&mut pb), &release),
         Ok(Next::Burn(Burn::LockBootPages))
     );
-    burn(&mut pb, &release, Burn::LockBootPages, || Ok(SECRET)).expect("Step 9b");
+    burn(&mut pb, &release, Burn::LockBootPages).expect("Step 9b");
+    assert_eq!(next(&standing(&mut pb), &release), Ok(Next::Done));
+
+    // The seal command, and only it, seals the board's own secret; the next boot reads it.
+    {
+        let model = pb_model(&mut pb);
+        assert_eq!(model.seal_command(), Ok(()));
+        assert_eq!(model.raw[usize::from(lock1(SECRET_PAGE))], SECRET_LOCK);
+        assert_eq!(
+            model.seal_command(),
+            Err(anchor_core::seal::SealError::AlreadySealed),
+            "a second command"
+        );
+    }
+    assert_eq!(standing(&mut pb).secret, SecretPage::Sealed);
     assert_eq!(next(&standing(&mut pb), &release), Ok(Next::Done));
 
     let model = pb_model(&mut pb);
@@ -213,7 +259,7 @@ fn a_step_out_of_order_writes_nothing() {
         Burn::LockDigestPage,
         Burn::LockBootPages,
     ] {
-        let refused = burn(&mut pb, &release, step, || Ok(SECRET)).expect_err("before the digest");
+        let refused = burn(&mut pb, &release, step).expect_err("before the digest");
         assert!(
             refused.contains("it needs Burn(WriteDigest)"),
             "{step:?}: {refused}"
@@ -236,23 +282,34 @@ fn a_board_burned_for_another_release_stops() {
     assert!(refused.contains("not this release's"), "{refused}");
 }
 
+/// A blank board's first burn is its digest: the phone draws and writes no secret.
 #[test]
-fn a_blank_board_has_its_secret_written_and_locked_in_one_step() {
+fn a_blank_board_starts_with_its_digest_and_no_secret_from_the_phone() {
     let release = release();
     let mut pb = Picoboot::connect(BootromModel::blank_board()).expect("connect");
     assert_eq!(
         next(&standing(&mut pb), &release),
-        Ok(Next::Burn(Burn::SealSecret))
-    );
-    burn(&mut pb, &release, Burn::SealSecret, || Ok(SECRET)).expect("written, read back, locked");
-    let model = pb_model(&mut pb);
-    assert_eq!(model.raw[usize::from(lock1(48))], SECRET_LOCK);
-    assert_eq!(model.ecc[usize::from(SECRET_ROW)], Some(0x5c5c));
-    assert_eq!(standing(&mut pb).secret, SecretPage::Sealed);
-    assert_eq!(
-        next(&standing(&mut pb), &release),
         Ok(Next::Burn(Burn::WriteDigest))
     );
+    assert_eq!(standing(&mut pb).secret, SecretPage::Blank);
+}
+
+/// A secret page someone else wrote before anything is burned is refused at Step 0, whatever its lock
+/// row says: the board could not then seal a secret no one else has seen.
+/// MUTATION CONTROL: taking a page sealed before the first burn as the board's own turns this red.
+#[test]
+fn a_secret_page_written_before_the_procedure_is_refused_at_step_0() {
+    for lock in [SEAL_BEGUN, SECRET_LOCK] {
+        let mut model = BootromModel::blank_board();
+        model.raw[usize::from(lock1(SECRET_PAGE))] = lock;
+        let mut pb = Picoboot::connect(model).expect("connect");
+        let otp = OtpReading::read(&mut pb).expect("read");
+        let refused = check_blank(&otp).expect_err("a page sealed before the procedure");
+        assert!(
+            refused.contains("is not blank before anything is burned"),
+            "{lock:#x}: {refused}"
+        );
+    }
 }
 
 #[test]
@@ -410,9 +467,6 @@ impl BoardPort for Phone {
             .map(|(_carried, bytes)| bytes.clone())
             .ok_or_else(|| format!("the app carries no anchor-release/{}", image.file()))
     }
-    fn secret(&self) -> Result<[u8; 32], String> {
-        Ok(SECRET)
-    }
     fn wait_for_return(&self, _chip_id: &str) -> Result<Returned, String> {
         match held(&self.board.0).last_boot {
             LastBoot::Refused | LastBoot::BackToBootsel => Ok(Returned::Bootsel),
@@ -509,27 +563,14 @@ fn the_phone_reads_a_board_in_hand_and_offers_the_image_first() {
     assert!(answer.board_connected);
     assert_eq!(answer.chip_id, CHIP);
     assert_eq!(state_of(&answer, K::LoadImage), S::Next);
-    assert_eq!(
-        state_of(&answer, K::SealSecret),
-        S::Done,
-        "kept from the earlier procedure"
-    );
     assert_eq!(state_of(&answer, K::WriteDigest), S::Later);
-    assert!(
-        answer
-            .found
-            .iter()
-            .any(|f| f.contains("sealed by an earlier procedure")),
-        "{:?}",
-        answer.found
-    );
     assert!(
         answer.found.iter().any(|f| f.contains("0x40404")),
         "{:?}",
         answer.found
     );
     assert!(
-        answer.steps.iter().filter(|s| s.permanent).count() == 7,
+        answer.steps.iter().filter(|s| s.permanent).count() == 6,
         "all but the image load"
     );
 }
@@ -722,8 +763,8 @@ fn lock_pages_as_yellow_holds_them(mut model: BootromModel) -> BootromModel {
 
 /// The release's digest in its sixteen rows, as a board burned to Step 5 holds it.
 fn digest_burned(model: &mut BootromModel, release: &Release) {
-    for (i, pair) in release.digest.chunks_exact(2).enumerate() {
-        let value = u16::from_le_bytes([pair[0], pair[1]]);
+    for (i, pair) in release.digest.as_chunks::<2>().0.iter().enumerate() {
+        let value = u16::from_le_bytes(*pair);
         model.ecc[usize::from(DIGEST_ROW) + i] = Some(value);
         model.raw[usize::from(DIGEST_ROW) + i] = u32::from(value) | 0x3f << 16;
     }
@@ -820,17 +861,16 @@ fn the_same_locks_on_an_a4_bootrom_guard_each_lock_row_by_its_own_page() {
     let left =
         crate::otp_burn::burns_left(&Standing::read(&mut pb, &otp).expect("standing"), &release)
             .expect("burns left");
-    assert_eq!(left.len(), 6, "every burn, the secret first");
+    assert_eq!(left.len(), 5, "every burn, the digest first");
     bootloader_may_write(&otp, a4, &left).expect("each lock row by the page it locks: all open");
     load_image(&mut pb, &release).expect("Step 3");
     for step in [
-        Burn::SealSecret,
         Burn::WriteDigest,
         Burn::LockDigestPage,
         Burn::WriteBootKey,
         Burn::Lockdown,
     ] {
-        burn(&mut pb, &release, step, || Ok(SECRET)).expect("the step burns and reads back");
+        burn(&mut pb, &release, step).expect("the step burns and reads back");
     }
     assert_eq!(pb_model(&mut pb).raw[usize::from(lock1(46))], DIGEST_LOCK);
 }
@@ -864,34 +904,46 @@ fn a_board_burned_to_its_digest_stops_where_its_bootloader_cannot_go_on() {
         refused.refused
     );
     let mut pb = Picoboot::connect(OnUsb(board.clone())).expect("connect");
-    let direct = burn(&mut pb, &release, Burn::LockDigestPage, || Ok(SECRET))
+    let direct = burn(&mut pb, &release, Burn::LockDigestPage)
         .expect_err("the burn checks its own rows before it writes one");
     assert!(direct.contains("page 63"), "{direct}");
     let model = held(&board);
     assert_eq!(model.raw, raw, "no OTP row changed");
     assert!(
-        !model.commands[commands..].iter().any(|c| *c == 0x0d),
+        !model.commands[commands..].contains(&0x0d),
         "no OTP write was sent"
     );
 }
 
 #[test]
 fn a_secret_page_closed_to_the_bootloader_is_closed_on_every_bootrom() {
-    // The sealed page's lock bars the bootloader from reading the page on either rule: the
+    // The board's seal bars the bootloader from reading the page on either rule, begun or done: the
     // procedure reads the secret's state from its lock row, never its rows.
     assert_eq!(
         SECRET_LOCK,
         lock_row_value(READ_ONLY, INACCESSIBLE, INACCESSIBLE)
     );
-    let mut pb = Picoboot::connect(BootromModel::sealed_board()).expect("connect");
-    let refused = pb.otp_read_raw(SECRET_ROW, 1);
     assert_eq!(
-        refused,
-        Err(BootselError::Refused {
-            command: 0x8c,
-            status: crate::picoboot::NOT_PERMITTED
-        })
+        SEAL_BEGUN,
+        lock_row_value(READ_WRITE, INACCESSIBLE, INACCESSIBLE)
     );
+    for lock in [SEAL_BEGUN, SECRET_LOCK] {
+        for version in [2, 4] {
+            let mut model = BootromModel::blank_board();
+            model.bootrom_version = version;
+            model.raw[usize::from(lock1(SECRET_PAGE))] = lock;
+            let mut pb = Picoboot::connect(model).expect("connect");
+            let refused = pb.otp_read_raw(SECRET_ROW, 1);
+            assert_eq!(
+                refused,
+                Err(BootselError::Refused {
+                    command: 0x8c,
+                    status: crate::picoboot::NOT_PERMITTED
+                }),
+                "{lock:#x} on A{version}"
+            );
+        }
+    }
 }
 
 /// The yellow board as it stood after Step 5 on 2026-11-11: the signed image in flash, the digest

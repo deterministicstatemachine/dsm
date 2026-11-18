@@ -31,6 +31,13 @@ const MEMBER_REST: Duration = Duration::from_secs(30);
 /// How long the waiter waits for the sync a wake asked for.
 const SYNC_WAIT: Duration = Duration::from_secs(60);
 
+/// The shortest a round of waits takes. A wait a member holds runs for its
+/// whole hold, far longer; a round that ends sooner with nothing new held no
+/// wait (no member to wait on, or every one answered at once), and the next
+/// one waits out the rest of this, so no answer, however quick, turns the
+/// waiter into a loop. It is a sleep, not a clock read.
+const MIN_ROUND: Duration = Duration::from_secs(5);
+
 /// How long the waiter rests when it has nothing to wait on (no identity, no
 /// contact) or could not work out what to, before it looks again. A sync
 /// that completes meanwhile ends the rest early.
@@ -226,13 +233,15 @@ async fn run() {
             }
         };
 
+        let floor = tokio::time::sleep(MIN_ROUND);
+        tokio::pin!(floor);
         let round = hold(&plan, &resting, &mut holding).await;
         MEMBERS_NEEDED.store(plan.needed, Ordering::SeqCst);
         MEMBERS_HOLDING.store(holding.len(), Ordering::SeqCst);
         match round {
             Round::Stopped => break,
             Round::Replan => continue,
-            Round::Quiet => idle_wakes.quiet(),
+            Round::Quiet => quiet_round(&mut idle_wakes, floor).await,
             Round::Ready => {
                 let before = crate::sdk::inbox_poller::cycles_completed();
                 let took_before = crate::sdk::inbox_poller::cycles_that_took();
@@ -253,6 +262,28 @@ async fn run() {
                 }
             }
         }
+    }
+}
+
+/// After a round in which every wait ran out with nothing new: the wakes in
+/// a row start again, and the next round waits out what is left of this
+/// one's floor ([`MIN_ROUND`]).
+async fn quiet_round(idle_wakes: &mut IdleWakes, floor: std::pin::Pin<&mut tokio::time::Sleep>) {
+    idle_wakes.quiet();
+    rest_out(floor).await;
+}
+
+/// Wait out what is left of a round's floor, unless the poller stops.
+async fn rest_out(floor: std::pin::Pin<&mut tokio::time::Sleep>) {
+    let stop = WAITER_STOP.notified();
+    tokio::pin!(stop);
+    stop.as_mut().enable();
+    if crate::sdk::inbox_poller::poller_stopping() {
+        return;
+    }
+    tokio::select! {
+        () = floor => {}
+        () = &mut stop => {}
     }
 }
 
@@ -334,6 +365,11 @@ fn plan(resting: &Resting) -> Result<Option<Plan>, String> {
             client,
             marks,
         });
+    }
+    // Every member resting: there is nothing to hold until one is back, and
+    // the poller reads meanwhile.
+    if members.is_empty() {
+        return Ok(None);
     }
     Ok(Some(Plan {
         members,
@@ -602,6 +638,46 @@ mod tests {
             "a wait whose mark is past the spool's last entry was answered"
         );
         past_the_end.abort();
+    }
+
+    /// A round that held no wait ends Quiet at once: here no member is left to
+    /// wait on, as when all five failed their last waits and rest. The next
+    /// round waits out the rest of the floor, so the waiter cannot loop
+    /// planning and replanning; on 2026-11-16 that loop, re-reading the
+    /// network config at every turn, wrote 24.9 GB of host log in ten hours.
+    /// MUTATION CONTROL: `quiet_round` without its `rest_out` turns this red.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_round_that_held_no_wait_waits_out_its_floor() {
+        let plan = Plan {
+            members: Vec::new(),
+            addresses: BTreeSet::new(),
+            needed: 3,
+        };
+        let resting = Resting::default();
+        let mut holding = HashSet::new();
+        let mut idle = IdleWakes::new();
+        let floor = tokio::time::sleep(MIN_ROUND);
+        tokio::pin!(floor);
+        let round = tokio::time::timeout(
+            Duration::from_millis(500),
+            hold(&plan, &resting, &mut holding),
+        )
+        .await
+        .expect("a round with no wait to hold ends at once");
+        assert!(matches!(round, Round::Quiet), "the round did not end Quiet");
+        tokio::time::timeout(
+            MIN_ROUND - Duration::from_millis(1500),
+            quiet_round(&mut idle, floor.as_mut()),
+        )
+        .await
+        .expect_err("the next round began before the floor had passed");
+        tokio::time::timeout(
+            Duration::from_millis(3000),
+            quiet_round(&mut idle, floor.as_mut()),
+        )
+        .await
+        .expect("the floor ends the wait once it has passed");
     }
 
     /// The back-off starts at one second after the third wake in a row whose

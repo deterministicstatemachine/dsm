@@ -116,6 +116,24 @@ fn every_operation_fits_the_secure_heap() {
             anchor.frame(frame, Measurement::Matches)
         })
     };
+    // The owner's stamp, kept before the install as his setup sends it (DSM Amendment A38). The
+    // model's stamp key is derived once on the host first: a board's are in its image.
+    assert_eq!(
+        <anchor_chip::bring_up::SphincsPart as PartitionSig>::stamp_keys().len(),
+        1,
+        "the model's one stamp key"
+    );
+    let identity = peak_of("board identity", ceiling, || {
+        anchor.bare(pb::Op::BoardIdentity)
+    });
+    assert!(identity.ok, "board identity: error {}", identity.error);
+    let frame = support::stamp_frame(&identity);
+    drop(identity);
+    let kept = peak_of("stamp", ceiling, || {
+        anchor.frame(frame, Measurement::Matches)
+    });
+    assert!(kept.ok, "stamp: error {} {}", kept.error, kept.detail);
+    drop(kept);
     let run = rehearse(&mut anchor, try_run_request(), "try-run");
     assert!(run.ok, "the try-run: {:?}", run.try_run);
     drop(run);
@@ -201,6 +219,12 @@ fn every_operation_fits_the_secure_heap() {
         check_of, disclosure_of, prepare_of, receive_of, self_payment, served, thirty_two,
     };
     let status = served(anchor.bare(pb::Op::Status), "status");
+    // The payer's disclosure, its stamp from the board's identity as the phone reads it. Only what
+    // the board holds is measured: the host's copies are let go before the check.
+    let disclosure = {
+        let identity = served(anchor.bare(pb::Op::BoardIdentity), "the board's identity");
+        disclosure_of(&status, &identity)
+    };
     let challenge = thirty_two(
         &peak_of("challenge", ceiling, || {
             served(anchor.bare(pb::Op::Challenge), "challenge")
@@ -224,22 +248,18 @@ fn every_operation_fits_the_secure_heap() {
         &served(anchor.bare(pb::Op::Finalize), "finalize").active_root,
         "h",
     );
-    let check = check_of(&release, &disclosure_of(&status));
+    let t = receive_of(&release, root, 2, &challenge);
+    let check = encode_request(&check_of(&release, &disclosure));
     assert!(
-        encode_request(&check).len() <= anchor_core::service::MAX_PAYMENT_CHECK_BYTES,
+        check.len() <= anchor_core::service::MAX_PAYMENT_CHECK_BYTES,
         "a payment check fits the frame the monitor takes"
     );
     drop(release);
+    drop(disclosure);
+    // The frame as the monitor hands it over, the one copy of the message on the board.
     peak_of("payment check, the largest request", ceiling, || {
-        served(anchor.request(&check), "the check")
+        served(anchor.frame(check, Measurement::Matches), "the check")
     });
-    let paid = match check.payment.as_ref().map(|p| p.to_release()) {
-        Some(Ok(paid)) => paid,
-        other => panic!("the checked payment decodes: {:?}", other.map(|r| r.err())),
-    };
-    let t = receive_of(&paid, root, 2, &challenge);
-    drop(paid);
-    drop(check);
     let receive = prepare_of(&t, &challenge, [0x71; 32], [0x72; 32]);
     authorize(&mut anchor, &receive, "authorize, the receive's");
     peak_of("receive prepare", ceiling, || {
