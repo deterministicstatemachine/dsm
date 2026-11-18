@@ -5,12 +5,14 @@
 //!     [`Tropic::chip_sign`]; the key never leaves the chip. Its at-rest protection is
 //!     the die's physically unclonable function.
 //!   - [`PartitionSig`] — the RP2350 secure-partition signature scheme (the `σ^host`
-//!     factor), under a key generated at birth and sealed to the partition.
+//!     factor), under a key derived at every boot from the secret the board sealed itself
+//!     ([`crate::seal`]).
 //!
 //! Keeping these as traits lets the protocol core stay hardware- and scheme-agnostic and
-//! unit-test on the host with deterministic mocks; the firmware wires the real libtropic
-//! `ECC_Key` / `EdDSA` (chip) and `MCounter` (the counter, now a non-rewind floor), and
-//! the chosen partition signature scheme.
+//! unit-test on the host. The board's code (`dsm-anchor-chip`) wires the
+//! TROPIC01 through Tropic Square's `tropic01` driver: the resident Ed25519 key in an ECC slot
+//! (chip), the monotonic counter (now a non-rewind floor), and R-memory; and BLAKE3-SPHINCS+
+//! SPX128f as the partition scheme.
 
 extern crate alloc;
 use alloc::vec::Vec;

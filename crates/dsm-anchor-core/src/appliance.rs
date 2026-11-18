@@ -448,7 +448,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
 
     /// §12.3 Commit, in three durable phases: persist the committed candidate
     /// (`committed=false`) → move the counter → mark committed. The release exists durably
-    /// before the counter moves, so an interrupted commit is completable by [`recover`].
+    /// before the counter moves, so an interrupted commit is completable by [`Self::recover`].
     /// Nothing is exported before phase 2. The DSM SMT inclusion proofs are attached by the
     /// SDK (which owns the tree) after emit — the appliance carries them as empty here.
     ///
