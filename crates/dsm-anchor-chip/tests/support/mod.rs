@@ -580,8 +580,12 @@ pub fn provision_request() -> pb::ApplianceRequest {
 // The model is one chip, so its anchor pays itself and then receives that payment: every operation
 // of a receive runs on the chip, its own release standing in for a payer's.
 
-/// What the anchor discloses of its enrollment, from its STATUS and the provisioning.
-pub fn disclosure_of(status: &pb::ApplianceResponse) -> pb::PayerDisclosure {
+/// What the anchor discloses of its enrollment, from its STATUS, the provisioning, and the stamp its
+/// `OP_BOARD_IDENTITY` reports, which is where the phone reads it.
+pub fn disclosure_of(
+    status: &pb::ApplianceResponse,
+    identity: &pb::ApplianceResponse,
+) -> pb::PayerDisclosure {
     let provisioning = provisioning();
     pb::PayerDisclosure {
         online_id_pk: provisioning.online_id_pk,
@@ -595,7 +599,7 @@ pub fn disclosure_of(status: &pb::ApplianceResponse) -> pb::PayerDisclosure {
         device_id: provisioning.device_id.to_vec(),
         policy_hash: provisioning.policy_hash.to_vec(),
         birth_commitment: status.pin_birth_commitment.clone(),
-        board_stamp: status.board_stamp.clone(),
+        board_stamp: identity.board_stamp.clone(),
     }
 }
 

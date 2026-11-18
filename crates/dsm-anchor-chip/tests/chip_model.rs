@@ -1425,6 +1425,7 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
     let model = ModelServer::start();
     let mut anchor = stamped_and_provisioned(&model);
     let status = served(anchor.bare(pb::Op::Status), "status");
+    let identity = served(anchor.bare(pb::Op::BoardIdentity), "the board's identity");
     let challenge = thirty_two(
         &served(anchor.bare(pb::Op::Challenge), "a challenge").receiver_challenge,
         "the challenge",
@@ -1463,7 +1464,7 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
     let unchecked = anchor.request(&prepare_of(&t, &challenge, [0x71; 32], [0x72; 32]));
     assert_eq!(unchecked.error, err::PAYMENT_UNCHECKED);
     served(
-        anchor.request(&check_of(&release, &disclosure_of(&status))),
+        anchor.request(&check_of(&release, &disclosure_of(&status, &identity))),
         "the check",
     );
     served(
@@ -1499,7 +1500,7 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
         done.active_anchor_counter, 2,
         "a payment and a receive, one counter step each"
     );
-    let twice = anchor.request(&check_of(&release, &disclosure_of(&status)));
+    let twice = anchor.request(&check_of(&release, &disclosure_of(&status, &identity)));
     assert_eq!(
         twice.error,
         err::NO_OPEN_CHALLENGE,

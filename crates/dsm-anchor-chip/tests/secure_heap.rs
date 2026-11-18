@@ -219,6 +219,7 @@ fn every_operation_fits_the_secure_heap() {
         check_of, disclosure_of, prepare_of, receive_of, self_payment, served, thirty_two,
     };
     let status = served(anchor.bare(pb::Op::Status), "status");
+    let identity = served(anchor.bare(pb::Op::BoardIdentity), "the board's identity");
     let challenge = thirty_two(
         &peak_of("challenge", ceiling, || {
             served(anchor.bare(pb::Op::Challenge), "challenge")
@@ -242,7 +243,7 @@ fn every_operation_fits_the_secure_heap() {
         &served(anchor.bare(pb::Op::Finalize), "finalize").active_root,
         "h",
     );
-    let check = check_of(&release, &disclosure_of(&status));
+    let check = check_of(&release, &disclosure_of(&status, &identity));
     assert!(
         encode_request(&check).len() <= anchor_core::service::MAX_PAYMENT_CHECK_BYTES,
         "a payment check fits the frame the monitor takes"

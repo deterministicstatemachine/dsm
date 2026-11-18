@@ -17,10 +17,10 @@ crates/dsm-anchor-chip/src/bring_up.rs	117	dsm_sphincs::CryptoFailure::EmptySign
 crates/dsm-anchor-chip/src/bring_up.rs	118	| dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
 crates/dsm-anchor-chip/src/bring_up.rs	120	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
 crates/dsm-anchor-chip/tests/chip_model.rs	320	dsm_sphincs::verify(dsm_sphincs::SphincsVariant::SPX128f, pk_host, message, sig),
-crates/dsm-anchor-chip/tests/support/mod.rs	612	let key = match dsm_sphincs::generate_keypair_from_seed(
-crates/dsm-anchor-chip/tests/support/mod.rs	613	dsm_sphincs::SphincsVariant::SPX128f,
-crates/dsm-anchor-chip/tests/support/mod.rs	619	let stamp = match dsm_sphincs::sign(
-crates/dsm-anchor-chip/tests/support/mod.rs	620	dsm_sphincs::SphincsVariant::SPX128f,
+crates/dsm-anchor-chip/tests/support/mod.rs	616	let key = match dsm_sphincs::generate_keypair_from_seed(
+crates/dsm-anchor-chip/tests/support/mod.rs	617	dsm_sphincs::SphincsVariant::SPX128f,
+crates/dsm-anchor-chip/tests/support/mod.rs	623	let stamp = match dsm_sphincs::sign(
+crates/dsm-anchor-chip/tests/support/mod.rs	624	dsm_sphincs::SphincsVariant::SPX128f,
 crates/dsm-anchor-core/src/accept.rs	314	const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX128f;
 crates/dsm-anchor-core/src/accept.rs	318	let kp = dsm_sphincs::generate_keypair_from_seed(PARTITION, seed)
 crates/dsm-anchor-core/src/accept.rs	323	dsm_sphincs::sign(PARTITION, sk, digest).map_err(partition_error)
