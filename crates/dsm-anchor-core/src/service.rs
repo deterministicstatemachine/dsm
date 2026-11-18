@@ -63,6 +63,13 @@ pub mod err {
     /// board's identity, or the board's install is a trial, whose keys change at every boot. Nothing
     /// was written; `detail` says which (DSM Amendment A38).
     pub const STAMP_REFUSED: u32 = 109;
+    /// The board's own secret is not sealed yet, so it has no identity to serve under. Nothing was
+    /// written, and nothing is until `OP_SEAL_SECRET` asks; `detail` says what the board found,
+    /// its chip included.
+    pub const UNSEALED: u32 = 205;
+    /// `OP_SEAL_SECRET` refused: the secret is sealed already, the page is one this procedure never
+    /// leaves, the board's randomness failed, or the OTP refused. `detail` says which.
+    pub const SEAL_REFUSED: u32 = 206;
 }
 
 /// Protocol-level ceiling on a request frame, a backstop against absurd inputs before prost
@@ -289,6 +296,15 @@ pub fn refusal(op: i32, code: u32, detail: &str) -> Vec<u8> {
     encode_response(&pb::ApplianceResponse {
         detail: alloc::string::String::from(detail),
         ..fail(op, code)
+    })
+}
+
+/// The board's answer to a seal command it carried out (`OP_SEAL_SECRET`): its own secret is sealed,
+/// and `detail` says what comes next. From the board's firmware, as [`refusal`] is.
+pub fn sealed_answer(detail: &str) -> Vec<u8> {
+    encode_response(&pb::ApplianceResponse {
+        detail: alloc::string::String::from(detail),
+        ..ok(pb::Op::SealSecret as i32)
     })
 }
 
@@ -625,7 +641,8 @@ pub fn dispatch<A: Served>(
             fail(op, err::ALREADY_PROVISIONED)
         }
         // Only the identify image reads a chip for whoever asks (`identify`); an anchor does not.
-        Ok(pb::Op::Identify) => fail(op, err::BAD_OP),
+        // The seal command is the board's firmware's to answer, before any anchor is asked.
+        Ok(pb::Op::Identify | pb::Op::SealSecret) => fail(op, err::BAD_OP),
         Ok(pb::Op::Unspecified) | Err(_) => fail(op, err::BAD_OP),
     }
 }

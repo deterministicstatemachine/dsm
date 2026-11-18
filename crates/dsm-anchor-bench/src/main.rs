@@ -31,6 +31,11 @@
 //! `<file>`, which it does only when the stamp verifies under its firmware's stamp keys over its own
 //! identity, and reads it back.
 //!
+//! `--seal-secret` tells a board to seal its own secret in its OTP, for good (`OP_SEAL_SECRET`). A
+//! board never does that because it started (owner, 2026-11-18): until this is sent it answers every
+//! request with what it found, its chip included, and writes nothing. This run prints that answer
+//! first, and sends the command only to a board that says it is waiting for its seal.
+//!
 //! `--identify` asks a board running the identify image what its chip is and holds, prints every
 //! reading, and saves the chip's four certificates under `--certs <dir>` by the names Tropic Square's
 //! `verify.sh` reads. Nothing is written to the chip or the board.
@@ -98,6 +103,8 @@ enum Check {
     BoardIdentity,
     /// The owner's stamp, for the board to keep (DSM Amendment A38).
     KeepStamp,
+    /// The board seals its own secret, for good, because it is told to.
+    SealSecret,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -144,6 +151,7 @@ fn parse_args() -> Result<Args, String> {
                 check = Check::KeepStamp;
                 file = it.next().ok_or("--keep-stamp needs the stamp's file")?;
             }
+            "--seal-secret" => check = Check::SealSecret,
             "--certs" => certs = it.next().ok_or("--certs needs a directory")?,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown arg: {other}")),
@@ -500,6 +508,41 @@ fn board_identity(port: &mut dyn serialport::SerialPort, file: &str) -> Result<(
     let mut out = std::fs::File::create_new(file).map_err(|e| format!("{file}: {e}"))?;
     std::io::Write::write_all(&mut out, &identity).map_err(|e| format!("{file}: {e}"))?;
     println!("[STAMP] identity written to {file}: sign it with `dsm-board-stamp stamp --identity {file}`");
+    Ok(())
+}
+
+/// `--seal-secret`: the board seals its own secret in its OTP, for good. Sent only to a board that
+/// answers a status request by saying it is waiting for its seal; what it found, its chip included,
+/// is printed first. The board is unplugged and plugged back in after it.
+fn seal_secret(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
+    let found = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Status as i32,
+            ..Default::default()
+        },
+    )?;
+    if found.error != anchor_core::service::err::UNSEALED {
+        return Err(format!(
+            "this board is not waiting for its seal (it answered error {}): {}\nnothing was sent",
+            found.error, found.detail
+        ));
+    }
+    println!("[SEAL] the board, before the seal: {}", found.detail);
+    let sealed = answer(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::SealSecret as i32,
+            ..Default::default()
+        },
+    )?;
+    if !sealed.ok {
+        return Err(format!(
+            "the board did not seal its secret (error {}): {}",
+            sealed.error, sealed.detail
+        ));
+    }
+    println!("[SEAL] {}", sealed.detail);
     Ok(())
 }
 
@@ -1033,6 +1076,7 @@ fn run() -> Result<(), String> {
          used-chip-bench --port <serial> --identify [--certs <dir>]\n       \
          used-chip-bench --port <serial> --board-identity <file>\n       \
          used-chip-bench --port <serial> --keep-stamp <file>\n       \
+         used-chip-bench --port <serial> --seal-secret\n       \
          used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
                          [--deny <id> ...] [--label \"used chip A\"] [--fw-commit <hash>] \
                          [--baud 115200] [--repeats 5]\n  \
@@ -1065,6 +1109,7 @@ fn run() -> Result<(), String> {
         Check::Identify => return identify(port.as_mut(), &args.certs),
         Check::BoardIdentity => return board_identity(port.as_mut(), &args.file),
         Check::KeepStamp => return keep_stamp(port.as_mut(), &args.file),
+        Check::SealSecret => return seal_secret(port.as_mut()),
         Check::No => {}
     }
     // Structural guard against the one operational rule: read the chip's anchor-id and refuse unless

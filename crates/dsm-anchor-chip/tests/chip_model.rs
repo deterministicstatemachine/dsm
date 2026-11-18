@@ -832,6 +832,33 @@ fn a_part_whose_randomness_is_untested_is_given_nothing() {
     assert_eq!(moved(&factory, &chip_state(&model)), Vec::<String>::new());
 }
 
+/// A board whose own secret is not sealed yet reads its chip and says what it found, with nothing
+/// written to the chip: a part fit for an install, and a test part whose PTRNG was never configured.
+/// Nobody has to seal a board to learn its chip is not fit (owner, 2026-11-18).
+/// MUTATION CONTROL: a report that brings the anchor up generates the key and turns this red.
+#[test]
+fn a_board_waiting_for_its_seal_reports_its_chip_and_writes_nothing_to_it() {
+    for (model, says) in [
+        (ModelServer::start(), "It may be given a key and a counter"),
+        (
+            ModelServer::start_as(Part::TestPart),
+            "It does not test its PTRNG at start-up",
+        ),
+    ] {
+        let factory = chip_state(&model);
+        let report = anchor_chip::bring_up::chip_before_seal(model.power_cycle(), HostBoard);
+        assert!(
+            report.contains("TR01-C2S-T200") && report.contains(says),
+            "the report: {report}"
+        );
+        assert_eq!(
+            moved(&factory, &chip_state(&model)),
+            Vec::<String>::new(),
+            "what the report changed on the chip"
+        );
+    }
+}
+
 /// Tropic Square's correction for that part takes on the chip, once, and the chip is then an
 /// ordinary new one. Only this image's one command writes anything.
 #[test]

@@ -1,7 +1,7 @@
 //! The owner's stamp on a board (DSM Amendment A38, owner, 2026-11-18).
 //!
 //! The owner sets up every board before it ships. His boot key is burned and the board locked, so it
-//! runs only firmware he signed, and the board seals its own secret at its first boot, so its
+//! runs only firmware he signed, and the board seals its own secret itself, when it is told to, so its
 //! partition key `pk_host` exists only inside it. He then signs the board's public identity — its
 //! `anchor_id`, `pk_host` and the chip's resident key `pk_chip` — with his stamp key. That signature is
 //! the board's stamp, and the board keeps it.

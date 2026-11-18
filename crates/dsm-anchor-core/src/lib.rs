@@ -22,7 +22,7 @@
 //! - `σ^host` — the RP2350 secure-partition key, verified against `pk_host` pinned in `B`.
 //!
 //! The partition key behind `σ^host` is BLAKE3-SPHINCS+ SPX128f, derived at every boot from the
-//! secret the board drew and sealed in its own OTP at its first signed boot ([`seal`], DSM Amendment
+//! secret the board drew and sealed in its own OTP when it was told to ([`seal`], DSM Amendment
 //! A38): no phone or computer ever holds it.
 //!
 //! The TROPIC01 monotonic counter is demoted to a **non-rewind floor + offline exposure

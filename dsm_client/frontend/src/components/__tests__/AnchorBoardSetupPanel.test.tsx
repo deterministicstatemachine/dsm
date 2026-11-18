@@ -47,7 +47,7 @@ const NAMES = new Map<pb.AnchorBoardStepKind, string>([
   [K.LOCK_DIGEST, 'Lock the digest page'],
   [K.WRITE_BOOT_KEY, "Burn the boot key's hash"],
   [K.LOCKDOWN, 'Lock down: secure boot on, debug off'],
-  [K.BOOT, 'Start the signed image once: the board seals its own secret'],
+  [K.BOOT, 'Start the signed image once: it records its version, nothing else'],
   [K.LOCK_BOOT_PAGES, 'Lock the boot pages'],
 ]);
 
@@ -125,7 +125,7 @@ describe('a board set up from the phone', () => {
     const steps = screen.getByTestId('anchor-board-steps');
     expect(steps).toHaveTextContent('NEXT: Load the signed image into flash');
     expect(steps).not.toHaveTextContent("secret and lock its page");
-    expect(steps).toHaveTextContent('Start the signed image once: the board seals its own secret');
+    expect(steps).toHaveTextContent('Start the signed image once: it records its version, nothing else');
     expect(steps).toHaveTextContent('LATER: Burn the firmware digest');
     expect(screen.getByTestId('anchor-board-found')).toHaveTextContent('0x40404');
   });

@@ -144,7 +144,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::LockDigest => "Lock the digest page",
         Kind::WriteBootKey => "Burn the boot key's hash",
         Kind::Lockdown => "Lock down: secure boot on, debug off",
-        Kind::Boot => "Start the signed image once: the board seals its own secret",
+        Kind::Boot => "Start the signed image once: it records its version, nothing else",
         Kind::LockBootPages => "Lock the boot pages",
         Kind::CheckChangedImage => "Check that a changed image is refused",
         Kind::LockPages => "Lock the digest and rollback pages, from a one-time image",
@@ -687,8 +687,8 @@ impl<P: BoardPort> BoardSetup<P> {
             Kind::Boot => otp_burn::boot(boot, release).map(|()| {
                 vec![
                     "the board is starting its signed image: its first boot records the image's \
-                     rollback version, and the board seals its own secret, drawn from its own \
-                     randomness, which no phone or computer ever sees. Once it has started, unplug \
+                     rollback version and writes nothing else. The board's own secret is sealed \
+                     later, only when the seal command is sent to it. Once it has started, unplug \
                      it, hold BOOTSEL, and plug it in again for the last step"
                         .to_string(),
                 ]

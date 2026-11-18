@@ -9,10 +9,13 @@
 //! than picotool does.
 //!
 //! The phone never draws or writes the board's secret (DSM Amendment A38, owner, 2026-11-18): the
-//! signed image seals it itself at its first boot, from the board's TRNG, in page 49, its lock row
-//! before any row of it (`anchor_core::seal`). Step 0 requires that page blank, with no access key
-//! and Secure code free to write it and its lock row; after the first boot the page reads sealed, or,
-//! on an A3 or A4 bootrom, closed to the bootloader altogether. Page 48 held a secret drawn on a
+//! signed image seals it itself, from the board's TRNG, in page 49, its lock row before any row of
+//! it (`anchor_core::seal`). It does that only when the seal command is sent to it
+//! (`OP_SEAL_SECRET`), never because it started (owner, 2026-11-18: "fix the image so it doesn't
+//! auto-write"): no step here makes it happen, and a board's first boot leaves the page blank. Step 0
+//! requires that page blank, with no access key and Secure code free to write it and its lock row;
+//! once the board has sealed it the page reads sealed, or, on an A3 or A4 bootrom, closed to the
+//! bootloader altogether. Page 48 held a secret drawn on a
 //! computer by an earlier procedure on the boards burned before A38; nothing here reads or writes it.
 
 use crate::picoboot::{BootselError, BootselLink, Picoboot, NOT_PERMITTED, RAW_ROW_MASK};
@@ -325,10 +328,11 @@ impl OtpReading {
 /// What the board's secret page holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecretPage {
-    /// Nothing, and its lock row unburned: the board seals its own secret at its first boot.
+    /// Nothing, and its lock row unburned: the board seals its own secret when the seal command
+    /// tells it to.
     Blank,
-    /// The board's own seal begun and not finished: its next boot finishes a seal cut before any row
-    /// and refuses one cut after.
+    /// The board's own seal begun and not finished: the next seal command finishes a seal cut before
+    /// any row, and the board refuses one cut after.
     Begun,
     /// Sealed by the board itself: it keeps its secret.
     Sealed,
@@ -601,11 +605,12 @@ pub enum Burn {
 pub enum Next {
     /// A burn, the next in order.
     Burn(Burn),
-    /// Step 9: reboot into the signed image, so its first boot records its rollback version and the
-    /// board seals its own secret (DSM Amendment A38). The board comes back as the anchor; Step 9b
-    /// needs it in BOOTSEL again.
+    /// Step 9: reboot into the signed image, so its first boot records its rollback version. That
+    /// boot writes nothing else: the board's own secret waits for the seal command. The board comes
+    /// back as the anchor; Step 9b needs it in BOOTSEL again.
     Boot,
-    /// Every burn is done: the board goes on to its install from the wallet.
+    /// Every burn the phone makes is done. The board's own seal is the owner's command
+    /// (`OP_SEAL_SECRET`), then his stamp, then its install from the wallet.
     Done,
 }
 
@@ -639,7 +644,7 @@ pub fn next(standing: &Standing, release: &Release) -> Result<Next, String> {
         return Ok(Next::Burn(Burn::Lockdown));
     }
     if !standing.rollback_recorded {
-        // The secret page stays blank until the signed image's first boot seals it.
+        // The secret page stays blank until the signed image, running, is told to seal it.
         if standing.secret != SecretPage::Blank {
             return Err(format!(
                 "page {SECRET_PAGE} was written before the signed image ever booted on this board \
@@ -649,18 +654,8 @@ pub fn next(standing: &Standing, release: &Release) -> Result<Next, String> {
         }
         return Ok(Next::Boot);
     }
-    match standing.secret {
-        SecretPage::Sealed | SecretPage::Closed => {}
-        // A seal cut short: the next boot finishes one cut before any row, and refuses one cut after.
-        SecretPage::Begun => return Ok(Next::Boot),
-        SecretPage::Blank => {
-            return Err(
-                "the signed image booted and the board did not seal its own secret: its answer as \
-                 the DSM Anchor says why"
-                    .to_string(),
-            )
-        }
-    }
+    // Whether the board has sealed its own secret decides nothing here: no boot seals it, and no
+    // step of this procedure does. It waits for the seal command, before or after Step 9b.
     if !standing.boot_pages_locked {
         return Ok(Next::Burn(Burn::LockBootPages));
     }
@@ -911,7 +906,8 @@ fn write_hash<L: BootselLink>(
 }
 
 /// Burn one step, only the one the board needs next ([`next`]), and read back every row it wrote.
-/// No step draws or writes the board's secret: the board seals its own at its first boot.
+/// No step draws or writes the board's secret: the board seals its own when the seal command tells
+/// it to, which is no step of this procedure.
 pub fn burn<L: BootselLink>(
     pb: &mut Picoboot<L>,
     release: &Release,

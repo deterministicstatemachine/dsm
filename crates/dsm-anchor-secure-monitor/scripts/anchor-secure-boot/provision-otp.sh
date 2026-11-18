@@ -5,8 +5,8 @@
 set -euo pipefail
 # Everything this script writes is the operator's alone.
 umask 077
-# The board's sealed secret is its identity root, and the board makes it itself at its first signed
-# boot (DSM Amendment A38): nothing here draws, holds or writes it. This directory keeps only what
+# The board's sealed secret is its identity root, and the board makes it itself, when the seal
+# command is sent to its signed image (DSM Amendment A38): nothing here draws, holds or writes it. This directory keeps only what
 # the procedure records of each board (its chip id), outside the repository, one directory per board.
 SECRET_DIR="${DSM_ANCHOR_SECRET_DIR:-$HOME/.dsm-anchor-secure-boot}"
 BUILD_DIR="$SECRET_DIR/build"
@@ -95,8 +95,8 @@ run() { # pt <args>: printed as the picotool command it is
   shift
   if [ "$COMMIT" = 1 ]; then echo "+ picotool $* --ser $SER"; pt "$@"; else echo "[dry-run] picotool $* --ser $SER"; fi
 }
-# What the board's secret page holds, read fresh (READ-ONLY): `blank` before the signed image's first
-# boot; `begun` or `sealed` once the board has begun or finished sealing its own secret there. Anything
+# What the board's secret page holds, read fresh (READ-ONLY): `blank` until the board is told to seal
+# it; `begun` or `sealed` once the board has begun or finished sealing its own secret there. Anything
 # else is a page someone else wrote, and it stops. The lock row decides: once the board has begun its
 # seal the USB bootloader has no access to the page, so the rows themselves read as nothing here. The
 # dump is a private temporary file, gone when this returns.
@@ -137,7 +137,7 @@ need() { [ -f "$1" ] || { echo "ERROR: no $1 — $2"; exit 1; }; }
 case "$CMD" in
   --check-blank)
     # READ-ONLY. Every row this procedure writes must still be zero, and the secret's page blank, with
-    # no access key, for the board to seal its own secret at its first boot (DSM Amendment A38). The
+    # no access key, for the board to seal its own secret when it is told to (DSM Amendment A38). The
     # kept dump holds no secret: none is on the board yet.
     page="$(secret_page)"
     [ "$page" = blank ] || { echo "ERROR: page $SECRET_PAGE, where the board seals its own secret, is not blank before anything is burned ($page): someone else wrote it"; exit 1; }
@@ -183,7 +183,7 @@ PY
     confirm
     run pt otp load -e -s "$DIGEST_ROW" "$MU_BIN" -t bin ;;
   --lock-pages)
-    # The digest page alone: the secret's page is the board's to lock, at its first boot.
+    # The digest page alone: the secret's page is the board's to lock, when it seals its secret.
     confirm
     run pt otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK" ;;
   --write-bootkey)

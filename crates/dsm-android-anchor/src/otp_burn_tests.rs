@@ -127,10 +127,13 @@ fn the_boards_in_hand_check_blank_with_their_old_secret_page_left_alone() {
     assert!(blank.locks_already_set[0].contains("0x40404"));
 }
 
-/// A board is burned from the phone in the runbook's order, and the phone writes nothing of its secret:
-/// the signed image's first boot seals the board's own, in page 49, lock row first (DSM Amendment A38).
+/// A board is burned from the phone in the runbook's order, and the phone writes nothing of its secret.
+/// Nor does a boot of the signed image: page 49 stays blank through it. Only the seal command, sent to
+/// the running image, seals the board's own secret, lock row first (DSM Amendment A38; owner,
+/// 2026-11-18: "fix the image so it doesn't auto-write").
+/// MUTATION CONTROL: a boot that seals the page turns this red.
 #[test]
-fn a_board_is_burned_from_the_phone_in_the_runbooks_order_and_seals_its_own_secret() {
+fn a_board_is_burned_from_the_phone_in_the_runbooks_order_and_seals_only_on_command() {
     let release = release();
     let mut pb = Picoboot::connect(BootromModel::sealed_board()).expect("connect");
     assert_eq!(
@@ -181,22 +184,38 @@ fn a_board_is_burned_from_the_phone_in_the_runbooks_order_and_seals_its_own_secr
     assert_eq!(pb_model(&mut pb).rebooted, 1);
     {
         let model = pb_model(&mut pb);
-        assert!(
-            matches!(model.secret_at_boot, Some(Ok(_secret))),
-            "the board sealed its own secret: {:?}",
-            model
-                .secret_at_boot
-                .as_ref()
-                .map(|read| read.as_ref().err())
+        assert_eq!(
+            model.secret_at_boot,
+            Some(Ok(None)),
+            "the first boot read a blank page"
         );
-        assert_eq!(model.raw[usize::from(lock1(SECRET_PAGE))], SECRET_LOCK);
+        assert_eq!(
+            model.raw[usize::from(lock1(SECRET_PAGE))],
+            0,
+            "the first boot wrote nothing of the secret's page"
+        );
+        assert!((SECRET_ROW..SECRET_ROW + 16).all(|r| model.raw[usize::from(r)] == 0));
     }
-    assert_eq!(standing(&mut pb).secret, SecretPage::Sealed);
+    assert_eq!(standing(&mut pb).secret, SecretPage::Blank);
     assert_eq!(
         next(&standing(&mut pb), &release),
         Ok(Next::Burn(Burn::LockBootPages))
     );
     burn(&mut pb, &release, Burn::LockBootPages).expect("Step 9b");
+    assert_eq!(next(&standing(&mut pb), &release), Ok(Next::Done));
+
+    // The seal command, and only it, seals the board's own secret; the next boot reads it.
+    {
+        let model = pb_model(&mut pb);
+        assert_eq!(model.seal_command(), Ok(()));
+        assert_eq!(model.raw[usize::from(lock1(SECRET_PAGE))], SECRET_LOCK);
+        assert_eq!(
+            model.seal_command(),
+            Err(anchor_core::seal::SealError::AlreadySealed),
+            "a second command"
+        );
+    }
+    assert_eq!(standing(&mut pb).secret, SecretPage::Sealed);
     assert_eq!(next(&standing(&mut pb), &release), Ok(Next::Done));
 
     let model = pb_model(&mut pb);

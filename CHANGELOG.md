@@ -23,8 +23,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   An unstamped board is refused by name, never as a changed one. A trial
   install, whose keys change at every boot, pays and is paid nothing offline.
 - **The board makes its own secret (DSM Amendment A38).** The signed image
-  seals it at its first boot, from the board's TRNG, in OTP page 49, its lock
-  row written before any row; no phone or computer draws or sees it. The
+  seals it from the board's TRNG, in OTP page 49, its lock row written before
+  any row; no phone or computer draws or sees it. It seals only when the seal
+  command is sent (`OP_SEAL_SECRET`, `used-chip-bench --seal-secret`): starting
+  a board writes nothing to its OTP, and until then the board answers every
+  request with what it found, its chip included. The
   phone's procedure and `provision-otp.sh` no longer write a secret, and refuse
   a page 49 someone else wrote.
 

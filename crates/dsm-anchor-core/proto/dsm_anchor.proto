@@ -107,6 +107,11 @@ enum Op {
                           // and only a stamp that verifies under the firmware's stamp keys over this
                           // board's identity. The stamp follows the head on the wire, as an
                           // OP_AUTHORIZE's signature does (see ApplianceRequest)
+  OP_SEAL_SECRET    = 19; // seal the board's own secret in its OTP, for good: the board draws it and
+                          // writes it only when this asks, never because it started (owner,
+                          // 2026-11-18). Answered by the board's firmware, on a board locked for
+                          // production whose secret page is blank, running the image burned for it.
+                          // The board is restarted after it. See seal.rs.
 }
 
 // What a payer discloses of its enrollment, for its bundle B to recompute (every field B binds).

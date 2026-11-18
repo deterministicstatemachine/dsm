@@ -1,8 +1,11 @@
-//! The board's own secret (DSM Amendment A38, owner, 2026-11-18): drawn by the board itself at its
-//! first signed boot, inside its Secure firmware, and sealed in one OTP page whose lock row is written
-//! before any row of the secret. No phone or computer draws it or sees it, so the keys derived from it
-//! — the partition key `pk_host` the owner's stamp names, and the chip's pairing key — exist only
-//! inside the board.
+//! The board's own secret (DSM Amendment A38, owner, 2026-11-18): drawn by the board itself, inside
+//! its Secure firmware, and sealed in one OTP page whose lock row is written before any row of the
+//! secret. No phone or computer draws it or sees it, so the keys derived from it — the partition key
+//! `pk_host` the owner's stamp names, and the chip's pairing key — exist only inside the board.
+//!
+//! The board seals it only when it is told to ([`seal_on_command`], `OP_SEAL_SECRET`), never because
+//! it started (owner, 2026-11-18: "fix the image so it doesn't auto-write"). A boot writes nothing to
+//! the page ([`read_if_sealed`]): plugging a board in changes nothing on it.
 //!
 //! The page goes through three lock-row values, each only setting bits of the one before (OTP bits
 //! are never cleared):
@@ -15,11 +18,11 @@
 //! page's software lock itself, so Non-secure code is barred before the secret is written and Secure
 //! code is read-only once it is.
 //!
-//! What a boot finds decides what it does ([`classify`]). A page sealed is read. A blank page is
-//! sealed now, as is a page whose seal was cut after the lock row and before any row of the secret.
-//! Anything else is refused for good: a page written but not locked, a seal cut after some of its
-//! rows, and a lock row this procedure never writes. None of those can be told from a page someone
-//! else wrote before the board ever ran, so none is ever used or completed.
+//! What the page holds decides what is done ([`classify`]). A page sealed is read. A blank page waits
+//! for the seal command, as does a page whose seal was cut after the lock row and before any row of
+//! the secret. Anything else is refused for good: a page written but not locked, a seal cut after
+//! some of its rows, and a lock row this procedure never writes. None of those can be told from a
+//! page someone else wrote before the board ever ran, so none is ever used or completed.
 
 /// The rows the 256-bit secret takes: sixteen ECC rows of 16 bits.
 pub const SECRET_ROWS: usize = 16;
@@ -47,9 +50,9 @@ const RAW_ROW_BITS: u32 = 0x00ff_ffff;
 /// What a boot finds in the secret's page.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SecretPage {
-    /// The lock row and every row blank: the board seals its secret now.
+    /// The lock row and every row blank: the board seals its secret when it is told to.
     Blank,
-    /// The seal begun and cut before any row of the secret: the board seals it now.
+    /// The seal begun and cut before any row of the secret: the board finishes it when it is told to.
     Begun,
     /// Sealed: the board reads its secret.
     Sealed,
@@ -122,6 +125,8 @@ pub enum SealError {
     Foreign(u32),
     /// Sealed, with nothing in it.
     SealedEmpty,
+    /// A seal command to a board whose secret is sealed already: nothing was written.
+    AlreadySealed,
     /// The board's randomness gave nothing that passed its health tests: nothing was written.
     NoEntropy,
     /// The OTP refused a read or a write.
@@ -130,19 +135,35 @@ pub enum SealError {
     ReadBack,
 }
 
-/// The board's secret: read when the page is sealed; drawn from `draw` and sealed when the page is
-/// blank or its seal was cut before any of its rows; refused otherwise. A seal writes, in order: the
-/// lock row [`SEAL_BEGUN`], read back; Non-secure code barred for this boot; the sixteen rows,
-/// read back; the lock row [`SEALED`], read back; Secure code read-only for this boot. `draw` runs
-/// before anything is written, so a board whose randomness fails writes nothing.
-pub fn seal_or_read<O: SecretOtp>(
-    otp: &mut O,
-    draw: impl FnOnce() -> Option<[u8; 32]>,
-) -> Result<[u8; 32], SealError> {
+/// What a boot does with the page, which is to read it: the board's secret when the page is sealed;
+/// nothing when it is blank or its seal was cut before any of its rows, and the board then waits for
+/// the seal command; refused otherwise. Nothing is written.
+pub fn read_if_sealed<O: SecretOtp>(otp: &mut O) -> Result<Option<[u8; 32]>, SealError> {
     let lock = otp.lock_row().map_err(SealError::Otp)?;
     let rows = otp.raw_rows().map_err(SealError::Otp)?;
     match classify(lock, &rows) {
-        SecretPage::Sealed => read_sealed(otp),
+        SecretPage::Sealed => read_sealed(otp).map(Some),
+        SecretPage::Blank | SecretPage::Begun => Ok(None),
+        SecretPage::WrittenUnlocked => Err(SealError::WrittenUnlocked),
+        SecretPage::BegunWithRows => Err(SealError::BegunWithRows),
+        SecretPage::Foreign(value) => Err(SealError::Foreign(value)),
+    }
+}
+
+/// The seal, done on the seal command and at no other time: the secret drawn from `draw` and sealed
+/// when the page is blank or its seal was cut before any of its rows; refused otherwise, a page
+/// sealed already included. A seal writes, in order: the lock row [`SEAL_BEGUN`], read back;
+/// Non-secure code barred for this boot; the sixteen rows, read back; the lock row [`SEALED`], read
+/// back; Secure code read-only for this boot. `draw` runs before anything is written, so a board
+/// whose randomness fails writes nothing. The secret is not handed back: the next boot reads it.
+pub fn seal_on_command<O: SecretOtp>(
+    otp: &mut O,
+    draw: impl FnOnce() -> Option<[u8; 32]>,
+) -> Result<(), SealError> {
+    let lock = otp.lock_row().map_err(SealError::Otp)?;
+    let rows = otp.raw_rows().map_err(SealError::Otp)?;
+    match classify(lock, &rows) {
+        SecretPage::Sealed => Err(SealError::AlreadySealed),
         SecretPage::Blank => seal(otp, draw, Begin::Now),
         SecretPage::Begun => seal(otp, draw, Begin::Already),
         SecretPage::WrittenUnlocked => Err(SealError::WrittenUnlocked),
@@ -161,19 +182,14 @@ fn seal<O: SecretOtp>(
     otp: &mut O,
     draw: impl FnOnce() -> Option<[u8; 32]>,
     begin: Begin,
-) -> Result<[u8; 32], SealError> {
+) -> Result<(), SealError> {
     let mut secret = draw().ok_or(SealError::NoEntropy)?;
     let mut words: [u16; SECRET_ROWS] =
         core::array::from_fn(|i| u16::from_le_bytes([secret[2 * i], secret[2 * i + 1]]));
+    crate::util::zeroize(&mut secret);
     let sealed = seal_words(otp, &words, begin);
     zeroize_words(&mut words);
-    match sealed {
-        Ok(()) => Ok(secret),
-        Err(e) => {
-            crate::util::zeroize(&mut secret);
-            Err(e)
-        }
-    }
+    sealed
 }
 
 fn seal_words<O: SecretOtp>(
@@ -371,17 +387,39 @@ mod tests {
         assert_eq!(SEALED & SEAL_BEGUN, SEAL_BEGUN, "sealing only sets bits");
     }
 
-    /// A blank page is sealed at the first boot with the secret drawn, in this order: the lock row
+    /// A boot leaves a blank page as it is, however many times the board starts: it reads no secret
+    /// and writes nothing. Only the seal command writes the page.
+    /// MUTATION CONTROL: a boot that seals a blank page turns this red.
+    #[test]
+    fn a_boot_never_writes_the_page() {
+        let mut page = Page::blank();
+        for _boot in 0..3 {
+            page.boot();
+            assert_eq!(read_if_sealed(&mut page), Ok(None));
+            assert!(page.writes.is_empty(), "a boot wrote the page");
+            assert_eq!(classify(page.lock, &page.rows), SecretPage::Blank);
+        }
+        // A seal cut after its lock row waits for the command as a blank page does.
+        page.power = Some(1);
+        assert!(matches!(seal_on_command(&mut page, drawn(3)), Err(_cut)));
+        page.boot();
+        page.writes.clear();
+        assert_eq!(read_if_sealed(&mut page), Ok(None));
+        assert!(page.writes.is_empty(), "a boot finished a seal");
+        assert_eq!(classify(page.lock, &page.rows), SecretPage::Begun);
+    }
+
+    /// The seal command seals a blank page with the secret drawn, in this order: the lock row
     /// barring Non-secure code and the bootloader, Non-secure code barred for this boot, every row of
     /// the secret, the lock row sealed, Secure code read-only for this boot; every later boot reads
-    /// the same secret.
+    /// that secret, and a second command is refused with nothing written.
     /// MUTATION CONTROL: writing the rows before the lock row, or before Non-secure code is barred,
     /// turns this red.
     #[test]
-    fn a_blank_page_is_sealed_lock_row_first_and_read_at_every_boot_after() {
+    fn the_command_seals_a_blank_page_lock_row_first_and_every_boot_after_reads_it() {
         let mut page = Page::blank();
         let expected = secret_of(7);
-        assert_eq!(seal_or_read(&mut page, drawn(7)), Ok(expected));
+        assert_eq!(seal_on_command(&mut page, drawn(7)), Ok(()));
         let order: Vec<Event> = [Event::LockRow(SEAL_BEGUN), Event::BarNonSecure]
             .into_iter()
             .chain((0..SECRET_ROWS).map(Event::Row))
@@ -399,11 +437,16 @@ mod tests {
             page.boot();
             page.writes.clear();
             assert_eq!(
-                seal_or_read(&mut page, || None),
-                Ok(expected),
-                "a later boot reads the secret and draws nothing"
+                read_if_sealed(&mut page),
+                Ok(Some(expected)),
+                "a later boot reads the secret"
             );
-            assert!(page.writes.is_empty(), "and writes nothing");
+            assert_eq!(
+                seal_on_command(&mut page, drawn(8)),
+                Err(SealError::AlreadySealed),
+                "a second command"
+            );
+            assert!(page.writes.is_empty(), "and nothing is written");
         }
     }
 
@@ -411,7 +454,10 @@ mod tests {
     #[test]
     fn no_randomness_writes_nothing() {
         let mut page = Page::blank();
-        assert_eq!(seal_or_read(&mut page, || None), Err(SealError::NoEntropy));
+        assert_eq!(
+            seal_on_command(&mut page, || None),
+            Err(SealError::NoEntropy)
+        );
         assert!(page.writes.is_empty());
         assert_eq!(classify(page.lock, &page.rows), SecretPage::Blank);
     }
@@ -426,17 +472,47 @@ mod tests {
             rows[3] = 0x1234;
             rows
         };
-        for (lock, rows, refusal) in [
-            (0, written, SealError::WrittenUnlocked),
-            (SEAL_BEGUN, written, SealError::BegunWithRows),
-            (0x14_1414, [0; SECRET_ROWS], SealError::Foreign(0x14_1414)),
-            (SEALED, [0; SECRET_ROWS], SealError::SealedEmpty),
+        // What a boot says of each, and what the seal command says.
+        for (lock, rows, at_boot, on_command) in [
+            (
+                0,
+                written,
+                SealError::WrittenUnlocked,
+                SealError::WrittenUnlocked,
+            ),
+            (
+                SEAL_BEGUN,
+                written,
+                SealError::BegunWithRows,
+                SealError::BegunWithRows,
+            ),
+            (
+                0x14_1414,
+                [0; SECRET_ROWS],
+                SealError::Foreign(0x14_1414),
+                SealError::Foreign(0x14_1414),
+            ),
+            (
+                SEALED,
+                [0; SECRET_ROWS],
+                SealError::SealedEmpty,
+                SealError::AlreadySealed,
+            ),
         ] {
             let mut page = Page::blank();
             page.lock = lock;
             page.rows = rows;
             page.boot();
-            assert_eq!(seal_or_read(&mut page, drawn(9)), Err(refusal), "{lock:#x}");
+            assert_eq!(
+                seal_on_command(&mut page, drawn(9)),
+                Err(on_command),
+                "{lock:#x}"
+            );
+            assert_eq!(
+                read_if_sealed(&mut page).map(|_secret| ()),
+                Err(at_boot),
+                "{lock:#x}: a boot"
+            );
             assert!(
                 page.writes.is_empty(),
                 "{lock:#x}: nothing done to the page"
@@ -444,22 +520,26 @@ mod tests {
         }
     }
 
-    /// A power cut at every write of a seal: cut before the lock row landed, the next boot seals as
-    /// from blank; cut after it and before any row, it finishes the seal with a secret it draws then;
-    /// cut after any row, the page is refused for good.
+    /// A power cut at every write of a seal: cut before the lock row landed, the next command seals
+    /// as from blank; cut after it and before any row, the next command finishes the seal with a
+    /// secret it draws then; cut after any row, the page is refused for good.
     #[test]
     fn a_seal_cut_short_is_finished_only_before_its_first_row() {
         for writes_before_cut in 0..=SECRET_ROWS + 1 {
             let mut page = Page::blank();
             page.power = Some(writes_before_cut);
             assert!(
-                matches!(seal_or_read(&mut page, drawn(3)), Err(_cut)),
+                matches!(seal_on_command(&mut page, drawn(3)), Err(_cut)),
                 "cut after {writes_before_cut} writes"
             );
             page.boot();
-            let after = seal_or_read(&mut page, drawn(5));
+            let after = seal_on_command(&mut page, drawn(5));
             match writes_before_cut {
-                0 | 1 => assert_eq!(after, Ok(secret_of(5)), "cut after {writes_before_cut}"),
+                0 | 1 => {
+                    assert_eq!(after, Ok(()), "cut after {writes_before_cut}");
+                    page.boot();
+                    assert_eq!(read_if_sealed(&mut page), Ok(Some(secret_of(5))));
+                }
                 _ => assert_eq!(
                     after,
                     Err(SealError::BegunWithRows),

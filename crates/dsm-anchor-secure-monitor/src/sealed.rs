@@ -2,9 +2,11 @@
 //! The secret only this board holds, and the boot context the appliance requires before it reads it.
 //!
 //! The sealed secret is 256 bits in an RP2350 OTP page that the board seals itself (DSM Amendment
-//! A38, owner, 2026-11-18): the production image draws it from the board's TRNG at its first signed
-//! boot and writes it with the page's lock row first (`anchor_core::seal`), so no phone or computer
-//! ever draws it or sees it. Every secret the appliance's identity needs derives from it: the
+//! A38, owner, 2026-11-18): the production image draws it from the board's TRNG and writes it with
+//! the page's lock row first (`anchor_core::seal`), so no phone or computer ever draws it or sees
+//! it. It does that only when the seal command asks (`OP_SEAL_SECRET`), never because it started
+//! (owner, 2026-11-18: "fix the image so it doesn't auto-write"): a boot reads the page and writes
+//! nothing. Every secret the appliance's identity needs derives from it: the
 //! pairing key the TROPIC01 is opened with, the σ^host partition key seed and the birth entropy. None
 //! derives from data the chip reports to anyone who asks.
 
@@ -61,7 +63,7 @@ pub enum SealedError {
     /// The OTP page was never provisioned.
     #[cfg(feature = "bench_self_enroll")]
     Unprovisioned,
-    /// The board could not seal its own secret, or found a page it may never use.
+    /// The board's secret page is one it may never use, or the seal command did not finish.
     #[cfg(not(feature = "bench_self_enroll"))]
     Seal(anchor_core::seal::SealError),
     /// A board locked for production, a finished unit: the trial image and the prepare image stand
@@ -247,14 +249,20 @@ impl SecretOtp for SecretPage49 {
     }
 }
 
-/// The board's own secret (DSM Amendment A38): read when page 49 is sealed; drawn from `draw` and
-/// sealed now, lock row first, when the page is blank or its seal was cut before any row; refused
-/// for good otherwise (`anchor_core::seal::seal_or_read`).
+/// The board's own secret (DSM Amendment A38) as a boot finds it, with nothing written: read when
+/// page 49 is sealed; none when the page is blank or its seal was cut before any row, and the board
+/// then waits for the seal command; refused for good otherwise
+/// (`anchor_core::seal::read_if_sealed`).
 #[cfg(not(feature = "bench_self_enroll"))]
-pub fn seal_or_read_secret(
-    draw: impl FnOnce() -> Option<[u8; 32]>,
-) -> Result<[u8; 32], SealedError> {
-    anchor_core::seal::seal_or_read(&mut SecretPage49, draw).map_err(SealedError::Seal)
+pub fn read_secret_if_sealed() -> Result<Option<[u8; 32]>, SealedError> {
+    anchor_core::seal::read_if_sealed(&mut SecretPage49).map_err(SealedError::Seal)
+}
+
+/// The seal command's one act: the secret drawn from `draw` and sealed in page 49, lock row first,
+/// for good (`anchor_core::seal::seal_on_command`). Nothing else in this image writes the page.
+#[cfg(not(feature = "bench_self_enroll"))]
+pub fn seal_secret(draw: impl FnOnce() -> Option<[u8; 32]>) -> Result<(), SealedError> {
+    anchor_core::seal::seal_on_command(&mut SecretPage49, draw).map_err(SealedError::Seal)
 }
 
 /// Whether page 49 takes the board's own secret, read with nothing written: blank, or a seal cut

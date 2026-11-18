@@ -84,8 +84,11 @@ opt-level = "s"
 opt-level = "s"
 [profile.release.package.aes-gcm]
 opt-level = "s"
+# SHA-2 is outside that budget: SPHINCS+ here is BLAKE3, and SHA-2 hashes a few blocks for the chip
+# session and the chip's Ed25519 signature. At "z" its SHA-512 rounds are not unrolled, which gives
+# back about 12 KB (compress512: 22,670 bytes down to 9,728).
 [profile.release.package.sha2]
-opt-level = "s"
+opt-level = "z"
 
 # Its own workspace: excluded from the root manifest.
 [workspace]

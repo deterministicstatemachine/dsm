@@ -2264,8 +2264,8 @@ message AnchorTryRunResponse {
 enum AnchorBoardStepKind {
   ANCHOR_BOARD_STEP_KIND_UNSPECIFIED     = 0;
   ANCHOR_BOARD_STEP_KIND_LOAD_IMAGE      = 1; // Step 3: the signed image into flash (flash, not OTP)
-  // 2 was the phone writing the board's secret; the board seals its own at its first boot (DSM
-  // Amendment A38), in ANCHOR_BOARD_STEP_KIND_BOOT.
+  // 2 was the phone writing the board's secret; the board seals its own (DSM Amendment A38), when
+  // the seal command is sent to its signed image, which is no step of the phone's.
   reserved 2;
   reserved "ANCHOR_BOARD_STEP_KIND_SEAL_SECRET";
   ANCHOR_BOARD_STEP_KIND_WRITE_DIGEST    = 3; // Step 5: the Non-secure app's digest

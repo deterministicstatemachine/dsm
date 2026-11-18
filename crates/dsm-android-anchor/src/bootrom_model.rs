@@ -8,8 +8,10 @@
 //! from each page's Secure lock advanced by its bootloader lock; a refused read or write answers
 //! `PICOBOOT_NOT_PERMITTED`, as the boards in hand answer for their sealed secret page. Flash is erased
 //! by sector and written by page, and a reboot into a signed image records its rollback version, as
-//! the bootrom's first boot of one does; the signed image then seals the board's own secret in page
-//! 49 through `anchor_core::seal`, as Secure code at a normal boot may write there (DSM Amendment A38).
+//! the bootrom's first boot of one does. The signed image reads page 49 at each boot and writes
+//! nothing; it seals the board's own secret there through `anchor_core::seal` only when the seal
+//! command is sent ([`BootromModel::seal_command`]), as Secure code at a normal boot may write there
+//! (DSM Amendment A38; owner, 2026-11-18: no write because the board started).
 
 use crate::board_setup::Carried;
 use crate::otp_burn::{
@@ -90,8 +92,9 @@ pub struct BootromModel {
     /// Which of those two the board runs as the DSM Anchor since its last start: none after a start on
     /// anything else.
     pub running: Option<Carried>,
-    /// What the signed image's last boot did with the board's own secret (DSM Amendment A38).
-    pub secret_at_boot: Option<Result<[u8; 32], anchor_core::seal::SealError>>,
+    /// What the signed image's last boot read of the board's own secret (DSM Amendment A38): the
+    /// secret once it is sealed, none while the page waits for the seal command.
+    pub secret_at_boot: Option<Result<Option<[u8; 32]>, anchor_core::seal::SealError>>,
 }
 
 /// How a reboot went.
@@ -336,12 +339,17 @@ impl BootromModel {
             for copy in 0..3 {
                 self.raw[usize::from(BOOT_FLAGS0_ROW) + copy] |= ROLLBACK_REQUIRED;
             }
-            // The signed image, at every boot: its own secret sealed, or read (DSM Amendment A38).
-            self.secret_at_boot = Some(anchor_core::seal::seal_or_read(
+            // The signed image, at every boot: its own secret read, and nothing written.
+            self.secret_at_boot = Some(anchor_core::seal::read_if_sealed(
                 &mut SecurePage49::at_boot(self),
-                || Some([0x5e; 32]),
             ));
         }
+    }
+
+    /// The seal command, sent to the signed image while it runs (`OP_SEAL_SECRET`): the one thing
+    /// that seals the board's own secret.
+    pub fn seal_command(&mut self) -> Result<(), anchor_core::seal::SealError> {
+        anchor_core::seal::seal_on_command(&mut SecurePage49::at_boot(self), || Some([0x5e; 32]))
     }
 
     /// The Secure lock (`LOCK_S`) a page's lock row gives at reset, by majority, and whether an access

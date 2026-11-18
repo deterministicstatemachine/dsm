@@ -1,6 +1,6 @@
 file	line	lexical_reference
-crates/dsm-anchor-bench/src/main.rs	273	dsm_sphincs::generate_keypair_from_seed(dsm_sphincs::SphincsVariant::SPX256f, &seed)
-crates/dsm-anchor-bench/src/main.rs	288	dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest)
+crates/dsm-anchor-bench/src/main.rs	281	dsm_sphincs::generate_keypair_from_seed(dsm_sphincs::SphincsVariant::SPX256f, &seed)
+crates/dsm-anchor-bench/src/main.rs	296	dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest)
 crates/dsm-anchor-chip/src/bring_up.rs	27	use dsm_sphincs::SphincsVariant;
 crates/dsm-anchor-chip/src/bring_up.rs	43	const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
 crates/dsm-anchor-chip/src/bring_up.rs	58	dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed).map_err(partition_error)?;
