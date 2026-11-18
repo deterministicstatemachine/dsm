@@ -66,6 +66,12 @@ pub trait ActiveStore {
     fn trial_read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
     /// Erase whatever a try-run wrote, a power cut's remains included.
     fn trial_clear(&mut self) -> Result<(), StoreError>;
+    /// Keep the owner's stamp on this board (DSM Amendment A38), in place of any kept before. After a
+    /// power cut the store holds this stamp or the one before it, never a mixture. Apart from the
+    /// record and from what a try-run writes, so neither ever touches it.
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError>;
+    /// The stamp last kept in full; `None` while none was.
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
 }
 
 /// A store behind a `Box`, as a firmware holds it, and as a try-run drives its trial slots.
@@ -88,6 +94,12 @@ impl<S: ActiveStore + ?Sized> ActiveStore for Box<S> {
     fn trial_clear(&mut self) -> Result<(), StoreError> {
         (**self).trial_clear()
     }
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError> {
+        (**self).stamp_write(stamp)
+    }
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).stamp_read()
+    }
 }
 
 /// A store a try-run lends out for the length of one payment.
@@ -109,6 +121,12 @@ impl<S: ActiveStore + ?Sized> ActiveStore for &mut S {
     }
     fn trial_clear(&mut self) -> Result<(), StoreError> {
         (**self).trial_clear()
+    }
+    fn stamp_write(&mut self, stamp: &[u8]) -> Result<(), StoreError> {
+        (**self).stamp_write(stamp)
+    }
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).stamp_read()
     }
 }
 
@@ -136,6 +154,13 @@ impl<S: ActiveStore> ActiveStore for TrialRecords<S> {
     }
     fn trial_clear(&mut self) -> Result<(), StoreError> {
         self.0.trial_clear()
+    }
+    /// A trial install is never stamped: its keys change at every boot.
+    fn stamp_write(&mut self, _stamp: &[u8]) -> Result<(), StoreError> {
+        Err(StoreError::Refused)
+    }
+    fn stamp_read(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.stamp_read()
     }
 }
 
@@ -458,6 +483,11 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     /// The appliance's store, to read.
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    /// The owner's stamp this board keeps (DSM Amendment A38), if any.
+    pub fn board_stamp(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.store.stamp_read()
     }
 
     /// Write the active state if it changed. A write the store does not take undoes the change in

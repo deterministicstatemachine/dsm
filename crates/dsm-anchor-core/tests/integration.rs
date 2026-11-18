@@ -155,6 +155,11 @@ impl PartitionSig for Partition {
     fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
         dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest).map_err(partition_error)
     }
+    /// No board here is ever stamped or checks a stamp: these appliances release and accept, and the
+    /// stamp is checked by a receiving board (`tests/durable.rs`) and by the wallet.
+    fn stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
+        &[]
+    }
 }
 
 /// The SPHINCS+ failure, as the partition reports it.

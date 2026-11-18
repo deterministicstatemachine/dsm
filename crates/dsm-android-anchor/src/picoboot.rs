@@ -245,8 +245,10 @@ impl<L: BootselLink> Picoboot<L> {
             Data::In(usize::from(rows) * RAW_ROW_BYTES),
         )?;
         Ok(bytes
-            .chunks_exact(RAW_ROW_BYTES)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .as_chunks::<RAW_ROW_BYTES>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
             .collect())
     }
 
@@ -275,7 +277,7 @@ impl<L: BootselLink> Picoboot<L> {
     /// Write OTP rows from `row` with the bootloader's error correction, two bytes a row. The
     /// bootloader refuses rows that already hold a value.
     pub fn otp_write_ecc(&mut self, row: u16, data: &[u8]) -> Result<(), BootselError> {
-        if data.len() % ECC_ROW_BYTES != 0 {
+        if !data.len().is_multiple_of(ECC_ROW_BYTES) {
             return Err(BootselError::Link(format!(
                 "{} bytes are not whole rows of {ECC_ROW_BYTES}",
                 data.len()

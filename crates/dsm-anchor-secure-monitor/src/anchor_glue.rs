@@ -105,7 +105,29 @@ impl<R: core::borrow::Borrow<hal::rosc::RingOscillator<hal::rosc::Enabled>>> Boa
     fn silicon_revision(&self) -> u8 {
         unsafe { core::ptr::read_volatile(BOOTROM_VERSION_BYTE as *const u8) }
     }
+
+    fn secret_page(&self) -> Result<(), String> {
+        sealed::secret_page_takes_a_seal(self.silicon_revision())
+    }
 }
+
+/// The board's own secret, drawn at its first signed boot (DSM Amendment A38): TRNG blocks that each
+/// passed the block's health tests, under a context of its own, never the session keys'. `None` when
+/// the TRNG fails: nothing is then written.
+#[cfg(not(feature = "bench_self_enroll"))]
+fn sealed_secret_entropy() -> Option<[u8; 32]> {
+    let mut hasher = blake3::Hasher::new_derive_key("DSM/anchor/sealed-secret/v1");
+    for _block in 0..SEALED_SECRET_TRNG_BLOCKS {
+        let mut block = trng_block()?;
+        hasher.update(&block);
+        crate::zeroize(&mut block);
+    }
+    Some(*hasher.finalize().as_bytes())
+}
+
+/// TRNG blocks of 192 bits behind the board's own secret.
+#[cfg(not(feature = "bench_self_enroll"))]
+const SEALED_SECRET_TRNG_BLOCKS: usize = 4;
 
 /// Where the bootrom keeps its version.
 const BOOTROM_VERSION_BYTE: usize = 0x0000_0013;
@@ -287,9 +309,12 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     #[cfg(feature = "production")]
     sealed::assert_secure_context().map_err(InitFailure::Sealed)?;
 
-    // The board's sealed secret: without it the anchor has no identity to serve under.
+    // The board's own secret (DSM Amendment A38): sealed now, at the first signed boot, from the
+    // board's TRNG with the page's lock row written first; read at every boot after. Without it the
+    // anchor has no identity to serve under.
     #[cfg(not(feature = "bench_self_enroll"))]
-    let mut sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
+    let mut sealed =
+        sealed::seal_or_read_secret(sealed_secret_entropy).map_err(InitFailure::Sealed)?;
     // A board locked for production is a finished unit, and the trial and the prepare image stand
     // down on it. Any other board, its secret page blank or written by an earlier procedure, takes
     // either under a secret of this boot held nowhere: the page is neither used nor written. The

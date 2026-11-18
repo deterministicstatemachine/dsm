@@ -110,6 +110,11 @@ pub trait AppRouter: Send + Sync {
         offline: Option<dsm::types::device_state::OfflineMove>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 
+    /// This device's own board carries the owner's stamp (DSM Amendment A38), checked before a
+    /// bearer step is proposed, so no receiver is asked to accept a payment every receiver refuses.
+    /// Delegates to [`CoreSDK::require_own_board_pays`].
+    fn require_own_board_pays(&self) -> Result<(), dsm::types::error::DsmError>;
+
     /// v2 producer phase 1 (Software-Authority / Hardware-Identity): stage the next offline-bearer
     /// transition from the appliance's active state — the transition `Δ`, the successor frontier,
     /// and the successor anchor-state leaf — WITHOUT any appliance mutation. The caller simulates

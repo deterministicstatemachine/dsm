@@ -48,6 +48,34 @@ fn provisioned(model: &ModelServer) -> Served {
     anchor
 }
 
+/// Stamp this never-installed board as the owner stamps one: read the identity it reports, sign it,
+/// and have the board keep the stamp through its own `OP_STAMP`, which verifies it first. The stamp
+/// the board answers with is returned.
+pub fn stamp_board(anchor: &mut Served) -> Vec<u8> {
+    let identity = support::served(anchor.bare(pb::Op::BoardIdentity), "the board's identity");
+    let kept = support::served(
+        anchor.frame(support::stamp_frame(&identity), Measurement::Matches),
+        "the board keeps its stamp",
+    );
+    kept.board_stamp
+}
+
+/// A board set up as the owner sets one up before it ships (DSM Amendment A38): stamped, then
+/// installed for good. Its status reports the stamp it kept.
+fn stamped_and_provisioned(model: &ModelServer) -> Served {
+    let mut anchor = booted(model);
+    let stamp = stamp_board(&mut anchor);
+    let answer = rehearse(&mut anchor, &provision_request());
+    assert!(answer.ok, "provisioning refused: error {}", answer.error);
+    let status = support::served(anchor.bare(pb::Op::Status), "status");
+    assert_eq!(
+        status.board_stamp, stamp,
+        "the installed board reports the stamp it kept"
+    );
+    assert_eq!(stamp.len(), anchor_core::stamp::BOARD_STAMP_BYTES);
+    anchor
+}
+
 /// The board's own pairing key, derived here from the labels the monitor derives it with.
 fn own_pairing_key(chip: &mut ModelChip) -> StaticSecret {
     let chip_id = match chip.get_info_chip_id() {
@@ -969,8 +997,12 @@ fn the_trial_image_installs_with_nothing_permanent() {
         run.try_run
     );
     assert_eq!(
-        production, unmet,
-        "the PTRNG step is a production requirement"
+        production,
+        [
+            "the chip tests its PTRNG at start-up",
+            "the board's OTP page takes the secret the board draws itself"
+        ],
+        "the PTRNG step and the board's secret page are production requirements"
     );
     assert_eq!(
         run.permanent, TRIAL_PERMANENT,
@@ -1390,7 +1422,7 @@ fn a_receive_on_the_chip_checks_the_payment_and_uses_its_challenge_up() {
         check_of, disclosure_of, prepare_of, receive_of, self_payment, served, thirty_two,
     };
     let model = ModelServer::start();
-    let mut anchor = provisioned(&model);
+    let mut anchor = stamped_and_provisioned(&model);
     let status = served(anchor.bare(pb::Op::Status), "status");
     let challenge = thirty_two(
         &served(anchor.bare(pb::Op::Challenge), "a challenge").receiver_challenge,

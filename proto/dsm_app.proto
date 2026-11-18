@@ -1735,7 +1735,8 @@ message BilateralPrepareRequest {
 // A discloses its fused-anchor pin material so B can PIN it under the ALREADY-verified contact,
 // bound to THIS transfer's state transition (never a standalone/implicit pin). pk_chip is the
 // resident TROPIC01 ECC public key that verifies the release's σ^chip; a disclosure without it is
-// rejected (no partial v2 pin).
+// rejected (no partial v2 pin). The board's stamp rides every disclosure and is checked every time
+// (DSM Amendment A38).
 message AnchorDisclosure {
   bytes  bundle                = 1 [(dsm_fixed_len)=32];
   bytes  anchor_id             = 2 [(dsm_fixed_len)=32];
@@ -1747,6 +1748,11 @@ message AnchorDisclosure {
   // The public birth commitment S_birth B commits: with the keys above, the sender's pinned
   // online key and its device id, the receiver recomputes B from what is disclosed.
   bytes  birth_commitment      = 10 [(dsm_fixed_len)=32];
+  // The owner's stamp on this board (DSM Amendment A38, owner, 2026-11-18): his BLAKE3-SPHINCS+
+  // SPX128f signature over H("DSM/anchor/board-stamp/v1" ‖ anchor_id ‖ commit(pk_host) ‖
+  // commit(pk_chip)), which the board keeps and reports. A board is admitted only when it verifies
+  // under the stamp key the wallet carries. Empty when the board carries none; it is then refused.
+  bytes  board_stamp           = 11 [(dsm_max_len)=17088];
 }
 
 message BilateralPrepareResponse {
@@ -1777,8 +1783,8 @@ message BilateralPrepareResponse {
   bytes  responder_kyber_binding_sig = 10 [(dsm_max_len)=51200];
   // The receiver's board (owner, 2026-11-07: an offline payment needs a board on both sides): the
   // pin material of the anchor whose board drew receiver_challenge and will commit the receive, its
-  // bundle under local_signature. The sender pins it on first use, as a receiver pins a sender's,
-  // and checks the step's acknowledgement under it.
+  // bundle under local_signature. The sender pins it only when it carries the owner's stamp (DSM
+  // Amendment A38), as a receiver pins a sender's, and checks the step's acknowledgement under it.
   AnchorDisclosure receiver_anchor = 11;
 }
 
@@ -1958,8 +1964,9 @@ message BilateralConfirmRequest {
   bytes offline_release = 12 [(dsm_max_len)=262144];
   reserved 13, 14; // removed v1 counter-era anchor_state_prev/next_proof (Π now rides IN the release)
   // Receiver-admit fold: A's fused-anchor pin disclosure, present iff this confirm carries a bearer
-  // release. B pins it TOFU on the first transfer (already-verified contact, bound to this
-  // transfer) and verifies same-anchor on every subsequent one. Absent for ordinary transfers.
+  // release. B pins it on the first transfer (already-verified contact, bound to this transfer)
+  // only when the board carries the owner's stamp (DSM Amendment A38), and on every later one
+  // verifies the same anchor and the stamp again. Absent for ordinary transfers.
   AnchorDisclosure anchor_disclosure = 15;
   reserved 16; // removed: the sender's spends alone (OfflineSpendChain); its receives ride with them
   // The steps of the sender's offline account since the boundary of its online history that left
@@ -2181,8 +2188,9 @@ enum BilateralEventType {
   BILATERAL_EVENT_TRANSFER_COMPLETE= 4; // Both: transaction finalized
   BILATERAL_EVENT_REJECTED         = 5; // Receiver: rejected transfer
   BILATERAL_EVENT_FAILED           = 6; // Either: transaction failed
-  BILATERAL_EVENT_ANCHOR_PINNED    = 7; // Receiver: first-transfer TOFU anchor pin admitted (trust established)
+  BILATERAL_EVENT_ANCHOR_PINNED    = 7; // Receiver: a stamped anchor pinned on its first transfer (DSM Amendment A38)
   BILATERAL_EVENT_ANCHOR_CHANGED   = 8; // Receiver: a pinned anchor's identity changed on a later transfer (SECURITY warning; transfer refused, pinned anchor kept)
+  BILATERAL_EVENT_ANCHOR_UNSTAMPED = 9; // Either side: the counterparty's board carries no stamp of the owner's, or one that does not verify (DSM Amendment A38; payment refused, nothing pinned)
 }
 
 enum BilateralFailureReason {
@@ -2256,7 +2264,10 @@ message AnchorTryRunResponse {
 enum AnchorBoardStepKind {
   ANCHOR_BOARD_STEP_KIND_UNSPECIFIED     = 0;
   ANCHOR_BOARD_STEP_KIND_LOAD_IMAGE      = 1; // Step 3: the signed image into flash (flash, not OTP)
-  ANCHOR_BOARD_STEP_KIND_SEAL_SECRET     = 2; // Step 4 with its page's lock, on a board whose page is blank
+  // 2 was the phone writing the board's secret; the board seals its own at its first boot (DSM
+  // Amendment A38), in ANCHOR_BOARD_STEP_KIND_BOOT.
+  reserved 2;
+  reserved "ANCHOR_BOARD_STEP_KIND_SEAL_SECRET";
   ANCHOR_BOARD_STEP_KIND_WRITE_DIGEST    = 3; // Step 5: the Non-secure app's digest
   ANCHOR_BOARD_STEP_KIND_LOCK_DIGEST     = 4; // Step 6: the digest page locked
   ANCHOR_BOARD_STEP_KIND_WRITE_BOOT_KEY  = 5; // Step 7: the boot key's hash

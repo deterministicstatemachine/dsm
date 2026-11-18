@@ -116,6 +116,24 @@ fn every_operation_fits_the_secure_heap() {
             anchor.frame(frame, Measurement::Matches)
         })
     };
+    // The owner's stamp, kept before the install as his setup sends it (DSM Amendment A38). The
+    // model's stamp key is derived once on the host first: a board's are in its image.
+    assert_eq!(
+        <anchor_chip::bring_up::SphincsPart as PartitionSig>::stamp_keys().len(),
+        1,
+        "the model's one stamp key"
+    );
+    let identity = peak_of("board identity", ceiling, || {
+        anchor.bare(pb::Op::BoardIdentity)
+    });
+    assert!(identity.ok, "board identity: error {}", identity.error);
+    let frame = support::stamp_frame(&identity);
+    drop(identity);
+    let kept = peak_of("stamp", ceiling, || {
+        anchor.frame(frame, Measurement::Matches)
+    });
+    assert!(kept.ok, "stamp: error {} {}", kept.error, kept.detail);
+    drop(kept);
     let run = rehearse(&mut anchor, try_run_request(), "try-run");
     assert!(run.ok, "the try-run: {:?}", run.try_run);
     drop(run);

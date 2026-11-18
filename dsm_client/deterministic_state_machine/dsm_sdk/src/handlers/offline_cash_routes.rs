@@ -338,6 +338,9 @@ mod tests {
         fn status(&mut self) -> Result<crate::anchor::ApplianceStatus, DsmError> {
             self.anchor.status()
         }
+        fn board_identity(&mut self) -> Result<crate::anchor::BoardIdentityReport, DsmError> {
+            self.anchor.board_identity()
+        }
         fn authorization_nonce(&mut self) -> Result<[u8; 32], DsmError> {
             self.anchor.authorization_nonce()
         }

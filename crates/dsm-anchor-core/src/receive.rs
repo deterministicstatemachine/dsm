@@ -56,6 +56,8 @@ pub struct PayerDisclosure {
     pub device_id: [u8; 32],
     pub policy_hash: [u8; 32],
     pub birth_commitment: [u8; 32],
+    /// The owner's stamp on the payer's board (DSM Amendment A38); empty when it carries none.
+    pub board_stamp: Vec<u8>,
 }
 
 impl PayerDisclosure {
@@ -120,6 +122,9 @@ pub enum PaymentRefusal {
     ChipSignature,
     /// `σ^host` does not verify under the disclosed partition key.
     HostSignature,
+    /// The payer's board carries no stamp, or one that does not verify under this firmware's stamp
+    /// keys over the identity its bundle binds (DSM Amendment A38).
+    Unstamped(crate::stamp::StampRefusal),
 }
 
 /// What a receive of a checked payment must bind, as one digest: its action fields (the payer's bundle,
@@ -171,6 +176,18 @@ pub fn check_payment<T: Tropic, P: PartitionSig>(
     {
         return Err(PaymentRefusal::Bundle);
     }
+    // The board the bundle names carries the owner's stamp: this board keeps nothing a board made by
+    // anyone else released, whatever the wallet in front of it decided.
+    crate::stamp::verify_board_stamp::<P>(
+        P::stamp_keys(),
+        crate::stamp::BoardIdentity {
+            anchor_id: &payer.anchor_id,
+            pk_host: &payer.partition_pk,
+            pk_chip: &payer.chip_pk,
+        },
+        &payer.board_stamp,
+    )
+    .map_err(PaymentRefusal::Unstamped)?;
     if transition.action_type != ACTION_TRANSFER {
         return Err(PaymentRefusal::Action);
     }

@@ -269,6 +269,11 @@ impl Board for HostBoard {
     fn silicon_revision(&self) -> u8 {
         HOST_STEPPING
     }
+    /// The host board's secret is the run's own, held in memory: its page takes it as a new board's
+    /// blank page does.
+    fn secret_page(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// The stepping the host board reports, as the try-run's note shows it.
@@ -590,7 +595,41 @@ pub fn disclosure_of(status: &pb::ApplianceResponse) -> pb::PayerDisclosure {
         device_id: provisioning.device_id.to_vec(),
         policy_hash: provisioning.policy_hash.to_vec(),
         birth_commitment: status.pin_birth_commitment.clone(),
+        board_stamp: status.board_stamp.clone(),
     }
+}
+
+/// The `OP_STAMP` frame for the board whose `OP_BOARD_IDENTITY` answered `identity`: the model's
+/// stamp key's signature over that identity, after the request head, as the owner's setup sends his
+/// (DSM Amendment A38).
+pub fn stamp_frame(identity: &pb::ApplianceResponse) -> Vec<u8> {
+    let anchor_id = thirty_two(&identity.pin_anchor_id, "the board's anchor id");
+    let message = anchor_core::stamp::board_stamp_message(anchor_core::stamp::BoardIdentity {
+        anchor_id: &anchor_id,
+        pk_host: &identity.pin_partition_pk,
+        pk_chip: &identity.pin_chip_pk,
+    });
+    let key = match dsm_sphincs::generate_keypair_from_seed(
+        dsm_sphincs::SphincsVariant::SPX128f,
+        &anchor_chip::bring_up::MODEL_STAMP_SEED,
+    ) {
+        Ok(key) => key,
+        Err(e) => panic!("the model's stamp key: {e:?}"),
+    };
+    let stamp = match dsm_sphincs::sign(
+        dsm_sphincs::SphincsVariant::SPX128f,
+        &key.secret_key,
+        &message,
+    ) {
+        Ok(stamp) => stamp,
+        Err(e) => panic!("a stamp: {e:?}"),
+    };
+    let mut frame = encode_request(&pb::ApplianceRequest {
+        op: pb::Op::Stamp as i32,
+        ..Default::default()
+    });
+    frame.extend_from_slice(&stamp);
+    frame
 }
 
 /// A payment from the provisioned device to itself, from the frontier `prev` at counter `u`.

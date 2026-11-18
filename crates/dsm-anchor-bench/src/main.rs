@@ -24,6 +24,13 @@
 //! permanent. It is what a new board runs before anything is burned on it, on the trial image, and it
 //! never provisions.
 //!
+//! `--board-identity <file>` and `--keep-stamp <file>` are the owner's stamping of a board before it
+//! ships (DSM Amendment A38). The first reads the board's public identity with nothing written and,
+//! for a board that installs for good, writes it to `<file>` (anchor id, `pk_host`, `pk_chip`, 96
+//! bytes) for `dsm-board-stamp stamp --identity <file>`; the second has the board keep the stamp in
+//! `<file>`, which it does only when the stamp verifies under its firmware's stamp keys over its own
+//! identity, and reads it back.
+//!
 //! `--identify` asks a board running the identify image what its chip is and holds, prints every
 //! reading, and saves the chip's four certificates under `--certs <dir>` by the names Tropic Square's
 //! `verify.sh` reads. Nothing is written to the chip or the board.
@@ -72,6 +79,8 @@ struct Args {
     fw_commit: Option<String>,
     /// Where `--identify` saves the chip's certificates.
     certs: String,
+    /// The file `--board-identity` writes, or `--keep-stamp` reads.
+    file: String,
 }
 
 /// What this run is.
@@ -85,6 +94,10 @@ enum Check {
     TryRun,
     /// What the identify image read from the chip.
     Identify,
+    /// The board's public identity, for the owner's stamp (DSM Amendment A38).
+    BoardIdentity,
+    /// The owner's stamp, for the board to keep (DSM Amendment A38).
+    KeepStamp,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -97,6 +110,7 @@ fn parse_args() -> Result<Args, String> {
     let mut label = None;
     let mut fw_commit = None;
     let mut certs = String::from("tropic01-certs");
+    let mut file = String::new();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -120,6 +134,14 @@ fn parse_args() -> Result<Args, String> {
             "--check" => check = Check::Yes,
             "--try-run" => check = Check::TryRun,
             "--identify" => check = Check::Identify,
+            "--board-identity" => {
+                check = Check::BoardIdentity;
+                file = it.next().ok_or("--board-identity needs the file to write")?;
+            }
+            "--keep-stamp" => {
+                check = Check::KeepStamp;
+                file = it.next().ok_or("--keep-stamp needs the stamp's file")?;
+            }
             "--certs" => certs = it.next().ok_or("--certs needs a directory")?,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown arg: {other}")),
@@ -135,6 +157,7 @@ fn parse_args() -> Result<Args, String> {
         check,
         fw_commit,
         certs,
+        file,
     })
 }
 
@@ -424,6 +447,84 @@ fn identify(port: &mut dyn serialport::SerialPort, certs: &str) -> Result<(), St
 
 /// The runbook's Step 9, read-only: what the anchor reports, and the measurement gate's verdict. A
 /// PREPARE with no transition passes the gate and is then refused, so nothing moves.
+/// The 96 bytes `dsm-board-stamp stamp --identity` signs: anchor id, `pk_host` and `pk_chip`.
+const IDENTITY_BYTES: usize = 96;
+
+/// `--board-identity`: the board's public identity, read with nothing written, written to `file` for
+/// the owner's stamp. Only a board that installs for good is ever stamped: a trial's keys change at
+/// every boot.
+fn board_identity(port: &mut dyn serialport::SerialPort, file: &str) -> Result<(), String> {
+    let read = roundtrip(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::BoardIdentity as i32,
+            ..Default::default()
+        },
+    )?;
+    let install = pb::InstallKind::try_from(read.install)
+        .map_err(|e| format!("the board named no install: {e}"))?;
+    println!("[STAMP] anchor id {}", base32_crockford(&read.pin_anchor_id));
+    println!("[STAMP] install {install:?}");
+    println!(
+        "[STAMP] a stamp kept already: {}",
+        if read.board_stamp.is_empty() { "no" } else { "yes" }
+    );
+    if install != pb::InstallKind::InstallForGood {
+        return Err("only a board that installs for good is stamped: a trial's keys change at every boot".to_string());
+    }
+    let identity: Vec<u8> = [&read.pin_anchor_id, &read.pin_partition_pk, &read.pin_chip_pk]
+        .iter()
+        .flat_map(|part| part.iter().copied())
+        .collect();
+    if identity.len() != IDENTITY_BYTES {
+        return Err(format!(
+            "the board's identity is {} bytes, not the {IDENTITY_BYTES} of an anchor id, an SPX128f \
+             pk_host and an Ed25519 pk_chip",
+            identity.len()
+        ));
+    }
+    let mut out = std::fs::File::create_new(file).map_err(|e| format!("{file}: {e}"))?;
+    std::io::Write::write_all(&mut out, &identity).map_err(|e| format!("{file}: {e}"))?;
+    println!("[STAMP] identity written to {file}: sign it with `dsm-board-stamp stamp --identity {file}`");
+    Ok(())
+}
+
+/// `--keep-stamp`: the board keeps the owner's stamp in `file`, which it does only when the stamp
+/// verifies under its firmware's stamp keys over its own identity, and before its install; its answer
+/// must report that very stamp.
+fn keep_stamp(port: &mut dyn serialport::SerialPort, file: &str) -> Result<(), String> {
+    let stamp = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+    if stamp.len() != anchor_core::stamp::BOARD_STAMP_BYTES {
+        return Err(format!(
+            "{file} is {} bytes, not a stamp's {}",
+            stamp.len(),
+            anchor_core::stamp::BOARD_STAMP_BYTES
+        ));
+    }
+    let kept = answer_with_tail(
+        port,
+        &pb::ApplianceRequest {
+            op: pb::Op::Stamp as i32,
+            ..Default::default()
+        },
+        &stamp,
+    )?;
+    if !kept.ok {
+        return Err(format!(
+            "the board did not keep the stamp (error {}): {}",
+            kept.error, kept.detail
+        ));
+    }
+    if kept.board_stamp != stamp {
+        return Err("the board's answer reports another stamp than the one sent".to_string());
+    }
+    println!(
+        "[STAMP] the board keeps the owner's stamp: anchor id {}",
+        base32_crockford(&kept.pin_anchor_id)
+    );
+    Ok(())
+}
+
 fn check(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
     use anchor_core::service::err;
     let bare = |op: pb::Op| pb::ApplianceRequest {
@@ -914,6 +1015,8 @@ fn run() -> Result<(), String> {
     const USAGE: &str = "usage: used-chip-bench --port <serial> --check\n       \
          used-chip-bench --port <serial> --try-run\n       \
          used-chip-bench --port <serial> --identify [--certs <dir>]\n       \
+         used-chip-bench --port <serial> --board-identity <file>\n       \
+         used-chip-bench --port <serial> --keep-stamp <file>\n       \
          used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
                          [--deny <id> ...] [--label \"used chip A\"] [--fw-commit <hash>] \
                          [--baud 115200] [--repeats 5]\n  \
@@ -946,6 +1049,8 @@ fn run() -> Result<(), String> {
         Check::Yes => return check(port.as_mut()),
         Check::TryRun => return try_run(port.as_mut()),
         Check::Identify => return identify(port.as_mut(), &args.certs),
+        Check::BoardIdentity => return board_identity(port.as_mut(), &args.file),
+        Check::KeepStamp => return keep_stamp(port.as_mut(), &args.file),
         Check::No => {}
     }
     // Structural guard against the one operational rule: read the chip's anchor-id and refuse unless

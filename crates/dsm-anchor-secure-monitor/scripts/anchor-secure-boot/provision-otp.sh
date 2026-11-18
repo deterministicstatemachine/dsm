@@ -5,12 +5,15 @@
 set -euo pipefail
 # Everything this script writes is the operator's alone.
 umask 077
-# The sealed secret is the board's identity root: it lives outside the repository, in a directory
-# only its owner can open, one directory per board.
+# The board's sealed secret is its identity root, and the board makes it itself at its first signed
+# boot (DSM Amendment A38): nothing here draws, holds or writes it. This directory keeps only what
+# the procedure records of each board (its chip id), outside the repository, one directory per board.
 SECRET_DIR="${DSM_ANCHOR_SECRET_DIR:-$HOME/.dsm-anchor-secure-boot}"
 BUILD_DIR="$SECRET_DIR/build"
-# page 48, row 0 — MUST equal SEALED_SECRET_ROW in ../../src/sealed.rs
-SECRET_ROW=$(( 48 * 64 ))
+# page 49, row 0 — MUST equal SEALED_SECRET_PAGE in ../../src/sealed.rs. Page 48 held a secret drawn on
+# a computer by an earlier procedure; nothing reads it.
+SECRET_PAGE=49
+SECRET_ROW=$(( SECRET_PAGE * 64 ))
 # page 46, row 0 — MUST equal MU_ROW in ../../src/main.rs
 DIGEST_ROW=$(( 46 * 64 ))
 # PAGEn_LOCK1 = 0xf80 + 2n + 1. Each row holds its low byte three times over, and that byte is
@@ -23,9 +26,11 @@ lock_row_value() { # LOCK_S LOCK_NS LOCK_BL
 LOCK_READ_WRITE=0
 LOCK_READ_ONLY=1
 LOCK_INACCESSIBLE=3
-# Secure reads and nothing writes; Non-secure has no access. The USB bootloader never serves the
-# secret, and may read back the digest, which is public.
-SECRET_LOCK_ROW=$(( 0xf80 + 2 * 48 + 1 ))
+# The board's own seal, written by its signed image and never here: begun (Secure still writing,
+# Non-secure and the bootloader barred), then done (Secure reads, nothing writes). The USB bootloader
+# never serves the secret, and may read back the digest, which is public.
+SECRET_LOCK_ROW=$(( 0xf80 + 2 * SECRET_PAGE + 1 ))
+SEAL_BEGUN=$(lock_row_value "$LOCK_READ_WRITE" "$LOCK_INACCESSIBLE" "$LOCK_INACCESSIBLE")
 SECRET_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_INACCESSIBLE" "$LOCK_INACCESSIBLE")
 DIGEST_LOCK_ROW=$(( 0xf80 + 2 * 46 + 1 ))
 DIGEST_LOCK=$(lock_row_value "$LOCK_READ_ONLY" "$LOCK_INACCESSIBLE" "$LOCK_READ_ONLY")
@@ -54,15 +59,14 @@ while [ $# -gt 0 ]; do
 done
 
 usage() {
-  echo "usage: $0 --board <name> --ser <chip id> [--check-blank | --gen-secret | --write-secret |"
-  echo "                           --write-digest | --lock-pages | --write-bootkey | --lockdown |"
-  echo "                           --lock-boot-pages] [--commit]"
+  echo "usage: $0 --board <name> --ser <chip id> [--check-blank | --write-digest | --lock-pages |"
+  echo "                           --write-bootkey | --lockdown | --lock-boot-pages] [--commit]"
   echo "  <chip id> is the board's RP2350 chip id as BOOTSEL reports it (picotool info -d: chipid),"
   echo "  16 hexadecimal digits. Every picotool call names it, so nothing reaches another board."
   exit 2
 }
 [ -n "$CMD" ] || usage
-[ -n "$BOARD" ] || { echo "ERROR: --board names the board: every board has its own secret"; usage; }
+[ -n "$BOARD" ] || { echo "ERROR: --board names the board: every board is recorded by its chip id"; usage; }
 case "$BOARD" in *[!A-Za-z0-9_-]*) echo "ERROR: a board name is letters, digits, - and _"; exit 2 ;; esac
 # The chip id as the USB bootloader gives it for its serial number: upper case, no 0x.
 SER="$(printf '%s' "$SER" | tr '[:lower:]' '[:upper:]')"
@@ -82,7 +86,6 @@ if [ -f "$BOARD_DIR/chip-id" ]; then
 else
   printf '%s\n' "$SER" > "$BOARD_DIR/chip-id"
 fi
-SECRET_BIN="$BOARD_DIR/host-secret.bin"
 MU_BIN="$BUILD_DIR/mu-enrolled.bin"
 OTP_JSON="$BUILD_DIR/bootkey-otp.json"
 
@@ -92,34 +95,35 @@ run() { # pt <args>: printed as the picotool command it is
   shift
   if [ "$COMMIT" = 1 ]; then echo "+ picotool $* --ser $SER"; pt "$@"; else echo "[dry-run] picotool $* --ser $SER"; fi
 }
-# What the board's secret page holds, read fresh (READ-ONLY): `blank`, or `sealed` when an earlier
-# procedure burned a secret there and locked the page exactly as this one does. A board of the second
-# kind goes on with that secret, which production reads through the same rows: OTP is never rewritten,
-# and the board holds the only copy. Anything else is a page this procedure did not write, and it stops.
-# The lock row decides: once it holds Step 6's value the USB bootloader has no access to the page, so the
-# rows themselves read as nothing here. The dump is a private temporary file, gone when this returns: a
-# secret written and not yet locked would be in it.
+# What the board's secret page holds, read fresh (READ-ONLY): `blank` before the signed image's first
+# boot; `begun` or `sealed` once the board has begun or finished sealing its own secret there. Anything
+# else is a page someone else wrote, and it stops. The lock row decides: once the board has begun its
+# seal the USB bootloader has no access to the page, so the rows themselves read as nothing here. The
+# dump is a private temporary file, gone when this returns.
 secret_page() {
   local dump
   dump="$(mktemp)"
   trap 'rm -f "$dump"' RETURN
   pt otp dump -r --output "$dump" >/dev/null
-  python3 - "$dump" "$SECRET_ROW" "$SECRET_LOCK_ROW" "$SECRET_LOCK" <<'PAGE'
+  python3 - "$dump" "$SECRET_ROW" "$SECRET_LOCK_ROW" "$SECRET_LOCK" "$SEAL_BEGUN" <<'PAGE'
 import struct, sys
 data = open(sys.argv[1], "rb").read()
 rows = [word & 0xffffff for (word,) in struct.iter_unpack("<I", data)]
 if len(rows) != 4096:
     sys.exit(f"ERROR: the dump holds {len(rows)} rows, not 4096")
-secret, lock_row, lock = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4], 16)
+secret, lock_row = int(sys.argv[2]), int(sys.argv[3])
+sealed, begun = int(sys.argv[4], 16), int(sys.argv[5], 16)
 written = [hex(r) for r in range(secret, secret + 16) if rows[r] != 0]
-if rows[lock_row] == lock:
+if rows[lock_row] == sealed:
     print("sealed")
+elif rows[lock_row] == begun:
+    print("begun")
 elif not written and rows[lock_row] == 0:
     print("blank")
 else:
-    sys.exit(f"ERROR: the secret page is neither blank nor sealed as this procedure seals it: "
-             f"rows written {written}, lock row {hex(rows[lock_row])} (expected 0 or {hex(lock)}). "
-             "Another procedure wrote this board, or Step 4 ran without Step 6; nothing here goes on with it.")
+    sys.exit(f"ERROR: the secret page is neither blank nor sealed as the board seals it: "
+             f"rows written {written}, lock row {hex(rows[lock_row])} (expected 0, {hex(begun)} or {hex(sealed)}). "
+             "Someone other than the board wrote it; nothing here goes on with it.")
 PAGE
 }
 confirm() {
@@ -132,11 +136,11 @@ need() { [ -f "$1" ] || { echo "ERROR: no $1 — $2"; exit 1; }; }
 
 case "$CMD" in
   --check-blank)
-    # READ-ONLY. Every row this procedure writes must still be zero, except a secret page an earlier
-    # procedure sealed as this one seals it: that board keeps its secret, and Step 4 and the secret
-    # half of Step 6 are already done on it. The kept dump holds no secret: `secret_page` has stopped
-    # on a page written and unlocked, and a locked page gives the bootloader nothing.
+    # READ-ONLY. Every row this procedure writes must still be zero, and the secret's page blank, with
+    # no access key, for the board to seal its own secret at its first boot (DSM Amendment A38). The
+    # kept dump holds no secret: none is on the board yet.
     page="$(secret_page)"
+    [ "$page" = blank ] || { echo "ERROR: page $SECRET_PAGE, where the board seals its own secret, is not blank before anything is burned ($page): someone else wrote it"; exit 1; }
     dump="$BOARD_DIR/otp-before.bin"
     pt otp dump -r --output "$dump"
     python3 - "$dump" "$SECRET_ROW" "$DIGEST_ROW" "$ROLLBACK_ROW" "$page" \
@@ -155,14 +159,12 @@ watched = {"digest": range(digest, digest + 16),
            "boot key 0": range(0x80, 0x90), "CRIT1": range(0x40, 0x48), "BOOT_FLAGS1": range(0x4b, 0x4e),
            "rollback version": range(rollback, rollback + 3), "BOOT_FLAGS0": range(0x48, 0x4b),
            # The pages' access keys, which this procedure never sets.
-           "page locks' access keys": [lock0(1), lock0(2), lock0(44), lock0(46), lock0(48)]}
+           "page locks' access keys": [lock0(1), lock0(2), lock0(44), lock0(46), lock0(secret // 64)],
+           "the board's own secret": range(secret, secret + 16)}
 # Lock rows this procedure burns, with what it burns: one may already hold bits, as long as each of
 # them is among those (OTP only sets bits, so such a row still takes the burn and ends as intended).
 locks = {"boot configuration page lock": (lock1(1), boot_lock), "boot key page lock": (lock1(2), boot_lock),
          "rollback page lock": (lock1(44), rollback_lock), "digest page lock": (lock1(46), digest_lock)}
-if page == "blank":
-    watched["sealed secret"] = range(secret, secret + 16)
-    locks["secret page lock"] = (lock1(48), secret_lock)
 used = {name: [hex(r) for r in span if rows[r] != 0] for name, span in watched.items()}
 used = {name: found for name, found in used.items() if found}
 for name, (row, burned) in locks.items():
@@ -173,48 +175,17 @@ if used:
 for name, (row, burned) in locks.items():
     if rows[row]:
         print(f"{name} already holds {hex(rows[row])}, all of it within the {hex(burned)} this procedure burns there")
-if page == "sealed":
-    print("blank where the procedure writes, except its sealed secret: an earlier procedure burned and "
-          "locked it as this one does, so this board keeps it. Skip Step 4; Step 6 locks the digest page alone.")
-else:
-    print("blank where the procedure writes")
+print("blank where the procedure writes, the secret's page blank for the board to seal its own")
 PY
     ;;
-  --gen-secret)
-    [ -f "$SECRET_BIN" ] && { echo "ERROR: $SECRET_BIN exists — refusing to regenerate a provisioned secret"; exit 1; }
-    [ "$(secret_page)" = blank ] || { echo "ERROR: this board already holds its sealed secret; it needs none generated"; exit 1; }
-    python3 - "$SECRET_BIN" <<'PY'
-import os, sys
-fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "wb") as f:
-    f.write(os.urandom(32))
-print(f"wrote {sys.argv[1]}: this board's 256-bit sealed secret. Guard it like the key.")
-PY
-    ;;
-  --write-secret)
-    need "$SECRET_BIN" "run --gen-secret for this board first"
-    [ "$(secret_page)" = blank ] || { echo "ERROR: this board already holds its sealed secret, and goes on with it: nothing to write"; exit 1; }
-    confirm
-    run pt otp load -e -s "$SECRET_ROW" "$SECRET_BIN" -t bin ;;
   --write-digest)
     need "$MU_BIN" "run sign.sh --sign first"
     confirm
     run pt otp load -e -s "$DIGEST_ROW" "$MU_BIN" -t bin ;;
   --lock-pages)
-    page="$(secret_page)"
+    # The digest page alone: the secret's page is the board's to lock, at its first boot.
     confirm
-    if [ "$page" = sealed ]; then
-      echo "the secret page is already locked as this procedure locks it: only the digest page is locked"
-    else
-      run pt otp set -r "$SECRET_LOCK_ROW" "$SECRET_LOCK"
-    fi
-    run pt otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK"
-    # Nothing reads this copy again. It could restore no board, since the chip's key does not leave
-    # the chip, and all it can still do is leak.
-    if [ "$COMMIT" = 1 ]; then
-      rm -f "$SECRET_BIN"
-      echo "removed $SECRET_BIN: the board holds the only copy"
-    fi ;;
+    run pt otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK" ;;
   --write-bootkey)
     # The key's hash alone, so it can be read back before anything depends on it. sign.sh's OTP
     # file also holds KEY_VALID and SECURE_BOOT_ENABLE, which --lockdown burns.

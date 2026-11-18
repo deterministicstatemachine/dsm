@@ -42,8 +42,6 @@ log = "0.4"
 [target.'cfg(target_os = "android")'.dependencies]
 dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk", features = ["jni", "bluetooth"] }
 jni = "0.21"
-# The phone's random source, for a blank board's secret (the board setup's Android port).
-getrandom = "0.4.2"
 # `USBDEVFS_CLEAR_HALT` on the board link's usbfs descriptor, as libusb clears a halt.
 libc = "0.2"
 

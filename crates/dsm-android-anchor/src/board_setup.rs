@@ -12,9 +12,7 @@ use anchor_core::proto::pb as wire;
 use anchor_core::service::err;
 use dsm::types::proto as pb;
 
-use crate::otp_burn::{
-    self, BootloaderAccess, Bootrom, Burn, Next, OnBoard, OtpReading, SecretPage, Standing,
-};
+use crate::otp_burn::{self, BootloaderAccess, Bootrom, Burn, Next, OnBoard, OtpReading, Standing};
 use crate::picoboot::{BootselLink, Picoboot};
 use crate::release::Release;
 use crate::usb_appliance::{answer_to, request_frame};
@@ -33,8 +31,6 @@ pub trait BoardPort: Send + Sync {
     fn release(&self) -> Result<Release, String>;
     /// An image this app carries besides the release, its flash bytes from flash's first byte.
     fn image(&self, image: Carried) -> Result<Vec<u8>, String>;
-    /// 32 bytes from the phone's random source, for a blank board's secret.
-    fn secret(&self) -> Result<[u8; 32], String>;
     /// After a reboot: wait for the board to leave USB and come back, and say how it came back.
     fn wait_for_return(&self, chip_id: &str) -> Result<Returned, String>;
     /// One request to the board running as the DSM Anchor, once Android lets the app use it: the
@@ -124,7 +120,7 @@ pub enum Returned {
 
 /// The steps in the runbook's order. On a board whose bootloader may not write the page locks the
 /// lock image sets, that image's step takes the digest page lock's place, after the digest.
-fn order(read: &Read) -> [Kind; 8] {
+fn order(read: &Read) -> [Kind; 7] {
     let lock = if read.via_lock_image {
         Kind::LockPages
     } else {
@@ -132,7 +128,6 @@ fn order(read: &Read) -> [Kind; 8] {
     };
     [
         Kind::LoadImage,
-        Kind::SealSecret,
         Kind::WriteDigest,
         lock,
         Kind::WriteBootKey,
@@ -145,12 +140,11 @@ fn order(read: &Read) -> [Kind; 8] {
 fn kind_name(kind: Kind) -> &'static str {
     match kind {
         Kind::LoadImage => "Load the signed image into flash",
-        Kind::SealSecret => "Write the board's secret and lock its page",
         Kind::WriteDigest => "Burn the firmware digest",
         Kind::LockDigest => "Lock the digest page",
         Kind::WriteBootKey => "Burn the boot key's hash",
         Kind::Lockdown => "Lock down: secure boot on, debug off",
-        Kind::Boot => "Start the signed image once",
+        Kind::Boot => "Start the signed image once: the board seals its own secret",
         Kind::LockBootPages => "Lock the boot pages",
         Kind::CheckChangedImage => "Check that a changed image is refused",
         Kind::LockPages => "Lock the digest and rollback pages, from a one-time image",
@@ -182,7 +176,6 @@ fn offered_step(kind: Kind) -> pb::AnchorBoardStep {
 
 fn burn_kind(burn: Burn) -> Kind {
     match burn {
-        Burn::SealSecret => Kind::SealSecret,
         Burn::WriteDigest => Kind::WriteDigest,
         Burn::LockDigestPage => Kind::LockDigest,
         Burn::WriteBootKey => Kind::WriteBootKey,
@@ -205,10 +198,9 @@ fn is_chip_id(chip_id: &str) -> bool {
     chip_id.len() == 16 && chip_id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// A board read: where it stands, the step it needs next (none once every step is done), what it
-/// takes besides, and why the procedure cannot go on from BOOTSEL, if it cannot.
+/// A board read: the step it needs next (none once every step is done), what it takes besides, and
+/// why the procedure cannot go on from BOOTSEL, if it cannot.
 struct Read {
-    standing: Standing,
     next: Option<Kind>,
     found: Vec<String>,
     blocked: Option<String>,
@@ -264,12 +256,6 @@ fn read_board<L: BootselLink>(
         Some(otp_burn::barred_words(&barred))
     };
     let via_lock_image = barred_from_lock_image_rows(&otp, bootrom)?;
-    if standing.secret == SecretPage::Sealed && standing.digest == otp_burn::Hash32::Blank {
-        found.push(
-            "the board's secret is sealed by an earlier procedure: it keeps that secret"
-                .to_string(),
-        );
-    }
     let next = match otp_burn::next(&standing, release)? {
         Next::Done => None,
         // The first boot runs what flash holds: the signed image, or it is loaded again first (after
@@ -279,7 +265,7 @@ fn read_board<L: BootselLink>(
             OnBoard::Differs { .. } => Some(Kind::LoadImage),
         },
         Next::Burn(burn) => {
-            if matches!(burn, Burn::SealSecret | Burn::WriteDigest) {
+            if burn == Burn::WriteDigest {
                 found.extend(otp_burn::check_blank(&otp)?.locks_already_set);
             }
             // Every burn goes toward the image in flash: Step 3 comes before the first, and the
@@ -304,7 +290,6 @@ fn read_board<L: BootselLink>(
         }
     }
     Ok(Read {
-        standing,
         next,
         found,
         blocked,
@@ -313,9 +298,8 @@ fn read_board<L: BootselLink>(
     })
 }
 
-/// Each step's state: done before the next, the next, later after it. A secret sealed by an earlier
-/// procedure is done whatever comes next. The next step of a procedure this board's bootloader
-/// cannot finish is blocked, and none is offered.
+/// Each step's state: done before the next, the next, later after it. The next step of a procedure
+/// this board's bootloader cannot finish is blocked, and none is offered.
 fn steps(read: &Read) -> Vec<pb::AnchorBoardStep> {
     let at_next = match &read.blocked {
         Some(_why) => State::Blocked,
@@ -330,9 +314,6 @@ fn steps(read: &Read) -> Vec<pb::AnchorBoardStep> {
         .enumerate()
         .map(|(i, kind)| {
             let state = match next_at {
-                _ if *kind == Kind::SealSecret && read.standing.secret == SecretPage::Sealed => {
-                    State::Done
-                }
                 None => State::Done,
                 Some(at) if i < at => State::Done,
                 Some(at) if i == at => at_next,
@@ -690,7 +671,7 @@ impl<P: BoardPort> BoardSetup<P> {
         step: Kind,
     ) -> Result<Vec<String>, String> {
         let burn = |b: Burn, boot: &mut Picoboot<P::Link>| -> Result<Vec<String>, String> {
-            otp_burn::burn(boot, release, b, || self.port.secret()).map(|done| done.rows)
+            otp_burn::burn(boot, release, b).map(|done| done.rows)
         };
         match step {
             Kind::LoadImage => otp_burn::load_image(boot, release).map(|()| {
@@ -699,16 +680,16 @@ impl<P: BoardPort> BoardSetup<P> {
                     release.image.len()
                 )]
             }),
-            Kind::SealSecret => burn(Burn::SealSecret, boot),
             Kind::WriteDigest => burn(Burn::WriteDigest, boot),
             Kind::LockDigest => burn(Burn::LockDigestPage, boot),
             Kind::WriteBootKey => burn(Burn::WriteBootKey, boot),
             Kind::Lockdown => burn(Burn::Lockdown, boot),
             Kind::Boot => otp_burn::boot(boot, release).map(|()| {
                 vec![
-                    "the board is starting its signed image, and its first boot records the image's \
-                     rollback version. Once it has started, unplug it, hold BOOTSEL, and plug it in \
-                     again for the last step"
+                    "the board is starting its signed image: its first boot records the image's \
+                     rollback version, and the board seals its own secret, drawn from its own \
+                     randomness, which no phone or computer ever sees. Once it has started, unplug \
+                     it, hold BOOTSEL, and plug it in again for the last step"
                         .to_string(),
                 ]
             }),
@@ -718,9 +699,9 @@ impl<P: BoardPort> BoardSetup<P> {
                 "the changed-image check runs on its own, across the board's reboot".to_string(),
             ),
             // So does the lock image's step: `lock_pages` runs it.
-            Kind::LockPages => Err(
-                "the lock image's step runs on its own, across the board's reboot".to_string(),
-            ),
+            Kind::LockPages => {
+                Err("the lock image's step runs on its own, across the board's reboot".to_string())
+            }
             // And the images before the first burn: `start_before_the_digest` runs them.
             Kind::PrepareChip | Kind::TrialImage => Err(
                 "an image before the first burn runs on its own, across the board's restart"
@@ -1158,15 +1139,6 @@ pub mod jni_port {
                 1 => Ok(super::Returned::AsAnchor),
                 _neither => Err(last_error()),
             }
-        }
-
-        /// Filled from the phone's random source into memory never initialised to anything else.
-        fn secret(&self) -> Result<[u8; 32], String> {
-            let mut fresh = [core::mem::MaybeUninit::<u8>::uninit(); 32];
-            let drawn = getrandom::fill_uninit(&mut fresh)
-                .map_err(|e| format!("the phone's random source: {e}"))?;
-            <[u8; 32]>::try_from(&*drawn)
-                .map_err(|_short| format!("{} random bytes for 32", drawn.len()))
         }
     }
 }

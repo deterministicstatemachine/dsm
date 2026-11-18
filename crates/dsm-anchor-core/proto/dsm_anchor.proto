@@ -100,6 +100,13 @@ enum Op {
   OP_CHECK_PAYMENT = 15; // check the payer's release against the open challenge, before the receive
   OP_AUTHORIZATION_NONCE = 16; // draw the nonce the owner's next OP_AUTHORIZE must bind: an
                                // authorization serves the one prepare it was made for, once
+  // The owner's stamp on a board (DSM Amendment A38, owner, 2026-11-18). See stamp.rs.
+  OP_BOARD_IDENTITY = 17; // the board's public identity and the stamp it keeps, read with nothing
+                          // written; answered before and after an install alike
+  OP_STAMP          = 18; // keep the owner's stamp on this board: only before an install for good,
+                          // and only a stamp that verifies under the firmware's stamp keys over this
+                          // board's identity. The stamp follows the head on the wire, as an
+                          // OP_AUTHORIZE's signature does (see ApplianceRequest)
 }
 
 // What a payer discloses of its enrollment, for its bundle B to recompute (every field B binds).
@@ -112,6 +119,9 @@ message PayerDisclosure {
   bytes  device_id        = 6;  // 32
   bytes  policy_hash      = 7;  // 32
   bytes  birth_commitment = 8;  // 32
+  // The owner's stamp on the payer's board (DSM Amendment A38): the receiving board refuses a
+  // payment from a board whose stamp does not verify under its firmware's stamp keys. 17,088.
+  bytes  board_stamp      = 9;
 }
 
 // What an install of this anchor makes.
@@ -150,7 +160,8 @@ message ApplianceRequest {
   // signature is not a field: on the wire it follows this message, as the frame's last
   // OWNER_AUTHORIZATION_BYTES (49,856) bytes, so the anchor verifies it from the frame it holds and
   // copies it nowhere. Any frame longer than a signature is read that way; a frame longer than
-  // REQUEST_HEAD_MAX (4 KiB) that is not one is refused unread.
+  // REQUEST_HEAD_MAX (4 KiB) that is not one is refused unread. An OP_STAMP's stamp is read the same
+  // way: it follows the message as the frame's last BOARD_STAMP_BYTES (17,088) bytes.
   bytes authorization_digest        = 8;
   // OP_TRY_RUN, OP_PROVISION: the wallet's rehearsal owner key (SPX256f), derived apart from its
   // device key: the try-run's payment is authorized under it, through the same check a real one is.
@@ -191,7 +202,8 @@ message ApplianceResponse {
   // OP_STATUS pin material — the chip self-describing the identity a receiver pins. anchor_bundle
   // (field 6) is B; these complete the AnchorPin so a USB client sources it from one STATUS
   // round-trip and the sender's disclosure carries the REAL pin.
-  bytes  pin_anchor_id         = 10; // OP_STATUS: 32-byte anchor id (stpub)
+  // Fields 10–13 and 22 also answer OP_BOARD_IDENTITY, before an install as after it.
+  bytes  pin_anchor_id         = 10; // OP_STATUS: 32-byte anchor id, H(H(stpub ‖ H(chip id)))
   uint64 pin_enrolled_counter  = 11; // OP_STATUS: H0 (the live provisioned enrollment counter)
   bytes  pin_partition_pk      = 12; // OP_STATUS: partition public key pk_host
   bytes  pin_chip_pk           = 13; // OP_STATUS: resident chip public key pk_chip
@@ -217,6 +229,9 @@ message ApplianceResponse {
   bytes receiver_challenge           = 24; // OP_CHALLENGE: the challenge drawn (32)
   bytes open_challenge               = 25; // OP_STATUS: the challenge held open (32), if any
   bytes authorization_nonce          = 26; // OP_AUTHORIZATION_NONCE: the nonce drawn (32)
+  // OP_BOARD_IDENTITY: the owner's stamp this board keeps (DSM Amendment A38), 17,088 bytes; empty
+  // while it keeps none.
+  bytes board_stamp                  = 27;
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the

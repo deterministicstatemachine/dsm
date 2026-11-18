@@ -288,6 +288,10 @@ pub trait PartitionSig {
     /// A signature in the owner's scheme over a 32-byte digest: the rehearsal owner's
     /// authorization of the try-run's own payment.
     fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
+    /// The stamp keys a board's stamp is checked under (DSM Amendment A38): the owner's, compiled into
+    /// the signed image. A board keeps only a stamp that verifies under one of them over its own
+    /// identity, and refuses a payment from a board whose stamp does not.
+    fn stamp_keys() -> &'static [crate::stamp::StampKey];
 }
 
 /// Verification of the partition witness `σ^host` alone: what a receiver or a walker of an

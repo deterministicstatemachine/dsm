@@ -1,0 +1,21 @@
+[package]
+name = "dsm-board-stamp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "The owner's board stamp (DSM Amendment A38): makes his stamp key under his passphrase, signs one board's public identity with it, and checks a stamp."
+
+[[bin]]
+name = "dsm-board-stamp"
+path = "src/main.rs"
+
+[dependencies]
+dsm-anchor-core = { path = "../dsm-anchor-core" }
+dsm-sphincs = { path = "../dsm-sphincs" }
+# The stamp key is kept encrypted under the owner's passphrase: Argon2id derives the key,
+# ChaCha20-Poly1305 seals the SPX128f secret key and binds the file's header and public key.
+argon2 = "0.5.3"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
+getrandom = "0.4.2"
+zeroize = "1.7.0"

@@ -10,10 +10,10 @@
 //! Removing the live hardware checks does not remove the chip and host witness requirements
 //! (§ Corollary 1).
 //!
-//! The anchor's identity is pinned on first use (DSM Amendment A24): a receiver pins a
-//! holder's bundle `B`, `anchor_id`, `pk_chip` and `pk_host` when the bundle recomputes for the
-//! holder's online key, device id and policy, and a later release under any other identity
-//! fails step 1, the pin kept. Nothing here can learn of a compromise or revocation of the
+//! The anchor's identity is pinned on its first payment (DSM Amendments A24 and A38): a receiver
+//! pins a holder's bundle `B`, `anchor_id`, `pk_chip` and `pk_host` when the bundle recomputes for
+//! the holder's online key, device id and policy and the board carries the owner's stamp, and a
+//! later release under any other identity fails step 1, the pin kept. Nothing here can learn of a compromise or revocation of the
 //! anchor found elsewhere: an offline receiver checks the evidence it is handed, and the
 //! answer to a compromised anchor is the holder's online unload. Delivery to this receiver is
 //! the DSM receipt's, which Core checks before the predicate runs.
@@ -335,6 +335,9 @@ mod tests {
         fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
             dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest)
                 .map_err(partition_error)
+        }
+        fn stamp_keys() -> &'static [crate::stamp::StampKey] {
+            crate::stamp::test_keys::keys()
         }
     }
     /// The SPHINCS+ failure, as the partition reports it.

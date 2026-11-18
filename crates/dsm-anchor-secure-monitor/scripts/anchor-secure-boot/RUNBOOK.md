@@ -30,7 +30,10 @@ passed every step, the digest and the boot key's hash were burned, the digest an
 locked by the lock image in Step 6's place (the A2 bootrom refuses those rows from BOOTSEL), the
 lockdown was burned, a changed copy of the signed image was refused, the first secure boot recorded the
 rollback version, the boot pages were locked, the production image's try-run passed all 26 steps, and
-the install closed the chip's birth. On 2026-11-13 the two paid each other offline, both ways.
+the install closed the chip's birth. On 2026-11-13 the two paid each other offline, both ways. Their
+TROPIC01s were replaced on 2026-11-17 and are untouched. Under DSM Amendment A38 (2026-11-18) the secret
+their page 48 holds, drawn on a computer by that earlier procedure, is never used: an image signed with A38
+seals each board's own secret in page 49 at its next boot, if page 49 is blank on it (not yet read).
 
 ## What has run without a chip
 
@@ -229,16 +232,17 @@ phone carries only its public outputs.
    locks the boot pages only once `ROLLBACK_REQUIRED` is set.
 8. **Then plug it in normally** and install it from the wallet that will keep it (Step 10).
 
-What the phone does differently: a blank secret page is written and locked in one step (Steps 4 and
-the secret half of 6), so no page stands written and unlocked between steps; every write is read
-back, the rows picotool's JSON load writes included; and Step 9's refused-image check is made before
-the first boot, on a changed copy of the signed image.
+What the phone does differently: every write is read back, the rows picotool's JSON load writes
+included; and Step 9's refused-image check is made before the first boot, on a changed copy of the
+signed image. Like the computer, it never draws or writes the board's secret: the board seals its own
+at the signed image's first boot (Step 9; DSM Amendment A38, owner, 2026-11-18).
 
 The commands below are the same procedure from a computer with picotool.
 
 ## Step 0 — check the board is blank (READ-ONLY)
 
-Name each board. Its secret and records live under `~/.dsm-anchor-secure-boot/boards/<name>/`.
+Name each board. Its records (its chip id) live under `~/.dsm-anchor-secure-boot/boards/<name>/`; no
+secret of the board's is ever on the computer or the phone.
 Every command also names the board's RP2350 chip id, as `picotool info -d` gives it in BOOTSEL (`chipid`,
 16 hexadecimal digits), and every picotool call goes to that chip alone: with two boards in BOOTSEL, nothing
 reaches the other. The first run records the chip id under the board's name, and a later run under that name
@@ -250,11 +254,12 @@ for another chip stops.
 It refuses when any row this procedure writes data into already holds a value, or when a lock row it burns
 holds a bit outside what it burns there. A lock row already holding some of those bits is fine and is named:
 on the boards read on 2026-11-11 the boot configuration and boot key pages' lock rows hold `0x040404`
-(Non-secure read-only), within the `0x151515` Step 9b burns. One exception it also names: a secret
-page an earlier procedure burned and locked exactly as Step 4 and Step 6 do (the lock row says so; the
-bootloader cannot read the rows of a locked page). Such a board keeps that secret,
-which production reads through the same rows (OTP is never rewritten, and the board holds its only copy):
-skip Step 4 on it, and Step 6 locks the digest page alone. A secret page in any other state stops the procedure.
+(Non-secure read-only), within the `0x151515` Step 9b burns. The secret's page, 49, must be blank, its
+lock row zero and no access key registered for it, so the board can seal its own secret there at its first
+boot; a page 49 in any other state stops the procedure, since someone else wrote it. The phone also checks
+that Secure code may write page 49 and its lock row (on an A2 bootrom page 63's Secure lock guards that
+row; on A3 and A4 the page's own). Page 48, where an earlier procedure sealed a secret drawn on a computer
+on the boards burned before 2026-11-18, is never read or written.
 
 ## Step 1 — create the boot signing key, once
 
@@ -288,14 +293,14 @@ picotool load -v ~/.dsm-anchor-secure-boot/build/signed.elf
 Stay in BOOTSEL. Until Step 8 is done production firmware does nothing to its chip and answers every
 request `NOT_UP`, naming what is missing (`secure boot is not enabled in OTP`).
 
-## Step 4 — burn the board's secret  ⚠️ IRREVERSIBLE
+## Step 4 — none: the board makes its own secret
 
-```
-./provision-otp.sh --board <name> --ser <chip id> --gen-secret
-./provision-otp.sh --board <name> --ser <chip id> --write-secret            # DRY RUN: prints the command
-./provision-otp.sh --board <name> --ser <chip id> --write-secret --commit   # page 48
-```
-On a board whose secret page Step 0 found sealed, both refuse: it already holds its secret and goes on with it.
+Nothing draws or writes the board's secret here (DSM Amendment A38, owner, 2026-11-18). The signed image
+does, at its first boot (Step 9), inside its Secure firmware: it draws 256 bits from the board's TRNG,
+writes page 49's lock row first (Non-secure code and the bootloader barred, Secure still writing), then
+the sixteen rows, then the lock row's final value (Secure read-only). A seal cut short before its first row
+is finished at the next boot; one cut after is refused for good. No phone or computer ever sees the secret,
+so the keys derived from it, `pk_host` among them, exist only inside the board.
 
 ## Step 5 — burn the firmware digest  ⚠️ IRREVERSIBLE
 
@@ -304,16 +309,14 @@ On a board whose secret page Step 0 found sealed, both refuse: it already holds 
 ./provision-otp.sh --board <name> --ser <chip id> --write-digest --commit   # page 46
 ```
 
-## Step 6 — lock both pages  ⚠️ IRREVERSIBLE
+## Step 6 — lock the digest page  ⚠️ IRREVERSIBLE
 
 ```
 ./provision-otp.sh --board <name> --ser <chip id> --lock-pages
 ./provision-otp.sh --board <name> --ser <chip id> --lock-pages --commit
 ```
-Secure firmware reads both; Non-secure reads neither; nothing writes either. The USB bootloader
-reads the digest and never the secret. With `--commit` this removes `host-secret.bin`: nothing reads it
-again, and it could restore no board, since the chip's key does not leave the chip. On a board whose secret
-page Step 0 found sealed, only the digest page is locked here; its secret page is already as this leaves it.
+Secure firmware reads it; Non-secure does not; nothing writes it. The USB bootloader may read the digest,
+which is public. The secret's page is the board's to lock, at its first boot.
 
 ## Step 7 — burn the boot key's hash  ⚠️ IRREVERSIBLE
 
@@ -336,7 +339,10 @@ This step takes the hash from it and Step 8 burns the flags.
 This marks boot key 0 valid and keys 1-3 invalid, then sets `SECURE_BOOT_ENABLE` and
 `DEBUG_DISABLE`. The board now boots only images signed by the key, with debug off.
 
-## Step 9 — boot and validate (no pairing key, access rule or OTP is written)
+## Step 9 — boot: the board seals its own secret, and is validated  ⚠️ IRREVERSIBLE (page 49)
+
+No pairing key or access rule is written. OTP is: the bootrom records the image's rollback version, and
+the image seals the board's own secret in page 49 (Step 4).
 
 ```
 picotool reboot
@@ -350,8 +356,9 @@ bound it yet. Stop and look if any line is not as stated.
 
 1. **Unsigned firmware refused:** load an UNSIGNED build; the bootrom must not run it. Load
    `signed.elf` again.
-2. **Secure context and sealed secret:** `the anchor is up and not provisioned`. A board missing either
-   says `the anchor did NOT come up` with the reason.
+2. **Secure context and the board's own secret:** `the anchor is up and not provisioned`. A board missing
+   either says `the anchor did NOT come up` with the reason: a secure context not locked down, or a page 49
+   the board may not use (written by someone else, or a seal cut after its first row).
 3. **A chip that cannot take a birth is refused here,** with nothing written to it: a counter away from
    its start is reset while the chip is uncaged, but another board's key in slot 1 or a cage already
    begun comes up as `NOT_UP`.
@@ -369,6 +376,26 @@ Pages 1 and 2, the boot configuration and the boot key hashes, become read-only 
 the rollback version, read-only for the USB bootloader. Not before Step 9: that first boot of the signed
 image records its rollback version and sets `ROLLBACK_REQUIRED` on page 1, and the bootrom will not launch
 an image whose version it could not record.
+
+## Step 9c — the owner stamps the board, before it ships
+
+Every board that pays or is paid offline carries the owner's stamp (DSM Amendment A38, owner, 2026-11-18):
+his signature over the board's public identity, which receivers, receiving boards and the holder's own
+wallet check. Without it, the wallet refuses to install the board for good, and every counterparty refuses
+it. The stamp key is made once, on the owner's computer, under his passphrase, apart from the boot key:
+
+```
+dsm-board-stamp genkey            # ~/.dsm-board-stamp/stamp-key.enc; its public key into the code
+```
+
+For each board, after Step 9b and before Step 10:
+
+1. Read its identity, nothing written: `OP_BOARD_IDENTITY` answers `anchor_id`, `pk_host` (the one its
+   install will bind), `pk_chip` and its install kind. A trial image's identity is never stamped.
+2. Sign it: `dsm-board-stamp stamp --anchor-id <hex> --pk-host <hex> --pk-chip <hex> --out <file>`.
+3. Have the board keep it: `OP_STAMP` with the stamp after the request. The board keeps only a stamp that
+   verifies under the stamp keys its signed firmware carries, over its own identity, and only before its
+   install; it answers with the identity and the stamp it now keeps.
 
 ## Step 10 — install, from the wallet  ⚠️ IRREVERSIBLE
 

@@ -363,7 +363,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             .map_err(|e| format!("Failed to install app router: {:?}", e))?;
         install_app_router_adapter(crate::runtime::get_runtime().handle().clone());
         // Receiver-admit fold: persistent pinned-anchor store, so an admitted counterparty pin
-        // survives restarts (a restart must never re-open the first-transfer TOFU window).
+        // survives restarts (a restart must never let a later disclosure replace a kept pin).
         crate::bridge::install_anchor_enrollment_store(Arc::new(
             crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
         ));
@@ -434,6 +434,10 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _offline: Option<dsm::types::device_state::OfflineMove>,
             ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
                 Err(requires_genesis("simulate_advance_for_confirm"))
+            }
+
+            fn require_own_board_pays(&self) -> Result<(), DsmError> {
+                Err(requires_genesis("require_own_board_pays"))
             }
 
             fn stage_offline_bearer_transition(

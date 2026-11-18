@@ -101,17 +101,28 @@ pub fn anchor_bundle(
     )
 }
 
+/// The partition keypair `(sk, pk)` a board's sealed secret and chip determine: the one its birth
+/// binds, and the one its identity reports before any birth ([`ChipBirth::partition_pk`]). Nothing
+/// a holder provisions enters it.
+fn partition_keypair<P: PartitionSig>(
+    partition_key_seed: &[u8; 32],
+    partition_device_id: &[u8; 32],
+) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+    let mut part_seed = h(
+        domain::PARTITION_KEY_SEED_V1,
+        &[partition_key_seed, partition_device_id],
+    );
+    let keypair = P::part_keygen(&part_seed);
+    zeroize(&mut part_seed);
+    keypair
+}
+
 /// Run the birth ceremony (§7). Generates the partition keypair, forms the bundle and the
 /// genesis frontier, and **destroys the birth fuse preimage**.
 pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Result<Birth, PartitionError> {
     // Partition keypair (pre-bundle, so its pubkey can be bound into B).
-    let mut part_seed = h(
-        domain::PARTITION_KEY_SEED_V1,
-        &[inp.partition_key_seed, inp.partition_device_id],
-    );
-    let keypair = P::part_keygen(&part_seed);
-    zeroize(&mut part_seed);
-    let (partition_sk, partition_pk) = keypair?;
+    let (partition_sk, partition_pk) =
+        partition_keypair::<P>(inp.partition_key_seed, inp.partition_device_id)?;
 
     // One-way birth fuse and its public commitment (binds fresh device entropy into B).
     let mut s_birth = h(
@@ -208,6 +219,16 @@ impl Drop for ChipBirth {
 }
 
 impl ChipBirth {
+    /// This board's partition key `pk_host`, as its birth will bind it: fixed by its sealed secret and
+    /// its chip before any install, so the owner can stamp it (DSM Amendment A38). The secret half
+    /// is made and let go.
+    pub fn partition_pk<P: PartitionSig>(&self) -> Result<Vec<u8>, PartitionError> {
+        let (mut sk, pk) =
+            partition_keypair::<P>(&self.partition_key_seed, &self.partition_device_id)?;
+        crate::util::zeroize_vec(&mut sk);
+        Ok(pk)
+    }
+
     /// The birth ceremony for the device `provisioning` names.
     pub fn birth<P: PartitionSig>(
         &self,

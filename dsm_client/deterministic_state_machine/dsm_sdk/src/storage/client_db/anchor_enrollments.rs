@@ -110,8 +110,9 @@ pub fn store_accepted_anchor_root_with_conn(
 
 /// Admit (pin) a fused anchor. INSERT OR REPLACE: re-admission overwrites, matching the
 /// [`AnchorEnrollmentStore`](dsm::crypto::anchor_enrollment::AnchorEnrollmentStore) contract —
-/// the CALLER owns the authority rules (first-transfer TOFU / same-anchor upgrade only; a
-/// differing anchor is rejected before ever reaching this write).
+/// the CALLER owns the authority rules (a first transfer from a board carrying the owner's stamp,
+/// DSM Amendment A38, and the same anchor after; a differing or unstamped anchor is rejected before
+/// ever reaching this write).
 pub fn admit_anchor_enrollment(e: &AnchorEnrollment) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding

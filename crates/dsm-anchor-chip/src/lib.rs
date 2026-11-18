@@ -9,6 +9,11 @@
 #![no_std]
 
 extern crate alloc;
+// The model's stamp key is derived once, on the host the model runs on.
+#[cfg(feature = "model-stamp-key")]
+extern crate std;
+#[cfg(all(feature = "model-stamp-key", target_os = "none"))]
+compile_error!("a board's image carries the owner's stamp keys, never the chip model's");
 
 pub mod bring_up;
 pub mod session;
@@ -25,6 +30,10 @@ pub trait Board {
     fn alive(&self);
     /// The stepping of the board's RP2350: 2 for A2, 3 for A3, 4 for A4.
     fn silicon_revision(&self) -> u8;
+    /// Whether the board's OTP page for its own secret takes it (DSM Amendment A38): blank, or a seal
+    /// cut before any row, with Secure code free to write the page and its lock row; or sealed by the
+    /// board itself. Read with nothing written; why not, when not.
+    fn secret_page(&self) -> Result<(), alloc::string::String>;
 }
 
 /// The Secure heap the monitor gives the anchor. Its size is here so that the rehearsal holds every
@@ -45,7 +54,8 @@ pub const MAX_REQUEST_BYTES: usize =
     anchor_core::service::REQUEST_HEAD_MAX + anchor_core::service::OWNER_AUTHORIZATION_BYTES;
 
 /// The largest frame the monitor takes at all: a payment check, the payer's certificate with its
-/// 49,856-byte `σ^host`, one message read whole. The anchor serves a frame larger than
+/// 17,088-byte `σ^host` (SPX128f) and the payer's disclosure with its board's 17,088-byte stamp (DSM
+/// Amendment A38), one message read whole. The anchor serves a frame larger than
 /// [`MAX_REQUEST_BYTES`] only as a payment check, and only while it holds no record
 /// ([`anchor_core::service::handle`]), so its copies never meet a record's.
 pub const MAX_FRAME_BYTES: usize = anchor_core::service::MAX_PAYMENT_CHECK_BYTES;

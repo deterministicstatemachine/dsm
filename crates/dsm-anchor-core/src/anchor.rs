@@ -17,8 +17,8 @@ use crate::durable::{
 use crate::enrollment::{ChipBirth, Provisioning};
 use crate::proto::{arr32, decode_frame, encode_response, pb, ProtoError};
 use crate::service::{
-    appliance_refusal, awaiting_response, durable_code, err, fail, handle, proto_code, status,
-    try_run_response,
+    appliance_refusal, awaiting_response, board_identity, durable_code, err, fail, handle,
+    proto_code, status, try_run_response,
 };
 use crate::tropic::{PartitionSig, Tropic};
 use crate::try_run::{begin, finish, Begun, TryRun, TryStep};
@@ -137,7 +137,9 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Anchor<T, P, S> {
 }
 
 /// An unprovisioned anchor's answer: a try-run or a provisioning begins a rehearsal, which waits on
-/// its owner's authorization ([`Anchor::Rehearsing`]); anything else is refused as not provisioned.
+/// its owner's authorization ([`Anchor::Rehearsing`]); its identity is read, and the owner's stamp
+/// kept (DSM Amendment A38), with the anchor still unprovisioned; anything else is refused as not
+/// provisioned.
 fn provision<T: Tropic, P: PartitionSig, S: ActiveStore>(
     chip: ChipBirth,
     mut tropic: T,
@@ -154,11 +156,26 @@ fn provision<T: Tropic, P: PartitionSig, S: ActiveStore>(
             encode_response(&fail(op, code)),
         )
     };
-    let (req, _signature) = match decode_frame(frame) {
+    let (req, trailing) = match decode_frame(frame) {
         Ok(decoded) => decoded,
         Err(e) => return unprovisioned(tropic, store, proto_code(e), 0),
     };
     let op = req.op;
+    if op == pb::Op::BoardIdentity as i32 || op == pb::Op::Stamp as i32 {
+        let answer = if op == pb::Op::Stamp as i32 {
+            keep_stamp::<P, S>(op, &chip, &mut store, trailing)
+        } else {
+            identity_of::<P, S>(op, &chip, &mut store)
+        };
+        return (
+            Anchor::Unprovisioned {
+                chip,
+                tropic,
+                store,
+            },
+            encode_response(&answer),
+        );
+    }
     if op != pb::Op::Provision as i32 && op != pb::Op::TryRun as i32 {
         return unprovisioned(tropic, store, err::NOT_PROVISIONED, op);
     }
@@ -211,6 +228,98 @@ fn provision<T: Tropic, P: PartitionSig, S: ActiveStore>(
                 encode_response(&answer),
             )
         }
+    }
+}
+
+/// `OP_BOARD_IDENTITY` before an install: what the owner's stamp signs (DSM Amendment A38), read with
+/// nothing written. `pk_host` is the one the install will bind ([`ChipBirth::partition_pk`]).
+fn identity_of<P: PartitionSig, S: ActiveStore>(
+    op: i32,
+    chip: &ChipBirth,
+    store: &mut S,
+) -> pb::ApplianceResponse {
+    let pk_host = match chip.partition_pk::<P>() {
+        Ok(pk) => pk,
+        Err(e) => {
+            return pb::ApplianceResponse {
+                detail: alloc::format!("the partition key: {e:?}"),
+                ..fail(op, err::PARTITION)
+            }
+        }
+    };
+    let stamp = match store.stamp_read() {
+        Ok(stamp) => stamp,
+        Err(e) => {
+            return pb::ApplianceResponse {
+                detail: alloc::format!("the stamp this board keeps did not read: {e:?}"),
+                ..fail(op, err::STORE)
+            }
+        }
+    };
+    board_identity(
+        op,
+        crate::stamp::BoardIdentity {
+            anchor_id: &chip.anchor_id,
+            pk_host: &pk_host,
+            pk_chip: &chip.chip_pk,
+        },
+        chip.enrolled_counter,
+        chip.install,
+        stamp,
+    )
+}
+
+/// `OP_STAMP`: keep the owner's stamp on this board (DSM Amendment A38). Only before an install, only
+/// on a board that installs for good, and only a stamp that verifies under this firmware's stamp keys
+/// over this board's own identity; it is then written, read back, and answered with the identity it
+/// names. A stamp kept before is replaced, by another the owner made for this same board.
+fn keep_stamp<P: PartitionSig, S: ActiveStore>(
+    op: i32,
+    chip: &ChipBirth,
+    store: &mut S,
+    stamp: &[u8],
+) -> pb::ApplianceResponse {
+    let refuse = |detail: &str| pb::ApplianceResponse {
+        detail: alloc::string::String::from(detail),
+        ..fail(op, err::STAMP_REFUSED)
+    };
+    if chip.install != crate::enrollment::Install::ForGood {
+        return refuse("a trial install's keys change at every boot: it is never stamped");
+    }
+    let pk_host = match chip.partition_pk::<P>() {
+        Ok(pk) => pk,
+        Err(e) => {
+            return pb::ApplianceResponse {
+                detail: alloc::format!("the partition key: {e:?}"),
+                ..fail(op, err::PARTITION)
+            }
+        }
+    };
+    let board = crate::stamp::BoardIdentity {
+        anchor_id: &chip.anchor_id,
+        pk_host: &pk_host,
+        pk_chip: &chip.chip_pk,
+    };
+    if let Err(refusal) = crate::stamp::verify_board_stamp::<P>(P::stamp_keys(), board, stamp) {
+        return refuse(refusal.reason());
+    }
+    let kept = match store.stamp_write(stamp).and_then(|()| store.stamp_read()) {
+        Ok(kept) => kept,
+        Err(e) => {
+            return pb::ApplianceResponse {
+                detail: alloc::format!("the stamp was not kept: {e:?}"),
+                ..fail(op, err::STORE)
+            }
+        }
+    };
+    match kept {
+        Some(kept) if kept.as_slice() == stamp => {
+            board_identity(op, board, chip.enrolled_counter, chip.install, Some(kept))
+        }
+        _ => pb::ApplianceResponse {
+            detail: alloc::string::String::from("the stamp did not read back as written"),
+            ..fail(op, err::STORE)
+        },
     }
 }
 

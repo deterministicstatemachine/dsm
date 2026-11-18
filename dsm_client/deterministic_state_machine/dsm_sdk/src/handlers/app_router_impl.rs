@@ -2722,6 +2722,10 @@ impl AppRouter for AppRouterImpl {
         )
     }
 
+    fn require_own_board_pays(&self) -> Result<(), dsm::types::error::DsmError> {
+        self.core_sdk.require_own_board_pays()
+    }
+
     fn stage_offline_bearer_transition(
         &self,
         relationship_id: [u8; 32],

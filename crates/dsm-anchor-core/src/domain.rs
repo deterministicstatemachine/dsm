@@ -53,3 +53,9 @@ pub const RMEM_HEADER_V1: &str = "DSM/anchor/rmem-header/v1";
 pub const RECEIVE_CHALLENGE_V1: &str = "DSM/anchor/receive-challenge/v1";
 /// What a receive of a checked payment binds, as one digest (`receive::receive_binding`).
 pub const RECEIVE_BINDING_V1: &str = "DSM/anchor/receive-binding/v1";
+
+// --- The owner's stamp on a board (DSM Amendment A38, owner, 2026-11-18) ---
+/// What the owner's stamp signs: one board's public identity, `H(tag ‖ anchor_id ‖ commit(pk_host) ‖
+/// commit(pk_chip))`. A receiver admits a board only when its stamp verifies under the stamp key the
+/// wallet and the board's firmware carry.
+pub const BOARD_STAMP_V1: &str = "DSM/anchor/board-stamp/v1";

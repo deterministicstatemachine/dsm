@@ -9,6 +9,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Security
+
+- **A board pays or is paid offline only under the owner's stamp (DSM
+  Amendment A38).** Every board is set up by the owner before it ships, and he
+  signs its public identity (anchor id, `pk_host`, `pk_chip`) with his stamp
+  key, a BLAKE3-SPHINCS+ SPX128f key kept under his passphrase
+  (`crates/dsm-board-stamp`). The board keeps the stamp only when it verifies
+  under the stamp keys its signed firmware carries, and reports it with a new
+  identity read. A receiver checks the payer's stamp on every payment, a payer
+  checks the receiver's board, the receiving board checks the payer's in its
+  own payment check, and a wallet installs and drives only a stamped board.
+  An unstamped board is refused by name, never as a changed one. A trial
+  install, whose keys change at every boot, pays and is paid nothing offline.
+- **The board makes its own secret (DSM Amendment A38).** The signed image
+  seals it at its first boot, from the board's TRNG, in OTP page 49, its lock
+  row written before any row; no phone or computer draws or sees it. The
+  phone's procedure and `provision-otp.sh` no longer write a secret, and refuse
+  a page 49 someone else wrote.
+
 ---
 
 ## [0.1.1-beta.4] — 2026-11-15

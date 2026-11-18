@@ -76,6 +76,35 @@ impl PartitionSig for SphincsPart {
     fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
         dsm_sphincs::sign(dsm_sphincs::SphincsVariant::SPX256f, sk, digest).map_err(partition_error)
     }
+    /// The owner's stamp keys, compiled into the signed image (DSM Amendment A38): the board keeps
+    /// only a stamp made by one of them over its own identity, and refuses a payment from a board
+    /// whose stamp is not.
+    fn stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
+        #[cfg(not(feature = "model-stamp-key"))]
+        let keys = anchor_core::stamp::BOARD_STAMP_KEYS;
+        #[cfg(feature = "model-stamp-key")]
+        let keys = model_stamp_keys();
+        keys
+    }
+}
+
+/// The seed of the chip model's stamp key (feature `model-stamp-key`): the rehearsal signs with it
+/// as the owner signs with his.
+#[cfg(feature = "model-stamp-key")]
+pub const MODEL_STAMP_SEED: [u8; 32] = [0xA5; 32];
+
+/// The chip model's stamp key, in place of the owner's: the public half of [`MODEL_STAMP_SEED`]'s
+/// SPX128f key.
+#[cfg(feature = "model-stamp-key")]
+fn model_stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
+    static KEYS: std::sync::OnceLock<[anchor_core::stamp::StampKey; 1]> =
+        std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        match dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, &MODEL_STAMP_SEED) {
+            Ok(kp) => [core::array::from_fn(|i| kp.public_key[i])],
+            Err(e) => panic!("the chip model's stamp key: {e:?}"),
+        }
+    })
 }
 
 /// The SPHINCS+ failure, as the partition reports it.
@@ -139,7 +168,8 @@ pub enum Measurement {
 
 /// The ops the §2 measurement seal gates. A provisioning is among them: it is irreversible, so a
 /// board whose Non-secure image does not hash to its burned digest is refused before its chip is
-/// bound and caged, not after.
+/// bound and caged, not after. So are the identity read and the stamp (DSM Amendment A38): a board
+/// running another release than its digest names is never stamped.
 fn op_requires_measurement(op: i32) -> bool {
     matches!(
         pb::Op::try_from(op),
@@ -152,7 +182,9 @@ fn op_requires_measurement(op: i32) -> bool {
             | pb::Op::Recover
             | pb::Op::Challenge
             | pb::Op::AuthorizationNonce
-            | pb::Op::CheckPayment)
+            | pb::Op::CheckPayment
+            | pb::Op::BoardIdentity
+            | pb::Op::Stamp)
     )
 }
 

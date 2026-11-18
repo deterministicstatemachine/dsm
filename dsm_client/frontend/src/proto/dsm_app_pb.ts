@@ -584,7 +584,7 @@ export enum BilateralEventType {
   BILATERAL_EVENT_FAILED = 6,
 
   /**
-   * Receiver: first-transfer TOFU anchor pin admitted (trust established)
+   * Receiver: a stamped anchor pinned on its first transfer (DSM Amendment A38)
    *
    * @generated from enum value: BILATERAL_EVENT_ANCHOR_PINNED = 7;
    */
@@ -596,6 +596,13 @@ export enum BilateralEventType {
    * @generated from enum value: BILATERAL_EVENT_ANCHOR_CHANGED = 8;
    */
   BILATERAL_EVENT_ANCHOR_CHANGED = 8,
+
+  /**
+   * Either side: the counterparty's board carries no stamp of the owner's, or one that does not verify (DSM Amendment A38; payment refused, nothing pinned)
+   *
+   * @generated from enum value: BILATERAL_EVENT_ANCHOR_UNSTAMPED = 9;
+   */
+  BILATERAL_EVENT_ANCHOR_UNSTAMPED = 9,
 }
 // Retrieve enum metadata with: proto3.getEnumType(BilateralEventType)
 proto3.util.setEnumType(BilateralEventType, "dsm.BilateralEventType", [
@@ -608,6 +615,7 @@ proto3.util.setEnumType(BilateralEventType, "dsm.BilateralEventType", [
   { no: 6, name: "BILATERAL_EVENT_FAILED" },
   { no: 7, name: "BILATERAL_EVENT_ANCHOR_PINNED" },
   { no: 8, name: "BILATERAL_EVENT_ANCHOR_CHANGED" },
+  { no: 9, name: "BILATERAL_EVENT_ANCHOR_UNSTAMPED" },
 ]);
 
 /**
@@ -691,13 +699,6 @@ export enum AnchorBoardStepKind {
    * @generated from enum value: ANCHOR_BOARD_STEP_KIND_LOAD_IMAGE = 1;
    */
   LOAD_IMAGE = 1,
-
-  /**
-   * Step 4 with its page's lock, on a board whose page is blank
-   *
-   * @generated from enum value: ANCHOR_BOARD_STEP_KIND_SEAL_SECRET = 2;
-   */
-  SEAL_SECRET = 2,
 
   /**
    * Step 5: the Non-secure app's digest
@@ -789,7 +790,6 @@ export enum AnchorBoardStepKind {
 proto3.util.setEnumType(AnchorBoardStepKind, "dsm.AnchorBoardStepKind", [
   { no: 0, name: "ANCHOR_BOARD_STEP_KIND_UNSPECIFIED" },
   { no: 1, name: "ANCHOR_BOARD_STEP_KIND_LOAD_IMAGE" },
-  { no: 2, name: "ANCHOR_BOARD_STEP_KIND_SEAL_SECRET" },
   { no: 3, name: "ANCHOR_BOARD_STEP_KIND_WRITE_DIGEST" },
   { no: 4, name: "ANCHOR_BOARD_STEP_KIND_LOCK_DIGEST" },
   { no: 5, name: "ANCHOR_BOARD_STEP_KIND_WRITE_BOOT_KEY" },
@@ -12086,7 +12086,8 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
  * A discloses its fused-anchor pin material so B can PIN it under the ALREADY-verified contact,
  * bound to THIS transfer's state transition (never a standalone/implicit pin). pk_chip is the
  * resident TROPIC01 ECC public key that verifies the release's σ^chip; a disclosure without it is
- * rejected (no partial v2 pin).
+ * rejected (no partial v2 pin). The board's stamp rides every disclosure and is checked every time
+ * (DSM Amendment A38).
  *
  * @generated from message dsm.AnchorDisclosure
  */
@@ -12135,6 +12136,16 @@ export class AnchorDisclosure extends Message<AnchorDisclosure> {
    */
   birthCommitment = new Uint8Array(0);
 
+  /**
+   * The owner's stamp on this board (DSM Amendment A38, owner, 2026-11-18): his BLAKE3-SPHINCS+
+   * SPX128f signature over H("DSM/anchor/board-stamp/v1" ‖ anchor_id ‖ commit(pk_host) ‖
+   * commit(pk_chip)), which the board keeps and reports. A board is admitted only when it verifies
+   * under the stamp key the wallet carries. Empty when the board carries none; it is then refused.
+   *
+   * @generated from field: bytes board_stamp = 11;
+   */
+  boardStamp = new Uint8Array(0);
+
   constructor(data?: PartialMessage<AnchorDisclosure>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12150,6 +12161,7 @@ export class AnchorDisclosure extends Message<AnchorDisclosure> {
     { no: 5, name: "policy_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "pk_chip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "birth_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "board_stamp", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorDisclosure {
@@ -12233,8 +12245,8 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
   /**
    * The receiver's board (owner, 2026-11-07: an offline payment needs a board on both sides): the
    * pin material of the anchor whose board drew receiver_challenge and will commit the receive, its
-   * bundle under local_signature. The sender pins it on first use, as a receiver pins a sender's,
-   * and checks the step's acknowledgement under it.
+   * bundle under local_signature. The sender pins it only when it carries the owner's stamp (DSM
+   * Amendment A38), as a receiver pins a sender's, and checks the step's acknowledgement under it.
    *
    * @generated from field: dsm.AnchorDisclosure receiver_anchor = 11;
    */
@@ -12966,8 +12978,9 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
 
   /**
    * Receiver-admit fold: A's fused-anchor pin disclosure, present iff this confirm carries a bearer
-   * release. B pins it TOFU on the first transfer (already-verified contact, bound to this
-   * transfer) and verifies same-anchor on every subsequent one. Absent for ordinary transfers.
+   * release. B pins it on the first transfer (already-verified contact, bound to this transfer)
+   * only when the board carries the owner's stamp (DSM Amendment A38), and on every later one
+   * verifies the same anchor and the stamp again. Absent for ordinary transfers.
    *
    * @generated from field: dsm.AnchorDisclosure anchor_disclosure = 15;
    */

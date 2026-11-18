@@ -793,6 +793,11 @@ pub(crate) mod fixture {
             )
             .expect("the owner signs"))
         }
+        /// These payers' releases are checked by a wallet, never by a receiving board here, so no
+        /// stamp key is held: a board check under it refuses every payer.
+        fn stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
+            &[]
+        }
     }
 
     fn derive(seed: u8, input: &str) -> [u8; 32] {
