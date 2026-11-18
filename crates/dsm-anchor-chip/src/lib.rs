@@ -42,9 +42,12 @@ pub trait Board {
 /// heap gave up 4 KiB for it. 154 KiB (owner, 2026-11-12: "Yes, from the heap"): the single-use
 /// authorization, the spare-slot check and the handler's exclusion (CONFORMANCE_GAPS 6.158) grew
 /// the image again, to 488 bytes past its 59 KiB stack's floor, and the heap gave up 2 KiB more.
-/// Its measured peak (105,456 bytes, a boot that recovers a committed record) stands under three
-/// quarters of what remains, which is what the rehearsal holds every operation to.
-pub const SECURE_HEAP_BYTES: usize = 154 * 1024;
+/// 148 KiB (owner, 2026-11-18: "Yes", then "Yes" again): the owner's stamp (DSM Amendment A38),
+/// its checks and its storage, and the board sealing its own secret grew the image 5,896 bytes past
+/// that floor, and the heap gave up 6 KiB more. Its peak measured before the stamp (105,456 bytes, a
+/// boot that recovers a committed record) stands under three quarters of what remains (113,664
+/// bytes), which is what the rehearsal holds every operation to, the stamp's included.
+pub const SECURE_HEAP_BYTES: usize = 148 * 1024;
 
 /// The largest request frame the monitor takes: a request's largest message and, after it, the
 /// owner's authorization signature when the request is one (anchor-core's frame rule,

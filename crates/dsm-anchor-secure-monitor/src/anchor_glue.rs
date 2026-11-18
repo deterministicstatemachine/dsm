@@ -168,7 +168,7 @@ fn trng_block() -> Option<[u8; 24]> {
                 ];
                 trng.rnd_source_enable().write(|w| unsafe { w.bits(0) });
                 let mut block = [0u8; 24];
-                for (bytes, word) in block.chunks_exact_mut(4).zip(words) {
+                for (bytes, word) in block.as_chunks_mut::<4>().0.iter_mut().zip(words) {
                     bytes.copy_from_slice(&word.to_le_bytes());
                 }
                 return Some(block);
