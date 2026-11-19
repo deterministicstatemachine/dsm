@@ -7779,12 +7779,12 @@ Found on the developer storage set, 2026-11-17, by Sennite's shop suite (`test/r
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 375 | 246 | 48 | 16 | 0 | 38 | 27 |
+| DSM high-level (MR-DSM) | 377 | 248 | 48 | 16 | 0 | 38 | 27 |
 | SoFi (MR-SOFI) | 431 | 387 | 13 | 10 | 1 | 17 | 3 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 160 | 79 | 13 | 40 | 0 | 18 | 10 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
-| **All** | **1112** | **723** | **74** | **66** | **1** | **73** | **175** |
+| **All** | **1114** | **725** | **74** | **66** | **1** | **73** | **175** |
 
 ## 8 Per-requirement results
 
@@ -8167,6 +8167,8 @@ Found on the developer storage set, 2026-11-17, by Sennite's shop suite (`test/r
 | MR-DSM-0378 | Met | `dsm::offline_origin::payment_at_cells`; `dsm::economic::offline_boundary::OfflineSettlementBody::verify`; `dsm_sdk::sdk::economic_admission_flow::admitted_offline_settlement` | `dsm::offline_origin::tests::a_receiver_settles_from_the_cells_without_the_payer`; `dsm::economic::offline_boundary::tests::a_settlement_is_held_to_the_payment_its_payers_cells_hold`; `dsm_sdk::bluetooth::offline_step_tests::an_offline_payment_runs_end_to_end_load_spend_receive_unload_and_spend_online` | DSM Amendment A39 (owner, 2026-11-19). Prototype on PR #1262. |
 | MR-DSM-0379 | Met | `dsm::types::offline_chain::board_step_transition`; `dsm::types::offline_chain::verify_account_hops`; `dsm_sdk::sdk::core_sdk::CoreSDK::board_signs_boundary` | `dsm::economic::offline_boundary::tests::a_payer_cannot_unload_what_it_paid_offline`; `dsm::economic::offline_boundary::tests::a_boundary_its_board_did_not_sign_is_refused`; `dsm::types::offline_chain::tests::an_unload_its_board_did_not_sign_is_refused`; `dsm_sdk::bluetooth::offline_step_tests::origin_cells::a_payer_cannot_unload_what_it_paid_offline_before_its_receiver_publishes` | DSM Amendment A39 (owner, 2026-11-19). Prototype on PR #1262. |
 | MR-DSM-0380 | Met | `dsm::offline_origin::payment_at_cells`; `dsm::economic::peer_lineage::boundary_holds_its_cells` | `dsm::offline_origin::tests::valid_conflicting_steps_settle_once`; `dsm::offline_origin::tests::a_payment_and_an_unload_from_one_root_never_both_count`; `dsm_sdk::bluetooth::offline_step_tests::origin_cells::a_cloned_board_paying_two_receivers_settles_once_on_the_nodes` | DSM Amendment A39 (owner, 2026-11-19). Prototype on PR #1262. |
+| MR-DSM-0381 | Met | `dsm_sdk::handlers::system_routes::handle_restore_from_phrase`; `dsm_sdk::sdk::device_directory::read_entry` | `dsm_sdk::handlers::restore_from_phrase_tests::a_wallet_restored_from_its_words_is_the_same_identity_at_its_last_online_balance` | DSM Amendment A40 (owner, 2026-11-19). On PR #1262. |
+| MR-DSM-0382 | Met | `dsm::economic::peer_lineage::replay_own_lineage`; `dsm::types::device_state::DeviceState::restored_from_register`; `dsm_sdk::sdk::core_sdk::CoreSDK::restore_admitted_head` | `dsm_sdk::handlers::restore_from_phrase_tests::a_wallet_restored_from_its_words_is_the_same_identity_at_its_last_online_balance` | DSM Amendment A40 (owner, 2026-11-19). On PR #1262. |
 
 ### 8.2 SoFi settlement specification
 

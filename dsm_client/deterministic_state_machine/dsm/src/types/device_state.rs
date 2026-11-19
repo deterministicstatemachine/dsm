@@ -211,6 +211,15 @@ impl RealizedHead {
         self.0.with_resolved_position(balances).map(Self)
     }
 
+    /// This genesis head holding the balances its own register holds: see
+    /// [`DeviceState::restored_from_register`].
+    pub fn restored_from_register(
+        &self,
+        lineage: &crate::economic::peer_lineage::OwnLineage,
+    ) -> Result<RealizedHead, DsmError> {
+        self.0.restored_from_register(lineage).map(Self)
+    }
+
     /// This head with the offline account of `bundle` opened: see
     /// [`DeviceState::open_offline_account`].
     pub fn open_offline_account(
@@ -960,6 +969,36 @@ impl DeviceState {
         // A device's own relationship exists from its creation.
         state.insert_relationship_leaf(devid);
         state
+    }
+
+    /// A wallet restored from its phrase: this head, which must be its genesis
+    /// head and nothing more, holding the balances its own register holds at
+    /// its head, as Core re-verified and folded them
+    /// ([`crate::economic::peer_lineage::replay_own_lineage`]). Balances are
+    /// outside the device tree, so the root is the genesis head's.
+    pub(crate) fn restored_from_register(
+        &self,
+        lineage: &crate::economic::peer_lineage::OwnLineage,
+    ) -> Result<Self, DsmError> {
+        let genesis = Self::new(self.genesis, self.devid, self.public_key.clone());
+        if self.root() != genesis.root()
+            || !self.balances.is_empty()
+            || !self.offline_accounts.is_empty()
+            || self.pending_economic_admission.is_some()
+        {
+            return Err(DsmError::invalid_operation(
+                "a restore installs its register's balances on the genesis head only: this head \
+                 already holds state of its own",
+            ));
+        }
+        let mut next = self.clone();
+        next.balances = lineage
+            .balances()
+            .iter()
+            .filter(|(_, amount)| **amount > 0)
+            .map(|(policy, amount)| (*policy, *amount))
+            .collect();
+        Ok(next)
     }
 
     /// The genesis head of a device: its own relationship at `h_0` and
@@ -3471,7 +3510,7 @@ pub(crate) mod tests {
                 OfflineBoundaryKind::Unload,
                 &token,
                 5,
-                frontier_after(&loaded, &bundle),
+                frontier_after(loaded, &bundle),
             )
             .expect("unload 5")
             .new_device_state;

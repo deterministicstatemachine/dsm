@@ -17,14 +17,14 @@ const WORDS = [
   'across', 'act', 'action', 'actor', 'actress', 'actual',
 ];
 
-type Harness = { created: number; picked: string[]; cancelled: number };
+type Harness = { created: number; picked: string[]; cancelled: number; restoring: number; restored: string[]; leftRestore: number };
 
-function boot(appState: AppState): Harness {
-  const h: Harness = { created: 0, picked: [], cancelled: 0 };
+function boot(appState: AppState, error: string | null = null): Harness {
+  const h: Harness = { created: 0, picked: [], cancelled: 0, restoring: 0, restored: [], leftRestore: 0 };
   render(
     <ModernBoot
       appState={appState}
-      error={null}
+      error={error}
       securingProgress={40}
       handleGenerateGenesis={() => { h.created += 1; }}
       cancelPhraseBackup={() => {
@@ -35,6 +35,14 @@ function boot(appState: AppState): Harness {
         h.picked.push(word);
         recoveryPhraseStore.answer(word);
         return Promise.resolve();
+      }}
+      restore={{
+        begin: () => { h.restoring += 1; },
+        cancel: () => { h.leftRestore += 1; },
+        submit: (words) => {
+          h.restored.push(words);
+          return Promise.resolve();
+        },
       }}
       eraTokenSrc=""
       btcLogoSrc=""
@@ -47,7 +55,7 @@ afterEach(() => recoveryPhraseStore.clear());
 
 describe('the skin each phase is drawn in', () => {
   it('is Modern in every phase once chosen, but a combo-locked wallet shows the device', () => {
-    const phases: AppState[] = ['loading', 'runtime_loading', 'needs_genesis', 'backup_phrase', 'securing_device', 'publication_pending', 'wallet_ready', 'error'];
+    const phases: AppState[] = ['loading', 'runtime_loading', 'needs_genesis', 'backup_phrase', 'restore_phrase', 'securing_device', 'publication_pending', 'wallet_ready', 'error'];
     for (const phase of phases) expect(skinInUse('modern', phase, 'none')).toBe('modern');
     expect(skinInUse('modern', 'locked', 'pin')).toBe('modern');
     expect(skinInUse('modern', 'locked', 'combo')).toBe('dgen');
@@ -90,5 +98,38 @@ describe('a new wallet\'s recovery phrase, in the Modern skin', () => {
     expect(screen.getByText(`That is not word #${asked}. Read your phrase again and correct what you wrote down.`)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel setup' }));
     expect(h.cancelled).toBe(1);
+  });
+});
+
+describe('restoring a wallet from its 24 words, in the Modern skin', () => {
+  it('offers the restore right under creating a wallet', () => {
+    const h = boot('needs_genesis');
+    const buttons = screen.getAllByRole('button').map((b) => b.textContent);
+    expect(buttons.indexOf('Restore my wallet from its 24 words')).toBe(
+      buttons.indexOf('Create my wallet') + 1,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Restore my wallet from its 24 words' }));
+    expect(h.restoring).toBe(1);
+    expect(h.created).toBe(0);
+  });
+
+  it('restores only once all 24 words are typed, sent lower-cased one space apart', () => {
+    const h = boot('restore_phrase');
+    const field = screen.getByLabelText('Your 24 words');
+    const restore = screen.getByRole('button', { name: 'Restore' });
+    fireEvent.change(field, { target: { value: WORDS.slice(0, 23).join(' ') } });
+    expect(screen.getByText('23 of 24 words')).toBeInTheDocument();
+    expect(restore).toBeDisabled();
+    fireEvent.change(field, { target: { value: `  ${WORDS.join('  \n').toUpperCase()} ` } });
+    expect(restore).toBeEnabled();
+    fireEvent.click(restore);
+    expect(h.restored).toEqual([WORDS.join(' ')]);
+  });
+
+  it('shows why a restore was refused, and goes back', () => {
+    const h = boot('restore_phrase', 'no wallet made from these words is on the network');
+    expect(screen.getByRole('alert')).toHaveTextContent('no wallet made from these words is on the network');
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(h.leftRestore).toBe(1);
   });
 });

@@ -742,7 +742,7 @@ mod tests {
 
         let m1 = first.board_message().expect("signed");
         let m2 = second.board_message().expect("signed");
-        let paid1 = payment_at_cells(&p.pin.bundle, &loaded, &[r0.clone()], &m1)
+        let paid1 = payment_at_cells(&p.pin.bundle, &loaded, std::slice::from_ref(&r0), &m1)
             .expect("R1's payment is final at its cell");
         assert_eq!((paid1.recipient, paid1.amount), (R1, 10));
         let paid2 = payment_at_cells(&p.pin.bundle, &loaded, &[r0, r1], &m2)
@@ -874,7 +874,7 @@ mod tests {
             let mut settled = Vec::new();
             let mut refused = Vec::new();
             for (m, r) in [(m1, R1), (m2, R2)] {
-                match payment_at_cells(&board.pin.bundle, &root, &[read.clone()], &m) {
+                match payment_at_cells(&board.pin.bundle, &root, std::slice::from_ref(&read), &m) {
                     Ok(paid) => settled.push((paid.recipient, paid.amount, r)),
                     Err(why) => refused.push(why.to_string()),
                 }
@@ -916,16 +916,16 @@ mod tests {
         };
         let not_this_cell = "it is not the cell of the root the path stands at";
         // Skipping the first cell: the second cell is not the start's.
-        let skipped = refusal(&[r1.clone()], &p.pin.bundle, &loaded, &m2);
+        let skipped = refusal(std::slice::from_ref(&r1), &p.pin.bundle, &loaded, &m2);
         assert!(skipped.contains(not_this_cell), "{skipped}");
         // Past the payment.
         let past = refusal(&[r0.clone(), r1.clone()], &p.pin.bundle, &loaded, &m1);
         assert!(past.contains("goes on past the payment"), "{past}");
         // From another start.
-        let elsewhere = refusal(&[r0.clone()], &p.pin.bundle, &mid, &m1);
+        let elsewhere = refusal(std::slice::from_ref(&r0), &p.pin.bundle, &mid, &m1);
         assert!(elsewhere.contains(not_this_cell), "{elsewhere}");
         // Another bundle's cells.
-        let stranger = refusal(&[r0.clone()], &[0xEE; 32], &loaded, &m1);
+        let stranger = refusal(std::slice::from_ref(&r0), &[0xEE; 32], &loaded, &m1);
         assert!(stranger.contains(not_this_cell), "{stranger}");
         // The right path settles.
         let paid = payment_at_cells(&p.pin.bundle, &loaded, &[r0, r1], &m2).expect("settles");

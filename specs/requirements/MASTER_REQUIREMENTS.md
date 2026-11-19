@@ -14,7 +14,7 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `b2323b353ae5106bcd5d0f07b3923432e785d458` | 4549 |
+| `specs/DSM_High_Level_Explainer.md` | `cbed31b38f694f6819626ff3d8191458dc6c6338` | 4551 |
 | `specs/SoFi_Settlement_Specification.md` | `870fa85b5828328262a78af4799de86913c068ff` | 3138 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
 | `specs/DSM_Storage_Node_Specification.md` | `2b970c594e114d5deeb9b5052f4e204af864132d` | 651 |
@@ -26,6 +26,8 @@ Storage pin updated 2026-11-15, again: the members distribute an object among th
 Explainer pin updated 2026-11-18, again, after the owner's direction of 2026-11-18 on when a board seals its own secret ("It shouldn't be like that. That could be the last change that happens." and "fix the image so it doesn't auto-write"): A38's text now says the board seals its secret only when the seal command is sent to its signed image (`OP_SEAL_SECRET`), never because it started. MR-DSM-0376 restated to it; MR-DSM-0374 and MR-DSM-0375 read as written, and the line count is unchanged.
 
 Explainer pin updated 2026-11-18 after §72 was corrected to the code (the owner's words of 2026-11-18, "Yes, correct the fork detection."): a payment from a cloned or broken board is not detected or attributed at reconnection; the payer's next boundary carries one of the two payments and the other never settles. A38's text now says the board reports its stamp with its identity (`OP_BOARD_IDENTITY`), where the code reports it, not with its status. No row derives from §72 (both extractions excluded it), MR-DSM-0374 to MR-DSM-0376 read as written, and the line count is unchanged.
+
+Explainer pin updated 2026-11-19 after DSM Amendment A40 (the owner's words of 2026-11-19, "It needs to come back from the network then." and "Yes, it recovers you to your last online balance.": a wallet restored from its 24 words is the same identity, its register re-verified to its head from the network): MR-DSM-0381 and MR-DSM-0382 added, and every other row reads as written. The edit added A40's block after A39's, so line citations into the explainer past A39 are off by its lines.
 
 Explainer pin updated 2026-11-19 after DSM Amendment A39 (the owner's words of 2026-11-17 and 2026-11-19 that offline must not depend on the other party coming back, "Yes, wire it", "Option B. Security first. Don't allow any chance of robbing a receiver." and "Full cells": an offline step is final at its origin cell, a receiver settles from the payer's cells without the payer, and every step of an offline account is signed by its board at its next counter): MR-DSM-0377 to MR-DSM-0380 added, and every other row reads as written. A30's sentence that value received offline stays pending until the payer's return exposes it is superseded by A39's own text, not edited in place. The edit added A39's block after A38's line, so line citations into the explainer past A38 are off by its lines.
 
@@ -213,7 +215,7 @@ Reconciled on 2026-09-22 from two extractions: `claude-chat` (798 rows) and `cha
 | DSM_Storage_Node_Specification.md | 128 | 122 | 6 |
 | **Total** | **859** | **652** | **207** |
 
-Added afterwards by amendment (§7.1): DSM 105, SoFi 100, storage 32, for 1101 canonical requirements in all.
+Added afterwards by amendment (§7.1): DSM 107, SoFi 100, storage 32, for 1103 canonical requirements in all.
 
 Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sources** are the extraction IDs merged into the row (`cc:` claude-chat, `gpt:` chatgpt); the first source locates the quote. **Flags** carry the findings in §8.7 that bear on the row.
 
@@ -596,6 +598,8 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0378 | authority | explicit | A receiver settles a payment it took offline from the payer's origin cells alone: from the account the payer's boundary left, which it recorded before it took the payment, through the cell its payment starts from, each final, the last holding its payment to it. The settlement names that boundary's position and the payment's starting root; anyone checking it reads the same cells. The payer is never needed. | amendment: DSM Amendment A39 (2026-11-19) | owner | none |
 | MR-DSM-0379 | authority | explicit | A load, an unload and the unload of a payment received offline are each signed by the account's board at its next counter, under the transition the one shared builder makes from the account's frontier and counter, its payload the step's own name; the counter and frontier advance with the step, and every verifier checks the board's release of it. | amendment: DSM Amendment A39 (2026-11-19) | owner | none |
 | MR-DSM-0380 | prohibition | explicit | A load or an unload whose board-signed steps or departure are not each final at their origin cells is refused. A payment and another step from one account root never both count: the step final first at the root's cell is the account's one history, and a step off it is never admitted or settled. | amendment: DSM Amendment A39 (2026-11-19) | owner | none |
+| MR-DSM-0381 | authority | explicit | A wallet restored from its 24 words is the same wallet: the words re-derive its genesis, device id and keys exactly as its creation did, and no other identity is made. Nothing is installed unless the network's directory holds the wallet's own entry, proving itself and naming exactly that genesis, device id and authentication key. | amendment: DSM Amendment A40 (2026-11-19) | owner | none |
+| MR-DSM-0382 | authority | explicit | A restored wallet's admitted position, leaf cache and balances are its own register re-verified from its activation root to its head with the predicate any device runs for a peer, its leaves folded from each validated step's witness and recomputing every root the walk proved; its next step lands at the position after its head. A register that does not reach its head, or holds a realized SoFi position, holds the restore and rolls the identity back. | amendment: DSM Amendment A40 (2026-11-19) | owner | none |
 
 ### 8.2 SoFi settlement specification
 

@@ -85,6 +85,8 @@ mod relationship_write_authorization_tests;
 mod reserve_head_e2e_tests;
 pub mod response_helpers;
 #[cfg(test)]
+mod restore_from_phrase_tests;
+#[cfg(test)]
 mod second_spend_e2e_tests;
 #[cfg(test)]
 mod sender_admission_tests;

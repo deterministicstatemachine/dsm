@@ -4,9 +4,9 @@ import type { AppState } from '../types/app';
 
 export type NativeSessionIdentityStatus = 'runtime_not_ready' | 'missing' | 'ready';
 export type NativeSessionEnvConfigStatus = 'loading' | 'ready' | 'error';
-// `backup_phrase` is the frontend's own: the recovery phrase is on the screen
-// before any wallet exists, so the native session never reports it.
-export type NativeSessionPhase = Exclude<AppState, 'loading' | 'backup_phrase'>;
+// `backup_phrase` and `restore_phrase` are the frontend's own: a phrase is on
+// the screen before any wallet exists, so the native session never reports them.
+export type NativeSessionPhase = Exclude<AppState, 'loading' | 'backup_phrase' | 'restore_phrase'>;
 export type NativeSessionLockMethod = 'none' | 'pin' | 'combo';
 
 /** The tries Rust's app lock reports (sdk::app_lock). */

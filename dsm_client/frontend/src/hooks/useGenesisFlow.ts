@@ -23,6 +23,7 @@ export function useGenesisFlow({
 }: Args) {
   const genesisInFlight = useRef(false);
   const phraseInFlight = useRef<Promise<void> | null>(null);
+  const restoreInFlight = useRef<Promise<void> | null>(null);
   const interruptedMessage = 'Device securing was interrupted. Do not leave the screen until finished. Initialization was wiped and must be started again so the device key material is not corrupted.';
 
   // Abort device-key initialisation if the user navigates away during securing.
@@ -54,7 +55,7 @@ export function useGenesisFlow({
   // Listen for device-key enrollment progress events from Kotlin
   useEffect(() => {
     const unsub = addDsmEventListener((evt) => {
-      if (!genesisInFlight.current) {
+      if (!genesisInFlight.current && restoreInFlight.current === null) {
         if (evt.topic.startsWith('genesis.')) {
           logger.debug(`FRONTEND: Ignoring stale genesis lifecycle event '${evt.topic}' with no genesis in flight`);
         }
@@ -176,5 +177,68 @@ export function useGenesisFlow({
     return Promise.resolve();
   }, [createWalletFromPhrase]);
 
-  return { handleGenerateGenesis, cancelPhraseBackup, answerPhraseCheck };
+  /** Open the screen where the user types the 24 words of a wallet to restore. */
+  const beginRestore = useCallback(() => {
+    if (genesisInFlight.current || phraseInFlight.current) return;
+    setError(null);
+    setAppState('restore_phrase');
+  }, [setAppState, setError]);
+
+  /** Leave the restore without restoring; nothing typed is kept. */
+  const cancelRestore = useCallback(() => {
+    setError(null);
+    setAppState('needs_genesis');
+  }, [setAppState, setError]);
+
+  /**
+   * Restore the wallet the 24 `words` belong to (owner, 2026-11-19): the same wallet, back from the
+   * DSM network at its last online balance. A refusal (words of no wallet on the network, a
+   * register not decided yet) leaves the user on the restore screen with the reason. One restore
+   * runs at a time; a second press waits on the first.
+   */
+  const restoreFromWords = useCallback((words: string): Promise<void> => {
+    if (restoreInFlight.current) return restoreInFlight.current;
+    if (genesisInFlight.current) return Promise.resolve();
+    logger.info('FRONTEND: Restoring a wallet from its words');
+    setError(null);
+    const run = (async () => {
+      try {
+        const { restoreFromPhraseViaRouter } = await import('../dsm/WebViewBridge');
+        const envelopeBytes = await restoreFromPhraseViaRouter(words);
+        const env = decodeFramedEnvelopeV3(envelopeBytes);
+        const payload: any = env.payload;
+        if (payload?.case === 'error') {
+          throw new Error(payload.value?.message || 'The wallet could not be restored');
+        }
+        if (payload?.case !== 'genesisCreatedResponse') {
+          throw new Error(`Invalid restore envelope - got case: ${payload?.case}`);
+        }
+        logger.info('FRONTEND: Wallet restored');
+        // Native session state event will transition appState to wallet_ready
+      } catch (err) {
+        logger.error('FRONTEND: Restore failed', err);
+        setSecuringProgress(0);
+        setError(err instanceof Error ? err.message : 'The wallet could not be restored');
+        setAppState('restore_phrase');
+      } finally {
+        restoreInFlight.current = null;
+      }
+    })();
+    restoreInFlight.current = run;
+    return run;
+  }, [setAppState, setError, setSecuringProgress]);
+
+  return {
+    handleGenerateGenesis,
+    cancelPhraseBackup,
+    answerPhraseCheck,
+    restore: { begin: beginRestore, cancel: cancelRestore, submit: restoreFromWords },
+  };
 }
+
+/** The restore flow's three moves, as the setup screens use them. */
+export type RestoreFlow = {
+  begin: () => void;
+  cancel: () => void;
+  submit: (words: string) => Promise<void>;
+};

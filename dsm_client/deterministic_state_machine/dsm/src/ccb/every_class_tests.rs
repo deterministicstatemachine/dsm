@@ -1372,10 +1372,10 @@ fn every_class() -> Vec<Shown> {
         crate::offline_origin::SCHEMA_V1,
         ok(departure.encode(), "origin departure"),
         Read::Parsed(|b| {
-            Ok(crate::offline_origin::OriginDeparture::decode(b)
+            crate::offline_origin::OriginDeparture::decode(b)
                 .map_err(text)?
                 .encode()
-                .map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
         }),
     ));
 
@@ -1398,10 +1398,10 @@ fn every_class() -> Vec<Shown> {
         crate::offline_origin::SCHEMA_V1,
         ok(origin.encode(), "origin write"),
         Read::Parsed(|b| {
-            Ok(crate::offline_origin::OriginWrite::decode(b)
+            crate::offline_origin::OriginWrite::decode(b)
                 .map_err(text)?
                 .encode()
-                .map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
         }),
     ));
 

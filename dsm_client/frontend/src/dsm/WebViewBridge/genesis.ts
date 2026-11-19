@@ -21,6 +21,24 @@ export async function generateMnemonic(): Promise<string> {
  * native side derives `wallet_seed`, caches it in the unlocked session, and runs `create_genesis_v2`
  * (install + persist v2 record + identity + SDK context). Returns the framed genesis envelope.
  */
+/**
+ * A wallet that exists on the DSM network, restored on this phone from its 24 words. The native
+ * side re-derives the same identity, checks the network holds it, and brings it back at its last
+ * online balance. Returns the framed genesis envelope, or Rust's error envelope.
+ */
+export async function restoreFromPhraseViaRouter(mnemonic: string): Promise<Uint8Array> {
+  if (!mnemonic || mnemonic.trim().length === 0) {
+    throw new Error("restoreFromPhraseViaRouter: the 24 words are required");
+  }
+  const req = new WalletCreateGenesisV2Request({ mnemonic });
+  const res = await bridgeGate.enqueue(() => callBin("restoreFromPhrase", req.toBinary()));
+  const env = decodeFramedEnvelopeV3(res);
+  if (env.payload.case !== "error" && env.payload.case !== "genesisCreatedResponse") {
+    throw new Error(`restoreFromPhrase returned unexpected payload: ${env.payload.case}`);
+  }
+  return res;
+}
+
 export async function createGenesisViaRouter(mnemonic: string): Promise<Uint8Array> {
   if (!mnemonic || mnemonic.trim().length === 0) {
     throw new Error("createGenesisViaRouter: mnemonic is required (Genesis v2)");

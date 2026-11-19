@@ -213,6 +213,12 @@ class SinglePathWebViewBridge(private val context: Context) {
                     inst.createGenesisV2(mnemonic = req.mnemonic)
                 }
 
+                // A wallet on the network, restored from its 24 words (same request shape).
+                "restoreFromPhrase" -> {
+                    val req = WalletCreateGenesisV2Request.parseFrom(payload)
+                    inst.restoreFromPhrase(mnemonic = req.mnemonic)
+                }
+
                 // strict balances (JNI): FramedEnvelopeV3 bytes; a failure is the dispatcher's error response.
                 "getAllBalancesStrict" -> {
                     Unified.getAllBalancesStrict()
@@ -472,6 +478,18 @@ class SinglePathWebViewBridge(private val context: Context) {
      */
     fun createGenesisV2(mnemonic: String): ByteArray {
         return BridgeIdentityHandler.createGenesisV2(
+            prefs = prefs(),
+            sdkContextInitialized = sdkContextInitialized,
+            logTag = TAG,
+            keyDeviceId = KEY_DEVICE_ID,
+            keyGenesisHash = KEY_GENESIS_HASH,
+            keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
+            mnemonic = mnemonic,
+        )
+    }
+
+    fun restoreFromPhrase(mnemonic: String): ByteArray {
+        return BridgeIdentityHandler.restoreFromPhrase(
             prefs = prefs(),
             sdkContextInitialized = sdkContextInitialized,
             logTag = TAG,

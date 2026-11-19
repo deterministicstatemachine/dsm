@@ -20,6 +20,8 @@ type Params = {
   navigate: (to: ScreenType) => void;
   goBack: (appState: AppState) => void;
   handleGenerateGenesis: () => Promise<void> | void;
+  /** Open the screen that restores a wallet from its 24 words. */
+  beginRestore: () => void;
   soundEnabled: boolean;
   setSoundEnabled: (enabled: boolean) => void;
 };
@@ -36,6 +38,7 @@ export function useInputIntents({
   navigate,
   goBack,
   handleGenerateGenesis,
+  beginRestore,
   soundEnabled,
   setSoundEnabled,
 }: Params) {
@@ -47,6 +50,9 @@ export function useInputIntents({
     switch (currentItem) {
       case 'INITIALIZE':
         void handleGenerateGenesis();
+        break;
+      case 'RESTORE WALLET':
+        beginRestore();
         break;
       case 'RETRY CONNECTION':
         window.location.reload();
@@ -84,7 +90,7 @@ export function useInputIntents({
       default:
         if (currentItem) logger.info(`Selected: ${currentItem}`);
     }
-  }, [currentMenuIndex, handleGenerateGenesis, menuItems, navigate]);
+  }, [beginRestore, currentMenuIndex, handleGenerateGenesis, menuItems, navigate]);
 
   const back = useCallback(() => {
     if ((window as any).__dsmComboEntryActive) return;

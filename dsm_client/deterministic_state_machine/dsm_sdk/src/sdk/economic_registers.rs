@@ -579,6 +579,48 @@ pub(crate) async fn walk_contact(genesis: [u8; 32], device_id: [u8; 32]) -> Resu
     Ok(())
 }
 
+/// This wallet's own lineage as the register on `network_id` holds it,
+/// re-verified from its activation root and its leaves folded from every
+/// step's witness (`replay_own_lineage`): what a wallet restored from its
+/// phrase admits as its own head, once its identity is installed. Nothing local
+/// is read but what this device recorded of other peers.
+pub(crate) async fn replay_own_register(
+    network_id: Vec<u8>,
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+) -> Result<dsm::economic::peer_lineage::OwnLineage, String> {
+    let set = crate::sdk::storage_set::canonical_set(&network_id)
+        .map_err(|e| format!("the register set: {e}"))?;
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let live = LiveRegisterResolver {
+            set: &set,
+            runtime,
+            expected_network_id: network_id.clone(),
+        };
+        let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
+            .map_err(|e| format!("SoFi reads: {e}"))?;
+        let checked = dsm::economic::peer_lineage::replay_own_lineage(
+            &live,
+            &network_id,
+            &genesis,
+            &device_id,
+            &StoredOfflineRecords,
+            &sofi.peer_position_resolver(),
+        )
+        .map_err(|e| e.to_string())?;
+        log_cost(
+            "own lineage",
+            &device_id,
+            checked.answer().reached(),
+            &checked.cost(),
+        );
+        Ok(checked.into_answer())
+    })
+    .await
+    .map_err(|e| format!("the replay of this wallet's register did not finish: {e}"))?
+}
+
 /// The root a trader selected at a position and the reference a later `P`
 /// names it by (`SofiReads::trader_root_at`), validated one hop (DSM
 /// Amendment A14).

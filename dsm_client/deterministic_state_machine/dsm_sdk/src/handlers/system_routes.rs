@@ -86,26 +86,9 @@ pub(crate) fn handle_create_genesis_v2(args: &[u8]) -> AppResult {
     // wallet creation itself.
     use crate::generated::genesis_lifecycle_event::Kind as LifecycleKind;
     let emit = |kind: LifecycleKind, progress: u32| {
-        if let Err(e) = crate::ingress::push_genesis_lifecycle_event(kind as i32, progress) {
-            log::warn!(
-                "system.createGenesisV2: lifecycle event dispatch failed (non-fatal): {:?}",
-                e
-            );
-        }
+        emit_lifecycle("system.createGenesisV2", kind, progress)
     };
-    // Hold phase=securing_device for any concurrent session-state read until this function
-    // exits (success OR error), mirroring the finalize_bootstrap_core scope-guard discipline —
-    // otherwise a mid-genesis snapshot would report needs_genesis and flash the start screen.
-    crate::sdk::session_manager::BOOTSTRAP_SECURING
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    struct ClearSecuringOnDrop;
-    impl Drop for ClearSecuringOnDrop {
-        fn drop(&mut self) {
-            crate::sdk::session_manager::BOOTSTRAP_SECURING
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    let _clear_securing = ClearSecuringOnDrop;
+    let _securing = Securing::begin();
     emit(LifecycleKind::GenesisKindStarted, 0);
     emit(LifecycleKind::GenesisKindSecuringDevice, 0);
 
@@ -161,101 +144,10 @@ pub(crate) fn handle_create_genesis_v2(args: &[u8]) -> AppResult {
     // with has_identity left true a failed genesis would compute phase=wallet_ready — landing the
     // user on a wallet screen whose router never came up (fail-open). Rolled back, the snapshot
     // honestly reports needs_genesis and the user can retry.
-    let fail_rolled_back =
-        |msg: String| match crate::sdk::app_state::AppState::set_has_identity(false) {
-            Ok(()) => err(msg),
-            Err(rollback) => err(format!(
-                "{msg}; the identity mark was not rolled back: {rollback}"
-            )),
-        };
     emit(LifecycleKind::GenesisKindSecuringProgress, 85);
 
-    // 5b. Hot-swap the MinimalBootstrapRouter for the full AppRouter now that the canonical identity
-    //     exists (device_id set + wallet seed cached above). Without this the bootstrap router stays
-    //     installed for the rest of the session and every post-genesis route (identity.pairingQR,
-    //     wallet.*, contacts.*) fails with "requires genesis". The core adapter reads the router slot
-    //     live, so the swap takes effect on the very next query.
-    match crate::init::install_full_app_router_self_config() {
-        Ok(true) => {}
-        Ok(false) => {
-            return fail_rolled_back(
-                "system.createGenesisV2: canonical identity not ready after genesis (fail closed)"
-                    .into(),
-            )
-        }
-        Err(e) => {
-            return fail_rolled_back(format!(
-                "system.createGenesisV2: full AppRouter install failed: {e}"
-            ))
-        }
-    }
-
-    //     THE BLUETOOTH TRANSFER STACK for the new identity, once its router is up. Startup builds it only when an
-    //     identity already exists, so without this a wallet created in this session paired over
-    //     Bluetooth but refused every offline send ("the BLE stack is not live yet") until the
-    //     app restarted.
-    #[cfg(feature = "bluetooth")]
-    if let Err(e) = crate::init::build_ble_stack_for_identity() {
-        return fail_rolled_back(format!(
-            "system.createGenesisV2: the Bluetooth transfer stack could not be built: {e}"
-        ));
-    }
-
-    //     LISTENING for the new identity, as `inbox.startPoller` starts it when the app starts
-    //     with an identity: the connect listener while an application is connected (DSM
-    //     Amendment A11), then the inbox poller. Startup starts them only when an identity
-    //     already exists, so without this a wallet created in this session took in nothing sent
-    //     to it until the app was backgrounded and reopened, and the sender's next transfer
-    //     waited on the first one to settle.
-    if let Err(e) = crate::sdk::connect::wallet::resume_listener() {
-        return fail_rolled_back(format!("system.createGenesisV2: the connect listener: {e}"));
-    }
-    crate::sdk::inbox_poller::start_poller();
-
-    // 5c. IDENTITY PUBLICATION, driven in THIS session: this device's own
-    //     directory entry, read back from the network's pinned set
-    //     (`identity_publication`). The row FIRST, so a crash between here and
-    //     the publish still leaves something for the startup retry to find;
-    //     then the publish itself, SPAWNED — genesis never blocks on the
-    //     network. Failure is non-fatal: local genesis stays durable, the row
-    //     stays unpublished, and the startup retry resumes it.
-    {
-        let dev_b32 = device_id_b32.clone();
-        let g_b32 = crate::util::text_id::encode_base32_crockford(&g);
-        if let Err(e) = crate::storage::client_db::publication::upsert_publication_state(
-            &dev_b32,
-            &g_b32,
-            crate::storage::client_db::publication::PublicationState::LocalGenesisCommitted,
-            0,
-            "",
-        ) {
-            log::warn!(
-                "system.createGenesisV2: failed to record local-genesis publication state: {e}"
-            );
-        }
-        crate::runtime::get_runtime().spawn(async move {
-            let short = &dev_b32[..8.min(dev_b32.len())];
-            match crate::sdk::identity_publication::publish_identity_now(&dev_b32, &g_b32).await {
-                Ok(report) if report.is_published() => log::info!(
-                    "system.createGenesisV2: identity PUBLISHED for device={short} ({}/{} \
-                     members hold the entry)",
-                    report.holders,
-                    report.members
-                ),
-                Ok(report) => log::warn!(
-                    "system.createGenesisV2: identity NOT published for device={short} ({}/{} \
-                     members hold the entry, {} needed) — local genesis is durable and startup \
-                     will retry",
-                    report.holders,
-                    report.members,
-                    report.required
-                ),
-                Err(e) => log::warn!(
-                    "system.createGenesisV2: identity publication failed for device={short}: {e} \
-                     — local genesis is durable and startup will retry"
-                ),
-            }
-        });
+    if let Err(e) = bring_up_wallet("system.createGenesisV2", &device_id_b32, &g) {
+        return rolled_back_error(e);
     }
 
     // Success rail (mirrors finalize_bootstrap_core): complete → ok. The wallet_ready screen
@@ -277,8 +169,319 @@ pub(crate) fn handle_create_genesis_v2(args: &[u8]) -> AppResult {
     pack_envelope_ok(generated::envelope::Payload::GenesisCreatedResponse(resp))
 }
 
+/// system.restoreFromPhrase — a wallet that exists on the network, restored on this device from
+/// its 24 words (owner, 2026-11-19: "It needs to come back from the network then."). The SAME
+/// identity: the phrase re-derives the wallet's genesis, device id and keys exactly as
+/// `system.createGenesisV2` derived them. Before anything is installed, the network must hold this
+/// wallet's directory entry naming exactly that identity. Then its own register is re-verified from
+/// its activation root to its head and its leaves folded from every step's witness, so the wallet
+/// comes back at its last online balance; a register that does not reach its head rolls the
+/// identity back. Nothing the lost device held locally comes back.
+pub(crate) async fn handle_restore_from_phrase(args: &[u8]) -> AppResult {
+    const ROUTE: &str = "system.restoreFromPhrase";
+    let pack = match generated::ArgPack::decode(args) {
+        Ok(p) => p,
+        Err(e) => return err(format!("decode ArgPack failed: {e}")),
+    };
+    if pack.codec != generated::Codec::Proto as i32 {
+        return err(format!("{ROUTE}: ArgPack.codec must be PROTO"));
+    }
+    let req = match generated::WalletCreateGenesisV2Request::decode(&*pack.body) {
+        Ok(r) => r,
+        Err(e) => return err(format!("decode the phrase request failed: {e}")),
+    };
+    if req.mnemonic.trim().is_empty() {
+        return err(format!("{ROUTE}: the 24 words are required"));
+    }
+    let network_id = match std::str::from_utf8(dsm::economic::register::BETA_NETWORK_ID) {
+        Ok(network) => network.to_string(),
+        Err(e) => return err(format!("{ROUTE}: the network id is not text: {e}")),
+    };
+    // One wallet identity per app data, as for a new wallet: a restore never replaces one.
+    if crate::sdk::app_state::AppState::get_has_identity() {
+        return err(format!(
+            "{ROUTE}: a wallet already exists on this device; wipe the app data before restoring"
+        ));
+    }
+
+    // 1. The identity the phrase derives, held in memory only until the network confirms it.
+    let wallet_seed = match crate::sdk::recovery_sdk::wallet_seed_from_mnemonic(&req.mnemonic) {
+        Ok(seed) => zeroize::Zeroizing::new(seed),
+        Err(e) => return err(format!("{ROUTE}: {e}")),
+    };
+    let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
+    let inputs =
+        crate::sdk::identity_presentation::OwnerIdentityInputs::beta(network_id.as_bytes());
+    let outcome = match dsm::core::identity::genesis::create_genesis_v3_self_attested(
+        &*wallet_seed,
+        inputs.network_id,
+        inputs.wallet_index,
+        inputs.device_slot,
+        inputs.genesis_version,
+        &aph,
+    ) {
+        Ok(o) => o,
+        Err(e) => return err(format!("{ROUTE}: the identity the phrase derives: {e}")),
+    };
+    let g = outcome.state.hash;
+    let devid = outcome.state.device_id;
+    let ak_pk = outcome.state.signing_key.public_key.clone();
+
+    // 2. The network holds this wallet: its directory entry, proving itself, names exactly the
+    //    identity the phrase derived.
+    let set = match crate::sdk::storage_set::canonical_set(network_id.as_bytes()) {
+        Ok(set) => set,
+        Err(e) => return err(format!("{ROUTE}: the network's storage set: {e}")),
+    };
+    let published = match crate::sdk::device_directory::read_entry(&set, &g, &devid).await {
+        Ok(Some(read)) => read.entry,
+        Ok(None) => {
+            return err(format!(
+                "{ROUTE}: no wallet made from these words is on the network; check the words, \
+                 or create a new wallet"
+            ))
+        }
+        Err(e) => {
+            return err(format!(
+                "{ROUTE}: reading this wallet's directory entry: {e}"
+            ))
+        }
+    };
+    if published.body.genesis != g
+        || published.body.device_id != devid
+        || published.body.ak_public_key != ak_pk
+    {
+        return err(format!(
+            "{ROUTE}: the network's directory entry for this wallet names another key; nothing \
+             was restored"
+        ));
+    }
+
+    // 3. Install: the seed cached and sealed, the identity, and the published directory entry as
+    //    this device's own. The register's walk below keeps what it reads under this identity.
+    use crate::generated::genesis_lifecycle_event::Kind as LifecycleKind;
+    let emit = |kind: LifecycleKind, progress: u32| emit_lifecycle(ROUTE, kind, progress);
+    let _securing = Securing::begin();
+    emit(LifecycleKind::GenesisKindStarted, 0);
+    emit(LifecycleKind::GenesisKindSecuringDevice, 0);
+    if let Err(e) = crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&req.mnemonic) {
+        return err(format!("{ROUTE}: wallet seed derivation failed: {e}"));
+    }
+    emit(LifecycleKind::GenesisKindSecuringProgress, 30);
+    let installed = match install_wallet_genesis(&outcome, &*wallet_seed, &network_id) {
+        Ok(installed) => installed,
+        Err(e) => return err(format!("{ROUTE}: {e}")),
+    };
+    if let Err(e) = crate::storage::client_db::own_directory_entry::store(&published.encode()) {
+        return rolled_back_error(format!(
+            "{ROUTE}: keeping this wallet's directory entry: {e}"
+        ));
+    }
+    // 4. Its last online balance: its own register re-verified to its head, its leaves folded.
+    let lineage = match crate::sdk::economic_registers::replay_own_register(
+        network_id.as_bytes().to_vec(),
+        g,
+        devid,
+    )
+    .await
+    {
+        Ok(lineage) => lineage,
+        Err(e) => return rolled_back_error(format!("{ROUTE}: this wallet's register: {e}")),
+    };
+    match lineage.stop() {
+        dsm::economic::peer_lineage::HeadStop::Head => {}
+        dsm::economic::peer_lineage::HeadStop::Short(why) => {
+            return rolled_back_error(format!(
+                "{ROUTE}: this wallet's register is not decided past position {}: {why}; try \
+                 again shortly",
+                lineage.reached()
+            ))
+        }
+        dsm::economic::peer_lineage::HeadStop::Bound => {
+            return rolled_back_error(format!(
+                "{ROUTE}: this wallet's register did not reach its head (position {})",
+                lineage.reached()
+            ))
+        }
+    }
+
+    if let Err(e) = installed.core.restore_admitted_head(&lineage) {
+        return rolled_back_error(format!("{ROUTE}: installing the register's head: {e}"));
+    }
+    emit(LifecycleKind::GenesisKindSecuringProgress, 85);
+    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&devid);
+    if let Err(e) = bring_up_wallet(ROUTE, &device_id_b32, &g) {
+        return rolled_back_error(e);
+    }
+    log::info!(
+        "{ROUTE}: wallet {} restored at register position {}",
+        &device_id_b32[..8.min(device_id_b32.len())],
+        lineage.reached()
+    );
+    emit(LifecycleKind::GenesisKindSecuringComplete, 0);
+    emit(LifecycleKind::GenesisKindOk, 0);
+    let resp = generated::GenesisCreated {
+        device_id: devid.to_vec(),
+        genesis_hash: Some(generated::Hash32 { v: g.to_vec() }),
+        public_key: ak_pk,
+        smt_root: Some(generated::Hash32 {
+            v: installed.smt_root.to_vec(),
+        }),
+        genesis_nonce: outcome.genesis_nonce.to_vec(),
+        network_id,
+    };
+    pack_envelope_ok(generated::envelope::Payload::GenesisCreatedResponse(resp))
+}
+
+/// The genesis lifecycle rail, for one wallet install: drives the frontend securing screen through
+/// the SAME native events as the legacy bootstrap path (EventBridge maps these to
+/// `genesis.securing-device*` topics the useGenesisFlow hook already renders). The frontend is pure
+/// rendering — progress truth lives here. A dispatch that does not reach the WebView is logged and
+/// the install goes on: the screen only renders what the install reports.
+fn emit_lifecycle(
+    route: &str,
+    kind: crate::generated::genesis_lifecycle_event::Kind,
+    progress: u32,
+) {
+    if let Err(e) = crate::ingress::push_genesis_lifecycle_event(kind as i32, progress) {
+        log::warn!(
+            "{route}: the lifecycle event did not reach the WebView; the install goes on: {:?}",
+            e
+        );
+    }
+}
+
+/// Phase=securing_device held for any concurrent session-state read while a wallet is installed,
+/// until the route exits (success OR error), mirroring the finalize_bootstrap_core scope-guard
+/// discipline — otherwise a mid-install snapshot would report needs_genesis and flash the start
+/// screen.
+struct Securing;
+
+impl Securing {
+    fn begin() -> Self {
+        crate::sdk::session_manager::BOOTSTRAP_SECURING
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Securing {
+    fn drop(&mut self) {
+        crate::sdk::session_manager::BOOTSTRAP_SECURING
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// `msg` as the route's error, the identity mark rolled back first. Any failure after a wallet's
+/// identity is installed must roll the mark back before returning the error envelope: Kotlin
+/// publishes a session snapshot after EVERY wallet-install response, and with has_identity left
+/// set a failed install would compute phase=wallet_ready — landing the user on a wallet screen
+/// whose router never came up (fail-open). Rolled back, the snapshot honestly reports
+/// needs_genesis and the user can retry.
+fn rolled_back_error(msg: String) -> AppResult {
+    let fail_rolled_back =
+        |msg: String| match crate::sdk::app_state::AppState::set_has_identity(false) {
+            Ok(()) => err(msg),
+            Err(rollback) => err(format!(
+                "{msg}; the identity mark was not rolled back: {rollback}"
+            )),
+        };
+    fail_rolled_back(msg)
+}
+
+/// A wallet identity just installed on this device brought up in this session
+/// (`system.createGenesisV2`, `system.restoreFromPhrase`): the full router, the
+/// Bluetooth transfer stack, the connect listener and inbox poller, and the
+/// identity's directory entry published from it.
+fn bring_up_wallet(route: &str, device_id_b32: &str, g: &[u8; 32]) -> Result<(), String> {
+    // 5b. Hot-swap the MinimalBootstrapRouter for the full AppRouter now that the canonical identity
+    //     exists (device_id set + wallet seed cached above). Without this the bootstrap router stays
+    //     installed for the rest of the session and every post-genesis route (identity.pairingQR,
+    //     wallet.*, contacts.*) fails with "requires genesis". The core adapter reads the router slot
+    //     live, so the swap takes effect on the very next query.
+    match crate::init::install_full_app_router_self_config() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "{route}: canonical identity not ready after genesis (fail closed)"
+            ))
+        }
+        Err(e) => return Err(format!("{route}: full AppRouter install failed: {e}")),
+    }
+
+    //     THE BLUETOOTH TRANSFER STACK for the new identity, once its router is up. Startup builds it only when an
+    //     identity already exists, so without this a wallet created in this session paired over
+    //     Bluetooth but refused every offline send ("the BLE stack is not live yet") until the
+    //     app restarted.
+    #[cfg(feature = "bluetooth")]
+    if let Err(e) = crate::init::build_ble_stack_for_identity() {
+        return Err(format!(
+            "{route}: the Bluetooth transfer stack could not be built: {e}"
+        ));
+    }
+
+    //     LISTENING for the new identity, as `inbox.startPoller` starts it when the app starts
+    //     with an identity: the connect listener while an application is connected (DSM
+    //     Amendment A11), then the inbox poller. Startup starts them only when an identity
+    //     already exists, so without this a wallet created in this session took in nothing sent
+    //     to it until the app was backgrounded and reopened, and the sender's next transfer
+    //     waited on the first one to settle.
+    if let Err(e) = crate::sdk::connect::wallet::resume_listener() {
+        return Err(format!("{route}: the connect listener: {e}"));
+    }
+    crate::sdk::inbox_poller::start_poller();
+
+    // 5c. IDENTITY PUBLICATION, driven in THIS session: this device's own
+    //     directory entry, read back from the network's pinned set
+    //     (`identity_publication`). The row FIRST, so a crash between here and
+    //     the publish still leaves something for the startup retry to find;
+    //     then the publish itself, SPAWNED — genesis never blocks on the
+    //     network. Failure is non-fatal: local genesis stays durable, the row
+    //     stays unpublished, and the startup retry resumes it.
+    {
+        let dev_b32 = device_id_b32.to_string();
+        let g_b32 = crate::util::text_id::encode_base32_crockford(g);
+        let route = route.to_string();
+        if let Err(e) = crate::storage::client_db::publication::upsert_publication_state(
+            &dev_b32,
+            &g_b32,
+            crate::storage::client_db::publication::PublicationState::LocalGenesisCommitted,
+            0,
+            "",
+        ) {
+            log::warn!("{route}: failed to record local-genesis publication state: {e}");
+        }
+        crate::runtime::get_runtime().spawn(async move {
+            let short = &dev_b32[..8.min(dev_b32.len())];
+            match crate::sdk::identity_publication::publish_identity_now(&dev_b32, &g_b32).await {
+                Ok(report) if report.is_published() => log::info!(
+                    "{route}: identity PUBLISHED for device={short} ({}/{} \
+                     members hold the entry)",
+                    report.holders,
+                    report.members
+                ),
+                Ok(report) => log::warn!(
+                    "{route}: identity NOT published for device={short} ({}/{} \
+                     members hold the entry, {} needed) — local genesis is durable and startup \
+                     will retry",
+                    report.holders,
+                    report.members,
+                    report.required
+                ),
+                Err(e) => log::warn!(
+                    "{route}: identity publication failed for device={short}: {e} \
+                     — local genesis is durable and startup will retry"
+                ),
+            }
+        });
+    }
+    Ok(())
+}
+
 /// A wallet identity installed on this device by [`install_wallet_genesis`].
 pub(crate) struct InstalledGenesis {
+    /// The device's Core, holding the head just installed.
+    pub(crate) core: crate::sdk::core_sdk::CoreSDK,
     pub(crate) device_id: [u8; 32],
     pub(crate) genesis: [u8; 32],
     pub(crate) ak_public_key: Vec<u8>,
@@ -386,6 +589,7 @@ pub(crate) fn install_wallet_genesis(
     }
 
     Ok(InstalledGenesis {
+        core,
         device_id: devid,
         genesis: g,
         ak_public_key: ak_pk,
@@ -407,6 +611,7 @@ impl AppRouterImpl {
     pub(crate) async fn handle_system_invoke(&self, i: AppInvoke) -> AppResult {
         match i.method.as_str() {
             "system.createGenesisV2" => handle_create_genesis_v2(&i.args),
+            "system.restoreFromPhrase" => handle_restore_from_phrase(&i.args).await,
             _ => err(format!("unknown system invoke: {}", i.method)),
         }
     }

@@ -523,6 +523,95 @@ pub fn walk_peer_to_head(
     Ok(verifier.checked(answer))
 }
 
+/// A wallet's own lineage as its register holds it, re-verified from the
+/// activation root with the predicate any device runs for a peer (DSM
+/// Amendment A14), and the leaves its validated steps installed, folded from
+/// each step's witness. What a wallet restored from its phrase admits as its
+/// own head: nothing it held locally is read.
+#[derive(Debug)]
+pub struct OwnLineage {
+    reached: u64,
+    head: Option<crate::economic::lineage::AdmittedEconomicPosition>,
+    rows: Vec<crate::economic::lineage::LeafRow>,
+    balances: std::collections::BTreeMap<[u8; 32], u64>,
+    stop: HeadStop,
+}
+
+impl OwnLineage {
+    /// The last position the walk proved; 0 when the wallet admitted nothing.
+    pub fn reached(&self) -> u64 {
+        self.reached
+    }
+
+    /// The admitted position at the head, `None` when the wallet admitted
+    /// nothing.
+    pub fn head(&self) -> Option<&crate::economic::lineage::AdmittedEconomicPosition> {
+        self.head.as_ref()
+    }
+
+    /// Every leaf the head root holds: `(leaf key, leaf value, state bytes)`.
+    pub fn rows(&self) -> &[crate::economic::lineage::LeafRow] {
+        &self.rows
+    }
+
+    /// Every balance the head root holds, by policy commit.
+    pub fn balances(&self) -> &std::collections::BTreeMap<[u8; 32], u64> {
+        &self.balances
+    }
+
+    /// Why the walk stopped: only `Head` is the wallet's whole lineage.
+    pub fn stop(&self) -> &HeadStop {
+        &self.stop
+    }
+}
+
+/// The states a receiver kept of every peer but one: a replay of that one's
+/// lineage starts at its activation root, whatever was kept of it.
+struct KeptOfOthers<'a, R: ReceiverRecords + ?Sized> {
+    records: &'a R,
+    own: PeerKey,
+}
+
+impl<R: ReceiverRecords + ?Sized> KeptPeerStates for KeptOfOthers<'_, R> {
+    fn kept_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<KeptPeerState>, PeerLineageFailure> {
+        if (*genesis, *device_id) == self.own {
+            return Ok(None);
+        }
+        self.records.kept_below(genesis, device_id, position)
+    }
+}
+
+/// Re-verify the lineage of `(genesis, device_id)` from its activation root to
+/// its head, and fold the leaves its steps installed. Each step is read at the
+/// cell routed from the root proved before it and validated from that root,
+/// its credits' sources from the states kept of them; every leaf comes from a
+/// validated witness, and the folded leaves must recompute every root the walk
+/// proved. A realized SoFi position publishes no witness of the leaves it
+/// installed, so a lineage holding one is `Incomplete`.
+pub fn replay_own_lineage<R: ReceiverRecords>(
+    fetcher: &dyn PeerEvidenceFetcher,
+    expected_network_id: &[u8],
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    records: &R,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<Checked<OwnLineage>, PeerLineageFailure> {
+    let kept = KeptOfOthers {
+        records,
+        own: (*genesis, *device_id),
+    };
+    let verifier =
+        Verifier::new(fetcher, expected_network_id, records, conditional)?.keeping(&kept);
+    let walk = verifier.toward_head(&kept, genesis, device_id, u64::MAX)?;
+    let lineage = verifier.fold_own(genesis, device_id, walk)?;
+    Ok(verifier.checked(lineage))
+}
+
 /// The root a peer selected AT `position`, and the reference a later `P`
 /// names that position by (SoFi Amendment S15): the step there validated
 /// from its own parent, or, when its claim is conditional, resolved through
@@ -887,6 +976,22 @@ struct Verifier<'a> {
     /// The steps this check is validating now: a step that is, through its
     /// credits' sources, its own source is circular.
     validating: std::cell::RefCell<std::collections::BTreeSet<(PeerKey, u64)>>,
+    /// What each step this check validated changed: its witness, or the claim a
+    /// conditional position's resolution accepted. A wallet restored from its
+    /// phrase folds its own (`replay_own_lineage`).
+    replayed: std::cell::RefCell<std::collections::BTreeMap<(PeerKey, u64), Replayed>>,
+}
+
+/// What one validated step changed, as a replay of the lineage folds it.
+#[derive(Debug, Clone)]
+enum Replayed {
+    /// An ordinary step: its witness, validated against its parent.
+    Witnessed(crate::economic::witness::EconomicTransitionWitness),
+    /// A conditional SoFi position, by the claim its resolution accepted.
+    Resolved {
+        claim_ref: [u8; 32],
+        fulfillment_id: [u8; 32],
+    },
 }
 
 /// A claim's identity at its cell: the entry digest the register recognizes
@@ -928,6 +1033,7 @@ impl<'a> Verifier<'a> {
             proved: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             walking: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             validating: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            replayed: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         })
     }
 
@@ -1177,6 +1283,12 @@ impl Verifier<'_> {
         )?;
         let witness = crate::economic::decode::decode_transition_witness(&witness_bytes)
             .map_err(|e| invalid(format!("witness at {position}: {e}")))?;
+        if let StepRole::Offered = role {
+            self.replayed.borrow_mut().insert(
+                ((*genesis, *device_id), position),
+                Replayed::Witnessed(witness.clone()),
+            );
+        }
         let (accepted, substrate) = match &manifest.substrate {
             AdmissionSubstrate::DsmSuccessor {
                 evidence_addr: successor_addr,
@@ -1907,6 +2019,117 @@ impl Verifier<'_> {
         })
     }
 
+    /// The leaves the steps of `(genesis, device_id)` this check validated
+    /// installed, from its activation root through `walk.reached`, each step
+    /// folded from its witness over the root the step before left.
+    fn fold_own(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        walk: PeerWalk,
+    ) -> Result<OwnLineage, PeerLineageFailure> {
+        use crate::economic::lineage::AdmittedEconomicPosition;
+        let own = (*genesis, *device_id);
+        let replayed = self.replayed.borrow();
+        let proved = self.proved.borrow();
+        let mut leaves: std::collections::BTreeMap<
+            [u8; 32],
+            crate::economic::state::EconomicLeafState,
+        > = std::collections::BTreeMap::new();
+        let mut root = crate::economic::tree::empty_economic_root();
+        let mut head = None;
+        for position in 1..=walk.reached {
+            let kept = proved
+                .get(&own)
+                .and_then(|states| states.get(&position))
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "own position {position}: the walk proved no state there"
+                    ))
+                })?;
+            match replayed.get(&(own, position)) {
+                Some(Replayed::Witnessed(witness)) => {
+                    if witness.pre_economic_root != root {
+                        return Err(invalid(format!(
+                            "own position {position}: the witness is not built on the root the \
+                             step before left"
+                        )));
+                    }
+                    for mutation in &witness.mutations {
+                        let key = mutation
+                            .leaf_key(genesis, device_id)
+                            .map_err(|e| invalid(format!("own position {position}: {e:?}")))?;
+                        match &mutation.post_state {
+                            Some(post) => {
+                                leaves.insert(key, post.clone());
+                            }
+                            None => {
+                                leaves.remove(&key);
+                            }
+                        }
+                    }
+                    root = witness.post_economic_root;
+                    let ParentClaimRef::SingleRoot { claim_ref } = kept.accepted else {
+                        return Err(invalid(format!(
+                            "own position {position}: a witnessed step accepted as conditional"
+                        )));
+                    };
+                    head = Some(AdmittedEconomicPosition::SingleRoot {
+                        economic_position: position,
+                        economic_root: root,
+                        claim_ref,
+                    });
+                }
+                Some(Replayed::Resolved {
+                    claim_ref,
+                    fulfillment_id,
+                }) => {
+                    if kept.economic_root != root {
+                        return Err(PeerLineageFailure::Incomplete(format!(
+                            "own position {position}: a SoFi position that realized; the leaves \
+                             its realization installed are published nowhere, so they cannot be \
+                             rebuilt from the register"
+                        )));
+                    }
+                    head = Some(AdmittedEconomicPosition::ResolvedSofi {
+                        economic_position: position,
+                        selected_root: root,
+                        fulfillment_id: *fulfillment_id,
+                        claim_ref: *claim_ref,
+                    });
+                }
+                None => {
+                    return Err(invalid(format!(
+                        "own position {position}: the walk validated nothing there"
+                    )))
+                }
+            }
+            if kept.economic_root != root {
+                return Err(invalid(format!(
+                    "own position {position}: the folded leaves do not reach the root the walk \
+                     proved there"
+                )));
+            }
+        }
+        let rows = leaves
+            .iter()
+            .map(|(key, state)| Ok((*key, state.leaf_value()?, state.encode()?)))
+            .collect::<Result<Vec<_>, crate::ccb::CcbError>>()
+            .map_err(|e| invalid(format!("a folded leaf has no canonical bytes: {e:?}")))?;
+        let balances = ValidatedEconomicRoot::from_verifier_memo(walk.reached, root)
+            .admitted_tree(&rows)
+            .map_err(|e| invalid(format!("the folded leaves: {e}")))?
+            .balances()
+            .clone();
+        Ok(OwnLineage {
+            reached: walk.reached,
+            head,
+            rows,
+            balances,
+            stop: walk.stop,
+        })
+    }
+
     /// The state the peer's step at `position` installed, validated from
     /// `point`, the state proved before it; a conditional position is resolved
     /// from it.
@@ -1937,8 +2160,15 @@ impl Verifier<'_> {
                 }
                 RegisteredEconomicClaim::ConditionalSofi(held) => {
                     self.count(|c| c.conditional_hops += 1);
-                    let (root, _) =
+                    let (root, accepted) =
                         self.resolve_conditional(genesis, device_id, position, point, &held)?;
+                    self.replayed.borrow_mut().insert(
+                        ((*genesis, *device_id), position),
+                        Replayed::Resolved {
+                            claim_ref: accepted.claim_ref(),
+                            fulfillment_id: held.fulfillment_id,
+                        },
+                    );
                     ChainPoint {
                         root,
                         accepted: Some(ParentClaimRef::Conditional {

@@ -17,11 +17,12 @@ final class BridgeDispatcher {
     /// Answer `method` with `payload` on the queue it belongs on; `completion`
     /// runs on that queue.
     func dispatch(method: String, payload: Data, completion: @escaping (Result<Data, BridgeFailure>) -> Void) {
-        let queue = method == "createGenesisV2" ? genesis : general
+        let installsWallet = method == "createGenesisV2" || method == "restoreFromPhrase"
+        let queue = installsWallet ? genesis : general
         queue.async {
             let outcome = self.answer(method: method, payload: payload)
             BridgeLogger.logBridgeCall(method: method, payloadBytes: payload.count, outcome: outcome.map(\.count).mapError { $0 as Error })
-            if method == "createGenesisV2" {
+            if installsWallet {
                 // The wallet exists now: the page sees phase=wallet_ready from
                 // a fresh snapshot, as it does on Android.
                 DispatchQueue.main.async { SessionFacts.shared.publish(method) }
@@ -65,6 +66,9 @@ final class BridgeDispatcher {
 
         case "createGenesisV2":
             return try IdentityHandler.shared.createGenesisV2(request: payload)
+
+        case "restoreFromPhrase":
+            return try IdentityHandler.shared.restoreFromPhrase(request: payload)
 
         case "getAllBalancesStrict":
             return DsmSdk.balancesStrict()

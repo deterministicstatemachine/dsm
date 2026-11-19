@@ -537,6 +537,60 @@ impl CoreSDK {
         Ok(())
     }
 
+    /// A wallet restored from its phrase takes its own register's head as its
+    /// admitted position: the head Core re-verified and folded
+    /// (`replay_own_lineage`), its leaves as the leaf cache, and the balances
+    /// they hold on the genesis head, in ONE transaction. Refused unless this
+    /// device holds its genesis head and nothing admitted.
+    pub(crate) fn restore_admitted_head(
+        &self,
+        lineage: &dsm::economic::peer_lineage::OwnLineage,
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
+        let storage = |what: &str, e: String| {
+            DsmError::storage(format!("restore: {what}: {e}"), None::<std::io::Error>)
+        };
+        let mut sm = self.state_machine.lock();
+        let head = sm.device_head().cloned().ok_or_else(|| {
+            DsmError::storage("restore: no head".to_string(), None::<std::io::Error>)
+        })?;
+        let admitted = crate::storage::client_db::economic_lineage::get_admitted()
+            .map_err(|e| storage("the admitted position", e.to_string()))?;
+        if admitted.is_some() {
+            // A restore that stopped after this write and runs again finds the same head.
+            if admitted.as_ref() == lineage.head() && head.balances_snapshot() == lineage.balances()
+            {
+                return Ok(());
+            }
+            return Err(DsmError::invalid_operation(
+                "restore: this device already admitted a position of its own",
+            ));
+        }
+        let restored = head.restored_from_register(lineage)?;
+        {
+            let binding = get_connection().map_err(|e| storage("db", e.to_string()))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|poisoned| storage("db", poisoned.to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| storage("tx", e.to_string()))?;
+            if let Some(admitted) = lineage.head() {
+                crate::storage::client_db::economic_lineage::record_admitted_with_conn(
+                    &tx,
+                    admitted,
+                    lineage.rows(),
+                )
+                .map_err(|e| storage("the admitted position", e.to_string()))?;
+            }
+            update_bcr_device_head_with_conn(&tx, &restored)
+                .map_err(|e| storage("the head", e.to_string()))?;
+            tx.commit().map_err(|e| storage("commit", e.to_string()))?;
+        }
+        sm.set_device_head(restored);
+        Ok(())
+    }
+
     /// The full seam: head + pending row + FROZEN EVIDENCE, one transaction.
     ///
     /// `artifacts` are `(object_key, exact payload bytes, purpose)` — every

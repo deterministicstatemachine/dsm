@@ -1115,7 +1115,6 @@ mod tests {
     use super::*;
 
     const ASSET: [u8; 32] = [0xA1; 32];
-    const OPENED: [u8; 32] = [0x01; 32];
 
     use crate::types::offline_chain::fixture::Payer;
 

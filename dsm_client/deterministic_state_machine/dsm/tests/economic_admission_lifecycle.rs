@@ -1504,8 +1504,7 @@ impl Board {
 fn boundary(
     board: &mut Board,
     head: &dsm::types::device_state::RealizedHead,
-    kind: dsm::types::device_state::OfflineBoundaryKind,
-    amount: u64,
+    (kind, amount): (dsm::types::device_state::OfflineBoundaryKind, u64),
     pre_root: [u8; 32],
     tree: &mut EconomicSmt,
     balances: &std::collections::BTreeMap<[u8; 32], u64>,
@@ -1693,8 +1692,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     let load = boundary(
         &mut board,
         &head,
-        Load,
-        300,
+        (Load, 300),
         at_one.economic_root(),
         &mut tree,
         &online,
@@ -1716,8 +1714,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     let unload = boundary(
         &mut board,
         &load.outcome.new_device_state,
-        Unload,
-        100,
+        (Unload, 100),
         at_two.economic_root(),
         &mut tree,
         &online,
@@ -1849,8 +1846,7 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
     let load = boundary(
         &mut board,
         &head,
-        Load,
-        300,
+        (Load, 300),
         pre_root,
         &mut tree.clone(),
         &online,
@@ -1875,8 +1871,7 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
     let unload = boundary(
         &mut board,
         &load.outcome.new_device_state,
-        Unload,
-        100,
+        (Unload, 100),
         loaded_tree.root(),
         &mut loaded_tree.clone(),
         &after_load,

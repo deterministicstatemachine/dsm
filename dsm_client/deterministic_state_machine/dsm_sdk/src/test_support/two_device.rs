@@ -168,6 +168,25 @@ impl TestDevice {
         }
     }
 
+    /// This wallet on a new device, where a restore from its words starts: the
+    /// process switched to `slot`'s empty database, holding no identity, no SDK
+    /// context, no wallet seed and nothing read before. The returned device is
+    /// this wallet over that slot, not yet started.
+    pub fn on_a_new_device(&self, slot: &'static str) -> TestDevice {
+        client_db::switch_test_database_slot(slot);
+        client_db::init_database().expect("init the new device's database");
+        AppState::reset_for_testing();
+        crate::reset_sdk_context_for_testing();
+        crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
+        crate::sdk::final_reads::forget_everything();
+        TestDevice {
+            slot,
+            router: None,
+            kyber_pk: Vec::new(),
+            ..self.clone()
+        }
+    }
+
     /// The device's router. Only meaningful while [`enter`](Self::enter)ed.
     pub fn router(&self) -> &AppRouterImpl {
         self.router.as_deref().expect("device not booted")

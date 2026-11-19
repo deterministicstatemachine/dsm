@@ -3,8 +3,10 @@
 /**
  * `backup_phrase`: a new wallet's recovery phrase is on the screen for the user
  * to write down and check; the wallet is created from it after the check.
+ * `restore_phrase`: the user is typing the 24 words of a wallet that exists on
+ * the network, to restore it on this phone.
  */
-export type AppState = 'loading' | 'runtime_loading' | 'needs_genesis' | 'backup_phrase' | 'securing_device' | 'publication_pending' | 'wallet_ready' | 'locked' | 'error';
+export type AppState = 'loading' | 'runtime_loading' | 'needs_genesis' | 'backup_phrase' | 'restore_phrase' | 'securing_device' | 'publication_pending' | 'wallet_ready' | 'locked' | 'error';
 
 /**
  * Every screen the app has, once. `ScreenType` is derived from this list and

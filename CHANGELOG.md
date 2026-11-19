@@ -41,6 +41,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   holds its cells, or every checker refuses it. With a broken board, a payment
   and a conflicting step from one root never both count. The board's firmware
   is unchanged: it signs every action but a receive alike.
+- **Restore a wallet from its 24 words (DSM Amendment A40).** Under Create /
+  INITIALIZE, a new option restores a wallet that exists on the network: the
+  same identity (genesis, device id, keys), checked against the wallet's own
+  directory entry before anything is installed, back at its last online
+  balance. The balance comes from the wallet's own register, re-verified from
+  its start to its head with the check any device runs for a peer, its leaves
+  rebuilt from each step's witness. Words of no wallet on the network restore
+  nothing. Chains with contacts, Connect sessions and local history held only
+  on the lost phone do not come back.
 
 ---
 
