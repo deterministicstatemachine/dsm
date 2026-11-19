@@ -305,8 +305,51 @@ pub(crate) async fn handle_restore_from_phrase(args: &[u8]) -> AppResult {
         }
     }
 
-    if let Err(e) = installed.core.restore_admitted_head(&lineage) {
-        return rolled_back_error(format!("{ROUTE}: installing the register's head: {e}"));
+    // 5. Its contacts: the latest backup it kept on the nodes (DSM Amendment A40), installed
+    //    only when it is the wallet as it stood at the register's head. Backups the cells do not
+    //    decide yet roll the restore back, so contacts that are there are never given up.
+    let keys = match crate::sdk::wallet_backup_flow::keys() {
+        Ok(keys) => keys,
+        Err(e) => return rolled_back_error(format!("{ROUTE}: the backup keys: {e}")),
+    };
+    let backups = {
+        let (set, keys) = (set.clone(), keys.clone());
+        tokio::task::spawn_blocking(move || {
+            crate::sdk::wallet_backup_flow::latest(&set, (g, devid), &keys)
+        })
+        .await
+    };
+    let latest = match backups {
+        Ok(Ok(latest)) => latest,
+        Ok(Err(e)) => {
+            return rolled_back_error(format!(
+                "{ROUTE}: this wallet's backups: {e}; try again shortly"
+            ))
+        }
+        Err(e) => return rolled_back_error(format!("{ROUTE}: reading the backups stopped: {e}")),
+    };
+    let installed_backup = match latest {
+        Some((n, body)) => {
+            if let Err(e) = crate::sdk::wallet_backup_flow::record_latest(n) {
+                return rolled_back_error(format!("{ROUTE}: {e}"));
+            }
+            match installed.core.restore_from_backup(&lineage, &body) {
+                Ok(()) => Some(n),
+                Err(e) => {
+                    log::warn!("{ROUTE}: backup {n} not installed, contacts stay off: {e}");
+                    None
+                }
+            }
+        }
+        None => {
+            log::info!("{ROUTE}: this wallet kept no backup on the nodes");
+            None
+        }
+    };
+    if installed_backup.is_none() {
+        if let Err(e) = installed.core.restore_admitted_head(&lineage) {
+            return rolled_back_error(format!("{ROUTE}: installing the register's head: {e}"));
+        }
     }
     emit(LifecycleKind::GenesisKindSecuringProgress, 85);
     let device_id_b32 = crate::util::text_id::encode_base32_crockford(&devid);
@@ -314,9 +357,10 @@ pub(crate) async fn handle_restore_from_phrase(args: &[u8]) -> AppResult {
         return rolled_back_error(e);
     }
     log::info!(
-        "{ROUTE}: wallet {} restored at register position {}",
+        "{ROUTE}: wallet {} restored at register position {}, contacts from backup {:?}",
         &device_id_b32[..8.min(device_id_b32.len())],
-        lineage.reached()
+        lineage.reached(),
+        installed_backup
     );
     emit(LifecycleKind::GenesisKindSecuringComplete, 0);
     emit(LifecycleKind::GenesisKindOk, 0);
@@ -430,6 +474,7 @@ fn bring_up_wallet(route: &str, device_id_b32: &str, g: &[u8; 32]) -> Result<(),
         return Err(format!("{route}: the connect listener: {e}"));
     }
     crate::sdk::inbox_poller::start_poller();
+    crate::sdk::wallet_backup_flow::start();
 
     // 5c. IDENTITY PUBLICATION, driven in THIS session: this device's own
     //     directory entry, read back from the network's pinned set

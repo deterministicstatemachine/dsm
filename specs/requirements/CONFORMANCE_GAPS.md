@@ -7779,12 +7779,12 @@ Found on the developer storage set, 2026-11-17, by Sennite's shop suite (`test/r
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 377 | 248 | 48 | 16 | 0 | 38 | 27 |
+| DSM high-level (MR-DSM) | 378 | 249 | 48 | 16 | 0 | 38 | 27 |
 | SoFi (MR-SOFI) | 431 | 387 | 13 | 10 | 1 | 17 | 3 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 160 | 79 | 13 | 40 | 0 | 18 | 10 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
-| **All** | **1114** | **725** | **74** | **66** | **1** | **73** | **175** |
+| **All** | **1115** | **726** | **74** | **66** | **1** | **73** | **175** |
 
 ## 8 Per-requirement results
 
@@ -8169,6 +8169,7 @@ Found on the developer storage set, 2026-11-17, by Sennite's shop suite (`test/r
 | MR-DSM-0380 | Met | `dsm::offline_origin::payment_at_cells`; `dsm::economic::peer_lineage::boundary_holds_its_cells` | `dsm::offline_origin::tests::valid_conflicting_steps_settle_once`; `dsm::offline_origin::tests::a_payment_and_an_unload_from_one_root_never_both_count`; `dsm_sdk::bluetooth::offline_step_tests::origin_cells::a_cloned_board_paying_two_receivers_settles_once_on_the_nodes` | DSM Amendment A39 (owner, 2026-11-19). Prototype on PR #1262. |
 | MR-DSM-0381 | Met | `dsm_sdk::handlers::system_routes::handle_restore_from_phrase`; `dsm_sdk::sdk::device_directory::read_entry` | `dsm_sdk::handlers::restore_from_phrase_tests::a_wallet_restored_from_its_words_is_the_same_identity_at_its_last_online_balance` | DSM Amendment A40 (owner, 2026-11-19). On PR #1262. |
 | MR-DSM-0382 | Met | `dsm::economic::peer_lineage::replay_own_lineage`; `dsm::types::device_state::DeviceState::restored_from_register`; `dsm_sdk::sdk::core_sdk::CoreSDK::restore_admitted_head` | `dsm_sdk::handlers::restore_from_phrase_tests::a_wallet_restored_from_its_words_is_the_same_identity_at_its_last_online_balance` | DSM Amendment A40 (owner, 2026-11-19). On PR #1262. |
+| MR-DSM-0383 | Met | `dsm::wallet_backup::BackupKeys::seal`; `dsm::wallet_backup::BackupKeys::open`; `dsm_sdk::sdk::wallet_backup_flow::back_up_now`; `dsm_sdk::sdk::wallet_backup_flow::latest`; `dsm_sdk::sdk::core_sdk::CoreSDK::restore_from_backup` | `dsm::wallet_backup::tests::a_backup_opens_only_as_itself`; `dsm::wallet_backup::tests::the_derivations_are_the_drafted_hashes`; `dsm_sdk::handlers::restore_from_phrase_tests::a_restored_wallet_carries_on_with_its_contacts_from_its_backup`; `dsm_sdk::handlers::restore_from_phrase_tests::a_backup_behind_the_register_is_never_installed` | DSM Amendment A40 (owner, 2026-11-19). On PR #1262. |
 
 ### 8.2 SoFi settlement specification
 

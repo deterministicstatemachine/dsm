@@ -242,6 +242,8 @@ impl AppRouterImpl {
             "inbox.startPoller" => {
                 log::info!("[DSM_SDK] inbox.startPoller called");
                 crate::sdk::inbox_poller::start_poller();
+                // The wallet's backups, taken once it is still (DSM Amendment A40).
+                crate::sdk::wallet_backup_flow::start();
                 // A connected application's requests are fetched beside the
                 // inbox (DSM Amendment A11).
                 if let Err(e) = crate::sdk::connect::wallet::resume_listener() {

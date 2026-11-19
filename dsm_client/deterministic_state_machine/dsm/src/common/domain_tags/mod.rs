@@ -228,7 +228,7 @@ mod tests {
     // +3 with offline origin cells (DSM Amendment A39 draft): the cell of an
     // offline account root, its seed, and the challenge a board signs a load
     // or an unload under.
-    const EXPECTED_TAG_COUNT: usize = 454;
+    const EXPECTED_TAG_COUNT: usize = 458;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

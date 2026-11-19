@@ -591,6 +591,97 @@ impl CoreSDK {
         Ok(())
     }
 
+    /// A wallet restored from its phrase takes the latest backup it kept on the
+    /// nodes (DSM Amendment A40) — its contacts, their chain state and the
+    /// device head — only when that backup was taken at exactly the register
+    /// position `lineage` re-verified, and its head holds exactly the balances
+    /// the register holds there. The backup's tables, its head and the
+    /// register's admitted position are written in ONE transaction. Refused,
+    /// with nothing written, otherwise.
+    pub(crate) fn restore_from_backup(
+        &self,
+        lineage: &dsm::economic::peer_lineage::OwnLineage,
+        body: &crate::sdk::wallet_backup_flow::Body,
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::get_connection;
+        let storage = |what: &str, e: String| {
+            DsmError::storage(format!("restore: {what}: {e}"), None::<std::io::Error>)
+        };
+        let registered = match lineage.head() {
+            None => None,
+            Some(dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position,
+                economic_root,
+                ..
+            })
+            | Some(dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi {
+                economic_position,
+                selected_root: economic_root,
+                ..
+            }) => Some((*economic_position, *economic_root)),
+            Some(dsm::economic::lineage::AdmittedEconomicPosition::UnresolvedSofi {
+                economic_position,
+                ..
+            }) => {
+                return Err(DsmError::invalid_operation(format!(
+                    "restore: the register's head at {economic_position} is unresolved"
+                )))
+            }
+        };
+        if body.admitted != registered {
+            return Err(DsmError::invalid_operation(format!(
+                "restore: the latest backup was taken at register position {:?}, and the \
+                 register's head is at {:?}: the backup is not the wallet as it last stood",
+                body.admitted.map(|(p, _)| p),
+                registered.map(|(p, _)| p)
+            )));
+        }
+        let mut sm = self.state_machine.lock();
+        let current = sm.device_head().cloned().ok_or_else(|| {
+            DsmError::storage("restore: no head".to_string(), None::<std::io::Error>)
+        })?;
+        let head = crate::sdk::wallet_backup_flow::head_of(body, &current.devid())?;
+        if head.genesis_digest() != current.genesis_digest() || head.devid() != current.devid() {
+            return Err(DsmError::invalid_operation(
+                "restore: the backup's head is another wallet's",
+            ));
+        }
+        if head.balances_snapshot() != lineage.balances() {
+            return Err(DsmError::invalid_operation(
+                "restore: the backup's head holds other balances than the register's head",
+            ));
+        }
+        if crate::storage::client_db::economic_lineage::get_admitted()
+            .map_err(|e| storage("the admitted position", e.to_string()))?
+            .is_some()
+        {
+            return Err(DsmError::invalid_operation(
+                "restore: this device already admitted a position of its own",
+            ));
+        }
+        {
+            let binding = get_connection().map_err(|e| storage("db", e.to_string()))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|poisoned| storage("db", poisoned.to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| storage("tx", e.to_string()))?;
+            crate::sdk::wallet_backup_flow::install(&tx, body)?;
+            if let Some(admitted) = lineage.head() {
+                crate::storage::client_db::economic_lineage::record_admitted_with_conn(
+                    &tx,
+                    admitted,
+                    lineage.rows(),
+                )
+                .map_err(|e| storage("the admitted position", e.to_string()))?;
+            }
+            tx.commit().map_err(|e| storage("commit", e.to_string()))?;
+        }
+        sm.set_device_head(head);
+        Ok(())
+    }
+
     /// The full seam: head + pending row + FROZEN EVIDENCE, one transaction.
     ///
     /// `artifacts` are `(object_key, exact payload bytes, purpose)` — every

@@ -48,8 +48,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   balance. The balance comes from the wallet's own register, re-verified from
   its start to its head with the check any device runs for a peer, its leaves
   rebuilt from each step's witness. Words of no wallet on the network restore
-  nothing. Chains with contacts, Connect sessions and local history held only
-  on the lost phone do not come back.
+  nothing. Contacts come back from the wallet's own backup on the nodes:
+  sealed under a key only the 24 words give, taken once the wallet has been
+  still about 20 seconds (any new step cancels it), and installed only when it
+  is the wallet as the register's head shows it. Connect sessions, local
+  history and anything since the last backup do not come back.
 
 ---
 

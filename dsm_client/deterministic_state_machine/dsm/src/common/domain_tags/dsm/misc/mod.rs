@@ -19,6 +19,7 @@ mod sofi;
 mod testing;
 mod token_ops;
 mod wallet;
+mod wallet_backup;
 
 pub use addressing::*;
 pub use app_cell::*;
@@ -32,6 +33,7 @@ pub use sofi::*;
 pub use testing::*;
 pub use token_ops::*;
 pub use wallet::*;
+pub use wallet_backup::*;
 
 /// The SoFi v8 tags, collected separately so the flat `TAGS` list below stays
 /// untouched by the v8 allocation.
@@ -56,6 +58,12 @@ pub(super) fn app_cell_tags() -> &'static [TaggedHashDomain<'static>] {
 #[cfg(test)]
 pub(super) fn offline_origin_tags() -> &'static [TaggedHashDomain<'static>] {
     offline_origin::OFFLINE_ORIGIN_TAGS
+}
+
+/// The wallet-backup tags (DSM Amendment A40), collected the same way.
+#[cfg(test)]
+pub(super) fn wallet_backup_tags() -> &'static [TaggedHashDomain<'static>] {
+    wallet_backup::WALLET_BACKUP_TAGS
 }
 
 /// The shared-lineage tags (SoFi Amendment S23), collected the same way.
