@@ -477,8 +477,8 @@ dsm_client/deterministic_state_machine/dsm/tests/economic_admission_lifecycle.rs
 dsm_client/deterministic_state_machine/dsm/tests/economic_admission_lifecycle.rs	1424	Ok(spx(dsm::crypto::sphincs::SphincsVariant::SPX256f, seed))
 dsm_client/deterministic_state_machine/dsm/tests/economic_admission_lifecycle.rs	1427	Ok(dsm::crypto::sphincs::sign(
 dsm_client/deterministic_state_machine/dsm/tests/economic_admission_lifecycle.rs	1428	dsm::crypto::sphincs::SphincsVariant::SPX256f,
-dsm_client/deterministic_state_machine/dsm/tests/economic_admission_lifecycle.rs	1536	let signature = dsm::crypto::sphincs::sign(
-dsm_client/deterministic_state_machine/dsm/tests/economic_admission_lifecycle.rs	1537	dsm::crypto::sphincs::SphincsVariant::SPX256f,
+dsm_client/deterministic_state_machine/dsm/tests/economic_admission_lifecycle.rs	1535	let signature = dsm::crypto::sphincs::sign(
+dsm_client/deterministic_state_machine/dsm/tests/economic_admission_lifecycle.rs	1536	dsm::crypto::sphincs::SphincsVariant::SPX256f,
 dsm_client/deterministic_state_machine/dsm/tests/economic_lineage_register.rs	164	dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair")
 dsm_client/deterministic_state_machine/dsm/tests/economic_lineage_register.rs	288	let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a keypair");
 dsm_client/deterministic_state_machine/dsm/tests/economic_peer_evidence.rs	12	use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};

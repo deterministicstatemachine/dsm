@@ -197,30 +197,45 @@ impl ValidatedEconomicRoot {
     /// write set.
     pub fn admitted_tree(&self, rows: &[LeafRow]) -> Result<AdmittedTree, LeafCacheError> {
         let (tree, states) = tree_of_rows(rows, &self.economic_root)?;
-        let mut balances = std::collections::BTreeMap::new();
-        for state in states {
-            match state {
-                EconomicLeafState::Balance(b) => {
-                    balances.insert(b.policy_commit, b.amount);
-                }
-                // Write-once records a write set inserts and never starts
-                // from: a consumed source, and the creation records a write
-                // set refuses to create twice by reading the tree.
-                EconomicLeafState::ConsumedSource(..)
-                | EconomicLeafState::VaultCreation(..)
-                | EconomicLeafState::TokenCreation(..) => {}
-                // A SoFi relationship's base is read by `sofi::validation`, by
-                // key, with the vault's own evidence; a write set's balances
-                // have no slot for it.
-                EconomicLeafState::Relationship(..) => {}
-            }
-        }
         Ok(AdmittedTree {
             root: *self,
             tree,
-            balances,
+            balances: balances_of(states),
         })
     }
+}
+
+/// Every balance the leaves `rows` hold, once they recompute `root` under the
+/// same check [`ValidatedEconomicRoot::admitted_tree`] makes of a leaf cache:
+/// for leaves a replay of a lineage folded, whose root its walk proved.
+pub(crate) fn balances_of_rows(
+    rows: &[LeafRow],
+    root: &[u8; 32],
+) -> Result<std::collections::BTreeMap<[u8; 32], u64>, LeafCacheError> {
+    Ok(balances_of(tree_of_rows(rows, root)?.1))
+}
+
+/// The balances among `states`, by policy commit.
+fn balances_of(states: Vec<EconomicLeafState>) -> std::collections::BTreeMap<[u8; 32], u64> {
+    let mut balances = std::collections::BTreeMap::new();
+    for state in states {
+        match state {
+            EconomicLeafState::Balance(b) => {
+                balances.insert(b.policy_commit, b.amount);
+            }
+            // Write-once records a write set inserts and never starts
+            // from: a consumed source, and the creation records a write
+            // set refuses to create twice by reading the tree.
+            EconomicLeafState::ConsumedSource(..)
+            | EconomicLeafState::VaultCreation(..)
+            | EconomicLeafState::TokenCreation(..) => {}
+            // A SoFi relationship's base is read by `sofi::validation`, by
+            // key, with the vault's own evidence; a write set's balances
+            // have no slot for it.
+            EconomicLeafState::Relationship(..) => {}
+        }
+    }
+    balances
 }
 
 /// One row of a device's economic leaf cache: the leaf key, the leaf value,

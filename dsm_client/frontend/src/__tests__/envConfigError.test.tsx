@@ -33,10 +33,6 @@ jest.mock('../hooks/useLockState', () => ({
   useLockState: () => ({ lock: null }),
 }));
 
-jest.mock('../hooks/useGenesisFlow', () => ({
-  useGenesisFlow: () => ({ handleGenerateGenesis: jest.fn() }),
-}));
-
 jest.mock('../hooks/useThemeAssets', () => ({
   useThemeAssets: () => ({
     chameleonSrc: 'chameleon.gif',

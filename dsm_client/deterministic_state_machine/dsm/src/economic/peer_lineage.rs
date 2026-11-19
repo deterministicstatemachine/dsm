@@ -2116,11 +2116,8 @@ impl Verifier<'_> {
             .map(|(key, state)| Ok((*key, state.leaf_value()?, state.encode()?)))
             .collect::<Result<Vec<_>, crate::ccb::CcbError>>()
             .map_err(|e| invalid(format!("a folded leaf has no canonical bytes: {e:?}")))?;
-        let balances = ValidatedEconomicRoot::from_verifier_memo(walk.reached, root)
-            .admitted_tree(&rows)
-            .map_err(|e| invalid(format!("the folded leaves: {e}")))?
-            .balances()
-            .clone();
+        let balances = crate::economic::lineage::balances_of_rows(&rows, &root)
+            .map_err(|e| invalid(format!("the folded leaves: {e}")))?;
         Ok(OwnLineage {
             reached: walk.reached,
             head,
