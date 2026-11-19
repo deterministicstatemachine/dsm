@@ -918,4 +918,68 @@ mod tests {
         let paid = payment_at_cells(&p.pin.bundle, &loaded, &[r0, r1], &m2).expect("settles");
         assert_eq!((paid.recipient, paid.amount), (R2, 10));
     }
+
+    /// DSM Amendment A39 draft, option B, with a broken board: a clone of a board signs both a
+    /// payment to R1 and an unload of the whole allocation from the same root. Both are that board's
+    /// valid steps, and both hold the root's cell alone; whichever is first is the account's one
+    /// history. With the payment first, R1 settles and the unload's departure never holds the cell
+    /// (so every checker refuses the unload); with the unload first, R1's payment is off the history
+    /// and never settles. The money is never both paid and unloaded.
+    #[test]
+    fn a_payment_and_an_unload_from_one_root_never_both_count() {
+        use crate::economic::offline_boundary::{
+            BoundaryAncestry, BoundarySince, OfflineBoundaryBody,
+        };
+        use crate::types::device_state::OfflineBoundaryKind;
+        let mut board = Payer::loaded(0x37, 40);
+        let mut clone = Payer::loaded(0x37, 40);
+        let root = board.account_root();
+        assert_eq!(clone.account_root(), root);
+        let payment = spend(&mut board, R1, 30);
+        let (unload, release) = clone.boundary(OfflineBoundaryKind::Unload, 40);
+        let body = OfflineBoundaryBody::of(
+            &unload,
+            OfflineBoundaryKind::Unload,
+            clone.pin.bundle,
+            clone.token,
+            40,
+            BoundaryAncestry {
+                anchor: anchor_of(&clone),
+                since: BoundarySince::Previous { account_root: root },
+                chain: Vec::new(),
+            },
+            release,
+        )
+        .expect("body");
+        let departure = OriginDeparture::of(
+            clone.head.genesis(),
+            clone.head.public_key(),
+            clone.head.devid(),
+            &body,
+        )
+        .expect("a departure")
+        .encode()
+        .expect("bytes");
+        let paid = bytes_of(&write_of(&board, &payment));
+        let cell = cell_of(&board.pin.bundle, &root);
+        let m = payment.board_message().expect("signed");
+
+        // Both are valid steps of that root.
+        let unloads = departure_authority(&OriginDeparture::decode(&departure).expect("decode"), cell.key())
+            .expect("the unload's departure holds the cell alone");
+        assert_eq!(unloads.before, root);
+        assert_eq!(unloads.payment, None);
+
+        let payment_first = read_after(&cell, &[&paid, &departure]);
+        assert_eq!(payment_first.settled().map(|s| s.message), Some(m));
+        payment_at_cells(&board.pin.bundle, &root, &[payment_first], &m)
+            .expect("R1 settles; the unload holds nothing");
+
+        let unload_first = read_after(&cell, &[&departure, &paid]);
+        assert_eq!(unload_first.settled().map(|s| s.message), Some(unloads.message));
+        let refused = payment_at_cells(&board.pin.bundle, &root, &[unload_first], &m)
+            .expect_err("R1's payment is off the history the cell holds");
+        assert!(refused.to_string().contains("another history"), "{refused}");
+    }
+
 }

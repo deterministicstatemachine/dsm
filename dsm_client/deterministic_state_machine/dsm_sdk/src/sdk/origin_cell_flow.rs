@@ -152,14 +152,28 @@ pub fn reaches_a_final_step(reads: &[OriginRead], bundle: &D32, payment_root: &D
     })
 }
 
-/// Put each of `writes` (`0x0078 OfflineOriginWrite` bytes) at its origin cell,
+/// Put each of `writes` (`0x0078 OfflineOriginWrite` or `0x0079 OfflineOriginDeparture` bytes) at
+/// its origin cell,
 /// leader first. A cell another step already holds keeps it; reading the cells
 /// says which.
 pub async fn put_writes(set: &StorageSet, writes: &[Vec<u8>]) -> Result<(), DsmError> {
     for bytes in writes {
-        let held = OriginWrite::decode(bytes)
-            .map_err(|e| refuse(format!("a kept origin write: {e}")))?;
-        write(set, &held).await?;
+        // A departure (`0x0079`) holds the cell of the root its boundary leaves; every other
+        // write the cell of the root its step starts from.
+        match dsm::offline_origin::OriginDeparture::decode(bytes) {
+            Ok(departure) => {
+                let body = dsm::economic::offline_boundary::OfflineBoundaryBody::decode(
+                    &departure.body,
+                )
+                .map_err(|e| refuse(format!("a departure's boundary: {e}")))?;
+                put(set, &body.bundle, &body.pre_account_root, bytes).await?;
+            }
+            Err(_not_a_departure) => {
+                let held = OriginWrite::decode(bytes)
+                    .map_err(|e| refuse(format!("a kept origin write: {e}")))?;
+                write(set, &held).await?;
+            }
+        }
     }
     Ok(())
 }

@@ -685,6 +685,8 @@ impl CoreSDK {
         kind: dsm::types::device_state::OfflineBoundaryKind,
         asset: &[u8; 32],
         amount: u64,
+        next_frontier: [u8; 32],
+        signed_roots: ([u8; 32], [u8; 32]),
         prepare: impl FnOnce(
             &dsm::types::device_state::OfflineBoundaryOutcome,
         ) -> Result<
@@ -714,7 +716,15 @@ impl CoreSDK {
                 pending.economic_position
             )));
         }
-        let outcome = head.cross_offline_boundary(bundle, kind, asset, amount)?;
+        let outcome =
+            head.cross_offline_boundary(bundle, kind, asset, amount, next_frontier)?;
+        // The board signed the boundary over the device roots it previewed: the head must still
+        // stand where it did, or the board's signature is of another boundary.
+        if (outcome.pre_device_root, outcome.post_device_root) != signed_roots {
+            return Err(DsmError::invalid_operation(
+                "offline boundary: the head moved after the board signed the boundary",
+            ));
+        }
         let (prepared, coords, artifacts) = prepare(&outcome)?;
         let pending = prepared
             .into_locally_accepted(coords)
@@ -754,6 +764,14 @@ impl CoreSDK {
                     )
                 },
             )?;
+            // Durable now: the board's signature of it is no longer pending.
+            crate::storage::client_db::offline_spends::clear_boundary_signing_in_tx(&tx, bundle)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("offline boundary: the boundary being signed: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
             // The boundary's body carries every step since the last boundary: they are
             // exposed with it, and the next chain starts from the account it leaves.
             crate::storage::client_db::offline_spends::expose_own_offline_hops_in_tx(&tx, bundle)
@@ -2862,6 +2880,81 @@ impl CoreSDK {
             offline_release: app.emit()?,
             pin: staged.pin.clone(),
         })
+    }
+
+    /// The board's signature of a load or an unload of its account (DSM Amendment A39 draft,
+    /// option B): the boundary's transition `t`, built from its operation id, prepared over the
+    /// device roots before and after it, committed and emitted, with the offline-state proofs
+    /// attached. A board that already committed exactly this transition (a crash after its counter
+    /// moved and before the boundary was durable) emits that release again; a board holding any
+    /// other committed step signs nothing. The frontier is advanced only once the boundary is
+    /// durable ([`Self::finalize_offline_bearer`]).
+    pub fn board_signs_boundary(
+        &self,
+        t: &anchor_core::root_advance::OwnedTransition,
+        challenge: [u8; 32],
+        pre_device_root: [u8; 32],
+        post_device_root: [u8; 32],
+        proofs: &dsm::types::device_state::OfflineStateProofs,
+    ) -> Result<Vec<u8>, DsmError> {
+        use prost::Message;
+        let mut guard = self.anchor_appliance.lock();
+        let attached = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline boundary: anchor appliance not attached")
+        })?;
+        let bundle = attached.pin.bundle;
+        let app = &mut attached.appliance;
+        let committed = match app.emit() {
+            Ok(release) => Some(release),
+            Err(_not_committed) => None,
+        };
+        let release = match committed {
+            Some(release) => {
+                let held = anchor_core::proto::pb::OfflineRelease::decode(release.as_slice())
+                    .map_err(|e| {
+                        DsmError::invalid_operation(format!("offline boundary: the board's release: {e}"))
+                    })?
+                    .to_release()
+                    .map_err(|e| {
+                        DsmError::invalid_operation(format!(
+                            "offline boundary: the board's release: {e:?}"
+                        ))
+                    })?;
+                if anchor_core::root_advance::enc_transition(&held.transition.as_transition())
+                    != anchor_core::root_advance::enc_transition(&t.as_transition())
+                {
+                    return Err(DsmError::invalid_operation(
+                        "offline boundary: the board holds another committed step; it signs no \
+                         boundary until that step is settled",
+                    ));
+                }
+                release
+            }
+            None => {
+                let nonce = app.authorization_nonce()?;
+                let digest = anchor_core::appliance::owner_authorization_digest(
+                    &bundle,
+                    &t.prev_root,
+                    t.anchor_counter,
+                    &anchor_core::root_advance::transition_digest(&t.as_transition(), &challenge),
+                    &pre_device_root,
+                    &post_device_root,
+                    &nonce,
+                );
+                let secret = crate::sdk::signing_authority::current_secret_key()?;
+                let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &digest)?;
+                app.authorize(&digest, &signature)?;
+                app.prepare(
+                    &t.as_transition(),
+                    &challenge,
+                    &pre_device_root,
+                    &post_device_root,
+                )?;
+                app.commit()?;
+                app.emit()?
+            }
+        };
+        attach_offline_state_proofs(&release, proofs.parent.clone(), proofs.child.clone())
     }
 
     /// The committed release the appliance holds, emitted again: the same signed release, never a

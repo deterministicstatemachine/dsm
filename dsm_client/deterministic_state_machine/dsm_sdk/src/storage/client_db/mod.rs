@@ -642,8 +642,9 @@ fn get_database_path() -> Result<PathBuf> {
 ///
 /// Still 49, additively (DSM Amendment A39 draft): `pending_offline_origin`
 /// and `pending_offline_origin_write`, the payer's steps a payment received
-/// offline was carried with, are new tables a database made at 49 takes at its
-/// next open, and `peer_offline_exposure` is dropped there. No version moves,
+/// offline was carried with, and `offline_boundary_signing`, a load or unload
+/// its board is signing, are new tables a database made at 49 takes at its next
+/// open, and `peer_offline_exposure` is dropped there. No version moves,
 /// so a wallet bound to a board opens as it is.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 49;
 
@@ -1099,6 +1100,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             origin_position     INTEGER NOT NULL,
             origin_root         BLOB NOT NULL,      -- 32B
             payment_root        BLOB NOT NULL       -- 32B
+        );
+        -- A load or an unload this device's board is signing (DSM Amendment
+        -- A39 draft, option B): written before the board is driven, removed in
+        -- the transaction that makes the boundary durable. A crash between
+        -- leaves it, and the account's next boundary finishes it first: the
+        -- same boundary from the same head is the same transition, which the
+        -- board, if it already committed it, emits again.
+        CREATE TABLE IF NOT EXISTS offline_boundary_signing(
+            bundle              BLOB PRIMARY KEY,   -- 32B
+            kind                INTEGER NOT NULL,   -- OfflineBoundaryKind code
+            asset               BLOB NOT NULL,      -- 32B
+            amount              INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS pending_offline_origin_write(
             release_message     BLOB NOT NULL,      -- 32B M

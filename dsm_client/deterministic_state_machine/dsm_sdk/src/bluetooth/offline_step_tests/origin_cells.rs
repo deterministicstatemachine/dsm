@@ -292,3 +292,48 @@ async fn a_restored_wallet_finds_its_account_from_the_nodes() {
     assert_eq!(at, steps[0].after, "the restored wallet stands where A's step left the account");
     assert_ne!(at, start);
 }
+
+/// A payer cannot unload what it already paid offline, even before its receiver has published
+/// anything (DSM Amendment A39 draft, option B; owner, 2026-11-19: "Don't allow any chance of
+/// robbing a receiver"). A loads 20 ERA — its board signs the load — and pays B 15 offline. B
+/// writes nothing. A's wallet is then restored from a backup taken before the payment, still on
+/// A's genuine board, and asks to unload all 20: the board, which signed the payment from that
+/// root and left it, refuses, so no unload is admitted and A's online balance does not move. B
+/// then settles its 15 from A's cells. 15 of the 20 settles to B; nothing is taken back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payer_cannot_unload_what_it_paid_offline_before_its_receiver_publishes() {
+    let (pair, a, b, _appliance, _) = bearer_pair().await;
+    let mut before_payment = a.device.backed_up_into("A-before-payment");
+    offline_step(&a, &b, bearer_transfer(&b, whole_era(15))).await;
+    a.device.enter();
+    let online_before = pair.a.era_balance();
+
+    // A's wallet as it stood before the payment, on A's own board.
+    before_payment.boot(&pair.fleet).await;
+    before_payment.enter();
+    let unload = before_payment
+        .invoke(
+            "wallet.unloadOffline",
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: "20.00".to_string(),
+            },
+        )
+        .await;
+    assert!(
+        !unload.success,
+        "the board signed an unload of money it already paid"
+    );
+    assert_eq!(
+        before_payment.era_balance(),
+        online_before,
+        "nothing came back online"
+    );
+
+    // B was never needed for that: it settles its payment from A's cells afterwards.
+    b.device.enter();
+    let moved = unload_received(&b).await;
+    assert_eq!((moved.moved, moved.waiting), (1, 0), "{}", moved.message);
+    assert_eq!(pair.b.era_balance(), whole_era(15), "B holds what it was paid");
+}

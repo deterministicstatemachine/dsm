@@ -15,7 +15,7 @@
 //! admission.
 
 use anyhow::{anyhow, Result};
-use rusqlite::{params, Transaction};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 use super::get_connection;
 
@@ -163,4 +163,74 @@ pub fn close_offline_accounts(
     }
     tx.commit()?;
     Ok(payments)
+}
+
+/// A load or an unload this device's board is signing (DSM Amendment A39 draft,
+/// option B): the boundary's kind (its code), asset and amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundarySigning {
+    pub kind: u8,
+    pub asset: [u8; 32],
+    pub amount: u64,
+}
+
+/// Record that the board of the account of `bundle` is about to sign
+/// `signing`, before it is driven.
+pub fn record_boundary_signing(bundle: &[u8; 32], signing: &BoundarySigning) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO offline_boundary_signing(bundle, kind, asset, amount)
+         VALUES(?1, ?2, ?3, ?4)",
+        params![
+            bundle.as_slice(),
+            i64::from(signing.kind),
+            signing.asset.as_slice(),
+            i64::try_from(signing.amount).map_err(|e| anyhow!("an amount overflows: {e}"))?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The boundary the board of the account of `bundle` was left signing, if a
+/// crash left one.
+pub fn boundary_signing(bundle: &[u8; 32]) -> Result<Option<BoundarySigning>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let row = conn
+        .query_row(
+            "SELECT kind, asset, amount FROM offline_boundary_signing WHERE bundle = ?1",
+            params![bundle.as_slice()],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(kind, asset, amount)| {
+        Ok(BoundarySigning {
+            kind: u8::try_from(kind).map_err(|e| anyhow!("a boundary's kind: {e}"))?,
+            asset: <[u8; 32]>::try_from(asset.as_slice())
+                .map_err(|e| anyhow!("a boundary's asset is not 32 bytes: {e}"))?,
+            amount: u64::try_from(amount).map_err(|e| anyhow!("a boundary's amount: {e}"))?,
+        })
+    })
+    .transpose()
+}
+
+/// The boundary of the account of `bundle` is durable: it is no longer being
+/// signed. In the transaction that makes it so.
+pub fn clear_boundary_signing_in_tx(tx: &Transaction<'_>, bundle: &[u8; 32]) -> Result<()> {
+    tx.execute(
+        "DELETE FROM offline_boundary_signing WHERE bundle = ?1",
+        params![bundle.as_slice()],
+    )?;
+    Ok(())
 }

@@ -715,8 +715,15 @@ fn own_boundary_ancestry(
     // unloads of received payments (owner, 2026-11-07), in order.
     let chain = client_db::offline_spends::own_offline_hops(bundle)
         .map_err(|e| storage_err("this device's unexposed offline steps", e))?;
-    let funded = match &boundary.account_move.before {
-        dsm::types::offline_account::StepBefore::Boundary { funding_chain, .. } => *funding_chain,
+    // Where the account stood before the boundary: a load or an unload moves its counter and
+    // frontier (option B), so the account's first boundary names where it was, never where it goes.
+    let (funded, before_counter, before_frontier) = match &boundary.account_move.before {
+        dsm::types::offline_account::StepBefore::Boundary {
+            funding_chain,
+            counter,
+            frontier,
+            ..
+        } => (*funding_chain, *counter, *frontier),
         _ => {
             return Err(DsmError::invalid_operation(
                 "offline boundary: Core took another step where a boundary was asked",
@@ -740,8 +747,8 @@ fn own_boundary_ancestry(
             BoundarySince::Opened { frontier, counter }
         }
         (None, None) => BoundarySince::Opened {
-            frontier: boundary.account_move.account.frontier(),
-            counter: boundary.account_move.account.counter(),
+            frontier: before_frontier,
+            counter: before_counter,
         },
         (Some(_), Some(hop)) => BoundarySince::Previous {
             account_root: hop.starts_from(),
@@ -830,11 +837,57 @@ pub(crate) async fn admitted_offline_boundary(
             "offline boundary: no anchor is attached, so the account's anchor cannot be named",
         )
     })?;
+    // A boundary a crash left being signed is finished before any other: the same boundary from
+    // the same head is the same transition, which the board emits again if it committed it.
+    if let Some(left) = client_db::offline_spends::boundary_signing(&bundle)
+        .map_err(|e| storage_err("the boundary being signed", e))?
+    {
+        if (left.kind, left.asset, left.amount) != (kind.code(), asset, amount) {
+            return Err(DsmError::invalid_operation(format!(
+                "offline boundary: a boundary of {} was being signed by the board when this \
+                 wallet stopped; ask for it again to finish it before another",
+                left.amount
+            )));
+        }
+    }
+    // The board signs the boundary at its next counter, as it signs a payment (DSM Amendment A39
+    // draft, option B), from where the account stands, over the device roots the boundary moves:
+    // previewed from the head here, taken again under its lock, and refused there if the head
+    // moved. A board that left the account's root after a payment signs no unload of it.
+    let (boundary_id, counter, frontier) =
+        head.offline_boundary_start(&bundle, kind, &asset, amount)?;
+    let (transition, challenge) = dsm::types::offline_chain::boundary_transition(
+        kind,
+        &devid,
+        &boundary_id,
+        &frontier,
+        counter,
+    )?;
+    let preview =
+        head.cross_offline_boundary(&bundle, kind, &asset, amount, transition.next_root)?;
+    client_db::offline_spends::record_boundary_signing(
+        &bundle,
+        &client_db::offline_spends::BoundarySigning {
+            kind: kind.code(),
+            asset,
+            amount,
+        },
+    )
+    .map_err(|e| storage_err("the boundary being signed", e))?;
+    let release = core.board_signs_boundary(
+        &transition,
+        challenge,
+        preview.pre_device_root,
+        preview.post_device_root,
+        &preview.offline_state_proofs,
+    )?;
     let (outcome, pending) = core.admitted_boundary(
         &bundle,
         kind,
         &asset,
         amount,
+        transition.next_root,
+        (preview.pre_device_root, preview.post_device_root),
         |boundary| {
             let body = OfflineBoundaryBody::of(
                 boundary,
@@ -843,6 +896,7 @@ pub(crate) async fn admitted_offline_boundary(
                 asset,
                 amount,
                 own_boundary_ancestry(&pin, &bundle, boundary)?,
+                release.clone(),
             )?
             .encode()
             .map_err(|e| storage_err("boundary body", e))?;
@@ -951,6 +1005,12 @@ pub(crate) async fn admitted_offline_boundary(
             None::<std::io::Error>,
         )
     })?;
+    // Durable: the board's frontier moves to the boundary's successor.
+    core.finalize_offline_bearer(transition.next_root)?;
+    // The boundary holds its origin cells: every step its board signed since the last boundary,
+    // and its own departure from the root it leaves. A receiver of a payment from that root
+    // settles from the cells; a boundary from a root a payment holds is refused by every checker.
+    write_boundary_cells(&set, &genesis, head.public_key(), &devid, &body).await?;
     let admitted = finish_admission(
         core,
         &network_id,
@@ -964,6 +1024,45 @@ pub(crate) async fn admitted_offline_boundary(
     )
     .await?;
     Ok((outcome, admitted))
+}
+
+/// Write the origin cells a boundary `body_bytes` of this device holds (DSM Amendment A39 draft,
+/// option B): each board-signed step the boundary carries, at the cell of the root it starts from,
+/// and the boundary's departure, at the cell of the root it leaves.
+async fn write_boundary_cells(
+    set: &crate::sdk::storage_set::StorageSet,
+    genesis: &[u8; 32],
+    owner_key: &[u8],
+    devid: &[u8; 32],
+    body_bytes: &[u8],
+) -> Result<(), DsmError> {
+    use dsm::economic::offline_boundary::OfflineBoundaryBody;
+    let body = OfflineBoundaryBody::decode(body_bytes)
+        .map_err(|e| DsmError::invalid_operation(format!("offline boundary body: {e}")))?;
+    let mut writes = Vec::new();
+    for bytes in &body.ancestry.chain {
+        let step = dsm::types::offline_chain::AccountHop::from_bytes(bytes)?;
+        if step.board_message().is_some() {
+            writes.push(
+                dsm::offline_origin::OriginWrite::new(
+                    owner_key,
+                    *devid,
+                    body.bundle,
+                    &body.ancestry.anchor,
+                    &step,
+                )
+                .encode()
+                .map_err(|e| storage_err("an origin write", e))?,
+            );
+        }
+    }
+    writes.push(
+        dsm::offline_origin::OriginDeparture::of(*genesis, owner_key, *devid, &body)
+            .map_err(|e| storage_err("a departure", e))?
+            .encode()
+            .map_err(|e| storage_err("a departure", e))?,
+    );
+    crate::sdk::origin_cell_flow::put_writes(set, &writes).await
 }
 
 /// Settle a payment this device received offline (SA-91; DSM Amendment A39
