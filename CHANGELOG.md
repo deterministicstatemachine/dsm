@@ -68,6 +68,11 @@ still `dsm-testnet`.
   §5 rule 7). A writer uploads an object once; the member that takes it
   copies it to its set-mates, and the writer checks every member holds it
   and fills any gap itself.
+- **A board that cannot reach its chip says what the chip answered.** When
+  bring-up fails, the board's refusal now carries the TROPIC01's status byte
+  at each start-up warm-up transfer (its ready, alarm and start-up bits, and
+  nothing else the chip sent), so a silent line, a chip in alarm, and a chip
+  still starting can be told apart from the phone without opening the board.
 
 ### Noted for after beta
 
