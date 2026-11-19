@@ -1277,6 +1277,8 @@ impl Verifier<'_> {
                         })?;
                         continues_the_account(since, previous.as_ref())
                             .map_err(|e| at_position(position, e))?;
+                        self.boundary_holds_its_cells(&body_bytes, &verified)
+                            .map_err(|e| at_position(position, e))?;
                         verified
                     }
                 };
@@ -1390,6 +1392,61 @@ impl Verifier<'_> {
         let reads = self.origin_path(&body.bundle, &account.account_root, &body.payment_root)?;
         OfflineSettlementBody::verify(body_bytes, genesis, device_id, &account.account_root, &reads)
             .map_err(|e| invalid(format!("an offline settlement: {e}")))
+    }
+
+    /// That a boundary holds its origin cells (DSM Amendment A39 draft, option
+    /// B): every step its board signed since the last boundary, final at the
+    /// cell of the root it starts from, and the boundary's own departure, final
+    /// at the cell of the root it leaves. A boundary whose root another step
+    /// holds took back what that step moved, and is refused.
+    fn boundary_holds_its_cells(
+        &self,
+        body_bytes: &[u8],
+        verified: &crate::economic::offline_boundary::VerifiedOfflineBoundary,
+    ) -> Result<(), PeerLineageFailure> {
+        let body = crate::economic::offline_boundary::OfflineBoundaryBody::decode(body_bytes)
+            .map_err(|e| invalid(format!("an offline boundary body: {e}")))?;
+        for bytes in &body.ancestry.chain {
+            let step = crate::types::offline_chain::AccountHop::from_bytes(bytes)
+                .map_err(|e| invalid(format!("a step the boundary carries: {e}")))?;
+            if let Some(message) = step.board_message() {
+                self.held_final(&body.bundle, &step.starts_from(), &message)?;
+            }
+        }
+        let departure = verified
+            .departure()
+            .ok_or_else(|| invalid("a boundary moves the account it departs"))?;
+        self.held_final(&body.bundle, &body.pre_account_root, &departure)
+    }
+
+    /// That the origin cell of `root` of `bundle`'s account holds the step `M`
+    /// final. Another step final there is a refusal; none final yet is not
+    /// established.
+    fn held_final(
+        &self,
+        bundle: &[u8; 32],
+        root: &[u8; 32],
+        message: &[u8; 32],
+    ) -> Result<(), PeerLineageFailure> {
+        let cell = crate::offline_origin::OriginCell::new(
+            bundle,
+            root,
+            &self.register.set,
+            &self.register.profile.storage_set_id,
+        )
+        .map_err(|e| incomplete(format!("origin cell: {e:?}")))?;
+        let evidence = self.fetcher.origin_cell(&cell)?;
+        let read = crate::offline_origin::resolution(&cell, &evidence)
+            .map_err(|missing| incomplete(format!("origin cell not decided: {missing:?}")))?;
+        match read.settled() {
+            Some(step) if step.message == *message => Ok(()),
+            Some(..) => Err(invalid(
+                "another step holds the origin cell this boundary's history passes through",
+            )),
+            None => Err(incomplete(
+                "a step of this boundary's history is not final at its origin cell yet",
+            )),
+        }
     }
 
     /// The payer's origin cells of `bundle`'s account read from `start`, each

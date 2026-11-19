@@ -16,6 +16,15 @@ pub const TAG_DSM_OFFLINE_ORIGIN_CELL: TaggedHashDomain<'static> =
 pub const TAG_DSM_OFFLINE_ORIGIN_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/offline-origin/seed/v1");
 
+/// `r = H(tag ‖ boundary_id)` — the challenge an offline account's board signs
+/// a load or an unload under (option B): drawn from the boundary itself, so the
+/// same boundary always yields the same transition.
+pub const TAG_DSM_OFFLINE_BOUNDARY_CHALLENGE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-origin/boundary-challenge/v1");
+
 #[cfg(test)]
-pub(crate) const OFFLINE_ORIGIN_TAGS: &[TaggedHashDomain<'static>] =
-    &[TAG_DSM_OFFLINE_ORIGIN_CELL, TAG_DSM_OFFLINE_ORIGIN_SEED];
+pub(crate) const OFFLINE_ORIGIN_TAGS: &[TaggedHashDomain<'static>] = &[
+    TAG_DSM_OFFLINE_ORIGIN_CELL,
+    TAG_DSM_OFFLINE_ORIGIN_SEED,
+    TAG_DSM_OFFLINE_BOUNDARY_CHALLENGE,
+];

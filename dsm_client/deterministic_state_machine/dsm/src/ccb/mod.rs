@@ -341,6 +341,12 @@ pub mod class {
     /// bundle `B` recomputes from. It occupies the cell of the root the step
     /// starts from only when it proves that from these bytes and folds.
     pub const OFFLINE_ORIGIN_WRITE: u16 = 0x0078;
+    /// `0x0079` — a boundary's departure at an offline origin cell (DSM
+    /// Amendment A39 draft, option B): a load or an unload its account's board
+    /// signed, with no steps carried, and the owner's genesis, online key and
+    /// device. It occupies the cell of the root the boundary starts from only
+    /// when the boundary folds there and its board signed it.
+    pub const OFFLINE_ORIGIN_DEPARTURE: u16 = 0x0079;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

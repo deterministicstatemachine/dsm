@@ -170,6 +170,123 @@ impl OriginWrite {
     }
 }
 
+// ── 0x0079 OfflineOriginDeparture ──────────────────────────────────────────
+
+struct OriginDepartureObject;
+impl CcbObject for OriginDepartureObject {
+    const CLASS: u16 = class::OFFLINE_ORIGIN_DEPARTURE;
+    const SCHEMA: u16 = SCHEMA_V1;
+}
+
+/// The longest boundary a departure carries: a boundary with no steps.
+const MAX_DEPARTURE_BYTES: usize = 64 * 1024;
+
+/// `0x0079 OfflineOriginDeparture` — a load or an unload of an offline account,
+/// as its board signed it, at the origin cell of the root it starts from (DSM
+/// Amendment A39 draft, option B): the boundary with no steps carried (each of
+/// those is at its own cell), and the owner's genesis, online key and device,
+/// which its operation id and its bundle bind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginDeparture {
+    pub genesis: D32,
+    pub owner_key: Vec<u8>,
+    pub device_id: D32,
+    /// The boundary body's one encoding, with no steps carried.
+    pub body: Vec<u8>,
+}
+
+impl OriginDeparture {
+    /// The departure of `body`, a boundary of the device `(genesis, device_id)`
+    /// whose online key is `owner_key`.
+    pub fn of(
+        genesis: D32,
+        owner_key: &[u8],
+        device_id: D32,
+        body: &crate::economic::offline_boundary::OfflineBoundaryBody,
+    ) -> Result<Self, CcbError> {
+        Ok(Self {
+            genesis,
+            owner_key: owner_key.to_vec(),
+            device_id,
+            body: body.departure().encode()?,
+        })
+    }
+
+    /// The departure's canonical bytes, fields in registry order.
+    pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
+        let mut out = Vec::new();
+        push_envelope::<OriginDepartureObject>(&mut out);
+        push_digest32(&mut out, &self.genesis); // 1
+        push_bytes(&mut out, &self.owner_key)?; // 2
+        push_digest32(&mut out, &self.device_id); // 3
+        push_bytes(&mut out, &self.body)?; // 4
+        Ok(out)
+    }
+
+    /// Decode a departure, strictly: its class, schema 1, every field, nothing after.
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(OriginDepartureObject::CLASS, OriginDepartureObject::SCHEMA)?;
+        let genesis = c.digest32()?;
+        let owner_key = bounded_bytes(&mut c, MAX_KEY_BYTES)?;
+        let device_id = c.digest32()?;
+        let body = bounded_bytes(&mut c, MAX_DEPARTURE_BYTES)?;
+        if c.i != bytes.len() {
+            return Err(DecodeError::TrailingBytes {
+                extra: bytes.len() - c.i,
+            });
+        }
+        Ok(Self {
+            genesis,
+            owner_key,
+            device_id,
+            body,
+        })
+    }
+}
+
+/// Whether `departure` proves its own authority for the origin cell `cell`: its
+/// boundary is in its one encoding with no steps carried, `B` recomputes from
+/// the owner and the anchor it names, the boundary folds from the root it
+/// starts from, its board signed it, and the cell is that root's.
+pub fn departure_authority(
+    departure: &OriginDeparture,
+    cell: &D32,
+) -> Result<OriginStep, OriginRefusal> {
+    use crate::economic::offline_boundary::OfflineBoundaryBody;
+    let body = OfflineBoundaryBody::decode(&departure.body)
+        .map_err(|e| OriginRefusal::DoesNotDecode(e.to_string()))?;
+    match body.encode() {
+        Ok(again) if again == departure.body => {}
+        Ok(..) | Err(..) => return Err(OriginRefusal::NotOneEncoding),
+    }
+    if origin_key(&body.bundle, &body.pre_account_root) != *cell {
+        return Err(OriginRefusal::NotThisCell);
+    }
+    let verified = OfflineBoundaryBody::verify_departure(
+        &departure.body,
+        &departure.genesis,
+        &departure.device_id,
+        &departure.owner_key,
+    )
+    .map_err(|e| OriginRefusal::DoesNotVerify(e.to_string()))?;
+    match (
+        verified.departure(),
+        verified.pre_account_root(),
+        verified.post_account_root(),
+    ) {
+        (Some(message), Some(before), Some(after)) => Ok(OriginStep {
+            message,
+            before,
+            after,
+            payment: None,
+        }),
+        _ => Err(OriginRefusal::DoesNotVerify(
+            "a departure moves the account it starts from".to_string(),
+        )),
+    }
+}
+
 /// A length-prefixed field of at most `max` bytes, refused before anything is
 /// allocated for it.
 fn bounded_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError> {
@@ -217,7 +334,8 @@ pub struct OriginStep {
     pub payment: Option<ChainPayment>,
 }
 
-/// Whether `write` proves its own authority for the origin cell `cell`:
+/// Whether `write` (a step between boundaries; a boundary itself is an
+/// [`OriginDeparture`]) proves its own authority for the origin cell `cell`:
 /// 1. its step decodes and is in its one encoding;
 /// 2. its board signed it (a spend or a receive);
 /// 3. the cell is the one of the bundle and the root the step starts from;
@@ -278,9 +396,21 @@ pub fn write_authority(write: &OriginWrite, cell: &D32) -> Result<OriginStep, Or
 /// The write `bytes` are, with the step it proves, when it proves its own
 /// authority for the cell `cell`, or why it does not.
 pub fn write_occupying(bytes: &[u8], cell: &D32) -> Result<OriginStep, OriginRefusal> {
-    let write =
-        OriginWrite::decode(bytes).map_err(|e| OriginRefusal::DoesNotDecode(e.to_string()))?;
-    write_authority(&write, cell)
+    let class = Cursor { b: bytes, i: 0 }
+        .peek_class()
+        .map_err(|e| OriginRefusal::DoesNotDecode(e.to_string()))?;
+    match class {
+        class::OFFLINE_ORIGIN_DEPARTURE => departure_authority(
+            &OriginDeparture::decode(bytes)
+                .map_err(|e| OriginRefusal::DoesNotDecode(e.to_string()))?,
+            cell,
+        ),
+        _ => write_authority(
+            &OriginWrite::decode(bytes)
+                .map_err(|e| OriginRefusal::DoesNotDecode(e.to_string()))?,
+            cell,
+        ),
+    }
 }
 
 // ── the cell ───────────────────────────────────────────────────────────────

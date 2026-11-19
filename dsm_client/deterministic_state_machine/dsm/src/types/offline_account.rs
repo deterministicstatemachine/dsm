@@ -125,18 +125,25 @@ pub fn funding_chain_key() -> [u8; 32] {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfflineAccountStep {
     /// A canonical load: `amount` of `asset` enters the account. `boundary_id` is
-    /// the economic operation id of the load.
+    /// the economic operation id of the load. The account's board signs it at
+    /// its next counter, as it signs a spend, so the counter and the frontier
+    /// advance with it in the same write set (DSM Amendment A39 draft, option B).
     Load {
         asset: [u8; 32],
         amount: u64,
         boundary_id: [u8; 32],
+        next_frontier: [u8; 32],
     },
     /// A canonical unload: `amount` of `asset` leaves the account for the
     /// online balance. `boundary_id` is the economic operation id of the unload.
+    /// Signed by the board at its next counter, as a load is: a board that
+    /// signed a spend from a root has left that root, so no unload of what it
+    /// paid is ever signed.
     Unload {
         asset: [u8; 32],
         amount: u64,
         boundary_id: [u8; 32],
+        next_frontier: [u8; 32],
     },
     /// An offline-bearer spend: `amount` of `asset` leaves the account, and
     /// the counter and the frontier advance with it in the same write set.
@@ -164,10 +171,13 @@ pub enum OfflineAccountStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepBefore {
     /// Before a load or an unload: the allocation of the step's asset, if the
-    /// account holds one, and the funding chain, if a boundary has funded it.
+    /// account holds one, the funding chain, if a boundary has funded it, and
+    /// the counter and the frontier.
     Boundary {
         allocation: Option<u64>,
         funding_chain: Option<[u8; 32]>,
+        counter: u64,
+        frontier: [u8; 32],
     },
     /// Before a spend: the allocation of the step's asset, the counter and
     /// the frontier.
@@ -210,10 +220,13 @@ pub fn step_writes(
                 asset,
                 amount,
                 boundary_id,
+                next_frontier,
             },
             StepBefore::Boundary {
                 allocation,
                 funding_chain: prior_chain,
+                counter,
+                frontier,
             },
         ) => {
             positive(*amount, "a load")?;
@@ -224,17 +237,27 @@ pub fn step_writes(
                 })?,
                 None => *amount,
             };
-            boundary_writes(asset, *allocation, next, *prior_chain, *boundary_id)?
+            boundary_writes(
+                asset,
+                *allocation,
+                next,
+                *prior_chain,
+                *boundary_id,
+                (*counter, frontier, next_frontier),
+            )?
         }
         (
             OfflineAccountStep::Unload {
                 asset,
                 amount,
                 boundary_id,
+                next_frontier,
             },
             StepBefore::Boundary {
                 allocation,
                 funding_chain: prior_chain,
+                counter,
+                frontier,
             },
         ) => {
             positive(*amount, "an unload")?;
@@ -246,7 +269,14 @@ pub fn step_writes(
                     "an unload takes more than the offline allocation holds",
                 )
             })?;
-            boundary_writes(asset, *allocation, next, *prior_chain, *boundary_id)?
+            boundary_writes(
+                asset,
+                *allocation,
+                next,
+                *prior_chain,
+                *boundary_id,
+                (*counter, frontier, next_frontier),
+            )?
         }
         (
             OfflineAccountStep::Spend {
@@ -369,16 +399,28 @@ fn positive(amount: u64, what: &str) -> Result<(), DsmError> {
     }
 }
 
+/// The leaves a load or an unload writes: the allocation and the funding chain,
+/// and — the board signing it at its next counter — the counter's step and the
+/// frontier's advance, `(counter, frontier, next_frontier)`.
 fn boundary_writes(
     asset: &[u8; 32],
     allocation: Option<u64>,
     next: u64,
     prior_chain: Option<[u8; 32]>,
     boundary_id: [u8; 32],
+    (counter, frontier, next_frontier): (u64, &[u8; 32], &[u8; 32]),
 ) -> Result<Vec<AccountWrite>, DsmError> {
     if prior_chain == Some(boundary_id) {
         return Err(DsmError::invalid_operation(
             "a boundary names the operation that already funded the account",
+        ));
+    }
+    let next_counter = counter
+        .checked_add(1)
+        .ok_or_else(|| DsmError::invalid_operation("the offline counter is exhausted"))?;
+    if next_frontier == frontier {
+        return Err(DsmError::invalid_operation(
+            "a boundary moves the offline frontier",
         ));
     }
     Ok(vec![
@@ -391,6 +433,16 @@ fn boundary_writes(
             key: funding_chain_key(),
             pre: prior_chain,
             post: boundary_id,
+        },
+        AccountWrite {
+            key: counter_key(),
+            pre: Some(counter_value(counter)),
+            post: counter_value(next_counter),
+        },
+        AccountWrite {
+            key: frontier_key(),
+            pre: Some(*frontier),
+            post: *next_frontier,
         },
     ])
 }
@@ -568,6 +620,8 @@ impl OfflineAccount {
                 Ok(StepBefore::Boundary {
                     allocation: self.allocation(asset),
                     funding_chain: self.funding_chain,
+                    counter: self.counter,
+                    frontier: self.frontier,
                 })
             }
             OfflineAccountStep::Spend { asset, .. } => Ok(StepBefore::Spend {
@@ -615,19 +669,25 @@ impl OfflineAccount {
                 asset,
                 amount,
                 boundary_id,
+                next_frontier,
             } => {
                 let held = account.allocations.entry(*asset).or_insert(0);
                 *held += amount;
                 account.funding_chain = Some(*boundary_id);
+                account.counter += 1;
+                account.frontier = *next_frontier;
             }
             OfflineAccountStep::Unload {
                 asset,
                 amount,
                 boundary_id,
+                next_frontier,
             } => {
                 let held = account.allocations.entry(*asset).or_insert(0);
                 *held -= amount;
                 account.funding_chain = Some(*boundary_id);
+                account.counter += 1;
+                account.frontier = *next_frontier;
             }
             OfflineAccountStep::Spend {
                 asset,
@@ -1132,11 +1192,13 @@ mod tests {
         m.entries.iter().map(|e| e.path.clone()).collect()
     }
 
+    /// A load named `boundary`, its board's advance to a frontier of its own.
     fn load(asset: [u8; 32], amount: u64, boundary: u8) -> OfflineAccountStep {
         OfflineAccountStep::Load {
             asset,
             amount,
             boundary_id: [boundary; 32],
+            next_frontier: [boundary ^ 0xF0; 32],
         }
     }
 
@@ -1159,6 +1221,7 @@ mod tests {
                 asset: ASSET,
                 amount: 5,
                 boundary_id: [0x12; 32],
+                next_frontier: [0xE2; 32],
             },
         ];
         let mut account = opened;
@@ -1171,8 +1234,10 @@ mod tests {
         }
         assert_eq!(account.allocation(&ASSET), Some(15));
         assert_eq!(account.allocation(&OTHER), Some(7));
-        assert_eq!(account.counter(), 1);
-        assert_eq!(account.frontier(), [0x02; 32]);
+        // Two loads, a spend and an unload: each signed by the board at its next counter, the
+        // unload's frontier last.
+        assert_eq!(account.counter(), 4);
+        assert_eq!(account.frontier(), [0xE2; 32]);
         assert_eq!(account.funding_chain(), Some([0x12; 32]));
         let rebuilt = OfflineAccount::restore(
             account.allocations().clone(),
@@ -1221,7 +1286,9 @@ mod tests {
         expected.sort();
         assert_eq!(keys, expected);
         assert_eq!(m.account.allocation(&OTHER), Some(9));
-        assert_eq!(m.account.counter(), 5);
+        // Opened at 4; each load, signed by the board at its next counter, stepped it; then the
+        // spend.
+        assert_eq!(m.account.counter(), 7);
         // One path more than the step writes is not this step's multiproof.
         let mut extra = paths(&m);
         extra.push(extra[0].clone());
@@ -1241,14 +1308,21 @@ mod tests {
                 asset: ASSET,
                 amount: 1,
                 boundary_id: [0x10; 32],
+                next_frontier: [0xE0; 32],
             }),
             "does not hold",
         );
         refused(opened.step(&load(ASSET, 0, 0x10)), "positive amount");
         let funded = opened.step(&load(ASSET, 5, 0x10)).expect("load").account;
         refused(funded.step(&load(ASSET, 1, 0x10)), "already funded");
-        refused(funded.step(&spend(1, 0x01)), "moves the offline frontier");
-        let exhausted = OfflineAccount::open([0x01; 32], u64::MAX)
+        // The load left the account at its board's frontier for it; a spend must move on from it.
+        refused(funded.step(&spend(1, 0xE0)), "moves the offline frontier");
+        // A load takes the board's last counter step, and then nothing more is signed.
+        refused(
+            OfflineAccount::open([0x01; 32], u64::MAX).step(&load(ASSET, 5, 0x10)),
+            "counter is exhausted",
+        );
+        let exhausted = OfflineAccount::open([0x01; 32], u64::MAX - 1)
             .step(&load(ASSET, 5, 0x10))
             .expect("load")
             .account;
@@ -1323,7 +1397,11 @@ mod tests {
             BTreeMap::from([(ASSET, 12)]),
             "it holds what was loaded and what was received: a closed account takes both"
         );
-        assert_eq!(account.counter(), 2, "each receive moves the counter once");
+        assert_eq!(
+            account.counter(),
+            3,
+            "the board-signed load and each receive move the counter once"
+        );
         assert_eq!(account.frontier(), [0x03; 32]);
         let rebuilt = OfflineAccount::restore(
             account.allocations().clone(),

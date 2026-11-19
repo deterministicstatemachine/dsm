@@ -1316,34 +1316,176 @@ struct AdmittedBoundary {
     witness: EconomicTransitionWitness,
 }
 
-/// The anchor of the trader's offline account: pin material whose bundle
-/// recomputes for the trader's online key and device id.
-fn boundary_anchor() -> dsm::economic::offline_boundary::BoundaryAnchor {
-    dsm::economic::offline_boundary::BoundaryAnchor {
-        anchor_id: [0xB1; 32],
-        pk_chip: vec![0xB2; 32],
-        pk_host: vec![0xB3; 64],
-        enrolled_counter: 16,
-        birth_commitment: [0xB4; 32],
+/// The trader's board in software: the anchor-core appliance on a chip with a
+/// resident Ed25519 key and the SPHINCS+ partition key, born for the trader, so
+/// each load and unload is the board's signed advance (DSM Amendment A39 draft,
+/// option B).
+mod soft_board {
+    use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
+    use ed25519_dalek::{Signer, SigningKey};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    pub const H0: u32 = 32;
+
+    pub struct Chip {
+        pub counter: Rc<Cell<u32>>,
+        pub resident: SigningKey,
+    }
+
+    impl Tropic for Chip {
+        fn counter_get(&mut self) -> Result<u32, TropicError> {
+            Ok(self.counter.get())
+        }
+        fn counter_update(&mut self) -> Result<(), TropicError> {
+            let h = self.counter.get();
+            self.counter
+                .set(h.checked_sub(1).ok_or(TropicError::CounterExhausted)?);
+            Ok(())
+        }
+        fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
+            Ok(self.resident.sign(message).to_bytes().to_vec())
+        }
+        fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+            matches!(
+                (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
+                (Ok(key), Ok(signature)) if matches!(
+                    ed25519_dalek::VerifyingKey::from_bytes(&key).and_then(|key| key
+                        .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                    Ok(())
+                )
+            )
+        }
+        fn close_birth(&mut self) -> Result<(), TropicError> {
+            Ok(())
+        }
+        fn set_counter_back(&mut self) -> Result<(), TropicError> {
+            self.counter.set(H0);
+            Ok(())
+        }
+        fn rehearse_birth(&mut self) -> Vec<anchor_core::try_run::TryStep> {
+            vec![anchor_core::try_run::TryStep::new(
+                "this software chip's counter reads",
+                self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
+            )]
+        }
+        fn challenge_entropy(&mut self) -> Result<anchor_core::tropic::ChallengeEntropy, TropicError> {
+            let draw = || {
+                <[u8; 32]>::try_from(dsm::crypto::rng::random_bytes(32).as_slice())
+                    .map_err(|_short| TropicError::NoEntropy)
+            };
+            Ok(anchor_core::tropic::ChallengeEntropy {
+                board: draw()?,
+                chip: draw()?,
+            })
+        }
+    }
+
+    pub struct Partition;
+
+    fn spx(variant: dsm::crypto::sphincs::SphincsVariant, seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
+        let kp = dsm::crypto::sphincs::generate_keypair_from_seed(variant, seed).expect("a keypair");
+        (kp.secret_key.clone(), kp.public_key.clone())
+    }
+
+    impl PartitionSig for Partition {
+        fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+            Ok(spx(dsm::crypto::sphincs::SphincsVariant::SPX128f, seed))
+        }
+        fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+            Ok(dsm::crypto::sphincs::sign(dsm::crypto::sphincs::SphincsVariant::SPX128f, sk, digest)
+                .expect("the partition signs"))
+        }
+        fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+            matches!(
+                dsm::crypto::sphincs::verify(dsm::crypto::sphincs::SphincsVariant::SPX128f, pk, digest, sig),
+                Ok(valid) if valid
+            )
+        }
+        fn owner_verify(pk_on: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+            matches!(
+                dsm::crypto::sphincs::verify(dsm::crypto::sphincs::SphincsVariant::SPX256f, pk_on, digest, sig),
+                Ok(valid) if valid
+            )
+        }
+        fn owner_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+            Ok(spx(dsm::crypto::sphincs::SphincsVariant::SPX256f, seed))
+        }
+        fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+            Ok(dsm::crypto::sphincs::sign(dsm::crypto::sphincs::SphincsVariant::SPX256f, sk, digest)
+                .expect("the owner signs"))
+        }
+        /// Releases here are checked by the economic lineage, never by a receiving board.
+        fn stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
+            &[]
+        }
     }
 }
 
-/// The bundle `B` of [`boundary_anchor`] provisioned for the trader.
-fn bundle() -> [u8; 32] {
-    let a = boundary_anchor();
-    anchor_core::enrollment::anchor_bundle(
-        &trader().0,
-        &a.anchor_id,
-        &a.pk_chip,
-        &a.pk_host,
-        16,
-        dev(),
-        &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
-        &a.birth_commitment,
-    )
+/// The trader's board, born for the trader's online key and device.
+struct Board {
+    app: anchor_core::appliance::Appliance<soft_board::Chip, soft_board::Partition>,
+    bundle: [u8; 32],
+    anchor: dsm::economic::offline_boundary::BoundaryAnchor,
+    /// The frontier the board was born at, where the trader's account opens.
+    origin: [u8; 32],
+}
+
+impl Board {
+    fn born() -> Self {
+        let seed = |label: &str| blake3::derive_key(&format!("DSM lifecycle board {label}"), &[0x4C; 32]);
+        let resident = ed25519_dalek::SigningKey::from_bytes(&seed("resident key"));
+        let chip_pk = resident.verifying_key().to_bytes().to_vec();
+        let anchor_id = seed("anchor id");
+        let born = anchor_core::enrollment::birth::<soft_board::Partition>(
+            &anchor_core::enrollment::BirthInputs {
+                birth_entropy: &seed("birth entropy"),
+                chip_birth_witness: &seed("chip birth witness"),
+                host_nonce: &seed("host nonce"),
+                device_id: dev(),
+                policy_hash: &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+                partition_device_id: &seed("partition device id"),
+                anchor_id: &anchor_id,
+                chip_pk: &chip_pk,
+                online_id_pk: &trader().0,
+                partition_key_seed: &seed("partition key seed"),
+                enrolled_counter: soft_board::H0,
+                genesis_root: &g(),
+            },
+        )
+        .expect("the board is born");
+        let anchor = dsm::economic::offline_boundary::BoundaryAnchor {
+            anchor_id,
+            pk_chip: chip_pk,
+            pk_host: born.partition_pk.clone(),
+            enrolled_counter: u64::from(soft_board::H0),
+            birth_commitment: born.birth_commitment,
+        };
+        let bundle = born.bundle;
+        let origin = born.genesis_frontier;
+        let app = anchor_core::appliance::Appliance::new(
+            soft_board::Chip {
+                counter: std::rc::Rc::new(std::cell::Cell::new(soft_board::H0)),
+                resident,
+            },
+            soft_board::H0,
+            anchor_id,
+            seed("partition device id"),
+            born,
+            anchor_core::enrollment::Install::ForGood,
+            trader().0.clone(),
+        );
+        Self {
+            app,
+            bundle,
+            anchor,
+            origin,
+        }
+    }
 }
 
 fn boundary(
+    board: &mut Board,
     head: &dsm::types::device_state::RealizedHead,
     kind: dsm::types::device_state::OfflineBoundaryKind,
     amount: u64,
@@ -1354,13 +1496,55 @@ fn boundary(
 ) -> AdmittedBoundary {
     use dsm::economic::offline_boundary::{offline_boundary_evidence_addr, OfflineBoundaryBody};
     let era = dsm::core::token::token_state_manager::era_policy_commit();
+    // The board signs the boundary at its next counter, as the wallet has it signed.
+    let (id, counter, frontier) = head
+        .offline_boundary_start(&board.bundle, kind, &era, amount)
+        .expect("the boundary's start");
+    let (t, challenge) =
+        dsm::types::offline_chain::boundary_transition(kind, dev(), &id, &frontier, counter)
+            .expect("the boundary's transition");
     let outcome = head
-        .cross_offline_boundary(&bundle(), kind, &era, amount)
+        .cross_offline_boundary(&board.bundle, kind, &era, amount, t.next_root)
         .expect("the head takes the boundary");
+    let nonce = board.app.draw_authorization_nonce().expect("a nonce");
+    let authorization = anchor_core::appliance::owner_authorization_digest(
+        &board.bundle,
+        &frontier,
+        counter,
+        &anchor_core::root_advance::transition_digest(&t.as_transition(), &challenge),
+        &outcome.pre_device_root,
+        &outcome.post_device_root,
+        &nonce,
+    );
+    let signature = dsm::crypto::sphincs::sign(
+        dsm::crypto::sphincs::SphincsVariant::SPX256f,
+        &trader().1,
+        &authorization,
+    )
+    .expect("the trader signs");
+    board
+        .app
+        .authorize(&authorization, &signature)
+        .expect("authorized");
+    board
+        .app
+        .prepare(
+            &t.as_transition(),
+            &challenge,
+            &outcome.pre_device_root,
+            &outcome.post_device_root,
+        )
+        .expect("the board signs the boundary");
+    board.app.commit().expect("committed");
+    let mut release = board.app.emit().expect("emitted").clone();
+    release.offline_state_proof_before = outcome.offline_state_proofs.parent.clone();
+    release.offline_state_proof_after = outcome.offline_state_proofs.child.clone();
+    board.app.finalize().expect("finalized");
+    let release = anchor_core::proto::encode_release(&release.to_pb());
     // No spends here: the boundary starts from the account as it stands,
     // which is the account its previous boundary left, or the one opened.
     let account = head
-        .offline_account(&bundle())
+        .offline_account(&board.bundle)
         .expect("the account is open");
     let since = match account.funding_chain() {
         None => dsm::economic::offline_boundary::BoundarySince::Opened {
@@ -1374,14 +1558,15 @@ fn boundary(
     let bytes = OfflineBoundaryBody::of(
         &outcome,
         kind,
-        bundle(),
+        board.bundle,
         era,
         amount,
         dsm::economic::offline_boundary::BoundaryAncestry {
-            anchor: boundary_anchor(),
+            anchor: board.anchor.clone(),
             since,
             chain: Vec::new(),
         },
+        release,
     )
     .expect("body")
     .encode()
@@ -1481,13 +1666,15 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
         credit.leaf_value().expect("encodable"),
     );
     assert_eq!(tree.root(), at_one.economic_root());
+    let mut board = Board::born();
     let head = head_of(g(), &fx, &[(era, ERA_FAUCET_PAYOUT)], &[], None)
-        .open_offline_account(&bundle(), [0x01; 32], 0)
+        .open_offline_account(&board.bundle, board.origin, 0)
         .expect("the account opens");
 
     // ── position 2: load 300 ──
     let online = std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT)]);
     let load = boundary(
+        &mut board,
         &head,
         Load,
         300,
@@ -1502,7 +1689,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     assert_eq!(
         load.outcome
             .new_device_state
-            .offline_allocation(&bundle(), &era),
+            .offline_allocation(&board.bundle, &era),
         Some(300)
     );
 
@@ -1510,6 +1697,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     let online = std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT - 300)]);
     let after_load = tree.clone();
     let unload = boundary(
+        &mut board,
         &load.outcome.new_device_state,
         Unload,
         100,
@@ -1630,8 +1818,9 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
     let era = dsm::core::token::token_state_manager::era_policy_commit();
     let fx = faucet_fixture(1);
     let online = std::collections::BTreeMap::from([(era, 500)]);
+    let mut board = Board::born();
     let head = head_of(g(), &fx, &[(era, 500)], &[], None)
-        .open_offline_account(&bundle(), [0x01; 32], 0)
+        .open_offline_account(&board.bundle, board.origin, 0)
         .expect("the account opens");
     let mut tree = EconomicSmt::new();
     let held = bal(era, 500);
@@ -1640,7 +1829,7 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
         held.leaf_value().expect("encodable"),
     );
     let pre_root = tree.root();
-    let load = boundary(&head, Load, 300, pre_root, &mut tree.clone(), &online, 2);
+    let load = boundary(&mut board, &head, Load, 300, pre_root, &mut tree.clone(), &online, 2);
     let after_load = std::collections::BTreeMap::from([(era, 200)]);
     let mut loaded_tree = tree.clone();
     let built = dsm::economic::write_set::build_boundary_write_set(
@@ -1658,6 +1847,7 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
     .expect("the load's write set");
     assert_eq!(built.post_root, load.witness.post_economic_root);
     let unload = boundary(
+        &mut board,
         &load.outcome.new_device_state,
         Unload,
         100,
