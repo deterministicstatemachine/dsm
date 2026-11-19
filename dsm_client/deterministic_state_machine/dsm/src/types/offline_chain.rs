@@ -516,6 +516,16 @@ impl AccountHop {
         }
     }
 
+    /// The root-advance message `M` the account's board signed for the step, which names it: for a
+    /// spend or a receive. An unload of a received payment carries no board signature.
+    pub fn board_message(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Spend(s) => Some(s.release.cert.root_advance_message),
+            Self::Receive(r) => Some(r.release.cert.root_advance_message),
+            Self::Settle(_) => None,
+        }
+    }
+
     /// The counter and the frontier the step started from, for a step its board signed (a spend or
     /// a receive). An unload of a received payment moves neither.
     pub fn starts_at(&self) -> Option<(u64, [u8; 32])> {

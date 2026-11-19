@@ -1355,6 +1355,32 @@ fn every_class() -> Vec<Shown> {
         }),
     ));
 
+    // ── offline origin cells (DSM Amendment A39 draft) ──────────────────
+    let origin = crate::offline_origin::OriginWrite {
+        owner_key: key(),
+        device_id: b(0xD1),
+        bundle: b(0xB0),
+        anchor: crate::economic::offline_boundary::BoundaryAnchor {
+            anchor_id: b(0xA1),
+            pk_chip: vec![0xC1; 32],
+            pk_host: vec![0xC2; 32],
+            enrolled_counter: 32,
+            birth_commitment: b(0xB1),
+        },
+        step: b"one step of an offline account".to_vec(),
+    };
+    all.push(shown(
+        class::OFFLINE_ORIGIN_WRITE,
+        crate::offline_origin::SCHEMA_V1,
+        ok(origin.encode(), "origin write"),
+        Read::Parsed(|b| {
+            Ok(crate::offline_origin::OriginWrite::decode(b)
+                .map_err(text)?
+                .encode()
+                .map_err(|e| e.to_string())?)
+        }),
+    ));
+
     all
 }
 

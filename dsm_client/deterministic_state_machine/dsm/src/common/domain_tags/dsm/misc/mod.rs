@@ -12,6 +12,7 @@ mod app_cell;
 mod connect;
 mod economic;
 mod escrow;
+mod offline_origin;
 mod protocol;
 mod shared_lineage;
 mod sofi;
@@ -24,6 +25,7 @@ pub use app_cell::*;
 pub use connect::*;
 pub use economic::*;
 pub use escrow::*;
+pub use offline_origin::*;
 pub use protocol::*;
 pub use shared_lineage::*;
 pub use sofi::*;
@@ -48,6 +50,12 @@ pub(super) fn escrow_tags() -> &'static [TaggedHashDomain<'static>] {
 #[cfg(test)]
 pub(super) fn app_cell_tags() -> &'static [TaggedHashDomain<'static>] {
     app_cell::APP_CELL_TAGS
+}
+
+/// The offline origin-cell tags (DSM Amendment A39 draft), collected the same way.
+#[cfg(test)]
+pub(super) fn offline_origin_tags() -> &'static [TaggedHashDomain<'static>] {
+    offline_origin::OFFLINE_ORIGIN_TAGS
 }
 
 /// The shared-lineage tags (SoFi Amendment S23), collected the same way.
