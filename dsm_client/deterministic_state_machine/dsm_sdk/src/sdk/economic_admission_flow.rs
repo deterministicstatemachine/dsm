@@ -883,11 +883,15 @@ pub(crate) async fn admitted_offline_boundary(
     )?;
     let (outcome, pending) = core.admitted_boundary(
         &bundle,
-        kind,
-        &asset,
-        amount,
-        transition.next_root,
-        (preview.pre_device_root, preview.post_device_root),
+        crate::sdk::core_sdk::OfflineMove {
+            kind,
+            asset,
+            amount,
+        },
+        crate::sdk::core_sdk::BoardSigned {
+            next_frontier: transition.next_root,
+            roots: (preview.pre_device_root, preview.post_device_root),
+        },
         |boundary| {
             let body = OfflineBoundaryBody::of(
                 boundary,

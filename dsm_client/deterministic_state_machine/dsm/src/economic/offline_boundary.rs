@@ -161,6 +161,9 @@ pub struct VerifiedOfflineBoundary {
     operation_id: [u8; 32],
     operation_digest: [u8; 32],
     moved: Moved,
+    /// `M`, the root-advance message the account's board signed for a load or an unload: what
+    /// holds the boundary's origin cell. `None` for a settlement.
+    departure: Option<[u8; 32]>,
 }
 
 /// What a verified boundary moved: an offline account (a load or an unload),
@@ -173,9 +176,6 @@ enum Moved {
         pre_account_root: [u8; 32],
         post_account_root: [u8; 32],
         since: BoundarySince,
-        /// `M`, the root-advance message the board signed for the boundary: what
-        /// holds the boundary's origin cell.
-        departure: [u8; 32],
     },
     Settlement,
 }
@@ -188,10 +188,7 @@ impl VerifiedOfflineBoundary {
     /// boundary: the step that holds the origin cell of the root it starts
     /// from. `None` for a settlement, which moves no offline account.
     pub fn departure(&self) -> Option<[u8; 32]> {
-        match self.moved {
-            Moved::Account { departure, .. } => Some(departure),
-            Moved::Settlement => None,
-        }
+        self.departure
     }
     pub fn bundle(&self) -> [u8; 32] {
         self.bundle
@@ -702,8 +699,8 @@ fn verify_boundary_step(
                 pre_account_root: body.pre_account_root,
                 post_account_root,
                 since: body.ancestry.since,
-                departure,
             },
+            departure: Some(departure),
         };
         Ok(verified)
     }
@@ -885,6 +882,7 @@ impl OfflineSettlementBody {
             operation_id: body.operation_id(genesis, device_id),
             operation_digest: offline_boundary_operation_digest(body_bytes),
             moved: Moved::Settlement,
+            departure: None,
         })
     }
 }

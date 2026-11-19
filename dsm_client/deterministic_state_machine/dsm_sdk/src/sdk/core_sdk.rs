@@ -682,11 +682,8 @@ impl CoreSDK {
     pub(crate) fn admitted_boundary(
         &self,
         bundle: &[u8; 32],
-        kind: dsm::types::device_state::OfflineBoundaryKind,
-        asset: &[u8; 32],
-        amount: u64,
-        next_frontier: [u8; 32],
-        signed_roots: ([u8; 32], [u8; 32]),
+        moved: OfflineMove,
+        signed: BoardSigned,
         prepare: impl FnOnce(
             &dsm::types::device_state::OfflineBoundaryOutcome,
         ) -> Result<
@@ -716,10 +713,16 @@ impl CoreSDK {
                 pending.economic_position
             )));
         }
-        let outcome = head.cross_offline_boundary(bundle, kind, asset, amount, next_frontier)?;
+        let outcome = head.cross_offline_boundary(
+            bundle,
+            moved.kind,
+            &moved.asset,
+            moved.amount,
+            signed.next_frontier,
+        )?;
         // The board signed the boundary over the device roots it previewed: the head must still
         // stand where it did, or the board's signature is of another boundary.
-        if (outcome.pre_device_root, outcome.post_device_root) != signed_roots {
+        if (outcome.pre_device_root, outcome.post_device_root) != signed.roots {
             return Err(DsmError::invalid_operation(
                 "offline boundary: the head moved after the board signed the boundary",
             ));
@@ -2359,6 +2362,22 @@ pub struct OfflineBearerArtifacts {
     pub pin: crate::anchor::AnchorPin,
 }
 
+/// What an offline boundary moves: which way, which asset, how much.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfflineMove {
+    pub kind: dsm::types::device_state::OfflineBoundaryKind,
+    pub asset: [u8; 32],
+    pub amount: u64,
+}
+
+/// What a board signed for a step that is no payment (DSM Amendment A39 draft, option B): the
+/// frontier it advanced to, and the device roots before and after it signed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardSigned {
+    pub next_frontier: [u8; 32],
+    pub roots: ([u8; 32], [u8; 32]),
+}
+
 /// `release` with the offline-state proofs `Π_i`/`Π_{i+1}` attached. They sit OUTSIDE all three
 /// signatures (the receiver verifies them independently against `R_i`/`R_{i+1}`), so attaching
 /// them mutates no signed bytes.
@@ -2925,9 +2944,17 @@ impl CoreSDK {
         })?;
         let bundle = attached.pin.bundle;
         let app = &mut attached.appliance;
-        let committed = match app.emit() {
-            Ok(release) => Some(release),
-            Err(_not_committed) => None,
+        // What the board holds decides: a committed step is emitted again, never signed anew; a
+        // board at rest signs; any other state signs nothing (§26).
+        let committed = match app.recover()? {
+            anchor_core::appliance::RecoverOutcome::ReemitCommitted(_) => Some(app.emit()?),
+            anchor_core::appliance::RecoverOutcome::Accept(_) => None,
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "offline boundary: the board is in no state to sign ({other:?}); settle its \
+                     pending step first"
+                )))
+            }
         };
         let release = match committed {
             Some(release) => {

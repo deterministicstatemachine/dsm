@@ -1360,6 +1360,18 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
         .await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
     pair.b.sync().await;
+    // The board signed the load: it is the account's one step (DSM Amendment A39).
+    let after_load = core
+        .device_head()
+        .and_then(|head| {
+            head.offline_account(&bundle)
+                .map(|account| account.counter())
+        })
+        .expect("the account the load opened");
+    assert_eq!(
+        after_load, 1,
+        "the board-signed load is the account's one step"
+    );
 
     // The trial carries no stamp, so its payment is refused before it is proposed.
     let operation = bearer_transfer(&b, 7);
@@ -1382,7 +1394,11 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
         .device_head()
         .and_then(|head| head.offline_account(&bundle).cloned())
         .expect("the account the load opened");
-    assert_eq!(loaded_account.counter(), 0, "nothing moved the account");
+    assert_eq!(
+        loaded_account.counter(),
+        after_load,
+        "the refused payment moved nothing"
+    );
     assert_eq!(
         loaded_account.allocation(&era),
         Some(2000),

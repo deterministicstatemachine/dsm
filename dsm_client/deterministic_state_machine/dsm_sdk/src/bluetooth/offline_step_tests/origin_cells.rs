@@ -209,6 +209,8 @@ async fn a_cloned_board_paying_two_receivers_settles_once_on_the_nodes() {
     pair.b.sync().await;
     c_device.sync().await;
     let mut copy = pair.a.backed_up_into("A-copy");
+    // A's board, cloned as it stands after the load: the copy's board.
+    let clone = board_a.cloned();
 
     let a = OfflineDevice::new(&pair.a);
     let b = OfflineDevice::new(&pair.b);
@@ -220,7 +222,6 @@ async fn a_cloned_board_paying_two_receivers_settles_once_on_the_nodes() {
 
     // The copy, on a clone of A's board.
     drop(installed);
-    let clone = HostAppliance::birth(&pair.a, [0xC4; 32], 16);
     assert_eq!(clone.pin().bundle, pin.bundle, "the clone holds A's keys");
     let _installed = boards(clone);
     copy.boot(&pair.fleet).await;
