@@ -14,7 +14,7 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `bbf619f01452e928c80a372d8797b0694706e6d2` | 4551 |
+| `specs/DSM_High_Level_Explainer.md` | `04c0e4bd7c58d06a3dadbd2a25f2eb9807f5e22a` | 4551 |
 | `specs/SoFi_Settlement_Specification.md` | `870fa85b5828328262a78af4799de86913c068ff` | 3138 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
 | `specs/DSM_Storage_Node_Specification.md` | `2b970c594e114d5deeb9b5052f4e204af864132d` | 651 |
@@ -600,7 +600,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0380 | prohibition | explicit | A load or an unload whose board-signed steps or departure are not each final at their origin cells is refused. A payment and another step from one account root never both count: the step final first at the root's cell is the account's one history, and a step off it is never admitted or settled. | amendment: DSM Amendment A39 (2026-11-19) | owner | none |
 | MR-DSM-0381 | authority | explicit | A wallet restored from its 24 words is the same wallet: the words re-derive its genesis, device id and keys exactly as its creation did, and no other identity is made. Nothing is installed unless the network's directory holds the wallet's own entry, proving itself and naming exactly that genesis, device id and authentication key. | amendment: DSM Amendment A40 (2026-11-19) | owner | none |
 | MR-DSM-0382 | authority | explicit | A restored wallet's admitted position, leaf cache and balances are its own register re-verified from its activation root to its head with the predicate any device runs for a peer, its leaves folded from each validated step's witness and recomputing every root the walk proved; its next step lands at the position after its head. A register that does not reach its head, or holds a realized SoFi position, holds the restore and rolls the identity back. | amendment: DSM Amendment A40 (2026-11-19) | owner | none |
-| MR-DSM-0383 | authority | explicit | A wallet keeps on the storage nodes a backup of what it needs to carry on with its contacts, taken once it is still and cancelled by any step that comes while it is written, sealed in parts under a key and found through a locator its wallet seed alone gives; each part's cell holds only a write that opens under that key as that part of that backup. A restore installs the latest backup only when it was taken at exactly the register position the restore re-verified and its head holds exactly the register's balances; an older backup is never installed. | amendment: DSM Amendment A40 (2026-11-19) | owner | none |
+| MR-DSM-0383 | authority | explicit | A wallet keeps on the storage nodes a backup of what it needs to carry on with its contacts, taken once it is still and cancelled by any step that comes while it is written, sealed in parts under a key and found through a locator its wallet seed alone gives; each part's cell holds only a write that opens under that key as that part of that backup. A restore installs the latest backup only when it was taken at exactly the register position the restore re-verified, its head holds exactly the register's balances, and it holds no offline account and no admission in flight; an older backup is never installed. | amendment: DSM Amendment A40 (2026-11-19) | owner | none |
 
 ### 8.2 SoFi settlement specification
 

@@ -1310,7 +1310,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(Ok(read))
     }
 
-    /// What the cell of part `part` of a wallet's `n`-th backup holds (DSM
+    /// What the cell of a part of a wallet's `n`-th backup holds (DSM
     /// Amendment A40),
     /// read from the set's seats. A backup final at its cell is relied on only
     /// through its completion proof, checked against fresh reads; reads that
@@ -1319,10 +1319,11 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         &self,
         keys: &crate::wallet_backup::BackupKeys,
         n: u64,
-        part: u32,
+        place: crate::wallet_backup::Place,
     ) -> Result<Result<crate::wallet_backup::BackupRead, CellMissing>, VerifierFailure> {
-        let cell = crate::wallet_backup::BackupCell::new(keys, n, part, self.members, &self.set_id)
-            .map_err(|e| VerifierFailure::Refused(format!("backup cell: {e:?}")))?;
+        let cell =
+            crate::wallet_backup::BackupCell::new(keys, n, place, self.members, &self.set_id)
+                .map_err(|e| VerifierFailure::Refused(format!("backup cell: {e:?}")))?;
         let evidence = self.reads.cell(cell.routed(), &cell.keeps())?;
         let read = match crate::wallet_backup::resolution(&cell, &evidence) {
             Ok(read) => read,

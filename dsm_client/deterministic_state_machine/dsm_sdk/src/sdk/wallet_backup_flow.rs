@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use dsm::types::error::DsmError;
-use dsm::wallet_backup::{BackupCell, BackupKeys, BackupRead};
+use dsm::wallet_backup::{BackupCell, BackupKeys, BackupRead, Place};
 use rusqlite::types::Value;
 
 use crate::sdk::route_seats::{write_recorded, AtLeader};
@@ -43,8 +43,10 @@ const LATEST: &str = "wallet_backup_latest";
 /// What a backup carries: each contact's resume state (its chain tip, through
 /// the device head; its key chain heads and step chain; its write grants and
 /// inbox routes; the contact's head as this wallet holds it), the steps still
-/// in flight, the replay guards, and the token, anchor, offline and SoFi vault
-/// state the head refers to.
+/// in flight, the replay guards, and the token, anchor pin and SoFi vault state
+/// the head refers to. Never an offline account's state: a board's account
+/// comes back from the network, not from a copy (owner, 2026-11-19: "it needs
+/// to reestablish your counter position").
 pub const BACKUP_TABLES: &[&str] = &[
     "bcr_device_heads",
     "contacts",
@@ -82,13 +84,6 @@ pub const BACKUP_TABLES: &[&str] = &[
     "token_registry",
     "anchor_enrollments",
     "anchor_accepted_roots",
-    "own_offline_hop",
-    "own_offline_boundary",
-    "offline_boundary_told",
-    "offline_acknowledgement",
-    "pending_offline_receipt",
-    "pending_offline_origin",
-    "pending_offline_origin_write",
     "sofi_vault_baseline",
     "sofi_vault_history_published",
     "sofi_vault_label",
@@ -463,86 +458,107 @@ pub fn record_latest(n: u64) -> Result<(), DsmError> {
 /// its largest.
 pub const PART: usize = dsm::wallet_backup::MAX_PART;
 
-/// Write `body` as backup `n`, in parts of at most [`PART`], each leader first:
-/// the later parts first and part 0, which says how many there are, last. A
-/// cell another write already holds is the leader's answer, never overwritten.
+/// Write `body` as backup `n` in one attempt of its own, in parts of at most
+/// [`PART`], each leader first: the later parts under the attempt, then part 0,
+/// which names the attempt and the count of parts, at the backup's own cell. An
+/// attempt cut short leaves only cells no later attempt uses. Answers the
+/// leader's answer for part 0, or for the later part it stopped at.
 pub async fn write(
     set: &StorageSet,
     keys: &BackupKeys,
     n: u64,
     body: &Body,
-) -> Result<AtLeader, DsmError> {
+) -> Result<Written, DsmError> {
     let bytes = body.encode()?;
     let chunks: Vec<&[u8]> = bytes.chunks(PART).collect();
     let parts = u32::try_from(chunks.len()).map_err(|e| storage("parts", e))?;
+    let attempt = dsm::wallet_backup::new_attempt();
     let members = as_ccb_members(set)?;
     for (index, chunk) in chunks.iter().enumerate().rev() {
         let part = u32::try_from(index).map_err(|e| storage("part", e))?;
-        let cell = BackupCell::new(keys, n, part, &members, &set.id())
+        let place = Place::of(part, attempt);
+        let cell = BackupCell::new(keys, n, place, &members, &set.id())
             .map_err(|e| storage("cell", format!("{e:?}")))?;
-        let sealed = keys.seal(n, part, parts, chunk)?;
+        let sealed = keys.seal(n, part, parts, &attempt, chunk)?;
         let report = write_recorded(set, cell.routed(), &cell.keeps(), &sealed).await?;
-        match report.leader() {
-            AtLeader::Link => {}
-            other => return Ok(other),
+        match (place, report.leader()) {
+            (_, AtLeader::Link) => {}
+            (Place::First, AtLeader::Taken) => return Ok(Written::NumberTaken),
+            (Place::Later { .. }, AtLeader::Taken) | (_, AtLeader::Unanswered) => {
+                return Ok(Written::Stopped { part })
+            }
         }
     }
-    Ok(AtLeader::Link)
+    Ok(Written::Whole)
 }
 
-/// What the cell of part `part` of backup `n` holds, read from the set's
-/// seats. Reads that do not decide it yet are a storage error, never an open
-/// cell.
+/// How a write of a backup came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    /// Every part holds its cell, part 0 last: the backup is written.
+    Whole,
+    /// Part 0's cell already holds a whole backup of this wallet's: the number
+    /// is used, and the next backup goes after it.
+    NumberTaken,
+    /// The write stopped at `part` without part 0: nothing of it is relied on,
+    /// and the number stays free for the next attempt.
+    Stopped { part: u32 },
+}
+
+/// What the cell of the part of backup `n` at `place` holds, read from the
+/// set's seats. Reads that do not decide it yet are a storage error, never an
+/// open cell.
 pub fn read(
     set: &StorageSet,
     own: (D32, D32),
     keys: &BackupKeys,
     n: u64,
-    part: u32,
+    place: Place,
 ) -> Result<BackupRead, DsmError> {
     let ctx = crate::sdk::sofi_reads::VerifierContext::new(set, Some(own), None)?;
     ctx.verifier()
-        .read_backup_cell(keys, n, part)
+        .read_backup_cell(keys, n, place)
         .map_err(crate::sdk::sofi_reads::verifier_error)?
         .map_err(|missing| {
             storage(
-                &format!("backup {n} part {part}"),
+                &format!("backup {n} part {}", place.index()),
                 format!("not decided yet: {missing:?}"),
             )
         })
 }
 
-/// Part `part` of backup `n` once final, `None` when its cell is open. A cell
-/// held by a write not final yet is an error to try again on.
+/// The part of backup `n` at `place` once final, `None` when its cell is
+/// open. A cell held by a write not final yet is an error to try again on.
 fn settled_part(
     set: &StorageSet,
     own: (D32, D32),
     keys: &BackupKeys,
     n: u64,
-    part: u32,
+    place: Place,
 ) -> Result<Option<dsm::wallet_backup::Opened>, DsmError> {
-    let at = read(set, own, keys, n, part)?;
+    let at = read(set, own, keys, n, place)?;
     if at.open() {
         return Ok(None);
     }
     at.settled().cloned().map(Some).ok_or_else(|| {
         storage(
-            &format!("backup {n} part {part}"),
+            &format!("backup {n} part {}", place.index()),
             "held, not final yet; try again shortly",
         )
     })
 }
 
-/// The latest backup the cells hold, by its number: the wallet writes backup
-/// `n` only once `n − 1` is written, and each backup's part 0 last, so the
-/// backups fill the cells in order, and the latest is found by doubling, then
-/// halving, on part 0. Its other parts must each be final.
+/// The latest backup the cells hold, by its number: backup `n`'s part 0 holds
+/// its cell only once its later parts do, and `n` is written only once
+/// `n − 1`'s part 0 holds its cell, so the part 0 cells fill in order with no
+/// gap, and the latest is found by doubling, then halving, on part 0. Its later
+/// parts are read under the attempt part 0 names, and each must be final.
 pub fn latest(
     set: &StorageSet,
     own: (D32, D32),
     keys: &BackupKeys,
 ) -> Result<Option<(u64, Body)>, DsmError> {
-    let head = |n: u64| settled_part(set, own, keys, n, 0);
+    let head = |n: u64| settled_part(set, own, keys, n, Place::First);
     let Some(first) = head(1)? else {
         return Ok(None);
     };
@@ -563,7 +579,8 @@ pub fn latest(
     }
     let mut bytes = lo_head.chunk;
     for part in 1..lo_head.parts {
-        let found = settled_part(set, own, keys, lo, part)?.ok_or_else(|| {
+        let place = Place::of(part, lo_head.attempt);
+        let found = settled_part(set, own, keys, lo, place)?.ok_or_else(|| {
             storage(
                 &format!("backup {lo} part {part}"),
                 "missing though part 0 is written",
@@ -648,17 +665,21 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
     };
     tokio::select! {
         written = write(set, &keys, n, &body) => match written? {
-            AtLeader::Link => {
+            Written::Whole => {
                 record_latest(n)?;
                 Ok(Attempt::Written(n))
             }
-            // A write of this wallet's own holds the cell already: one an
-            // earlier attempt left there. The next backup goes after it.
-            AtLeader::Taken => {
+            // A whole backup of this wallet's holds the number already: one
+            // an earlier attempt finished. The next backup goes after it.
+            Written::NumberTaken => {
                 record_latest(n)?;
-                Err(storage(&format!("backup {n}"), "the cell is taken; the next goes after it"))
+                Err(storage(&format!("backup {n}"), "the number is used; the next goes after it"))
             }
-            AtLeader::Unanswered => Err(storage(&format!("backup {n}"), "the leader did not answer")),
+            // Nothing of this attempt is relied on, and the number stays free.
+            Written::Stopped { part } => Err(storage(
+                &format!("backup {n} part {part}"),
+                "the write stopped before part 0; the next attempt takes the number",
+            )),
         },
         () = moved => Ok(Attempt::Cancelled),
     }

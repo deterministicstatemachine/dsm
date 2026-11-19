@@ -651,6 +651,20 @@ impl CoreSDK {
                 "restore: the backup's head holds other balances than the register's head",
             ));
         }
+        // A board's offline account comes back from the network, never from a
+        // copy, and nothing in flight is installed: such a head is refused.
+        if !head.offline_accounts().is_empty() {
+            return Err(DsmError::invalid_operation(
+                "restore: the backup's head holds an offline account; its counter comes back \
+                 from the network, not from a copy",
+            ));
+        }
+        if let Some(pending) = head.pending_economic_admission() {
+            return Err(DsmError::invalid_operation(format!(
+                "restore: the backup's head carries the admission at {} in flight",
+                pending.economic_position
+            )));
+        }
         if crate::storage::client_db::economic_lineage::get_admitted()
             .map_err(|e| storage("the admitted position", e.to_string()))?
             .is_some()

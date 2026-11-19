@@ -202,3 +202,53 @@ async fn a_backup_behind_the_register_is_never_installed() {
         "the next backup goes after the one the cells hold"
     );
 }
+
+/// An attempt at a backup cut short leaves no gap. After backup 1, an attempt
+/// at backup 2 stops after a later part, before part 0. The next attempt still
+/// writes backup 2, under an attempt of its own, and the latest the cells hold
+/// is backup 2, with exactly the body that attempt wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn an_attempt_cut_short_leaves_no_gap() {
+    let pair = Pair::boot(100, 0).await;
+    back_up(&pair.a, 1).await;
+    pair.a.enter();
+    let set = crate::sdk::storage_set::canonical_set(economic_fixtures::NETWORK).expect("the set");
+    let keys = crate::sdk::wallet_backup_flow::keys().expect("the keys");
+    let cut_short = dsm::wallet_backup::new_attempt();
+    let place = dsm::wallet_backup::Place::of(1, cut_short);
+    let cell = dsm::wallet_backup::BackupCell::new(
+        &keys,
+        2,
+        place,
+        &crate::sdk::storage_set::as_ccb_members(&set).expect("the members"),
+        &set.id(),
+    )
+    .expect("the cell");
+    let stray = keys
+        .seal(2, 1, 2, &cut_short, b"a later part of an attempt cut short")
+        .expect("sealed");
+    let left = crate::sdk::route_seats::write_recorded(&set, cell.routed(), &cell.keeps(), &stray)
+        .await
+        .expect("the stray part");
+    assert!(matches!(
+        left.leader(),
+        crate::sdk::route_seats::AtLeader::Link
+    ));
+
+    back_up(&pair.a, 2).await;
+    pair.a.enter();
+    let own = (pair.a.genesis, pair.a.device_id);
+    let latest = tokio::task::spawn_blocking(move || {
+        crate::sdk::wallet_backup_flow::latest(&set, own, &keys)
+    })
+    .await
+    .expect("the read finished")
+    .expect("the backups")
+    .expect("a backup");
+    let taken = crate::sdk::wallet_backup_flow::snapshot()
+        .expect("the snapshot")
+        .expect("still");
+    assert_eq!(latest.0, 2, "the latest is backup 2");
+    assert_eq!(latest.1, taken, "with the body its own attempt wrote");
+}
