@@ -1262,6 +1262,50 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(Ok(read))
     }
 
+    /// The offline origin cell of `account_root` of `bundle` (DSM Amendment
+    /// A39 draft): its route chains evaluated from every seat's reads into a
+    /// read bound to the key. A step final at the cell is relied on only
+    /// through its completion proof, checked against fresh reads (Amendment
+    /// S10, [`Self::rely_on_final`]). Reads that do not decide the cell yet are
+    /// the inner `Err`: a network status, never an open cell.
+    pub fn read_origin_cell(
+        &self,
+        bundle: &D32,
+        account_root: &D32,
+    ) -> Result<Result<crate::offline_origin::OriginRead, CellMissing>, VerifierFailure> {
+        let cell =
+            crate::offline_origin::OriginCell::new(bundle, account_root, self.members, &self.set_id)
+                .map_err(|e| VerifierFailure::Refused(format!("origin cell: {e:?}")))?;
+        let evidence = self.reads.cell(cell.routed(), &cell.keeps())?;
+        let read = match crate::offline_origin::resolution(&cell, &evidence) {
+            Ok(read) => read,
+            Err(missing) => return Ok(Err(missing)),
+        };
+        if let CellFact::Held {
+            state: ChainState::Final,
+            ..
+        } = read.fact()
+        {
+            let (.., proof) = crate::offline_origin::completion(&cell, &read, &evidence)
+                .map_err(|missing| {
+                    VerifierFailure::Read(format!("origin cell completion: {missing:?}"))
+                })?
+                .ok_or_else(|| {
+                    VerifierFailure::Read(
+                        "origin cell completion: a final step has no completion proof".to_string(),
+                    )
+                })?;
+            if let Err(missing) =
+                self.rely_on_final(cell.routed(), &cell.keeps(), &evidence, proof, |ev, p| {
+                    crate::offline_origin::check_completion(&cell, &read, ev, p).map(drop)
+                })?
+            {
+                return Ok(Err(missing));
+            }
+        }
+        Ok(Ok(read))
+    }
+
     /// The start and match cells of a computed escrow vault as a Release
     /// reads them (SoFi Amendment S22): the start cell first, and the match
     /// cell only once a Start holds it. A Start, a Withdraw or an occupant

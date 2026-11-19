@@ -5524,6 +5524,9 @@ mod model_correspondence;
 /// The receiver's board: no board, a cut at each of its writes, and a forged acknowledgement.
 mod receiver_board;
 
+/// Offline steps final at their origin cells, on the five storage nodes (DSM Amendment A39 draft).
+mod origin_cells;
+
 /// DSM Amendment A27 (SA-35; the owner's requirement of 2026-11-01: "a
 /// passive BLE observer must not learn permanent identifiers, transfer
 /// amounts, salts, or other private transfer data"). A's bearer payment to B,

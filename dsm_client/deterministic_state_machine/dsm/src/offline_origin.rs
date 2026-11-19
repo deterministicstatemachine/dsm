@@ -37,7 +37,8 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 use crate::economic::offline_boundary::BoundaryAnchor;
 use crate::route_chain::{
-    evaluate, CellError, CellEvidence, CellFact, CellReading, ChainState, Missing, RoutedCell,
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
+    CellReading, ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
 use crate::types::error::DsmError;
 use crate::types::offline_chain::{
@@ -418,6 +419,37 @@ pub fn resolution(cell: &OriginCell, evidence: &CellEvidence) -> Result<OriginRe
         held,
         passed_over: refused.into_inner(),
     })
+}
+
+/// The recognizer of the one write a read found holding the cell: its exact
+/// bytes, so a completion proof built or checked with it is about the same
+/// leader link.
+fn held_step(read: &OriginRead) -> impl Fn(&[u8]) -> Option<(D32, OriginStep)> + '_ {
+    move |bytes| match &read.held {
+        Some((step, value)) if value.as_slice() == bytes => Some((step.message, step.clone())),
+        Some(..) | None => None,
+    }
+}
+
+/// The completion proof of the step `read` found final at the cell; `None`
+/// while no chain of it has three links, or when the read found the cell open.
+pub fn completion(
+    cell: &OriginCell,
+    read: &OriginRead,
+    evidence: &CellEvidence,
+) -> Result<Option<(OriginStep, CompletionProof)>, Missing> {
+    completion_proof(&cell.cell, evidence, held_step(read))
+}
+
+/// Check a kept completion proof of the step `read` found at the cell against
+/// the reads in `evidence`: the step it proves final.
+pub fn check_completion(
+    cell: &OriginCell,
+    read: &OriginRead,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<OriginStep, ProofRefusal> {
+    check_completion_proof(&cell.cell, evidence, proof, held_step(read))
 }
 
 // ── settling without the payer ─────────────────────────────────────────────
