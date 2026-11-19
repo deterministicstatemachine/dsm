@@ -285,7 +285,7 @@ impl core::fmt::Debug for InitFailure {
 pub unsafe fn keep_refusal(failure: &InitFailure) {
     let said = match failure {
         InitFailure::BringUp(_) => format!(
-            "{failure:?}; the chip's bytes at warm-up: {:02x?}",
+            "{failure:?}; the chip's status at warm-up: {:02x?}",
             *core::ptr::addr_of!(WARM_UP)
         ),
         _ => format!("{failure:?}"),
@@ -297,8 +297,9 @@ pub unsafe fn keep_refusal(failure: &InitFailure) {
     };
 }
 
-/// What the chip answered to the three warm-up transfers: its status byte first in each four.
-static mut WARM_UP: [u8; 12] = [0; 12];
+/// The chip's status byte at each of the three warm-up transfers: its ready, alarm and start-up
+/// bits, and nothing else the chip sent back.
+static mut WARM_UP: [u8; 3] = [0; 3];
 
 /// Bring up the TROPIC01 from Secure and install the anchor in `MONITOR_APP`. Fail-closed: any
 /// failure returns the failing stage and installs nothing, so every request is answered with the
@@ -411,7 +412,7 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     for turn in 0..3usize {
         let mut rx = [0u8; 4];
         let _ = spi_dev.transfer(&mut rx, &[0xAAu8, 0, 0, 0]);
-        (&mut *core::ptr::addr_of_mut!(WARM_UP))[turn * 4..turn * 4 + 4].copy_from_slice(&rx);
+        (*core::ptr::addr_of_mut!(WARM_UP))[turn] = rx[0];
         cortex_m::asm::delay(150_000_000); // ~1 s @150 MHz
     }
 
