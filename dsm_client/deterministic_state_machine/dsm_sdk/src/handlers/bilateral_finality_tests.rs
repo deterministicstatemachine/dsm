@@ -669,8 +669,10 @@ async fn r4_calibration_cannot_release_the_sender_gate() {
 #[serial]
 async fn the_harness_defers_the_background_poller_while_a_pair_lives() {
     use crate::sdk::inbox_poller::{
-        poller_running, poller_start_deferred, resume_poller, stop_poller, POLLER_CYCLE_DONE,
+        poller_running, poller_start_deferred, poller_stopping, put_back_the_stop, resume_poller,
+        stop_poller_and_wait, POLLER_CYCLE_DONE,
     };
+    let stopping_before = poller_stopping();
     let mut p = Pair::boot(1_000, 0).await;
     let rel = p.a.rel_key_with(&p.b);
     let sent = p.a.send(&p.b, 10).await;
@@ -709,7 +711,8 @@ async fn the_harness_defers_the_background_poller_while_a_pair_lives() {
     tokio::time::timeout(std::time::Duration::from_secs(60), cycle)
         .await
         .expect("the released poller's first cycle");
-    stop_poller();
+    stop_poller_and_wait().expect("the released poller stops");
+    put_back_the_stop(stopping_before);
     p.a.enter();
     assert_eq!(
         outbox_statuses(&rel),
