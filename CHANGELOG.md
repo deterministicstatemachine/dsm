@@ -9,6 +9,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- **A connected app sends the player to the wallet to approve, and the wallet
+  goes back to it (DSM Amendment A11; owner, 2026-11-19).** A `dsm:connect/v1:`
+  link that carries the code of an application the wallet is already connected
+  to no longer asks to connect again: the Apps screen opens that application's
+  waiting requests, and once the player has approved or declined them the
+  wallet steps back to the app that opened it, as after a connect. It is the
+  same for every application. The wallet finds the connection in its own record
+  (`connect.connectedBy`, a new query) and fetches nothing the link names.
+
 ### Security
 
 - **A board pays or is paid offline only under the owner's stamp (DSM

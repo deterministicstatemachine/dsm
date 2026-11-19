@@ -22,6 +22,7 @@ function reply(value: pb.ConnectReplyV1['reply']): Answer {
 function phoneWithAnOffer() {
   return installScriptedPhone({
     'connect.list': reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [] }) }),
+    'connect.connectedBy': reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [] }) }),
     'connect.pending': reply({ case: 'pending', value: new pb.ConnectPendingListV1({ pending: [] }) }),
     'connect.preview': reply({
       case: 'preview',
@@ -45,6 +46,7 @@ describe('a connect offer', () => {
     await act(settle);
 
     act(() => emit('connect.link', new TextEncoder().encode(`com.example.lookalike\n${CODE}`)));
+    await act(settle);
     expect(screen.getByText(/A link from outside the wallet handed over a connect code, opened by com\.example\.lookalike/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'READ' }));
@@ -67,6 +69,7 @@ describe('a connect offer', () => {
     render(<AppsScreen />);
     await act(settle);
     act(() => emit('connect.link', new TextEncoder().encode(`\n${CODE}`)));
+    await act(settle);
     fireEvent.click(screen.getByRole('button', { name: 'READ' }));
     await act(settle);
     expect(screen.getByTestId('connect-offer-origin')).toHaveTextContent('a link opened by an app your phone did not name');
@@ -83,6 +86,7 @@ describe('a connect offer', () => {
       const phone = installScriptedPhone(
         {
           'connect.list': reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [] }) }),
+          'connect.connectedBy': reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [] }) }),
           'connect.pending': reply({ case: 'pending', value: new pb.ConnectPendingListV1({ pending: [] }) }),
           'connect.preview': reply({
             case: 'preview',
@@ -104,6 +108,7 @@ describe('a connect offer', () => {
       const { unmount } = render(<AppsScreen />);
       await act(settle);
       act(() => emit('connect.link', new TextEncoder().encode(`\n${CODE}`)));
+      await act(settle);
       fireEvent.click(screen.getByRole('button', { name: 'READ' }));
       await act(settle);
       fireEvent.click(screen.getByRole('button', { name: 'APPROVE' }));
@@ -125,6 +130,132 @@ describe('a connect offer', () => {
     await act(settle);
     expect(screen.getByTestId('connect-offer')).toBeInTheDocument();
     expect(screen.queryByTestId('connect-offer-origin')).toBeNull();
+  });
+});
+
+// Owner, 2026-11-19: an app the wallet is connected to sends the player to the
+// wallet to approve what it asks for, and the wallet goes back to it by itself.
+describe('a link carrying the code of a connected application', () => {
+  const ARENA = new Uint8Array(32).fill(5);
+  const OTHER = new Uint8Array(32).fill(6);
+  const arena = new pb.ConnectSessionV1({
+    sessionId: ARENA,
+    displayName: 'Arena',
+    status: pb.ConnectSessionStatus.CONNECTED,
+  });
+  const asked = (sessionId: Uint8Array<ArrayBuffer>, seq: bigint, displayName: string, summary: string) =>
+    new pb.ConnectPendingV1({ sessionId, seq, displayName, summary, reason: 'the grant covers no payment' });
+
+  /** A phone connected to Arena, with `waiting` held for the player; what it was asked, in order. */
+  function phoneConnectedToArena(waiting: pb.ConnectPendingV1[], stepped: number) {
+    const calls: string[] = [];
+    let held = waiting;
+    const heard = (route: string, answer: () => ReturnType<typeof reply>) => () => {
+      calls.push(route);
+      return answer();
+    };
+    const phone = installScriptedPhone(
+      {
+        'connect.list': reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [arena] }) }),
+        'connect.connectedBy': heard('connect.connectedBy', () => reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [arena] }) })),
+        'connect.sync': heard('connect.sync', () => reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [arena] }) })),
+        'connect.preview': heard('connect.preview', () => reply({ case: 'preview', value: new pb.ConnectPreviewV1({}) })),
+        'connect.pending': () => reply({ case: 'pending', value: new pb.ConnectPendingListV1({ pending: held }) }),
+        'connect.respond': () => {
+          calls.push(`connect.respond ${held[0].seq.toString()}`);
+          held = held.slice(1);
+          return reply({
+            case: 'decided',
+            value: new pb.ConnectDecidedV1({ session: arena, outcome: pb.ConnectOutcome.CARRIED_OUT, line: 'Paid 1,200 DBUCKS to Arena.' }),
+          });
+        },
+      },
+      { returnToConnectCaller: new Uint8Array([stepped]) },
+    );
+    return { phone, calls };
+  }
+
+  it('opens what that application has waiting, fetching nothing the link names', async () => {
+    const { phone, calls } = phoneConnectedToArena([asked(ARENA, 7n, 'Arena', 'Pay 1,200 DBUCKS')], 1);
+    render(<AppsScreen />);
+    await act(settle);
+    act(() => emit('connect.link', new TextEncoder().encode(`com.example.arena\n${CODE}`)));
+    await act(settle);
+
+    expect(screen.getByText(/com\.example\.arena opened the wallet for Arena, which is connected/)).toBeInTheDocument();
+    expect(screen.getByText(/Pay 1,200 DBUCKS/).closest('section')).toHaveTextContent('Arena: Pay 1,200 DBUCKS');
+    expect(screen.getByRole('button', { name: 'APPROVE' })).toBeInTheDocument();
+    // No connect offer is read or shown, and the code is not left in the field.
+    expect(screen.queryByTestId('connect-offer')).toBeNull();
+    expect(screen.queryByLabelText('Connect an app')).toBeNull();
+    expect(calls).toEqual(['connect.connectedBy', 'connect.sync']);
+    expect(phone.guards).toContain(CONFIRM);
+  });
+
+  it('steps back to the app once its request is decided, or says so where the phone cannot', async () => {
+    for (const [stepped, said] of [
+      [1, 'Paid 1,200 DBUCKS to Arena.'],
+      [0, 'Paid 1,200 DBUCKS to Arena. Go back to the app that sent you here.'],
+    ] as const) {
+      const { calls } = phoneConnectedToArena([asked(ARENA, 7n, 'Arena', 'Pay 1,200 DBUCKS')], stepped);
+      const { unmount } = render(<AppsScreen />);
+      await act(settle);
+      act(() => emit('connect.link', new TextEncoder().encode(`com.example.arena\n${CODE}`)));
+      await act(settle);
+      fireEvent.click(screen.getByRole('button', { name: 'APPROVE' }));
+      await act(settle);
+      expect(screen.getByText(said)).toBeInTheDocument();
+      expect(calls).toEqual(['connect.connectedBy', 'connect.sync', 'connect.respond 7']);
+      unmount();
+      removeScriptedPhone();
+    }
+  });
+
+  it('stays while another of its requests waits, and steps back after the last', async () => {
+    // A phone that cannot step back says so only once the wallet asked it to.
+    const { calls } = phoneConnectedToArena(
+      [asked(ARENA, 7n, 'Arena', 'Pay 1,200 DBUCKS'), asked(ARENA, 8n, 'Arena', 'Pay 300 DBUCKS')],
+      0,
+    );
+    render(<AppsScreen />);
+    await act(settle);
+    act(() => emit('connect.link', new TextEncoder().encode(`\n${CODE}`)));
+    await act(settle);
+    expect(screen.getByText(/An app your phone did not name opened the wallet for Arena/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'DECLINE' })[0]);
+    await act(settle);
+    expect(screen.getByText('Paid 1,200 DBUCKS to Arena.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'DECLINE' }));
+    await act(settle);
+    expect(screen.getByText('Paid 1,200 DBUCKS to Arena. Go back to the app that sent you here.')).toBeInTheDocument();
+    expect(calls).toEqual(['connect.connectedBy', 'connect.sync', 'connect.respond 7', 'connect.respond 8']);
+  });
+
+  it('does not step back after a request of another application', async () => {
+    const { calls } = phoneConnectedToArena([asked(OTHER, 2n, 'Bazaar', 'Pay 5 ERA')], 0);
+    render(<AppsScreen />);
+    await act(settle);
+    act(() => emit('connect.link', new TextEncoder().encode(`\n${CODE}`)));
+    await act(settle);
+    fireEvent.click(screen.getByRole('button', { name: 'APPROVE' }));
+    await act(settle);
+    expect(screen.getByText('Paid 1,200 DBUCKS to Arena.')).toBeInTheDocument();
+    expect(screen.queryByText(/Go back to the app that sent you here/)).toBeNull();
+    expect(calls).toEqual(['connect.connectedBy', 'connect.sync', 'connect.respond 2']);
+  });
+
+  it('a request the player opened the wallet for themselves does not step back', async () => {
+    const { calls } = phoneConnectedToArena([asked(ARENA, 7n, 'Arena', 'Pay 1,200 DBUCKS')], 0);
+    render(<AppsScreen />);
+    await act(settle);
+    fireEvent.click(screen.getByRole('button', { name: /^Waiting/ }));
+    await act(settle);
+    fireEvent.click(screen.getByRole('button', { name: 'APPROVE' }));
+    await act(settle);
+    expect(screen.getByText('Paid 1,200 DBUCKS to Arena.')).toBeInTheDocument();
+    expect(screen.queryByText(/Go back to the app that sent you here/)).toBeNull();
+    expect(calls).toEqual(['connect.respond 7']);
   });
 });
 
