@@ -68,7 +68,12 @@ async fn invalid_steps_never_displace_a_payment_on_the_nodes() {
 
     let mut reencoded = real.clone();
     reencoded.step.extend_from_slice(&[0x78, 0x01]);
-    let overpaid = write_of(&pin, &real.owner_key, a.device.device_id, &inflated(&step, 9));
+    let overpaid = write_of(
+        &pin,
+        &real.owner_key,
+        a.device.device_id,
+        &inflated(&step, 9),
+    );
     let mut stranger = real.clone();
     stranger.device_id = b.device.device_id;
     let set = set();
@@ -92,35 +97,71 @@ async fn invalid_steps_never_displace_a_payment_on_the_nodes() {
     b.device.enter();
     let core = &b.device.router().core_sdk;
     let open = origin_cell_flow::read(core, &set, &pin.bundle, &start).expect("the cell reads");
-    assert_eq!(open.fact(), dsm::route_chain::CellFact::Open, "no invalid write holds the cell");
+    assert_eq!(
+        open.fact(),
+        dsm::route_chain::CellFact::Open,
+        "no invalid write holds the cell"
+    );
     assert_eq!(open.occupant(), None);
 
     // B writes the step A carried it, and reads the cell.
     let written = origin_cell_flow::write(&set, &real)
         .await
         .expect("B writes A's step");
-    assert!(matches!(written, AtLeader::Link), "the real step is first recognized");
+    assert!(
+        matches!(written, AtLeader::Link),
+        "the real step is first recognized"
+    );
     let read = origin_cell_flow::read(core, &set, &pin.bundle, &start).expect("the cell reads");
     let held = read.settled().expect("the real step is final");
     assert_eq!(held.message, message);
-    let paid = payment_from_cells(core, &set, &pin.bundle, &start, &start, &message, &b.device.device_id)
-        .expect("B settles from the cells without A");
+    let paid = payment_from_cells(
+        core,
+        &set,
+        &pin.bundle,
+        &start,
+        &start,
+        &message,
+        &b.device.device_id,
+    )
+    .expect("B settles from the cells without A");
     assert_eq!(paid.recipient, b.device.device_id);
     assert_eq!(paid.amount, 7);
 
     // Replay: the same step written again, by A and by B, is the same step.
     for who in [&a, &b] {
         who.device.enter();
-        origin_cell_flow::write(&set, &real).await.expect("written again");
+        origin_cell_flow::write(&set, &real)
+            .await
+            .expect("written again");
     }
     b.device.enter();
-    let again = payment_from_cells(core, &set, &pin.bundle, &start, &start, &message, &b.device.device_id)
-        .expect("still B's one payment");
+    let again = payment_from_cells(
+        core,
+        &set,
+        &pin.bundle,
+        &start,
+        &start,
+        &message,
+        &b.device.device_id,
+    )
+    .expect("still B's one payment");
     assert_eq!(again, paid);
     // No other device can claim it.
-    let claimed = payment_from_cells(core, &set, &pin.bundle, &start, &start, &message, &a.device.device_id)
-        .expect_err("A is not the payment's recipient");
-    assert!(claimed.to_string().contains("not to this device"), "{claimed}");
+    let claimed = payment_from_cells(
+        core,
+        &set,
+        &pin.bundle,
+        &start,
+        &start,
+        &message,
+        &a.device.device_id,
+    )
+    .expect_err("A is not the payment's recipient");
+    assert!(
+        claimed.to_string().contains("not to this device"),
+        "{claimed}"
+    );
 }
 
 /// Valid conflicting steps settle once, on the nodes. A loads 20 ERA. A copy of
@@ -190,7 +231,11 @@ async fn a_cloned_board_paying_two_receivers_settles_once_on_the_nodes() {
     let to_c = own_steps(&pin.bundle).remove(0);
 
     let root = to_b.starts_from();
-    assert_eq!(to_c.starts_from(), root, "both start from the root the load left");
+    assert_eq!(
+        to_c.starts_from(),
+        root,
+        "both start from the root the load left"
+    );
     let m_b = to_b.board_message().expect("signed");
     let m_c = to_c.board_message().expect("signed");
     assert_ne!(m_b, m_c);
@@ -198,23 +243,49 @@ async fn a_cloned_board_paying_two_receivers_settles_once_on_the_nodes() {
     let set = set();
     c.device.enter();
     let c_write = write_of(&pin, &a_key, pair.a.device_id, &to_c);
-    let first = origin_cell_flow::write(&set, &c_write).await.expect("C writes");
+    let first = origin_cell_flow::write(&set, &c_write)
+        .await
+        .expect("C writes");
     assert!(matches!(first, AtLeader::Link));
     b.device.enter();
     let b_write = write_of(&pin, &a_key, pair.a.device_id, &to_b);
-    let second = origin_cell_flow::write(&set, &b_write).await.expect("B writes");
-    assert!(matches!(second, AtLeader::Taken), "the cell is C's step's: {second:?}");
+    let second = origin_cell_flow::write(&set, &b_write)
+        .await
+        .expect("B writes");
+    assert!(
+        matches!(second, AtLeader::Taken),
+        "the cell is C's step's: {second:?}"
+    );
 
     let core_b = &b.device.router().core_sdk;
-    let refused = payment_from_cells(core_b, &set, &pin.bundle, &root, &root, &m_b, &b.device.device_id)
-        .expect_err("B's payment is off the history the cells hold");
+    let refused = payment_from_cells(
+        core_b,
+        &set,
+        &pin.bundle,
+        &root,
+        &root,
+        &m_b,
+        &b.device.device_id,
+    )
+    .expect_err("B's payment is off the history the cells hold");
     assert!(refused.to_string().contains("another history"), "{refused}");
     c.device.enter();
     let core_c = &c.device.router().core_sdk;
-    let paid = payment_from_cells(core_c, &set, &pin.bundle, &root, &root, &m_c, &c.device.device_id)
-        .expect("C settles from the cells");
+    let paid = payment_from_cells(
+        core_c,
+        &set,
+        &pin.bundle,
+        &root,
+        &root,
+        &m_c,
+        &c.device.device_id,
+    )
+    .expect("C settles from the cells");
     assert_eq!(paid.amount, whole_era(15));
-    assert!(paid.amount <= whole_era(20), "never more than the account held");
+    assert!(
+        paid.amount <= whole_era(20),
+        "never more than the account held"
+    );
 }
 
 /// A flooded cell still settles its payment. Before B writes the step A carried
@@ -246,10 +317,20 @@ async fn a_flooded_cell_still_settles_its_payment() {
         );
     }
     b.device.enter();
-    origin_cell_flow::write(&set, &real).await.expect("B writes");
+    origin_cell_flow::write(&set, &real)
+        .await
+        .expect("B writes");
     let core = &b.device.router().core_sdk;
-    let paid = payment_from_cells(core, &set, &pin.bundle, &start, &start, &message, &b.device.device_id)
-        .expect("the flood does not keep B from settling");
+    let paid = payment_from_cells(
+        core,
+        &set,
+        &pin.bundle,
+        &start,
+        &start,
+        &message,
+        &b.device.device_id,
+    )
+    .expect("the flood does not keep B from settling");
     assert_eq!((paid.recipient, paid.amount), (b.device.device_id, 7));
 }
 
@@ -277,10 +358,15 @@ async fn a_restored_wallet_finds_its_account_from_the_nodes() {
     let core = &restored.router().core_sdk;
     let (before, at) = walk(core, &set, &pin.bundle, &start).expect("the cells read");
     assert!(before.is_empty());
-    assert_eq!(at, start, "nothing written: the walk stands at the load's root");
+    assert_eq!(
+        at, start,
+        "nothing written: the walk stands at the load's root"
+    );
 
     b.device.enter();
-    origin_cell_flow::write(&set, &real).await.expect("B writes");
+    origin_cell_flow::write(&set, &real)
+        .await
+        .expect("B writes");
     restored.enter();
     let (steps, at) = walk(core, &set, &pin.bundle, &start).expect("the cells read");
     assert_eq!(steps.len(), 1);
@@ -289,7 +375,10 @@ async fn a_restored_wallet_finds_its_account_from_the_nodes() {
     let account = crate::storage::client_db::offline_spends::own_offline_hops(&pin.bundle)
         .expect("A's steps");
     assert_eq!(account.len(), 1);
-    assert_eq!(at, steps[0].after, "the restored wallet stands where A's step left the account");
+    assert_eq!(
+        at, steps[0].after,
+        "the restored wallet stands where A's step left the account"
+    );
     assert_ne!(at, start);
 }
 
@@ -335,5 +424,9 @@ async fn a_payer_cannot_unload_what_it_paid_offline_before_its_receiver_publishe
     b.device.enter();
     let moved = unload_received(&b).await;
     assert_eq!((moved.moved, moved.waiting), (1, 0), "{}", moved.message);
-    assert_eq!(pair.b.era_balance(), whole_era(15), "B holds what it was paid");
+    assert_eq!(
+        pair.b.era_balance(),
+        whole_era(15),
+        "B holds what it was paid"
+    );
 }

@@ -396,9 +396,9 @@ impl OfflineBoundaryBody {
         push_digest32(&mut out, &self.pre_frontier); // 9
         push_digest32(&mut out, &self.next_frontier); // 10
         push_bytes(&mut out, &self.release)?; // 11
-        // 12: a boundary writes exactly four account leaves — its allocation,
-        // the funding chain, the counter and the frontier — so four paths, in
-        // key order.
+                                              // 12: a boundary writes exactly four account leaves — its allocation,
+                                              // the funding chain, the counter and the frontier — so four paths, in
+                                              // key order.
         if self.account_paths.len() != BOUNDARY_WRITES {
             return Err(CcbError::FixedLength {
                 field: "account_paths",
@@ -632,24 +632,25 @@ fn verify_boundary_step(
         pre_account_root: body.pre_account_root,
     }
     .operation_id();
-    let step =
-        match body.kind {
-            OfflineBoundaryKind::Load => OfflineAccountStep::Load {
-                asset: body.asset,
-                amount: body.amount,
-                boundary_id: operation_id,
-                next_frontier: body.next_frontier,
-            },
-            OfflineBoundaryKind::Unload => OfflineAccountStep::Unload {
-                asset: body.asset,
-                amount: body.amount,
-                boundary_id: operation_id,
-                next_frontier: body.next_frontier,
-            },
-            OfflineBoundaryKind::Settle => return Err(DsmError::invalid_operation(
+    let step = match body.kind {
+        OfflineBoundaryKind::Load => OfflineAccountStep::Load {
+            asset: body.asset,
+            amount: body.amount,
+            boundary_id: operation_id,
+            next_frontier: body.next_frontier,
+        },
+        OfflineBoundaryKind::Unload => OfflineAccountStep::Unload {
+            asset: body.asset,
+            amount: body.amount,
+            boundary_id: operation_id,
+            next_frontier: body.next_frontier,
+        },
+        OfflineBoundaryKind::Settle => {
+            return Err(DsmError::invalid_operation(
                 "an offline boundary body is a load or an unload of the device's own account",
-            )),
-        };
+            ))
+        }
+    };
     let paths = body
         .account_paths
         .iter()
@@ -956,9 +957,8 @@ fn verify_boundary_release(
     use anchor_core::accept::verify_cert_frontier_and_sigs;
     use anchor_core::root_advance::transition_digest;
     use prost::Message;
-    let refused = |why: &str| {
-        DsmError::invalid_operation(format!("the boundary's board release: {why}"))
-    };
+    let refused =
+        |why: &str| DsmError::invalid_operation(format!("the boundary's board release: {why}"));
     let release = anchor_core::proto::pb::OfflineRelease::decode(body.release.as_slice())
         .map_err(|e| refused(&e.to_string()))?
         .to_release()
@@ -988,7 +988,9 @@ fn verify_boundary_release(
         || cert.next_anchor_counter != expected.next_anchor_counter
         || transition_digest(&expected.as_transition(), &challenge) != cert.transition_digest
     {
-        return Err(refused("its certificate does not sign this boundary's advance"));
+        return Err(refused(
+            "its certificate does not sign this boundary's advance",
+        ));
     }
     verify_cert_frontier_and_sigs::<Ed25519Chip, SphincsHost>(
         cert,
@@ -1183,8 +1185,13 @@ mod tests {
     }
 
     fn verify(p: &Payer, bytes: &[u8]) -> Result<VerifiedOfflineBoundary, DsmError> {
-        OfflineBoundaryBody::verify(bytes, &p.head.genesis(), &p.head.devid(), p.head.public_key())
-            .map(|(verified, _)| verified)
+        OfflineBoundaryBody::verify(
+            bytes,
+            &p.head.genesis(),
+            &p.head.devid(),
+            p.head.public_key(),
+        )
+        .map(|(verified, _)| verified)
     }
 
     fn refused<T: core::fmt::Debug>(result: Result<T, DsmError>, reason: &str) {
@@ -1209,7 +1216,10 @@ mod tests {
             Some(load.new_device_state.root())
         );
         assert_eq!(verified.post_account_root(), Some(p.account_root()));
-        assert!(verified.departure().is_some(), "the board's message names it");
+        assert!(
+            verified.departure().is_some(),
+            "the board's message names it"
+        );
         assert_eq!(
             OfflineBoundaryBody::decode(&bytes)
                 .expect("decode")
@@ -1239,7 +1249,11 @@ mod tests {
                 account_root: after_load
             })
         );
-        assert_eq!(standing(&p).0, counter + 2, "each boundary moved the counter");
+        assert_eq!(
+            standing(&p).0,
+            counter + 2,
+            "each boundary moved the counter"
+        );
     }
 
     /// A body that misstates what the account held, or names another device,
@@ -1289,8 +1303,12 @@ mod tests {
             "does not commit the offline account",
         );
         // The same bytes under another device's identity are another boundary.
-        let other =
-            OfflineBoundaryBody::verify(&bytes, &p.head.genesis(), &[0x55; 32], p.head.public_key());
+        let other = OfflineBoundaryBody::verify(
+            &bytes,
+            &p.head.genesis(),
+            &[0x55; 32],
+            p.head.public_key(),
+        );
         refused(other, "does not recompute for its owner");
     }
 
@@ -1331,7 +1349,10 @@ mod tests {
             Vec::new(),
             &load_release,
         );
-        refused(verify(&p, &another_boundarys), "the boundary's board release:");
+        refused(
+            verify(&p, &another_boundarys),
+            "the boundary's board release:",
+        );
         let mut stranger = Payer::opened(0xE4);
         let (s_counter, s_frontier) = standing(&stranger);
         let (_, strangers_release, _) = signed(

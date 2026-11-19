@@ -248,7 +248,6 @@ impl RealizedHead {
         self.0
             .cross_offline_boundary(bundle, kind, asset, amount, next_frontier)
     }
-
 }
 
 impl core::ops::Deref for RealizedHead {
@@ -1979,7 +1978,16 @@ impl DeviceState {
         crate::types::offline_account::offline_state_proof(&self.smt, bundle, account)
     }
 
-/// The operation id the boundary of `kind` would take from this head, and
+    /// The counter and frontier the offline account of `bundle` stands at: where its board signs
+    /// the account's next step from.
+    pub fn offline_account_standing(&self, bundle: &[u8; 32]) -> Result<(u64, [u8; 32]), DsmError> {
+        let account = self.offline_accounts.get(bundle).ok_or_else(|| {
+            DsmError::invalid_operation("no offline account is open for this anchor bundle")
+        })?;
+        Ok((account.counter(), account.frontier()))
+    }
+
+    /// The operation id the boundary of `kind` would take from this head, and
     /// the counter and frontier its account stands at: what the board's
     /// transition for it is built from before it is taken (DSM Amendment A39
     /// draft, option B).
@@ -2120,16 +2128,18 @@ impl RealizedHead {
     /// The unload of a payment this device received offline (owner, 2026-11-07): `amount` of
     /// `asset` leaves what its offline account under its own bundle `bundle` holds received, and its
     /// online balance is credited by it. The credit is an admitted economic transition, funded by the
-    /// payer's spend the payer's online history exposed
-    /// (`economic::offline_boundary::OfflineSettlementBody`), which a contact checks against that
-    /// history. Answers the head it leaves, with the account's step as the witness the account's
-    /// next boundary carries in its ancestry.
+    /// payer's spend its origin cells hold (`economic::offline_boundary::OfflineSettlementBody`). The
+    /// account's board signs the unload at its next counter, advancing to `next_frontier` (DSM
+    /// Amendment A39 draft, option B). Answers the head it leaves, with the account's step as the
+    /// witness the account's next boundary carries in its ancestry, and the device roots and
+    /// offline-state proofs the board's release carries.
     pub fn settle_offline_receipt(
         &self,
         bundle: &[u8; 32],
         asset: &[u8; 32],
         amount: u64,
-    ) -> Result<(RealizedHead, crate::types::offline_account::SettleWitness), DsmError> {
+        next_frontier: [u8; 32],
+    ) -> Result<OfflineSettleOutcome, DsmError> {
         use crate::types::offline_account::{OfflineAccountStep, SettleWitness};
         if amount == 0 {
             return Err(DsmError::invalid_operation(
@@ -2145,6 +2155,7 @@ impl RealizedHead {
         let settled = account.step(&OfflineAccountStep::Settle {
             asset: *asset,
             amount,
+            next_frontier,
         })?;
         let witness = SettleWitness::of(account, &settled)?;
         let mut balances = self.0.balances.clone();
@@ -2157,18 +2168,46 @@ impl RealizedHead {
         balances.insert(*asset, credited);
         let mut smt = self.0.smt.clone();
         smt.apply_writes(&[(offline_account_leaf_key(bundle), settled.account.root())])?;
+        let offline_state_proofs = OfflineStateProofs {
+            parent: crate::types::offline_account::offline_state_proof(
+                &self.0.smt,
+                bundle,
+                account,
+            )?,
+            child: crate::types::offline_account::offline_state_proof(
+                &smt,
+                bundle,
+                &settled.account,
+            )?,
+        };
+        let pre_device_root = *self.0.smt.root();
+        let post_device_root = *smt.root();
         let mut offline_accounts = self.0.offline_accounts.clone();
         offline_accounts.insert(*bundle, settled.account);
-        Ok((
-            RealizedHead::of(DeviceState {
+        Ok(OfflineSettleOutcome {
+            new_device_state: RealizedHead::of(DeviceState {
                 balances,
                 smt,
                 offline_accounts,
                 ..self.0.clone()
             }),
             witness,
-        ))
+            pre_device_root,
+            post_device_root,
+            offline_state_proofs,
+        })
     }
+}
+
+/// The unload of a payment received offline, taken: the head it leaves, the account's step as
+/// its witness, and what the board's release of it carries (DSM Amendment A39 draft, option B).
+#[derive(Clone)]
+pub struct OfflineSettleOutcome {
+    pub new_device_state: RealizedHead,
+    pub witness: crate::types::offline_account::SettleWitness,
+    pub pre_device_root: [u8; 32],
+    pub post_device_root: [u8; 32],
+    pub offline_state_proofs: OfflineStateProofs,
 }
 
 /// Which way an offline boundary moves value.
@@ -3378,7 +3417,13 @@ pub(crate) mod tests {
         let dev = with_offline_account(0xC1, token, bundle);
 
         let load = dev
-            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 30, frontier_after(&dev, &bundle))
+            .cross_offline_boundary(
+                &bundle,
+                OfflineBoundaryKind::Load,
+                &token,
+                30,
+                frontier_after(&dev, &bundle),
+            )
             .expect("load 30");
         let loaded = &load.new_device_state;
         assert_eq!(online(loaded, &token), Some(70));
@@ -3421,7 +3466,13 @@ pub(crate) mod tests {
         );
 
         let unloaded = loaded
-            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Unload, &token, 5, frontier_after(&loaded, &bundle))
+            .cross_offline_boundary(
+                &bundle,
+                OfflineBoundaryKind::Unload,
+                &token,
+                5,
+                frontier_after(&loaded, &bundle),
+            )
             .expect("unload 5")
             .new_device_state;
         assert_eq!(online(&unloaded, &token), Some(75));
@@ -3432,15 +3483,33 @@ pub(crate) mod tests {
             assert!(e.to_string().contains(reason), "{e}");
         };
         refused(
-            unloaded.cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 76, frontier_after(&unloaded, &bundle)),
+            unloaded.cross_offline_boundary(
+                &bundle,
+                OfflineBoundaryKind::Load,
+                &token,
+                76,
+                frontier_after(&unloaded, &bundle),
+            ),
             "more than the online balance",
         );
         refused(
-            unloaded.cross_offline_boundary(&bundle, OfflineBoundaryKind::Unload, &token, 26, frontier_after(&unloaded, &bundle)),
+            unloaded.cross_offline_boundary(
+                &bundle,
+                OfflineBoundaryKind::Unload,
+                &token,
+                26,
+                frontier_after(&unloaded, &bundle),
+            ),
             "more than the offline allocation holds",
         );
         refused(
-            unloaded.cross_offline_boundary(&[0x7C; 32], OfflineBoundaryKind::Load, &token, 1, [0x7D; 32]),
+            unloaded.cross_offline_boundary(
+                &[0x7C; 32],
+                OfflineBoundaryKind::Load,
+                &token,
+                1,
+                [0x7D; 32],
+            ),
             "no offline account is open",
         );
         let reopened = unloaded
@@ -3493,7 +3562,13 @@ pub(crate) mod tests {
         use crate::types::offline_account::verify_offline_state;
         let (token, bundle) = (moving_token().0, [0xB2; 32]);
         let loaded = with_offline_account(0xD5, token, bundle)
-            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 40, frontier_after(&with_offline_account(0xD5, token, bundle), &bundle))
+            .cross_offline_boundary(
+                &bundle,
+                OfflineBoundaryKind::Load,
+                &token,
+                40,
+                frontier_after(&with_offline_account(0xD5, token, bundle), &bundle),
+            )
             .expect("load 40")
             .new_device_state;
         let cp = devid(0xC5);
@@ -3526,7 +3601,11 @@ pub(crate) mod tests {
         );
         let account = spent.offline_account(&bundle).expect("open");
         assert_eq!(account.allocation(&token), Some(15));
-        assert_eq!(account.counter(), c0 + 1, "the counter steps with the spend");
+        assert_eq!(
+            account.counter(),
+            c0 + 1,
+            "the counter steps with the spend"
+        );
         assert_eq!(account.frontier(), [0x02; 32]);
 
         // Each device root commits the account at its own frontier and
@@ -3540,20 +3619,8 @@ pub(crate) mod tests {
         verify_offline_state(&out.child_r_a, &bundle, &[0x02; 32], c0 + 1, &proofs.child)
             .expect("the child root commits the account after");
         for (root, frontier, counter, proof, reason) in [
-            (
-                &out.child_r_a,
-                f0,
-                c0,
-                &proofs.parent,
-                "does not hold",
-            ),
-            (
-                &out.parent_r_a,
-                f0,
-                c0 + 1,
-                &proofs.parent,
-                "counter named",
-            ),
+            (&out.child_r_a, f0, c0, &proofs.parent, "does not hold"),
+            (&out.parent_r_a, f0, c0 + 1, &proofs.parent, "counter named"),
             (
                 &out.parent_r_a,
                 [0x02; 32],
@@ -3626,7 +3693,13 @@ pub(crate) mod tests {
         };
         let (token, bundle, genesis) = (moving_token().0, [0xB5; 32], [0x6E; 32]);
         let mut loaded = with_offline_account(0xD7, token, bundle)
-            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 40, frontier_after(&with_offline_account(0xD7, token, bundle), &bundle))
+            .cross_offline_boundary(
+                &bundle,
+                OfflineBoundaryKind::Load,
+                &token,
+                40,
+                frontier_after(&with_offline_account(0xD7, token, bundle), &bundle),
+            )
             .expect("load 40")
             .new_device_state
             .into_head();
@@ -3761,7 +3834,13 @@ pub(crate) mod tests {
         const MAX_STEPS: u64 = 3;
         let (token, bundle, genesis) = (moving_token().0, [0xB6; 32], [0x6F; 32]);
         let mut loaded = with_offline_account(0xD8, token, bundle)
-            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, INIT_ALLOC, frontier_after(&with_offline_account(0xD8, token, bundle), &bundle))
+            .cross_offline_boundary(
+                &bundle,
+                OfflineBoundaryKind::Load,
+                &token,
+                INIT_ALLOC,
+                frontier_after(&with_offline_account(0xD8, token, bundle), &bundle),
+            )
             .expect("load")
             .new_device_state
             .into_head();

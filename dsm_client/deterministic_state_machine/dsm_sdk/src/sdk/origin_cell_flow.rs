@@ -147,8 +147,7 @@ pub fn path(
 /// until they do, a payment stays pending, which is no refusal.
 pub fn reaches_a_final_step(reads: &[OriginRead], bundle: &D32, payment_root: &D32) -> bool {
     reads.last().is_some_and(|last| {
-        *last.key() == offline_origin::origin_key(bundle, payment_root)
-            && last.settled().is_some()
+        *last.key() == offline_origin::origin_key(bundle, payment_root) && last.settled().is_some()
     })
 }
 
@@ -162,10 +161,9 @@ pub async fn put_writes(set: &StorageSet, writes: &[Vec<u8>]) -> Result<(), DsmE
         // write the cell of the root its step starts from.
         match dsm::offline_origin::OriginDeparture::decode(bytes) {
             Ok(departure) => {
-                let body = dsm::economic::offline_boundary::OfflineBoundaryBody::decode(
-                    &departure.body,
-                )
-                .map_err(|e| refuse(format!("a departure's boundary: {e}")))?;
+                let body =
+                    dsm::economic::offline_boundary::OfflineBoundaryBody::decode(&departure.body)
+                        .map_err(|e| refuse(format!("a departure's boundary: {e}")))?;
                 put(set, &body.bundle, &body.pre_account_root, bytes).await?;
             }
             Err(_not_a_departure) => {

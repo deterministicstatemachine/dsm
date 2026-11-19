@@ -1151,8 +1151,62 @@ pub(crate) async fn admitted_offline_settlement(
     .map_err(|e| DsmError::invalid_operation(format!("an offline settlement body: {e:?}")))?;
     let verified = OfflineSettlementBody::verify(&body, &genesis, &devid, &origin.root, &reads)?;
     let mut built: Option<(EconomicTransitionWitness, EconomicAdmissionManifest)> = None;
+    // The account's board signs the unload of the received payment at its next counter, as it
+    // signs every step of the account (DSM Amendment A39 draft, option B): previewed here, taken
+    // again under the head lock, and refused there if the head moved. A board that committed
+    // exactly this unload before a crash emits it again.
+    let settle_id = dsm::economic::offline_boundary::settlement_id(
+        &genesis,
+        &devid,
+        &receipt.payer_genesis,
+        &receipt.payer_device,
+        &release_message,
+    );
+    if let Some(left) = client_db::offline_spends::boundary_signing(&receipt.receiver_bundle)
+        .map_err(|e| storage_err("the step being signed", e))?
+    {
+        let this = (
+            dsm::types::device_state::OfflineBoundaryKind::Settle.code(),
+            receipt.asset,
+            receipt.amount,
+        );
+        if (left.kind, left.asset, left.amount) != this {
+            return Err(DsmError::invalid_operation(
+                "offline settlement: the board was signing another step of the account when this \
+                 wallet stopped; finish it first",
+            ));
+        }
+    }
+    let (counter, frontier) = head.offline_account_standing(&receipt.receiver_bundle)?;
+    let (transition, challenge) =
+        dsm::types::offline_chain::settle_transition(&devid, &settle_id, &frontier, counter)?;
+    let preview = head.settle_offline_receipt(
+        &receipt.receiver_bundle,
+        &receipt.asset,
+        receipt.amount,
+        transition.next_root,
+    )?;
+    client_db::offline_spends::record_boundary_signing(
+        &receipt.receiver_bundle,
+        &client_db::offline_spends::BoundarySigning {
+            kind: dsm::types::device_state::OfflineBoundaryKind::Settle.code(),
+            asset: receipt.asset,
+            amount: receipt.amount,
+        },
+    )
+    .map_err(|e| storage_err("the unload being signed", e))?;
+    let release = core.board_signs_boundary(
+        &transition,
+        challenge,
+        preview.pre_device_root,
+        preview.post_device_root,
+        &preview.offline_state_proofs,
+    )?;
     let pending = core.admitted_settlement(
         &receipt,
+        transition.next_root,
+        (preview.pre_device_root, preview.post_device_root),
+        &release,
         || {
             let digest = offline_boundary_operation_digest(&body);
             let evidence_addr = offline_boundary_evidence_addr(&body);
@@ -1260,6 +1314,8 @@ pub(crate) async fn admitted_offline_settlement(
             None::<std::io::Error>,
         )
     })?;
+    // Durable: the board's frontier moves to the unload's successor.
+    core.finalize_offline_bearer(transition.next_root)?;
     finish_admission(
         core,
         &network_id,

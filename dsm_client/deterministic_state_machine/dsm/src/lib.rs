@@ -67,12 +67,12 @@
 //! - Feature-gated optional modules (bluetooth)
 
 pub mod app_cell; // application cells (DSM Amendment A35)
-pub mod offline_origin; // offline steps final at their origin cells (DSM Amendment A39 draft)
 pub mod authored_object; // authored objects (storage spec §5, §7)
 pub mod bilateral;
 pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
 pub mod commitments;
 pub mod common;
+pub mod offline_origin; // offline steps final at their origin cells (DSM Amendment A39 draft)
 // DSM Connect's signed objects (DSM Amendment A11)
 pub mod connect;
 // keyed-cell arrival records and running hashes (storage spec §14)

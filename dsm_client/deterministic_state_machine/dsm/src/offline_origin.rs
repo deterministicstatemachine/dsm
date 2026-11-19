@@ -406,8 +406,7 @@ pub fn write_occupying(bytes: &[u8], cell: &D32) -> Result<OriginStep, OriginRef
             cell,
         ),
         _ => write_authority(
-            &OriginWrite::decode(bytes)
-                .map_err(|e| OriginRefusal::DoesNotDecode(e.to_string()))?,
+            &OriginWrite::decode(bytes).map_err(|e| OriginRefusal::DoesNotDecode(e.to_string()))?,
             cell,
         ),
     }
@@ -766,7 +765,10 @@ mod tests {
         let m = step.board_message().expect("signed");
         let refused = payment_at_cells(&p.pin.bundle, &loaded, &[read], &m)
             .expect_err("one link is not final");
-        assert!(refused.to_string().contains("no step is final there yet"), "{refused}");
+        assert!(
+            refused.to_string().contains("no step is final there yet"),
+            "{refused}"
+        );
     }
 
     /// Invalid competing steps cannot displace a legitimate payment. Ahead of the
@@ -855,15 +857,20 @@ mod tests {
         let cell = cell_of(&board.pin.bundle, &root);
         // Both are the board's valid steps from this root: each would hold the
         // cell alone.
-        let one = write_authority(&write_of(&board, &to_r1), cell.key()).expect("R1's step holds alone");
-        let two = write_authority(&write_of(&clone, &to_r2), cell.key()).expect("R2's step holds alone");
+        let one =
+            write_authority(&write_of(&board, &to_r1), cell.key()).expect("R1's step holds alone");
+        let two =
+            write_authority(&write_of(&clone, &to_r2), cell.key()).expect("R2's step holds alone");
         assert_eq!((one.before, two.before), (root, root));
 
         for (first, second) in [
             (write_of(&board, &to_r1), write_of(&clone, &to_r2)),
             (write_of(&clone, &to_r2), write_of(&board, &to_r1)),
         ] {
-            let read = read_after(&cell, &[&bytes_of(&first), &bytes_of(&second), &bytes_of(&first)]);
+            let read = read_after(
+                &cell,
+                &[&bytes_of(&first), &bytes_of(&second), &bytes_of(&first)],
+            );
             let mut settled = Vec::new();
             let mut refused = Vec::new();
             for (m, r) in [(m1, R1), (m2, R2)] {
@@ -891,8 +898,14 @@ mod tests {
         let first = spend(&mut p, R1, 10);
         let mid = p.account_root();
         let second = spend(&mut p, R2, 10);
-        let r0 = read_after(&cell_of(&p.pin.bundle, &loaded), &[&bytes_of(&write_of(&p, &first))]);
-        let r1 = read_after(&cell_of(&p.pin.bundle, &mid), &[&bytes_of(&write_of(&p, &second))]);
+        let r0 = read_after(
+            &cell_of(&p.pin.bundle, &loaded),
+            &[&bytes_of(&write_of(&p, &first))],
+        );
+        let r1 = read_after(
+            &cell_of(&p.pin.bundle, &mid),
+            &[&bytes_of(&write_of(&p, &second))],
+        );
         let m1 = first.board_message().expect("signed");
         let m2 = second.board_message().expect("signed");
 
@@ -927,9 +940,7 @@ mod tests {
     /// and never settles. The money is never both paid and unloaded.
     #[test]
     fn a_payment_and_an_unload_from_one_root_never_both_count() {
-        use crate::economic::offline_boundary::{
-            BoundaryAncestry, BoundarySince, OfflineBoundaryBody,
-        };
+        use crate::economic::offline_boundary::{BoundaryAncestry, BoundarySince, OfflineBoundaryBody};
         use crate::types::device_state::OfflineBoundaryKind;
         let mut board = Payer::loaded(0x37, 40);
         let mut clone = Payer::loaded(0x37, 40);
@@ -965,8 +976,11 @@ mod tests {
         let m = payment.board_message().expect("signed");
 
         // Both are valid steps of that root.
-        let unloads = departure_authority(&OriginDeparture::decode(&departure).expect("decode"), cell.key())
-            .expect("the unload's departure holds the cell alone");
+        let unloads = departure_authority(
+            &OriginDeparture::decode(&departure).expect("decode"),
+            cell.key(),
+        )
+        .expect("the unload's departure holds the cell alone");
         assert_eq!(unloads.before, root);
         assert_eq!(unloads.payment, None);
 
@@ -976,10 +990,12 @@ mod tests {
             .expect("R1 settles; the unload holds nothing");
 
         let unload_first = read_after(&cell, &[&departure, &paid]);
-        assert_eq!(unload_first.settled().map(|s| s.message), Some(unloads.message));
+        assert_eq!(
+            unload_first.settled().map(|s| s.message),
+            Some(unloads.message)
+        );
         let refused = payment_at_cells(&board.pin.bundle, &root, &[unload_first], &m)
             .expect_err("R1's payment is off the history the cell holds");
         assert!(refused.to_string().contains("another history"), "{refused}");
     }
-
 }

@@ -1273,9 +1273,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         bundle: &D32,
         account_root: &D32,
     ) -> Result<Result<crate::offline_origin::OriginRead, CellMissing>, VerifierFailure> {
-        let cell =
-            crate::offline_origin::OriginCell::new(bundle, account_root, self.members, &self.set_id)
-                .map_err(|e| VerifierFailure::Refused(format!("origin cell: {e:?}")))?;
+        let cell = crate::offline_origin::OriginCell::new(
+            bundle,
+            account_root,
+            self.members,
+            &self.set_id,
+        )
+        .map_err(|e| VerifierFailure::Refused(format!("origin cell: {e:?}")))?;
         let evidence = self.reads.cell(cell.routed(), &cell.keeps())?;
         let read = match crate::offline_origin::resolution(&cell, &evidence) {
             Ok(read) => read,

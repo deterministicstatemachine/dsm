@@ -341,7 +341,9 @@ pub fn offline_origin(release_message: &[u8; 32]) -> Result<Option<OfflineOrigin
         "SELECT write FROM pending_offline_origin_write WHERE release_message = ?1 ORDER BY seq",
     )?;
     let writes = stmt
-        .query_map(params![release_message.as_slice()], |r| r.get::<_, Vec<u8>>(0))?
+        .query_map(params![release_message.as_slice()], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Some(OfflineOrigin {
         release_message: *release_message,

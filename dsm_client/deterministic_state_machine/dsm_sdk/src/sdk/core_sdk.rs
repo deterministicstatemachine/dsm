@@ -716,8 +716,7 @@ impl CoreSDK {
                 pending.economic_position
             )));
         }
-        let outcome =
-            head.cross_offline_boundary(bundle, kind, asset, amount, next_frontier)?;
+        let outcome = head.cross_offline_boundary(bundle, kind, asset, amount, next_frontier)?;
         // The board signed the boundary over the device roots it previewed: the head must still
         // stand where it did, or the board's signature is of another boundary.
         if (outcome.pre_device_root, outcome.post_device_root) != signed_roots {
@@ -815,6 +814,9 @@ impl CoreSDK {
     pub(crate) fn admitted_settlement(
         &self,
         receipt: &crate::storage::client_db::offline_receipts::PendingOfflineReceipt,
+        next_frontier: [u8; 32],
+        signed_roots: ([u8; 32], [u8; 32]),
+        release: &[u8],
         prepare: impl FnOnce() -> Result<
             (
                 dsm::economic::admission::PendingEconomicAdmission,
@@ -838,11 +840,23 @@ impl CoreSDK {
         }
         // The unload of the payment received (owner, 2026-11-07): out of what this device's own
         // offline account holds received, into its online balance.
-        let (settled, witness) =
-            head.settle_offline_receipt(&receipt.receiver_bundle, &receipt.asset, receipt.amount)?;
+        // Its board signed the unload over the device roots it previewed (DSM Amendment A39 draft,
+        // option B): the head must still stand where it did.
+        let settled = head.settle_offline_receipt(
+            &receipt.receiver_bundle,
+            &receipt.asset,
+            receipt.amount,
+            next_frontier,
+        )?;
+        if (settled.pre_device_root, settled.post_device_root) != signed_roots {
+            return Err(DsmError::invalid_operation(
+                "offline settlement: the head moved after the board signed the unload",
+            ));
+        }
         let settle_hop = dsm::types::offline_chain::AccountHop::Settle(
             dsm::types::offline_chain::SettleHop::new(
-                witness,
+                release,
+                settled.witness.clone(),
                 receipt.asset,
                 receipt.amount,
                 dsm::economic::offline_boundary::settlement_id(
@@ -852,8 +866,9 @@ impl CoreSDK {
                     &receipt.payer_device,
                     &receipt.release_message,
                 ),
-            ),
+            )?,
         );
+        let settled = settled.new_device_state;
         let (prepared, coords, artifacts) = prepare()?;
         let pending = prepared
             .into_locally_accepted(coords)
@@ -897,6 +912,12 @@ impl CoreSDK {
                 &settle_hop,
             )
             .map_err(|e| storage("the unload, for the account's next boundary", &e))?;
+            // Durable now: the board's signature of it is no longer pending.
+            crate::storage::client_db::offline_spends::clear_boundary_signing_in_tx(
+                &tx,
+                &receipt.receiver_bundle,
+            )
+            .map_err(|e| storage("the unload being signed", &e))?;
             tx.commit().map_err(|e| storage("commit", &e))?;
         }
         sm.set_device_head(new_head.clone());
@@ -2912,7 +2933,9 @@ impl CoreSDK {
             Some(release) => {
                 let held = anchor_core::proto::pb::OfflineRelease::decode(release.as_slice())
                     .map_err(|e| {
-                        DsmError::invalid_operation(format!("offline boundary: the board's release: {e}"))
+                        DsmError::invalid_operation(format!(
+                            "offline boundary: the board's release: {e}"
+                        ))
                     })?
                     .to_release()
                     .map_err(|e| {

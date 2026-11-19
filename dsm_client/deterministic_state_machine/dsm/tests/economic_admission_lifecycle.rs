@@ -1346,7 +1346,12 @@ mod soft_board {
         fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
             Ok(self.resident.sign(message).to_bytes().to_vec())
         }
-        fn chip_signature_holds(&self, pk_chip: &[u8], message: &[u8; 32], signature: &[u8]) -> bool {
+        fn chip_signature_holds(
+            &self,
+            pk_chip: &[u8],
+            message: &[u8; 32],
+            signature: &[u8],
+        ) -> bool {
             matches!(
                 (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(signature)),
                 (Ok(key), Ok(signature)) if matches!(
@@ -1369,7 +1374,9 @@ mod soft_board {
                 self.counter_get().map(|_| ()).map_err(|e| format!("{e:?}")),
             )]
         }
-        fn challenge_entropy(&mut self) -> Result<anchor_core::tropic::ChallengeEntropy, TropicError> {
+        fn challenge_entropy(
+            &mut self,
+        ) -> Result<anchor_core::tropic::ChallengeEntropy, TropicError> {
             let draw = || {
                 <[u8; 32]>::try_from(dsm::crypto::rng::random_bytes(32).as_slice())
                     .map_err(|_short| TropicError::NoEntropy)
@@ -1384,7 +1391,8 @@ mod soft_board {
     pub struct Partition;
 
     fn spx(variant: dsm::crypto::sphincs::SphincsVariant, seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        let kp = dsm::crypto::sphincs::generate_keypair_from_seed(variant, seed).expect("a keypair");
+        let kp =
+            dsm::crypto::sphincs::generate_keypair_from_seed(variant, seed).expect("a keypair");
         (kp.secret_key.clone(), kp.public_key.clone())
     }
 
@@ -1393,8 +1401,12 @@ mod soft_board {
             Ok(spx(dsm::crypto::sphincs::SphincsVariant::SPX128f, seed))
         }
         fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
-            Ok(dsm::crypto::sphincs::sign(dsm::crypto::sphincs::SphincsVariant::SPX128f, sk, digest)
-                .expect("the partition signs"))
+            Ok(dsm::crypto::sphincs::sign(
+                dsm::crypto::sphincs::SphincsVariant::SPX128f,
+                sk,
+                digest,
+            )
+            .expect("the partition signs"))
         }
         fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
             matches!(
@@ -1412,8 +1424,12 @@ mod soft_board {
             Ok(spx(dsm::crypto::sphincs::SphincsVariant::SPX256f, seed))
         }
         fn owner_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
-            Ok(dsm::crypto::sphincs::sign(dsm::crypto::sphincs::SphincsVariant::SPX256f, sk, digest)
-                .expect("the owner signs"))
+            Ok(dsm::crypto::sphincs::sign(
+                dsm::crypto::sphincs::SphincsVariant::SPX256f,
+                sk,
+                digest,
+            )
+            .expect("the owner signs"))
         }
         /// Releases here are checked by the economic lineage, never by a receiving board.
         fn stamp_keys() -> &'static [anchor_core::stamp::StampKey] {
@@ -1433,7 +1449,8 @@ struct Board {
 
 impl Board {
     fn born() -> Self {
-        let seed = |label: &str| blake3::derive_key(&format!("DSM lifecycle board {label}"), &[0x4C; 32]);
+        let seed =
+            |label: &str| blake3::derive_key(&format!("DSM lifecycle board {label}"), &[0x4C; 32]);
         let resident = ed25519_dalek::SigningKey::from_bytes(&seed("resident key"));
         let chip_pk = resident.verifying_key().to_bytes().to_vec();
         let anchor_id = seed("anchor id");
@@ -1829,7 +1846,16 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
         held.leaf_value().expect("encodable"),
     );
     let pre_root = tree.root();
-    let load = boundary(&mut board, &head, Load, 300, pre_root, &mut tree.clone(), &online, 2);
+    let load = boundary(
+        &mut board,
+        &head,
+        Load,
+        300,
+        pre_root,
+        &mut tree.clone(),
+        &online,
+        2,
+    );
     let after_load = std::collections::BTreeMap::from([(era, 200)]);
     let mut loaded_tree = tree.clone();
     let built = dsm::economic::write_set::build_boundary_write_set(

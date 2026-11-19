@@ -255,7 +255,6 @@ pub fn record_validated(
     Ok(())
 }
 
-
 /// The peer's offline account under `bundle` as the latest boundary this
 /// receiver recorded strictly below `position` left it.
 /// The state of `(peer_genesis, peer_devid)` this receiver kept at the highest

@@ -30,6 +30,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   request with what it found, its chip included. The
   phone's procedure and `provision-otp.sh` no longer write a secret, and refuse
   a page 49 someone else wrote.
+- **An offline payment is final without its payer (DSM Amendment A39).**
+  Every step an offline account's board signs has an origin cell, keyed by the
+  account root it starts from, which holds the first step written there: one
+  history per account, whoever writes it. A receiver keeps the payer's steps it
+  was carried and settles from the payer's cells alone; the payer never has to
+  come back online. Every load, unload and unload of received money is now
+  signed by the board at its next counter, as a payment is, so a payer cannot
+  unload money it already paid offline, published or not. A load or unload
+  holds its cells, or every checker refuses it. With a broken board, a payment
+  and a conflicting step from one root never both count. The board's firmware
+  is unchanged: it signs every action but a receive alike.
 
 ---
 

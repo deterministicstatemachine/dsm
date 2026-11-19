@@ -1390,8 +1390,14 @@ impl Verifier<'_> {
                 })?,
         };
         let reads = self.origin_path(&body.bundle, &account.account_root, &body.payment_root)?;
-        OfflineSettlementBody::verify(body_bytes, genesis, device_id, &account.account_root, &reads)
-            .map_err(|e| invalid(format!("an offline settlement: {e}")))
+        OfflineSettlementBody::verify(
+            body_bytes,
+            genesis,
+            device_id,
+            &account.account_root,
+            &reads,
+        )
+        .map_err(|e| invalid(format!("an offline settlement: {e}")))
     }
 
     /// That a boundary holds its origin cells (DSM Amendment A39 draft, option
