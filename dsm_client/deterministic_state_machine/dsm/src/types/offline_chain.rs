@@ -515,6 +515,32 @@ pub enum AccountHop {
     Settle(SettleHop),
 }
 
+impl AccountHop {
+    /// The step this hop takes on its offline account: what a wallet restored
+    /// from its words folds over the account its backup kept, to reach the
+    /// account its cells hold (DSM Amendment A40).
+    pub fn account_step(&self) -> crate::types::offline_account::OfflineAccountStep {
+        use crate::types::offline_account::OfflineAccountStep;
+        match self {
+            Self::Spend(h) => OfflineAccountStep::Spend {
+                asset: h.asset,
+                amount: h.amount,
+                next_frontier: h.witness.next_frontier,
+            },
+            Self::Receive(h) => OfflineAccountStep::Receive {
+                asset: h.asset,
+                amount: h.amount,
+                next_frontier: h.witness.next_frontier,
+            },
+            Self::Settle(h) => OfflineAccountStep::Settle {
+                asset: h.asset,
+                amount: h.amount,
+                next_frontier: h.witness.next_frontier,
+            },
+        }
+    }
+}
+
 fn asset32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
     bytes
         .try_into()

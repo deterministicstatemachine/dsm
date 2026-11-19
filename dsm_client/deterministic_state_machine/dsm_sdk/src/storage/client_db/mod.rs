@@ -1152,6 +1152,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY(bundle, seq)
         );
 
+        -- The public material of this wallet's own anchor, as its board gave its pin when
+        -- attached: what an origin write of its own steps carries (DSM Amendment A40).
+        CREATE TABLE IF NOT EXISTS own_offline_anchor(
+            bundle              BLOB PRIMARY KEY,   -- 32B
+            anchor_id           BLOB NOT NULL,      -- 32B
+            pk_chip             BLOB NOT NULL,
+            pk_host             BLOB NOT NULL,
+            enrolled_counter    INTEGER NOT NULL,
+            birth_commitment    BLOB NOT NULL       -- 32B
+        );
+
         -- Each offline step's acknowledgement: the receiver board's receive
         -- commit (its release), kept by the payer that checked it and by the
         -- receiver that answers a confirm delivered again with it.

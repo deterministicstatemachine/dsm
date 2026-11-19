@@ -234,3 +234,67 @@ pub fn clear_boundary_signing_in_tx(tx: &Transaction<'_>, bundle: &[u8; 32]) -> 
     )?;
     Ok(())
 }
+
+/// Keep the public material of this wallet's own anchor, from the pin its board gave when
+/// attached (DSM Amendment A40): what an origin write of its own steps carries.
+pub fn record_own_anchor(pin: &crate::anchor::AnchorPin) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO own_offline_anchor(bundle, anchor_id, pk_chip, pk_host, \
+         enrolled_counter, birth_commitment) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            pin.bundle.as_slice(),
+            pin.anchor_id.as_slice(),
+            pin.pk_chip,
+            pin.partition_pk,
+            i64::try_from(pin.enrolled_counter)
+                .map_err(|e| anyhow::anyhow!("enrolled counter: {e}"))?,
+            pin.birth_commitment.as_slice()
+        ],
+    )?;
+    Ok(())
+}
+
+/// This wallet's own anchors, by bundle, as their boards gave their pins.
+pub fn own_anchors() -> Result<Vec<([u8; 32], dsm::economic::offline_boundary::BoundaryAnchor)>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+    let mut stmt = conn.prepare(
+        "SELECT bundle, anchor_id, pk_chip, pk_host, enrolled_counter, birth_commitment \
+         FROM own_offline_anchor",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, Vec<u8>>(0)?,
+            r.get::<_, Vec<u8>>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+            r.get::<_, Vec<u8>>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, Vec<u8>>(5)?,
+        ))
+    })?;
+    let d32 = |v: Vec<u8>, what: &str| -> Result<[u8; 32]> {
+        <[u8; 32]>::try_from(v.as_slice()).map_err(|e| anyhow::anyhow!("{what}: {e}"))
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let (bundle, anchor_id, pk_chip, pk_host, enrolled, birth) = row?;
+        out.push((
+            d32(bundle, "bundle")?,
+            dsm::economic::offline_boundary::BoundaryAnchor {
+                anchor_id: d32(anchor_id, "anchor id")?,
+                pk_chip,
+                pk_host,
+                enrolled_counter: u64::try_from(enrolled)
+                    .map_err(|e| anyhow::anyhow!("enrolled counter: {e}"))?,
+                birth_commitment: d32(birth, "birth commitment")?,
+            },
+        ));
+    }
+    Ok(out)
+}

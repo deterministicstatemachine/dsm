@@ -211,6 +211,18 @@ impl RealizedHead {
         self.0.with_resolved_position(balances).map(Self)
     }
 
+    /// This head with the offline account of `bundle` advanced by `hops`, the
+    /// steps final at its origin cells after it: see
+    /// [`DeviceState::advanced_by_cells`].
+    pub fn advanced_by_cells(
+        &self,
+        bundle: &[u8; 32],
+        anchor: &crate::types::offline_chain::ChainAnchor,
+        hops: &[crate::types::offline_chain::AccountHop],
+    ) -> Result<RealizedHead, DsmError> {
+        self.0.advanced_by_cells(bundle, anchor, hops).map(Self)
+    }
+
     /// This genesis head holding the balances its own register holds: see
     /// [`DeviceState::restored_from_register`].
     pub fn restored_from_register(
@@ -969,6 +981,50 @@ impl DeviceState {
         // A device's own relationship exists from its creation.
         state.insert_relationship_leaf(devid);
         state
+    }
+
+    /// A wallet restored from its words (DSM Amendment A40): the offline account
+    /// of `bundle` this head holds, advanced by `hops`, the steps final at its
+    /// origin cells after it, in order. Each is the board's signed advance from
+    /// the root the one before left and folds there (`verify_account_hops`,
+    /// under the anchor of `bundle` and this device), and applying each to the
+    /// account must reach exactly the root the last one installs; nothing else
+    /// in the head moves. Whether the account is then the board's own is the
+    /// board's to say: every use requires its counter and frontier exactly.
+    pub(crate) fn advanced_by_cells(
+        &self,
+        bundle: &[u8; 32],
+        anchor: &crate::types::offline_chain::ChainAnchor,
+        hops: &[crate::types::offline_chain::AccountHop],
+    ) -> Result<Self, DsmError> {
+        if anchor.bundle != *bundle {
+            return Err(DsmError::invalid_operation(
+                "offline account from its cells: the anchor names another bundle",
+            ));
+        }
+        let account = self.offline_accounts.get(bundle).ok_or_else(|| {
+            DsmError::invalid_operation("offline account from its cells: no account of this bundle")
+        })?;
+        let (_payments, after) = crate::types::offline_chain::verify_account_hops(
+            &account.root(),
+            anchor,
+            &self.devid,
+            hops,
+        )?;
+        let mut at = account.clone();
+        for hop in hops {
+            at = at.step(&hop.account_step())?.account;
+        }
+        if at.root() != after {
+            return Err(DsmError::invalid_operation(
+                "offline account from its cells: the steps do not reach the root their cells hold",
+            ));
+        }
+        let mut next = self.clone();
+        next.smt
+            .apply_writes(&[(offline_account_leaf_key(bundle), at.root())])?;
+        next.offline_accounts.insert(*bundle, at);
+        Ok(next)
     }
 
     /// A wallet restored from its phrase: this head, which must be its genesis

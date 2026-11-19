@@ -431,3 +431,116 @@ async fn a_payer_cannot_unload_what_it_paid_offline_before_its_receiver_publishe
         "B holds what it was paid"
     );
 }
+
+/// A wallet's offline account comes back on a restore, from the network (DSM
+/// Amendment A40). A has contacts B and C; A loads 20 ERA onto its board and its
+/// wallet backs up; then A pays B 15 ERA offline, after the backup, and the
+/// wallet puts that step at its origin cell. A's phone is lost before its next
+/// backup. Restored from its words on a new device, with the same board, A's
+/// account is the backup's advanced through the step its cell holds: the
+/// board's counter exactly, 5 ERA, and A pays C 3 ERA offline from there. (Its
+/// chain with B moved after the backup, so B refuses a step from the backup's
+/// older tip: a step after the last backup is lost to that contact.)
+///
+/// MUTATION CONTROL: without the account advanced through its cells
+/// (`advance_offline_from_cells`), the restored account is the backup's, at
+/// counter 1, a step behind its board: red (run 2026-11-19).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_restored_wallet_carries_on_offline_from_its_cells() {
+    let pair = Pair::boot(100, 0).await;
+    let mut c_device = TestDevice::create("C", 0x0C);
+    c_device.boot(&pair.fleet).await;
+    pair.a.add_and_establish(&c_device).await;
+    c_device.add_and_establish(&pair.a).await;
+    let board_a = HostAppliance::birth(&pair.a, [0xA7; 32], 16);
+    let board_b = HostAppliance::birth(&pair.b, [0xB7; 32], 16);
+    let board_c = HostAppliance::birth(&c_device, [0xC7; 32], 16);
+    let _installed = HostAppliance::install_each(vec![
+        (pair.a.device_id, board_a.clone()),
+        (pair.b.device_id, board_b.clone()),
+        (c_device.device_id, board_c.clone()),
+    ]);
+    pair.a.enter();
+    let loaded = pair
+        .a
+        .invoke(
+            "wallet.loadOffline",
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: "20.00".to_string(),
+            },
+        )
+        .await;
+    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    pair.b.sync().await;
+    c_device.sync().await;
+    pair.a.enter();
+    let mark = crate::sdk::wallet_backup_flow::activity_mark().expect("the mark");
+    let backed = crate::sdk::wallet_backup_flow::back_up_now(&set(), mark)
+        .await
+        .expect("the backup");
+    assert_eq!(backed, crate::sdk::wallet_backup_flow::Attempt::Written(1));
+
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    offline_step(&a, &b, bearer_transfer(&b, whole_era(15))).await;
+    a.device.enter();
+    let put = crate::sdk::wallet_backup_flow::publish_own_steps(&set())
+        .await
+        .expect("the own steps put");
+    assert_eq!(put, 1, "the payment's step, at its cell");
+    let bundle = board_a.pin().bundle;
+    let board_counter = board_a.chip_counter();
+
+    let mut restored = pair.a.on_a_new_device("A-restored");
+    let request = dsm::types::proto::WalletCreateGenesisV2Request {
+        mnemonic: crate::economic_fixtures::test_mnemonic(pair.a.seed),
+    };
+    let args = dsm::types::proto::ArgPack {
+        codec: dsm::types::proto::Codec::Proto as i32,
+        body: prost::Message::encode_to_vec(&request),
+        ..Default::default()
+    };
+    let answer = crate::handlers::system_routes::handle_restore_from_phrase(
+        &prost::Message::encode_to_vec(&args),
+    )
+    .await;
+    assert!(answer.success, "the restore: {:?}", answer.error_message);
+    restored.start(&pair.fleet);
+    restored.enter();
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let account = restored
+        .router()
+        .core_sdk
+        .device_head()
+        .and_then(|head| head.offline_account(&bundle).cloned())
+        .expect("the restored offline account");
+    assert_eq!(account.counter(), 2, "the load and the payment");
+    assert_eq!(
+        account.allocation(&era),
+        Some(whole_era(5)),
+        "20 loaded, 15 paid"
+    );
+    assert_eq!(
+        board_a.chip_counter(),
+        board_counter,
+        "the board was not moved by the restore"
+    );
+
+    let again = OfflineDevice::new(&restored);
+    let c = OfflineDevice::new(&c_device);
+    offline_step(&again, &c, bearer_transfer(&c, whole_era(3))).await;
+    restored.enter();
+    let after = restored
+        .router()
+        .core_sdk
+        .device_head()
+        .and_then(|head| head.offline_account(&bundle).cloned())
+        .expect("the account");
+    assert_eq!(
+        after.allocation(&era),
+        Some(whole_era(2)),
+        "the restored A paid C offline"
+    );
+}

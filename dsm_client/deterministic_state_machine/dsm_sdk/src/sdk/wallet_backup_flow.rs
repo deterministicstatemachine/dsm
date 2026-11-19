@@ -44,9 +44,11 @@ const LATEST: &str = "wallet_backup_latest";
 /// the device head; its key chain heads and step chain; its write grants and
 /// inbox routes; the contact's head as this wallet holds it), the steps still
 /// in flight, the replay guards, and the token, anchor pin and SoFi vault state
-/// the head refers to. Never an offline account's state: a board's account
-/// comes back from the network, not from a copy (owner, 2026-11-19: "it needs
-/// to reestablish your counter position").
+/// the head refers to, and the offline account's records: its own steps since
+/// its last boundary and its anchor, and the payers' paths the payments it took
+/// settle from. A restored offline account is advanced through its origin cells
+/// past the backup (owner, 2026-11-19: "it needs to reestablish your counter
+/// position"), and used only when it is exactly its board's.
 pub const BACKUP_TABLES: &[&str] = &[
     "bcr_device_heads",
     "contacts",
@@ -84,6 +86,14 @@ pub const BACKUP_TABLES: &[&str] = &[
     "token_registry",
     "anchor_enrollments",
     "anchor_accepted_roots",
+    "own_offline_anchor",
+    "own_offline_hop",
+    "own_offline_boundary",
+    "offline_boundary_told",
+    "offline_acknowledgement",
+    "pending_offline_receipt",
+    "pending_offline_origin",
+    "pending_offline_origin_write",
     "sofi_vault_baseline",
     "sofi_vault_history_published",
     "sofi_vault_label",
@@ -611,6 +621,7 @@ pub fn activity_mark() -> Result<D32, DsmError> {
         "SELECT pre_economic_root FROM economic_pending_admissions",
         "SELECT submission_id FROM sender_outbox",
         "SELECT relationship_key FROM acceptance_fold_journal",
+        "SELECT hop FROM own_offline_hop",
     ] {
         let mut stmt = conn.prepare(sql).map_err(|e| storage("mark", e))?;
         let values = stmt
@@ -734,6 +745,15 @@ async fn run() {
                 continue;
             }
         };
+        match publish_own_steps(&set).await {
+            Ok(0) => {}
+            Ok(n) => log::info!("[wallet backup] {n} own offline steps put at their cells"),
+            Err(e) => {
+                still_since = tokio::time::Instant::now();
+                log::warn!("[wallet backup] own offline steps not put yet: {e}");
+                continue;
+            }
+        }
         match back_up_now(&set, mark).await {
             Ok(Attempt::Written(n)) => {
                 backed_up = Some(mark);
@@ -747,4 +767,137 @@ async fn run() {
             }
         }
     }
+}
+
+// ── the offline account on the network ─────────────────────────────────────
+
+/// The setting naming the last own step of `bundle` put at its cell.
+fn published_key(bundle: &D32) -> String {
+    format!(
+        "offline_steps_published_{}",
+        crate::util::text_id::encode_base32_crockford(bundle)
+    )
+}
+
+/// Put every board-signed step of this wallet's own offline accounts since the
+/// last one put at its origin cell (DSM Amendment A40): so the network holds the
+/// whole history of the account, and a wallet restored from its words reaches
+/// the account its board holds. A cell another step already holds is a step of
+/// another history, and nothing after it is put. Answers how many were put.
+pub async fn publish_own_steps(set: &StorageSet) -> Result<usize, DsmError> {
+    let anchors = crate::storage::client_db::offline_spends::own_anchors()
+        .map_err(|e| storage("own anchors", e))?;
+    if anchors.is_empty() {
+        return Ok(0);
+    }
+    let field = |v: Option<Vec<u8>>, what: &str| -> Result<D32, DsmError> {
+        let v = v.ok_or_else(|| storage(what, "not set"))?;
+        <D32>::try_from(v.as_slice()).map_err(|e| storage(what, e))
+    };
+    let devid = field(
+        crate::sdk::app_state::AppState::get_device_id(),
+        "device id",
+    )?;
+    let owner_key = crate::sdk::app_state::AppState::get_public_key()
+        .ok_or_else(|| storage("owner key", "not set"))?;
+    let mut put = 0;
+    for (bundle, anchor) in anchors {
+        let hops = crate::storage::client_db::offline_spends::own_offline_hops(&bundle)
+            .map_err(|e| storage("own steps", e))?;
+        let last = crate::storage::client_db::get_setting(&published_key(&bundle))
+            .map_err(|e| storage("setting", e))?;
+        let mut steps = Vec::with_capacity(hops.len());
+        for bytes in &hops {
+            steps.push(dsm::types::offline_chain::AccountHop::from_bytes(bytes)?);
+        }
+        let named = |step: &dsm::types::offline_chain::AccountHop| {
+            step.board_message()
+                .map(|m| crate::util::text_id::encode_base32_crockford(&m))
+        };
+        let from = match &last {
+            Some(last) => steps
+                .iter()
+                .position(|step| named(step).as_deref() == Some(last.as_str()))
+                .map_or(0, |at| at + 1),
+            None => 0,
+        };
+        for step in &steps[from..] {
+            let Some(message) = named(step) else {
+                continue;
+            };
+            let write =
+                dsm::offline_origin::OriginWrite::new(&owner_key, devid, bundle, &anchor, step);
+            match crate::sdk::origin_cell_flow::write(set, &write).await? {
+                AtLeader::Link => {}
+                AtLeader::Taken => {
+                    log::warn!(
+                        "[wallet backup] the cell of own step {message} holds another write; \
+                         reading the cells says which"
+                    );
+                }
+                AtLeader::Unanswered => {
+                    return Err(storage(
+                        &format!("own step {message}"),
+                        "the leader did not answer",
+                    ))
+                }
+            }
+            crate::storage::client_db::set_setting(&published_key(&bundle), &message)
+                .map_err(|e| storage("setting", e))?;
+            put += 1;
+        }
+    }
+    Ok(put)
+}
+
+/// The steps final at the origin cells of `bundle`'s account after `root`,
+/// each a write of this wallet's device, in order, with the anchor they carry:
+/// what a restored account is advanced through. The walk stops at the first
+/// cell holding no final step, or at a departure, a boundary the register has
+/// not admitted.
+pub fn own_steps_after(
+    core: &crate::sdk::core_sdk::CoreSDK,
+    set: &StorageSet,
+    bundle: &D32,
+    root: &D32,
+    devid: &D32,
+) -> Result<
+    (
+        Vec<dsm::types::offline_chain::AccountHop>,
+        Option<dsm::types::offline_chain::ChainAnchor>,
+    ),
+    DsmError,
+> {
+    let mut at = *root;
+    let mut hops = Vec::new();
+    let mut anchor = None;
+    for _ in 0..dsm::types::offline_chain::MAX_CHAIN_HOPS {
+        let read = crate::sdk::origin_cell_flow::read(core, set, bundle, &at)?;
+        let (Some(step), Some(value)) = (read.settled(), read.value()) else {
+            break;
+        };
+        match dsm::offline_origin::OriginDeparture::decode(value) {
+            Ok(_boundary_not_admitted) => break,
+            Err(_a_step) => {}
+        }
+        let write = dsm::offline_origin::OriginWrite::decode(value)
+            .map_err(|e| storage("origin write", e))?;
+        if write.device_id != *devid {
+            return Err(storage(
+                "origin write",
+                "a step of another device's account",
+            ));
+        }
+        anchor.get_or_insert(dsm::types::offline_chain::ChainAnchor {
+            bundle: *bundle,
+            anchor_id: write.anchor.anchor_id,
+            pk_chip: write.anchor.pk_chip.clone(),
+            pk_host: write.anchor.pk_host.clone(),
+        });
+        hops.push(dsm::types::offline_chain::AccountHop::from_bytes(
+            &write.step,
+        )?);
+        at = step.after;
+    }
+    Ok((hops, anchor))
 }

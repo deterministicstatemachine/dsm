@@ -51,8 +51,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   nothing. Contacts come back from the wallet's own backup on the nodes:
   sealed under a key only the 24 words give, taken once the wallet has been
   still about 20 seconds (any new step cancels it), and installed only when it
-  is the wallet as the register's head shows it. Connect sessions, local
-  history and anything since the last backup do not come back.
+  is the wallet as the register's head shows it. A board's offline account
+  comes back from the network: the wallet puts its own offline steps at their
+  origin cells once online, and a restore advances the backed-up account
+  through them, using it only when it matches the board's counter exactly.
+  Connect sessions, local history and anything since the last backup do not
+  come back.
 
 ---
 

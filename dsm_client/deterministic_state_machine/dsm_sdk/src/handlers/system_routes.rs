@@ -351,6 +351,47 @@ pub(crate) async fn handle_restore_from_phrase(args: &[u8]) -> AppResult {
             return rolled_back_error(format!("{ROUTE}: installing the register's head: {e}"));
         }
     }
+
+    // 6. Its offline accounts: each the backup kept, advanced through the steps final at its
+    //    origin cells since (DSM Amendment A40). Each is used only when its counter and frontier
+    //    are exactly its board's; a board past what the network holds leaves it frozen.
+    let restored_root = installed.smt_root;
+    let core = std::sync::Arc::new(installed.core);
+    let Some(head) = core.device_head() else {
+        return rolled_back_error(format!("{ROUTE}: no head after the install"));
+    };
+    let accounts: Vec<([u8; 32], [u8; 32])> = head
+        .offline_accounts()
+        .iter()
+        .map(|(bundle, account)| (*bundle, account.root()))
+        .collect();
+    for (bundle, root) in accounts {
+        let walked = {
+            let (core, set) = (core.clone(), set.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::sdk::wallet_backup_flow::own_steps_after(&core, &set, &bundle, &root, &devid)
+            })
+            .await
+        };
+        let (hops, anchor) = match walked {
+            Ok(Ok(found)) => found,
+            Ok(Err(e)) => {
+                return rolled_back_error(format!(
+                    "{ROUTE}: the offline account's cells: {e}; try again shortly"
+                ))
+            }
+            Err(e) => return rolled_back_error(format!("{ROUTE}: reading the cells stopped: {e}")),
+        };
+        if let Some(anchor) = anchor {
+            if let Err(e) = core.advance_offline_from_cells(&bundle, &anchor, &hops) {
+                return rolled_back_error(format!("{ROUTE}: the offline account: {e}"));
+            }
+            log::info!(
+                "{ROUTE}: offline account advanced through {} steps on the network",
+                hops.len()
+            );
+        }
+    }
     emit(LifecycleKind::GenesisKindSecuringProgress, 85);
     let device_id_b32 = crate::util::text_id::encode_base32_crockford(&devid);
     if let Err(e) = bring_up_wallet(ROUTE, &device_id_b32, &g) {
@@ -369,7 +410,7 @@ pub(crate) async fn handle_restore_from_phrase(args: &[u8]) -> AppResult {
         genesis_hash: Some(generated::Hash32 { v: g.to_vec() }),
         public_key: ak_pk,
         smt_root: Some(generated::Hash32 {
-            v: installed.smt_root.to_vec(),
+            v: restored_root.to_vec(),
         }),
         genesis_nonce: outcome.genesis_nonce.to_vec(),
         network_id,

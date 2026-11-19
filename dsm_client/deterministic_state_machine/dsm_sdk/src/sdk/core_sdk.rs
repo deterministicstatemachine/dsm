@@ -651,14 +651,9 @@ impl CoreSDK {
                 "restore: the backup's head holds other balances than the register's head",
             ));
         }
-        // A board's offline account comes back from the network, never from a
-        // copy, and nothing in flight is installed: such a head is refused.
-        if !head.offline_accounts().is_empty() {
-            return Err(DsmError::invalid_operation(
-                "restore: the backup's head holds an offline account; its counter comes back \
-                 from the network, not from a copy",
-            ));
-        }
+        // Nothing in flight is installed. An offline account the head holds is
+        // then advanced through the steps final at its origin cells, and is used
+        // only when its counter and frontier are exactly its board's.
         if let Some(pending) = head.pending_economic_admission() {
             return Err(DsmError::invalid_operation(format!(
                 "restore: the backup's head carries the admission at {} in flight",
@@ -693,6 +688,51 @@ impl CoreSDK {
             tx.commit().map_err(|e| storage("commit", e.to_string()))?;
         }
         sm.set_device_head(head);
+        Ok(())
+    }
+
+    /// The offline account of `bundle` advanced by `hops`, the steps final at
+    /// its origin cells after the account this head holds (DSM Amendment A40),
+    /// and the steps kept as this account's own, for its next boundary to
+    /// carry: one transaction. Core checks every step (`advanced_by_cells`).
+    pub(crate) fn advance_offline_from_cells(
+        &self,
+        bundle: &[u8; 32],
+        anchor: &dsm::types::offline_chain::ChainAnchor,
+        hops: &[dsm::types::offline_chain::AccountHop],
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
+        let storage = |what: &str, e: String| {
+            DsmError::storage(
+                format!("offline restore: {what}: {e}"),
+                None::<std::io::Error>,
+            )
+        };
+        let mut sm = self.state_machine.lock();
+        let head = sm
+            .device_head()
+            .cloned()
+            .ok_or_else(|| storage("head", "none".to_string()))?;
+        let next = head.advanced_by_cells(bundle, anchor, hops)?;
+        {
+            let binding = get_connection().map_err(|e| storage("db", e.to_string()))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|poisoned| storage("db", poisoned.to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| storage("tx", e.to_string()))?;
+            update_bcr_device_head_with_conn(&tx, &next)
+                .map_err(|e| storage("head", e.to_string()))?;
+            for hop in hops {
+                crate::storage::client_db::offline_spends::record_own_offline_hop_in_tx(
+                    &tx, bundle, hop,
+                )
+                .map_err(|e| storage("own step", e.to_string()))?;
+            }
+            tx.commit().map_err(|e| storage("commit", e.to_string()))?;
+        }
+        sm.set_device_head(next);
         Ok(())
     }
 
@@ -2637,6 +2677,12 @@ impl CoreSDK {
             )
         })?;
         self.require_anchor_for_this_device(&pin)?;
+        crate::storage::client_db::offline_spends::record_own_anchor(&pin).map_err(|e| {
+            DsmError::storage(
+                format!("keep the anchor's pin: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         Ok(slot.insert(AttachedAnchor { appliance, pin }))
     }
 
