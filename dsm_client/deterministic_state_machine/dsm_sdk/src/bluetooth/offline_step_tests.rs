@@ -2426,10 +2426,10 @@ async fn a_rejected_bearer_transfer_spends_no_counter_step_and_frees_the_relatio
 /// load. A pays B 7, then 3 more before A goes online again — the second payment carries A's chain
 /// of spends from the account B recorded (SA-116). B's board commits each receive, and B holds the
 /// 10 in its offline account's received amount, shown as waiting, in neither its online balance nor
-/// its loaded allocation. B's unload moves nothing while A has not been back online. A unloads what
-/// is left; that boundary carries both spends and exposes them online. B's sync moves nothing on its
-/// own. B's one unload action then moves each payment online by an admitted transition of its own,
-/// once — each checked against A's own history — and a second moves nothing more. B then spends the
+/// its loaded allocation. With A never back online, B's one unload action writes A's steps it was
+/// carried to A's origin cells and moves each payment online by an admitted transition of its own,
+/// once — each proved from A's cells (DSM Amendment A39 draft). A comes back later and unloads what
+/// is left; nothing is counted twice. A second unload of B's moves nothing more. B then spends the
 /// result online, and A takes it.
 /// MUTATION CONTROL: `wallet.pendingOffline` answering from the settled rows
 /// too, or `balance.list` adding the value held received to `available`, turns
@@ -2514,14 +2514,40 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_and_spend_
         !refused.success,
         "B spent online what it received offline before it was unloaded"
     );
-    let early = unload_received(&b).await;
+    // A is not back online. B's unload writes A's steps it was carried to A's origin cells and
+    // settles both payments from the cells alone (DSM Amendment A39 draft).
+    let moved = unload_received(&b).await;
     assert_eq!(
-        (early.moved, early.waiting),
-        (0, 2),
-        "nothing moves while the payer has not been back online: {}",
-        early.message
+        (moved.moved, moved.waiting),
+        (2, 0),
+        "B's unload moved both payments online without A: {}",
+        moved.message
+    );
+    assert_eq!(
+        unexposed_spends(&a, &appliance),
+        2,
+        "A has not been back online: its spends are still its own to carry"
+    );
+    b.device.enter();
+    assert_eq!(pending_era(), 0, "nothing received is waiting");
+    assert_eq!(
+        pending_offline_shown(&b).await,
+        Vec::new(),
+        "a payment unloaded is shown waiting no more"
+    );
+    assert_eq!(
+        received_held("unloaded"),
+        Some(0),
+        "the unload took both payments out of what B's account holds received"
+    );
+    assert_eq!(
+        pair.b.era_balance(),
+        whole_era(10),
+        "B's online balance holds what it was paid offline"
     );
 
+    // A comes back later and unloads what is left: its boundary carries both spends, which its
+    // cells already hold. Nothing is counted twice: 90 online on A, 10 on B, of the 100 funded.
     a.device.enter();
     let unloaded = a
         .device
@@ -2544,38 +2570,8 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_and_spend_
         whole_era(90),
         "A's online balance: 100 funded, 20 loaded, 10 unloaded"
     );
-
     pair.b.sync().await;
     b.device.enter();
-    assert_eq!(
-        (pending_era(), pair.b.era_balance()),
-        (whole_era(10), 0),
-        "B's sync moves nothing on its own"
-    );
-    let moved = unload_received(&b).await;
-    assert_eq!(
-        (moved.moved, moved.waiting),
-        (2, 0),
-        "B's unload moved both payments online: {}",
-        moved.message
-    );
-    b.device.enter();
-    assert_eq!(pending_era(), 0, "nothing received is waiting");
-    assert_eq!(
-        pending_offline_shown(&b).await,
-        Vec::new(),
-        "a payment unloaded is shown waiting no more"
-    );
-    assert_eq!(
-        received_held("unloaded"),
-        Some(0),
-        "the unload took both payments out of what B's account holds received"
-    );
-    assert_eq!(
-        pair.b.era_balance(),
-        whole_era(10),
-        "B's online balance holds what it was paid offline"
-    );
     let again = unload_received(&b).await;
     assert_eq!((again.moved, again.waiting), (0, 0), "{}", again.message);
     assert_eq!(

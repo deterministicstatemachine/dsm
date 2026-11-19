@@ -1029,7 +1029,8 @@ pub(crate) mod fixture {
             let challenge = derive(counter as u8, "challenge");
             let policy = crate::types::operations::canonical_offline_bearer_policy().policy_id;
             let object = derive(0, "object");
-            let payload = *blake3::hash(&operation.to_bytes()).as_bytes();
+            // The payload hash the wallet signs: the domain-tagged hash of the transfer (SA-133).
+            let payload = crate::types::operations::bearer_payload_hash(&operation.to_bytes());
             let devid = self.head.devid();
             let core = Transition {
                 relationship_id: &rk,

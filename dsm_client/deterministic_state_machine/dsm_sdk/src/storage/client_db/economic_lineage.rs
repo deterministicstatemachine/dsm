@@ -202,12 +202,10 @@ fn record_offline_account_in_tx(
 
 /// Record what one verification validated, in one transaction, whatever the
 /// verification was for: the offline accounts the boundaries it passed left
-/// (the owner's receive rule, 2026-10-22), the payments they exposed, and the
-/// EK steps it verified. A row is only ever added, so nothing recorded moves
+/// (the owner's receive rule, 2026-10-22) and the EK steps it verified. A row is only ever added, so nothing recorded moves
 /// back.
 pub fn record_validated(
     offline_accounts: &[dsm::economic::peer_lineage::PeerOfflineAccount],
-    offline_exposures: &[dsm::economic::peer_lineage::PeerOfflineExposure],
     ek_steps: &[dsm::economic::peer_acceptance::VerifiedEkStep],
     kept_states: &[dsm::economic::peer_lineage::KeptPeerState],
 ) -> Result<()> {
@@ -244,9 +242,6 @@ pub fn record_validated(
     for account in offline_accounts {
         record_offline_account_in_tx(&tx, account)?;
     }
-    for exposure in offline_exposures {
-        record_offline_exposure_in_tx(&tx, exposure)?;
-    }
     // The EK steps the check verified: a later check of these signers starts
     // from them and fetches only the rotations since (SA-93).
     for step in ek_steps {
@@ -260,123 +255,6 @@ pub fn record_validated(
     Ok(())
 }
 
-fn record_offline_exposure_in_tx(
-    tx: &Transaction<'_>,
-    exposure: &dsm::economic::peer_lineage::PeerOfflineExposure,
-) -> Result<()> {
-    let payment = exposure.payment();
-    tx.execute(
-        "INSERT OR IGNORE INTO peer_offline_exposure(
-             release_message, peer_genesis, peer_devid, economic_position, bundle, recipient,
-             asset, amount, before_root, before_counter, before_frontier, after_root,
-             after_counter, after_frontier, payload_hash)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-        params![
-            payment.release_message.as_slice(),
-            exposure.genesis().as_slice(),
-            exposure.device_id().as_slice(),
-            i64::try_from(exposure.economic_position())
-                .map_err(|e| anyhow!("position overflow: {e}"))?,
-            exposure.bundle().as_slice(),
-            payment.recipient.as_slice(),
-            payment.asset.as_slice(),
-            i64::try_from(payment.amount).map_err(|e| anyhow!("amount overflow: {e}"))?,
-            payment.before.root.as_slice(),
-            i64::try_from(payment.before.counter).map_err(|e| anyhow!("counter overflow: {e}"))?,
-            payment.before.frontier.as_slice(),
-            payment.after.root.as_slice(),
-            i64::try_from(payment.after.counter).map_err(|e| anyhow!("counter overflow: {e}"))?,
-            payment.after.frontier.as_slice(),
-            payment.payload_hash.as_slice(),
-        ],
-    )?;
-    Ok(())
-}
-
-/// The payment a peer's offline boundary exposed under the release that
-/// signed it, as this receiver recorded it from the boundary's step; `None` while it
-/// has recorded no boundary exposing it.
-pub fn offline_exposure(
-    release_message: &[u8; 32],
-) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineExposure>> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|e| anyhow!("the client database lock: {e}"))?;
-    type Row = (
-        Vec<u8>,
-        Vec<u8>,
-        i64,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        i64,
-        Vec<u8>,
-        i64,
-        Vec<u8>,
-        Vec<u8>,
-        i64,
-        Vec<u8>,
-        Vec<u8>,
-    );
-    let row: Option<Row> = conn
-        .query_row(
-            "SELECT peer_genesis, peer_devid, economic_position, bundle, recipient, asset, amount,
-                    before_root, before_counter, before_frontier, after_root, after_counter,
-                    after_frontier, payload_hash
-             FROM peer_offline_exposure WHERE release_message = ?1",
-            params![release_message.as_slice()],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                    r.get(9)?,
-                    r.get(10)?,
-                    r.get(11)?,
-                    r.get(12)?,
-                    r.get(13)?,
-                ))
-            },
-        )
-        .optional()?;
-    row.map(|r| {
-        let unsigned =
-            |v: i64, what: &str| u64::try_from(v).map_err(|e| anyhow!("an exposure's {what}: {e}"));
-        Ok(
-            dsm::economic::peer_lineage::PeerOfflineExposure::rehydrate_recorded(
-                digest32(r.0, "exposure genesis")?,
-                digest32(r.1, "exposure device")?,
-                unsigned(r.2, "position")?,
-                digest32(r.3, "exposure bundle")?,
-                dsm::types::offline_chain::ChainPayment {
-                    recipient: digest32(r.4, "exposure recipient")?,
-                    asset: digest32(r.5, "exposure asset")?,
-                    amount: unsigned(r.6, "amount")?,
-                    release_message: *release_message,
-                    payload_hash: digest32(r.13, "exposure payload hash")?,
-                    before: dsm::types::offline_chain::AccountPoint {
-                        root: digest32(r.7, "exposure before root")?,
-                        counter: unsigned(r.8, "before counter")?,
-                        frontier: digest32(r.9, "exposure before frontier")?,
-                    },
-                    after: dsm::types::offline_chain::AccountPoint {
-                        root: digest32(r.10, "exposure after root")?,
-                        counter: unsigned(r.11, "after counter")?,
-                        frontier: digest32(r.12, "exposure after frontier")?,
-                    },
-                },
-            ),
-        )
-    })
-    .transpose()
-}
 
 /// The peer's offline account under `bundle` as the latest boundary this
 /// receiver recorded strictly below `position` left it.
@@ -1217,7 +1095,6 @@ mod admitted_row_tests {
         let (signer, other, addr) = ([0x34; 32], [0x35; 32], [0x44; 32]);
         assert_eq!(held_ek_step(&signer, &addr).expect("read"), None);
         record_validated(
-            &[],
             &[],
             &[dsm::economic::peer_acceptance::VerifiedEkStep {
                 signer,

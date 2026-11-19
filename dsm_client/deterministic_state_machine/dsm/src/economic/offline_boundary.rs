@@ -603,22 +603,29 @@ impl OfflineBoundaryBody {
 struct SettlementBody;
 impl CcbObject for SettlementBody {
     const CLASS: u16 = class::OFFLINE_SETTLEMENT_BODY;
-    const SCHEMA: u16 = 2;
+    const SCHEMA: u16 = 3;
 }
 
-/// The body of an offline settlement (SA-91): a receiver's admission of value
-/// it received offline. It names the payer's spend by the root-advance message
-/// `M` the payer's anchor signed for it, and the economic position of the
-/// payer's boundary that exposed it online. Its credit is funded by that spend
-/// and consumed once, as an unload's by its own debit: the settlement's
-/// identity is `H(G ‖ DevID ‖ G_payer ‖ DevID_payer ‖ M)`, one per receiver and
-/// spend, and the source it consumes is derived from it.
+/// The body of an offline settlement (SA-91; DSM Amendment A39 draft): a
+/// receiver's admission of value it received offline. It names the payer's
+/// spend by the root-advance message `M` the payer's anchor signed for it, the
+/// economic position of the payer's boundary whose account the receiver
+/// recorded before it took the payment, and the account root the payment's own
+/// step starts from. The payment is proved from the payer's origin cells, from
+/// that account to the payment, each final: the payer is never needed. Its
+/// credit is funded by that spend and consumed once: the settlement's identity
+/// is `H(G ‖ DevID ‖ G_payer ‖ DevID_payer ‖ M)`, one per receiver and spend,
+/// and the source it consumes is derived from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfflineSettlementBody {
     pub payer_genesis: [u8; 32],
     pub payer_device: [u8; 32],
-    /// The economic position of the payer's boundary that exposed the spend.
-    pub exposed_at: u64,
+    /// The economic position of the payer's boundary whose account the
+    /// payment's history starts from.
+    pub boundary_position: u64,
+    /// The account root the payment's own step starts from: the last cell of
+    /// the path.
+    pub payment_root: [u8; 32],
     /// `M`, the root-advance message the payer's anchor signed for the spend.
     pub release_message: [u8; 32],
     /// The payer's anchor bundle.
@@ -632,48 +639,31 @@ pub struct OfflineSettlementBody {
 }
 
 impl OfflineSettlementBody {
-    /// The settlement of the payment `exposure` records, which was the
-    /// bearer transfer `payment_operation`.
-    pub fn of(
-        exposure: &crate::economic::peer_lineage::PeerOfflineExposure,
-        payment_operation: Vec<u8>,
-    ) -> Self {
-        let payment = exposure.payment();
-        Self {
-            payer_genesis: *exposure.genesis(),
-            payer_device: *exposure.device_id(),
-            exposed_at: exposure.economic_position(),
-            release_message: payment.release_message,
-            bundle: *exposure.bundle(),
-            asset: payment.asset,
-            amount: payment.amount,
-            payment_operation,
-        }
-    }
-
     /// The body's canonical bytes, fields in registry order.
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
         push_envelope::<SettlementBody>(&mut out);
         push_digest32(&mut out, &self.payer_genesis); // 1
         push_digest32(&mut out, &self.payer_device); // 2
-        push_u64(&mut out, self.exposed_at); // 3
-        push_digest32(&mut out, &self.release_message); // 4
-        push_digest32(&mut out, &self.bundle); // 5
-        push_digest32(&mut out, &self.asset); // 6
-        push_u64(&mut out, self.amount); // 7
-        push_bytes(&mut out, &self.payment_operation)?; // 8
+        push_u64(&mut out, self.boundary_position); // 3
+        push_digest32(&mut out, &self.payment_root); // 4
+        push_digest32(&mut out, &self.release_message); // 5
+        push_digest32(&mut out, &self.bundle); // 6
+        push_digest32(&mut out, &self.asset); // 7
+        push_u64(&mut out, self.amount); // 8
+        push_bytes(&mut out, &self.payment_operation)?; // 9
         Ok(out)
     }
 
-    /// Decode a body, strictly: its class, schema 1, every field, nothing after.
+    /// Decode a body, strictly: its class, schema 3, every field, nothing after.
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
         c.envelope(SettlementBody::CLASS, SettlementBody::SCHEMA)?;
         let body = Self {
             payer_genesis: c.digest32()?,
             payer_device: c.digest32()?,
-            exposed_at: c.u64()?,
+            boundary_position: c.u64()?,
+            payment_root: c.digest32()?,
             release_message: c.digest32()?,
             bundle: c.digest32()?,
             asset: c.digest32()?,
@@ -700,27 +690,46 @@ impl OfflineSettlementBody {
     }
 
     /// Verify the body at `body_bytes` as a settlement of the device
-    /// `(genesis, device_id)`, against `exposure`: the payment a boundary of
-    /// the payer's online history exposed, as a walk of the payer this
-    /// verifier ran itself found it. The body must name exactly that payment —
-    /// the payer, the position of the boundary, `M`, the bundle, the asset and
-    /// the amount — and the payment must be to this device.
+    /// `(genesis, device_id)`. `start` is the account the payer's boundary at
+    /// `boundary_position` left, as a check of the payer this verifier ran or
+    /// recorded found it, and `reads` the payer's origin cells from it through
+    /// the cell of `payment_root`. The cells must hold, each final, the one
+    /// history from `start` to the payment `M`; the payment must be to this
+    /// device, of the body's asset and amount, and the bearer transfer the
+    /// payer's anchor signed.
     pub fn verify(
         body_bytes: &[u8],
         genesis: &[u8; 32],
         device_id: &[u8; 32],
-        exposure: &crate::economic::peer_lineage::PeerOfflineExposure,
+        start: &[u8; 32],
+        reads: &[crate::offline_origin::OriginRead],
     ) -> Result<VerifiedOfflineBoundary, DsmError> {
         let body = Self::decode(body_bytes)
             .map_err(|e| DsmError::invalid_operation(format!("an offline settlement body: {e}")))?;
-        if body != Self::of(exposure, body.payment_operation.clone()) {
+        match reads.last() {
+            Some(last)
+                if *last.key()
+                    == crate::offline_origin::origin_key(&body.bundle, &body.payment_root) => {}
+            Some(..) | None => {
+                return Err(DsmError::invalid_operation(
+                    "the settlement's path does not end at the cell its payment starts from",
+                ))
+            }
+        }
+        let payment = crate::offline_origin::payment_at_cells(
+            &body.bundle,
+            start,
+            reads,
+            &body.release_message,
+        )?;
+        if payment.recipient != *device_id {
             return Err(DsmError::invalid_operation(
-                "the settlement does not name the payment the payer's boundary exposed",
+                "the payment the payer's cells hold is not to the device that settles it",
             ));
         }
-        if exposure.payment().recipient != *device_id {
+        if payment.asset != body.asset || payment.amount != body.amount {
             return Err(DsmError::invalid_operation(
-                "the exposed payment is not to the device that settles it",
+                "the settlement does not name the payment the payer's cells hold",
             ));
         }
         // The payment was the bearer transfer the anchor signed, to this
@@ -728,7 +737,7 @@ impl OfflineSettlementBody {
         // this device and this genesis, the asset and the amount. A device id
         // alone names no one lineage (SA-133).
         if crate::types::operations::bearer_payload_hash(&body.payment_operation)
-            != exposure.payment().payload_hash
+            != payment.payload_hash
         {
             return Err(DsmError::invalid_operation(
                 "the settlement's payment is not the transfer the payer's anchor signed",
@@ -1321,96 +1330,133 @@ mod tests {
         .to_bytes()
     }
 
-    /// The exposure of a spend of 7 of `ASSET` to `receiver`, whose anchor
-    /// transition carried `payment`'s payload hash.
-    fn exposed(
+    /// A payment of `amount` to `receiver` held, final, at the payer's origin
+    /// cell: the settlement body naming it, the account the payer's load left,
+    /// and the read of the cell (DSM Amendment A39 draft).
+    fn held_at_cells(
         receiver: [u8; 32],
-        payment: &[u8],
-    ) -> crate::economic::peer_lineage::PeerOfflineExposure {
-        use crate::types::offline_chain::{AccountPoint, ChainPayment};
-        let point = |b: u8, counter: u64| AccountPoint {
-            root: [b; 32],
-            counter,
-            frontier: [b ^ 0x0F; 32],
-        };
-        crate::economic::peer_lineage::PeerOfflineExposure::rehydrate_recorded(
-            [0x31; 32],
-            [0x32; 32],
-            4,
-            [0x33; 32],
-            ChainPayment {
-                recipient: receiver,
-                asset: ASSET,
-                amount: 7,
-                release_message: [0x34; 32],
-                payload_hash: crate::types::operations::bearer_payload_hash(payment),
-                before: point(0x41, 0),
-                after: point(0x42, 1),
+        amount: u64,
+    ) -> (
+        OfflineSettlementBody,
+        [u8; 32],
+        Vec<crate::offline_origin::OriginRead>,
+    ) {
+        use crate::offline_origin::{resolution, OriginCell, OriginWrite};
+        use crate::types::offline_chain::fixture::{bearer_op, Payer};
+        let mut p = Payer::loaded(0x51, 40);
+        let start = p.account_root();
+        let step = crate::types::offline_chain::AccountHop::Spend(p.spend(receiver, amount).0);
+        let write = OriginWrite::new(
+            p.head.public_key(),
+            p.head.devid(),
+            p.pin.bundle,
+            &BoundaryAnchor {
+                anchor_id: p.pin.anchor_id,
+                pk_chip: p.pin.pk_chip.clone(),
+                pk_host: p.pin.pk_host.clone(),
+                enrolled_counter: u64::from(p.enrolled_counter),
+                birth_commitment: p.birth_commitment,
             },
+            &step,
+        );
+        let cell = OriginCell::new(
+            &p.pin.bundle,
+            &start,
+            &crate::route_chain::fixtures::committed_set(),
+            &crate::route_chain::fixtures::committed_set_id(),
         )
+        .expect("a cell over the fixture set");
+        let mut seats = crate::route_chain::fixtures::Cell::at(cell.routed());
+        seats.write(&write.encode().expect("bytes"), 2, &[]);
+        let read = resolution(&cell, &seats.evidence()).expect("the leader is read");
+        let body = OfflineSettlementBody {
+            payer_genesis: p.genesis,
+            payer_device: p.head.devid(),
+            boundary_position: 4,
+            payment_root: start,
+            release_message: step.board_message().expect("signed"),
+            bundle: p.pin.bundle,
+            asset: p.token,
+            amount,
+            payment_operation: bearer_op(receiver, p.token, &p.token_policy, amount).to_bytes(),
+        };
+        (body, start, vec![read])
     }
 
-    /// SA-91. A settlement names exactly the payment a boundary of the
-    /// payer's online history exposed, to the device that settles it; its
-    /// identity is that device's one settlement of that spend.
-    /// MUTATION CONTROL: dropping the check that the body is the exposed
-    /// payment, or that the payment is to this device, turns this red.
+    /// The fixture payer's bearer transfers name this genesis.
+    const PAYEE_GENESIS: [u8; 32] = [0x6E; 32];
+
+    /// SA-91, DSM Amendment A39 draft. A settlement names exactly the payment
+    /// the payer's origin cells hold, final, from the account the payer's
+    /// boundary left, to the device that settles it; its identity is that
+    /// device's one settlement of that spend. The payer is never needed.
+    /// MUTATION CONTROL: dropping the check that the payment is to this device,
+    /// or that the body names the payment the cells hold, turns this red.
     #[test]
-    fn a_settlement_is_held_to_the_payment_exposed_to_its_device() {
+    fn a_settlement_is_held_to_the_payment_its_payers_cells_hold() {
         let receiver = [0xB0; 32];
-        let payment = bearer_payment(receiver, [0x0B; 32], 7);
-        let exposure = exposed(receiver, &payment);
-        let honest = OfflineSettlementBody::of(&exposure, payment);
+        let (honest, start, reads) = held_at_cells(receiver, 7);
         let bytes = honest.encode().expect("encodes");
         assert_eq!(
             OfflineSettlementBody::decode(&bytes).expect("decode"),
             honest,
             "the one encoding round-trips"
         );
-        let verified = OfflineSettlementBody::verify(&bytes, &[0x0B; 32], &receiver, &exposure)
-            .expect("the settlement of the exposed payment");
+        let verified =
+            OfflineSettlementBody::verify(&bytes, &PAYEE_GENESIS, &receiver, &start, &reads)
+                .expect("the settlement of the payment the cells hold");
         assert_eq!(verified.kind(), OfflineBoundaryKind::Settle);
         assert_eq!(
             verified.operation_id(),
-            honest.operation_id(&[0x0B; 32], &receiver)
+            honest.operation_id(&PAYEE_GENESIS, &receiver)
         );
-        assert_eq!((verified.asset(), verified.amount()), (ASSET, 7));
+        assert_eq!((verified.asset(), verified.amount()), (honest.asset, 7));
         assert_eq!(
             verified.post_account_root(),
             None,
             "no offline account moves"
         );
-        for misstated in [
-            OfflineSettlementBody {
-                amount: 8,
-                ..honest.clone()
-            },
-            OfflineSettlementBody {
-                release_message: [0x35; 32],
-                ..honest.clone()
-            },
-            OfflineSettlementBody {
-                exposed_at: 5,
-                ..honest.clone()
-            },
-            OfflineSettlementBody {
-                payer_device: [0x36; 32],
-                ..honest.clone()
-            },
+        for (misstated, why) in [
+            (
+                OfflineSettlementBody {
+                    amount: 8,
+                    ..honest.clone()
+                },
+                "does not name the payment the payer's cells hold",
+            ),
+            (
+                OfflineSettlementBody {
+                    release_message: [0x35; 32],
+                    ..honest.clone()
+                },
+                "another history",
+            ),
+            (
+                OfflineSettlementBody {
+                    payment_root: [0x36; 32],
+                    ..honest.clone()
+                },
+                "does not end at the cell its payment starts from",
+            ),
         ] {
             refused(
                 OfflineSettlementBody::verify(
                     &misstated.encode().expect("encodes"),
-                    &[0x0B; 32],
+                    &PAYEE_GENESIS,
                     &receiver,
-                    &exposure,
+                    &start,
+                    &reads,
                 ),
-                "does not name the payment the payer's boundary exposed",
+                why,
             );
         }
         refused(
-            OfflineSettlementBody::verify(&bytes, &[0x0C; 32], &[0xB1; 32], &exposure),
+            OfflineSettlementBody::verify(&bytes, &PAYEE_GENESIS, &[0xB1; 32], &start, &reads),
             "is not to the device that settles it",
+        );
+        refused(
+            OfflineSettlementBody::verify(&bytes, &PAYEE_GENESIS, &receiver, &[0x37; 32], &reads),
+            "it is not the cell of the root the path stands at",
         );
         assert_eq!(
             offline_body_kind(&bytes).expect("a body"),
@@ -1428,23 +1474,22 @@ mod tests {
     #[test]
     fn a_settlement_pays_only_the_lineage_its_payment_named() {
         let receiver = [0xB0; 32];
-        let payment = bearer_payment(receiver, [0x0B; 32], 7);
-        let exposure = exposed(receiver, &payment);
-        let body = OfflineSettlementBody::of(&exposure, payment.clone())
-            .encode()
-            .expect("encodes");
-        OfflineSettlementBody::verify(&body, &[0x0B; 32], &receiver, &exposure)
+        let (honest, start, reads) = held_at_cells(receiver, 7);
+        let body = honest.encode().expect("encodes");
+        OfflineSettlementBody::verify(&body, &PAYEE_GENESIS, &receiver, &start, &reads)
             .expect("the payee's lineage settles its payment");
         refused(
-            OfflineSettlementBody::verify(&body, &[0x0C; 32], &receiver, &exposure),
+            OfflineSettlementBody::verify(&body, &[0x0C; 32], &receiver, &start, &reads),
             "is not a bearer transfer to this lineage",
         );
-        let other = bearer_payment(receiver, [0x0C; 32], 7);
-        let carried = OfflineSettlementBody::of(&exposure, other)
-            .encode()
-            .expect("encodes");
+        let carried = OfflineSettlementBody {
+            payment_operation: bearer_payment(receiver, [0x0C; 32], 7),
+            ..honest
+        }
+        .encode()
+        .expect("encodes");
         refused(
-            OfflineSettlementBody::verify(&carried, &[0x0C; 32], &receiver, &exposure),
+            OfflineSettlementBody::verify(&carried, &[0x0C; 32], &receiver, &start, &reads),
             "is not the transfer the payer's anchor signed",
         );
     }

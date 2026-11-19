@@ -114,6 +114,56 @@ pub fn walk(
     Ok((steps, at))
 }
 
+/// The payer's origin cells of `bundle`'s account read from `start`, each the
+/// cell of the root the last final step left, through the cell of
+/// `payment_root`, where the payment's own step starts. A cell holding no final
+/// step ends the path early.
+pub fn path(
+    core: &CoreSDK,
+    set: &StorageSet,
+    bundle: &D32,
+    start: &D32,
+    payment_root: &D32,
+) -> Result<Vec<OriginRead>, DsmError> {
+    let mut at = *start;
+    let mut reads = Vec::new();
+    for _ in 0..MAX_CHAIN_HOPS {
+        let read = read(core, set, bundle, &at)?;
+        let next = read.settled().map(|step| step.after);
+        reads.push(read);
+        // The payment's own cell is the last one read: whatever holds it decides.
+        if at == *payment_root {
+            break;
+        }
+        match next {
+            Some(after) => at = after,
+            None => break,
+        }
+    }
+    Ok(reads)
+}
+
+/// Whether `reads` reached the payment's own cell with a step final there:
+/// until they do, a payment stays pending, which is no refusal.
+pub fn reaches_a_final_step(reads: &[OriginRead], bundle: &D32, payment_root: &D32) -> bool {
+    reads.last().is_some_and(|last| {
+        *last.key() == offline_origin::origin_key(bundle, payment_root)
+            && last.settled().is_some()
+    })
+}
+
+/// Put each of `writes` (`0x0078 OfflineOriginWrite` bytes) at its origin cell,
+/// leader first. A cell another step already holds keeps it; reading the cells
+/// says which.
+pub async fn put_writes(set: &StorageSet, writes: &[Vec<u8>]) -> Result<(), DsmError> {
+    for bytes in writes {
+        let held = OriginWrite::decode(bytes)
+            .map_err(|e| refuse(format!("a kept origin write: {e}")))?;
+        write(set, &held).await?;
+    }
+    Ok(())
+}
+
 /// The payment `message` of the payer's account of `bundle`, to this device
 /// `me`, proved by the payer's origin cells from `start` — the account a
 /// boundary of the payer left, which this device recorded before it took the
@@ -129,21 +179,7 @@ pub fn payment_from_cells(
     message: &D32,
     me: &D32,
 ) -> Result<ChainPayment, DsmError> {
-    let mut at = *start;
-    let mut reads = Vec::new();
-    for _ in 0..MAX_CHAIN_HOPS {
-        let read = read(core, set, bundle, &at)?;
-        let next = read.settled().map(|step| step.after);
-        reads.push(read);
-        // The payment's own cell is the last one read: whatever holds it decides.
-        if at == *payment_start {
-            break;
-        }
-        match next {
-            Some(after) => at = after,
-            None => break,
-        }
-    }
+    let reads = path(core, set, bundle, start, payment_start)?;
     let paid = offline_origin::payment_at_cells(bundle, start, &reads, message)?;
     if paid.recipient != *me {
         return Err(DsmError::invalid_operation(

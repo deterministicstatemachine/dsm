@@ -639,6 +639,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// directory entry publishes, which the relationship's first inbox from that
 /// contact is bound to (DSM Amendment A37). A database made at 48 is refused
 /// at open.
+///
+/// Still 49, additively (DSM Amendment A39 draft): `pending_offline_origin`
+/// and `pending_offline_origin_write`, the payer's steps a payment received
+/// offline was carried with, are new tables a database made at 49 takes at its
+/// next open, and `peer_offline_exposure` is dropped there. No version moves,
+/// so a wallet bound to a board opens as it is.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 49;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -1076,27 +1082,29 @@ fn create_schema(conn: &Connection) -> Result<()> {
             economic_position   INTEGER NOT NULL
         );
 
-        -- A payment a peer's offline boundary exposed online, as this
-        -- receiver's own walk of the peer verified it: one spend of the chain
-        -- the boundary carried, named by the release that signed it.
-        CREATE TABLE IF NOT EXISTS peer_offline_exposure(
+        -- What a peer's offline boundary exposed is no longer how a payment
+        -- received offline settles: its payer's origin cells are (DSM Amendment
+        -- A39 draft). A database from before keeps no table for it.
+        DROP TABLE IF EXISTS peer_offline_exposure;
+
+        -- The payer's steps a payment received offline was carried with, each
+        -- as a write at the payer's origin cell of the root it starts from, from
+        -- the account the payer's boundary at `origin_position` left
+        -- (`origin_root`) through the payment's own step, which starts from
+        -- `payment_root` (DSM Amendment A39 draft). This device writes them to
+        -- the payer's cells and settles from the cells alone; the payer is
+        -- never needed. Kept in the transaction that records the payment.
+        CREATE TABLE IF NOT EXISTS pending_offline_origin(
             release_message     BLOB PRIMARY KEY,   -- 32B M
-            peer_genesis        BLOB NOT NULL,      -- 32B
-            peer_devid          BLOB NOT NULL,      -- 32B
-            economic_position   INTEGER NOT NULL,
-            bundle              BLOB NOT NULL,      -- 32B
-            recipient           BLOB NOT NULL,      -- 32B
-            asset               BLOB NOT NULL,      -- 32B
-            amount              INTEGER NOT NULL,
-            before_root         BLOB NOT NULL,
-            before_counter      INTEGER NOT NULL,
-            before_frontier     BLOB NOT NULL,
-            after_root          BLOB NOT NULL,
-            after_counter       INTEGER NOT NULL,
-            after_frontier      BLOB NOT NULL,
-            -- The spend's payload hash, the transfer the anchor signed
-            -- (SA-133).
-            payload_hash        BLOB NOT NULL CHECK (length(payload_hash) = 32)
+            origin_position     INTEGER NOT NULL,
+            origin_root         BLOB NOT NULL,      -- 32B
+            payment_root        BLOB NOT NULL       -- 32B
+        );
+        CREATE TABLE IF NOT EXISTS pending_offline_origin_write(
+            release_message     BLOB NOT NULL,      -- 32B M
+            seq                 INTEGER NOT NULL,   -- the step's place on the path
+            write               BLOB NOT NULL,      -- 0x0078 OfflineOriginWrite
+            PRIMARY KEY(release_message, seq)
         );
 
         -- A payment this device received offline (owner, 2026-11-07): its

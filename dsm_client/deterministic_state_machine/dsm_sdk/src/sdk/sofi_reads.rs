@@ -257,6 +257,13 @@ impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
         )
     }
 
+    fn origin_cell(
+        &self,
+        cell: &dsm::offline_origin::OriginCell,
+    ) -> Result<CellEvidence, PeerLineageFailure> {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::origin_cell(&self.live, cell)
+    }
+
     fn native_reserve_release(
         &self,
         reserve_id: &D32,

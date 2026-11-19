@@ -714,7 +714,8 @@ fn every_class() -> Vec<Shown> {
     let offline_settlement = crate::economic::offline_boundary::OfflineSettlementBody {
         payer_genesis: b(0xC1),
         payer_device: b(0xC2),
-        exposed_at: 7,
+        boundary_position: 7,
+        payment_root: b(0xC5),
         release_message: b(0xC3),
         bundle: b(0xC4),
         asset: b(0x0A),
@@ -723,7 +724,7 @@ fn every_class() -> Vec<Shown> {
     };
     all.push(shown(
         class::OFFLINE_SETTLEMENT_BODY,
-        2,
+        3,
         ok(offline_settlement.encode(), "offline settlement"),
         Read::Parsed(|b| {
             re(
