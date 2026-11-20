@@ -61,6 +61,15 @@ pub enum CellOwnership {
     /// Amendment A10: the claim's key and AttA derive the trader's device and
     /// the key signed it), whoever delivers it.
     Register,
+    /// An application cell `K_app` (DSM Amendment A35): its writer set is
+    /// committed in its address, and any one writer of the set writes it.
+    /// A write is kept only when its value is a route entry for this cell
+    /// carrying a write that proves its own authority (its application,
+    /// writer set and name derive the cell, and a writer of that set signed
+    /// it), whoever delivers it. Owner, 2026-11-20: "the fulfillment cell and
+    /// application cells still need the same kind of write protection. Add
+    /// that without breaking any legitimate multi-party protocol steps."
+    Application,
 }
 
 /// The namespaces of owned cells.
@@ -74,6 +83,8 @@ pub fn ownership(namespace: &[u8]) -> CellOwnership {
         CellOwnership::Directory
     } else if namespace == crate::economic::register::economic_root_namespace() {
         CellOwnership::Register
+    } else if namespace == crate::app_cell::namespace() {
+        CellOwnership::Application
     } else if owned_namespaces().contains(&namespace) {
         CellOwnership::Owned
     } else {
@@ -193,8 +204,12 @@ pub enum CellWriteRefusal {
     /// The cell's key is not the address the proof binds.
     WrongAddress,
     /// A register write's value is not a route entry for this cell carrying
-    /// a claim its trader's key authorized for this cell.
+    /// a claim its trader's key authorized for this cell (also: a delivery
+    /// to a self-authorizing cell that is no route entry).
     ClaimNotAuthorized,
+    /// An application cell's write is a route entry for this cell carrying
+    /// no write a writer of its committed set signed for it: why.
+    WriteNotAuthorized(String),
     /// The proof's key did not sign this write.
     Signature,
     /// The signature could not be checked.
@@ -217,6 +232,10 @@ impl core::fmt::Display for CellWriteRefusal {
             Self::ClaimNotAuthorized => write!(
                 f,
                 "the register write carries no claim its trader authorized for this cell"
+            ),
+            Self::WriteNotAuthorized(why) => write!(
+                f,
+                "the application cell write carries no write a writer of its set signed: {why}"
             ),
             Self::Signature => write!(f, "the proof's key did not sign this write"),
             Self::Crypto(why) => write!(f, "the signature could not be checked: {why}"),
@@ -283,6 +302,26 @@ fn signed_by(
     }
 }
 
+/// The route entry a delivery to a self-authorizing cell carries: the value
+/// is its own authorization, so a delivery carries nothing else and has one
+/// encoding without a proof; the entry must be canonical and name this cell.
+fn delivered_entry(
+    namespace: &[u8],
+    key: &[u8; 32],
+    value: &[u8],
+    proof: &[u8],
+) -> Result<crate::route_chain::RouteEntry, CellWriteRefusal> {
+    if !proof.is_empty() {
+        return Err(CellWriteRefusal::ProofOnOpenCell);
+    }
+    let entry = crate::route_chain::RouteEntry::decode(value)
+        .ok_or(CellWriteRefusal::ClaimNotAuthorized)?;
+    if entry.namespace != namespace || entry.key != *key {
+        return Err(CellWriteRefusal::WrongAddress);
+    }
+    Ok(entry)
+}
+
 /// The check every member runs before it keeps `value` at `key` in
 /// `namespace`, with `proof` as the write carried it (empty for none).
 pub fn admit_cell_write(
@@ -313,20 +352,18 @@ pub fn admit_cell_write(
             signed_by(&write.lock_public_key, &target, &write.write_signature)
         }
         CellOwnership::Register => {
-            // The claim is its own authorization; a delivery carries nothing
-            // else, so it has one encoding without a proof.
-            if !proof.is_empty() {
-                return Err(CellWriteRefusal::ProofOnOpenCell);
-            }
-            let entry = crate::route_chain::RouteEntry::decode(value)
-                .ok_or(CellWriteRefusal::ClaimNotAuthorized)?;
-            if entry.namespace != namespace || entry.key != *key {
-                return Err(CellWriteRefusal::WrongAddress);
-            }
+            let entry = delivered_entry(namespace, key, value, proof)?;
             if crate::economic::register::root_claim_naming(&entry.value, key).is_none() {
                 return Err(CellWriteRefusal::ClaimNotAuthorized);
             }
             Ok(())
+        }
+        CellOwnership::Application => {
+            let entry = delivered_entry(namespace, key, value, proof)?;
+            match crate::app_cell::write_occupying(&entry.value, key) {
+                Ok(_write) => Ok(()),
+                Err(why) => Err(CellWriteRefusal::WriteNotAuthorized(format!("{why:?}"))),
+            }
         }
         CellOwnership::Directory => {
             if proof.is_empty() {
@@ -597,6 +634,230 @@ mod tests {
         assert_eq!(
             admit_cell_write(ns, &key, &register_entry(key, genuine, 0), &[0x0A, 0x00]),
             Err(CellWriteRefusal::ProofOnOpenCell)
+        );
+    }
+
+    /// What a member keeps at a register is bound to the trader, the
+    /// position and the transition the trader signed. Each signed field of a
+    /// claim, changed after signing with the trader's signature kept, is
+    /// refused at the cell the changed claim names; so is the trader's own
+    /// key under another AttA, a claim delivered at another device's or
+    /// genesis's register, and the trader's claim in an entry of another
+    /// namespace. Both claim kinds: the single-root envelope and the signed
+    /// `C_q`.
+    /// MUTATION CONTROL: dropping the claim check in `admit_cell_write`
+    /// keeps every altered claim and turns this red; dropping only the
+    /// namespace half of the delivered entry's comparison keeps the entry of
+    /// another namespace.
+    #[test]
+    fn a_register_keeps_a_claim_only_as_its_trader_signed_it() {
+        use crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F as ALG;
+        use crate::economic::claim::EconomicRootClaimBody;
+        use crate::economic::claim_envelope::device_fixture::device;
+        use crate::economic::claim_envelope::sign_economic_root_claim;
+        use crate::economic::register::{economic_root_namespace, economic_root_register_key};
+        use crate::sofi::wire::{SignedSofiResolutionClaim, SofiResolutionClaim};
+        use crate::types::proto as generated;
+        use prost::Message;
+        let ns = economic_root_namespace();
+        let trader = device([0xA7; 32]).expect("a trader");
+        let other = device([0xC7; 32]).expect("another device");
+        let genesis = [0x11; 32];
+        // The key the claim names, and the write delivering it there.
+        let admit_at = |g: &[u8; 32], devid: &[u8; 32], q: u64, claim: Vec<u8>| {
+            let key = economic_root_register_key(g, devid, q);
+            admit_cell_write(ns, &key, &register_entry(key, claim, 0), &[])
+        };
+        let refused =
+            |r: Result<(), CellWriteRefusal>| r == Err(CellWriteRefusal::ClaimNotAuthorized);
+
+        // The single-root envelope.
+        let body = EconomicRootClaimBody::new(
+            genesis,
+            trader.devid,
+            7,
+            [0x0E; 32],
+            [0x0F; 32],
+            [0x5E; 32],
+            ALG,
+            &trader.pk,
+            trader.att_a,
+        )
+        .expect("a claim body");
+        let signed = sign_economic_root_claim(&body, &trader.sk).expect("signed");
+        assert_eq!(admit_at(&genesis, &trader.devid, 7, signed.clone()), Ok(()));
+        let signature = generated::EconomicRootClaimV1::decode(signed.as_slice())
+            .expect("an envelope")
+            .claimant_signature;
+        let resealed = |b: &EconomicRootClaimBody| {
+            generated::EconomicRootClaimV1 {
+                body_ccb: b.encode().expect("a body"),
+                claimant_signature: signature.clone(),
+            }
+            .encode_to_vec()
+        };
+        let altered: [(&str, fn(&mut EconomicRootClaimBody)); 7] = [
+            ("genesis", |b| b.trader_genesis = [0x12; 32]),
+            ("position", |b| b.economic_position = 8),
+            ("root", |b| b.post_economic_root = [0x1E; 32]),
+            ("manifest", |b| b.admission_manifest_addr = [0x1F; 32]),
+            ("set id", |b| b.root_register_storage_set_id = [0x6E; 32]),
+            ("devid", |b| b.trader_devid = [0xD1; 32]),
+            ("AttA", |b| b.claimant_att_a = [0xA8; 32]),
+        ];
+        for (field, alter) in altered {
+            let mut b = body.clone();
+            alter(&mut b);
+            assert!(
+                refused(admit_at(
+                    &b.trader_genesis,
+                    &b.trader_devid,
+                    b.economic_position,
+                    resealed(&b)
+                )),
+                "a single-root claim with its {field} changed after signing"
+            );
+        }
+        let mut under_other_key = body.clone();
+        under_other_key.claimant_public_key = other.pk.clone();
+        assert!(
+            refused(admit_at(
+                &genesis,
+                &trader.devid,
+                7,
+                resealed(&under_other_key)
+            )),
+            "a single-root claim naming another AK"
+        );
+        let mut own_key_other_att_a = body.clone();
+        own_key_other_att_a.claimant_att_a = other.att_a;
+        assert!(
+            refused(admit_at(
+                &genesis,
+                &trader.devid,
+                7,
+                sign_economic_root_claim(&own_key_other_att_a, &trader.sk).expect("signed")
+            )),
+            "the trader's own key under another AttA"
+        );
+        assert!(
+            refused(admit_cell_write(
+                ns,
+                &economic_root_register_key(&genesis, &other.devid, 7),
+                &register_entry(
+                    economic_root_register_key(&genesis, &other.devid, 7),
+                    signed.clone(),
+                    0
+                ),
+                &[]
+            )),
+            "the trader's claim at another device's register"
+        );
+        assert!(
+            refused(admit_cell_write(
+                ns,
+                &economic_root_register_key(&[0x12; 32], &trader.devid, 7),
+                &register_entry(
+                    economic_root_register_key(&[0x12; 32], &trader.devid, 7),
+                    signed.clone(),
+                    0
+                ),
+                &[]
+            )),
+            "the trader's claim at another genesis's register"
+        );
+        let key = economic_root_register_key(&genesis, &trader.devid, 7);
+        let in_other_namespace = crate::route_chain::RouteEntry {
+            namespace: b"DSM/sofi/fulfillment/v1".to_vec(),
+            key,
+            value: signed,
+            seat: b"dsm-node-1".to_vec(),
+            position: 0,
+            chain: Vec::new(),
+        }
+        .encode();
+        assert_eq!(
+            admit_cell_write(ns, &key, &in_other_namespace, &[]),
+            Err(CellWriteRefusal::WrongAddress),
+            "the trader's claim in an entry of another namespace"
+        );
+
+        // The signed C_q.
+        let c_q = SofiResolutionClaim {
+            genesis,
+            device_id: trader.devid,
+            position: 7,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        };
+        let digest = crate::sofi::derive::resolution_claim_signing_digest(
+            &c_q,
+            ALG,
+            &trader.pk,
+            &trader.att_a,
+        );
+        let c_q_signature =
+            crate::crypto::sphincs::sphincs_sign(&trader.sk, &digest).expect("signs");
+        let sealed = |claim: SofiResolutionClaim, pk: &[u8], att_a: [u8; 32]| {
+            SignedSofiResolutionClaim::new(claim, ALG, pk, att_a, &c_q_signature)
+                .expect("a claim's shape")
+                .encode()
+        };
+        assert_eq!(
+            admit_at(
+                &genesis,
+                &trader.devid,
+                7,
+                sealed(c_q.clone(), &trader.pk, trader.att_a)
+            ),
+            Ok(())
+        );
+        let altered: [(&str, fn(&mut SofiResolutionClaim)); 6] = [
+            ("genesis", |c| c.genesis = [0x12; 32]),
+            ("device id", |c| c.device_id = [0xD1; 32]),
+            ("position", |c| c.position = 8),
+            ("fulfillment id", |c| c.fulfillment_id = [0xF2; 32]),
+            ("realize root", |c| c.realize_root = [0xA2; 32]),
+            ("void root", |c| c.void_root = [0xB2; 32]),
+        ];
+        for (field, alter) in altered {
+            let mut c = c_q.clone();
+            alter(&mut c);
+            assert!(
+                refused(admit_at(
+                    &c.genesis,
+                    &c.device_id,
+                    c.position,
+                    sealed(c.clone(), &trader.pk, trader.att_a)
+                )),
+                "a C_q with its {field} changed after signing"
+            );
+        }
+        assert!(
+            refused(admit_at(
+                &genesis,
+                &trader.devid,
+                7,
+                sealed(c_q.clone(), &other.pk, trader.att_a)
+            )),
+            "a C_q naming another AK"
+        );
+        assert!(
+            refused(admit_at(
+                &genesis,
+                &trader.devid,
+                7,
+                sealed(c_q.clone(), &trader.pk, other.att_a)
+            )),
+            "a C_q naming another AttA"
+        );
+        let mut tampered = sealed(c_q, &trader.pk, trader.att_a);
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(
+            refused(admit_at(&genesis, &trader.devid, 7, tampered)),
+            "a C_q with a flipped signature byte"
         );
     }
 

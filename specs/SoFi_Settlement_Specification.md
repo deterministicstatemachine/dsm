@@ -2646,7 +2646,7 @@ fi
 grep -q 'verify_claim_attribution' "$node" || { echo "[FAIL] attribution check missing"; exit 1; }
 echo "[OK] the root register accepts only caller signed single root claims"
 
-> **Amendment S2 (owner, 2026-09-22) — this gate is retired.** The root register must not decode or verify caller signatures or check attribution. A node that can check the writer can block, and blocking is an authority a node must not have (§12; DSM Amendment A3). A root claim that is not signed by its device is not a claim; the reader verifies the signature in Core and ignores it.
+> **Amendment S2 (owner, 2026-09-22) — this gate is retired.** The root register must not decode or verify caller signatures or check attribution. A node that can check the writer can block, and blocking is an authority a node must not have (§12; DSM Amendment A3). A root claim that is not signed by its device is not a claim; the reader verifies the signature in Core and ignores it. *Superseded at the register by DSM Amendment A41 (owner, 2026-11-19): "only the owner authorizes the economic transition, but anyone may deliver its authenticated proof", "Trader authorizes the claim, anyone can relay it". A member keeps at `K_root(q)` only a claim its trader's key signed for it, whoever delivers it; it checks the claim's own signature and nothing about who sent it, and the reader still verifies every claim it counts.*
 
 
 **Gate:** build and tests

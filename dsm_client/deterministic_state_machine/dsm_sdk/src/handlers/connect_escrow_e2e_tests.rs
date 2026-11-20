@@ -1341,13 +1341,58 @@ pub(super) async fn put_at_the_leader(
     }
 }
 
+/// `values` at `cell`'s leader as a hostile leader holds them: an honest
+/// member refuses them at an application cell (DSM Amendment A41, the
+/// owner's words of 2026-11-20), so they are put straight in the leader's
+/// store, past its check, after the honest refusal is seen.
+async fn planted_at_a_hostile_leader(
+    nodes: &crate::test_support::nodes::NodeSet,
+    set: &crate::sdk::storage_set::StorageSet,
+    routed: &dsm::route_chain::RoutedCell,
+    values: &[Vec<u8>],
+) {
+    let client = crate::sdk::storage_node_sdk::SetClient::new(set).expect("a client of the set");
+    let leader = client
+        .member(routed.route().leader())
+        .expect("the leader is a member of the set");
+    let entries: Vec<Vec<u8>> = values
+        .iter()
+        .map(|value| {
+            dsm::route_chain::RouteEntry::at_leader(
+                routed.namespace().to_vec(),
+                *routed.key(),
+                value.clone(),
+                routed.route(),
+            )
+            .encode()
+        })
+        .collect();
+    let honest = leader
+        .put_cells(&[(
+            routed.namespace().to_vec(),
+            *routed.key(),
+            entries[0].clone(),
+        )])
+        .await;
+    assert!(
+        matches!(honest, Err(..)),
+        "an honest leader keeps no unsigned bytes at an application cell: {honest:?}"
+    );
+    for entry in &entries {
+        nodes
+            .plant_cell(leader.member_id(), routed.namespace(), routed.key(), entry)
+            .await;
+    }
+}
+
 /// Storage spec §9, route chains, rule 3: bytes at a seat that are no
 /// recognized object naming the cell never count, and block nothing.
 ///
 /// A stranger to a faction, holding no key of its cells, derives the cell of
 /// the faction's next step from public values and puts a little over one
-/// seat's log budget of well-formed writes there that no writer signed,
-/// through the node's ordinary cell route. A member's wallet then writes the
+/// seat's log budget of well-formed writes there that no writer signed.
+/// An honest leader refuses them; a hostile leader keeps them, and they are
+/// planted there as it would hold them. A member's wallet then writes the
 /// step through its grant. The step must hold the cell, final, exactly as it
 /// does at a cell where the stranger put as many bytes that are no write.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1403,7 +1448,8 @@ async fn a_strangers_unsigned_writes_at_a_cell_block_no_members_write() {
     // nothing.
     let unsigned = a_strangers_writes(r.genesis, b"faction 4 / step 2", &writers, ONE_SEATS_LOG);
     let third_cell = cell_from_public_values(&set, &r.genesis, b"faction 4 / step 3", &writers);
-    put_at_the_leader(
+    planted_at_a_hostile_leader(
+        &p.nodes,
         &set,
         third_cell.routed(),
         &bytes_that_are_no_write(&unsigned),
@@ -1428,7 +1474,7 @@ async fn a_strangers_unsigned_writes_at_a_cell_block_no_members_write() {
     // Step 2's cell: the stranger puts as many bytes, as writes for the cell
     // that no writer signed.
     let second_cell = cell_from_public_values(&set, &r.genesis, b"faction 4 / step 2", &writers);
-    put_at_the_leader(&set, second_cell.routed(), &unsigned).await;
+    planted_at_a_hostile_leader(&p.nodes, &set, second_cell.routed(), &unsigned).await;
     let second = request(
         &r,
         &relay,

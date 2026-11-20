@@ -502,6 +502,12 @@ pub struct AppCell {
     cell: RoutedCell,
 }
 
+/// The namespace of application cells at a member: the cell domain's own
+/// bytes.
+pub fn namespace() -> &'static [u8] {
+    TAG_DSM_APP_CELL.source_bytes()
+}
+
 impl AppCell {
     /// `members` must re-derive `committed_set_id`, the network's pinned
     /// storage set.
@@ -511,7 +517,7 @@ impl AppCell {
         committed_set_id: &D32,
     ) -> Result<Self, CellError> {
         let routed = RoutedCell::new(
-            TAG_DSM_APP_CELL.source_bytes(),
+            namespace(),
             *cell,
             &cell_seed(cell),
             members,
@@ -934,6 +940,125 @@ mod tests {
             write_occupying(b"not a write", &k),
             Err(WriteRefusal::DoesNotDecode(_))
         ));
+    }
+
+    /// A member keeps at an application cell exactly what a reader counts
+    /// there (owner, 2026-11-20: "the fulfillment cell and application cells
+    /// still need the same kind of write protection. Add that without
+    /// breaking any legitimate multi-party protocol steps."). Either writer's
+    /// signed write is kept, at the leader and as a relayed copy at a later
+    /// seat, with no proof and whoever delivers it, so writers still race and
+    /// anyone still carries a write on. An outsider's forgery, a write for a
+    /// wider set, a signature moved to another payload, a write for another
+    /// name, bytes that are no write, a write in an entry naming another cell
+    /// or namespace, and a delivery carrying a proof are each refused.
+    /// MUTATION CONTROL: taking an application write unchecked in
+    /// `dsm::owned_cell::admit_cell_write` keeps the forgery and turns this
+    /// red; dropping the delivered entry's namespace/key comparison keeps
+    /// the entry that names another cell.
+    #[test]
+    fn a_member_keeps_only_a_writers_write_at_an_application_cell_from_anyone() {
+        use crate::owned_cell::{admit_cell_write, CellWriteRefusal};
+        use crate::route_chain::{ChainSlot, RouteEntry};
+        let m = members();
+        let k = key_of(&m);
+        let entry_at = |ns: &[u8], key: D32, value: Vec<u8>, position: usize| {
+            RouteEntry {
+                namespace: ns.to_vec(),
+                key,
+                value,
+                seat: b"dsm-node-1".to_vec(),
+                position,
+                chain: (0..position).map(|_| ChainSlot::NoResponse).collect(),
+            }
+            .encode()
+        };
+        let admit = |value: Vec<u8>| admit_cell_write(namespace(), &k, &value, &[]);
+        let refused_write = |r: Result<(), CellWriteRefusal>| {
+            matches!(r, Err(CellWriteRefusal::WriteNotAuthorized(_)))
+        };
+
+        let by_a = write(&m, &m.a, b"build").encode();
+        let by_b = write(&m, &m.b, b"raze").encode();
+        let other_name = cell_key(&APP, &writers_digest(&m.set), b"lineage step 8");
+        assert_eq!(
+            admit(entry_at(namespace(), other_name, by_a.clone(), 0)),
+            Err(CellWriteRefusal::WrongAddress),
+            "a writer's write in an entry that names another cell"
+        );
+        assert_eq!(
+            admit(entry_at(b"DSM/escrow/verdict-cell/v1", k, by_a.clone(), 0)),
+            Err(CellWriteRefusal::WrongAddress),
+            "a writer's write in an entry that names another namespace"
+        );
+        assert_eq!(admit(entry_at(namespace(), k, by_a.clone(), 0)), Ok(()));
+        assert_eq!(
+            admit(entry_at(namespace(), k, by_a.clone(), 3)),
+            Ok(()),
+            "a relayed copy at a later seat"
+        );
+        assert_eq!(
+            admit(entry_at(namespace(), k, by_b, 0)),
+            Ok(()),
+            "the other writer's rival write"
+        );
+
+        let forged_sig =
+            crate::crypto::sphincs::sphincs_sign(&m.outsider.1, &statement(&k, b"build"))
+                .expect("signs");
+        let forged = AppCellWrite::new(APP, NAME, m.set.clone(), 0, b"build", &forged_sig)
+            .expect("has an encoding");
+        assert!(
+            refused_write(admit(entry_at(namespace(), k, forged.encode(), 0))),
+            "an outsider's signature under a writer's place"
+        );
+        let wider = WriterSet::new(vec![m.a.0.clone(), m.b.0.clone(), m.outsider.0.clone()])
+            .expect("three writers");
+        let elsewhere = sign_write(APP, NAME, wider, &m.outsider.0, &m.outsider.1, b"build")
+            .expect("signs at its own cell");
+        assert!(
+            refused_write(admit(entry_at(namespace(), k, elsewhere.encode(), 0))),
+            "a write for a wider set"
+        );
+        let good = write(&m, &m.a, b"build");
+        let moved = AppCellWrite::new(
+            APP,
+            NAME,
+            m.set.clone(),
+            good.signer,
+            b"raze",
+            good.signature(),
+        )
+        .expect("has an encoding");
+        assert!(
+            refused_write(admit(entry_at(namespace(), k, moved.encode(), 0))),
+            "a writer's signature moved to another payload"
+        );
+        let at_other_name = sign_write(
+            APP,
+            b"lineage step 8",
+            m.set.clone(),
+            &m.a.0,
+            &m.a.1,
+            b"build",
+        )
+        .expect("signs at the other name");
+        assert!(
+            refused_write(admit(entry_at(namespace(), k, at_other_name.encode(), 0))),
+            "a writer's write for another name"
+        );
+        assert!(
+            refused_write(admit(entry_at(namespace(), k, b"not a write".to_vec(), 0))),
+            "bytes that are no write"
+        );
+        assert_eq!(
+            admit(b"not a route entry".to_vec()),
+            Err(CellWriteRefusal::ClaimNotAuthorized)
+        );
+        assert_eq!(
+            admit_cell_write(namespace(), &k, &entry_at(namespace(), k, by_a, 0), &[0x0A]),
+            Err(CellWriteRefusal::ProofOnOpenCell)
+        );
     }
 
     /// The canonical occupant is the first recognized write in the leader's
