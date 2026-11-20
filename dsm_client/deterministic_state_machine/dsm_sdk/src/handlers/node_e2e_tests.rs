@@ -2816,8 +2816,9 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     );
     assert_eq!(walked, WalkOutcome::Unresolved { attempt: 0 });
 
-    // A signs a claim of its own for B's pair: it is not the trader's, so
-    // at K_root(q) it occupies nothing.
+    // A signs a claim of its own for B's pair: it is not the trader's, so no
+    // member keeps it at K_root(q) (DSM Amendment A41: the trader authorizes,
+    // anyone delivers) and it occupies nothing.
     let substitute = {
         let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("A's AK");
         let att_a = crate::sdk::signing_authority::current_att_a().expect("A's AttA");
@@ -2839,8 +2840,24 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
         &substitute,
     )
     .await
-    .expect("the nodes keep whatever they are given");
-    assert_eq!(written.leader(), crate::sdk::route_seats::AtLeader::Link);
+    .expect("the write runs to its end");
+    assert_eq!(
+        written.leader(),
+        crate::sdk::route_seats::AtLeader::Unanswered,
+        "the leader keeps no claim B did not sign"
+    );
+    let held = crate::sdk::storage_node_sdk::SetClient::new(&set)
+        .expect("a set client")
+        .held_at(
+            dsm::economic::register::economic_root_namespace(),
+            pair.root().routed().key(),
+        )
+        .await;
+    assert!(
+        held.iter()
+            .all(|values| values.as_ref().is_some_and(|v| v.is_empty())),
+        "every member answers, and none holds A's claim: {held:?}"
+    );
     let (still, ..) = read_vault();
     assert!(
         matches!(still, Registration::Unresolved),
@@ -8532,6 +8549,160 @@ async fn a_copied_anchor_is_kept_by_no_member_of_its_owners_cell() {
     RecoverySDK::publish_authority_anchor()
         .await
         .expect("A publishes its anchor again");
+}
+
+/// The trader authorizes, anyone delivers (owner, 2026-11-19: "only the owner
+/// authorizes the economic transition, but anyone may deliver its
+/// authenticated proof"; DSM Amendment A41). A's register cell is still
+/// `K_root(G, DevID, q)`, with no lock in it. B writes junk there, and then a
+/// claim B's own key signed naming A's device: no member keeps either, and
+/// the cell reads open. Then A signs its claim and B, holding none of A's
+/// keys, delivers those exact bytes along the route: every member keeps it
+/// and it is final, the claim A authorized.
+/// MUTATION CONTROL: taking a register write unchecked in
+/// `dsm::owned_cell::admit_cell_write` keeps B's own claim and turns the
+/// "kept by no member" assertion red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_register_keeps_the_claim_its_trader_authorized_whoever_delivers_it() {
+    use crate::sdk::economic_registers::{
+        register_economic_root, root_cell, root_claim_settlement, RootClaimSettlement,
+    };
+    use crate::sdk::signing_authority::{current_att_a, current_public_key, current_secret_key};
+    let p = Pair::boot(0, 0).await;
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("the pinned set");
+    let profile =
+        dsm::economic::register::resolve_root_register_profile(NETWORK).expect("the register");
+    let (position, parent) = (40u64, [0x7Au8; 32]);
+    let cell = root_cell(
+        &set,
+        NETWORK,
+        &p.a.genesis,
+        &p.a.device_id,
+        position,
+        &parent,
+    )
+    .expect("A's cell at 40");
+    assert_eq!(
+        *cell.routed().key(),
+        dsm::economic::register::economic_root_register_key(&p.a.genesis, &p.a.device_id, position),
+        "the register's address is K_root itself: no lock enters it"
+    );
+    let body_by = |ak: Vec<u8>, att_a: [u8; 32]| {
+        dsm::economic::claim::EconomicRootClaimBody::new(
+            p.a.genesis,
+            p.a.device_id,
+            position,
+            [0x0E; 32],
+            [0x0F; 32],
+            profile.storage_set_id,
+            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &ak,
+            att_a,
+        )
+        .expect("a claim body")
+    };
+    let members_holding = |bytes: Vec<u8>| {
+        let (set, cell) = (set.clone(), cell.clone());
+        async move {
+            let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a set client");
+            client
+                .held_at(
+                    dsm::economic::register::economic_root_namespace(),
+                    cell.routed().key(),
+                )
+                .await
+                .into_iter()
+                .filter(|held| {
+                    held.as_ref().is_some_and(|values| {
+                        values.iter().any(|v| {
+                            dsm::route_chain::RouteEntry::decode(v)
+                                .is_some_and(|entry| entry.value == bytes)
+                        })
+                    })
+                })
+                .count()
+        }
+    };
+
+    p.b.enter();
+    let junk = b"nobody authorized this".to_vec();
+    let by_b = dsm::economic::claim_envelope::sign_economic_root_claim(
+        &body_by(
+            current_public_key().expect("B's AK"),
+            current_att_a().expect("B's AttA"),
+        ),
+        &current_secret_key().expect("B's AK secret"),
+    )
+    .expect("B signs a claim naming A's device");
+    // Straight at every member, past any client: each entry as the leader's.
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a set client");
+    for value in [&junk, &by_b] {
+        let entry = dsm::route_chain::RouteEntry::at_leader(
+            dsm::economic::register::economic_root_namespace().to_vec(),
+            *cell.routed().key(),
+            value.clone(),
+            cell.routed().route(),
+        );
+        assert_eq!(
+            client
+                .put_cell(
+                    dsm::economic::register::economic_root_namespace(),
+                    cell.routed().key(),
+                    &entry.encode(),
+                )
+                .await,
+            0,
+            "no member keeps a register write A did not authorize"
+        );
+    }
+    // And along the route, as B's own register writer sends it.
+    if let Err(e) = register_economic_root(&set, &cell, &by_b).await {
+        log::info!("B's own claim along the route: {e}");
+    }
+    assert_eq!(
+        members_holding(junk).await,
+        0,
+        "the junk is kept by no member"
+    );
+    assert_eq!(
+        members_holding(by_b.clone()).await,
+        0,
+        "B's own claim is kept by no member"
+    );
+    assert!(
+        matches!(
+            root_claim_settlement(&set, &cell, &by_b).await,
+            Ok(RootClaimSettlement::Pending(..))
+        ),
+        "A's cell reads open"
+    );
+
+    p.a.enter();
+    let by_a = dsm::economic::claim_envelope::sign_economic_root_claim(
+        &body_by(
+            current_public_key().expect("A's AK"),
+            current_att_a().expect("A's AttA"),
+        ),
+        &current_secret_key().expect("A's AK secret"),
+    )
+    .expect("A authorizes its claim");
+    p.b.enter();
+    register_economic_root(&set, &cell, &by_a)
+        .await
+        .expect("B delivers A's claim along the route");
+    assert_eq!(
+        members_holding(by_a.clone()).await,
+        set.len(),
+        "every member keeps the claim A authorized, delivered by B"
+    );
+    assert_eq!(
+        root_claim_settlement(&set, &cell, &by_a)
+            .await
+            .expect("the cell reads"),
+        RootClaimSettlement::Final,
+        "A's claim is final at A's cell"
+    );
 }
 
 /// `device` takes in the tombstone notices posted for it, and whether it then

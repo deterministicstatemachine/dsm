@@ -53,6 +53,14 @@ pub enum CellOwnership {
     Owned,
     /// A device's own directory cell, bound to the device id.
     Directory,
+    /// A trader's economic register cell `K_root(q)` (owner, 2026-11-19:
+    /// "only the owner authorizes the economic transition, but anyone may
+    /// deliver its authenticated proof"). Its address stays `K_root(G, DevID,
+    /// q)`; a write is kept only when its value is a route entry for this
+    /// cell whose claim proves its own authority for exactly this key (DSM
+    /// Amendment A10: the claim's key and AttA derive the trader's device and
+    /// the key signed it), whoever delivers it.
+    Register,
 }
 
 /// The namespaces of owned cells.
@@ -64,6 +72,8 @@ fn owned_namespaces() -> [&'static [u8]; 1] {
 pub fn ownership(namespace: &[u8]) -> CellOwnership {
     if namespace == DIRECTORY_NAMESPACE {
         CellOwnership::Directory
+    } else if namespace == crate::economic::register::economic_root_namespace() {
+        CellOwnership::Register
     } else if owned_namespaces().contains(&namespace) {
         CellOwnership::Owned
     } else {
@@ -182,6 +192,9 @@ pub enum CellWriteRefusal {
     Wire(String),
     /// The cell's key is not the address the proof binds.
     WrongAddress,
+    /// A register write's value is not a route entry for this cell carrying
+    /// a claim its trader's key authorized for this cell.
+    ClaimNotAuthorized,
     /// The proof's key did not sign this write.
     Signature,
     /// The signature could not be checked.
@@ -201,6 +214,10 @@ impl core::fmt::Display for CellWriteRefusal {
             ),
             Self::Wire(why) => write!(f, "the owner's proof is not its wire form: {why}"),
             Self::WrongAddress => write!(f, "the cell is not the address the proof binds"),
+            Self::ClaimNotAuthorized => write!(
+                f,
+                "the register write carries no claim its trader authorized for this cell"
+            ),
             Self::Signature => write!(f, "the proof's key did not sign this write"),
             Self::Crypto(why) => write!(f, "the signature could not be checked: {why}"),
         }
@@ -294,6 +311,22 @@ pub fn admit_cell_write(
             }
             let target = write_target(TAG_DSM_OWNED_CELL_WRITE, namespace, key, value)?;
             signed_by(&write.lock_public_key, &target, &write.write_signature)
+        }
+        CellOwnership::Register => {
+            // The claim is its own authorization; a delivery carries nothing
+            // else, so it has one encoding without a proof.
+            if !proof.is_empty() {
+                return Err(CellWriteRefusal::ProofOnOpenCell);
+            }
+            let entry = crate::route_chain::RouteEntry::decode(value)
+                .ok_or(CellWriteRefusal::ClaimNotAuthorized)?;
+            if entry.namespace != namespace || entry.key != *key {
+                return Err(CellWriteRefusal::WrongAddress);
+            }
+            if crate::economic::register::root_claim_naming(&entry.value, key).is_none() {
+                return Err(CellWriteRefusal::ClaimNotAuthorized);
+            }
+            Ok(())
         }
         CellOwnership::Directory => {
             if proof.is_empty() {
@@ -463,6 +496,108 @@ mod tests {
             admit_cell_write(recovery_ns(), &[1; 32], b"v", &[0xFF, 0xFF]),
             Err(CellWriteRefusal::Wire(_))
         ));
+    }
+
+    /// A register entry for `claim` at `key`, at `position` on the route.
+    fn register_entry(key: [u8; 32], claim: Vec<u8>, position: usize) -> Vec<u8> {
+        crate::route_chain::RouteEntry {
+            namespace: crate::economic::register::economic_root_namespace().to_vec(),
+            key,
+            value: claim,
+            seat: b"dsm-node-1".to_vec(),
+            position,
+            // One slot per earlier position, as a relayed copy carries.
+            chain: (0..position)
+                .map(|_| crate::route_chain::ChainSlot::NoResponse)
+                .collect(),
+        }
+        .encode()
+    }
+
+    /// The trader authorizes; anyone delivers (owner, 2026-11-19). A claim the
+    /// trader's key signed for its own `K_root(q)` is kept at the leader and
+    /// as a relayed copy at a later seat, with no proof and whoever submits
+    /// it. Junk, a claim for another position, a claim a stranger signed
+    /// naming the trader's device, a claim delivered under another cell's key
+    /// and a write carrying a proof are each refused. The address is
+    /// `K_root(G, DevID, q)` itself: no lock enters it.
+    /// MUTATION CONTROL: dropping the claim check lets the junk, the
+    /// other-position claim and the stranger's claim in and turns this red;
+    /// dropping the namespace/key comparison lets in the entry that names
+    /// another cell around this cell's claim.
+    #[test]
+    fn a_register_keeps_only_claims_its_trader_authorized_from_anyone() {
+        use crate::economic::claim_envelope::device_fixture::{device, signed_by, signed_conditional};
+        use crate::economic::register::{economic_root_namespace, economic_root_register_key};
+        use crate::sofi::wire::SofiResolutionClaim;
+        let ns = economic_root_namespace();
+        let trader = device([0xA7; 32]).expect("a trader");
+        let stranger = device([0xB7; 32]).expect("a stranger");
+        let claim_at = |position: u64| SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id: trader.devid,
+            position,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        };
+        let key = economic_root_register_key(&[0x11; 32], &trader.devid, 7);
+        let genuine = signed_conditional(claim_at(7), &trader).expect("C_q");
+
+        assert_eq!(
+            admit_cell_write(ns, &key, &register_entry(key, genuine.clone(), 0), &[]),
+            Ok(())
+        );
+        assert_eq!(
+            admit_cell_write(ns, &key, &register_entry(key, genuine.clone(), 2), &[]),
+            Ok(()),
+            "a relayed copy at a later seat"
+        );
+        assert_eq!(
+            admit_cell_write(ns, &key, &register_entry(key, b"junk".to_vec(), 0), &[]),
+            Err(CellWriteRefusal::ClaimNotAuthorized)
+        );
+        assert_eq!(
+            admit_cell_write(ns, &key, b"not a route entry", &[]),
+            Err(CellWriteRefusal::ClaimNotAuthorized)
+        );
+        let other_position = signed_conditional(claim_at(8), &trader).expect("C_q at 8");
+        assert_eq!(
+            admit_cell_write(ns, &key, &register_entry(key, other_position, 0), &[]),
+            Err(CellWriteRefusal::ClaimNotAuthorized),
+            "the trader's claim for another position"
+        );
+        let squatted = signed_by(claim_at(7), &stranger, stranger.att_a).expect("a squatter's C_q");
+        assert_eq!(
+            admit_cell_write(ns, &key, &register_entry(key, squatted, 0), &[]),
+            Err(CellWriteRefusal::ClaimNotAuthorized),
+            "a stranger's signature naming the trader's device"
+        );
+        let elsewhere = economic_root_register_key(&[0x11; 32], &trader.devid, 9);
+        assert_eq!(
+            admit_cell_write(
+                ns,
+                &key,
+                &register_entry(elsewhere, genuine.clone(), 0),
+                &[]
+            ),
+            Err(CellWriteRefusal::WrongAddress),
+            "this cell's genuine claim in an entry that names another cell"
+        );
+        assert_eq!(
+            admit_cell_write(
+                ns,
+                &elsewhere,
+                &register_entry(key, genuine.clone(), 0),
+                &[]
+            ),
+            Err(CellWriteRefusal::WrongAddress),
+            "a genuine claim delivered under another cell's key"
+        );
+        assert_eq!(
+            admit_cell_write(ns, &key, &register_entry(key, genuine, 0), &[0x0A, 0x00]),
+            Err(CellWriteRefusal::ProofOnOpenCell)
+        );
     }
 
     /// The cell lock comes back from the master seed alone and is not the

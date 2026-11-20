@@ -109,10 +109,11 @@ impl ArrivalRecord {
         }
     }
 
-    /// `None` if the member id is empty, a fixed-length field has the wrong
-    /// length, or the index is zero (indexes start at 1).
+    /// `None` if the member id is empty or longer than [`MAX_MEMBER_ID_LEN`]
+    /// (a record names a member, as a ByteCommit does), a fixed-length field
+    /// has the wrong length, or the index is zero (indexes start at 1).
     pub fn from_proto(p: &crate::types::proto::ArrivalRecordV1) -> Option<Self> {
-        if p.index == 0 || p.member_id.is_empty() {
+        if p.index == 0 || p.member_id.is_empty() || p.member_id.len() > MAX_MEMBER_ID_LEN {
             return None;
         }
         Some(Self {
@@ -671,5 +672,12 @@ mod tests {
         .to_proto();
         r.member_id.clear();
         assert_eq!(ArrivalRecord::from_proto(&r), None);
+        // A record's member id is bounded as a ByteCommit's is: a route
+        // entry's chain cannot carry unbounded bytes in it (core audit,
+        // 2026-11-19).
+        r.member_id = vec![b'm'; MAX_MEMBER_ID_LEN + 1];
+        assert_eq!(ArrivalRecord::from_proto(&r), None);
+        r.member_id = vec![b'm'; MAX_MEMBER_ID_LEN];
+        assert!(ArrivalRecord::from_proto(&r).is_some());
     }
 }

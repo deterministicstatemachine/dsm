@@ -1572,14 +1572,36 @@ mod tests {
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
+        // K_root(q) keeps only a claim its trader signed (DSM Amendment A41).
+        let trader = crate::test_support::reserve::claimant(0x92);
         let cells = crate::sdk::sofi_register::position_cells(
             &set,
-            &[0x91; 32],
-            &[0x92; 32],
+            &trader.genesis,
+            &trader.devid,
             7,
             &[0x93; 32],
         )
         .expect("the pair's cells");
+        let profile = dsm::economic::register::resolve_root_register_profile(
+            crate::economic_fixtures::NETWORK,
+        )
+        .expect("the register");
+        let claim = dsm::economic::claim_envelope::sign_economic_root_claim(
+            &dsm::economic::claim::EconomicRootClaimBody::new(
+                trader.genesis,
+                trader.devid,
+                7,
+                [0x94; 32],
+                [0x95; 32],
+                profile.storage_set_id,
+                dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+                &trader.ak_public_key,
+                trader.att_a,
+            )
+            .expect("a claim body"),
+            &trader.ak_secret_key,
+        )
+        .expect("the trader signs its claim");
         assert_eq!(
             cells.fulfillment().route(),
             cells.root().routed().route(),
@@ -1588,7 +1610,7 @@ mod tests {
         for node in &nodes.nodes {
             node.forget_requests();
         }
-        let reports = write_recorded_position(&set, &cells, b"F", b"C_q")
+        let reports = write_recorded_position(&set, &cells, b"F", &claim)
             .await
             .expect("the pair is written");
         assert_eq!(pair_at_leader(&reports), AtLeader::Link);

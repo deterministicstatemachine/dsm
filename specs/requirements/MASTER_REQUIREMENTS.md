@@ -14,10 +14,12 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `ce9dd155edbd05444213eed92a0b0f47e317cb7c` | 4543 |
+| `specs/DSM_High_Level_Explainer.md` | `ee2401a913d8a2e0a0d901fa62fffe2d9736b1b7` | 4543 |
 | `specs/SoFi_Settlement_Specification.md` | `870fa85b5828328262a78af4799de86913c068ff` | 3138 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `4ab4d769a9d77870cda533394a7a97042ab1b484` | 652 |
+| `specs/DSM_Storage_Node_Specification.md` | `40413b55a45424c49b54172be8a3094dc325f563` | 652 |
+
+Explainer and storage pins updated 2026-11-19 again, for the economic register under A41 (owner, 2026-11-19: "only the owner authorizes the economic transition, but anyone may deliver its authenticated proof", "Trader authorizes the claim, anyone can relay it", and the register's address stays "stable across directory updates, so lock rotation can't create more than one valid location"): a member keeps a write at `K_root(G, DevID, q)` only when it carries a claim the trader authorized, whoever delivers it; the address is unchanged and acceptance is untouched. MR-DSM-0381 added and MR-STOR-0161 restated; every other row reads as written. Each edit added one sentence on an existing line (A41's block; storage §6 rule 6), so no line number moves.
 
 Explainer and storage pins updated 2026-11-19 after DSM Amendment A41 (the owner's words of 2026-11-19, "If they're renting it, no one else should be able to write to it." and "Everything that they pay for should be that way. It's theirs. It's not someone else's.": a cell one party pays for is theirs, and only their key writes it): MR-DSM-0075, MR-DSM-0084 and MR-STOR-0030 restated to it, MR-DSM-0377 to MR-DSM-0380 and MR-STOR-0161 added, and every other row reads as written. The explainer edit added two lines after A38's block and one sentence on the same line as the bullet "The node does not check who is writing"; the storage edit rewrote §6 rule 3 in place and added rule 6 after rule 5, so storage line numbers after line 137 shift by one.
 
@@ -215,7 +217,7 @@ Reconciled on 2026-09-22 from two extractions: `claude-chat` (798 rows) and `cha
 | DSM_Storage_Node_Specification.md | 128 | 122 | 6 |
 | **Total** | **859** | **652** | **207** |
 
-Added afterwards by amendment (§7.1): DSM 105, SoFi 100, storage 33, for 1102 canonical requirements in all.
+Added afterwards by amendment (§7.1): DSM 106, SoFi 100, storage 33, for 1103 canonical requirements in all.
 
 Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sources** are the extraction IDs merged into the row (`cc:` claude-chat, `gpt:` chatgpt); the first source locates the quote. **Flags** carry the findings in §8.7 that bear on the row.
 
@@ -598,6 +600,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0378 | authority | explicit | A cell one party owns lives at its route bound to its owner's cell lock, H(DSM/owned-cell/v1 ‖ route ‖ lock); a member keeps a write there only when the address is the route bound to the key the write carries and that key signed the namespace, the address and the value's entry digest; a single put, which carries no proof, is refused there. | amendment: DSM Amendment A41 (2026-11-19) | owner | none |
 | MR-DSM-0379 | authority | explicit | A device's own directory cell is bound to the device: a member keeps a write there only when the AK and AttA it carries hash to the device id the address names and that AK signed the write. | amendment: DSM Amendment A41 (2026-11-19) | owner | none |
 | MR-DSM-0380 | invariant | explicit | Recovery's cells are owned by the device that writes each of them, and a reader names the owner and finds its cell lock in its self-proving directory entry; a tombstone notice lives in the tombstoned device's own cell, and a contact reads its contacts' cells. | amendment: DSM Amendment A41 (2026-11-19) | owner | none |
+| MR-DSM-0381 | invariant | explicit | The economic register `K_root(G, DevID, q)` is the trader's and anyone may deliver to it: a member keeps a write there only when it is a route entry for that cell whose claim the trader authorized (its AK and AttA hash to the DevID it names, its AK signed it, its coordinates derive the key), whoever submits it; a relayer delivers the bytes unchanged with none of the trader's keys, the address carries no lock and needs no directory read, and acceptance is unchanged. | amendment: DSM Amendment A41 (2026-11-19) | owner | none |
 
 ### 8.2 SoFi settlement specification
 
@@ -1339,7 +1342,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0158 | obligation | explicit | The client that relies on a Final keeps its completion proof; nothing else stores or commits the proof or its digest. | amendment: storage §9 (2026-09-23) | owner | none |
 | MR-STOR-0159 | prohibition | explicit | A node stores a write to an inbox address only when the address is the write's route bound to the key it carries (the writer's first-inbox lock at a relationship's first inbox, the recipient's write lock at every later one), with a grant verifying under the key and the writer's signature over the protocol domain, the address, the commitment of the bytes and the write's message id, by the one check the protocol makes the same way on every node; it never reads the sealed write and has no choice of whom to admit. | amendment: DSM Amendment A37 (2026-11-15) | owner | none |
 | MR-STOR-0160 | obligation | explicit | A member that takes an immutable object put without the copy mark puts it at each set-mate before it answers, marked as a set-mate's copy, at the endpoint its own configuration names, each copy bounded in time and in copies in flight; a put marked as a copy, whoever sends it, is stored at that member alone and passed on to no one. The writer asks each other member whether it holds the object and puts it there itself, marked for that member alone, wherever a member answers without saying it does; a member not reached is not sent it in the same put. `Stored` is still read from the members' bytes, and a short read-back is repaired by the writer's own put at every member. | amendment: storage §5 rule 7 (2026-11-15) | owner | none |
-| MR-STOR-0161 | obligation | explicit | Every member runs the one owner check on a put to a cell one party owns, the same protocol code with no setting, no list of owners and no state, reading public keys, the address and the value's digest and never what the value means; which namespaces hold owned cells is fixed in the protocol. | amendment: storage §6 rule 6 (2026-11-19) | owner | none |
+| MR-STOR-0161 | obligation | explicit | Every member runs the one owner check on a put to a cell one party owns, the same protocol code with no setting, no list of owners and no state, reading public keys, the address and the value's digest and never what the value means, except at the economic register, where it decodes the delivered claim's signed envelope to see that the trader authorized it and reads no economic state; which namespaces hold owned cells is fixed in the protocol. | amendment: storage §6 rule 6 (2026-11-19) | owner | none |
 
 ### 8.5 Open items (not requirements)
 
