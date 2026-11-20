@@ -1197,6 +1197,10 @@ at the leader of s(q), both or neither, then puts the same bytes on the other me
 it establishes nothing about the conformance of F or the route, and nothing about it has to be established
 anywhere but Core. Kful (q) holds the signed envelope of F and Kroot (q) holds CCB(Cq ). Because Cq is
 computed from F and P , no claim that disagrees with F can be F ’s claim.
+*DSM Amendment A41 (owner, 2026-11-19 and 2026-11-20):* a member keeps at Kroot (q) only a claim its trader's
+key signed for it, and at Kful (q) only an F its trader signed, delivered with the trader's 32-byte genesis as a
+public hint (F carries none) from which, with F's own device and position, the member recomputes the cell; it
+checks nothing of F's conformance, and any caller still relays F.
 
 **Code**
 Cq is SofiResolutionClaim, CORE/sofi/wire/objects.rs:580, class 0x003A.

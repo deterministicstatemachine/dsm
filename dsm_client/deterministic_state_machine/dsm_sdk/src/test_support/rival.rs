@@ -9,14 +9,17 @@ use std::sync::Arc;
 use dsm::types::proto::CellPutsV1;
 use prost::Message;
 
-use crate::sdk::route_seats::CellPut;
 use crate::sdk::storage_node_sdk::SetClient;
 use crate::sdk::storage_set::StorageSet;
 use crate::test_support::nodes::RivalPut;
 
 /// `entry` put at `member_id` of `set` as another writer would put it, armed
 /// to land just before the next put there naming `entry`'s cell.
-pub fn rival_put(set: &StorageSet, member_id: &str, entry: CellPut) -> RivalPut {
+pub fn rival_put(
+    set: &StorageSet,
+    member_id: &str,
+    entry: (Vec<u8>, [u8; 32], Vec<u8>),
+) -> RivalPut {
     let client = Arc::new(SetClient::new(set).expect("a client of the set"));
     let key = entry.1;
     let member_id = member_id.to_string();

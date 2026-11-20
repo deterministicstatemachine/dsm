@@ -1306,7 +1306,7 @@ pub(super) async fn put_at_the_leader(
     let leader = client
         .member(routed.route().leader())
         .expect("the leader is a member of the set");
-    let entries: Vec<crate::sdk::route_seats::CellPut> = values
+    let entries: Vec<(Vec<u8>, [u8; 32], Vec<u8>)> = values
         .iter()
         .map(|value| {
             let entry = dsm::route_chain::RouteEntry::at_leader(
@@ -1319,7 +1319,7 @@ pub(super) async fn put_at_the_leader(
         })
         .collect();
     // A member takes at most 1 MiB a request.
-    let mut batch: Vec<crate::sdk::route_seats::CellPut> = Vec::new();
+    let mut batch: Vec<(Vec<u8>, [u8; 32], Vec<u8>)> = Vec::new();
     let mut batch_bytes = 0usize;
     for entry in entries {
         if batch_bytes + entry.2.len() > 900 * 1024 {

@@ -64,6 +64,35 @@ pub fn names_fulfillment_key(
         .then_some(signed)
 }
 
+/// An object naming the fulfillment cell `key` of a trader of genesis
+/// `genesis`: a fulfillment envelope whose own key and `AttA` derive a
+/// device, and whose position, with that device and `genesis`, derive `key`
+/// (`K_ful = H(fulfillment/v1 ‖ G ‖ DevID ‖ u64be(q))`), and which then
+/// recognizes under its own key. With `key` derived from `(G, DevID, q)`
+/// this is [`names_fulfillment_key`]; it is what a member checks before it
+/// keeps a write at `K_ful` (DSM Amendment A41), where `genesis` is the
+/// public hint the write carries, since `F` carries none. A wrong `genesis`
+/// derives another key, and the write names nothing here.
+pub fn fulfillment_naming_cell(
+    bytes: &[u8],
+    genesis: &D32,
+    key: &D32,
+) -> Result<Signed<TraderFulfillmentBody>, super::publication::FulfillmentRefusal> {
+    super::publication::fulfillment_naming(bytes, |body| {
+        let device_id = crate::core::identity::genesis_v2::derive_devid(
+            body.claimant_public_key(),
+            body.claimant_att_a(),
+        );
+        derive::fulfillment_register_key(genesis, &device_id, body.position()) == *key
+    })
+}
+
+/// The namespace of fulfillment cells at a member: the cell domain's own
+/// bytes.
+pub fn fulfillment_namespace() -> &'static [u8] {
+    crate::common::domain_tags::TAG_DSM_SOFI_FULFILLMENT.source_bytes()
+}
+
 /// The two cells of trader `(G, DevID)`'s position `q` as Core derives them
 /// (Sections 7.2, 17.4): `K_ful(q)` and `K_root(q)`, both routed by `s(q)`
 /// over the register's committed set, so one route serves both and a writer
@@ -96,7 +125,7 @@ impl PositionCells {
             committed_set_id,
         )?;
         let fulfillment = RoutedCell::new(
-            crate::common::domain_tags::TAG_DSM_SOFI_FULFILLMENT.source_bytes(),
+            fulfillment_namespace(),
             derive::fulfillment_register_key(genesis, device_id, position),
             &position_seed(genesis, device_id, position, parent_root),
             members,
@@ -477,6 +506,187 @@ mod tests {
         assert!(names_fulfillment_key(&bytes, &dev(), q + 1).is_none());
         assert!(names_fulfillment_key(&bytes, &[0x33; 32], q).is_none());
         assert!(names_fulfillment_key(b"not an envelope", &dev(), q).is_none());
+    }
+
+    /// What a member keeps at `K_ful(q)` (DSM Amendment A41; owner,
+    /// 2026-11-20: "prove that a genuine third-party relay succeeds, while a
+    /// forged fulfillment, mismatched genesis, wrong position, or incorrect
+    /// destination is rejected"). The write carries the trader's genesis as
+    /// a public hint; the member recomputes the cell from it and `F`'s own
+    /// device and position, then verifies `F` under its own key. The
+    /// trader's `F` is kept at the leader and as a relayed copy at a later
+    /// seat, whoever delivers it. Refused: no genesis, a genesis of another
+    /// length, a mismatched genesis, `F` for another position, a squatter's
+    /// `F` naming the trader's device (with either `AttA`), the trader's `F`
+    /// with a field changed after signing or a flipped signature byte, the
+    /// trader's `F` at another position's cell or in an entry naming another
+    /// cell or namespace, and `C_q` at `K_ful`.
+    /// MUTATION CONTROL: taking a fulfillment write unchecked in
+    /// `dsm::owned_cell::admit_cell_write` keeps the forgeries and turns this
+    /// red; dropping the genesis from the recomputed key keeps the
+    /// mismatched genesis.
+    #[test]
+    fn a_member_keeps_at_k_ful_only_the_traders_f_with_its_genesis_from_anyone() {
+        use crate::owned_cell::{admit_cell_write, CellWriteRefusal};
+        use crate::route_chain::{ChainSlot, RouteEntry};
+        let p = swap_fixture_n(2).precommit;
+        let g = *p.genesis();
+        let q = p.position() + 1;
+        let ns = fulfillment_namespace();
+        let k = derive::fulfillment_register_key(&g, &dev(), q);
+        let entry_at = |ns: &[u8], key: D32, value: Vec<u8>, position: usize| {
+            RouteEntry {
+                namespace: ns.to_vec(),
+                key,
+                value,
+                seat: b"dsm-node-1".to_vec(),
+                position,
+                chain: (0..position).map(|_| ChainSlot::NoResponse).collect(),
+            }
+            .encode()
+        };
+        let admit = |value: Vec<u8>, genesis: &[u8]| admit_cell_write(ns, &k, &value, genesis);
+        let refused = |r: Result<(), CellWriteRefusal>| {
+            matches!(r, Err(CellWriteRefusal::FulfillmentNotAuthorized(_)))
+        };
+
+        let f = fulfillment(&p, q);
+        let genuine = envelope(&f);
+        assert_eq!(admit(entry_at(ns, k, genuine.clone(), 0), &g), Ok(()));
+        assert_eq!(
+            admit(entry_at(ns, k, genuine.clone(), 2), &g),
+            Ok(()),
+            "a third party's relayed copy at a later seat"
+        );
+
+        assert!(matches!(
+            admit(entry_at(ns, k, genuine.clone(), 0), &[]),
+            Err(CellWriteRefusal::GenesisHint(_))
+        ));
+        assert!(matches!(
+            admit(entry_at(ns, k, genuine.clone(), 0), &g[..31]),
+            Err(CellWriteRefusal::GenesisHint(_))
+        ));
+        assert!(
+            refused(admit(entry_at(ns, k, genuine.clone(), 0), &[0x77; 32])),
+            "a mismatched genesis"
+        );
+        assert!(
+            refused(admit(
+                entry_at(ns, k, envelope(&fulfillment(&p, q + 1)), 0),
+                &g
+            )),
+            "the trader's F for another position"
+        );
+
+        let (squatter_pk, squatter_sk) =
+            crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        for att_a in [[0x5A; 32], crate::sofi::validation::fixtures::TRADER_ATT_A] {
+            let squat = TraderFulfillmentBody::new(
+                *f.precommit_id(),
+                vec![[0x01; 32], [0x02; 32]],
+                f.attempts().to_vec(),
+                q,
+                ALG,
+                &squatter_pk,
+                att_a,
+            )
+            .unwrap();
+            let forged = Publication::Fulfillment {
+                body: &squat,
+                signature: &crate::crypto::sphincs::sphincs_sign(
+                    &squatter_sk,
+                    &derive::fulfillment_signing_digest(&squat),
+                )
+                .unwrap(),
+            }
+            .object_bytes()
+            .unwrap();
+            assert!(
+                refused(admit(entry_at(ns, k, forged, 0), &g)),
+                "a squatter's F naming the trader's device"
+            );
+        }
+
+        let signature = signed(derive::fulfillment_signing_digest(&f));
+        let altered = TraderFulfillmentBody::new(
+            *f.precommit_id(),
+            vec![[0x01; 32], [0x03; 32]],
+            f.attempts().to_vec(),
+            q,
+            ALG,
+            key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
+        )
+        .unwrap();
+        let moved = Publication::Fulfillment {
+            body: &altered,
+            signature: &signature,
+        }
+        .object_bytes()
+        .unwrap();
+        assert!(
+            refused(admit(entry_at(ns, k, moved, 0), &g)),
+            "the trader's F with a field changed after signing"
+        );
+        let mut flipped = genuine.clone();
+        let last = flipped.len() - 1;
+        flipped[last] ^= 0x01;
+        assert!(
+            refused(admit(entry_at(ns, k, flipped, 0), &g)),
+            "the trader's F with a flipped signature byte"
+        );
+
+        let next = derive::fulfillment_register_key(&g, &dev(), q + 1);
+        assert!(
+            refused(admit_cell_write(
+                ns,
+                &next,
+                &entry_at(ns, next, genuine.clone(), 0),
+                &g
+            )),
+            "the trader's F at another position's cell"
+        );
+        assert_eq!(
+            admit(entry_at(ns, next, genuine.clone(), 0), &g),
+            Err(CellWriteRefusal::WrongAddress),
+            "the trader's F in an entry naming another cell"
+        );
+        assert_eq!(
+            admit(
+                entry_at(
+                    crate::economic::register::economic_root_namespace(),
+                    k,
+                    genuine.clone(),
+                    0
+                ),
+                &g
+            ),
+            Err(CellWriteRefusal::WrongAddress),
+            "the trader's F in an entry naming another namespace"
+        );
+        let claim = signed_c_q(derive::resolution_claim(&p, &f));
+        assert!(
+            refused(admit(entry_at(ns, k, claim, 0), &g)),
+            "C_q at K_ful"
+        );
+
+        // What a member cannot tell: a device's genesis from its id. The
+        // trader's own F, delivered with another genesis at the cell that
+        // genesis, the trader's device and the position derive, is kept
+        // there, a cell no reader of this trader reads (its readers derive
+        // the cell from the trader's real genesis), as at the register.
+        let other_g = [0x77; 32];
+        let elsewhere = derive::fulfillment_register_key(&other_g, &dev(), q);
+        assert_eq!(
+            admit_cell_write(
+                ns,
+                &elsewhere,
+                &entry_at(ns, elsewhere, genuine, 0),
+                &other_g
+            ),
+            Ok(())
+        );
     }
 
     /// DSM Amendment A10, SoFi Amendment S20: `F` proves its own authority

@@ -448,6 +448,67 @@ pub fn recognize_fulfillment(bytes: &[u8]) -> Option<(D32, Signed<TraderFulfillm
     Some((derive::fulfillment_id(&signed.body), signed))
 }
 
+/// Why bytes are no fulfillment naming a cell (see [`fulfillment_naming`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FulfillmentRefusal {
+    /// The bytes are not a signed SoFi object: why.
+    NotAnEnvelope(String),
+    /// The envelope signs another class of body.
+    NotAFulfillment(u16),
+    /// The body is not a canonical fulfillment: why.
+    BodyDoesNotDecode(String),
+    /// The envelope names another algorithm than its body.
+    AlgorithmMismatch,
+    /// The body names another cell.
+    NotThisCell,
+    /// The signature does not verify under the body's own key: why.
+    SignatureDoesNotVerify(String),
+}
+
+impl core::fmt::Display for FulfillmentRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotAnEnvelope(why) => write!(f, "not a signed SoFi object: {why}"),
+            Self::NotAFulfillment(class) => write!(f, "the envelope signs class {class:#06x}"),
+            Self::BodyDoesNotDecode(why) => write!(f, "the fulfillment does not decode: {why}"),
+            Self::AlgorithmMismatch => write!(f, "the envelope's algorithm is not its body's"),
+            Self::NotThisCell => write!(f, "the fulfillment names another cell"),
+            Self::SignatureDoesNotVerify(why) => {
+                write!(f, "the fulfillment's signature does not verify: {why}")
+            }
+        }
+    }
+}
+
+/// The fulfillment envelope `bytes` is, when its body `names` holds and it
+/// verifies under its own key, or why it is not. Which cell the body names
+/// is tested before the signature, so bytes for another cell cost no
+/// verification.
+pub fn fulfillment_naming(
+    bytes: &[u8],
+    names: impl Fn(&TraderFulfillmentBody) -> bool,
+) -> Result<Signed<TraderFulfillmentBody>, FulfillmentRefusal> {
+    let env = SignedSofiObject::decode(bytes)
+        .map_err(|e| FulfillmentRefusal::NotAnEnvelope(e.to_string()))?;
+    if env.body_class() != class::SOFI_TRADER_FULFILLMENT_BODY {
+        return Err(FulfillmentRefusal::NotAFulfillment(env.body_class()));
+    }
+    let body = TraderFulfillmentBody::decode(env.body_ccb())
+        .map_err(|e| FulfillmentRefusal::BodyDoesNotDecode(e.to_string()))?;
+    if body.signature_alg() != env.signature_alg() {
+        return Err(FulfillmentRefusal::AlgorithmMismatch);
+    }
+    if !names(&body) {
+        return Err(FulfillmentRefusal::NotThisCell);
+    }
+    verify_fulfillment(&body, env.signature(), body.claimant_public_key())
+        .map_err(|e| FulfillmentRefusal::SignatureDoesNotVerify(e.to_string()))?;
+    Ok(Signed {
+        body,
+        signature: env.signature().to_vec(),
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {

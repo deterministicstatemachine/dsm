@@ -70,6 +70,17 @@ pub enum CellOwnership {
     /// application cells still need the same kind of write protection. Add
     /// that without breaking any legitimate multi-party protocol steps."
     Application,
+    /// A trader's fulfillment cell `K_ful(q)` (SoFi §17.4): the trader's,
+    /// and anyone delivers to it (SoFi Amendment S20: "Any caller MAY relay
+    /// F"). Owner, 2026-11-20: "the storage node should recompute the cell
+    /// address from the provided genesis, device ID, and position, then
+    /// verify the trader's signature and its binding. The genesis is a
+    /// public hint, not a secret." A write carries the trader's 32-byte
+    /// genesis as its proof, since `F` carries none; it is kept only when its
+    /// value is a route entry for this cell carrying an `F` whose key and
+    /// AttA derive a device that, with that genesis and `F`'s position,
+    /// derives this cell, and which verifies under its own key.
+    Fulfillment,
 }
 
 /// The namespaces of owned cells.
@@ -83,6 +94,8 @@ pub fn ownership(namespace: &[u8]) -> CellOwnership {
         CellOwnership::Directory
     } else if namespace == crate::economic::register::economic_root_namespace() {
         CellOwnership::Register
+    } else if namespace == crate::sofi::registration::fulfillment_namespace() {
+        CellOwnership::Fulfillment
     } else if namespace == crate::app_cell::namespace() {
         CellOwnership::Application
     } else if owned_namespaces().contains(&namespace) {
@@ -210,6 +223,12 @@ pub enum CellWriteRefusal {
     /// An application cell's write is a route entry for this cell carrying
     /// no write a writer of its committed set signed for it: why.
     WriteNotAuthorized(String),
+    /// A fulfillment cell's write carries no 32-byte genesis hint: why.
+    GenesisHint(String),
+    /// A fulfillment cell's write is a route entry for this cell carrying no
+    /// `F` that, with the genesis it carries, names this cell and verifies
+    /// under its own key: why.
+    FulfillmentNotAuthorized(String),
     /// The proof's key did not sign this write.
     Signature,
     /// The signature could not be checked.
@@ -236,6 +255,14 @@ impl core::fmt::Display for CellWriteRefusal {
             Self::WriteNotAuthorized(why) => write!(
                 f,
                 "the application cell write carries no write a writer of its set signed: {why}"
+            ),
+            Self::GenesisHint(why) => write!(
+                f,
+                "a fulfillment cell write carries the trader's 32-byte genesis: {why}"
+            ),
+            Self::FulfillmentNotAuthorized(why) => write!(
+                f,
+                "the fulfillment cell write carries no F its trader signed for this cell: {why}"
             ),
             Self::Signature => write!(f, "the proof's key did not sign this write"),
             Self::Crypto(why) => write!(f, "the signature could not be checked: {why}"),
@@ -314,6 +341,15 @@ fn delivered_entry(
     if !proof.is_empty() {
         return Err(CellWriteRefusal::ProofOnOpenCell);
     }
+    entry_naming(namespace, key, value)
+}
+
+/// The route entry `value` is, when it is canonical and names this cell.
+fn entry_naming(
+    namespace: &[u8],
+    key: &[u8; 32],
+    value: &[u8],
+) -> Result<crate::route_chain::RouteEntry, CellWriteRefusal> {
     let entry = crate::route_chain::RouteEntry::decode(value)
         .ok_or(CellWriteRefusal::ClaimNotAuthorized)?;
     if entry.namespace != namespace || entry.key != *key {
@@ -357,6 +393,15 @@ pub fn admit_cell_write(
                 return Err(CellWriteRefusal::ClaimNotAuthorized);
             }
             Ok(())
+        }
+        CellOwnership::Fulfillment => {
+            let genesis = <[u8; 32]>::try_from(proof)
+                .map_err(|e| CellWriteRefusal::GenesisHint(e.to_string()))?;
+            let entry = entry_naming(namespace, key, value)?;
+            match crate::sofi::registration::fulfillment_naming_cell(&entry.value, &genesis, key) {
+                Ok(_fulfillment) => Ok(()),
+                Err(why) => Err(CellWriteRefusal::FulfillmentNotAuthorized(why.to_string())),
+            }
         }
         CellOwnership::Application => {
             let entry = delivered_entry(namespace, key, value, proof)?;
@@ -649,6 +694,9 @@ mod tests {
     /// keeps every altered claim and turns this red; dropping only the
     /// namespace half of the delivered entry's comparison keeps the entry of
     /// another namespace.
+    /// One signed field, named, and how a test changes it after signing.
+    type Alter<T> = (&'static str, fn(&mut T));
+
     #[test]
     fn a_register_keeps_a_claim_only_as_its_trader_signed_it() {
         use crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F as ALG;
@@ -696,7 +744,7 @@ mod tests {
             }
             .encode_to_vec()
         };
-        let altered: [(&str, fn(&mut EconomicRootClaimBody)); 7] = [
+        let altered: [Alter<EconomicRootClaimBody>; 7] = [
             ("genesis", |b| b.trader_genesis = [0x12; 32]),
             ("position", |b| b.economic_position = 8),
             ("root", |b| b.post_economic_root = [0x1E; 32]),
@@ -809,11 +857,11 @@ mod tests {
                 &genesis,
                 &trader.devid,
                 7,
-                sealed(c_q.clone(), &trader.pk, trader.att_a)
+                sealed(c_q, &trader.pk, trader.att_a)
             ),
             Ok(())
         );
-        let altered: [(&str, fn(&mut SofiResolutionClaim)); 6] = [
+        let altered: [Alter<SofiResolutionClaim>; 6] = [
             ("genesis", |c| c.genesis = [0x12; 32]),
             ("device id", |c| c.device_id = [0xD1; 32]),
             ("position", |c| c.position = 8),
@@ -822,14 +870,14 @@ mod tests {
             ("void root", |c| c.void_root = [0xB2; 32]),
         ];
         for (field, alter) in altered {
-            let mut c = c_q.clone();
+            let mut c = c_q;
             alter(&mut c);
             assert!(
                 refused(admit_at(
                     &c.genesis,
                     &c.device_id,
                     c.position,
-                    sealed(c.clone(), &trader.pk, trader.att_a)
+                    sealed(c, &trader.pk, trader.att_a)
                 )),
                 "a C_q with its {field} changed after signing"
             );
@@ -839,7 +887,7 @@ mod tests {
                 &genesis,
                 &trader.devid,
                 7,
-                sealed(c_q.clone(), &other.pk, trader.att_a)
+                sealed(c_q, &other.pk, trader.att_a)
             )),
             "a C_q naming another AK"
         );
@@ -848,7 +896,7 @@ mod tests {
                 &genesis,
                 &trader.devid,
                 7,
-                sealed(c_q.clone(), &trader.pk, other.att_a)
+                sealed(c_q, &trader.pk, other.att_a)
             )),
             "a C_q naming another AttA"
         );
