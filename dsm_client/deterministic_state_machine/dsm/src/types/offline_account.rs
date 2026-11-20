@@ -125,18 +125,25 @@ pub fn funding_chain_key() -> [u8; 32] {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfflineAccountStep {
     /// A canonical load: `amount` of `asset` enters the account. `boundary_id` is
-    /// the economic operation id of the load.
+    /// the economic operation id of the load. The account's board signs it at
+    /// its next counter, as it signs a spend, so the counter and the frontier
+    /// advance with it in the same write set (DSM Amendment A39 draft, option B).
     Load {
         asset: [u8; 32],
         amount: u64,
         boundary_id: [u8; 32],
+        next_frontier: [u8; 32],
     },
     /// A canonical unload: `amount` of `asset` leaves the account for the
     /// online balance. `boundary_id` is the economic operation id of the unload.
+    /// Signed by the board at its next counter, as a load is: a board that
+    /// signed a spend from a root has left that root, so no unload of what it
+    /// paid is ever signed.
     Unload {
         asset: [u8; 32],
         amount: u64,
         boundary_id: [u8; 32],
+        next_frontier: [u8; 32],
     },
     /// An offline-bearer spend: `amount` of `asset` leaves the account, and
     /// the counter and the frontier advance with it in the same write set.
@@ -154,8 +161,14 @@ pub enum OfflineAccountStep {
         next_frontier: [u8; 32],
     },
     /// The unload of a payment received offline: `amount` of `asset` leaves what the account holds
-    /// received, for the online balance.
-    Settle { asset: [u8; 32], amount: u64 },
+    /// received, for the online balance. Signed by the board at its next counter, as every step of
+    /// the account is (DSM Amendment A39 draft, option B), so the counter and the frontier advance
+    /// with it.
+    Settle {
+        asset: [u8; 32],
+        amount: u64,
+        next_frontier: [u8; 32],
+    },
 }
 
 /// The values a step's touched leaves held before it, as the prover states
@@ -164,10 +177,13 @@ pub enum OfflineAccountStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepBefore {
     /// Before a load or an unload: the allocation of the step's asset, if the
-    /// account holds one, and the funding chain, if a boundary has funded it.
+    /// account holds one, the funding chain, if a boundary has funded it, and
+    /// the counter and the frontier.
     Boundary {
         allocation: Option<u64>,
         funding_chain: Option<[u8; 32]>,
+        counter: u64,
+        frontier: [u8; 32],
     },
     /// Before a spend: the allocation of the step's asset, the counter and
     /// the frontier.
@@ -183,8 +199,13 @@ pub enum StepBefore {
         counter: u64,
         frontier: [u8; 32],
     },
-    /// Before the unload of a received payment: what the account holds received of its asset.
-    Settle { received: u64 },
+    /// Before the unload of a received payment: what the account holds received of its asset, the
+    /// counter and the frontier.
+    Settle {
+        received: u64,
+        counter: u64,
+        frontier: [u8; 32],
+    },
 }
 
 /// One leaf a step writes: its key and its value before and after.
@@ -210,10 +231,13 @@ pub fn step_writes(
                 asset,
                 amount,
                 boundary_id,
+                next_frontier,
             },
             StepBefore::Boundary {
                 allocation,
                 funding_chain: prior_chain,
+                counter,
+                frontier,
             },
         ) => {
             positive(*amount, "a load")?;
@@ -224,17 +248,27 @@ pub fn step_writes(
                 })?,
                 None => *amount,
             };
-            boundary_writes(asset, *allocation, next, *prior_chain, *boundary_id)?
+            boundary_writes(
+                asset,
+                *allocation,
+                next,
+                *prior_chain,
+                *boundary_id,
+                (*counter, frontier, next_frontier),
+            )?
         }
         (
             OfflineAccountStep::Unload {
                 asset,
                 amount,
                 boundary_id,
+                next_frontier,
             },
             StepBefore::Boundary {
                 allocation,
                 funding_chain: prior_chain,
+                counter,
+                frontier,
             },
         ) => {
             positive(*amount, "an unload")?;
@@ -246,7 +280,14 @@ pub fn step_writes(
                     "an unload takes more than the offline allocation holds",
                 )
             })?;
-            boundary_writes(asset, *allocation, next, *prior_chain, *boundary_id)?
+            boundary_writes(
+                asset,
+                *allocation,
+                next,
+                *prior_chain,
+                *boundary_id,
+                (*counter, frontier, next_frontier),
+            )?
         }
         (
             OfflineAccountStep::Spend {
@@ -337,18 +378,49 @@ pub fn step_writes(
                 },
             ]
         }
-        (OfflineAccountStep::Settle { asset, amount }, StepBefore::Settle { received }) => {
+        (
+            OfflineAccountStep::Settle {
+                asset,
+                amount,
+                next_frontier,
+            },
+            StepBefore::Settle {
+                received,
+                counter,
+                frontier,
+            },
+        ) => {
             positive(*amount, "an unload of a received payment")?;
             let next = received.checked_sub(*amount).ok_or_else(|| {
                 DsmError::invalid_operation(
                     "an unload of a received payment takes more than the account holds received",
                 )
             })?;
-            vec![AccountWrite {
-                key: received_key(asset),
-                pre: Some(received_value(*received)),
-                post: received_value(next),
-            }]
+            let next_counter = counter
+                .checked_add(1)
+                .ok_or_else(|| DsmError::invalid_operation("the offline counter is exhausted"))?;
+            if next_frontier == frontier {
+                return Err(DsmError::invalid_operation(
+                    "an unload of a received payment moves the offline frontier",
+                ));
+            }
+            vec![
+                AccountWrite {
+                    key: received_key(asset),
+                    pre: Some(received_value(*received)),
+                    post: received_value(next),
+                },
+                AccountWrite {
+                    key: counter_key(),
+                    pre: Some(counter_value(*counter)),
+                    post: counter_value(next_counter),
+                },
+                AccountWrite {
+                    key: frontier_key(),
+                    pre: Some(*frontier),
+                    post: *next_frontier,
+                },
+            ]
         }
         _ => {
             return Err(DsmError::invalid_operation(
@@ -369,16 +441,28 @@ fn positive(amount: u64, what: &str) -> Result<(), DsmError> {
     }
 }
 
+/// The leaves a load or an unload writes: the allocation and the funding chain,
+/// and — the board signing it at its next counter — the counter's step and the
+/// frontier's advance, `(counter, frontier, next_frontier)`.
 fn boundary_writes(
     asset: &[u8; 32],
     allocation: Option<u64>,
     next: u64,
     prior_chain: Option<[u8; 32]>,
     boundary_id: [u8; 32],
+    (counter, frontier, next_frontier): (u64, &[u8; 32], &[u8; 32]),
 ) -> Result<Vec<AccountWrite>, DsmError> {
     if prior_chain == Some(boundary_id) {
         return Err(DsmError::invalid_operation(
             "a boundary names the operation that already funded the account",
+        ));
+    }
+    let next_counter = counter
+        .checked_add(1)
+        .ok_or_else(|| DsmError::invalid_operation("the offline counter is exhausted"))?;
+    if next_frontier == frontier {
+        return Err(DsmError::invalid_operation(
+            "a boundary moves the offline frontier",
         ));
     }
     Ok(vec![
@@ -391,6 +475,16 @@ fn boundary_writes(
             key: funding_chain_key(),
             pre: prior_chain,
             post: boundary_id,
+        },
+        AccountWrite {
+            key: counter_key(),
+            pre: Some(counter_value(counter)),
+            post: counter_value(next_counter),
+        },
+        AccountWrite {
+            key: frontier_key(),
+            pre: Some(*frontier),
+            post: *next_frontier,
         },
     ])
 }
@@ -568,6 +662,8 @@ impl OfflineAccount {
                 Ok(StepBefore::Boundary {
                     allocation: self.allocation(asset),
                     funding_chain: self.funding_chain,
+                    counter: self.counter,
+                    frontier: self.frontier,
                 })
             }
             OfflineAccountStep::Spend { asset, .. } => Ok(StepBefore::Spend {
@@ -590,6 +686,8 @@ impl OfflineAccount {
                         "an unload of a received payment names an asset the account never received",
                     )
                 })?,
+                counter: self.counter,
+                frontier: self.frontier,
             }),
         }
     }
@@ -615,19 +713,25 @@ impl OfflineAccount {
                 asset,
                 amount,
                 boundary_id,
+                next_frontier,
             } => {
                 let held = account.allocations.entry(*asset).or_insert(0);
                 *held += amount;
                 account.funding_chain = Some(*boundary_id);
+                account.counter += 1;
+                account.frontier = *next_frontier;
             }
             OfflineAccountStep::Unload {
                 asset,
                 amount,
                 boundary_id,
+                next_frontier,
             } => {
                 let held = account.allocations.entry(*asset).or_insert(0);
                 *held -= amount;
                 account.funding_chain = Some(*boundary_id);
+                account.counter += 1;
+                account.frontier = *next_frontier;
             }
             OfflineAccountStep::Spend {
                 asset,
@@ -649,9 +753,15 @@ impl OfflineAccount {
                 account.counter += 1;
                 account.frontier = *next_frontier;
             }
-            OfflineAccountStep::Settle { asset, amount } => {
+            OfflineAccountStep::Settle {
+                asset,
+                amount,
+                next_frontier,
+            } => {
                 let held = account.received.entry(*asset).or_insert(0);
                 *held -= amount;
+                account.counter += 1;
+                account.frontier = *next_frontier;
             }
         }
         Ok(OfflineAccountMove {
@@ -948,22 +1058,36 @@ impl AccountWitness {
 pub struct SettleWitness {
     pub pre_account_root: [u8; 32],
     pub pre_received: u64,
-    pub account_path: EncodedPath,
+    pub pre_counter: u64,
+    pub pre_frontier: [u8; 32],
+    pub next_frontier: [u8; 32],
+    pub account_paths: Vec<EncodedPath>,
 }
 
 impl SettleWitness {
     /// The witness of `settle` taken by `before`.
     pub fn of(before: &OfflineAccount, settle: &OfflineAccountMove) -> Result<Self, DsmError> {
-        let (StepBefore::Settle { received }, [entry]) = (settle.before, settle.entries.as_slice())
+        let StepBefore::Settle {
+            received,
+            counter,
+            frontier,
+        } = settle.before
         else {
             return Err(DsmError::invalid_operation(
-                "a settle witness is taken of the one write of an unload of a received payment",
+                "a settle witness is taken of an unload of a received payment",
             ));
         };
         Ok(Self {
             pre_account_root: before.root(),
             pre_received: received,
-            account_path: smt_path::encode::<DeviceSmtHashes>(&entry.path),
+            pre_counter: counter,
+            pre_frontier: frontier,
+            next_frontier: settle.account.frontier(),
+            account_paths: settle
+                .entries
+                .iter()
+                .map(|e| smt_path::encode::<DeviceSmtHashes>(&e.path))
+                .collect(),
         })
     }
 
@@ -974,11 +1098,14 @@ impl SettleWitness {
             &OfflineAccountStep::Settle {
                 asset: *asset,
                 amount,
+                next_frontier: self.next_frontier,
             },
             &StepBefore::Settle {
                 received: self.pre_received,
+                counter: self.pre_counter,
+                frontier: self.pre_frontier,
             },
-            &decoded_paths(core::slice::from_ref(&self.account_path))?,
+            &decoded_paths(&self.account_paths)?,
         )
     }
 
@@ -986,22 +1113,22 @@ impl SettleWitness {
         crate::types::proto::StepWriteOfflineSettle {
             pre_account_root: self.pre_account_root.to_vec(),
             pre_received: self.pre_received,
-            account_path: paths_to_proto(core::slice::from_ref(&self.account_path))
-                .into_iter()
-                .next(),
+            pre_counter: self.pre_counter,
+            pre_frontier: self.pre_frontier.to_vec(),
+            next_frontier: self.next_frontier.to_vec(),
+            account_paths: paths_to_proto(&self.account_paths),
         }
     }
 
     pub fn from_proto(a: crate::types::proto::StepWriteOfflineSettle) -> Result<Self, DsmError> {
         const WHAT: &str = "an offline settle witness";
-        let path = a
-            .account_path
-            .ok_or_else(|| DsmError::invalid_operation(format!("{WHAT} carries no path")))?;
-        let mut paths = paths_from_proto(vec![path], WHAT)?;
         Ok(Self {
             pre_account_root: fixed32(&a.pre_account_root, WHAT, "pre-root")?,
             pre_received: a.pre_received,
-            account_path: paths.remove(0),
+            pre_counter: a.pre_counter,
+            pre_frontier: fixed32(&a.pre_frontier, WHAT, "pre-frontier")?,
+            next_frontier: fixed32(&a.next_frontier, WHAT, "next frontier")?,
+            account_paths: paths_from_proto(a.account_paths, WHAT)?,
         })
     }
 }
@@ -1132,11 +1259,13 @@ mod tests {
         m.entries.iter().map(|e| e.path.clone()).collect()
     }
 
+    /// A load named `boundary`, its board's advance to a frontier of its own.
     fn load(asset: [u8; 32], amount: u64, boundary: u8) -> OfflineAccountStep {
         OfflineAccountStep::Load {
             asset,
             amount,
             boundary_id: [boundary; 32],
+            next_frontier: [boundary ^ 0xF0; 32],
         }
     }
 
@@ -1159,6 +1288,7 @@ mod tests {
                 asset: ASSET,
                 amount: 5,
                 boundary_id: [0x12; 32],
+                next_frontier: [0xE2; 32],
             },
         ];
         let mut account = opened;
@@ -1171,8 +1301,10 @@ mod tests {
         }
         assert_eq!(account.allocation(&ASSET), Some(15));
         assert_eq!(account.allocation(&OTHER), Some(7));
-        assert_eq!(account.counter(), 1);
-        assert_eq!(account.frontier(), [0x02; 32]);
+        // Two loads, a spend and an unload: each signed by the board at its next counter, the
+        // unload's frontier last.
+        assert_eq!(account.counter(), 4);
+        assert_eq!(account.frontier(), [0xE2; 32]);
         assert_eq!(account.funding_chain(), Some([0x12; 32]));
         let rebuilt = OfflineAccount::restore(
             account.allocations().clone(),
@@ -1221,7 +1353,9 @@ mod tests {
         expected.sort();
         assert_eq!(keys, expected);
         assert_eq!(m.account.allocation(&OTHER), Some(9));
-        assert_eq!(m.account.counter(), 5);
+        // Opened at 4; each load, signed by the board at its next counter, stepped it; then the
+        // spend.
+        assert_eq!(m.account.counter(), 7);
         // One path more than the step writes is not this step's multiproof.
         let mut extra = paths(&m);
         extra.push(extra[0].clone());
@@ -1241,14 +1375,21 @@ mod tests {
                 asset: ASSET,
                 amount: 1,
                 boundary_id: [0x10; 32],
+                next_frontier: [0xE0; 32],
             }),
             "does not hold",
         );
         refused(opened.step(&load(ASSET, 0, 0x10)), "positive amount");
         let funded = opened.step(&load(ASSET, 5, 0x10)).expect("load").account;
         refused(funded.step(&load(ASSET, 1, 0x10)), "already funded");
-        refused(funded.step(&spend(1, 0x01)), "moves the offline frontier");
-        let exhausted = OfflineAccount::open([0x01; 32], u64::MAX)
+        // The load left the account at its board's frontier for it; a spend must move on from it.
+        refused(funded.step(&spend(1, 0xE0)), "moves the offline frontier");
+        // A load takes the board's last counter step, and then nothing more is signed.
+        refused(
+            OfflineAccount::open([0x01; 32], u64::MAX).step(&load(ASSET, 5, 0x10)),
+            "counter is exhausted",
+        );
+        let exhausted = OfflineAccount::open([0x01; 32], u64::MAX - 1)
             .step(&load(ASSET, 5, 0x10))
             .expect("load")
             .account;
@@ -1304,6 +1445,7 @@ mod tests {
             OfflineAccountStep::Settle {
                 asset: ASSET,
                 amount: 5,
+                next_frontier: [0x06; 32],
             },
         ] {
             let m = account.step(&step).expect("the account takes the step");
@@ -1323,8 +1465,12 @@ mod tests {
             BTreeMap::from([(ASSET, 12)]),
             "it holds what was loaded and what was received: a closed account takes both"
         );
-        assert_eq!(account.counter(), 2, "each receive moves the counter once");
-        assert_eq!(account.frontier(), [0x03; 32]);
+        assert_eq!(
+            account.counter(),
+            4,
+            "the board-signed load, each receive and the unload move the counter once"
+        );
+        assert_eq!(account.frontier(), [0x06; 32]);
         let rebuilt = OfflineAccount::restore(
             account.allocations().clone(),
             account.received_amounts().clone(),
@@ -1344,6 +1490,7 @@ mod tests {
             account.step(&OfflineAccountStep::Settle {
                 asset: ASSET,
                 amount: 3,
+                next_frontier: [0x07; 32],
             }),
             "takes more than the account holds received",
         );
@@ -1351,11 +1498,12 @@ mod tests {
             account.step(&OfflineAccountStep::Settle {
                 asset: OTHER,
                 amount: 1,
+                next_frontier: [0x07; 32],
             }),
             "never received",
         );
         refused(
-            account.step(&receive(1, 0x03)),
+            account.step(&receive(1, 0x06)),
             "moves the offline frontier",
         );
         refused(account.step(&receive(0, 0x05)), "positive amount");
@@ -1393,6 +1541,7 @@ mod tests {
             .step(&OfflineAccountStep::Settle {
                 asset: ASSET,
                 amount: 6,
+                next_frontier: [0x03; 32],
             })
             .expect("its unload");
         let witness = SettleWitness::of(&received.account, &settled).expect("its witness");

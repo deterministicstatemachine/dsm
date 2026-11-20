@@ -405,6 +405,9 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             async fn invoke(&self, i: AppInvoke) -> AppResult {
                 match i.method.as_str() {
                     "system.createGenesisV2" => handle_create_genesis_v2(&i.args),
+                    "system.restoreFromPhrase" => {
+                        crate::handlers::system_routes::handle_restore_from_phrase(&i.args).await
+                    }
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),

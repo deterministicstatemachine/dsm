@@ -116,6 +116,36 @@ cd tla
 java -cp tla2tools.jar tlc2.TLC -config DSM_OfflineAnchorSingleAppliance.cfg DSM_OfflineAnchorSingleAppliance.tla
 ```
 
+### DSM_OfflineOriginCells.tla (proposed design, not yet in the code)
+Offline steps final at their origin cells. One payer's offline account, its
+board, two receivers and one cell per account root. A cell's occupant is the
+first recognized write of a step that starts at that root, and anyone holding a
+step may write it: the board's signatures are the authority, the writer only
+carries it. A receiver settles its payment once every cell on its path holds
+that path's own step, with no need for the payer to come back online. A payer
+whose phone is wiped resumes from the steps its board kept.
+
+The design config models the privacy split (a cell shows the board, the
+starting root and the signatures over a sealed digest of the rest), with a
+modified payer wallet, jamming and restore. It holds `NoCounterfeit`,
+`AcceptedIsCovered`, `NoHonestBlock`, `RestoreResumes` and `SettledWasAccepted`.
+`_Public` is the same with full cells. With a broken board (`_BrokenBoard`,
+`_BrokenBoardPublic`) nothing is created, but a twin can take an accepted
+payment's cell: with full cells only a twin the fold covers
+(`_ValidTwinBlocksPublic`), with sealed cells any twin
+(`_InvalidTwinBlocksHidden`). The falsifications each break one rule: an unload
+signed by the online key (`_OptionA`), an unsigned step (`_UnsignedSettle`),
+identifying occupants by bytes (`_ByteIdentity`), recognizing junk
+(`_RecognizeJunk`), settling without the cells (`_SettleWithoutCells`), replay
+(`_Replay`) and restore without the board's copies (`_NoBoardCopies`).
+Storage-member finality is taken from `DSM_RouteChain` and
+`DSM_SofiSuccessorCells`, not re-modelled.
+
+```zsh
+cd tla
+java -cp tla2tools.jar tlc2.TLC -workers auto -config DSM_OfflineOriginCells.cfg DSM_OfflineOriginCells.tla
+```
+
 ### Guarded kernel: DSM_Guarded.tla and companions
 Machine-checkable realization of the guarded linear constraint system paper
 (Appendix B), with the general key-scoped statement over an abstract resource

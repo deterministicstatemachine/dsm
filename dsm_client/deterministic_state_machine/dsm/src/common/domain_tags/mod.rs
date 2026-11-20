@@ -225,10 +225,13 @@ mod tests {
     // -1 with the first inbox bound to its writer's published lock (DSM
     // Amendment A37): the open address's `DSM/b0x` is gone, and the first
     // inbox's key seed is now the first-inbox lock's.
+    // +3 with offline origin cells (DSM Amendment A39 draft): the cell of an
+    // offline account root, its seed, and the challenge a board signs a load
+    // or an unload under.
     // +4 for owned cells (owner ruling, 2026-11-19): a device's cell lock, an
     // owned cell's address, and the two write proofs (an owned cell's, a
     // directory cell's).
-    const EXPECTED_TAG_COUNT: usize = 455;
+    const EXPECTED_TAG_COUNT: usize = 462;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

@@ -347,15 +347,48 @@ pub fn advance_resolved(
     receiver: &DeviceState,
 ) -> Result<ResolvedAdvance, AdvanceError> {
     let derived = derive_resolved(previous, precommit, fulfillment, parent_claim, established)?;
+    if let Some(facts) = derived.realized_over {
+        // The adoption invariant, inside the function that installs the
+        // root, so that no caller can reach a realized advance without it.
+        adoption_admits(precommit, &facts.preimage, &facts.evidence, receiver)?;
+    }
+    moved_by(derived, precommit, fulfillment)
+}
+
+/// The trader's OWN resolved position, replayed by a wallet restored from its
+/// phrase (DSM Amendment A40): the verdict, the root, the claim, the balances,
+/// the leaves and the vault states exactly as [`advance_resolved`] derived them
+/// on the device that took the position, from the same public objects and the
+/// same facts, by the same functions.
+///
+/// What it leaves out is the adoption precondition. The trader's device held
+/// it when it admitted the position, and refused a realized advance without
+/// it, so a position its register holds already passed it. A restored device
+/// rebuilds what that admission installed; nothing in it depends on adoption,
+/// and the leaves are refused unless they recompute the root the register
+/// holds ([`ResolvedAdvance::installed_leaves`]).
+pub fn advance_own_replayed(
+    previous: &ValidatedEconomicRoot,
+    precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
+    parent_claim: &ParentClaimRef,
+    established: &Established,
+) -> Result<ResolvedAdvance, AdvanceError> {
+    let derived = derive_resolved(previous, precommit, fulfillment, parent_claim, established)?;
+    moved_by(derived, precommit, fulfillment)
+}
+
+/// What the verdict `derived` moves: for a `Realized` one, the balances the
+/// realize root holds for the tokens T° moves, the leaves it holds for every
+/// key T° touches, and the state each leg selected, all from the bytes the
+/// verdict was reached on; for a `Void`, nothing.
+fn moved_by(
+    derived: Derived<'_>,
+    precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
+) -> Result<ResolvedAdvance, AdvanceError> {
     let (balances, leaf_states, vault_generations) = match derived.realized_over {
         Some(facts) => {
-            // The adoption invariant, inside the function that installs the
-            // root, so that no caller can reach a realized advance without
-            // it.
-            adoption_admits(precommit, &facts.preimage, &facts.evidence, receiver)?;
-            // The balances the realize root holds for the tokens T° moves,
-            // and the leaves it holds for every key T° touches, from the same
-            // bytes `adoption_admits` just bound to this `E`.
             let balances = ResolvedBalances(
                 trader_balance_changes(precommit, &facts.preimage, &facts.evidence)
                     .map_err(AdvanceError::BalancesNotDerivable)?,
@@ -1694,6 +1727,74 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(installed.rows(), expected.as_slice());
+    }
+
+    /// A WALLET RESTORED FROM ITS PHRASE REBUILDS EXACTLY WHAT ITS DEVICE
+    /// ADMITTED (DSM Amendment A40). Over the same `P`, `F` and facts, the
+    /// replay of the trader's own position derives the same verdict, root,
+    /// claim, balances, leaves and vault states as the advance its device ran,
+    /// realized or void. A restored device holds no adoption yet and needs
+    /// none: its leaves still recompute the realize root over the cache the
+    /// position was taken on, and over any other cache they are refused.
+    /// MUTATION CONTROL: a replay that leaves out the leaves a realized
+    /// position writes turns this red.
+    #[test]
+    fn a_replayed_own_position_derives_exactly_what_its_device_admitted() {
+        use crate::sofi::validation::fixtures::balance;
+        let (fx, receiver) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        for shape in [Shape::Realized, Shape::Void] {
+            let facts = established(&p, &f, &fx.preimage, &fx.evidence, shape);
+            let admitted = advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &facts,
+                &receiver,
+            )
+            .unwrap();
+            let replayed = advance_own_replayed(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &facts,
+            )
+            .unwrap();
+            assert_eq!(replayed, admitted);
+        }
+
+        let facts = established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized);
+        assert!(matches!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &facts,
+                &bare_receiver(),
+            ),
+            Err(AdvanceError::TokenNotAdopted { .. })
+        ));
+        let replayed = advance_own_replayed(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            p.parent_claim_ref(),
+            &facts,
+        )
+        .unwrap();
+        let installed = replayed.installed_leaves(rig_rows(&fx)).unwrap();
+        assert_eq!(root_of(installed.rows()), *p.realize_root());
+        let mut other = rig_rows(&fx);
+        other.push(row_of(&EconomicLeafState::Balance(balance(d(0x7C), 3))));
+        assert!(matches!(
+            replayed.installed_leaves(other),
+            Err(LeafCacheError::DoesNotRecomputeTheRoot { root, .. })
+                if root == *p.realize_root()
+        ));
     }
 
     /// A CACHE THAT IS NOT THE PREDECESSOR'S INSTALLS NOTHING. A realized

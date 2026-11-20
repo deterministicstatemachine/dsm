@@ -625,6 +625,40 @@ impl HostAppliance {
         };
     }
 
+    /// A clone of this board as it stands — the attack a broken board is: the same chip keys and a
+    /// copy of the record its R-memory holds, on a supply and a counter of its own, booted from that
+    /// copy as the firmware boots.
+    pub fn cloned(&self) -> Self {
+        let anchor = held(&self.anchor);
+        let board = Board(Arc::new(Mutex::new(Supply {
+            power: Power::On,
+            cut: Cut::Never,
+            writes: 0,
+        })));
+        let copied = |slot: &Arc<Mutex<Option<Vec<u8>>>>| Arc::new(Mutex::new(held(slot).clone()));
+        let twin = Self {
+            anchor: Arc::new(Mutex::new(Anchor {
+                rmemory: SoftwareRMemory {
+                    board: board.clone(),
+                    slot: copied(&anchor.rmemory.slot),
+                    trial: copied(&anchor.rmemory.trial),
+                    stamp: copied(&anchor.rmemory.stamp),
+                },
+                board,
+                counter: Arc::new(Mutex::new(*held(&anchor.counter))),
+                closed_births: Arc::new(Mutex::new(*held(&anchor.closed_births))),
+                chip_seed: anchor.chip_seed,
+                enrolled_counter: anchor.enrolled_counter,
+                install: anchor.install,
+                births: anchor.births,
+                served: Served::Unprovisioned,
+            })),
+        };
+        drop(anchor);
+        twin.reboot();
+        twin
+    }
+
     /// The chip's counter `H`.
     pub fn chip_counter(&self) -> u32 {
         *held(&held(&self.anchor).counter)

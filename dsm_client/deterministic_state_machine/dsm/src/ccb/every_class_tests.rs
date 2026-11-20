@@ -390,7 +390,11 @@ fn boundary(kind: OfflineBoundaryKind) -> OfflineBoundaryBody {
         pre_account_root: b(0xB3),
         pre_allocation: Some(40),
         pre_funding_chain: Some(b(0xB4)),
-        account_paths: vec![encoded(0xB5), encoded(0xB6)],
+        pre_counter: 3,
+        pre_frontier: b(0xBE),
+        next_frontier: b(0xBF),
+        release: vec![0xC0; 48],
+        account_paths: vec![encoded(0xB5), encoded(0xB6), encoded(0xC1), encoded(0xC2)],
         device_path: encoded(0xB7),
         ancestry: crate::economic::offline_boundary::BoundaryAncestry {
             anchor: crate::economic::offline_boundary::BoundaryAnchor {
@@ -706,7 +710,7 @@ fn every_class() -> Vec<Shown> {
     ] {
         all.push(shown(
             boundary_class,
-            4,
+            5,
             ok(boundary(kind).encode(), "offline boundary"),
             Read::Parsed(|b| re(OfflineBoundaryBody::decode(b).map_err(text)?.encode())),
         ));
@@ -714,7 +718,8 @@ fn every_class() -> Vec<Shown> {
     let offline_settlement = crate::economic::offline_boundary::OfflineSettlementBody {
         payer_genesis: b(0xC1),
         payer_device: b(0xC2),
-        exposed_at: 7,
+        boundary_position: 7,
+        payment_root: b(0xC5),
         release_message: b(0xC3),
         bundle: b(0xC4),
         asset: b(0x0A),
@@ -723,7 +728,7 @@ fn every_class() -> Vec<Shown> {
     };
     all.push(shown(
         class::OFFLINE_SETTLEMENT_BODY,
-        2,
+        3,
         ok(offline_settlement.encode(), "offline settlement"),
         Read::Parsed(|b| {
             re(
@@ -1352,6 +1357,51 @@ fn every_class() -> Vec<Shown> {
             Ok(crate::app_cell::AppCellWrite::decode(b)
                 .map_err(text)?
                 .encode())
+        }),
+    ));
+
+    // ── an offline boundary's departure (DSM Amendment A39 draft) ───────
+    let departure = crate::offline_origin::OriginDeparture {
+        genesis: b(0xD5),
+        owner_key: key(),
+        device_id: b(0xD6),
+        body: b"one boundary with no steps carried".to_vec(),
+    };
+    all.push(shown(
+        class::OFFLINE_ORIGIN_DEPARTURE,
+        crate::offline_origin::SCHEMA_V1,
+        ok(departure.encode(), "origin departure"),
+        Read::Parsed(|b| {
+            crate::offline_origin::OriginDeparture::decode(b)
+                .map_err(text)?
+                .encode()
+                .map_err(|e| e.to_string())
+        }),
+    ));
+
+    // ── offline origin cells (DSM Amendment A39 draft) ──────────────────
+    let origin = crate::offline_origin::OriginWrite {
+        owner_key: key(),
+        device_id: b(0xD1),
+        bundle: b(0xB0),
+        anchor: crate::economic::offline_boundary::BoundaryAnchor {
+            anchor_id: b(0xA1),
+            pk_chip: vec![0xC1; 32],
+            pk_host: vec![0xC2; 32],
+            enrolled_counter: 32,
+            birth_commitment: b(0xB1),
+        },
+        step: b"one step of an offline account".to_vec(),
+    };
+    all.push(shown(
+        class::OFFLINE_ORIGIN_WRITE,
+        crate::offline_origin::SCHEMA_V1,
+        ok(origin.encode(), "origin write"),
+        Read::Parsed(|b| {
+            crate::offline_origin::OriginWrite::decode(b)
+                .map_err(text)?
+                .encode()
+                .map_err(|e| e.to_string())
         }),
     ));
 

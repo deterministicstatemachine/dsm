@@ -23,7 +23,6 @@ use dsm::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use dsm::economic::peer_lineage::{
     peer_claim_at, peer_root_at, scan_offline_boundaries, validate_peer_step, Checked, OfflineScan,
     ConditionalPositionResolver, OfflineRecords, PeerEvidenceFetcher, StepCost,
-    OFFLINE_SCAN_POSITIONS,
 };
 use dsm::sofi::wire::ParentClaimRef;
 use dsm::economic::provenance::{
@@ -318,6 +317,19 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         })
     }
 
+    /// The seats' reads of a payer's origin cell (DSM Amendment A39 draft),
+    /// read fresh: only the reads Core evaluates decide it.
+    fn origin_cell(
+        &self,
+        cell: &dsm::offline_origin::OriginCell,
+    ) -> Result<CellEvidence, PeerLineageFailure> {
+        let seats = NodeSeats::new(self.set).map_err(|e| incomplete("origin cell seats", e))?;
+        Ok(tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(read_cell(&seats, cell.routed(), &cell.keeps()))
+        }))
+    }
+
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
         #[cfg(test)]
         asked_cells::note(cell.routed().key());
@@ -489,7 +501,6 @@ fn record_established<T>(
     log_cost(what, devid, position, &checked.cost());
     crate::storage::client_db::economic_lineage::record_validated(
         checked.offline_accounts(),
-        checked.offline_exposures(),
         checked.ek_steps(),
         checked.kept_states(),
     )
@@ -566,6 +577,48 @@ pub(crate) async fn walk_contact(genesis: [u8; 32], device_id: [u8; 32]) -> Resu
         walk.stop()
     );
     Ok(())
+}
+
+/// This wallet's own lineage as the register on `network_id` holds it,
+/// re-verified from its activation root and its leaves folded from every
+/// step's witness (`replay_own_lineage`): what a wallet restored from its
+/// phrase admits as its own head, once its identity is installed. Nothing local
+/// is read but what this device recorded of other peers.
+pub(crate) async fn replay_own_register(
+    network_id: Vec<u8>,
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+) -> Result<dsm::economic::peer_lineage::OwnLineage, String> {
+    let set = crate::sdk::storage_set::canonical_set(&network_id)
+        .map_err(|e| format!("the register set: {e}"))?;
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let live = LiveRegisterResolver {
+            set: &set,
+            runtime,
+            expected_network_id: network_id.clone(),
+        };
+        let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
+            .map_err(|e| format!("SoFi reads: {e}"))?;
+        let checked = dsm::economic::peer_lineage::replay_own_lineage(
+            &live,
+            &network_id,
+            &genesis,
+            &device_id,
+            &StoredOfflineRecords,
+            &sofi.peer_position_resolver(),
+        )
+        .map_err(|e| e.to_string())?;
+        log_cost(
+            "own lineage",
+            &device_id,
+            checked.answer().reached(),
+            &checked.cost(),
+        );
+        Ok(checked.into_answer())
+    })
+    .await
+    .map_err(|e| format!("the replay of this wallet's register did not finish: {e}"))?
 }
 
 /// The root a trader selected at a position and the reference a later `P`
@@ -652,30 +705,6 @@ async fn read_payer_offline_boundaries(
     .map_err(|e| PeerLineageFailure::Incomplete(format!("the payer's read did not finish: {e}")))?
 }
 
-/// Scan a payer's positions from `from` for the offline boundaries that expose
-/// what it paid this device offline (SA-91), within
-/// [`OFFLINE_SCAN_POSITIONS`].
-pub(crate) async fn scan_payer_offline_boundaries(
-    genesis: [u8; 32],
-    device_id: [u8; 32],
-    from: u64,
-) -> Result<(), String> {
-    let scan = read_payer_offline_boundaries(
-        genesis,
-        device_id,
-        from..from.saturating_add(OFFLINE_SCAN_POSITIONS),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    log::info!(
-        "[A14] payer {} scanned from position {from} to {}: {:?}",
-        text_id::encode_base32_crockford(&device_id),
-        scan.reached(),
-        scan.stop()
-    );
-    Ok(())
-}
-
 /// The one position a payer's notice names (DSM Amendment A30), validated one
 /// hop when it is an offline boundary. A constant cost, whatever the position
 /// and however long the payer's history. The notice is believed in nothing:
@@ -760,6 +789,13 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
 
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
         dsm::economic::peer_lineage::PeerEvidenceFetcher::register_cell(self.inner, cell)
+    }
+
+    fn origin_cell(
+        &self,
+        cell: &dsm::offline_origin::OriginCell,
+    ) -> Result<CellEvidence, PeerLineageFailure> {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::origin_cell(self.inner, cell)
     }
 
     fn native_reserve_release(

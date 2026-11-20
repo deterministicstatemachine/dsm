@@ -55,7 +55,7 @@ export const {
 } = diagnostics;
 
 export const { addDsmEventListener } = events;
-export const { createGenesisViaRouter, generateMnemonic } = genesis;
+export const { createGenesisViaRouter, generateMnemonic, restoreFromPhraseViaRouter } = genesis;
 
 export const { getPreference, setPreference } = preferences;
 export const {

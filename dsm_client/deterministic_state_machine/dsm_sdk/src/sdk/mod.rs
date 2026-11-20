@@ -29,9 +29,11 @@ pub mod economic_registers;
 pub mod escrow_flow;
 pub mod faucet_claim_flow;
 pub mod native_reserve;
+pub mod origin_cell_flow; // offline origin cells (DSM Amendment A39 draft)
 pub mod outcome_programs;
 pub mod runtime_config;
 pub mod sdk_context;
+pub mod wallet_backup_flow; // a wallet's sealed backups (DSM Amendment A40)
 
 // Re-export SdkContext for convenient access
 pub use sdk_context::SdkContext;

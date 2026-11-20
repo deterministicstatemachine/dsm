@@ -42,8 +42,9 @@ use crate::tla_trace_replay::{
 /// 107 with DSM Amendment A34's write check: `WriteLock` and its
 /// `unbound-lock`, `first-inbox-unbound` (since DSM Amendment A37 binds the
 /// first inbox to its writer's published lock) and `granted-write-reachable`
-/// configs.
-pub const EXPECTED_STANDARD_SPECS: usize = 107;
+/// configs. 124 with the proposed offline origin cells: `OfflineOriginCells`
+/// and its public, broken-board and falsification configs (17).
+pub const EXPECTED_STANDARD_SPECS: usize = 124;
 
 /// The TLC simulation trace a spec replays in Rust. No trace is replayed into
 /// the code: a model's code-level checks are its linked implementation traces
@@ -660,6 +661,175 @@ impl TlaRunner {
                 "DSM_OfflineAnchorSingleAppliance.tla",
                 "DSM_OfflineAnchorSingleAppliance_ReleaseBeforeReceipt.cfg",
                 "NoCommitWithoutDeliverableConfirm",
+            ),
+            // ── Offline steps final at their origin cells (proposed) ──────────
+            // One cell per offline account root holds the first recognized step
+            // that starts there; anyone holding a board-signed step may write it.
+            // A receiver settles without the payer and a restored payer resumes
+            // from its board's copies. Proposed design, not yet in the code.
+            // The design, with each cell showing only the board, the starting root and the signatures over a sealed digest.
+            TlaSpec {
+                label: "OfflineOriginCells".into(),
+                spec_file: "DSM_OfflineOriginCells.tla".into(),
+                config_file: "DSM_OfflineOriginCells.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "NoCounterfeit".into(),
+                    "AcceptedIsCovered".into(),
+                    "NoHonestBlock".into(),
+                    "RestoreResumes".into(),
+                    "SettledWasAccepted".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                trace_replay: TraceReplay::None,
+                expect_violation: None,
+                exhaustive: exhaustive_by_construction("DSM_OfflineOriginCells.tla"),
+            },
+            // The same with every cell readable in full: readers fold each occupant.
+            TlaSpec {
+                label: "OfflineOriginCells/public".into(),
+                spec_file: "DSM_OfflineOriginCells.tla".into(),
+                config_file: "DSM_OfflineOriginCells_Public.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "NoCounterfeit".into(),
+                    "AcceptedIsCovered".into(),
+                    "NoHonestBlock".into(),
+                    "RestoreResumes".into(),
+                    "SettledWasAccepted".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                trace_replay: TraceReplay::None,
+                expect_violation: None,
+                exhaustive: exhaustive_by_construction("DSM_OfflineOriginCells.tla"),
+            },
+            // A broken board signs twice from one root: still nothing is created.
+            TlaSpec {
+                label: "OfflineOriginCells/broken-board".into(),
+                spec_file: "DSM_OfflineOriginCells.tla".into(),
+                config_file: "DSM_OfflineOriginCells_BrokenBoard.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "NoCounterfeit".into(),
+                    "AcceptedIsCovered".into(),
+                    "SettledWasAccepted".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                trace_replay: TraceReplay::None,
+                expect_violation: None,
+                exhaustive: exhaustive_by_construction("DSM_OfflineOriginCells.tla"),
+            },
+            // With full cells, a twin the fold does not cover never takes an accepted payment's cell.
+            TlaSpec {
+                label: "OfflineOriginCells/broken-board-public".into(),
+                spec_file: "DSM_OfflineOriginCells.tla".into(),
+                config_file: "DSM_OfflineOriginCells_BrokenBoardPublic.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "NoCounterfeit".into(),
+                    "AcceptedIsCovered".into(),
+                    "SettledWasAccepted".into(),
+                    "NoInvalidTwinBlocks".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                trace_replay: TraceReplay::None,
+                expect_violation: None,
+                exhaustive: exhaustive_by_construction("DSM_OfflineOriginCells.tla"),
+            },
+            // A broken board's twin takes an accepted payment's cell: one receiver loses, as with any fork.
+            expect_violation(
+                "OfflineOriginCells/broken-board-blocks",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_BrokenBoardBlocks.cfg",
+                "NoHonestBlockAny",
+            ),
+            // With sealed cells, even a twin the fold does not cover can take that cell.
+            expect_violation(
+                "OfflineOriginCells/invalid-twin-blocks-hidden",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_InvalidTwinBlocksHidden.cfg",
+                "NoInvalidTwinBlocks",
+            ),
+            // With full cells, a covered twin still can.
+            expect_violation(
+                "OfflineOriginCells/valid-twin-blocks-public",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_ValidTwinBlocksPublic.cfg",
+                "NoValidTwinBlocks",
+            ),
+            // Reachable: a receiver settles while the payer never comes back.
+            expect_violation(
+                "OfflineOriginCells/settles-without-payer",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_SettlesWithoutPayer.cfg",
+                "NoSettleWithoutPayer",
+            ),
+            // Reachable: a payment made after a restore settles.
+            expect_violation(
+                "OfflineOriginCells/settles-after-restore",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_SettlesAfterRestore.cfg",
+                "NoSettleAfterRestore",
+            ),
+            // Reachable: an unreadable cell holds a payment back (liveness, never value).
+            expect_violation(
+                "OfflineOriginCells/jam-blocks-settle",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_JamBlocksSettle.cfg",
+                "NoJamBlocksSettle",
+            ),
+            // An unload signed by the online key races the board's payment from the same root.
+            expect_violation(
+                "OfflineOriginCells/option-a",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_OptionA.cfg",
+                "NoHonestBlock",
+            ),
+            // An unsigned step taking a cell blocks an accepted payment.
+            expect_violation(
+                "OfflineOriginCells/unsigned-settle",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_UnsignedSettle.cfg",
+                "NoHonestBlock",
+            ),
+            // Identifying an occupant by bytes lets a re-encoded copy block its own payment.
+            expect_violation(
+                "OfflineOriginCells/byte-identity",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_ByteIdentity.cfg",
+                "NoHonestBlock",
+            ),
+            // Recognizing junk lets it take a cell.
+            expect_violation(
+                "OfflineOriginCells/recognize-junk",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_RecognizeJunk.cfg",
+                "NoHonestBlock",
+            ),
+            // Settling on the boundary alone, with a broken board, creates value.
+            expect_violation(
+                "OfflineOriginCells/settle-without-cells",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_SettleWithoutCells.cfg",
+                "NoCounterfeit",
+            ),
+            // Settling a payment twice, or one addressed to another, creates value.
+            expect_violation(
+                "OfflineOriginCells/replay",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_Replay.cfg",
+                "NoCounterfeit",
+            ),
+            // Without the board's copies a restored payer stands behind its board.
+            expect_violation(
+                "OfflineOriginCells/no-board-copies",
+                "DSM_OfflineOriginCells.tla",
+                "DSM_OfflineOriginCells_NoBoardCopies.cfg",
+                "RestoreResumes",
             ),
             // ── A receipt proves its step's whole write set ───────────────────
             // An offline-bearer spend moves its relationship tip, anchor
@@ -1592,6 +1762,7 @@ fn exhaustive_by_construction(spec_file: &str) -> bool {
         || spec_file == "DSM_ReceiptWriteSet.tla"
         || spec_file == "DSM_BilateralLiveness.tla"
         || spec_file == "DSM_WriteLock.tla"
+        || spec_file == "DSM_OfflineOriginCells.tla"
 }
 
 /// A falsification config whose named finding is a `[][P]_vars` action

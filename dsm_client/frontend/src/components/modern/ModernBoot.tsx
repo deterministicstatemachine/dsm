@@ -9,6 +9,8 @@ import LockScreen from '../lock/LockScreen';
 import type { AppState } from '../../types/app';
 import ModernPhrase from './ModernPhrase';
 import ModernShell from './ModernShell';
+import RestoreWords from '../restore/RestoreWords';
+import type { RestoreFlow } from '../../hooks/useGenesisFlow';
 
 type Props = {
   appState: AppState;
@@ -17,6 +19,7 @@ type Props = {
   handleGenerateGenesis: () => Promise<void> | void;
   cancelPhraseBackup: () => void;
   answerPhraseCheck: (word: string) => Promise<void>;
+  restore: RestoreFlow;
   eraTokenSrc: string;
   btcLogoSrc: string;
 };
@@ -70,6 +73,9 @@ export default function ModernBoot(props: Props): React.JSX.Element {
             <button type="button" className="s-btn s-btn-primary" onClick={() => { props.handleGenerateGenesis(); }}>
               Create my wallet
             </button>
+            <button type="button" className="s-btn" onClick={() => props.restore.begin()}>
+              Restore my wallet from its 24 words
+            </button>
           </div>
           {props.error !== null ? <div className="s-notice s-error" style={{ marginTop: 14 }}>{props.error}</div> : null}
         </Frame>
@@ -79,6 +85,15 @@ export default function ModernBoot(props: Props): React.JSX.Element {
       return (
         <Frame>
           <ModernPhrase onCancel={props.cancelPhraseBackup} onAnswer={props.answerPhraseCheck} />
+        </Frame>
+      );
+
+    case 'restore_phrase':
+      return (
+        <Frame>
+          <div className="s-classic">
+            <RestoreWords error={props.error} onRestore={props.restore.submit} onCancel={props.restore.cancel} />
+          </div>
         </Frame>
       );
 

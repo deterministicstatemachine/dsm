@@ -108,6 +108,24 @@ fn u64_le(n: u64) -> [u8; 8] {
     n.to_le_bytes()
 }
 
+/// What a wallet restored from its phrase admits of its register (DSM
+/// Amendment A40), inside the restore's transaction: every position the
+/// replay proved before the head into the admitted history, as the wallet's
+/// device recorded each when it admitted it, then the head with its leaves.
+fn record_restored_lineage(
+    tx: &rusqlite::Transaction<'_>,
+    lineage: &dsm::economic::peer_lineage::OwnLineage,
+) -> anyhow::Result<()> {
+    use crate::storage::client_db::economic_lineage;
+    let Some((head, before)) = lineage.admitted().split_last() else {
+        return Ok(());
+    };
+    for admitted in before {
+        economic_lineage::record_admitted_history_with_conn(tx, admitted)?;
+    }
+    economic_lineage::record_admitted_with_conn(tx, head, lineage.rows())
+}
+
 /// Why `operation` may not move value out of this device now, if it may not:
 /// identity recovery is in progress (spec R3), or the operation's egress
 /// asset is held `LockedRecovery` until its own verified frontier reconciles
@@ -537,6 +555,203 @@ impl CoreSDK {
         Ok(())
     }
 
+    /// A wallet restored from its phrase takes its own register's head as its
+    /// admitted position: the head Core re-verified and folded
+    /// (`replay_own_lineage`), its leaves as the leaf cache, and the balances
+    /// they hold on the genesis head, in ONE transaction. Refused unless this
+    /// device holds its genesis head and nothing admitted.
+    pub(crate) fn restore_admitted_head(
+        &self,
+        lineage: &dsm::economic::peer_lineage::OwnLineage,
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
+        let storage = |what: &str, e: String| {
+            DsmError::storage(format!("restore: {what}: {e}"), None::<std::io::Error>)
+        };
+        let mut sm = self.state_machine.lock();
+        let head = sm.device_head().cloned().ok_or_else(|| {
+            DsmError::storage("restore: no head".to_string(), None::<std::io::Error>)
+        })?;
+        let admitted = crate::storage::client_db::economic_lineage::get_admitted()
+            .map_err(|e| storage("the admitted position", e.to_string()))?;
+        if admitted.is_some() {
+            // A restore that stopped after this write and runs again finds the same head.
+            if admitted.as_ref() == lineage.head() && head.balances_snapshot() == lineage.balances()
+            {
+                return Ok(());
+            }
+            return Err(DsmError::invalid_operation(
+                "restore: this device already admitted a position of its own",
+            ));
+        }
+        let restored = head.restored_from_register(lineage)?;
+        {
+            let binding = get_connection().map_err(|e| storage("db", e.to_string()))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|poisoned| storage("db", poisoned.to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| storage("tx", e.to_string()))?;
+            record_restored_lineage(&tx, lineage)
+                .map_err(|e| storage("the admitted positions", e.to_string()))?;
+            // The vault states its realized SoFi positions left, as its device
+            // recorded them when it admitted each (MR-DSM-0331).
+            for post in lineage.vault_heads() {
+                if let Some(replaced) =
+                    crate::storage::client_db::sofi_vault_head::record_resolved_with_conn(&tx, post)
+                        .map_err(|e| storage("a vault head", e.to_string()))?
+                {
+                    log::warn!("[restore] {replaced}");
+                }
+            }
+            update_bcr_device_head_with_conn(&tx, &restored)
+                .map_err(|e| storage("the head", e.to_string()))?;
+            tx.commit().map_err(|e| storage("commit", e.to_string()))?;
+        }
+        sm.set_device_head(restored);
+        Ok(())
+    }
+
+    /// A wallet restored from its phrase takes the latest backup it kept on the
+    /// nodes (DSM Amendment A40) — its contacts, their chain state and the
+    /// device head — only when that backup was taken at exactly the register
+    /// position `lineage` re-verified, and its head holds exactly the balances
+    /// the register holds there. The backup's tables, its head and the
+    /// register's admitted position are written in ONE transaction. Refused,
+    /// with nothing written, otherwise.
+    pub(crate) fn restore_from_backup(
+        &self,
+        lineage: &dsm::economic::peer_lineage::OwnLineage,
+        body: &crate::sdk::wallet_backup_flow::Body,
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::get_connection;
+        let storage = |what: &str, e: String| {
+            DsmError::storage(format!("restore: {what}: {e}"), None::<std::io::Error>)
+        };
+        let registered = match lineage.head() {
+            None => None,
+            Some(dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position,
+                economic_root,
+                ..
+            })
+            | Some(dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi {
+                economic_position,
+                selected_root: economic_root,
+                ..
+            }) => Some((*economic_position, *economic_root)),
+            Some(dsm::economic::lineage::AdmittedEconomicPosition::UnresolvedSofi {
+                economic_position,
+                ..
+            }) => {
+                return Err(DsmError::invalid_operation(format!(
+                    "restore: the register's head at {economic_position} is unresolved"
+                )))
+            }
+        };
+        if body.admitted != registered {
+            return Err(DsmError::invalid_operation(format!(
+                "restore: the latest backup was taken at register position {:?}, and the \
+                 register's head is at {:?}: the backup is not the wallet as it last stood",
+                body.admitted.map(|(p, _)| p),
+                registered.map(|(p, _)| p)
+            )));
+        }
+        let mut sm = self.state_machine.lock();
+        let current = sm.device_head().cloned().ok_or_else(|| {
+            DsmError::storage("restore: no head".to_string(), None::<std::io::Error>)
+        })?;
+        let head = crate::sdk::wallet_backup_flow::head_of(body, &current.devid())?;
+        if head.genesis_digest() != current.genesis_digest() || head.devid() != current.devid() {
+            return Err(DsmError::invalid_operation(
+                "restore: the backup's head is another wallet's",
+            ));
+        }
+        if head.balances_snapshot() != lineage.balances() {
+            return Err(DsmError::invalid_operation(
+                "restore: the backup's head holds other balances than the register's head",
+            ));
+        }
+        // Nothing in flight is installed. An offline account the head holds is
+        // then advanced through the steps final at its origin cells, and is used
+        // only when its counter and frontier are exactly its board's.
+        if let Some(pending) = head.pending_economic_admission() {
+            return Err(DsmError::invalid_operation(format!(
+                "restore: the backup's head carries the admission at {} in flight",
+                pending.economic_position
+            )));
+        }
+        if crate::storage::client_db::economic_lineage::get_admitted()
+            .map_err(|e| storage("the admitted position", e.to_string()))?
+            .is_some()
+        {
+            return Err(DsmError::invalid_operation(
+                "restore: this device already admitted a position of its own",
+            ));
+        }
+        {
+            let binding = get_connection().map_err(|e| storage("db", e.to_string()))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|poisoned| storage("db", poisoned.to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| storage("tx", e.to_string()))?;
+            crate::sdk::wallet_backup_flow::install(&tx, body)?;
+            record_restored_lineage(&tx, lineage)
+                .map_err(|e| storage("the admitted positions", e.to_string()))?;
+            tx.commit().map_err(|e| storage("commit", e.to_string()))?;
+        }
+        sm.set_device_head(head);
+        Ok(())
+    }
+
+    /// The offline account of `bundle` advanced by `hops`, the steps final at
+    /// its origin cells after the account this head holds (DSM Amendment A40),
+    /// and the steps kept as this account's own, for its next boundary to
+    /// carry: one transaction. Core checks every step (`advanced_by_cells`).
+    pub(crate) fn advance_offline_from_cells(
+        &self,
+        bundle: &[u8; 32],
+        anchor: &dsm::types::offline_chain::ChainAnchor,
+        hops: &[dsm::types::offline_chain::AccountHop],
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
+        let storage = |what: &str, e: String| {
+            DsmError::storage(
+                format!("offline restore: {what}: {e}"),
+                None::<std::io::Error>,
+            )
+        };
+        let mut sm = self.state_machine.lock();
+        let head = sm
+            .device_head()
+            .cloned()
+            .ok_or_else(|| storage("head", "none".to_string()))?;
+        let next = head.advanced_by_cells(bundle, anchor, hops)?;
+        {
+            let binding = get_connection().map_err(|e| storage("db", e.to_string()))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|poisoned| storage("db", poisoned.to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| storage("tx", e.to_string()))?;
+            update_bcr_device_head_with_conn(&tx, &next)
+                .map_err(|e| storage("head", e.to_string()))?;
+            for hop in hops {
+                crate::storage::client_db::offline_spends::record_own_offline_hop_in_tx(
+                    &tx, bundle, hop,
+                )
+                .map_err(|e| storage("own step", e.to_string()))?;
+            }
+            tx.commit().map_err(|e| storage("commit", e.to_string()))?;
+        }
+        sm.set_device_head(next);
+        Ok(())
+    }
+
     /// The full seam: head + pending row + FROZEN EVIDENCE, one transaction.
     ///
     /// `artifacts` are `(object_key, exact payload bytes, purpose)` — every
@@ -682,9 +897,8 @@ impl CoreSDK {
     pub(crate) fn admitted_boundary(
         &self,
         bundle: &[u8; 32],
-        kind: dsm::types::device_state::OfflineBoundaryKind,
-        asset: &[u8; 32],
-        amount: u64,
+        moved: OfflineMove,
+        signed: BoardSigned,
         prepare: impl FnOnce(
             &dsm::types::device_state::OfflineBoundaryOutcome,
         ) -> Result<
@@ -714,7 +928,20 @@ impl CoreSDK {
                 pending.economic_position
             )));
         }
-        let outcome = head.cross_offline_boundary(bundle, kind, asset, amount)?;
+        let outcome = head.cross_offline_boundary(
+            bundle,
+            moved.kind,
+            &moved.asset,
+            moved.amount,
+            signed.next_frontier,
+        )?;
+        // The board signed the boundary over the device roots it previewed: the head must still
+        // stand where it did, or the board's signature is of another boundary.
+        if (outcome.pre_device_root, outcome.post_device_root) != signed.roots {
+            return Err(DsmError::invalid_operation(
+                "offline boundary: the head moved after the board signed the boundary",
+            ));
+        }
         let (prepared, coords, artifacts) = prepare(&outcome)?;
         let pending = prepared
             .into_locally_accepted(coords)
@@ -754,6 +981,14 @@ impl CoreSDK {
                     )
                 },
             )?;
+            // Durable now: the board's signature of it is no longer pending.
+            crate::storage::client_db::offline_spends::clear_boundary_signing_in_tx(&tx, bundle)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("offline boundary: the boundary being signed: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
             // The boundary's body carries every step since the last boundary: they are
             // exposed with it, and the next chain starts from the account it leaves.
             crate::storage::client_db::offline_spends::expose_own_offline_hops_in_tx(&tx, bundle)
@@ -797,6 +1032,9 @@ impl CoreSDK {
     pub(crate) fn admitted_settlement(
         &self,
         receipt: &crate::storage::client_db::offline_receipts::PendingOfflineReceipt,
+        next_frontier: [u8; 32],
+        signed_roots: ([u8; 32], [u8; 32]),
+        release: &[u8],
         prepare: impl FnOnce() -> Result<
             (
                 dsm::economic::admission::PendingEconomicAdmission,
@@ -820,11 +1058,23 @@ impl CoreSDK {
         }
         // The unload of the payment received (owner, 2026-11-07): out of what this device's own
         // offline account holds received, into its online balance.
-        let (settled, witness) =
-            head.settle_offline_receipt(&receipt.receiver_bundle, &receipt.asset, receipt.amount)?;
+        // Its board signed the unload over the device roots it previewed (DSM Amendment A39 draft,
+        // option B): the head must still stand where it did.
+        let settled = head.settle_offline_receipt(
+            &receipt.receiver_bundle,
+            &receipt.asset,
+            receipt.amount,
+            next_frontier,
+        )?;
+        if (settled.pre_device_root, settled.post_device_root) != signed_roots {
+            return Err(DsmError::invalid_operation(
+                "offline settlement: the head moved after the board signed the unload",
+            ));
+        }
         let settle_hop = dsm::types::offline_chain::AccountHop::Settle(
             dsm::types::offline_chain::SettleHop::new(
-                witness,
+                release,
+                settled.witness.clone(),
                 receipt.asset,
                 receipt.amount,
                 dsm::economic::offline_boundary::settlement_id(
@@ -834,8 +1084,9 @@ impl CoreSDK {
                     &receipt.payer_device,
                     &receipt.release_message,
                 ),
-            ),
+            )?,
         );
+        let settled = settled.new_device_state;
         let (prepared, coords, artifacts) = prepare()?;
         let pending = prepared
             .into_locally_accepted(coords)
@@ -879,6 +1130,12 @@ impl CoreSDK {
                 &settle_hop,
             )
             .map_err(|e| storage("the unload, for the account's next boundary", &e))?;
+            // Durable now: the board's signature of it is no longer pending.
+            crate::storage::client_db::offline_spends::clear_boundary_signing_in_tx(
+                &tx,
+                &receipt.receiver_bundle,
+            )
+            .map_err(|e| storage("the unload being signed", &e))?;
             tx.commit().map_err(|e| storage("commit", &e))?;
         }
         sm.set_device_head(new_head.clone());
@@ -2320,6 +2577,22 @@ pub struct OfflineBearerArtifacts {
     pub pin: crate::anchor::AnchorPin,
 }
 
+/// What an offline boundary moves: which way, which asset, how much.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfflineMove {
+    pub kind: dsm::types::device_state::OfflineBoundaryKind,
+    pub asset: [u8; 32],
+    pub amount: u64,
+}
+
+/// What a board signed for a step that is no payment (DSM Amendment A39 draft, option B): the
+/// frontier it advanced to, and the device roots before and after it signed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardSigned {
+    pub next_frontier: [u8; 32],
+    pub roots: ([u8; 32], [u8; 32]),
+}
+
 /// `release` with the offline-state proofs `Π_i`/`Π_{i+1}` attached. They sit OUTSIDE all three
 /// signatures (the receiver verifies them independently against `R_i`/`R_{i+1}`), so attaching
 /// them mutates no signed bytes.
@@ -2420,6 +2693,12 @@ impl CoreSDK {
             )
         })?;
         self.require_anchor_for_this_device(&pin)?;
+        crate::storage::client_db::offline_spends::record_own_anchor(&pin).map_err(|e| {
+            DsmError::storage(
+                format!("keep the anchor's pin: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         Ok(slot.insert(AttachedAnchor { appliance, pin }))
     }
 
@@ -2862,6 +3141,91 @@ impl CoreSDK {
             offline_release: app.emit()?,
             pin: staged.pin.clone(),
         })
+    }
+
+    /// The board's signature of a load or an unload of its account (DSM Amendment A39 draft,
+    /// option B): the boundary's transition `t`, built from its operation id, prepared over the
+    /// device roots before and after it, committed and emitted, with the offline-state proofs
+    /// attached. A board that already committed exactly this transition (a crash after its counter
+    /// moved and before the boundary was durable) emits that release again; a board holding any
+    /// other committed step signs nothing. The frontier is advanced only once the boundary is
+    /// durable ([`Self::finalize_offline_bearer`]).
+    pub fn board_signs_boundary(
+        &self,
+        t: &anchor_core::root_advance::OwnedTransition,
+        challenge: [u8; 32],
+        pre_device_root: [u8; 32],
+        post_device_root: [u8; 32],
+        proofs: &dsm::types::device_state::OfflineStateProofs,
+    ) -> Result<Vec<u8>, DsmError> {
+        use prost::Message;
+        let mut guard = self.anchor_appliance.lock();
+        let attached = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline boundary: anchor appliance not attached")
+        })?;
+        let bundle = attached.pin.bundle;
+        let app = &mut attached.appliance;
+        // What the board holds decides: a committed step is emitted again, never signed anew; a
+        // board at rest signs; any other state signs nothing (§26).
+        let committed = match app.recover()? {
+            anchor_core::appliance::RecoverOutcome::ReemitCommitted(_) => Some(app.emit()?),
+            anchor_core::appliance::RecoverOutcome::Accept(_) => None,
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "offline boundary: the board is in no state to sign ({other:?}); settle its \
+                     pending step first"
+                )))
+            }
+        };
+        let release = match committed {
+            Some(release) => {
+                let held = anchor_core::proto::pb::OfflineRelease::decode(release.as_slice())
+                    .map_err(|e| {
+                        DsmError::invalid_operation(format!(
+                            "offline boundary: the board's release: {e}"
+                        ))
+                    })?
+                    .to_release()
+                    .map_err(|e| {
+                        DsmError::invalid_operation(format!(
+                            "offline boundary: the board's release: {e:?}"
+                        ))
+                    })?;
+                if anchor_core::root_advance::enc_transition(&held.transition.as_transition())
+                    != anchor_core::root_advance::enc_transition(&t.as_transition())
+                {
+                    return Err(DsmError::invalid_operation(
+                        "offline boundary: the board holds another committed step; it signs no \
+                         boundary until that step is settled",
+                    ));
+                }
+                release
+            }
+            None => {
+                let nonce = app.authorization_nonce()?;
+                let digest = anchor_core::appliance::owner_authorization_digest(
+                    &bundle,
+                    &t.prev_root,
+                    t.anchor_counter,
+                    &anchor_core::root_advance::transition_digest(&t.as_transition(), &challenge),
+                    &pre_device_root,
+                    &post_device_root,
+                    &nonce,
+                );
+                let secret = crate::sdk::signing_authority::current_secret_key()?;
+                let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &digest)?;
+                app.authorize(&digest, &signature)?;
+                app.prepare(
+                    &t.as_transition(),
+                    &challenge,
+                    &pre_device_root,
+                    &post_device_root,
+                )?;
+                app.commit()?;
+                app.emit()?
+            }
+        };
+        attach_offline_state_proofs(&release, proofs.parent.clone(), proofs.child.clone())
     }
 
     /// The committed release the appliance holds, emitted again: the same signed release, never a

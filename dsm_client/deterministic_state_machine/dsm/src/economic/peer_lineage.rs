@@ -45,12 +45,14 @@
 //! A boundary is validated in its own step. Its account continues the one the
 //! previous boundary left where this receiver recorded that one, and nothing
 //! behind the step is read to find it. A settlement is held to the payment the
-//! payer's step at the position it names exposed, that step validated one hop.
+//! payer's origin cells hold, final, from the account the payer's boundary at
+//! the position it names left (DSM Amendment A39 draft): the payer's later
+//! steps are never needed.
 //!
-//! A receiver holding a payment received offline finds the step that exposed
-//! it with [`scan_offline_boundaries`]: the payer's positions read in order by
-//! register key, within a bound the caller names, and only the steps whose
-//! substrate is an offline boundary validated, each one hop.
+//! A receiver finds the boundaries a payer published with
+//! [`scan_offline_boundaries`]: the payer's positions read in order by register
+//! key, within a bound the caller names, and only the steps whose substrate is
+//! an offline boundary validated, each one hop.
 
 use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_ADMISSION_MANIFEST, TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
@@ -102,6 +104,12 @@ pub trait PeerEvidenceFetcher {
     /// holds, its committed state from a mirror, and each later seat's own
     /// mirror of the leader. The verifier evaluates them.
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure>;
+    /// Every seat's reads of the offline origin `cell` (DSM Amendment A39
+    /// draft), as for a register cell. The verifier evaluates them.
+    fn origin_cell(
+        &self,
+        cell: &crate::offline_origin::OriginCell,
+    ) -> Result<CellEvidence, PeerLineageFailure>;
     /// The release that installed `generation` of the native reserve
     /// `reserve_id`, established final by a walk of the reserve lineage from
     /// its genesis state, with the state it succeeded. `Incomplete` while
@@ -350,58 +358,6 @@ pub fn continues_the_account(
     }
 }
 
-/// A payment a peer's offline boundary exposed online: one spend of the
-/// chain the boundary carried, verified hop by hop from the account the
-/// previous boundary left, at the economic position of the step that admitted
-/// the boundary. Built only from a step that passed whole.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PeerOfflineExposure {
-    genesis: [u8; 32],
-    device_id: [u8; 32],
-    economic_position: u64,
-    bundle: [u8; 32],
-    payment: crate::types::offline_chain::ChainPayment,
-}
-
-impl PeerOfflineExposure {
-    /// An exposure this device recorded, read back from its own store.
-    ///
-    /// **Only the receiver's store may call this**, with exactly the fields of
-    /// an exposure this module produced and the receiver recorded.
-    pub fn rehydrate_recorded(
-        genesis: [u8; 32],
-        device_id: [u8; 32],
-        economic_position: u64,
-        bundle: [u8; 32],
-        payment: crate::types::offline_chain::ChainPayment,
-    ) -> Self {
-        Self {
-            genesis,
-            device_id,
-            economic_position,
-            bundle,
-            payment,
-        }
-    }
-
-    pub fn genesis(&self) -> &[u8; 32] {
-        &self.genesis
-    }
-    pub fn device_id(&self) -> &[u8; 32] {
-        &self.device_id
-    }
-    /// The position of the step that admitted the boundary exposing it.
-    pub fn economic_position(&self) -> u64 {
-        self.economic_position
-    }
-    pub fn bundle(&self) -> &[u8; 32] {
-        &self.bundle
-    }
-    pub fn payment(&self) -> &crate::types::offline_chain::ChainPayment {
-        &self.payment
-    }
-}
-
 /// Derives the root a conditional SoFi position selected, from SoFi's public
 /// objects for that position alone (SoFi Amendment S15).
 pub trait ConditionalPositionResolver {
@@ -416,6 +372,17 @@ pub trait ConditionalPositionResolver {
         parent: &ParentClaimRef,
         held: &SofiResolutionClaim,
     ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure>;
+
+    /// The same position of a wallet's OWN lineage, replayed by that wallet
+    /// restored from its phrase (DSM Amendment A40): what [`Self::resolve`]
+    /// answers, with the leaves and vault states the resolution installed,
+    /// derived from the same facts as the trader's device derived them.
+    fn replay(
+        &self,
+        previous: &ValidatedEconomicRoot,
+        parent: &ParentClaimRef,
+        held: &SofiResolutionClaim,
+    ) -> Result<crate::sofi::lineage::ResolvedAdvance, PeerLineageFailure>;
 }
 
 /// What checking one step of a peer cost, in lookup stages. Every count is
@@ -442,7 +409,6 @@ pub struct Checked<T> {
     answer: T,
     cost: StepCost,
     offline_accounts: Vec<PeerOfflineAccount>,
-    offline_exposures: Vec<PeerOfflineExposure>,
     ek_steps: Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
     kept_states: Vec<KeptPeerState>,
 }
@@ -474,11 +440,6 @@ impl<T> Checked<T> {
     /// it passed left, each from a step that passed whole.
     pub fn offline_accounts(&self) -> &[PeerOfflineAccount] {
         &self.offline_accounts
-    }
-
-    /// Every payment an offline boundary this check validated exposed.
-    pub fn offline_exposures(&self) -> &[PeerOfflineExposure] {
-        &self.offline_exposures
     }
 
     pub fn into_answer(self) -> T {
@@ -571,6 +532,112 @@ pub fn walk_peer_to_head(
         Verifier::new(fetcher, expected_network_id, records, conditional)?.keeping(records);
     let answer = verifier.toward_head(records, peer_genesis, peer_devid, positions)?;
     Ok(verifier.checked(answer))
+}
+
+/// A wallet's own lineage as its register holds it, re-verified from the
+/// activation root with the predicate any device runs for a peer (DSM
+/// Amendment A14), and the leaves its validated steps installed, folded from
+/// each step's witness. What a wallet restored from its phrase admits as its
+/// own head: nothing it held locally is read.
+#[derive(Debug)]
+pub struct OwnLineage {
+    reached: u64,
+    admitted: Vec<crate::economic::lineage::AdmittedEconomicPosition>,
+    rows: Vec<crate::economic::lineage::LeafRow>,
+    balances: std::collections::BTreeMap<[u8; 32], u64>,
+    vault_heads: Vec<crate::sofi::validation::VaultPostState>,
+    stop: HeadStop,
+}
+
+impl OwnLineage {
+    /// The state each vault a realized SoFi position of this lineage moved is
+    /// in after it, in the order the positions were taken: what the wallet's
+    /// device recorded when it admitted each one.
+    pub fn vault_heads(&self) -> &[crate::sofi::validation::VaultPostState] {
+        &self.vault_heads
+    }
+
+    /// The last position the walk proved; 0 when the wallet admitted nothing.
+    pub fn reached(&self) -> u64 {
+        self.reached
+    }
+
+    /// The admitted position at the head, `None` when the wallet admitted
+    /// nothing.
+    pub fn head(&self) -> Option<&crate::economic::lineage::AdmittedEconomicPosition> {
+        self.admitted.last()
+    }
+
+    /// Every position the walk proved, from position 1 to the head, as the
+    /// wallet's device admitted each: what a later step of its own names, and
+    /// what a vault walk reads of this wallet at a position before its head.
+    pub fn admitted(&self) -> &[crate::economic::lineage::AdmittedEconomicPosition] {
+        &self.admitted
+    }
+
+    /// Every leaf the head root holds: `(leaf key, leaf value, state bytes)`.
+    pub fn rows(&self) -> &[crate::economic::lineage::LeafRow] {
+        &self.rows
+    }
+
+    /// Every balance the head root holds, by policy commit.
+    pub fn balances(&self) -> &std::collections::BTreeMap<[u8; 32], u64> {
+        &self.balances
+    }
+
+    /// Why the walk stopped: only `Head` is the wallet's whole lineage.
+    pub fn stop(&self) -> &HeadStop {
+        &self.stop
+    }
+}
+
+/// The states a receiver kept of every peer but one: a replay of that one's
+/// lineage starts at its activation root, whatever was kept of it.
+struct KeptOfOthers<'a, R: ReceiverRecords + ?Sized> {
+    records: &'a R,
+    own: PeerKey,
+}
+
+impl<R: ReceiverRecords + ?Sized> KeptPeerStates for KeptOfOthers<'_, R> {
+    fn kept_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<KeptPeerState>, PeerLineageFailure> {
+        if (*genesis, *device_id) == self.own {
+            return Ok(None);
+        }
+        self.records.kept_below(genesis, device_id, position)
+    }
+}
+
+/// Re-verify the lineage of `(genesis, device_id)` from its activation root to
+/// its head, and fold the leaves its steps installed. Each step is read at the
+/// cell routed from the root proved before it and validated from that root,
+/// its credits' sources from the states kept of them; every leaf comes from a
+/// validated witness, or, at a SoFi position that realized, from what its
+/// resolution installed, derived from SoFi's public objects as the trader's
+/// device derived it ([`ConditionalPositionResolver::replay`]). The folded
+/// leaves must recompute every root the walk proved. A position nothing
+/// decides yet ends the walk short.
+pub fn replay_own_lineage<R: ReceiverRecords>(
+    fetcher: &dyn PeerEvidenceFetcher,
+    expected_network_id: &[u8],
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    records: &R,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<Checked<OwnLineage>, PeerLineageFailure> {
+    let kept = KeptOfOthers {
+        records,
+        own: (*genesis, *device_id),
+    };
+    let verifier =
+        Verifier::new(fetcher, expected_network_id, records, conditional)?.keeping(&kept);
+    let walk = verifier.toward_head(&kept, genesis, device_id, u64::MAX)?;
+    let lineage = verifier.fold_own(genesis, device_id, walk)?;
+    Ok(verifier.checked(lineage))
 }
 
 /// The root a peer selected AT `position`, and the reference a later `P`
@@ -922,8 +989,6 @@ struct Verifier<'a> {
     /// Every offline account a step this check validated left: each boundary
     /// in a step that passed.
     offline_accounts: std::cell::RefCell<Vec<PeerOfflineAccount>>,
-    /// Every payment those boundaries exposed.
-    offline_exposures: std::cell::RefCell<Vec<PeerOfflineExposure>>,
     /// Every EK step a step this check validated fetched and verified; a later
     /// step of the same check holds them.
     ek_steps: std::cell::RefCell<Vec<crate::economic::peer_acceptance::VerifiedEkStep>>,
@@ -939,6 +1004,27 @@ struct Verifier<'a> {
     /// The steps this check is validating now: a step that is, through its
     /// credits' sources, its own source is circular.
     validating: std::cell::RefCell<std::collections::BTreeSet<(PeerKey, u64)>>,
+    /// What each step this check validated changed: its witness, or the claim a
+    /// conditional position's resolution accepted. A wallet restored from its
+    /// phrase folds its own (`replay_own_lineage`).
+    replayed: std::cell::RefCell<std::collections::BTreeMap<(PeerKey, u64), Replayed>>,
+}
+
+/// What one validated step changed, as a replay of the lineage folds it.
+#[derive(Debug, Clone)]
+enum Replayed {
+    /// An ordinary step: its witness, validated against its parent.
+    Witnessed(crate::economic::witness::EconomicTransitionWitness),
+    /// A conditional SoFi position, by the claim its resolution accepted, and
+    /// what it was resolved from: the root and claim proved before it and the
+    /// claim final at its root cell.
+    Resolved {
+        claim_ref: [u8; 32],
+        fulfillment_id: [u8; 32],
+        previous: ValidatedEconomicRoot,
+        parent: ParentClaimRef,
+        held: SofiResolutionClaim,
+    },
 }
 
 /// A claim's identity at its cell: the entry digest the register recognizes
@@ -975,12 +1061,12 @@ impl<'a> Verifier<'a> {
                 conditional_hops: 0,
             }),
             offline_accounts: std::cell::RefCell::new(Vec::new()),
-            offline_exposures: std::cell::RefCell::new(Vec::new()),
             ek_steps: std::cell::RefCell::new(Vec::new()),
             kept: None,
             proved: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             walking: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             validating: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            replayed: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         })
     }
 
@@ -999,7 +1085,6 @@ impl Verifier<'_> {
             answer,
             cost: self.cost.get(),
             offline_accounts: self.offline_accounts.into_inner(),
-            offline_exposures: self.offline_exposures.into_inner(),
             ek_steps: self.ek_steps.into_inner(),
             kept_states: self
                 .proved
@@ -1231,9 +1316,12 @@ impl Verifier<'_> {
         )?;
         let witness = crate::economic::decode::decode_transition_witness(&witness_bytes)
             .map_err(|e| invalid(format!("witness at {position}: {e}")))?;
-        // The payments an offline boundary at this step exposes, recorded once
-        // the step passes whole.
-        let mut exposed: Vec<crate::types::offline_chain::ChainPayment> = Vec::new();
+        if let StepRole::Offered = role {
+            self.replayed.borrow_mut().insert(
+                ((*genesis, *device_id), position),
+                Replayed::Witnessed(witness.clone()),
+            );
+        }
         let (accepted, substrate) = match &manifest.substrate {
             AdmissionSubstrate::DsmSuccessor {
                 evidence_addr: successor_addr,
@@ -1290,12 +1378,12 @@ impl Verifier<'_> {
                     .map_err(|e| invalid(format!("offline body at {position}: {e}")))?
                 {
                     // A settlement of value received offline: funded by the
-                    // payer's spend the payer's online history exposed.
+                    // payer's spend its origin cells hold.
                     OfflineBodyKind::Settlement => self
                         .settlement(genesis, device_id, &body_bytes)
                         .map_err(|e| at_position(position, e))?,
                     OfflineBodyKind::Boundary => {
-                        let (verified, payments) =
+                        let (verified, _spends) =
                             crate::economic::offline_boundary::OfflineBoundaryBody::verify(
                                 &body_bytes,
                                 genesis,
@@ -1334,7 +1422,8 @@ impl Verifier<'_> {
                         })?;
                         continues_the_account(since, previous.as_ref())
                             .map_err(|e| at_position(position, e))?;
-                        exposed = payments;
+                        self.boundary_holds_its_cells(&body_bytes, &verified)
+                            .map_err(|e| at_position(position, e))?;
                         verified
                     }
                 };
@@ -1377,15 +1466,6 @@ impl Verifier<'_> {
                 .extend(PeerOfflineAccount::validated(
                     *genesis, *device_id, position, boundary,
                 ));
-            self.offline_exposures
-                .borrow_mut()
-                .extend(exposed.iter().map(|payment| PeerOfflineExposure {
-                    genesis: *genesis,
-                    device_id: *device_id,
-                    economic_position: position,
-                    bundle: boundary.bundle(),
-                    payment: *payment,
-                }));
         }
         Ok(ValidatedPeerTransition::single_root_from_walk(
             *genesis,
@@ -1399,10 +1479,11 @@ impl Verifier<'_> {
         ))
     }
 
-    /// A settlement of value received offline, verified: the payer's step that
-    /// exposed the spend validated one hop, which records what its boundary
-    /// exposed, and the settlement held to exactly that exposed payment, to this
-    /// device.
+    /// A settlement of value received offline, verified (DSM Amendment A39
+    /// draft): the payer's step at the position the settlement names validated
+    /// one hop as a boundary of the payment's account, and the payer's origin
+    /// cells read from the account it left through the cell the payment starts
+    /// from, each final, holding the payment to this device.
     fn settlement(
         &self,
         genesis: &[u8; 32],
@@ -1413,33 +1494,146 @@ impl Verifier<'_> {
         use crate::economic::offline_boundary::OfflineSettlementBody;
         let body = OfflineSettlementBody::decode(body_bytes)
             .map_err(|e| invalid(format!("an offline settlement body: {e}")))?;
-        if body.exposed_at == 0 {
+        if body.boundary_position == 0 {
             return Err(invalid(
-                "a settlement names the payer's activation root, where nothing is exposed",
+                "a settlement names the payer's activation root, where no offline account opens",
             ));
         }
         self.step_at(
             &body.payer_genesis,
             &body.payer_device,
-            body.exposed_at,
+            body.boundary_position,
             StepRole::Offered,
         )?;
-        let exposure = self
-            .offline_exposures
+        let validated = self
+            .offline_accounts
             .borrow()
             .iter()
-            .find(|e| {
-                e.genesis == body.payer_genesis
-                    && e.device_id == body.payer_device
-                    && e.economic_position == body.exposed_at
-                    && e.payment.release_message == body.release_message
+            .find(|a| {
+                a.genesis == body.payer_genesis
+                    && a.device_id == body.payer_device
+                    && a.bundle == body.bundle
+                    && a.economic_position == body.boundary_position
             })
-            .copied()
-            .ok_or_else(|| {
-                invalid("the payer's step at the settlement's position exposes no such payment")
-            })?;
-        OfflineSettlementBody::verify(body_bytes, genesis, device_id, &exposure)
-            .map_err(|e| invalid(format!("an offline settlement: {e}")))
+            .copied();
+        let account = match validated {
+            Some(account) => account,
+            None => self
+                .records
+                .offline_account_below(
+                    &body.payer_genesis,
+                    &body.payer_device,
+                    &body.bundle,
+                    body.boundary_position.saturating_add(1),
+                )?
+                .filter(|a| a.economic_position == body.boundary_position)
+                .ok_or_else(|| {
+                    invalid(
+                        "the payer's step at the settlement's position is no boundary of the \
+                         payment's account",
+                    )
+                })?,
+        };
+        let reads = self.origin_path(&body.bundle, &account.account_root, &body.payment_root)?;
+        OfflineSettlementBody::verify(
+            body_bytes,
+            genesis,
+            device_id,
+            &account.account_root,
+            &reads,
+        )
+        .map_err(|e| invalid(format!("an offline settlement: {e}")))
+    }
+
+    /// That a boundary holds its origin cells (DSM Amendment A39 draft, option
+    /// B): every step its board signed since the last boundary, final at the
+    /// cell of the root it starts from, and the boundary's own departure, final
+    /// at the cell of the root it leaves. A boundary whose root another step
+    /// holds took back what that step moved, and is refused.
+    fn boundary_holds_its_cells(
+        &self,
+        body_bytes: &[u8],
+        verified: &crate::economic::offline_boundary::VerifiedOfflineBoundary,
+    ) -> Result<(), PeerLineageFailure> {
+        let body = crate::economic::offline_boundary::OfflineBoundaryBody::decode(body_bytes)
+            .map_err(|e| invalid(format!("an offline boundary body: {e}")))?;
+        for bytes in &body.ancestry.chain {
+            let step = crate::types::offline_chain::AccountHop::from_bytes(bytes)
+                .map_err(|e| invalid(format!("a step the boundary carries: {e}")))?;
+            if let Some(message) = step.board_message() {
+                self.held_final(&body.bundle, &step.starts_from(), &message)?;
+            }
+        }
+        let departure = verified
+            .departure()
+            .ok_or_else(|| invalid("a boundary moves the account it departs"))?;
+        self.held_final(&body.bundle, &body.pre_account_root, &departure)
+    }
+
+    /// That the origin cell of `root` of `bundle`'s account holds the step `M`
+    /// final. Another step final there is a refusal; none final yet is not
+    /// established.
+    fn held_final(
+        &self,
+        bundle: &[u8; 32],
+        root: &[u8; 32],
+        message: &[u8; 32],
+    ) -> Result<(), PeerLineageFailure> {
+        let cell = crate::offline_origin::OriginCell::new(
+            bundle,
+            root,
+            &self.register.set,
+            &self.register.profile.storage_set_id,
+        )
+        .map_err(|e| incomplete(format!("origin cell: {e:?}")))?;
+        let evidence = self.fetcher.origin_cell(&cell)?;
+        let read = crate::offline_origin::resolution(&cell, &evidence)
+            .map_err(|missing| incomplete(format!("origin cell not decided: {missing:?}")))?;
+        match read.settled() {
+            Some(step) if step.message == *message => Ok(()),
+            Some(..) => Err(invalid(
+                "another step holds the origin cell this boundary's history passes through",
+            )),
+            None => Err(incomplete(
+                "a step of this boundary's history is not final at its origin cell yet",
+            )),
+        }
+    }
+
+    /// The payer's origin cells of `bundle`'s account read from `start`, each
+    /// cell the one of the root the last final step left, through the cell of
+    /// `payment_root`. A cell not final, or one this check could not read,
+    /// ends the path: the settlement's own check says why it does not hold.
+    fn origin_path(
+        &self,
+        bundle: &[u8; 32],
+        start: &[u8; 32],
+        payment_root: &[u8; 32],
+    ) -> Result<Vec<crate::offline_origin::OriginRead>, PeerLineageFailure> {
+        let mut at = *start;
+        let mut reads = Vec::new();
+        for _ in 0..crate::types::offline_chain::MAX_CHAIN_HOPS {
+            let cell = crate::offline_origin::OriginCell::new(
+                bundle,
+                &at,
+                &self.register.set,
+                &self.register.profile.storage_set_id,
+            )
+            .map_err(|e| incomplete(format!("origin cell: {e:?}")))?;
+            let evidence = self.fetcher.origin_cell(&cell)?;
+            let read = crate::offline_origin::resolution(&cell, &evidence)
+                .map_err(|missing| incomplete(format!("origin cell not decided: {missing:?}")))?;
+            let next = read.settled().map(|step| step.after);
+            reads.push(read);
+            if at == *payment_root {
+                break;
+            }
+            match next {
+                Some(after) => at = after,
+                None => break,
+            }
+        }
+        Ok(reads)
     }
 
     /// The claim of `(genesis, device_id)` final at `position`, and the parent
@@ -1858,6 +2052,159 @@ impl Verifier<'_> {
         })
     }
 
+    /// The leaves the steps of `(genesis, device_id)` this check validated
+    /// installed, from its activation root through `walk.reached`, each step
+    /// folded from its witness over the root the step before left.
+    fn fold_own(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        walk: PeerWalk,
+    ) -> Result<OwnLineage, PeerLineageFailure> {
+        use crate::economic::lineage::AdmittedEconomicPosition;
+        let own = (*genesis, *device_id);
+        let replayed = self.replayed.borrow();
+        let proved = self.proved.borrow();
+        // Each leaf the folded root holds: its value and its state's bytes.
+        let mut leaves: std::collections::BTreeMap<[u8; 32], ([u8; 32], Vec<u8>)> =
+            std::collections::BTreeMap::new();
+        let mut root = crate::economic::tree::empty_economic_root();
+        let mut admitted = Vec::new();
+        let mut vault_heads = Vec::new();
+        for position in 1..=walk.reached {
+            let kept = proved
+                .get(&own)
+                .and_then(|states| states.get(&position))
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "own position {position}: the walk proved no state there"
+                    ))
+                })?;
+            match replayed.get(&(own, position)) {
+                Some(Replayed::Witnessed(witness)) => {
+                    if witness.pre_economic_root != root {
+                        return Err(invalid(format!(
+                            "own position {position}: the witness is not built on the root the \
+                             step before left"
+                        )));
+                    }
+                    for mutation in &witness.mutations {
+                        let key = mutation
+                            .leaf_key(genesis, device_id)
+                            .map_err(|e| invalid(format!("own position {position}: {e:?}")))?;
+                        match &mutation.post_state {
+                            Some(post) => {
+                                let row = post
+                                    .leaf_value()
+                                    .and_then(|value| Ok((value, post.encode()?)))
+                                    .map_err(|e| {
+                                        invalid(format!(
+                                            "own position {position}: a witnessed leaf has no \
+                                             canonical bytes: {e:?}"
+                                        ))
+                                    })?;
+                                leaves.insert(key, row);
+                            }
+                            None => {
+                                leaves.remove(&key);
+                            }
+                        }
+                    }
+                    root = witness.post_economic_root;
+                    let ParentClaimRef::SingleRoot { claim_ref } = kept.accepted else {
+                        return Err(invalid(format!(
+                            "own position {position}: a witnessed step accepted as conditional"
+                        )));
+                    };
+                    admitted.push(AdmittedEconomicPosition::SingleRoot {
+                        economic_position: position,
+                        economic_root: root,
+                        claim_ref,
+                    });
+                }
+                Some(Replayed::Resolved {
+                    claim_ref,
+                    fulfillment_id,
+                    previous,
+                    parent,
+                    held,
+                }) => {
+                    if kept.economic_root != root {
+                        // A position that realized: the leaves it installed,
+                        // derived from SoFi's public objects as the trader's
+                        // device derived them, over the leaves the step before
+                        // left, and refused unless they recompute the root the
+                        // register holds.
+                        let advanced = self
+                            .conditional
+                            .replay(previous, parent, held)
+                            .map_err(|failure| at_position(position, failure))?;
+                        if advanced.root.economic_position() != position
+                            || advanced.root.economic_root() != kept.economic_root
+                            || advanced.claim.claim_ref() != *claim_ref
+                        {
+                            return Err(invalid(format!(
+                                "own position {position}: the replayed resolution is not the one \
+                                 the walk accepted"
+                            )));
+                        }
+                        let installed = advanced
+                            .installed_leaves(
+                                leaves
+                                    .iter()
+                                    .map(|(key, (value, ccb))| (*key, *value, ccb.clone()))
+                                    .collect(),
+                            )
+                            .map_err(|e| {
+                                invalid(format!(
+                                    "own position {position}: the leaves the resolution \
+                                     installed: {e}"
+                                ))
+                            })?;
+                        leaves = installed
+                            .rows()
+                            .iter()
+                            .map(|(key, value, ccb)| (*key, (*value, ccb.clone())))
+                            .collect();
+                        root = kept.economic_root;
+                        vault_heads.extend(advanced.vault_generations().iter().cloned());
+                    }
+                    admitted.push(AdmittedEconomicPosition::ResolvedSofi {
+                        economic_position: position,
+                        selected_root: root,
+                        fulfillment_id: *fulfillment_id,
+                        claim_ref: *claim_ref,
+                    });
+                }
+                None => {
+                    return Err(invalid(format!(
+                        "own position {position}: the walk validated nothing there"
+                    )))
+                }
+            }
+            if kept.economic_root != root {
+                return Err(invalid(format!(
+                    "own position {position}: the folded leaves do not reach the root the walk \
+                     proved there"
+                )));
+            }
+        }
+        let rows: Vec<crate::economic::lineage::LeafRow> = leaves
+            .into_iter()
+            .map(|(key, (value, ccb))| (key, value, ccb))
+            .collect();
+        let balances = crate::economic::lineage::balances_of_rows(&rows, &root)
+            .map_err(|e| invalid(format!("the folded leaves: {e}")))?;
+        Ok(OwnLineage {
+            reached: walk.reached,
+            admitted,
+            rows,
+            balances,
+            vault_heads,
+            stop: walk.stop,
+        })
+    }
+
     /// The state the peer's step at `position` installed, validated from
     /// `point`, the state proved before it; a conditional position is resolved
     /// from it.
@@ -1888,8 +2235,20 @@ impl Verifier<'_> {
                 }
                 RegisteredEconomicClaim::ConditionalSofi(held) => {
                     self.count(|c| c.conditional_hops += 1);
-                    let (root, _) =
+                    let (root, accepted) =
                         self.resolve_conditional(genesis, device_id, position, point, &held)?;
+                    if let Some(parent) = point.accepted {
+                        self.replayed.borrow_mut().insert(
+                            ((*genesis, *device_id), position),
+                            Replayed::Resolved {
+                                claim_ref: accepted.claim_ref(),
+                                fulfillment_id: held.fulfillment_id,
+                                previous: point.root,
+                                parent,
+                                held,
+                            },
+                        );
+                    }
                     ChainPoint {
                         root,
                         accepted: Some(ParentClaimRef::Conditional {
@@ -2355,6 +2714,13 @@ mod tests {
             }
             Ok(seats.evidence())
         }
+        /// This fixture's seats hold nothing at any origin cell.
+        fn origin_cell(
+            &self,
+            cell: &crate::offline_origin::OriginCell,
+        ) -> Result<CellEvidence, PeerLineageFailure> {
+            Ok(crate::route_chain::fixtures::Cell::at(cell.routed()).evidence())
+        }
         fn native_reserve_release(
             &self,
             reserve_id: &[u8; 32],
@@ -2423,6 +2789,18 @@ mod tests {
                 held.position,
                 previous.economic_position()
             )))
+        }
+
+        fn replay(
+            &self,
+            previous: &ValidatedEconomicRoot,
+            parent: &ParentClaimRef,
+            held: &SofiResolutionClaim,
+        ) -> Result<crate::sofi::lineage::ResolvedAdvance, PeerLineageFailure> {
+            self.resolve(previous, parent, held)?;
+            Err(PeerLineageFailure::Incomplete(
+                "no conditional resolution in this test".to_string(),
+            ))
         }
     }
 
@@ -2886,6 +3264,13 @@ mod tests {
             }
             Ok(seats.evidence())
         }
+        /// This fixture's seats hold nothing at any origin cell.
+        fn origin_cell(
+            &self,
+            cell: &crate::offline_origin::OriginCell,
+        ) -> Result<CellEvidence, PeerLineageFailure> {
+            Ok(crate::route_chain::fixtures::Cell::at(cell.routed()).evidence())
+        }
         fn native_reserve_release(
             &self,
             reserve_id: &[u8; 32],
@@ -3259,6 +3644,19 @@ mod tests {
                     [0xC1; 32],
                 ),
             ))
+        }
+
+        fn replay(
+            &self,
+            _previous: &ValidatedEconomicRoot,
+            _parent: &ParentClaimRef,
+            held: &SofiResolutionClaim,
+        ) -> Result<crate::sofi::lineage::ResolvedAdvance, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(format!(
+                "these tests check the coordinates a resolution answers for, and replay none \
+                 (position {})",
+                held.position
+            )))
         }
     }
 

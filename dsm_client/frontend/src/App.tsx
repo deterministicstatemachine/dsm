@@ -47,7 +47,7 @@ export default function App() {
   const [_themeIndex, setThemeIndex] = useState(0);
 
   const themes = useMemo(() => getAvailableThemes(), []);
-  const { handleGenerateGenesis, cancelPhraseBackup, answerPhraseCheck } = useGenesisFlow({
+  const { handleGenerateGenesis, cancelPhraseBackup, answerPhraseCheck, restore } = useGenesisFlow({
     appState: runtime.appState,
     setAppState: appRuntimeStore.setAppState,
     setError: appRuntimeStore.setError,
@@ -147,6 +147,7 @@ export default function App() {
     navigate: navigationStore.navigate,
     goBack: navigationStore.goBack,
     handleGenerateGenesis,
+    beginRestore: restore.begin,
     soundEnabled: runtime.soundEnabled,
     setSoundEnabled: appRuntimeStore.setSoundEnabled,
   });
@@ -186,6 +187,7 @@ export default function App() {
                       handleGenerateGenesis={handleGenerateGenesis}
                       cancelPhraseBackup={cancelPhraseBackup}
                       answerPhraseCheck={answerPhraseCheck}
+                      restore={restore}
                       menuItems={menuItems}
                       currentMenuIndex={navigation.currentMenuIndex}
                       setCurrentMenuIndex={(next) => navigationStore.setCurrentMenuIndex(next)}
