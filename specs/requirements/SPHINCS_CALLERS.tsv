@@ -524,8 +524,8 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	1856	done_sig: sphincs_sign(&another, &restart_done_statement(&addr, &b_step))
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	1872	r.restarting_sig = sphincs_sign(&another, &statement).expect("sign");
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	1891	new_key: dsm::crypto::sphincs::generate_sphincs_keypair()
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	829	dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	833	signature: dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	926	dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	930	signature: dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/counterfeit_acceptance_tests.rs	438	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/first_inbox_e2e_tests.rs	17	use dsm::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/first_inbox_e2e_tests.rs	60	let own_key = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x66; 32])

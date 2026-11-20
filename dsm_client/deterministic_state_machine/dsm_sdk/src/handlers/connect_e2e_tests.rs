@@ -278,6 +278,103 @@ async fn offer(
     offer
 }
 
+/// The connections `code` made that still stand, as B's wallet answers.
+async fn connected_by(b: &TestDevice, code: &str) -> Vec<generated::ConnectSessionV1> {
+    let answered = query(
+        b,
+        "connect.connectedBy",
+        args(&generated::ConnectPreviewRequestV1 {
+            code: code.to_string(),
+        }),
+    )
+    .await;
+    let Reply::Sessions(found) = reply(&answered) else {
+        panic!("connect.connectedBy answered another reply");
+    };
+    found.sessions
+}
+
+/// An application this wallet is connected to opens the wallet with the code
+/// it was connected by (owner, 2026-11-19): the wallet names that connection
+/// from its own record, so the Apps screen shows what the application has
+/// waiting. A code that connected nothing names none, and the answer is not
+/// fetched: the code still names its connection once its endpoint no longer
+/// serves its offer. A disconnected one names none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_code_names_the_connection_it_made_while_it_stands() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    assert_eq!(
+        connected_by(&p.b, &made.code).await.len(),
+        0,
+        "a code not yet approved connected nothing"
+    );
+    let sid = connect(&p, &relay, &made.code).await;
+
+    let found = connected_by(&p.b, &made.code).await;
+    assert_eq!(found.len(), 1, "the code names its connection");
+    assert_eq!(found[0].session_id, sid.to_vec());
+    assert_eq!(found[0].display_name, "Wildstate");
+
+    // Another offer's code, never approved, names none.
+    let other = offer(&p.a, &relay, &wild).await;
+    assert_ne!(other.code, made.code);
+    assert_eq!(connected_by(&p.b, &other.code).await.len(), 0);
+
+    // The endpoint now serves the other offer only, so the first code can no
+    // longer be read; it still names its connection, from the wallet's record.
+    let unread = query(
+        &p.b,
+        "connect.preview",
+        args(&generated::ConnectPreviewRequestV1 {
+            code: made.code.clone(),
+        }),
+    )
+    .await;
+    assert!(
+        unread.error_message.is_some(),
+        "the endpoint no longer serves the first offer"
+    );
+    let found = connected_by(&p.b, &made.code).await;
+    assert_eq!(found.len(), 1, "named without fetching the offer");
+    assert_eq!(found[0].session_id, sid.to_vec());
+
+    // Text that is no connect code is refused, in words.
+    let refused = query(
+        &p.b,
+        "connect.connectedBy",
+        args(&generated::ConnectPreviewRequestV1 {
+            code: "dsm:contact/v3:ABC".into(),
+        }),
+    )
+    .await;
+    let why = refused
+        .error_message
+        .clone()
+        .expect("refused, with a reason");
+    assert!(why.contains("a connect code starts with"), "{why}");
+
+    let ended = invoke(
+        &p.b,
+        "connect.disconnect",
+        args(&generated::ConnectSessionRefV1 {
+            session_id: sid.to_vec(),
+        }),
+    )
+    .await;
+    let Reply::Session(_) = reply(&ended) else {
+        panic!("connect.disconnect answered another reply");
+    };
+    assert_eq!(
+        connected_by(&p.b, &made.code).await.len(),
+        0,
+        "a disconnected application's code names no connection"
+    );
+}
+
 /// B previews and approves the code; A takes the accept the relay kept. The
 /// session id.
 async fn connect(p: &Pair, relay: &ForwardRelay, code: &str) -> [u8; 32] {

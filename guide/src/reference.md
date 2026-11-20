@@ -122,7 +122,7 @@ The routes your app's account uses:
 | `escrow.adjudicate` | invoke | `EscrowOutcomeRequest` | `EscrowVerdictResponse` | `decide` |
 | `faucet.claim` | invoke | `FaucetClaimRequest` | `FaucetClaimResponse` | `fund` |
 
-And a wallet's: `connect.preview` (query), `connect.approve`, `connect.sync`, `connect.list` (query), `connect.pending` (query), `connect.respond`, `connect.log` (query), `connect.disconnect`.
+And a wallet's: `connect.preview` (query), `connect.approve`, `connect.sync`, `connect.list` (query), `connect.connectedBy` (query), `connect.pending` (query), `connect.respond`, `connect.log` (query), `connect.disconnect`.
 
 `GET /activity/{after}` returns `AppHostActivityV1`: your account's identity, and a record of each call and each wallet's visit to the relay. `GET /activity/{after}/wait` returns the same once the record has an entry after `after`, or empty after twenty seconds. Every plain result keeps the wire's message as `raw`, and `pb` exports every generated message, for anything the plain fields leave out.
 

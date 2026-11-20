@@ -522,6 +522,17 @@ export function practiceRoutes(book: PracticeBook): (method: string, args: Uint8
     value: new pb.ConnectSessionsV1({ sessions: await Promise.all(sessions.map(sessionView)) }),
   });
 
+  // The practice app's code names the practice connection while it stands; any
+  // other code is a real application's and names none here: nothing reaches Rust.
+  async function connectedBy(body: Uint8Array): Promise<Uint8Array> {
+    const practice = pb.ConnectPreviewRequestV1.fromBinary(body).code.trim() === PRACTICE_CONNECT_CODE;
+    const standing = sessions.filter((s) => practice && s.status === pb.ConnectSessionStatus.CONNECTED);
+    return connectReply({
+      case: 'sessions',
+      value: new pb.ConnectSessionsV1({ sessions: await Promise.all(standing.map(sessionView)) }),
+    });
+  }
+
   const pendingList = (): Uint8Array => connectReply({
     case: 'pending',
     value: new pb.ConnectPendingListV1({
@@ -662,6 +673,7 @@ export function practiceRoutes(book: PracticeBook): (method: string, args: Uint8
         case 'connect.approve': return await connectApprove(body);
         case 'connect.list':
         case 'connect.sync': return await sessionList();
+        case 'connect.connectedBy': return await connectedBy(body);
         case 'connect.pending': return pendingList();
         case 'connect.respond': return await connectRespond(body);
         case 'connect.disconnect': return await connectDisconnect(body);
