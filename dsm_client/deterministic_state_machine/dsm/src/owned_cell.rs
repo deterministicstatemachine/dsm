@@ -391,6 +391,9 @@ pub fn admit_cell_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One field of a signed body changed after signing: its name, and the change.
+    type Alteration<T> = (&'static str, fn(&mut T));
     use crate::crypto::sphincs::generate_keypair_from_seed;
 
     fn lock(seed: u8) -> SphincsKeyPair {
@@ -696,7 +699,7 @@ mod tests {
             }
             .encode_to_vec()
         };
-        let altered: [(&str, fn(&mut EconomicRootClaimBody)); 7] = [
+        let altered: [Alteration<EconomicRootClaimBody>; 7] = [
             ("genesis", |b| b.trader_genesis = [0x12; 32]),
             ("position", |b| b.economic_position = 8),
             ("root", |b| b.post_economic_root = [0x1E; 32]),
@@ -809,11 +812,11 @@ mod tests {
                 &genesis,
                 &trader.devid,
                 7,
-                sealed(c_q.clone(), &trader.pk, trader.att_a)
+                sealed(c_q, &trader.pk, trader.att_a)
             ),
             Ok(())
         );
-        let altered: [(&str, fn(&mut SofiResolutionClaim)); 6] = [
+        let altered: [Alteration<SofiResolutionClaim>; 6] = [
             ("genesis", |c| c.genesis = [0x12; 32]),
             ("device id", |c| c.device_id = [0xD1; 32]),
             ("position", |c| c.position = 8),
@@ -822,14 +825,14 @@ mod tests {
             ("void root", |c| c.void_root = [0xB2; 32]),
         ];
         for (field, alter) in altered {
-            let mut c = c_q.clone();
+            let mut c = c_q;
             alter(&mut c);
             assert!(
                 refused(admit_at(
                     &c.genesis,
                     &c.device_id,
                     c.position,
-                    sealed(c.clone(), &trader.pk, trader.att_a)
+                    sealed(c, &trader.pk, trader.att_a)
                 )),
                 "a C_q with its {field} changed after signing"
             );
@@ -839,7 +842,7 @@ mod tests {
                 &genesis,
                 &trader.devid,
                 7,
-                sealed(c_q.clone(), &other.pk, trader.att_a)
+                sealed(c_q, &other.pk, trader.att_a)
             )),
             "a C_q naming another AK"
         );
@@ -848,7 +851,7 @@ mod tests {
                 &genesis,
                 &trader.devid,
                 7,
-                sealed(c_q.clone(), &trader.pk, other.att_a)
+                sealed(c_q, &trader.pk, other.att_a)
             )),
             "a C_q naming another AttA"
         );
