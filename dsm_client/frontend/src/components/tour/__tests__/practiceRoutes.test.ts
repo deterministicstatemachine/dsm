@@ -91,6 +91,9 @@ describe('the practice wallet carries out the routes the tour walks through', ()
     expect(offer.scopeLines).toEqual(['Send this app: up to 5 PLAY a time, 15 PLAY in all', 'Prove what you own of PLAY']);
     const session = await connect.approve(offer.offerDigest);
     expect(session.connected).toBeTruthy();
+    // The practice app's code names its connection while it stands; a real application's names none here.
+    expect((await connect.connectedBy(PRACTICE_CONNECT_CODE))?.sessionId).toEqual(session.sessionId);
+    expect(await connect.connectedBy('dsm:connect/v1:AN0THERAPP')).toBeNull();
     const [waiting] = await connect.pending();
     expect(waiting.reason).toBe('8 PLAY is above the 5 PLAY the grant allows per request');
     const decided = await connect.respond(waiting.sessionId, waiting.seq, 'approve');
@@ -99,6 +102,7 @@ describe('the practice wallet carries out the routes the tour walks through', ()
     expect(await connect.pending()).toEqual([]);
     const ended = await connect.disconnect(session.sessionId);
     expect(ended.connected).toBeFalsy();
+    expect(await connect.connectedBy(PRACTICE_CONNECT_CODE)).toBeNull();
   });
 
   it('answers nothing once the tour has ended: the call goes to Rust', async () => {

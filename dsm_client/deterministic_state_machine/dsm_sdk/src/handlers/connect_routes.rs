@@ -8,6 +8,8 @@
 //! - `connect.approve`: add the application as a contact, root the anchors it
 //!   offered, record the grant, sign the accept and deliver it.
 //! - `connect.list`, `connect.pending`, `connect.log` (queries).
+//! - `connect.connectedBy` (query): the connection a code's offer made, while
+//!   it stands. Nothing is fetched.
 //! - `connect.respond`: the player's decision on a request outside its grant.
 //! - `connect.disconnect`.
 //! - `connect.sync`: fetch connected applications' requests and process them
@@ -500,6 +502,7 @@ impl AppRouterImpl {
         let result = match q.path.as_str() {
             "connect.preview" => self.connect_preview(&q.params).await,
             "connect.list" => connect_list(),
+            "connect.connectedBy" => connect_connected_by(&q.params),
             "connect.pending" => connect_pending(),
             "connect.log" => connect_log(&q.params),
             "connect.app.requests" => connect_app_requests(&q.params),
@@ -3222,6 +3225,25 @@ fn connect_list() -> Result<Reply, String> {
     let mut sessions = Vec::new();
     for s in store::sessions().map_err(|e| format!("connect.list: {e}"))? {
         sessions.push(wallet_session_view(&s, String::new())?);
+    }
+    Ok(Reply::Sessions(generated::ConnectSessionsV1 { sessions }))
+}
+
+/// The connection a code's offer made, while it stands: one session or none.
+/// An application this wallet is connected to opens the wallet with the code
+/// it was connected by, and the Apps screen shows what that application has
+/// waiting instead of asking to connect again. Read from this wallet's own
+/// record of its sessions: the code is parsed, and nothing it names is
+/// fetched or trusted.
+fn connect_connected_by(params: &[u8]) -> Result<Reply, String> {
+    const ROUTE: &str = "connect.connectedBy";
+    let req: generated::ConnectPreviewRequestV1 = body(params, ROUTE)?;
+    let code = code::parse(&req.code).map_err(|e| format!("{ROUTE}: {e}"))?;
+    let mut sessions = Vec::new();
+    for s in store::sessions().map_err(|e| format!("{ROUTE}: {e}"))? {
+        if s.connected == store::SessionStatus::Connected && s.offer_digest == code.offer_digest {
+            sessions.push(wallet_session_view(&s, String::new())?);
+        }
     }
     Ok(Reply::Sessions(generated::ConnectSessionsV1 { sessions }))
 }

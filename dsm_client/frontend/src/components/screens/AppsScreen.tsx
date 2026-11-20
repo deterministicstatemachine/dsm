@@ -8,7 +8,10 @@
 // out every request; this screen renders what Rust answers. A code a link
 // brought came from outside the wallet: the offer says so, and names the app
 // Android recorded as having opened the link. The name an offer gives is its
-// own; nothing checks it.
+// own; nothing checks it. A link that brings the code of an application this
+// wallet is already connected to asks for no second connection: it opens what
+// that application has waiting, and once the player has decided it the wallet
+// steps back to the app that opened it (owner, 2026-11-19), as after a connect.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as connect from '../../dsm/connect';
@@ -28,6 +31,10 @@ const REFRESH_MS = 3000;
 
 function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+function sameSession(a: Uint8Array, b: Uint8Array): boolean {
+  return encodeBase32Crockford(a) === encodeBase32Crockford(b);
 }
 
 function short(bytes: Uint8Array): string {
@@ -148,6 +155,11 @@ export default function AppsScreen(): React.JSX.Element {
   const [linkedCode, setLinkedCode] = useState<string | null>(null);
   const [linkSender, setLinkSender] = useState<string | null>(null);
   const [offer, setOffer] = useState<connect.Preview | null>(null);
+  // The connected application a link opened the wallet for, until what it has
+  // waiting is decided; and the application whose requests are being taken in
+  // right now, while they are.
+  const [openedFor, setOpenedFor] = useState<connect.Session | null>(null);
+  const [asking, setAsking] = useState<string | null>(null);
   /// A camera scan this screen started and has not heard back from. The
   /// camera answers on the shared `dsm-event` channel, so a result is this
   /// screen's only while it is waiting for one.
@@ -163,25 +175,55 @@ export default function AppsScreen(): React.JSX.Element {
     }
   }, []);
 
-  // A link from an app on this phone handed over a code: it fills the field,
+  // A link from an app on this phone handed over a code. The code of an
+  // application this wallet is connected to opens what that application has
+  // waiting: its requests are taken in now, from the endpoint the wallet
+  // connected to, never one the link names. Any other code fills the field,
   // and the player reads it as they would a pasted one.
   useEffect(() => {
     const show = () => {
       const linked = takeConnectLink();
       if (linked === null) return;
-      setTab('apps');
-      setOffer(null);
-      setCode(linked.code);
-      setLinkedCode(linked.code);
-      setLinkSender(linked.sender);
-      setStatus({
-        kind: 'info',
-        text: `A link from outside the wallet handed over a connect code${linked.sender !== null ? `, opened by ${linked.sender}` : ''}. READ it to see what it asks for.`,
-      });
+      const asCode = () => {
+        setTab('apps');
+        setOffer(null);
+        setOpenedFor(null);
+        setCode(linked.code);
+        setLinkedCode(linked.code);
+        setLinkSender(linked.sender);
+        setStatus({
+          kind: 'info',
+          text: `A link from outside the wallet handed over a connect code${linked.sender !== null ? `, opened by ${linked.sender}` : ''}. READ it to see what it asks for.`,
+        });
+      };
+      const asWaiting = (app: connect.Session) => {
+        setTab('waiting');
+        setOffer(null);
+        setCode('');
+        setLinkedCode(null);
+        setLinkSender(null);
+        setOpenedFor(app);
+        setStatus({
+          kind: 'info',
+          text: `${linked.sender !== null ? linked.sender : 'An app your phone did not name'} opened the wallet for ${app.displayName}, which is connected. What it asks for is below: approve or decline it.`,
+        });
+        setAsking(app.displayName);
+        connect.sync()
+          .catch((e: unknown) => setStatus({ kind: 'error', text: `Checking ${app.displayName} failed: ${messageOf(e)}` }))
+          .finally(() => {
+            setAsking(null);
+            return refresh();
+          });
+      };
+      // A code Rust cannot place is shown as a code: reading it says why.
+      connect.connectedBy(linked.code).then(
+        (app) => (app === null ? asCode() : asWaiting(app)),
+        asCode,
+      );
     };
     show();
     return onConnectLink(show);
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     const tick = () => {
@@ -287,6 +329,17 @@ export default function AppsScreen(): React.JSX.Element {
     run(choice === 'approve' ? 'Approving' : 'Declining', async () => {
       const decided = await connect.respond(p.sessionId, p.seq, choice);
       if (decided.outcome === 'failed') throw new Error(decided.line);
+      // The app that opened the wallet for this is where the player goes on,
+      // once nothing else of that application's is left for them to decide.
+      if (openedFor !== null && sameSession(openedFor.sessionId, p.sessionId)) {
+        const undecided = (await connect.pending()).filter((w) => sameSession(w.sessionId, p.sessionId) && !w.approved);
+        if (undecided.length === 0) {
+          setOpenedFor(null);
+          if (!(await returnToConnectCaller())) {
+            return `${decided.line} Go back to the app that sent you here.`;
+          }
+        }
+      }
       return decided.line;
     });
 
@@ -304,6 +357,7 @@ export default function AppsScreen(): React.JSX.Element {
           <p>Connect a Web2 app, such as a game, to this wallet. The app keeps running as it always does; what you own in it lives here, in this wallet.</p>
           <p><b>Connect</b>: scan the code the app shows. You see exactly what it asks for before you approve. Once approved, it can ask this wallet for those things without you switching back to the phone.</p>
           <p>Anything outside what you approved waits in <b>Waiting</b> for you to approve or decline. Disconnecting ends the grant.</p>
+          <p>A connected app on this phone can send you here to decide what it asks for. Once you have decided, the wallet goes back to that app.</p>
           <p>An app never holds your keys. Everything you send, trade or receive goes through this wallet, checked exactly as if you did it yourself.</p>
         </InfoTip>
       )}
@@ -407,7 +461,9 @@ export default function AppsScreen(): React.JSX.Element {
           {/* Each approval here is irreversible: no other app's window may sit over them. */}
           {waiting.length > 0 ? <ScreenGuard kind="confirm" /> : null}
           {waiting.length === 0 ? (
-            <p className="sb-hint">Nothing is waiting for you.</p>
+            <p className="sb-hint">
+              {asking !== null ? `Asking ${asking} what it has for you…` : 'Nothing is waiting for you.'}
+            </p>
           ) : (
             waiting.map((p) => (
               <section className="sb-card" key={`${encodeBase32Crockford(p.sessionId)}:${p.seq.toString()}`}>

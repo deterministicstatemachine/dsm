@@ -238,6 +238,8 @@ What an offer asks the player to let your app do without asking again:
 
 `ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that move nothing run without asking, up to the offer's `freeRequests` (default 64). Past that, each one waits for the player on the device, and holds every later request behind it. A payment inside the grant's caps keeps running past that count until one fails; from then on, every request waits for the player.
 
+A request that waits is under **Apps > Waiting** in the wallet. When your app is on the same phone as the wallet, send the player there: open the `dsm:connect/v1:` code the wallet connected by as a link. A wallet that is already connected to your app shows what your app has waiting instead of asking to connect again, and goes back to your app by itself once the player has approved or declined it (Android; on iOS the player returns themselves). The wallet trusts nothing in the link: it finds your connection in its own record.
+
 ## Matches
 
 A **match** is a contest your app referees. Each player's wallet stakes from its own balance, under terms the wallet builds itself (A wins, B wins, or void); your app's key decides. `ask.match.stake` names the opponent by the other player's connection (`connection.opponent`); side B passes side A's stake id as `against`, so both stakes share one verdict. `app.decide(stake, "A" | "B" | "void")`, then the winner's `ask.match.collect([stakeA, stakeB])`. Facts: `staked`, `collected`.
@@ -306,6 +308,6 @@ The routes your app's account uses:
 | `escrow.adjudicate` | invoke | `EscrowOutcomeRequest` | `EscrowVerdictResponse` | `decide` |
 | `faucet.claim` | invoke | `FaucetClaimRequest` | `FaucetClaimResponse` | `fund` |
 
-And a wallet's: `connect.preview` (query), `connect.approve`, `connect.sync`, `connect.list` (query), `connect.pending` (query), `connect.respond`, `connect.log` (query), `connect.disconnect`.
+And a wallet's: `connect.preview` (query), `connect.approve`, `connect.sync`, `connect.list` (query), `connect.connectedBy` (query), `connect.pending` (query), `connect.respond`, `connect.log` (query), `connect.disconnect`.
 
 `GET /activity/{after}` returns `AppHostActivityV1`: your account's identity, and a record of each call and each wallet's visit to the relay. Every plain result keeps the wire's message as `raw`, and `pb` exports every generated message, for anything the plain fields leave out.
