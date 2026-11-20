@@ -8861,9 +8861,10 @@ async fn trade_held_at_its_pair(
 /// MR-SOFI-0142, SoFi Amendment S20 and storage spec §9: `K_root(q)` counts
 /// only a claim naming it, so a precommit there counts as nothing. B trades
 /// with its pair held, so its `P` is published and nothing is at the pair.
-/// B's own `P`, exactly as stored, is then put first in the log of
-/// `K_root(q)`'s leader. B's completion writes the pair behind it, and the
-/// position realizes: `P` is still first at the leader and took nothing.
+/// An honest leader refuses B's `P` at `K_root(q)` (DSM Amendment A41); a
+/// hostile leader keeps it, first in its log. B's completion writes the pair
+/// behind it, and the position realizes: `P` is still first at the leader
+/// and took nothing.
 ///
 /// MUTATION CONTROL: the leader rule reading the first value in the leader's
 /// log whether or not it is recognized (`dsm::route_chain::first_at_leader`)
@@ -8902,10 +8903,24 @@ async fn a_precommit_first_at_its_root_cell_takes_nothing_from_the_position() {
         .iter()
         .position(|member| member.member_id().as_bytes() == root_cell.route().leader())
         .expect("the cell's leader");
-    clients.members()[leader]
+    // An honest leader refuses it: K_root(q) keeps only a claim its trader
+    // signed (DSM Amendment A41).
+    let honest = clients.members()[leader]
         .put_cells(&[(entry.namespace.clone(), entry.key, entry.encode())])
-        .await
-        .expect("the leader keeps it");
+        .await;
+    assert!(
+        matches!(honest, Err(..)),
+        "an honest leader keeps no P at K_root(q): {honest:?}"
+    );
+    // A hostile leader keeps it anyway; readers still count it as nothing.
+    p.nodes
+        .plant_cell(
+            clients.members()[leader].member_id(),
+            &entry.namespace,
+            &entry.key,
+            &entry.encode(),
+        )
+        .await;
     let first_at_leader = || async {
         clients
             .held_at(root_cell.namespace(), root_cell.key())

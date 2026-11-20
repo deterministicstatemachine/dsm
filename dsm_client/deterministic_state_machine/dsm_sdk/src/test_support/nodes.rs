@@ -791,6 +791,22 @@ impl NodeSet {
         }
     }
 
+    /// Member `member_id` stores `value` at `(namespace, key)` straight in
+    /// its store, past the check every honest member makes on a put
+    /// (`dsm::owned_cell::admit_cell_write`): what a hostile or broken member
+    /// holds. Readers must still count it as nothing it is not.
+    pub async fn plant_cell(
+        &self,
+        member_id: &str,
+        namespace: &[u8],
+        key: &[u8; 32],
+        value: &[u8],
+    ) {
+        if let Err(e) = db::put_cell(self.node(member_id).pool(), namespace, key, value).await {
+            panic!("{member_id}: plant a cell value: {e}");
+        }
+    }
+
     /// Every member loses every entry of the cell `key`: what a set whose
     /// stores all lost the cell holds. Nothing else is touched.
     pub async fn erase_cell(&self, key: &[u8; 32]) {

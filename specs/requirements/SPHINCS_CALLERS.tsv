@@ -289,11 +289,11 @@ dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	14
 dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	218	let ok = crate::crypto::sphincs::sphincs_verify(proven_ak, &digest, &ev.sigma_dsm)
 dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	33	generate_keypair_from_seed, sphincs_sign, sphincs_verify, SphincsKeyPair, SphincsVariant,
 dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	40	pub const CELL_LOCK_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	138	write_signature: sphincs_sign(&lock.secret_key, &target)?,
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	167	write_signature: sphincs_sign(ak_secret, &target)?,
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	260	if sphincs_verify(public_key, target, signature)
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	324	use crate::crypto::sphincs::generate_keypair_from_seed;
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	372	write_signature: sphincs_sign(&stranger.secret_key, &target).expect("signed"),
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	148	write_signature: sphincs_sign(&lock.secret_key, &target)?,
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	177	write_signature: sphincs_sign(ak_secret, &target)?,
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	277	if sphincs_verify(public_key, target, signature)
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	357	use crate::crypto::sphincs::generate_keypair_from_seed;
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	405	write_signature: sphincs_sign(&stranger.secret_key, &target).expect("signed"),
 dsm_client/deterministic_state_machine/dsm/src/recovery/activation.rs	242	use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm/src/recovery/activation.rs	252	let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
 dsm_client/deterministic_state_machine/dsm/src/recovery/assembly.rs	303	use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
@@ -531,17 +531,17 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/first_inbox_e2e_test
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/first_inbox_e2e_tests.rs	60	let own_key = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x66; 32])
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	2194	dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).expect("B signs")
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	2443	dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).expect("B signs")
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	2826	let signature = dsm::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	3291	dsm::crypto::sphincs::sphincs_sign(&sk, &derive::fulfillment_signing_digest(&bent))
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	3756	let signature = dsm::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	3859	dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::precommit_signing_digest(&lone))
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4069	dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::fulfillment_signing_digest(&f_a))
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4117	dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::precommit_signing_digest(&p_a))
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4832	dsm::crypto::sphincs::sphincs_sign(&secret_key, &checked.precommit_signing_digest())
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4861	let signature = dsm::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	6143	dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).expect("B signs")
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	8487	let m_lock = dsm::crypto::sphincs::generate_keypair_from_seed(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	8875	let signature = dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	2827	let signature = dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	3308	dsm::crypto::sphincs::sphincs_sign(&sk, &derive::fulfillment_signing_digest(&bent))
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	3773	let signature = dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	3876	dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::precommit_signing_digest(&lone))
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4086	dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::fulfillment_signing_digest(&f_a))
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4134	dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::precommit_signing_digest(&p_a))
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4849	dsm::crypto::sphincs::sphincs_sign(&secret_key, &checked.precommit_signing_digest())
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4878	let signature = dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	6160	dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).expect("B signs")
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	8504	let m_lock = dsm::crypto::sphincs::generate_keypair_from_seed(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	9061	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/recipient_dispatch.rs	1179	let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/recipient_dispatch.rs	1779	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_finalized.rs	193	let foreign_sk = dsm::crypto::sphincs::generate_sphincs_keypair()
