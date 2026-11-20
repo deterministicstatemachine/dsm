@@ -8420,16 +8420,118 @@ async fn a_succession_proof_counts_only_under_the_authority_its_predecessor_anch
         .expect_err("no proof under the authority A anchored is posted");
     assert!(refused.to_string().contains("none posted"), "{refused}");
 
+    // The successor's proof lives in the successor's own cell: M posts it.
+    m.enter();
     let honest = succession_proof_under(&k_a, &k_a_secret, &p.a.device_id, &m.device_id);
     crate::sdk::recovery_store::put(&cell, &honest.to_bytes())
         .await
         .expect("the proof under K_A");
+    p.b.enter();
     let (found, predecessor) =
         RecoverySDK::succession_proof_anchored_by_predecessor(&m.genesis, &m.device_id)
             .await
             .expect("the proof under the authority A anchored");
     assert_eq!(predecessor, p.a.device_id);
     assert_eq!(found.to_bytes(), honest.to_bytes());
+}
+
+/// A device's recovery cells are its own (owner ruling, 2026-11-19: what a
+/// person pays for is theirs). The 2026-11-19 core audit locked a device out of
+/// recovery for good: a third device copied the device's published authority
+/// anchor, changed its unsigned `authority_signature`, and appended it to the
+/// anchor cell, which every member kept; every reader then counted two anchors
+/// and found none. Now the cell is the anchor's route bound to the owner's cell
+/// lock, and no member keeps a write the owner's lock did not sign: the copy,
+/// sent with the third device's own lock or with no proof at all, is kept by no
+/// member, and the owner's anchor still reads as anchored and can be published
+/// again.
+/// MUTATION CONTROL: letting `dsm::owned_cell::admit_cell_write` take an owned
+/// cell's write unchecked lets every member keep the copy and turns the
+/// "kept by no member" and "still anchored" assertions red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_copied_anchor_is_kept_by_no_member_of_its_owners_cell() {
+    use crate::sdk::recovery_sdk::RecoverySDK;
+    let p = Pair::boot(0, 0).await;
+    let mut m = TestDevice::create("M", 0x4D);
+    m.boot(&p.fleet).await;
+
+    p.a.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("A anchors its recovery authority");
+    let (k_a, _) = RecoverySDK::get_cached_authority_keypair().expect("A's K_A");
+
+    m.enter();
+    let owner = dsm::recovery::CellOwner {
+        genesis: p.a.genesis,
+        device_id: p.a.device_id,
+    };
+    let cell = dsm::recovery::RecoveryCell::AuthorityAnchor {
+        genesis: p.a.genesis,
+    };
+    let held = crate::sdk::recovery_store::entries(&owner, &cell)
+        .await
+        .expect("A's anchor cell");
+    assert_eq!(held.len(), 1, "A's anchor is in A's cell");
+    let mut copy = dsm::recovery::RecoveryAuthorityAnchor::from_bytes(&held[0]).expect("an anchor");
+    copy.authority_signature = vec![0u8];
+    let copy = copy.to_bytes();
+
+    let a_lock = crate::sdk::recovery_store::cell_lock(&p.a.genesis, &p.a.device_id)
+        .await
+        .expect("A's published cell lock");
+    let a_address = cell.address(&a_lock);
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("the pinned set");
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a set client");
+    let m_lock = dsm::crypto::sphincs::generate_keypair_from_seed(
+        dsm::owned_cell::CELL_LOCK_VARIANT,
+        &[0x4D; 32],
+    )
+    .expect("M's lock");
+    let (_, m_proof) = dsm::owned_cell::sign_owned_cell_write(
+        dsm::recovery::RecoveryCell::namespace(),
+        &cell.key(),
+        &m_lock,
+        &copy,
+    )
+    .expect("M signs its own write");
+    let under_m_lock = client
+        .put_proven_cell(
+            dsm::recovery::RecoveryCell::namespace(),
+            &a_address,
+            &copy,
+            &m_proof,
+        )
+        .await;
+    let with_no_proof = client
+        .put_cell(dsm::recovery::RecoveryCell::namespace(), &a_address, &copy)
+        .await;
+    assert_eq!(
+        under_m_lock, 0,
+        "the copy under M's lock is kept by no member"
+    );
+    assert_eq!(
+        with_no_proof, 0,
+        "the copy with no proof is kept by no member"
+    );
+    assert_eq!(
+        crate::sdk::recovery_store::entries(&owner, &cell)
+            .await
+            .expect("A's anchor cell")
+            .len(),
+        1,
+        "A's cell holds A's anchor alone"
+    );
+
+    p.b.enter();
+    RecoverySDK::fetch_and_verify_authority_anchor(&p.a.genesis, &p.a.device_id, &k_a)
+        .await
+        .expect("B still reads A's authority as anchored");
+    p.a.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("A publishes its anchor again");
 }
 
 /// `device` takes in the tombstone notices posted for it, and whether it then
@@ -8475,15 +8577,21 @@ async fn a_tombstone_is_taken_in_under_the_authority_the_device_anchored() {
         contact_device_id: p.b.device_id,
     };
 
+    // A notice of A's tombstone lives in A's own cell: under same-identity
+    // restore (DSM Amendment A40) the restored A writes it with A's cell lock,
+    // and B reads it as A's contact. Both notices are A's writes, so what
+    // passes the first over is the authority check, not the cell.
+    p.a.enter();
     let forged = succession_proof_under(&k_m, &k_m_secret, &p.a.device_id, &m.device_id);
     crate::sdk::recovery_store::put(&notices, &forged.to_bytes())
         .await
-        .expect("M's notice");
+        .expect("a notice under M's authority, in A's cell");
     assert!(
         !records_tombstone_of(&p.b, &p.a.device_id).await,
         "a tombstone under M's authority is not taken in"
     );
 
+    p.a.enter();
     let honest = succession_proof_under(&k_a, &k_a_secret, &p.a.device_id, &m.device_id);
     crate::sdk::recovery_store::put(&notices, &honest.to_bytes())
         .await

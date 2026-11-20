@@ -92,6 +92,7 @@ pub mod economic; // the online economic root R_econ
 pub mod emissions;
 pub mod envelope;
 pub mod merkle;
+pub mod owned_cell; // cells a person pays for are theirs (owner ruling, 2026-11-19)
 pub mod pbi;
 pub mod prelude;
 pub mod recovery;

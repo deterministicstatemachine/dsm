@@ -100,6 +100,7 @@ pub fn identity(seed: u8) -> Identity {
         att_a,
         kyber_public_key: vec![seed; KYBER_PUBLIC_KEY_LEN],
         first_inbox_lock_public_key: vec![seed ^ 0xF1; FIRST_INBOX_LOCK_LEN],
+        cell_lock_public_key: vec![seed ^ 0xC1; dsm::owned_cell::CELL_LOCK_LEN],
         counter: 1,
         authority_position: t0.digest(),
         authority_evidence: evidence.encode_to_vec(),

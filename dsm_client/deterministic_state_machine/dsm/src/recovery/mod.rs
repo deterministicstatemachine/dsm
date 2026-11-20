@@ -38,7 +38,7 @@ pub use dbtc_backing::{classify_dbtc_backing, DbtcBitcoinFacts};
 pub use dbtc_reconcile::{aggregate_dbtc_frontier, DbtcVaultCondition, DbtcVaultOutcome};
 pub use dbtc_vault_index::{build_dbtc_vault_index, PostedDbtcVaultIndex};
 pub use bundle::RecoveryBundle;
-pub use cell::RecoveryCell;
+pub use cell::{CellOwner, RecoveryCell};
 pub use chain_segment::{
     rel_chain_state_from_proto, rel_chain_state_to_proto, RecoveryEstablishmentReceipt,
     RelationshipChainSegment,

@@ -19443,6 +19443,15 @@ export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBody
    */
   firstInboxLockPublicKey = new Uint8Array(0);
 
+  /**
+   * The device's cell lock (SPHINCS+, never the AK nor the first-inbox lock).
+   * Every cell this device owns is its route bound to it, so only this device
+   * writes there (owner ruling, 2026-11-19).
+   *
+   * @generated from field: bytes cell_lock_public_key = 10;
+   */
+  cellLockPublicKey = new Uint8Array(0);
+
   constructor(data?: PartialMessage<DeviceDirectoryEntryBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -19460,6 +19469,7 @@ export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBody
     { no: 7, name: "authority_position", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "authority_evidence", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "first_inbox_lock_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "cell_lock_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceDirectoryEntryBodyV1 {
@@ -30381,7 +30391,11 @@ export class KeptCommittedV1 extends Message<KeptCommittedV1> {
 
 /**
  * One value for one key, as a batch put carries it. The member keeps it
- * after anything already at the key, exactly as a single put would.
+ * after anything already at the key, exactly as a single put would. A cell
+ * one party pays for is theirs (owner ruling, 2026-11-19): its put carries
+ * the owner's proof, which every member checks by derivation before it keeps
+ * the value (an OwnedCellWriteV1, or a DirectoryCellWriteV1 for a device's
+ * own directory cell). A cell several parties write by protocol carries none.
  *
  * @generated from message dsm.CellPutV1
  */
@@ -30401,6 +30415,11 @@ export class CellPutV1 extends Message<CellPutV1> {
    */
   value = new Uint8Array(0);
 
+  /**
+   * @generated from field: bytes owner_proof = 4;
+   */
+  ownerProof = new Uint8Array(0);
+
   constructor(data?: PartialMessage<CellPutV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -30412,6 +30431,7 @@ export class CellPutV1 extends Message<CellPutV1> {
     { no: 1, name: "namespace", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "value", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "owner_proof", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CellPutV1 {
@@ -30428,6 +30448,120 @@ export class CellPutV1 extends Message<CellPutV1> {
 
   static equals(a: CellPutV1 | PlainMessage<CellPutV1> | undefined, b: CellPutV1 | PlainMessage<CellPutV1> | undefined): boolean {
     return proto3.util.equals(CellPutV1, a, b);
+  }
+}
+
+/**
+ * The owner's proof for a write to a cell it owns: the cell's route, the
+ * owner's cell lock (the key its directory entry publishes), and the lock's
+ * signature over the namespace, the address and the value's digest. The cell's
+ * address is the route bound to the lock, so a key nobody else holds names
+ * the cell.
+ *
+ * @generated from message dsm.OwnedCellWriteV1
+ */
+export class OwnedCellWriteV1 extends Message<OwnedCellWriteV1> {
+  /**
+   * @generated from field: bytes route = 1;
+   */
+  route = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes lock_public_key = 2;
+   */
+  lockPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes write_signature = 3;
+   */
+  writeSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<OwnedCellWriteV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OwnedCellWriteV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "route", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "lock_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "write_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OwnedCellWriteV1 {
+    return new OwnedCellWriteV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OwnedCellWriteV1 {
+    return new OwnedCellWriteV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OwnedCellWriteV1 {
+    return new OwnedCellWriteV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OwnedCellWriteV1 | PlainMessage<OwnedCellWriteV1> | undefined, b: OwnedCellWriteV1 | PlainMessage<OwnedCellWriteV1> | undefined): boolean {
+    return proto3.util.equals(OwnedCellWriteV1, a, b);
+  }
+}
+
+/**
+ * A device's proof for a write to its own directory cell: the genesis, the AK
+ * and AttA its device id is the hash of, and the AK's signature over the
+ * address and the value's digest.
+ *
+ * @generated from message dsm.DirectoryCellWriteV1
+ */
+export class DirectoryCellWriteV1 extends Message<DirectoryCellWriteV1> {
+  /**
+   * @generated from field: bytes genesis = 1;
+   */
+  genesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes ak_public_key = 2;
+   */
+  akPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes att_a = 3;
+   */
+  attA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes write_signature = 4;
+   */
+  writeSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DirectoryCellWriteV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DirectoryCellWriteV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ak_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "write_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DirectoryCellWriteV1 {
+    return new DirectoryCellWriteV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DirectoryCellWriteV1 {
+    return new DirectoryCellWriteV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DirectoryCellWriteV1 {
+    return new DirectoryCellWriteV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DirectoryCellWriteV1 | PlainMessage<DirectoryCellWriteV1> | undefined, b: DirectoryCellWriteV1 | PlainMessage<DirectoryCellWriteV1> | undefined): boolean {
+    return proto3.util.equals(DirectoryCellWriteV1, a, b);
   }
 }
 

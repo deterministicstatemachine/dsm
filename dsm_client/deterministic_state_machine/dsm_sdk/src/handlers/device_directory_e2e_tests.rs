@@ -39,6 +39,7 @@ fn entries_nobody_signed(device: &TestDevice, over: usize) -> Vec<Vec<u8>> {
                 att_a: [0x5A; 32],
                 kyber_public_key: vec![0x5A; KYBER_PUBLIC_KEY_LEN],
                 first_inbox_lock_public_key: vec![0x5A; FIRST_INBOX_LOCK_LEN],
+                cell_lock_public_key: vec![0xC5; dsm::owned_cell::CELL_LOCK_LEN],
                 counter: made.len() as u64,
                 authority_position: [0x5A; 32],
                 authority_evidence: vec![0xEE; 320 * 1024],
@@ -80,11 +81,13 @@ async fn a_third_partys_unsigned_entries_do_not_lock_a_device_out() {
     let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a client of the set");
     let cell = directory_cell_key(&p.b.genesis, &p.b.device_id);
     let unsigned = entries_nobody_signed(&p.b, ONE_MEMBERS_READ);
+    // B's directory cell is B's (owner ruling, 2026-11-19): no member keeps
+    // a write B's AK did not sign there.
     for entry in &unsigned {
         assert_eq!(
-            client.put_cell(DIRECTORY_NAMESPACE, &cell, entry).await as usize,
-            set.len(),
-            "every member keeps what it is given at the cell"
+            client.put_cell(DIRECTORY_NAMESPACE, &cell, entry).await,
+            0,
+            "no member keeps a third party's write in B's cell"
         );
     }
 

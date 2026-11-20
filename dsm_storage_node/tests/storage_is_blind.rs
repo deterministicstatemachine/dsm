@@ -28,10 +28,17 @@ const FRAMING: &[&str] = &["storage_cell", "storage_object", "merkle", "types", 
 /// Nothing that makes a key, a grant or a write.
 const WRITE_CHECK: &[&str] = &["verify_spool_write"];
 
+/// The item of Core's owned cells a node may name: the one check every node
+/// runs before it keeps a cell write (owner ruling, 2026-11-19: a cell one
+/// party pays for is theirs), which checks the write's proof against the
+/// address it names and signs nothing. Nothing that makes a lock or a proof.
+const CELL_WRITE_CHECK: &[&str] = &["admit_cell_write"];
+
 /// Whether the Core path `dsm::<rest>` is one a storage node may name: the
 /// framing modules; the storage set's id and members; the domain-separated
 /// hasher; a size bound of the route-chain and spool modules, which names no
-/// function either computes; and the write check ([`WRITE_CHECK`]).
+/// function either computes; the write check ([`WRITE_CHECK`]); and the
+/// cell write check ([`CELL_WRITE_CHECK`]).
 fn core_path_allowed(rest: &[String]) -> bool {
     let at = |i: usize| rest.get(i).map(String::as_str);
     let (module, item) = (at(0), at(1));
@@ -44,6 +51,7 @@ fn core_path_allowed(rest: &[String]) -> bool {
         || (module == Some("core")
             && item == Some("relationship_write_grant")
             && at(2).is_some_and(|i| WRITE_CHECK.contains(&i)))
+        || (module == Some("owned_cell") && item.is_some_and(|i| CELL_WRITE_CHECK.contains(&i)))
 }
 
 /// Names of application, economic and settlement concepts: what a node that

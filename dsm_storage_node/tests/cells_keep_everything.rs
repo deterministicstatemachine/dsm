@@ -126,6 +126,7 @@ async fn put_batch(app: &Router, entries: Vec<(Vec<u8>, [u8; 32], Vec<u8>)>) -> 
                 namespace,
                 key: key.to_vec(),
                 value,
+                owner_proof: Vec::new(),
             })
             .collect(),
     };

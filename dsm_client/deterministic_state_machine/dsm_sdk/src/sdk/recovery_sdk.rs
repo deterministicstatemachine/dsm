@@ -389,6 +389,22 @@ impl RecoverySDK {
     }
 
     /// Fail-closed `Option<Vec<u8>>` → `[u8; 32]` for this device's own identity fields.
+    /// The owner of a contact's cells: its pinned genesis and device id.
+    pub(crate) fn contact_owner(
+        device_id: &[u8; 32],
+    ) -> Result<dsm::recovery::CellOwner, DsmError> {
+        let contact = crate::storage::client_db::get_contact_by_device_id(device_id)
+            .map_err(|e| DsmError::storage(format!("contact lookup: {e}"), None::<std::io::Error>))?
+            .ok_or_else(|| DsmError::verification("the device is not a contact"))?;
+        let genesis = <[u8; 32]>::try_from(contact.genesis_hash.as_slice()).map_err(|e| {
+            DsmError::verification(format!("the contact's pinned genesis is not 32 bytes: {e}"))
+        })?;
+        Ok(dsm::recovery::CellOwner {
+            genesis,
+            device_id: *device_id,
+        })
+    }
+
     fn require_self_id32(v: Option<Vec<u8>>, what: &str) -> Result<[u8; 32], DsmError> {
         let bytes = v.ok_or_else(|| {
             DsmError::InvalidState(format!("recovery anchor: {what} not set (no identity)"))
@@ -411,8 +427,12 @@ impl RecoverySDK {
         let cell = dsm::recovery::RecoveryCell::AuthorityAnchor {
             genesis: *genesis_id,
         };
+        let owner = dsm::recovery::CellOwner {
+            genesis: *genesis_id,
+            device_id: *device_id,
+        };
         let mut bound: Vec<dsm::recovery::RecoveryAuthorityAnchor> = Vec::new();
-        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+        for bytes in crate::sdk::recovery_store::entries(&owner, &cell).await? {
             // Anyone can write a cell: bytes that are not an anchor are nothing.
             let Ok(anchor) = dsm::recovery::RecoveryAuthorityAnchor::from_bytes(&bytes) else {
                 continue;
@@ -420,7 +440,11 @@ impl RecoverySDK {
             if anchor
                 .verify_genesis_binding(genesis_id, device_id, device_ak)
                 .is_ok()
-                && !bound.contains(&anchor)
+                // Two anchors are two declarations only when what the device
+                // signed differs: the authority they commit.
+                && !bound
+                    .iter()
+                    .any(|held| held.authority_pubkey_commit == anchor.authority_pubkey_commit)
             {
                 bound.push(anchor);
             }
@@ -509,15 +533,20 @@ impl RecoverySDK {
     /// predecessor at the next number. Two verified heads at one position are a
     /// fork, and the chain is refused. Empty while no genesis head is there.
     pub async fn pdsmt_head_chain(
+        genesis_id: &[u8; 32],
         device_id: &[u8; 32],
         authority_pubkey: &[u8],
     ) -> Result<Vec<dsm::recovery::PostedPdsmtHead>, DsmError> {
+        let owner = dsm::recovery::CellOwner {
+            genesis: *genesis_id,
+            device_id: *device_id,
+        };
         let commit = dsm::recovery::compute_authority_pubkey_commit(authority_pubkey);
         let cell = dsm::recovery::RecoveryCell::PdsmtHead {
             device_id: *device_id,
         };
         let mut verified: Vec<dsm::recovery::PostedPdsmtHead> = Vec::new();
-        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+        for bytes in crate::sdk::recovery_store::entries(&owner, &cell).await? {
             let Ok(head) = dsm::recovery::PostedPdsmtHead::from_bytes(&bytes) else {
                 continue;
             };
@@ -560,27 +589,27 @@ impl RecoverySDK {
     }
 
     /// `device_id`'s latest PDSMT head under its genesis-anchored authority,
-    /// with that authority: of the authorities its posted heads name (under
-    /// `genesis_id` when given), the one the device anchored, and the tip of
-    /// the chain signed under it.
+    /// with that authority: of the authorities its posted heads under
+    /// `genesis_id` name, the one the device anchored, and the tip of the
+    /// chain signed under it. The heads are read from the device's own cell.
     pub async fn anchored_pdsmt_head(
-        genesis_id: Option<&[u8; 32]>,
+        genesis_id: &[u8; 32],
         device_id: &[u8; 32],
     ) -> Result<dsm::recovery::PostedPdsmtHead, DsmError> {
         let cell = dsm::recovery::RecoveryCell::PdsmtHead {
             device_id: *device_id,
         };
+        let owner = dsm::recovery::CellOwner {
+            genesis: *genesis_id,
+            device_id: *device_id,
+        };
         let mut candidates: Vec<([u8; 32], Vec<u8>)> = Vec::new();
-        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+        for bytes in crate::sdk::recovery_store::entries(&owner, &cell).await? {
             let Ok(head) = dsm::recovery::PostedPdsmtHead::from_bytes(&bytes) else {
                 continue;
             };
             let candidate = (head.genesis_id, head.authority_pubkey);
-            let named = match genesis_id {
-                Some(genesis) => candidate.0 == *genesis,
-                None => true,
-            };
-            if named && !candidates.contains(&candidate) {
+            if candidate.0 == *genesis_id && !candidates.contains(&candidate) {
                 candidates.push(candidate);
             }
         }
@@ -607,7 +636,7 @@ impl RecoverySDK {
                 )))
             }
         };
-        Self::pdsmt_head_chain(device_id, &authority)
+        Self::pdsmt_head_chain(genesis_id, device_id, &authority)
             .await?
             .pop()
             .ok_or_else(|| {
@@ -625,6 +654,10 @@ impl RecoverySDK {
         let device_id = Self::require_self_id32(
             crate::sdk::app_state::AppState::get_device_id(),
             "device_id",
+        )?;
+        let genesis_id = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_genesis_hash(),
+            "genesis",
         )?;
         let device_state = crate::storage::client_db::load_bcr_device_head(&device_id)
             .map_err(|e| {
@@ -648,7 +681,7 @@ impl RecoverySDK {
         // Chain position: extend this device's chain under its authority, or
         // start the genesis head.
         let (parent_head_hash, head_number) =
-            match Self::pdsmt_head_chain(&device_id, &authority_pk)
+            match Self::pdsmt_head_chain(&genesis_id, &device_id, &authority_pk)
                 .await?
                 .pop()
             {
@@ -702,12 +735,16 @@ impl RecoverySDK {
         head: &dsm::recovery::PostedPdsmtHead,
         anchored_authority_commit: &[u8; 32],
     ) -> Result<Vec<dsm::recovery::PostedPdsmtLeafRecord>, DsmError> {
+        let owner = dsm::recovery::CellOwner {
+            genesis: head.genesis_id,
+            device_id: head.device_id,
+        };
         let cell = dsm::recovery::RecoveryCell::PdsmtLeaves {
             genesis: head.genesis_id,
             device_id: head.device_id,
             head_number: head.head_number,
         };
-        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+        for bytes in crate::sdk::recovery_store::entries(&owner, &cell).await? {
             let Ok(leaves) = dsm::recovery::decode_leaf_set(&bytes) else {
                 continue;
             };
@@ -836,15 +873,16 @@ impl RecoverySDK {
         Ok(())
     }
 
-    /// Every ancestry segment posted for `rel_key` that is for that
-    /// relationship and verifies. The caller binds the one it needs by its
-    /// floor and current tips.
+    /// Every ancestry segment `poster` posted for `rel_key` that is for that
+    /// relationship and verifies, read from `poster`'s own cell. The caller
+    /// binds the one it needs by its floor and current tips.
     pub async fn rel_chain_segments(
+        poster: &dsm::recovery::CellOwner,
         rel_key: &[u8; 32],
     ) -> Result<Vec<dsm::recovery::RelationshipChainSegment>, DsmError> {
         let cell = dsm::recovery::RecoveryCell::RelChainSegment { rel_key: *rel_key };
         let mut out = Vec::new();
-        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+        for bytes in crate::sdk::recovery_store::entries(poster, &cell).await? {
             let Ok(segment) = dsm::recovery::RelationshipChainSegment::from_bytes(&bytes) else {
                 continue;
             };
@@ -876,6 +914,7 @@ impl RecoverySDK {
     /// The `(A_new,C)` establishment receipt for `new_rel_key`: the one distinct
     /// receipt posted for that relationship that verifies as its first state.
     pub async fn fetch_establishment_receipt(
+        a_new_genesis: &[u8; 32],
         new_rel_key: &[u8; 32],
         a_new: &[u8; 32],
         c: &[u8; 32],
@@ -883,8 +922,12 @@ impl RecoverySDK {
         let cell = dsm::recovery::RecoveryCell::EstablishmentReceipt {
             new_rel_key: *new_rel_key,
         };
+        let owner = dsm::recovery::CellOwner {
+            genesis: *a_new_genesis,
+            device_id: *a_new,
+        };
         let mut verified: Vec<dsm::recovery::RecoveryEstablishmentReceipt> = Vec::new();
-        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+        for bytes in crate::sdk::recovery_store::entries(&owner, &cell).await? {
             let Ok(receipt) = dsm::recovery::RecoveryEstablishmentReceipt::from_bytes(&bytes)
             else {
                 continue;
@@ -965,8 +1008,12 @@ impl RecoverySDK {
             genesis: *genesis_id,
             device_id: *device_id,
         };
+        let owner = dsm::recovery::CellOwner {
+            genesis: *genesis_id,
+            device_id: *device_id,
+        };
         let mut out = Vec::new();
-        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+        for bytes in crate::sdk::recovery_store::entries(&owner, &cell).await? {
             let Ok(index) = dsm::recovery::PostedDbtcVaultIndex::from_bytes(&bytes) else {
                 continue;
             };
@@ -1390,11 +1437,15 @@ impl RecoverySDK {
             genesis: *a_new_genesis,
             a_new: *a_new,
         };
+        let owner = dsm::recovery::CellOwner {
+            genesis: *a_new_genesis,
+            device_id: *a_new,
+        };
         let mut anchored: Vec<(dsm::recovery::RecoverySuccessionProof, [u8; 32])> = Vec::new();
         // Why each proof that was not anchored by its predecessor was passed
         // over: the refusal names them.
         let mut passed_over: Vec<String> = Vec::new();
-        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+        for bytes in crate::sdk::recovery_store::entries(&owner, &cell).await? {
             // Anyone can write a cell: bytes that are not a proof are nothing.
             let Ok(proof) = dsm::recovery::RecoverySuccessionProof::from_bytes(&bytes) else {
                 continue;
@@ -1456,7 +1507,7 @@ impl RecoverySDK {
 
         // C's current (A_old,C) tip from its posted PDSMT leaf, under C's
         // genesis-anchored authority.
-        let c_head = Self::anchored_pdsmt_head(None, c).await?;
+        let c_head = Self::anchored_pdsmt_head(&Self::contact_owner(c)?.genesis, c).await?;
         let c_leaves = Self::pdsmt_leaves(
             &c_head,
             &dsm::recovery::compute_authority_pubkey_commit(&c_head.authority_pubkey),
@@ -1585,7 +1636,7 @@ impl RecoverySDK {
 
         // A_old's posted head + leaves. A_old's recovery authority IS this identity's K_A
         // (per-identity, re-derived from the mnemonic) — the posted head must be signed by it.
-        let a_old_head = Self::pdsmt_head_chain(&ctx.a_old, &ka_pub)
+        let a_old_head = Self::pdsmt_head_chain(&ctx.genesis_id, &ctx.a_old, &ka_pub)
             .await?
             .pop()
             .ok_or_else(|| {
@@ -1618,7 +1669,14 @@ impl RecoverySDK {
                 continue;
             };
             // C's head under C's genesis-anchored authority.
-            let head = match Self::anchored_pdsmt_head(None, c).await {
+            let c_owner = match Self::contact_owner(c) {
+                Ok(owner) => owner,
+                Err(e) => {
+                    log::debug!("[RECOVERY] candidate is not a contact: {e}; skipping");
+                    continue;
+                }
+            };
+            let head = match Self::anchored_pdsmt_head(&c_owner.genesis, c).await {
                 Ok(h) => h,
                 Err(e) => {
                     log::debug!("[RECOVERY] no anchored head for a candidate: {e}; skipping");
@@ -1650,7 +1708,7 @@ impl RecoverySDK {
                 log::debug!("[RECOVERY] counterparty posted no (A_old,C) leaf; skipping");
                 continue;
             };
-            let segments = match Self::rel_chain_segments(&old_rel_key).await {
+            let segments = match Self::rel_chain_segments(&c_owner, &old_rel_key).await {
                 Ok(segments) => segments,
                 Err(e) => {
                     log::debug!("[RECOVERY] ancestry segments unreadable: {e}; skipping");
@@ -1664,16 +1722,22 @@ impl RecoverySDK {
                 log::debug!("[RECOVERY] no ancestry segment from the floor to C's tip; skipping");
                 continue;
             };
-            let establishment =
-                match Self::fetch_establishment_receipt(&new_rel_key, &ctx.a_new, c).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        log::debug!(
-                            "[RECOVERY] no establishment receipt for a counterparty: {e}; skipping"
-                        );
-                        continue;
-                    }
-                };
+            let establishment = match Self::fetch_establishment_receipt(
+                &ctx.genesis_id,
+                &new_rel_key,
+                &ctx.a_new,
+                c,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(
+                        "[RECOVERY] no establishment receipt for a counterparty: {e}; skipping"
+                    );
+                    continue;
+                }
+            };
             counterparties.insert(
                 *c,
                 dsm::recovery::CounterpartyRecoveryInput {

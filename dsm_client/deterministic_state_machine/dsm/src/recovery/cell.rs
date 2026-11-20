@@ -3,11 +3,14 @@
 //! Where each recovery object lives on the committed storage set (storage spec
 //! §8.3: bytes under derived keys, held in keyed cells, §6).
 //!
-//! A member stores every entry it is sent at a key and refuses nothing, so a
-//! cell can hold many entries, including ones no honest device wrote. Every
-//! recovery object is self-verifying, and the reader keeps only what verifies;
-//! nothing here is authority. This module fixes the one derivation of each
-//! object's key, so the writer and every reader address the same cell.
+//! Every recovery cell is owned by the one device that writes it (owner
+//! ruling, 2026-11-19: what a person pays for is theirs): its address is its
+//! route bound to the owner's cell lock (`crate::owned_cell`), and a member
+//! keeps a write there only when that lock signed it. So nothing anyone else
+//! writes is ever read from a device's recovery cell. Every recovery object is
+//! still self-verifying, and the reader still keeps only what verifies. This
+//! module fixes the one derivation of each object's route, so the writer and
+//! every reader address the same cell.
 
 use crate::common::domain_tags::{TAG_DSM_RECOVERY_CELL, TAG_DSM_RECOVERY_CELL_KEY};
 use crate::crypto::blake3::dsm_domain_hasher;
@@ -44,7 +47,20 @@ pub enum RecoveryCell {
     },
 }
 
+/// The device that owns a recovery cell: the only one whose cell lock writes
+/// it. A reader names it, and finds its cell lock in its directory entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellOwner {
+    pub genesis: D32,
+    pub device_id: D32,
+}
+
 impl RecoveryCell {
+    /// The cell's address: its route bound to its owner's cell lock.
+    pub fn address(&self, owner_cell_lock: &[u8]) -> D32 {
+        crate::owned_cell::owned_cell_address(&self.key(), owner_cell_lock)
+    }
+
     /// Whether `bytes` are an object of the kind this cell holds, naming the
     /// cell's coordinates where the object carries them. Anyone can write a
     /// cell, so a reader keeps nothing else (storage spec §9, route chains,
@@ -96,7 +112,9 @@ impl RecoveryCell {
         TAG_DSM_RECOVERY_CELL.source_bytes()
     }
 
-    /// The cell's key: the object's kind and coordinates under one domain.
+    /// The cell's route: the object's kind and coordinates under one domain.
+    /// The cell's address is the route bound to its owner's cell lock
+    /// ([`Self::address`]).
     pub fn key(&self) -> D32 {
         let mut hasher = dsm_domain_hasher(TAG_DSM_RECOVERY_CELL_KEY);
         match self {
@@ -158,7 +176,8 @@ mod tests {
     use super::*;
 
     /// Every kind addresses its own cell: the same coordinates under two
-    /// kinds, or two coordinates under one kind, never share a key.
+    /// kinds, or two coordinates under one kind, never share a route; and one
+    /// route under two owners' locks is two cells.
     #[test]
     fn every_object_has_its_own_cell() {
         let a = [0x0A; 32];
@@ -200,5 +219,7 @@ mod tests {
         ];
         let keys: std::collections::BTreeSet<D32> = cells.iter().map(RecoveryCell::key).collect();
         assert_eq!(keys.len(), cells.len());
+        let cell = RecoveryCell::AuthorityAnchor { genesis: a };
+        assert_ne!(cell.address(&[0x11; 64]), cell.address(&[0x22; 64]));
     }
 }

@@ -116,6 +116,18 @@ pub(crate) fn octets(body: Vec<u8>) -> Response {
     r
 }
 
+/// The one check every member runs before it keeps a value: a cell one party
+/// pays for is theirs, and only the key its address is bound to writes it
+/// (owner ruling, 2026-11-19; `dsm::owned_cell`). The protocol running, the
+/// same on every member, with no list of owners and no state; a cell several
+/// parties write by protocol takes a write with no proof.
+fn admit(namespace: &[u8], key: &[u8; 32], value: &[u8], proof: &[u8]) -> Result<(), StatusCode> {
+    dsm::owned_cell::admit_cell_write(namespace, key, value, proof).map_err(|why| {
+        log::info!("cell put: refused: {why}");
+        StatusCode::FORBIDDEN
+    })
+}
+
 /// Keep the body at the key, after anything already there, and answer with
 /// the entry's arrival record.
 async fn put_cell(
@@ -132,6 +144,13 @@ async fn put_cell(
     }
     let ns = namespace(&headers)?;
     let key = digest32(&key)?;
+    // A single put carries no owner's proof: a cell one party owns is
+    // written in a batch, whose entries carry it (owner ruling, 2026-11-19).
+    let cell: [u8; 32] = key.as_slice().try_into().map_err(|e| {
+        log::info!("cell put: the key is not 32 bytes: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+    admit(&ns, &cell, body.as_ref(), &[])?;
     let (index, running_hash) = crate::db::put_cell(&state.db_pool, &ns, &key, body.as_ref())
         .await
         .map_err(|e| {
@@ -200,10 +219,13 @@ async fn put_cells(
         if entry.value.len() > MAX_CELL_VALUE_BYTES {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
-        if entry.key.len() != 32 {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        entries.push((namespace_bytes(entry.namespace)?, entry.key, entry.value));
+        let key: [u8; 32] = entry.key.as_slice().try_into().map_err(|e| {
+            log::info!("cells put: a key is not 32 bytes: {e}");
+            StatusCode::BAD_REQUEST
+        })?;
+        let ns = namespace_bytes(entry.namespace)?;
+        admit(&ns, &key, &entry.value, &entry.owner_proof)?;
+        entries.push((ns, entry.key, entry.value));
     }
     let written = crate::db::put_cells(&state.db_pool, &entries)
         .await
