@@ -13523,8 +13523,10 @@ export class StepWriteOfflineReceive extends Message<StepWriteOfflineReceive> {
 
 /**
  * The unload of a payment received offline, as an offline account's step: the account as it stood
- * before, and what it held received of the payment's asset. After is derived — less the payment's
- * amount — by folding account_path from pre_account_root.
+ * before, what it held received of the payment's asset, and the counter and frontier its board
+ * signed the unload at (DSM Amendment A39 draft, option B). After is derived — less the payment's
+ * amount, the counter's step and the frontier's advance — by folding account_paths from
+ * pre_account_root.
  *
  * @generated from message dsm.StepWriteOfflineSettle
  */
@@ -13540,9 +13542,24 @@ export class StepWriteOfflineSettle extends Message<StepWriteOfflineSettle> {
   preReceived = protoInt64.zero;
 
   /**
-   * @generated from field: dsm.SmtPath account_path = 3;
+   * @generated from field: uint64 pre_counter = 4;
    */
-  accountPath?: SmtPath;
+  preCounter = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes pre_frontier = 5;
+   */
+  preFrontier = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes next_frontier = 6;
+   */
+  nextFrontier = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.SmtPath account_paths = 7;
+   */
+  accountPaths: SmtPath[] = [];
 
   constructor(data?: PartialMessage<StepWriteOfflineSettle>) {
     super();
@@ -13554,7 +13571,10 @@ export class StepWriteOfflineSettle extends Message<StepWriteOfflineSettle> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "pre_account_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "pre_received", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 3, name: "account_path", kind: "message", T: SmtPath },
+    { no: 4, name: "pre_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "pre_frontier", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "next_frontier", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "account_paths", kind: "message", T: SmtPath, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteOfflineSettle {
@@ -13827,6 +13847,14 @@ export class OfflineSettleHop extends Message<OfflineSettleHop> {
    */
   settlementId = new Uint8Array(0);
 
+  /**
+   * The board's release of the unload (a dsm.anchor.OfflineRelease, its offline-state proofs
+   * attached): signed at the board's next counter, as every step of the account is.
+   *
+   * @generated from field: bytes release = 5;
+   */
+  release = new Uint8Array(0);
+
   constructor(data?: PartialMessage<OfflineSettleHop>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13839,6 +13867,7 @@ export class OfflineSettleHop extends Message<OfflineSettleHop> {
     { no: 2, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "settlement_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSettleHop {

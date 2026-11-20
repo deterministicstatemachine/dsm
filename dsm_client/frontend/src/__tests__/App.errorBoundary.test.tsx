@@ -61,10 +61,6 @@ jest.mock('../hooks/useLockState', () => ({
   useLockState: () => ({ lock: null }),
 }));
 
-jest.mock('../hooks/useGenesisFlow', () => ({
-  useGenesisFlow: () => ({ handleGenerateGenesis: jest.fn() }),
-}));
-
 jest.mock('../services/lock/lockService', () => ({
   getLockPrefs: jest.fn().mockResolvedValue({ enabled: false, promptDismissed: true, lockOnPause: true }),
 }));

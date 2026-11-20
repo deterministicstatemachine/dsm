@@ -8,6 +8,8 @@ import SplashController from './SplashController';
 import LockScreen from './lock/LockScreen';
 import AppScreenRouter from './AppScreenRouter';
 import RecoveryPhraseScreen from './screens/RecoveryPhraseScreen';
+import RestoreWords from './restore/RestoreWords';
+import type { RestoreFlow } from '../hooks/useGenesisFlow';
 import { buildHomeStatusLines } from '../viewmodels/homeViewModel';
 import ModernBoot from './modern/ModernBoot';
 import type { Skin } from '../runtime/appRuntimeStore';
@@ -31,6 +33,7 @@ type Props = {
   handleGenerateGenesis: () => Promise<void> | void;
   cancelPhraseBackup: () => void;
   answerPhraseCheck: (word: string) => Promise<void>;
+  restore: RestoreFlow;
   menuItems: string[];
   currentMenuIndex: number;
   setCurrentMenuIndex: (next: number) => void;
@@ -173,6 +176,7 @@ export default function AppContent({
   handleGenerateGenesis,
   cancelPhraseBackup,
   answerPhraseCheck,
+  restore,
   menuItems,
   currentMenuIndex,
   setCurrentMenuIndex,
@@ -191,6 +195,7 @@ export default function AppContent({
         handleGenerateGenesis={handleGenerateGenesis}
         cancelPhraseBackup={cancelPhraseBackup}
         answerPhraseCheck={answerPhraseCheck}
+        restore={restore}
         eraTokenSrc={eraTokenSrc}
         btcLogoSrc={btcLogoSrc}
       />
@@ -245,7 +250,7 @@ export default function AppContent({
             WALLET SETUP REQUIRED
           </div>
           <MenuRenderer
-            items={['INITIALIZE']}
+            items={['INITIALIZE', 'RESTORE WALLET']}
             currentMenuIndex={currentMenuIndex}
             setCurrentMenuIndex={setCurrentMenuIndex}
             options={{
@@ -253,6 +258,8 @@ export default function AppContent({
               actions: {
                 // New genesis: creates a brand-new identity/device tree root.
                 INITIALIZE: () => void handleGenerateGenesis(),
+                // A wallet on the network, back from its 24 words: the same identity.
+                'RESTORE WALLET': () => restore.begin(),
               },
             }}
           />
@@ -264,6 +271,10 @@ export default function AppContent({
     // picks words back out, and the wallet is created from it after that.
     case 'backup_phrase':
       return <RecoveryPhraseScreen onCancel={cancelPhraseBackup} onAnswer={answerPhraseCheck} />;
+
+    // RESTORE WALLET: the 24 words of a wallet on the network, typed in.
+    case 'restore_phrase':
+      return <RestoreWords error={error} onRestore={restore.submit} onCancel={restore.cancel} />;
 
     // Local genesis is committed but the identity is not yet published to a
     // quorum of storage nodes, so it is not resolvable by peers. Rust retries

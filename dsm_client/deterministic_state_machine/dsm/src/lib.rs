@@ -72,6 +72,10 @@ pub mod bilateral;
 pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
 pub mod commitments;
 pub mod common;
+// offline steps final at their origin cells (DSM Amendment A39)
+pub mod offline_origin;
+// a wallet's sealed backups on storage nodes (DSM Amendment A40)
+pub mod wallet_backup;
 // DSM Connect's signed objects (DSM Amendment A11)
 pub mod connect;
 // keyed-cell arrival records and running hashes (storage spec §14)

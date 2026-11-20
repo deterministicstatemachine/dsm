@@ -595,7 +595,7 @@ class MainActivity : AppCompatActivity() {
             // Wallet creation must publish a fresh session snapshot after completing — without it
             // React never sees phase=wallet_ready and the UI sits on the start screen despite the
             // wallet existing.
-            val isLongRunningGenesisRequest = method == "createGenesisV2"
+            val isLongRunningGenesisRequest = method == "createGenesisV2" || method == "restoreFromPhrase"
 
             // Genesis + heavy JNI run on the dedicated executor to avoid starving the general
             // bridge worker pool (Genesis v2 is mnemonic-rooted; no silicon enrollment).

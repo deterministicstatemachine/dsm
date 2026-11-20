@@ -47,6 +47,108 @@ use crate::types::offline_account::{verify_offline_state_at, SpendWitness};
 /// again.
 pub const MAX_CHAIN_HOPS: usize = 64;
 
+/// The board action of a load of an offline account (DSM Amendment A39 draft,
+/// option B): signed at the board's next counter, as a spend is. Core's
+/// constant: the board signs every action but a receive alike, so its
+/// measured image is unchanged.
+pub const ACTION_OFFLINE_LOAD: u32 = 0x4F4C;
+/// The board action of an unload of an offline account, as for a load.
+pub const ACTION_OFFLINE_UNLOAD: u32 = 0x4F55;
+/// The board action of the unload of a payment received offline, as for a load.
+pub const ACTION_OFFLINE_SETTLE: u32 = 0x4F53;
+
+/// The board's transition for the load or unload `kind` of the account of the
+/// device `device_id`, whose operation id is `boundary_id`, from the account's
+/// `frontier` and `counter` ([`board_step_transition`]).
+pub fn boundary_transition(
+    kind: crate::types::device_state::OfflineBoundaryKind,
+    device_id: &[u8; 32],
+    boundary_id: &[u8; 32],
+    frontier: &[u8; 32],
+    counter: u64,
+) -> Result<(anchor_core::root_advance::OwnedTransition, [u8; 32]), DsmError> {
+    use crate::types::device_state::OfflineBoundaryKind;
+    let action_type = match kind {
+        OfflineBoundaryKind::Load => ACTION_OFFLINE_LOAD,
+        OfflineBoundaryKind::Unload => ACTION_OFFLINE_UNLOAD,
+        OfflineBoundaryKind::Settle => {
+            return Err(DsmError::invalid_operation(
+                "a board signs a load or an unload of its account as a boundary step",
+            ))
+        }
+    };
+    board_step_transition(action_type, device_id, boundary_id, frontier, counter)
+}
+
+/// The board's transition for the unload of the received payment `settlement_id` from the
+/// account of the device `device_id`, from the account's `frontier` and `counter`
+/// ([`board_step_transition`]).
+pub fn settle_transition(
+    device_id: &[u8; 32],
+    settlement_id: &[u8; 32],
+    frontier: &[u8; 32],
+    counter: u64,
+) -> Result<(anchor_core::root_advance::OwnedTransition, [u8; 32]), DsmError> {
+    board_step_transition(
+        ACTION_OFFLINE_SETTLE,
+        device_id,
+        settlement_id,
+        frontier,
+        counter,
+    )
+}
+
+/// The board's transition of `action_type` for a step of the account of the device
+/// `device_id` that is no payment (a load, an unload, the unload of a received payment), named by
+/// `payload`, from the account's `frontier` and `counter`: to the device itself, its payload that
+/// name, under the challenge drawn from it. Answers the transition with its successor frontier
+/// set, and the challenge. The one builder the wallet and every verifier share, so one step always
+/// yields one transition (DSM Amendment A39 draft, option B).
+pub fn board_step_transition(
+    action_type: u32,
+    device_id: &[u8; 32],
+    payload: &[u8; 32],
+    frontier: &[u8; 32],
+    counter: u64,
+) -> Result<(anchor_core::root_advance::OwnedTransition, [u8; 32]), DsmError> {
+    let next_anchor_counter = counter
+        .checked_add(1)
+        .ok_or_else(|| DsmError::invalid_operation("the offline counter is exhausted"))?;
+    let challenge = *crate::crypto::blake3::dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_OFFLINE_BOUNDARY_CHALLENGE,
+    )
+    .update(payload)
+    .finalize()
+    .as_bytes();
+    let policy = crate::types::operations::canonical_offline_bearer_policy().policy_id;
+    // The digest leaves the successor out (the DAG property), so the transition's core is
+    // digested first and its successor is the advance the digest makes.
+    let core = anchor_core::root_advance::Transition {
+        relationship_id: payload,
+        object_id: payload,
+        sender_device_id: device_id,
+        recipient_device_id: device_id,
+        prev_root: frontier,
+        next_root: frontier,
+        anchor_counter: counter,
+        next_anchor_counter,
+        action_type,
+        action_fields: &[],
+        payload_hash: payload,
+        old_leaf_proof: &[],
+        new_leaf_proof: &[],
+        authority_policy_hash: &policy,
+    };
+    let owned = anchor_core::root_advance::OwnedTransition {
+        next_root: anchor_core::root_advance::anchor_root_advance(
+            frontier,
+            &transition_digest(&core, &challenge),
+        ),
+        ..anchor_core::root_advance::OwnedTransition::from(&core)
+    };
+    Ok((owned, challenge))
+}
+
 /// The chip's resident Ed25519 key (`σ^chip`).
 pub struct Ed25519Chip;
 
@@ -371,13 +473,27 @@ pub struct ReceiveHop {
     amount: u64,
 }
 
-/// The unload of one payment received offline, as a step of the account.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The unload of one payment received offline, as a step of the account, with its board's
+/// release (DSM Amendment A39 draft, option B).
+#[derive(Clone)]
 pub struct SettleHop {
+    release: OfflineRelease,
     witness: crate::types::offline_account::SettleWitness,
     asset: [u8; 32],
     amount: u64,
     settlement_id: [u8; 32],
+}
+
+impl core::fmt::Debug for SettleHop {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SettleHop")
+            .field("release_message", &self.release.cert.root_advance_message)
+            .field("anchor_counter", &self.release.cert.anchor_counter)
+            .field("asset", &self.asset)
+            .field("amount", &self.amount)
+            .field("settlement_id", &self.settlement_id)
+            .finish()
+    }
 }
 
 impl core::fmt::Debug for ReceiveHop {
@@ -397,6 +513,32 @@ pub enum AccountHop {
     Spend(SpendHop),
     Receive(ReceiveHop),
     Settle(SettleHop),
+}
+
+impl AccountHop {
+    /// The step this hop takes on its offline account: what a wallet restored
+    /// from its words folds over the account its backup kept, to reach the
+    /// account its cells hold (DSM Amendment A40).
+    pub fn account_step(&self) -> crate::types::offline_account::OfflineAccountStep {
+        use crate::types::offline_account::OfflineAccountStep;
+        match self {
+            Self::Spend(h) => OfflineAccountStep::Spend {
+                asset: h.asset,
+                amount: h.amount,
+                next_frontier: h.witness.next_frontier,
+            },
+            Self::Receive(h) => OfflineAccountStep::Receive {
+                asset: h.asset,
+                amount: h.amount,
+                next_frontier: h.witness.next_frontier,
+            },
+            Self::Settle(h) => OfflineAccountStep::Settle {
+                asset: h.asset,
+                amount: h.amount,
+                next_frontier: h.witness.next_frontier,
+            },
+        }
+    }
 }
 
 fn asset32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
@@ -424,18 +566,22 @@ impl ReceiveHop {
 }
 
 impl SettleHop {
+    /// The unload `release` (a `dsm.anchor.OfflineRelease`, its offline-state proofs attached) of
+    /// the received payment `settlement_id`, `amount` of `asset`, with its account witness.
     pub fn new(
+        release: &[u8],
         witness: crate::types::offline_account::SettleWitness,
         asset: [u8; 32],
         amount: u64,
         settlement_id: [u8; 32],
-    ) -> Self {
-        Self {
+    ) -> Result<Self, DsmError> {
+        Ok(Self {
+            release: decode_release(release)?,
             witness,
             asset,
             amount,
             settlement_id,
-        }
+        })
     }
 }
 
@@ -457,6 +603,7 @@ impl AccountHop {
                     asset: s.asset.to_vec(),
                     amount: s.amount,
                     settlement_id: s.settlement_id.to_vec(),
+                    release: anchor_core::proto::encode_release(&s.release.to_pb()),
                 }),
             }),
         }
@@ -489,6 +636,7 @@ impl AccountHop {
                 r.amount,
             )?)),
             Some(Hop::Settle(s)) => Ok(Self::Settle(SettleHop::new(
+                &s.release,
                 crate::types::offline_account::SettleWitness::from_proto(s.settle.ok_or_else(
                     || {
                         DsmError::invalid_operation(
@@ -499,7 +647,7 @@ impl AccountHop {
                 asset32(&s.asset, "an unload's asset")?,
                 s.amount,
                 asset32(&s.settlement_id, "an unload's settlement")?,
-            ))),
+            )?)),
             None => Err(DsmError::invalid_operation(
                 "an offline account hop names no step",
             )),
@@ -516,13 +664,23 @@ impl AccountHop {
         }
     }
 
+    /// The root-advance message `M` the account's board signed for the step, which names it: for a
+    /// spend or a receive. An unload of a received payment carries no board signature.
+    pub fn board_message(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Spend(s) => Some(s.release.cert.root_advance_message),
+            Self::Receive(r) => Some(r.release.cert.root_advance_message),
+            Self::Settle(s) => Some(s.release.cert.root_advance_message),
+        }
+    }
+
     /// The counter and the frontier the step started from, for a step its board signed (a spend or
     /// a receive). An unload of a received payment moves neither.
     pub fn starts_at(&self) -> Option<(u64, [u8; 32])> {
         match self {
             Self::Spend(s) => Some((s.witness.pre_counter, s.witness.pre_frontier)),
             Self::Receive(r) => Some((r.witness.pre_counter, r.witness.pre_frontier)),
-            Self::Settle(_) => None,
+            Self::Settle(s) => Some((s.witness.pre_counter, s.witness.pre_frontier)),
         }
     }
 }
@@ -626,15 +784,72 @@ pub fn verify_account_hops(
                 at = after;
             }
             AccountHop::Settle(settle) => {
-                if settle.witness.pre_account_root != at {
+                // The board signed the unload at its next counter, from where the account stood
+                // (DSM Amendment A39 draft, option B).
+                let cert = &settle.release.cert;
+                let w = &settle.witness;
+                if cert.anchor_bundle != anchor.bundle || cert.anchor_id != anchor.anchor_id {
+                    return Err(refused("it is not the account's own anchor's"));
+                }
+                let (expected, challenge) = settle_transition(
+                    owner_device,
+                    &settle.settlement_id,
+                    &w.pre_frontier,
+                    w.pre_counter,
+                )?;
+                if anchor_core::root_advance::enc_transition(
+                    &settle.release.transition.as_transition(),
+                ) != anchor_core::root_advance::enc_transition(&expected.as_transition())
+                    || cert.receiver_challenge != challenge
+                    || cert.recipient != *owner_device
+                    || cert.prev_frontier != w.pre_frontier
+                    || cert.next_frontier != expected.next_root
+                    || cert.next_frontier != w.next_frontier
+                    || cert.anchor_counter != w.pre_counter
+                    || cert.next_anchor_counter != expected.next_anchor_counter
+                    || transition_digest(&expected.as_transition(), &challenge)
+                        != cert.transition_digest
+                {
+                    return Err(refused(
+                        "its release does not sign this unload of a received payment",
+                    ));
+                }
+                verify_cert_frontier_and_sigs::<Ed25519Chip, SphincsHost>(
+                    cert,
+                    &anchor.pk_chip,
+                    &anchor.pk_host,
+                )
+                .map_err(|e| refused(&format!("the board did not sign this unload: {e:?}")))?;
+                let before = verify_offline_state_at(
+                    &cert.sender_device_root_before,
+                    &anchor.bundle,
+                    &cert.prev_frontier,
+                    cert.anchor_counter,
+                    &settle.release.offline_state_proof_before,
+                )
+                .map_err(|e| refused(&format!("its device root before: {e}")))?;
+                if before != at || w.pre_account_root != at {
                     return Err(refused(
                         "it does not start from the account the steps stand at",
                     ));
                 }
-                at = settle
-                    .witness
+                let after = w
                     .post_account_root(&settle.asset, settle.amount)
                     .map_err(|e| refused(&format!("its unload does not fold: {e}")))?;
+                let committed = verify_offline_state_at(
+                    &cert.sender_device_root_after,
+                    &anchor.bundle,
+                    &cert.next_frontier,
+                    cert.next_anchor_counter,
+                    &settle.release.offline_state_proof_after,
+                )
+                .map_err(|e| refused(&format!("its device root after: {e}")))?;
+                if committed != after {
+                    return Err(refused(
+                        "its device root after does not commit the account its unload leaves",
+                    ));
+                }
+                at = after;
             }
         }
     }
@@ -885,6 +1100,31 @@ pub(crate) mod fixture {
             loaded: u64,
             flags: u8,
         ) -> Self {
+            let mut payer = Self::opened_on(device, owner_sk, genesis, seed, flags);
+            payer.boundary(OfflineBoundaryKind::Load, loaded);
+            payer
+        }
+
+        /// A device `seed` whose anchor is born for it and whose offline account is open at the
+        /// anchor's origin, holding nothing.
+        pub(crate) fn opened(seed: u8) -> Self {
+            Self::opened_on(
+                crate::types::device_state::tests::fresh_device(seed),
+                crate::types::device_state::tests::test_keypair().secret_key(),
+                derive(seed, "genesis"),
+                seed,
+                crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+            )
+        }
+
+        /// [`Self::opened`] on `device`, as [`Self::loaded_on`].
+        pub(crate) fn opened_on(
+            device: DeviceState,
+            owner_sk: &[u8],
+            genesis: [u8; 32],
+            seed: u8,
+            flags: u8,
+        ) -> Self {
             let resident = SigningKey::from_bytes(&derive(seed, "resident key"));
             let chip_pk = resident.verifying_key().to_bytes().to_vec();
             let (token, token_policy) = crate::sofi::validation::fixtures::committed(
@@ -931,11 +1171,7 @@ pub(crate) mod fixture {
             );
             head = head
                 .open_offline_account(&pin.bundle, frontier, 0)
-                .expect("the account opens at the anchor's origin")
-                .cross_offline_boundary(&pin.bundle, OfflineBoundaryKind::Load, &token, loaded)
-                .expect("the load")
-                .new_device_state
-                .into_head();
+                .expect("the account opens at the anchor's origin");
             Self {
                 head,
                 app,
@@ -948,6 +1184,80 @@ pub(crate) mod fixture {
                 related: Vec::new(),
                 owner_sk: owner_sk.to_vec(),
             }
+        }
+
+        /// A load or an unload of `amount` of the token, signed by the board at its next counter
+        /// as the wallet has it signed (DSM Amendment A39 draft, option B): the boundary's
+        /// transition built from its operation id, the board authorized, prepared over the two
+        /// device roots, committed, emitted with the offline-state proofs and finalized. Answers
+        /// the outcome Core took and the release's bytes; the head moves to the outcome's.
+        pub(crate) fn boundary(
+            &mut self,
+            kind: OfflineBoundaryKind,
+            amount: u64,
+        ) -> (crate::types::device_state::OfflineBoundaryOutcome, Vec<u8>) {
+            self.try_boundary(kind, amount)
+                .expect("the board signs the boundary")
+        }
+
+        /// [`Self::boundary`], with the board's refusal to sign it, if it refuses.
+        pub(crate) fn try_boundary(
+            &mut self,
+            kind: OfflineBoundaryKind,
+            amount: u64,
+        ) -> Result<
+            (crate::types::device_state::OfflineBoundaryOutcome, Vec<u8>),
+            anchor_core::appliance::ApplianceError,
+        > {
+            let (id, counter, frontier) = self
+                .head
+                .offline_boundary_start(&self.pin.bundle, kind, &self.token, amount)
+                .expect("the boundary's start");
+            let (t, challenge) =
+                super::boundary_transition(kind, &self.head.devid(), &id, &frontier, counter)
+                    .expect("the boundary's transition");
+            let outcome = self
+                .head
+                .cross_offline_boundary(&self.pin.bundle, kind, &self.token, amount, t.next_root)
+                .expect("the boundary");
+            let nonce = self
+                .app
+                .draw_authorization_nonce()
+                .expect("the anchor draws a nonce");
+            let authorization = owner_authorization_digest(
+                &self.pin.bundle,
+                &frontier,
+                counter,
+                &transition_digest(&t.as_transition(), &challenge),
+                &outcome.pre_device_root,
+                &outcome.post_device_root,
+                &nonce,
+            );
+            let signature = crate::crypto::sphincs::sign(
+                crate::crypto::sphincs::SphincsVariant::SPX256f,
+                &self.owner_sk,
+                &authorization,
+            )
+            .expect("the owner signs");
+            self.app
+                .authorize(&authorization, &signature)
+                .expect("authorized");
+            self.app.prepare(
+                &t.as_transition(),
+                &challenge,
+                &outcome.pre_device_root,
+                &outcome.post_device_root,
+            )?;
+            self.app.commit().expect("committed");
+            let mut release = self.app.emit().expect("emitted").clone();
+            release.offline_state_proof_before = outcome.offline_state_proofs.parent.clone();
+            release.offline_state_proof_after = outcome.offline_state_proofs.child.clone();
+            self.app.finalize().expect("finalized");
+            self.head = outcome.new_device_state.clone().into_head();
+            Ok((
+                outcome,
+                anchor_core::proto::encode_release(&release.to_pb()),
+            ))
         }
 
         /// The device's advance for a spend of `amount` to `to` from where its
@@ -1019,7 +1329,8 @@ pub(crate) mod fixture {
             let challenge = derive(counter as u8, "challenge");
             let policy = crate::types::operations::canonical_offline_bearer_policy().policy_id;
             let object = derive(0, "object");
-            let payload = *blake3::hash(&operation.to_bytes()).as_bytes();
+            // The payload hash the wallet signs: the domain-tagged hash of the transfer (SA-133).
+            let payload = crate::types::operations::bearer_payload_hash(&operation.to_bytes());
             let devid = self.head.devid();
             let core = Transition {
                 relationship_id: &rk,
@@ -1150,6 +1461,47 @@ mod tests {
     /// A chain of spends verifies hop by hop from the account the payer's load
     /// left to the account the payer holds after them, and answers each
     /// payment: whom, what, and the account before and after.
+    /// DSM Amendment A39 draft, option B: the unload of a received payment is its board's signed
+    /// advance like every step of the account. One carrying a payment's release in place of its
+    /// own — a step the board did not sign as this unload — is refused, so it never counts in an
+    /// account's history.
+    #[test]
+    fn an_unload_its_board_did_not_sign_is_refused() {
+        let mut payer = Payer::loaded(0x71, 40);
+        let start = payer.account_root();
+        let (spend, _, _) = payer.spend([0xB0; 32], 10);
+        let (counter, frontier) = payer
+            .head
+            .offline_account_standing(&payer.pin.bundle)
+            .expect("the account is open");
+        let witness = crate::types::offline_account::SettleWitness {
+            pre_account_root: start,
+            pre_received: 10,
+            pre_counter: counter,
+            pre_frontier: frontier,
+            next_frontier: [0x5E; 32],
+            account_paths: Vec::new(),
+        };
+        let forged = AccountHop::Settle(
+            super::SettleHop::new(
+                &anchor_core::proto::encode_release(&spend.release().to_pb()),
+                witness,
+                payer.token,
+                10,
+                [0x5D; 32],
+            )
+            .expect("decodes"),
+        );
+        let refused = verify_account_hops(&start, &payer.pin, &payer.head.devid(), &[forged])
+            .expect_err("a payment's release is no unload's");
+        assert!(
+            refused
+                .to_string()
+                .contains("its release does not sign this unload of a received payment"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn a_chain_of_spends_verifies_from_the_account_it_starts_at() {
         let mut payer = Payer::loaded(0x31, 40);
@@ -1174,9 +1526,10 @@ mod tests {
             payer.account_root(),
             "the chain leaves the account the payer holds"
         );
+        // The board-signed load took counter step 0; the two spends take 1 and 2.
         assert_eq!(
             (payments[1].after.counter, payments[0].before.counter),
-            (2, 0)
+            (3, 1)
         );
         assert_eq!(
             verify_spend_chain(&start, &payer.pin, &[]).expect("an empty chain"),

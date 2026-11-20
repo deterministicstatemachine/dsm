@@ -54,10 +54,6 @@ jest.mock('../inputs/providers/StateBoyInputProvider', () => ({
   StateBoyInputProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-jest.mock('../hooks/useGenesisFlow', () => ({
-  useGenesisFlow: () => ({ handleGenerateGenesis: jest.fn() }),
-}));
-
 jest.mock('../hooks/useIntroGate', () => ({
   useIntroGate: () => ({ showIntro: false, dismissIntro: () => {} }),
 }));

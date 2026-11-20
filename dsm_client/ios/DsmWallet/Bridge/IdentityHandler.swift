@@ -39,30 +39,43 @@ final class IdentityHandler {
     /// `WalletCreateGenesisV2Request`, handed to the route as it came. Answers
     /// the framed genesis envelope; Rust's own error envelope is forwarded.
     func createGenesisV2(request: Data) throws -> Data {
+        try installWallet(route: "system.createGenesisV2", request: request)
+    }
+
+    /// A wallet on the DSM network restored from its 24 words, through
+    /// `system.restoreFromPhrase` (same request shape): the same identity, at
+    /// its last online balance. Persisted on success exactly as a new wallet.
+    func restoreFromPhrase(request: Data) throws -> Data {
+        try installWallet(route: "system.restoreFromPhrase", request: request)
+    }
+
+    /// A wallet installed by `route` from the request's mnemonic, its public
+    /// identity persisted on success.
+    private func installWallet(route: String, request: Data) throws -> Data {
         guard !request.isEmpty else {
-            throw BridgeFailure.invalidPayload("createGenesisV2: mnemonic is required")
+            throw BridgeFailure.invalidPayload("\(route): mnemonic is required")
         }
         do {
-            let envelope = try DsmSdk.routerInvoke("system.createGenesisV2", args: DsmSdk.argPack(body: request))
+            let envelope = try DsmSdk.routerInvoke(route, args: DsmSdk.argPack(body: request))
             let errorCode = DsmSdk.errorCode(of: envelope)
             if errorCode != 0 {
-                DsmLog.warn("IdentityHandler", "createGenesisV2: Rust answered error envelope code=\(errorCode)")
+                DsmLog.warn("IdentityHandler", "\(route): Rust answered error envelope code=\(errorCode)")
                 return envelope
             }
             guard let identity = DsmSdk.genesisCreatedIdentity(envelope) else {
-                throw BridgeFailure.invalidPayload("createGenesisV2: the envelope installs no 32-byte identity")
+                throw BridgeFailure.invalidPayload("\(route): the envelope installs no 32-byte identity")
             }
             Preferences.setIdentity(.deviceId, Base32Crockford.encode(identity.deviceId))
             Preferences.setIdentity(.genesisHash, Base32Crockford.encode(identity.genesisHash))
             Preferences.setIdentity(.genesisEnvelope, Base32Crockford.encode(envelope))
             // The Rust route already initialized the SDK context (the wallet is unlocked this session).
             setContext(.initialized)
-            DsmLog.info("IdentityHandler", "createGenesisV2: identity persisted and SDK context initialized")
+            DsmLog.info("IdentityHandler", "\(route): identity persisted and SDK context initialized")
             // The appliance has an identity now; the radio follows it.
             DispatchQueue.main.async { WalletViewController.active?.startBleForIdentity() }
             return envelope
         } catch {
-            DsmLog.error("IdentityHandler", "createGenesisV2 failed: \(error)")
+            DsmLog.error("IdentityHandler", "\(route) failed: \(error)")
             Preferences.clearIdentity()
             setContext(.uninitialized)
             throw error

@@ -12,24 +12,28 @@ mod app_cell;
 mod connect;
 mod economic;
 mod escrow;
+mod offline_origin;
 mod protocol;
 mod shared_lineage;
 mod sofi;
 mod testing;
 mod token_ops;
 mod wallet;
+mod wallet_backup;
 
 pub use addressing::*;
 pub use app_cell::*;
 pub use connect::*;
 pub use economic::*;
 pub use escrow::*;
+pub use offline_origin::*;
 pub use protocol::*;
 pub use shared_lineage::*;
 pub use sofi::*;
 pub use testing::*;
 pub use token_ops::*;
 pub use wallet::*;
+pub use wallet_backup::*;
 
 /// The SoFi v8 tags, collected separately so the flat `TAGS` list below stays
 /// untouched by the v8 allocation.
@@ -48,6 +52,18 @@ pub(super) fn escrow_tags() -> &'static [TaggedHashDomain<'static>] {
 #[cfg(test)]
 pub(super) fn app_cell_tags() -> &'static [TaggedHashDomain<'static>] {
     app_cell::APP_CELL_TAGS
+}
+
+/// The offline origin-cell tags (DSM Amendment A39 draft), collected the same way.
+#[cfg(test)]
+pub(super) fn offline_origin_tags() -> &'static [TaggedHashDomain<'static>] {
+    offline_origin::OFFLINE_ORIGIN_TAGS
+}
+
+/// The wallet-backup tags (DSM Amendment A40), collected the same way.
+#[cfg(test)]
+pub(super) fn wallet_backup_tags() -> &'static [TaggedHashDomain<'static>] {
+    wallet_backup::WALLET_BACKUP_TAGS
 }
 
 /// The shared-lineage tags (SoFi Amendment S23), collected the same way.
