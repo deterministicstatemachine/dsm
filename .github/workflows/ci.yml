@@ -1070,6 +1070,10 @@ jobs:
       - name: dsm-anchor-secure-monitor builds its four images (thumbv8m)
         working-directory: crates/dsm-anchor-secure-monitor
         run: |
+          # A board wired on the Pico's left side (SPI1, GP12-GP15) runs images
+          # built with chip_on_spi1; the checks below run on the default image.
+          cargo build --release --locked --features bench_self_enroll,chip_on_spi1
+          cargo build --release --locked --features production,chip_on_spi1
           cargo build --release --locked --features bench_self_enroll,prepare_chip
           cargo build --release --locked --features bench_self_enroll,identify_chip
           cargo build --release --locked --features bench_self_enroll
