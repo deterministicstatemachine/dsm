@@ -87,8 +87,10 @@ async fn a_phone_with_no_board_of_its_own_cannot_receive_offline() {
     let payer = HostAppliance::birth(&pair.a, [0xC4; 32], 16);
     let _boards = HostAppliance::install_each(vec![(pair.a.device_id, payer.clone())]);
     a.device.enter();
-    let loaded = offline_cash(&a, "wallet.loadOffline", "20.00").await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    a.device
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     pair.b.sync().await;
     let before = board(&payer);
 
@@ -485,8 +487,10 @@ async fn an_acknowledgement_that_is_not_the_receivers_board_commit_is_refused_an
 async fn a_phone_that_received_offline_goes_on_paying_offline_from_what_it_loaded() {
     let (pair, a, b, appliance, payment) = loaded_pair(100, 100).await;
     b.device.enter();
-    let loaded = offline_cash(&b, "wallet.loadOffline", "20.00").await;
-    assert!(loaded.success, "B's load: {:?}", loaded.error_message);
+    b.device
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("B's load");
     pair.a.sync().await;
     let first = bearer_payment_over_ble(&a, &b, &payment).await;
     assert_committed_on_both(&a, &b, &first);
@@ -537,8 +541,10 @@ async fn a_second_offline_receive_waits_until_the_first_has_arrived() {
     ]);
     let c = OfflineDevice::new(&c_device);
     c.device.enter();
-    let loaded = offline_cash(&c, "wallet.loadOffline", "20.00").await;
-    assert!(loaded.success, "C's load: {:?}", loaded.error_message);
+    c.device
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("C's load");
     pair.b.sync().await;
 
     a.device.enter();

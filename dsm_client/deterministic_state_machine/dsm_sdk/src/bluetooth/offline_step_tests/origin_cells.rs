@@ -195,17 +195,10 @@ async fn a_cloned_board_paying_two_receivers_settles_once_on_the_nodes() {
     let installed = boards(board_a.clone());
 
     pair.a.enter();
-    let loaded = pair
-        .a
-        .invoke(
-            "wallet.loadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "20.00".to_string(),
-            },
-        )
-        .await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    pair.a
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     pair.b.sync().await;
     c_device.sync().await;
     let mut copy = pair.a.backed_up_into("A-copy");
@@ -462,17 +455,10 @@ async fn a_restored_wallet_carries_on_offline_from_its_cells() {
         (c_device.device_id, board_c.clone()),
     ]);
     pair.a.enter();
-    let loaded = pair
-        .a
-        .invoke(
-            "wallet.loadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "20.00".to_string(),
-            },
-        )
-        .await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    pair.a
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     pair.b.sync().await;
     c_device.sync().await;
     pair.a.enter();

@@ -31,8 +31,10 @@ async fn loaded_with_no_sync_since() -> (Pair, OfflineDevice, OfflineDevice, Ins
         HostAppliance::birth(&pair.b, [0xB4; 32], 16),
     );
     a.device.enter();
-    let loaded = offline_cash(&a, "wallet.loadOffline", "20.00").await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    a.device
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     (pair, a, b, appliance)
 }
 
@@ -85,8 +87,10 @@ async fn a_load_reaches_a_contact_by_its_sync_and_the_first_offline_payment_is_t
     );
 
     a.device.enter();
-    let unloaded = offline_cash(&a, "wallet.unloadOffline", "10.00").await;
-    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    a.device
+        .offline_boundary("wallet.unloadOffline", "10.00")
+        .await
+        .expect("the unload");
     let synced = pair.b.sync().await;
     assert_eq!(synced.errors, Vec::<String>::new(), "B's second sync");
     b.device.enter();
@@ -191,8 +195,10 @@ async fn a_contact_checks_a_load_one_hop_and_reads_nothing_behind_it() {
         HostAppliance::birth(&pair.b, [0xB4; 32], 16),
     );
     a.device.enter();
-    let loaded = offline_cash(&a, "wallet.loadOffline", "20.00").await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    a.device
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     a.device.enter();
     let (load_at, _) = get_admitted_coordinate()
         .expect("A's admitted coordinate reads")
@@ -244,8 +250,10 @@ async fn each_contact_is_told_what_it_is_owed_of_a_payers_boundaries() {
     let (pair, a, _b, appliance) = loaded_with_no_sync_since().await;
     a.device.enter();
     let loaded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
-    let unloaded = offline_cash(&a, "wallet.unloadOffline", "5.00").await;
-    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    a.device
+        .offline_boundary("wallet.unloadOffline", "5.00")
+        .await
+        .expect("the unload");
     let unloaded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
     assert_eq!(unloaded_at, loaded_at + 1);
     let bundle = appliance.pin().bundle;

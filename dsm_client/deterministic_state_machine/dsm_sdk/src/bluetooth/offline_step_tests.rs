@@ -840,17 +840,10 @@ async fn loaded_pair(
         crate::test_support::appliance::HostAppliance::birth(&pair.b, [0xB4; 32], 16),
     );
     a.device.enter();
-    let loaded = a
-        .device
-        .invoke(
-            "wallet.loadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "20.00".to_string(),
-            },
-        )
-        .await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    a.device
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     pair.b.sync().await;
     let operation = bearer_transfer(&b, 7);
     (pair, a, b, appliance, operation)
@@ -1348,17 +1341,10 @@ async fn an_ended_trials_account_is_closed_at_the_new_install_and_what_it_held_i
         installed.status
     );
     let bundle = installed.bundle;
-    let loaded = a
-        .device
-        .invoke(
-            "wallet.loadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "20.00".to_string(),
-            },
-        )
-        .await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    a.device
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     pair.b.sync().await;
     // The board signed the load: it is the account's one step (DSM Amendment A39).
     let after_load = core
@@ -1666,17 +1652,10 @@ async fn a_receiver_board_without_the_owners_stamp_takes_no_payment() {
         unstamped.clone(),
     );
     a.device.enter();
-    let loaded = a
-        .device
-        .invoke(
-            "wallet.loadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "20.00".to_string(),
-            },
-        )
-        .await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    a.device
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     pair.b.sync().await;
     let operation = bearer_transfer(&b, 7);
     a.device.enter();
@@ -2565,17 +2544,10 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_and_spend_
     // A comes back later and unloads what is left: its boundary carries both spends, which its
     // cells already hold. Nothing is counted twice: 90 online on A, 10 on B, of the 100 funded.
     a.device.enter();
-    let unloaded = a
-        .device
-        .invoke(
-            "wallet.unloadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "10.00".to_string(),
-            },
-        )
-        .await;
-    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    a.device
+        .offline_boundary("wallet.unloadOffline", "10.00")
+        .await
+        .expect("the unload");
     assert_eq!(
         unexposed_spends(&a, &appliance),
         0,
@@ -2767,8 +2739,10 @@ async fn an_offline_payment_in_flight_holds_the_account_until_it_is_acknowledged
 
     offline_step(&a, &c, bearer_transfer(&c, whole_era(3))).await;
     assert_eq!(unexposed_spends(&a, &appliance), 2, "A's two spends wait");
-    let unloaded = offline_cash(&a, "wallet.unloadOffline", "10.00").await;
-    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    a.device
+        .offline_boundary("wallet.unloadOffline", "10.00")
+        .await
+        .expect("the unload");
     assert_eq!(
         unexposed_spends(&a, &appliance),
         0,
@@ -4521,17 +4495,10 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
         .expect("a spend from the account B recorded is taken");
 
     a.device.enter();
-    let unloaded = a
-        .device
-        .invoke(
-            "wallet.unloadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "5.00".to_string(),
-            },
-        )
-        .await;
-    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    a.device
+        .offline_boundary("wallet.unloadOffline", "5.00")
+        .await
+        .expect("the unload");
     let from_unload = stage_release(&a, &b, &operation);
     let (unload_receipt, unload_leaves) = spend_receipt(&a, &b, &operation, &from_unload);
     let refused =
