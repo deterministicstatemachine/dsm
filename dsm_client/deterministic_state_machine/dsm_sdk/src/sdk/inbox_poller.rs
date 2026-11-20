@@ -418,6 +418,13 @@ pub(crate) fn poller_stopping() -> bool {
     POLLER_STOP.load(Ordering::SeqCst)
 }
 
+/// No stop asked of the poller: what a test whose code reads
+/// [`poller_stopping`] starts from, whatever a test before it left.
+#[cfg(test)]
+pub(crate) fn clear_stop_for_test() {
+    POLLER_STOP.store(false, Ordering::SeqCst);
+}
+
 /// True while this device owes the network a settlement step that only polling
 /// can complete:
 ///   * a SENDER-side pending online gate awaiting the recipient's acceptance
@@ -912,7 +919,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn stop_poller_sets_flag() {
-        POLLER_STOP.store(false, Ordering::SeqCst);
+        clear_stop_for_test();
         POLLER_RUNNING.store(false, Ordering::SeqCst);
         stop_poller();
         assert!(POLLER_STOP.load(Ordering::SeqCst));

@@ -59,7 +59,8 @@ use super::facts::{
     KeyGroundReads, LastLinkReads, LegReads, NotEstablished, ResolvedParent, TraderAtParent,
 };
 use super::lineage::{
-    advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted,
+    advance_own_replayed, advance_peer_resolved, AdvanceError, PeerResolvedAdvance,
+    ResolvedAdvance, genesis_accepted,
     AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
 };
 use super::publication::{recognize_setup, Signed};
@@ -3772,6 +3773,30 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
         ),
         PeerLineageFailure,
     > {
+        let advanced = self
+            .after(previous, parent)
+            .peer_position(previous, parent, held)?;
+        Ok((advanced.root, advanced.claim))
+    }
+
+    fn replay(
+        &self,
+        previous: &crate::economic::lineage::ValidatedEconomicRoot,
+        parent: &ParentClaimRef,
+        held: &SofiResolutionClaim,
+    ) -> Result<ResolvedAdvance, PeerLineageFailure> {
+        self.after(previous, parent)
+            .own_position_replayed(previous, parent, held)
+    }
+}
+
+impl<R: SofiReads + ?Sized> PeerPositionResolver<'_, R> {
+    /// A verifier of the position after `previous`.
+    fn after(
+        &self,
+        previous: &crate::economic::lineage::ValidatedEconomicRoot,
+        parent: &ParentClaimRef,
+    ) -> Verifier<'_, R> {
         // The walk authenticated `q − 1` itself: `parent` is the claim it
         // accepted there and `previous` the root it holds — for a SoFi
         // position, the root that resolution selected. What a `P` at `q`
@@ -3781,7 +3806,7 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
             selected_root: previous.economic_root(),
             named: *parent,
         });
-        let verifier = Verifier::new(
+        Verifier::new(
             self.reads,
             self.members,
             self.set_id,
@@ -3789,9 +3814,7 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
             resolved,
             AcceptedGeneses::default(),
         )
-        .with_programs(self.programs.clone());
-        let advanced = verifier.peer_position(previous, parent, held)?;
-        Ok((advanced.root, advanced.claim))
+        .with_programs(self.programs.clone())
     }
 }
 
@@ -3819,6 +3842,46 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         parent_claim: &ParentClaimRef,
         held: &SofiResolutionClaim,
     ) -> Result<PeerResolvedAdvance, PeerLineageFailure> {
+        let facts = self.position_facts(previous, held)?;
+        advance_peer_resolved(
+            previous,
+            &facts.precommit,
+            &facts.fulfillment,
+            parent_claim,
+            &facts.established,
+        )
+        .map_err(|e| advance_failure(held.position, e))
+    }
+
+    /// The trader's OWN position `q`, replayed by a wallet restored from its
+    /// phrase (DSM Amendment A40): the same stages and the same facts as
+    /// [`Self::peer_position`], and what the realization installed, derived as
+    /// the trader's device derived it ([`advance_own_replayed`]).
+    pub fn own_position_replayed(
+        &self,
+        previous: &crate::economic::lineage::ValidatedEconomicRoot,
+        parent_claim: &ParentClaimRef,
+        held: &SofiResolutionClaim,
+    ) -> Result<ResolvedAdvance, PeerLineageFailure> {
+        let facts = self.position_facts(previous, held)?;
+        advance_own_replayed(
+            previous,
+            &facts.precommit,
+            &facts.fulfillment,
+            parent_claim,
+            &facts.established,
+        )
+        .map_err(|e| advance_failure(held.position, e))
+    }
+
+    /// What a verifier establishes of a trader's position `q`, whose root
+    /// cell holds `held`, over its own reads: `P`, the registered `F` and the
+    /// facts the ladder decides over.
+    fn position_facts(
+        &self,
+        previous: &crate::economic::lineage::ValidatedEconomicRoot,
+        held: &SofiResolutionClaim,
+    ) -> Result<PositionFacts, PeerLineageFailure> {
         use PeerLineageFailure::{Incomplete, Invalid, Unresolved};
         let q = held.position;
         let read = |e: VerifierFailure| Incomplete(format!("position {q}: {e}"));
@@ -3948,32 +4011,41 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     Unresolved(format!("position {q}: the facts: {why:?}"))
                 }
             })?;
-
-        advance_peer_resolved(
-            previous,
-            &precommit,
-            &fulfillment.body,
-            parent_claim,
-            &established,
-        )
-        .map_err(|e| match e {
-            // Complete facts the ladder does not resolve yet, or facts read at
-            // a cell some other exercise holds: nothing is known wrong.
-            AdvanceError::FactsIncomplete(..) | AdvanceError::FactsAreNotThisOperation { .. } => {
-                Unresolved(format!("position {q}: {e}"))
-            }
-            AdvanceError::LineageIsTerminal
-            | AdvanceError::PositionIsNotSuccessor { .. }
-            | AdvanceError::PreRootIsNotThePredecessor { .. }
-            | AdvanceError::ParentClaimMismatch
-            | AdvanceError::RefutedYetNotTerminal
-            | AdvanceError::CreditsNotDerivable
-            | AdvanceError::TokenNotAdopted { .. }
-            | AdvanceError::BalancesNotDerivable(..)
-            | AdvanceError::VaultStatesNotDerivable(..)
-            | AdvanceError::PreimageIsNotThisOperation { .. }
-            | AdvanceError::Counter(..) => Invalid(format!("position {q}: {e}")),
+        Ok(PositionFacts {
+            precommit,
+            fulfillment: fulfillment.body,
+            established,
         })
+    }
+}
+
+/// What [`Verifier::position_facts`] establishes of one position.
+struct PositionFacts {
+    precommit: TraderPrecommitBody,
+    fulfillment: TraderFulfillmentBody,
+    established: Established,
+}
+
+/// Why the advance at `q` refused, as a walk of the trader's lineage reads it.
+fn advance_failure(q: u64, e: AdvanceError) -> PeerLineageFailure {
+    use PeerLineageFailure::{Invalid, Unresolved};
+    match e {
+        // Complete facts the ladder does not resolve yet, or facts read at
+        // a cell some other exercise holds: nothing is known wrong.
+        AdvanceError::FactsIncomplete(..) | AdvanceError::FactsAreNotThisOperation { .. } => {
+            Unresolved(format!("position {q}: {e}"))
+        }
+        AdvanceError::LineageIsTerminal
+        | AdvanceError::PositionIsNotSuccessor { .. }
+        | AdvanceError::PreRootIsNotThePredecessor { .. }
+        | AdvanceError::ParentClaimMismatch
+        | AdvanceError::RefutedYetNotTerminal
+        | AdvanceError::CreditsNotDerivable
+        | AdvanceError::TokenNotAdopted { .. }
+        | AdvanceError::BalancesNotDerivable(..)
+        | AdvanceError::VaultStatesNotDerivable(..)
+        | AdvanceError::PreimageIsNotThisOperation { .. }
+        | AdvanceError::Counter(..) => Invalid(format!("position {q}: {e}")),
     }
 }
 

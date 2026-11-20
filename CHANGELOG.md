@@ -47,7 +47,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   directory entry before anything is installed, back at its last online
   balance. The balance comes from the wallet's own register, re-verified from
   its start to its head with the check any device runs for a peer, its leaves
-  rebuilt from each step's witness. Words of no wallet on the network restore
+  rebuilt from each step's witness. SoFi trades and escrow releases that
+  realized come back too: the restore works out what each one paid exactly as
+  the lost phone did, from SoFi's public objects, and keeps it only when it
+  matches the root the network holds. A position still open holds the restore
+  until it resolves. Words of no wallet on the network restore
   nothing. Contacts come back from the wallet's own backup on the nodes:
   sealed under a key only the 24 words give, taken once the wallet has been
   still about 20 seconds (any new step cancels it), and installed only when it

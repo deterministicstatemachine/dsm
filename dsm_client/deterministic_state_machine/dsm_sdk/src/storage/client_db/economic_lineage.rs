@@ -482,6 +482,74 @@ pub fn record_admitted_with_conn(
     admitted: &AdmittedEconomicPosition,
     leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
 ) -> Result<()> {
+    let (position, kind, root, fulfillment, realize, void, claim_ref) = admitted_row(admitted)?;
+    tx.execute(
+        "INSERT INTO economic_admitted_v2 (id, economic_position, claim_kind, economic_root, \
+             fulfillment_id, realize_root, void_root, claim_ref)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+             economic_position = excluded.economic_position,
+             claim_kind = excluded.claim_kind,
+             economic_root = excluded.economic_root,
+             fulfillment_id = excluded.fulfillment_id,
+             realize_root = excluded.realize_root,
+             void_root = excluded.void_root,
+             claim_ref = excluded.claim_ref",
+        params![position, kind, root, fulfillment, realize, void, claim_ref],
+    )?;
+    record_admitted_history_with_conn(tx, admitted)?;
+    tx.execute("DELETE FROM economic_leaf_cache", [])?;
+    for (key, value, ccb) in leaves {
+        tx.execute(
+            "INSERT INTO economic_leaf_cache (leaf_key, leaf_value, state_ccb)
+             VALUES (?1, ?2, ?3)",
+            params![key.as_slice(), value.as_slice(), ccb],
+        )?;
+    }
+    Ok(())
+}
+
+/// Record `admitted` in this device's admitted history alone, INSIDE the
+/// caller's transaction: what [`get_admitted_at`] reads. A wallet restored from
+/// its phrase writes every position its register's replay proved before its
+/// head this way (DSM Amendment A40), as its device recorded each when it
+/// admitted it.
+pub fn record_admitted_history_with_conn(
+    tx: &Transaction<'_>,
+    admitted: &AdmittedEconomicPosition,
+) -> Result<()> {
+    let (position, kind, root, fulfillment, realize, void, claim_ref) = admitted_row(admitted)?;
+    tx.execute(
+        "INSERT INTO economic_admitted_history (economic_position, claim_kind, economic_root, \
+             fulfillment_id, realize_root, void_root, claim_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(economic_position) DO UPDATE SET
+             claim_kind = excluded.claim_kind,
+             economic_root = excluded.economic_root,
+             fulfillment_id = excluded.fulfillment_id,
+             realize_root = excluded.realize_root,
+             void_root = excluded.void_root,
+             claim_ref = excluded.claim_ref",
+        params![position, kind, root, fulfillment, realize, void, claim_ref],
+    )?;
+    Ok(())
+}
+
+/// The columns an admitted row holds: position, kind, root, fulfillment,
+/// realize root, void root, claim reference.
+type AdmittedColumns<'a> = (
+    i64,
+    i64,
+    Option<&'a [u8]>,
+    Option<&'a [u8]>,
+    Option<&'a [u8]>,
+    Option<&'a [u8]>,
+    Option<&'a [u8]>,
+);
+
+/// The row `admitted` is written as, in the ONE exact shape of the position's
+/// kind.
+fn admitted_row(admitted: &AdmittedEconomicPosition) -> Result<AdmittedColumns<'_>> {
     let position = i64::try_from(admitted.economic_position())
         .map_err(|e| anyhow!("position overflow: {e}"))?;
     let (kind, root, fulfillment, realize, void, claim_ref): (
@@ -531,42 +599,7 @@ pub fn record_admitted_with_conn(
             None,
         ),
     };
-    tx.execute(
-        "INSERT INTO economic_admitted_v2 (id, economic_position, claim_kind, economic_root, \
-             fulfillment_id, realize_root, void_root, claim_ref)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO UPDATE SET
-             economic_position = excluded.economic_position,
-             claim_kind = excluded.claim_kind,
-             economic_root = excluded.economic_root,
-             fulfillment_id = excluded.fulfillment_id,
-             realize_root = excluded.realize_root,
-             void_root = excluded.void_root,
-             claim_ref = excluded.claim_ref",
-        params![position, kind, root, fulfillment, realize, void, claim_ref],
-    )?;
-    tx.execute(
-        "INSERT INTO economic_admitted_history (economic_position, claim_kind, economic_root, \
-             fulfillment_id, realize_root, void_root, claim_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(economic_position) DO UPDATE SET
-             claim_kind = excluded.claim_kind,
-             economic_root = excluded.economic_root,
-             fulfillment_id = excluded.fulfillment_id,
-             realize_root = excluded.realize_root,
-             void_root = excluded.void_root,
-             claim_ref = excluded.claim_ref",
-        params![position, kind, root, fulfillment, realize, void, claim_ref],
-    )?;
-    tx.execute("DELETE FROM economic_leaf_cache", [])?;
-    for (key, value, ccb) in leaves {
-        tx.execute(
-            "INSERT INTO economic_leaf_cache (leaf_key, leaf_value, state_ccb)
-             VALUES (?1, ?2, ?3)",
-            params![key.as_slice(), value.as_slice(), ccb],
-        )?;
-    }
-    Ok(())
+    Ok((position, kind, root, fulfillment, realize, void, claim_ref))
 }
 
 /// Load the cached leaves: `(leaf_key, leaf_value, state CCB bytes)`.

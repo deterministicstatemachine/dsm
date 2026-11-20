@@ -12,7 +12,7 @@ use dsm::types::proto as generated;
 use prost::Message;
 
 /// `system.restoreFromPhrase` with `words`, as the frontend sends it.
-async fn restore(words: &str) -> crate::bridge::AppResult {
+pub(super) async fn restore(words: &str) -> crate::bridge::AppResult {
     super::system_routes::handle_restore_from_phrase(
         &generated::ArgPack {
             codec: generated::Codec::Proto as i32,
@@ -116,7 +116,7 @@ async fn a_wallet_restored_from_its_words_is_the_same_identity_at_its_last_onlin
 }
 
 /// A's wallet, as its backup loop takes it once still: backup `n` written.
-async fn back_up(device: &crate::test_support::two_device::TestDevice, n: u64) {
+pub(super) async fn back_up(device: &crate::test_support::two_device::TestDevice, n: u64) {
     device.enter();
     let set = crate::sdk::storage_set::canonical_set(economic_fixtures::NETWORK).expect("the set");
     let mark = crate::sdk::wallet_backup_flow::activity_mark().expect("the activity mark");

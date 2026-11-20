@@ -34,6 +34,9 @@ pub const QUIET: Duration = Duration::from_secs(20);
 /// How often the backup loop looks whether the wallet moved.
 const TICK: Duration = Duration::from_secs(2);
 
+/// [`QUIET`] in the loop's looks: the loop counts them, and reads no clock.
+const QUIET_TICKS: u64 = QUIET.as_secs() / TICK.as_secs();
+
 /// How often a backup being written looks whether the wallet moved.
 const WATCH: Duration = Duration::from_millis(250);
 
@@ -717,7 +720,7 @@ pub fn start() {
 
 async fn run() {
     let mut seen: Option<D32> = None;
-    let mut still_since = tokio::time::Instant::now();
+    let mut still_ticks: u64 = 0;
     let mut backed_up: Option<D32> = None;
     loop {
         tokio::time::sleep(TICK).await;
@@ -730,10 +733,11 @@ async fn run() {
         };
         if seen != Some(mark) {
             seen = Some(mark);
-            still_since = tokio::time::Instant::now();
+            still_ticks = 0;
             continue;
         }
-        if backed_up == Some(mark) || still_since.elapsed() < QUIET {
+        still_ticks = still_ticks.saturating_add(1);
+        if backed_up == Some(mark) || still_ticks < QUIET_TICKS {
             continue;
         }
         let set = match crate::sdk::economic_admission_flow::committed_network_id()
@@ -749,7 +753,7 @@ async fn run() {
             Ok(0) => {}
             Ok(n) => log::info!("[wallet backup] {n} own offline steps put at their cells"),
             Err(e) => {
-                still_since = tokio::time::Instant::now();
+                still_ticks = 0;
                 log::warn!("[wallet backup] own offline steps not put yet: {e}");
                 continue;
             }
@@ -762,7 +766,7 @@ async fn run() {
             Ok(Attempt::NotNow(why)) => log::debug!("[wallet backup] not now: {why:?}"),
             Ok(Attempt::Cancelled) => log::info!("[wallet backup] cancelled: the wallet moved"),
             Err(e) => {
-                still_since = tokio::time::Instant::now();
+                still_ticks = 0;
                 log::warn!("[wallet backup] {e}");
             }
         }

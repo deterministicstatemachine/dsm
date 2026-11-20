@@ -85,7 +85,7 @@ pub(super) fn era() -> [u8; 32] {
 /// Create a token on `d` and return its policy commit.
 /// `vault_id`'s accepted genesis root, as `verifier` accepts it: the first
 /// root of every chain walked from the vault's genesis.
-fn genesis_root_of<R: dsm::sofi::resolve::SofiReads + ?Sized>(
+pub(super) fn genesis_root_of<R: dsm::sofi::resolve::SofiReads + ?Sized>(
     verifier: &dsm::sofi::resolve::Verifier<'_, R>,
     vault_id: &[u8; 32],
 ) -> [u8; 32] {
@@ -782,10 +782,10 @@ async fn a_created_token_releases_its_whole_genesis_supply_to_its_creator() {
 
 /// A market: A's token and A's vault holding ERA against it, with B adopted
 /// to the token and set up to trade in the vault.
-struct Market {
-    vault_id: [u8; 32],
-    era: [u8; 32],
-    tkn: [u8; 32],
+pub(super) struct Market {
+    pub(super) vault_id: [u8; 32],
+    pub(super) era: [u8; 32],
+    pub(super) tkn: [u8; 32],
 }
 
 /// `base` units of `token` as the user enters them on `d`: token units, with
@@ -878,7 +878,7 @@ async fn open_market_unset(p: &Pair) -> Market {
 }
 
 /// [`open_market_unset`], and B sets up with the vault before anything else.
-async fn open_market(p: &Pair) -> Market {
+pub(super) async fn open_market(p: &Pair) -> Market {
     let m = open_market_unset(p).await;
     set_up(&p.b, &m.vault_id).await;
     m
@@ -941,7 +941,7 @@ async fn realized_trade(p: &Pair, m: &Market, amount_in: u64) -> u64 {
 /// What a device stands on for a resolution, as `sofi_advance` assembles it:
 /// its identity, and the conditional position it resolved, if that is what
 /// it stands on.
-fn standing_of(d: &TestDevice) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomicPosition>) {
+pub(super) fn standing_of(d: &TestDevice) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomicPosition>) {
     d.enter();
     standing_in(d)
 }
@@ -977,7 +977,7 @@ pub(super) fn admitted_position(d: &TestDevice) -> u64 {
         .0
 }
 
-fn member_name(member: &[u8]) -> String {
+pub(super) fn member_name(member: &[u8]) -> String {
     String::from_utf8(member.to_vec()).expect("member ids are UTF-8")
 }
 

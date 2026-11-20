@@ -108,6 +108,24 @@ fn u64_le(n: u64) -> [u8; 8] {
     n.to_le_bytes()
 }
 
+/// What a wallet restored from its phrase admits of its register (DSM
+/// Amendment A40), inside the restore's transaction: every position the
+/// replay proved before the head into the admitted history, as the wallet's
+/// device recorded each when it admitted it, then the head with its leaves.
+fn record_restored_lineage(
+    tx: &rusqlite::Transaction<'_>,
+    lineage: &dsm::economic::peer_lineage::OwnLineage,
+) -> anyhow::Result<()> {
+    use crate::storage::client_db::economic_lineage;
+    let Some((head, before)) = lineage.admitted().split_last() else {
+        return Ok(());
+    };
+    for admitted in before {
+        economic_lineage::record_admitted_history_with_conn(tx, admitted)?;
+    }
+    economic_lineage::record_admitted_with_conn(tx, head, lineage.rows())
+}
+
 /// Why `operation` may not move value out of this device now, if it may not:
 /// identity recovery is in progress (spec R3), or the operation's egress
 /// asset is held `LockedRecovery` until its own verified frontier reconciles
@@ -575,13 +593,17 @@ impl CoreSDK {
             let tx = conn
                 .transaction()
                 .map_err(|e| storage("tx", e.to_string()))?;
-            if let Some(admitted) = lineage.head() {
-                crate::storage::client_db::economic_lineage::record_admitted_with_conn(
-                    &tx,
-                    admitted,
-                    lineage.rows(),
-                )
-                .map_err(|e| storage("the admitted position", e.to_string()))?;
+            record_restored_lineage(&tx, lineage)
+                .map_err(|e| storage("the admitted positions", e.to_string()))?;
+            // The vault states its realized SoFi positions left, as its device
+            // recorded them when it admitted each (MR-DSM-0331).
+            for post in lineage.vault_heads() {
+                if let Some(replaced) =
+                    crate::storage::client_db::sofi_vault_head::record_resolved_with_conn(&tx, post)
+                        .map_err(|e| storage("a vault head", e.to_string()))?
+                {
+                    log::warn!("[restore] {replaced}");
+                }
             }
             update_bcr_device_head_with_conn(&tx, &restored)
                 .map_err(|e| storage("the head", e.to_string()))?;
@@ -677,14 +699,8 @@ impl CoreSDK {
                 .transaction()
                 .map_err(|e| storage("tx", e.to_string()))?;
             crate::sdk::wallet_backup_flow::install(&tx, body)?;
-            if let Some(admitted) = lineage.head() {
-                crate::storage::client_db::economic_lineage::record_admitted_with_conn(
-                    &tx,
-                    admitted,
-                    lineage.rows(),
-                )
-                .map_err(|e| storage("the admitted position", e.to_string()))?;
-            }
+            record_restored_lineage(&tx, lineage)
+                .map_err(|e| storage("the admitted positions", e.to_string()))?;
             tx.commit().map_err(|e| storage("commit", e.to_string()))?;
         }
         sm.set_device_head(head);
