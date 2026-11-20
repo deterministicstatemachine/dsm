@@ -89,10 +89,10 @@ mod restore_from_phrase_tests;
 #[cfg(test)]
 mod second_spend_e2e_tests;
 #[cfg(test)]
-mod sofi_restore_e2e_tests;
-#[cfg(test)]
 mod sender_admission_tests;
 pub mod session_routes;
+#[cfg(test)]
+mod sofi_restore_e2e_tests;
 pub mod sofi_routes;
 pub mod storage_routes;
 pub mod system_routes;

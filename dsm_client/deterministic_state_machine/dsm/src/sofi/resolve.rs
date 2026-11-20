@@ -60,8 +60,8 @@ use super::facts::{
 };
 use super::lineage::{
     advance_own_replayed, advance_peer_resolved, AdvanceError, PeerResolvedAdvance,
-    ResolvedAdvance, genesis_accepted,
-    AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
+    ResolvedAdvance, genesis_accepted, AcceptedVaultGenesis, GenesisInvalid, GenesisMissing,
+    GenesisRefusal,
 };
 use super::publication::{recognize_setup, Signed};
 use super::registration::{

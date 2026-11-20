@@ -941,7 +941,9 @@ async fn realized_trade(p: &Pair, m: &Market, amount_in: u64) -> u64 {
 /// What a device stands on for a resolution, as `sofi_advance` assembles it:
 /// its identity, and the conditional position it resolved, if that is what
 /// it stands on.
-pub(super) fn standing_of(d: &TestDevice) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomicPosition>) {
+pub(super) fn standing_of(
+    d: &TestDevice,
+) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomicPosition>) {
     d.enter();
     standing_in(d)
 }

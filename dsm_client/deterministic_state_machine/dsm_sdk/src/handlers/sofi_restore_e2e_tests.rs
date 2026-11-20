@@ -159,20 +159,26 @@ async fn a_restore_waits_for_an_open_position_and_then_takes_its_result() {
 
     p.nodes.accept_cell_writes(&leader).await;
     let resolved = position_of(
-        &invoke(&p.b, "sofi.resolve", args(&generated::SofiResolveRequest {})).await,
+        &invoke(
+            &p.b,
+            "sofi.resolve",
+            args(&generated::SofiResolveRequest {}),
+        )
+        .await,
         "sofi.resolve",
     );
-    assert_eq!(
-        resolved,
-        (q, generated::SofiPositionState::Realized as i32)
-    );
+    assert_eq!(resolved, (q, generated::SofiPositionState::Realized as i32));
     let held = holdings(&p.b, &m);
 
     // The same new device, its app opened again over what the refused attempt
     // left in its database.
     let mut restored = p.b.on_a_new_device("B-restored");
     let answer = restore(&test_mnemonic(p.b.seed)).await;
-    assert!(answer.success, "the restore again: {:?}", answer.error_message);
+    assert!(
+        answer.success,
+        "the restore again: {:?}",
+        answer.error_message
+    );
     restored.start(&p.fleet);
     assert_eq!(admitted_position(&restored), q);
     assert_eq!(holdings(&restored, &m), held);

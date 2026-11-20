@@ -183,10 +183,14 @@ impl BackupKeys {
                 "wallet backup: part {part} of {parts}"
             )));
         }
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        rand::TryRngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut nonce_bytes).map_err(
-            |e| DsmError::invalid_operation(format!("wallet backup: no entropy for a nonce: {e}")),
-        )?;
+        // The nonce: 24 bytes from the OS, drawn a word at a time.
+        let mut nonce_bytes = Vec::with_capacity(NONCE_LEN);
+        while nonce_bytes.len() < NONCE_LEN {
+            let word = rand::TryRngCore::try_next_u64(&mut rand::rngs::OsRng).map_err(|e| {
+                DsmError::invalid_operation(format!("wallet backup: no entropy for a nonce: {e}"))
+            })?;
+            nonce_bytes.extend_from_slice(&word.to_le_bytes());
+        }
         let nonce = XNonce::from_slice(&nonce_bytes);
         let mut plain = Vec::with_capacity(HEADER_LEN + chunk.len());
         plain.extend_from_slice(&n.to_le_bytes());
@@ -207,7 +211,7 @@ impl BackupKeys {
             .map_err(|chacha20poly1305::aead::Error| {
                 DsmError::invalid_operation("wallet backup: sealing failed")
             })?;
-        let mut out = nonce_bytes.to_vec();
+        let mut out = nonce_bytes;
         out.extend_from_slice(&sealed);
         Ok(out)
     }
