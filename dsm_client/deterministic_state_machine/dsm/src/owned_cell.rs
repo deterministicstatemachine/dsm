@@ -111,6 +111,15 @@ fn write_target(
     Ok(*h.finalize().as_bytes())
 }
 
+/// What a lock signs for a write of `value` at `address` in `namespace`.
+pub fn owned_cell_write_target(
+    namespace: &[u8],
+    address: &[u8; 32],
+    value: &[u8],
+) -> Result<[u8; 32], CellWriteRefusal> {
+    write_target(TAG_DSM_OWNED_CELL_WRITE, namespace, address, value)
+}
+
 /// The owner's write of `value` to its cell at `route` in `namespace`: the
 /// cell's address and the proof a member checks.
 pub fn sign_owned_cell_write(
@@ -326,9 +335,10 @@ mod tests {
     /// value under the owner's proof, a proof for another namespace, a write
     /// with no proof and a proof bound to another route are each refused with
     /// the check that refuses it.
-    /// MUTATION CONTROL: dropping the address comparison turns the
-    /// another-lock and another-route assertions red; dropping the signature
-    /// check turns the another-value and another-namespace assertions red.
+    /// MUTATION CONTROL (run 2026-11-19): dropping the address comparison
+    /// lets the stranger's own signature over the owner's address in and
+    /// turns this red; dropping the signature check turns the another-value
+    /// and another-namespace assertions red.
     #[test]
     fn only_the_owners_lock_writes_an_owned_cell() {
         let owner = lock(0x11);
@@ -348,6 +358,25 @@ mod tests {
         assert_eq!(
             admit_cell_write(recovery_ns(), &address, b"a copy", &foreign),
             Err(CellWriteRefusal::WrongAddress)
+        );
+        // The attack itself: a stranger signs a write naming the OWNER's
+        // address with its own lock. The signature verifies under the
+        // stranger's lock; only the address check refuses it.
+        let aimed = {
+            use prost::Message;
+            let target = write_target(TAG_DSM_OWNED_CELL_WRITE, recovery_ns(), &address, b"a copy")
+                .expect("a target");
+            OwnedCellWriteV1 {
+                route: route.to_vec(),
+                lock_public_key: stranger.public_key.clone(),
+                write_signature: sphincs_sign(&stranger.secret_key, &target).expect("signed"),
+            }
+            .encode_to_vec()
+        };
+        assert_eq!(
+            admit_cell_write(recovery_ns(), &address, b"a copy", &aimed),
+            Err(CellWriteRefusal::WrongAddress),
+            "a stranger's own signature over the owner's address"
         );
         // The owner's proof does not carry another value.
         assert_eq!(

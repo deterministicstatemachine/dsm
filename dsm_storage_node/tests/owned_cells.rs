@@ -146,6 +146,26 @@ fn a_member_keeps_only_the_owners_write_in_an_owned_cell() {
             StatusCode::FORBIDDEN,
             "a stranger's lock does not name the owner's cell"
         );
+        // The attack itself: the stranger signs a write naming the owner's
+        // address with its own lock; only the address check refuses it.
+        let target = ok(
+            dsm::owned_cell::owned_cell_write_target(ns, &address, b"a copy"),
+            "a target",
+        );
+        let aimed = dsm::types::proto::OwnedCellWriteV1 {
+            route: route.to_vec(),
+            lock_public_key: stranger.public_key.clone(),
+            write_signature: ok(
+                dsm::crypto::sphincs::sphincs_sign(&stranger.secret_key, &target),
+                "signed",
+            ),
+        }
+        .encode_to_vec();
+        assert_eq!(
+            put_one(&app, ns, address, b"a copy", &aimed).await,
+            StatusCode::FORBIDDEN,
+            "a stranger's own signature over the owner's address"
+        );
         assert_eq!(
             put_one(&app, ns, address, b"a copy", &proof).await,
             StatusCode::FORBIDDEN,
