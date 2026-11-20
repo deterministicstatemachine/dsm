@@ -228,7 +228,10 @@ mod tests {
     // +3 with offline origin cells (DSM Amendment A39 draft): the cell of an
     // offline account root, its seed, and the challenge a board signs a load
     // or an unload under.
-    const EXPECTED_TAG_COUNT: usize = 458;
+    // +4 for owned cells (owner ruling, 2026-11-19): a device's cell lock, an
+    // owned cell's address, and the two write proofs (an owned cell's, a
+    // directory cell's).
+    const EXPECTED_TAG_COUNT: usize = 462;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

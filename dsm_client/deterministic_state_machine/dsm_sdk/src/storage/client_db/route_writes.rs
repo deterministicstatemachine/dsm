@@ -28,6 +28,10 @@ pub struct RecordedWrite {
     pub seed: [u8; 32],
     pub storage_set_id: [u8; 32],
     pub slots: Vec<ChainSlot>,
+    /// The proof every copy of the write carries (a fulfillment cell's: the
+    /// trader's genesis), so a continued write is admitted as its first copy
+    /// was; empty for a write whose cell needs none, as the wire carries it.
+    pub proof: Vec<u8>,
 }
 
 fn digest32(bytes: Vec<u8>, what: &str) -> Result<[u8; 32]> {
@@ -39,6 +43,7 @@ pub fn record_write(
     namespace: &[u8],
     cell_key: &[u8; 32],
     value: &[u8],
+    proof: &[u8],
     seed: &[u8; 32],
     storage_set_id: &[u8; 32],
     slots: &[ChainSlot],
@@ -60,6 +65,14 @@ pub fn record_write(
             storage_set_id.as_slice()
         ],
     )?;
+    if !proof.is_empty() {
+        tx.execute(
+            "INSERT OR IGNORE INTO route_chain_write_proof
+                (namespace, cell_key, value_digest, proof)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![namespace, cell_key.as_slice(), digest.as_slice(), proof],
+        )?;
+    }
     for (position, slot) in slots.iter().enumerate() {
         tx.execute(
             "INSERT INTO route_chain_write_slot
@@ -78,6 +91,24 @@ pub fn record_write(
     }
     tx.commit()?;
     Ok(())
+}
+
+/// The proof recorded with a write: the empty proof when none was, as the
+/// wire carries a write that needs none.
+fn proof_of(
+    conn: &rusqlite::Connection,
+    namespace: &[u8],
+    cell_key: &[u8; 32],
+    digest: &[u8; 32],
+) -> Result<Vec<u8>> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(
+            (SELECT proof FROM route_chain_write_proof
+              WHERE namespace = ?1 AND cell_key = ?2 AND value_digest = ?3),
+            x'')",
+        params![namespace, cell_key.as_slice(), digest.as_slice()],
+        |r| r.get::<_, Vec<u8>>(0),
+    )?)
 }
 
 fn slots_of(
@@ -133,6 +164,7 @@ pub fn get_write(
             seed: digest32(seed, "seed")?,
             storage_set_id: digest32(set_id, "storage set id")?,
             slots: slots_of(&conn, namespace, cell_key, &digest)?,
+            proof: proof_of(&conn, namespace, cell_key, &digest)?,
         })
     })
     .transpose()
@@ -168,6 +200,7 @@ pub fn open_writes(route_len: usize, limit: u32) -> Result<Vec<RecordedWrite>> {
         let cell_key = digest32(key, "cell key")?;
         let digest = digest32(digest, "value digest")?;
         let slots = slots_of(&conn, &namespace, &cell_key, &digest)?;
+        let proof = proof_of(&conn, &namespace, &cell_key, &digest)?;
         out.push(RecordedWrite {
             namespace,
             cell_key,
@@ -175,6 +208,7 @@ pub fn open_writes(route_len: usize, limit: u32) -> Result<Vec<RecordedWrite>> {
             seed: digest32(seed, "seed")?,
             storage_set_id: digest32(set_id, "storage set id")?,
             slots,
+            proof,
         });
     }
     Ok(out)

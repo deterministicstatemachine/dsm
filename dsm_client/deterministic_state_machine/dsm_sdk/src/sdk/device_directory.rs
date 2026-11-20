@@ -54,10 +54,12 @@ pub fn build_own_entry(
             inputs,
             expected_g,
         )?;
+    let s_master = crate::init::smaster_of(wallet_seed, &genesis.g, &genesis.devid);
     let first_inbox_lock = dsm::core::relationship_write_grant::derive_first_inbox_lock_keypair(
-        &crate::init::smaster_of(wallet_seed, &genesis.g, &genesis.devid),
+        &s_master,
         &genesis.devid,
     )?;
+    let cell_lock = dsm::owned_cell::derive_cell_lock_keypair(&s_master, &genesis.devid)?;
     let body = DirectoryEntryBody {
         genesis: genesis.g,
         device_id: genesis.devid,
@@ -65,6 +67,7 @@ pub fn build_own_entry(
         att_a: derive_atta(wallet_seed, &genesis.g, inputs.device_slot),
         kyber_public_key,
         first_inbox_lock_public_key: first_inbox_lock.public_key.clone(),
+        cell_lock_public_key: cell_lock.public_key.clone(),
         counter,
         authority_position,
         authority_evidence,
@@ -76,13 +79,32 @@ pub fn build_own_entry(
     Ok(entry)
 }
 
-/// Write `entry` to its directory cell on every member of `set`. Which
-/// members hold it is read back (`read_entry`), never inferred from the
-/// write. A member keeps what it is given, so writing again is harmless.
-pub async fn publish_entry(set: &StorageSet, entry: &DirectoryEntry) -> Result<(), DsmError> {
-    let key = directory_cell_key(&entry.body.genesis, &entry.body.device_id);
+/// Write `entry` to its directory cell on every member of `set`, with the
+/// proof every member checks before it keeps it: the device's AK and AttA,
+/// whose hash is the device id the cell is bound to, and `ak_secret`'s
+/// signature (owner ruling, 2026-11-19: only the device writes its own
+/// cell). Which members hold it is read back (`read_entry`), never inferred
+/// from the write. Writing the same entry again is harmless.
+pub async fn publish_entry(
+    set: &StorageSet,
+    entry: &DirectoryEntry,
+    ak_secret: &[u8],
+) -> Result<(), DsmError> {
+    let bytes = entry.encode();
+    let (key, proof) = dsm::owned_cell::sign_directory_cell_write(
+        &entry.body.genesis,
+        &entry.body.ak_public_key,
+        &entry.body.att_a,
+        ak_secret,
+        &bytes,
+    )?;
+    if key != directory_cell_key(&entry.body.genesis, &entry.body.device_id) {
+        return Err(DsmError::invalid_parameter(
+            "device directory: the entry's AK and AttA are not its device id",
+        ));
+    }
     let taken = SetClient::new(set)?
-        .put_cell(DIRECTORY_NAMESPACE, &key, &entry.encode())
+        .put_proven_cell(DIRECTORY_NAMESPACE, &key, &bytes, &proof)
         .await;
     log::debug!(
         "device directory: {taken}/{} members took the entry",
@@ -307,18 +329,27 @@ mod tests {
             &a_secret,
         )
         .expect("A signs");
-        publish_entry(&set, &in_b_account).await.expect("written");
-        publish_entry(&set, &in_b_cell).await.expect("written");
+        publish_entry(&set, &in_b_account, &a_secret)
+            .await
+            .expect("written");
+        publish_entry(&set, &in_b_cell, &a_secret)
+            .await
+            .expect("sent");
         let a_in_b = directory_cell_key(&p.b.genesis, &p.a.device_id);
         assert_eq!(
             holding(&set, &a_in_b, &in_b_account.encode()).await,
             set.len(),
-            "every member holds A's entry naming B's genesis"
+            "A writes its own device's cell, even one naming B's genesis"
         );
+        // B's cell is B's (owner ruling, 2026-11-19): A's AK is not the key
+        // B's device id is the hash of, so no member keeps A's write there.
+        // MUTATION CONTROL: dropping the directory check in
+        // `dsm::owned_cell::admit_cell_write` lets every member keep it and
+        // turns this red.
         assert_eq!(
             holding(&set, &key, &in_b_cell.encode()).await,
-            set.len(),
-            "and A's entry in B's cell"
+            0,
+            "no member keeps A's write in B's cell"
         );
 
         p.b.enter();

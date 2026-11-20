@@ -22,8 +22,11 @@ use dsm::types::error::DsmError;
 use crate::sdk::storage_node_sdk::{CellFold, MemberClient, SetClient};
 use crate::sdk::storage_set::StorageSet;
 
-/// One value for one cell: `(namespace, key, bytes)`.
-pub type CellPut = (Vec<u8>, [u8; 32], Vec<u8>);
+/// One value for one cell, with the proof its cell's check needs:
+/// `(namespace, key, bytes, proof)`. The proof is empty for every cell but a
+/// fulfillment cell, whose write carries the trader's 32-byte genesis
+/// (`dsm::owned_cell::CellOwnership::Fulfillment`).
+pub type CellPut = (Vec<u8>, [u8; 32], Vec<u8>, Vec<u8>);
 
 /// The storage operations route chains use, addressed by the member ids a
 /// committed set names.
@@ -281,10 +284,23 @@ async fn read_leaders<S: RouteSeats>(
 ///
 /// When the leader does not answer, the write stops: a later copy would have
 /// no leader record to carry.
+#[cfg(test)]
 async fn from_leader<S: RouteSeats, const N: usize>(
     seats: &S,
     route: &Route,
     cells: [LeaderWrite<'_>; N],
+    record: &mut Recorder<'_, N>,
+) -> Result<[WriteReport; N], DsmError> {
+    from_leader_proven(seats, route, cells, &[(); N].map(|()| Vec::new()), record).await
+}
+
+/// [`from_leader`], each cell's every copy carrying `proofs[i]`, the proof its
+/// cell's check needs.
+async fn from_leader_proven<S: RouteSeats, const N: usize>(
+    seats: &S,
+    route: &Route,
+    cells: [LeaderWrite<'_>; N],
+    proofs: &[Vec<u8>; N],
     record: &mut Recorder<'_, N>,
 ) -> Result<[WriteReport; N], DsmError> {
     let Some(mut slots) = read_leaders(seats, &cells).await else {
@@ -297,11 +313,17 @@ async fn from_leader<S: RouteSeats, const N: usize>(
         .any(|slot| matches!(slot, Some(ChainSlot::Taken(..))));
     if !taken && !missing.is_empty() {
         let put: Vec<LeaderWrite<'_>> = missing.iter().map(|&i| cells[i]).collect();
-        let batch: Vec<CellPut> = put
+        let batch: Vec<CellPut> = missing
             .iter()
-            .map(|&(cell, _, value)| {
+            .map(|&i| {
+                let (cell, _, value) = cells[i];
                 let entry = entry_at_leader(cell, value);
-                (entry.namespace.clone(), entry.key, entry.encode())
+                (
+                    entry.namespace.clone(),
+                    entry.key,
+                    entry.encode(),
+                    proofs[i].clone(),
+                )
             })
             .collect();
         let returned = match seats.put_entries(route.leader(), &batch).await {
@@ -355,7 +377,7 @@ async fn from_leader<S: RouteSeats, const N: usize>(
         return Ok(reports);
     }
     record(&reports)?;
-    write_along(seats, route, entries, reports, record).await
+    write_along(seats, route, entries, proofs, reports, record).await
 }
 
 /// Carry `N` entries that share `route` from the position they are at to the
@@ -379,6 +401,7 @@ async fn write_along<S: RouteSeats, const N: usize>(
     seats: &S,
     route: &Route,
     mut entries: [RouteEntry; N],
+    proofs: &[Vec<u8>; N],
     mut reports: [WriteReport; N],
     record: &mut Recorder<'_, N>,
 ) -> Result<[WriteReport; N], DsmError> {
@@ -388,7 +411,8 @@ async fn write_along<S: RouteSeats, const N: usize>(
     for (position, seat) in route.seats().iter().enumerate().skip(start) {
         let batch: Vec<CellPut> = entries
             .iter()
-            .map(|e| (e.namespace.clone(), e.key, e.encode()))
+            .zip(proofs)
+            .map(|(e, proof)| (e.namespace.clone(), e.key, e.encode(), proof.clone()))
             .collect();
         let slots: Vec<ChainSlot> = match seats.put_entries(seat, &batch).await {
             Ok(records) => {
@@ -428,10 +452,10 @@ async fn borne_out<S: RouteSeats>(
     // it; the seat's log is read keeping that copy and nothing else.
     let copies: Vec<Option<RouteEntry>> = batch
         .iter()
-        .map(|(_, _, copy)| RouteEntry::decode(copy))
+        .map(|(_, _, copy, _)| RouteEntry::decode(copy))
         .collect();
     let logs = futures::future::join_all(batch.iter().zip(&copies).map(
-        |((namespace, key, _), copy)| async move {
+        |((namespace, key, _, _), copy)| async move {
             let copy = copy.as_ref()?;
             let keep = dsm::route_chain::copies_of(copy);
             fold_seat(seats, seat, HeldLog::new(namespace, key), &keep, None).await
@@ -474,10 +498,24 @@ async fn borne_out<S: RouteSeats>(
 /// a position already recorded, as a link or as no response, is closed for
 /// this chain and is never written again. A write without its leader link is
 /// returned as it is: only the flow that made it can take it to the leader.
+#[cfg(test)]
 async fn continue_write<S: RouteSeats>(
     seats: &S,
     cell: &RoutedCell,
     value: &[u8],
+    report: WriteReport,
+    record: &mut Recorder<'_, 1>,
+) -> Result<WriteReport, DsmError> {
+    continue_write_proven(seats, cell, value, &[], report, record).await
+}
+
+/// [`continue_write`], every copy carrying `proof`, the proof the cell's
+/// check needs.
+async fn continue_write_proven<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    value: &[u8],
+    proof: &[u8],
     report: WriteReport,
     record: &mut Recorder<'_, 1>,
 ) -> Result<WriteReport, DsmError> {
@@ -497,7 +535,8 @@ async fn continue_write<S: RouteSeats>(
         position,
         chain: report.slots.clone(),
     };
-    let [continued] = write_along(seats, route, [entry], [report], record).await?;
+    let [continued] =
+        write_along(seats, route, [entry], &[proof.to_vec()], [report], record).await?;
     Ok(continued)
 }
 
@@ -547,11 +586,17 @@ pub(crate) fn keep_completion(
         .map_err(|e| storage("keep completion proof", &e))
 }
 
-fn record(cell: &RoutedCell, value: &[u8], report: &WriteReport) -> Result<(), DsmError> {
+fn record(
+    cell: &RoutedCell,
+    value: &[u8],
+    proof: &[u8],
+    report: &WriteReport,
+) -> Result<(), DsmError> {
     crate::storage::client_db::route_writes::record_write(
         cell.namespace(),
         cell.key(),
         value,
+        proof,
         cell.seed(),
         cell.committed_set_id(),
         &report.slots,
@@ -574,15 +619,28 @@ pub async fn write_recorded(
     recognized: Recognized<'_>,
     value: &[u8],
 ) -> Result<WriteReport, DsmError> {
+    write_recorded_proven(set, cell, recognized, value, &[]).await
+}
+
+/// [`write_recorded`], every copy carrying `proof`, the proof the cell's
+/// check needs (a fulfillment cell's: the trader's genesis), recorded with
+/// the write so a continued write carries it too.
+pub async fn write_recorded_proven(
+    set: &StorageSet,
+    cell: &RoutedCell,
+    recognized: Recognized<'_>,
+    value: &[u8],
+    proof: &[u8],
+) -> Result<WriteReport, DsmError> {
     let seats = NodeSeats::new(set)?;
     let mut recorder = |reports: &[WriteReport; 1]| {
         let [report] = reports;
-        record(cell, value, report)
+        record(cell, value, proof, report)
     };
     if let Some(write) = recorded(cell, value)? {
         let report = WriteReport { slots: write.slots };
         if report.leader() == AtLeader::Link && !report.closed_short(cell.route()) {
-            return continue_write(&seats, cell, value, report, &mut recorder).await;
+            return continue_write_proven(&seats, cell, value, proof, report, &mut recorder).await;
         }
         log::info!(
             "route write: the recorded chain ({} slot) cannot finish; a new chain from the \
@@ -590,10 +648,11 @@ pub async fn write_recorded(
             report.slots.len()
         );
     }
-    let [report] = from_leader(
+    let [report] = from_leader_proven(
         &seats,
         cell.route(),
         [(cell, recognized, value)],
+        &[proof.to_vec()],
         &mut recorder,
     )
     .await?;
@@ -616,6 +675,9 @@ pub async fn write_recorded_position(
 ) -> Result<[WriteReport; 2], DsmError> {
     let seats = NodeSeats::new(set)?;
     let (ful_cell, root_cell) = (cells.fulfillment(), cells.root().routed());
+    // K_ful's every copy carries the trader's genesis, which F does not
+    // (DSM Amendment A41); K_root's claim carries its own authority.
+    let ful_proof = cells.root().genesis().to_vec();
     let ful = recorded(ful_cell, fulfillment)?;
     let root = recorded(root_cell, claim)?;
     let continuable = |slots: &[ChainSlot]| {
@@ -628,28 +690,30 @@ pub async fn write_recorded_position(
         (Some(ful), Some(root)) if continuable(&ful.slots) && continuable(&root.slots) => {
             let mut ful_recorder = |reports: &[WriteReport; 1]| {
                 let [report] = reports;
-                record(ful_cell, fulfillment, report)
+                record(ful_cell, fulfillment, &ful_proof, report)
             };
             let mut root_recorder = |reports: &[WriteReport; 1]| {
                 let [report] = reports;
-                record(root_cell, claim, report)
+                record(root_cell, claim, &[], report)
             };
             // Two cells, each continued seat by seat along its own chain;
             // neither chain carries anything of the other, so they move at
             // once, and both run to their end before either's error is
             // returned.
             let (ful, root) = futures::future::join(
-                continue_write(
+                continue_write_proven(
                     &seats,
                     ful_cell,
                     fulfillment,
+                    &ful_proof,
                     WriteReport { slots: ful.slots },
                     &mut ful_recorder,
                 ),
-                continue_write(
+                continue_write_proven(
                     &seats,
                     root_cell,
                     claim,
+                    &[],
                     WriteReport { slots: root.slots },
                     &mut root_recorder,
                 ),
@@ -665,17 +729,18 @@ pub async fn write_recorded_position(
             );
             let mut recorder = |reports: &[WriteReport; 2]| {
                 let [ful_report, root_report] = reports;
-                record(ful_cell, fulfillment, ful_report)?;
-                record(root_cell, claim, root_report)
+                record(ful_cell, fulfillment, &ful_proof, ful_report)?;
+                record(root_cell, claim, &[], root_report)
             };
             let (ful_rule, root_rule) = (cells.keeps_fulfillment(), cells.root().keeps());
-            from_leader(
+            from_leader_proven(
                 &seats,
                 ful_cell.route(),
                 [
                     (ful_cell, &ful_rule, fulfillment),
                     (root_cell, &root_rule, claim),
                 ],
+                &[ful_proof.clone(), Vec::new()],
                 &mut recorder,
             )
             .await
@@ -685,10 +750,13 @@ pub async fn write_recorded_position(
 
 /// Continue every recorded write that has its leader link and has not
 /// reached the end of its route, from the position after the last one it
-/// reached, over the set the write names. Returns how many writes now reach
-/// the end of their route. Writes without their leader link, and chains that
-/// closed short, are left to the flows that made them: only a flow reads the
-/// cell back through Core, and so knows whether its value holds the leader.
+/// reached, over the set the write names, every copy carrying the proof
+/// recorded with it. Returns how many writes now reach the end of their
+/// route. Writes without their leader link, chains that closed short, and a
+/// fulfillment write recorded without its genesis are left to the flows that
+/// made them: only a flow reads the cell back through Core, and so knows
+/// whether its value holds the leader, and the position's flow derives the
+/// genesis from its cells.
 pub async fn continue_recorded_writes(
     catalog: &crate::sdk::storage_set::StorageSetCatalog,
 ) -> Result<u32, DsmError> {
@@ -701,6 +769,18 @@ pub async fn continue_recorded_writes(
     for write in open {
         let report = WriteReport { slots: write.slots };
         if report.leader() != AtLeader::Link {
+            continue;
+        }
+        // A fulfillment cell's copies carry the trader's genesis (DSM
+        // Amendment A41). A write recorded without it (made before the
+        // genesis was recorded) would be refused at every seat left and its
+        // chain closed short; it is left to the flow that made it, which
+        // derives the genesis from the position's cells and continues it.
+        if dsm::owned_cell::ownership(&write.namespace)
+            == dsm::owned_cell::CellOwnership::Fulfillment
+            && write.proof.is_empty()
+        {
+            log::info!("route continue: a fulfillment write recorded without its genesis waits for its flow");
             continue;
         }
         let Some(set) = catalog.resolve(&write.storage_set_id) else {
@@ -717,12 +797,13 @@ pub async fn continue_recorded_writes(
         )
         .map_err(|e| DsmError::storage(format!("route continue: {e:?}"), None::<std::io::Error>))?;
         let seats = NodeSeats::new(set)?;
-        let value = write.value;
+        let (value, proof) = (write.value, write.proof);
         let mut recorder = |reports: &[WriteReport; 1]| {
             let [report] = reports;
-            record(&cell, &value, report)
+            record(&cell, &value, &proof, report)
         };
-        let report = continue_write(&seats, &cell, &value, report, &mut recorder).await?;
+        let report =
+            continue_write_proven(&seats, &cell, &value, &proof, report, &mut recorder).await?;
         if report.slots.len() == cell.route().seats().len() {
             completed += 1;
         }
@@ -1382,7 +1463,7 @@ impl RouteSeats for NodeSeats {
         member: &[u8],
         entries: &[CellPut],
     ) -> Result<Vec<ArrivalRecord>, String> {
-        self.member(member)?.put_cells(entries).await
+        self.member(member)?.put_cells_proven(entries).await
     }
 
     async fn fold_values(
@@ -1572,14 +1653,60 @@ mod tests {
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
+        // K_root(q) keeps only a claim its trader signed (DSM Amendment A41).
+        let trader = crate::test_support::reserve::claimant(0x92);
         let cells = crate::sdk::sofi_register::position_cells(
             &set,
-            &[0x91; 32],
-            &[0x92; 32],
+            &trader.genesis,
+            &trader.devid,
             7,
             &[0x93; 32],
         )
         .expect("the pair's cells");
+        let profile = dsm::economic::register::resolve_root_register_profile(
+            crate::economic_fixtures::NETWORK,
+        )
+        .expect("the register");
+        let claim = dsm::economic::claim_envelope::sign_economic_root_claim(
+            &dsm::economic::claim::EconomicRootClaimBody::new(
+                trader.genesis,
+                trader.devid,
+                7,
+                [0x94; 32],
+                [0x95; 32],
+                profile.storage_set_id,
+                dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+                &trader.ak_public_key,
+                trader.att_a,
+            )
+            .expect("a claim body"),
+            &trader.ak_secret_key,
+        )
+        .expect("the trader signs its claim");
+        // K_ful(q) keeps only an F its trader signed (DSM Amendment A41).
+        let f_body = dsm::sofi::wire::TraderFulfillmentBody::new(
+            [0x96; 32],
+            vec![[0x97; 32]],
+            vec![dsm::sofi::wire::AttemptEntry {
+                vault_id: [0x98; 32],
+                attempt: 0,
+            }],
+            7,
+            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &trader.ak_public_key,
+            trader.att_a,
+        )
+        .expect("an F body");
+        let fulfillment = dsm::sofi::publication::Publication::Fulfillment {
+            body: &f_body,
+            signature: &dsm::crypto::sphincs::sphincs_sign(
+                &trader.ak_secret_key,
+                &dsm::sofi::derive::fulfillment_signing_digest(&f_body),
+            )
+            .expect("the trader signs its F"),
+        }
+        .object_bytes()
+        .expect("F's envelope");
         assert_eq!(
             cells.fulfillment().route(),
             cells.root().routed().route(),
@@ -1588,7 +1715,7 @@ mod tests {
         for node in &nodes.nodes {
             node.forget_requests();
         }
-        let reports = write_recorded_position(&set, &cells, b"F", b"C_q")
+        let reports = write_recorded_position(&set, &cells, &fulfillment, &claim)
             .await
             .expect("the pair is written");
         assert_eq!(pair_at_leader(&reports), AtLeader::Link);
@@ -1778,7 +1905,12 @@ mod tests {
         seats
             .put_entries(
                 cell.route().leader(),
-                &[(cell.namespace().to_vec(), *cell.key(), b"junk".to_vec())],
+                &[(
+                    cell.namespace().to_vec(),
+                    *cell.key(),
+                    b"junk".to_vec(),
+                    Vec::new(),
+                )],
             )
             .await
             .expect("the leader keeps the junk");
@@ -1914,7 +2046,12 @@ mod tests {
         let racing = Racing {
             seats: &seats,
             leader: cell.route().leader().to_vec(),
-            rival: (rival.namespace.clone(), rival.key, rival.encode()),
+            rival: (
+                rival.namespace.clone(),
+                rival.key,
+                rival.encode(),
+                Vec::new(),
+            ),
             raced: std::sync::Mutex::new(None),
         };
         let rule = dsm::route_chain::recognized_copies(&cell, |bytes: &[u8]| {
@@ -2474,7 +2611,12 @@ mod tests {
         seats
             .put_entries(
                 &leader,
-                &[(cell.namespace().to_vec(), *cell.key(), b"W".to_vec())],
+                &[(
+                    cell.namespace().to_vec(),
+                    *cell.key(),
+                    b"W".to_vec(),
+                    Vec::new(),
+                )],
             )
             .await
             .expect("the leader takes a later entry");
@@ -2529,6 +2671,7 @@ mod tests {
                 self.cell.namespace().to_vec(),
                 *self.cell.key(),
                 b"a write after the read".to_vec(),
+                Vec::new(),
             );
             self.seats
                 .put_entries(member, &[write])
@@ -2641,7 +2784,12 @@ mod tests {
             seats
                 .put_entries(
                     &leader,
-                    &[(cell.namespace().to_vec(), *cell.key(), junk.clone())],
+                    &[(
+                        cell.namespace().to_vec(),
+                        *cell.key(),
+                        junk.clone(),
+                        Vec::new(),
+                    )],
                 )
                 .await
                 .expect("the leader takes the junk");

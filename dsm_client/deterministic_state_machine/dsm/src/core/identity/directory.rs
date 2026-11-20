@@ -70,6 +70,10 @@ pub struct DirectoryEntryBody {
     /// derives that address and nobody else can write there (DSM Amendment
     /// A37). Never the AK.
     pub first_inbox_lock_public_key: Vec<u8>,
+    /// The device's cell lock: every cell this device owns is its route
+    /// bound to this key, so only this device writes there (owner ruling,
+    /// 2026-11-19). Never the AK, never the first-inbox lock.
+    pub cell_lock_public_key: Vec<u8>,
     /// Higher replaces lower. Only the device can sign one.
     pub counter: u64,
     /// The transition `t` the evidence's chain reaches: the position P0–P6
@@ -94,6 +98,7 @@ impl DirectoryEntryBody {
             authority_position: self.authority_position.to_vec(),
             authority_evidence: self.authority_evidence.clone(),
             first_inbox_lock_public_key: self.first_inbox_lock_public_key.clone(),
+            cell_lock_public_key: self.cell_lock_public_key.clone(),
         }
     }
 
@@ -191,6 +196,7 @@ impl DirectoryEntry {
                 authority_position: d32(&b.authority_position)?,
                 authority_evidence: b.authority_evidence,
                 first_inbox_lock_public_key: b.first_inbox_lock_public_key,
+                cell_lock_public_key: b.cell_lock_public_key,
             },
             signature: p.signature,
         })
@@ -215,6 +221,9 @@ impl DirectoryEntry {
             || b.kyber_public_key.len() != KYBER_PUBLIC_KEY_LEN
             || b.first_inbox_lock_public_key.len() != FIRST_INBOX_LOCK_LEN
             || b.first_inbox_lock_public_key == b.ak_public_key
+            || b.cell_lock_public_key.len() != crate::owned_cell::CELL_LOCK_LEN
+            || b.cell_lock_public_key == b.ak_public_key
+            || b.cell_lock_public_key == b.first_inbox_lock_public_key
         {
             return Err(DirectoryError::KeyLength);
         }
@@ -471,6 +480,7 @@ pub(crate) mod test_identities {
             att_a,
             kyber_public_key: vec![counter as u8; KYBER_PUBLIC_KEY_LEN],
             first_inbox_lock_public_key: vec![0xF1; FIRST_INBOX_LOCK_LEN],
+            cell_lock_public_key: vec![0xC1; crate::owned_cell::CELL_LOCK_LEN],
             counter,
             authority_position: t0.digest(),
             authority_evidence: evidence.encode_to_vec(),

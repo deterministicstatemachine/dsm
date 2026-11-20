@@ -3092,6 +3092,10 @@ message DeviceDirectoryEntryBodyV1 {
   // Every relationship's first inbox this device writes is the route bound to
   // it, so only this device writes there.
   bytes  first_inbox_lock_public_key = 9 [(dsm_fixed_len)=64];
+  // The device's cell lock (SPHINCS+, never the AK nor the first-inbox lock).
+  // Every cell this device owns is its route bound to it, so only this device
+  // writes there (owner ruling, 2026-11-19).
+  bytes  cell_lock_public_key = 10 [(dsm_fixed_len)=64];
 }
 message DeviceDirectoryEntryV1 {
   DeviceDirectoryEntryBodyV1 body = 1;
@@ -5112,11 +5116,37 @@ message KeptCommittedV1 {
 }
 
 // One value for one key, as a batch put carries it. The member keeps it
-// after anything already at the key, exactly as a single put would.
+// after anything already at the key, exactly as a single put would. A cell
+// one party pays for is theirs (owner ruling, 2026-11-19): its put carries
+// the owner's proof, which every member checks by derivation before it keeps
+// the value (an OwnedCellWriteV1, or a DirectoryCellWriteV1 for a device's
+// own directory cell). A cell several parties write by protocol carries none.
 message CellPutV1 {
-  bytes namespace = 1 [(dsm_max_len)=128];
-  bytes key       = 2 [(dsm_fixed_len)=32];
-  bytes value     = 3 [(dsm_max_len)=327680];
+  bytes namespace   = 1 [(dsm_max_len)=128];
+  bytes key         = 2 [(dsm_fixed_len)=32];
+  bytes value       = 3 [(dsm_max_len)=327680];
+  bytes owner_proof = 4 [(dsm_max_len)=65800];
+}
+
+// The owner's proof for a write to a cell it owns: the cell's route, the
+// owner's cell lock (the key its directory entry publishes), and the lock's
+// signature over the namespace, the address and the value's digest. The cell's
+// address is the route bound to the lock, so a key nobody else holds names
+// the cell.
+message OwnedCellWriteV1 {
+  bytes route           = 1 [(dsm_fixed_len)=32];
+  bytes lock_public_key = 2 [(dsm_fixed_len)=64];
+  bytes write_signature = 3 [(dsm_max_len)=65535];
+}
+
+// A device's proof for a write to its own directory cell: the genesis, the AK
+// and AttA its device id is the hash of, and the AK's signature over the
+// address and the value's digest.
+message DirectoryCellWriteV1 {
+  bytes genesis         = 1 [(dsm_fixed_len)=32];
+  bytes ak_public_key   = 2 [(dsm_fixed_len)=64];
+  bytes att_a           = 3 [(dsm_fixed_len)=32];
+  bytes write_signature = 4 [(dsm_max_len)=65535];
 }
 
 // Several keys taken in ONE local transaction at the member: all of them or

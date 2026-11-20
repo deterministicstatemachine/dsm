@@ -211,6 +211,20 @@ pub const TAG_DSM_RELATIONSHIP_WRITE_LOCK_BINDING: TaggedHashDomain<'static> =
 /// (DSM Amendment A37).
 pub const TAG_DSM_FIRST_INBOX_LOCK: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/first-inbox-lock/v1");
+/// The seed of a device's cell lock, the key its directory entry publishes
+/// and every cell the device owns is bound to, keyed by its master seed (owner
+/// ruling, 2026-11-19: what a person pays for is theirs, and only their key
+/// writes it).
+pub const TAG_DSM_CELL_LOCK: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/cell-lock/v1");
+/// An owned cell's address: the cell's route bound to its owner's cell lock.
+pub const TAG_DSM_OWNED_CELL: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/owned-cell/v1");
+/// What an owner's cell lock signs for one write to one of its cells.
+pub const TAG_DSM_OWNED_CELL_WRITE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/owned-cell-write/v1");
+/// What a device's AK signs for one write to its own directory cell.
+pub const TAG_DSM_DIRECTORY_CELL_WRITE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/directory-cell-write/v1");
 /// What a writer's key signs for one write to an inbox address (DSM
 /// Amendment A34).
 pub const TAG_DSM_SPOOL_WRITE: TaggedHashDomain<'static> =

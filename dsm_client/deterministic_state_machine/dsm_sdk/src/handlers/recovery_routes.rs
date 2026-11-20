@@ -462,7 +462,15 @@ async fn poll_tombstone_acks() -> Result<String, String> {
             tombstoned_device_id: tombstoned,
             acknowledging_device_id: *contact_device_id,
         };
-        let acknowledged = crate::sdk::recovery_store::entries(&cell)
+        let owner = match crate::sdk::recovery_sdk::RecoverySDK::contact_owner(contact_device_id) {
+            Ok(owner) => owner,
+            Err(e) => {
+                log::warn!("[RECOVERY] cannot read an acknowledgement: {e}");
+                continue;
+            }
+        };
+        // The acknowledgement lives in the acknowledging contact's own cell.
+        let acknowledged = crate::sdk::recovery_store::entries(&owner, &cell)
             .await
             .map_err(|e| e.to_string())?
             .iter()
@@ -495,12 +503,26 @@ async fn check_tombstones() -> Result<String, String> {
     };
     let secret_key =
         crate::sdk::signing_authority::current_secret_key().map_err(|e| e.to_string())?;
+    // A notice for this device lives in the tombstoned contact's own cell
+    // (only that device writes it): read each contact's.
+    let mut notices: Vec<Vec<u8>> = Vec::new();
+    let mut unread: Vec<String> = Vec::new();
+    for contact in crate::storage::client_db::get_all_contacts().map_err(|e| e.to_string())? {
+        let (Ok(genesis), Ok(device_id)) = (
+            <[u8; 32]>::try_from(contact.genesis_hash.as_slice()),
+            <[u8; 32]>::try_from(contact.device_id.as_slice()),
+        ) else {
+            continue;
+        };
+        let owner = dsm::recovery::CellOwner { genesis, device_id };
+        match crate::sdk::recovery_store::entries(&owner, &cell).await {
+            Ok(held) => notices.extend(held),
+            Err(e) => unread.push(e.to_string()),
+        }
+    }
     let mut recorded: Vec<[u8; 32]> = Vec::new();
-    for bytes in crate::sdk::recovery_store::entries(&cell)
-        .await
-        .map_err(|e| e.to_string())?
-    {
-        // Anyone can write the cell: a notice counts only once its tombstone
+    for bytes in notices {
+        // A notice still counts only once its tombstone
         // verifies under the recovery authority the tombstoned device anchored
         // under the genesis this device pinned for it. The tombstone is signed
         // under K_A, never under that device's AK (SA-117).
@@ -543,12 +565,16 @@ async fn check_tombstones() -> Result<String, String> {
             recorded.push(tombstoned);
         }
     }
+    // A contact whose notice cell could not be read is reported, never
+    // taken as one with no notice.
+    let found = !recorded.is_empty();
     Ok(match recorded.first() {
         Some(first) => format!(
-            "found=true,tombstoned_device={},count={}",
+            "found={found},tombstoned_device={},count={},unread_contacts={}",
             &crate::util::text_id::encode_base32_crockford(first)[..16],
-            recorded.len()
+            recorded.len(),
+            unread.len()
         ),
-        None => "found=false".to_string(),
+        None => format!("found={found},unread_contacts={}", unread.len()),
     })
 }

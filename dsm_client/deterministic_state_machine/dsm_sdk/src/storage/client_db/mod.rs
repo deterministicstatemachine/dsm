@@ -646,6 +646,10 @@ fn get_database_path() -> Result<PathBuf> {
 /// its board is signing, are new tables a database made at 49 takes at its next
 /// open, and `peer_offline_exposure` is dropped there. No version moves,
 /// so a wallet bound to a board opens as it is.
+///
+/// Still 49, additively (DSM Amendment A41): `route_chain_write_proof`, the
+/// proof a recorded write's copies carry (a fulfillment cell's genesis), is a
+/// new table a database made at 49 takes at its next open.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 49;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -950,6 +954,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             value          BLOB NOT NULL,
             seed           BLOB NOT NULL CHECK (length(seed) = 32),
             storage_set_id BLOB NOT NULL CHECK (length(storage_set_id) = 32),
+            PRIMARY KEY (namespace, cell_key, value_digest)
+        );
+        -- The proof every copy of a recorded write carries, when its cell's
+        -- check needs one (DSM Amendment A41: a fulfillment cell's write
+        -- carries the trader's 32-byte genesis), so a continued write is
+        -- admitted as its first copy was. A write with no row has none.
+        CREATE TABLE IF NOT EXISTS route_chain_write_proof(
+            namespace    BLOB NOT NULL,
+            cell_key     BLOB NOT NULL CHECK (length(cell_key) = 32),
+            value_digest BLOB NOT NULL CHECK (length(value_digest) = 32),
+            proof        BLOB NOT NULL CHECK (length(proof) > 0),
             PRIMARY KEY (namespace, cell_key, value_digest)
         );
         -- The completion proofs this device relies on (storage spec §9 rule

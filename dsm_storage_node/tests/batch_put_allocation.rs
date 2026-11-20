@@ -58,6 +58,7 @@ fn batch(entries: u64) -> Vec<u8> {
                     namespace: b"DSM/batch-allocation".to_vec(),
                     key,
                     value: b"v".to_vec(),
+                    owner_proof: Vec::new(),
                 }
             })
             .collect(),

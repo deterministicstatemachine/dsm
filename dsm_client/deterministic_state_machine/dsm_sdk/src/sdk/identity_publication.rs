@@ -129,7 +129,8 @@ pub async fn publish_identity_now(
         let network = crate::sdk::economic_admission_flow::committed_network_id()?;
         let set = crate::sdk::storage_set::canonical_set(&network)?;
         let entry = own_entry(&network, &genesis, &device_id)?;
-        publish_entry(&set, &entry).await?;
+        let ak_secret = crate::sdk::signing_authority::current_secret_key()?;
+        publish_entry(&set, &entry, &ak_secret).await?;
         let holders = match read_entry(&set, &genesis, &device_id).await? {
             Some(read) if read.entry == entry => read.holders.len(),
             Some(..) | None => 0,

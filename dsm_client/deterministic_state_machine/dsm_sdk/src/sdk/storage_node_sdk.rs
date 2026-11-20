@@ -884,13 +884,27 @@ impl MemberClient {
         &self,
         entries: &[(Vec<u8>, [u8; 32], Vec<u8>)],
     ) -> Result<Vec<ArrivalRecord>, String> {
+        let proven: Vec<(Vec<u8>, [u8; 32], Vec<u8>, Vec<u8>)> = entries
+            .iter()
+            .map(|(namespace, key, value)| (namespace.clone(), *key, value.clone(), Vec::new()))
+            .collect();
+        self.put_cells_proven(&proven).await
+    }
+
+    /// Put entries as [`Self::put_cells`] does, each with the owner's proof a
+    /// cell one party owns needs (`dsm::owned_cell`; empty for an open cell).
+    pub async fn put_cells_proven(
+        &self,
+        entries: &[(Vec<u8>, [u8; 32], Vec<u8>, Vec<u8>)],
+    ) -> Result<Vec<ArrivalRecord>, String> {
         let batch = proto::CellPutsV1 {
             entries: entries
                 .iter()
-                .map(|(namespace, key, value)| proto::CellPutV1 {
+                .map(|(namespace, key, value, owner_proof)| proto::CellPutV1 {
                     namespace: namespace.clone(),
                     key: key.to_vec(),
                     value: value.clone(),
+                    owner_proof: owner_proof.clone(),
                 })
                 .collect(),
         };
@@ -899,7 +913,7 @@ impl MemberClient {
         let records_limit = proto::ArrivalRecordsV1 {
             records: entries
                 .iter()
-                .map(|(namespace, key, _)| proto::ArrivalRecordV1 {
+                .map(|(namespace, key, _, _)| proto::ArrivalRecordV1 {
                     member_id: self.member_id.as_bytes().to_vec(),
                     namespace: namespace.clone(),
                     key: key.to_vec(),
@@ -929,7 +943,7 @@ impl MemberClient {
         page.records
             .iter()
             .zip(entries)
-            .map(|(record, (namespace, key, value))| {
+            .map(|(record, (namespace, key, value, _))| {
                 let record = ArrivalRecord::from_proto(record)
                     .ok_or("cells put: a malformed arrival record")?;
                 if record.member_id != self.member_id.as_bytes()
@@ -1407,10 +1421,31 @@ impl SetClient {
     /// device directory); a cell that is raced is written along its route
     /// (`sdk::route_seats`). Returns how many members took it.
     pub async fn put_cell(&self, namespace: &[u8], key: &[u8; 32], value: &[u8]) -> u32 {
-        let entry = [(namespace.to_vec(), *key, value.to_vec())];
-        let answers =
-            futures::future::join_all(self.members.iter().map(|member| member.put_cells(&entry)))
-                .await;
+        self.put_proven_cell(namespace, key, value, &[]).await
+    }
+
+    /// Put `value` at a cell one party owns, at every member, with the
+    /// owner's proof every member checks before it keeps the value
+    /// (`dsm::owned_cell`). Returns how many members took it.
+    pub async fn put_proven_cell(
+        &self,
+        namespace: &[u8],
+        key: &[u8; 32],
+        value: &[u8],
+        owner_proof: &[u8],
+    ) -> u32 {
+        let entry = [(
+            namespace.to_vec(),
+            *key,
+            value.to_vec(),
+            owner_proof.to_vec(),
+        )];
+        let answers = futures::future::join_all(
+            self.members
+                .iter()
+                .map(|member| member.put_cells_proven(&entry)),
+        )
+        .await;
         let mut took = 0u32;
         for (member, answer) in self.members.iter().zip(answers) {
             match answer {

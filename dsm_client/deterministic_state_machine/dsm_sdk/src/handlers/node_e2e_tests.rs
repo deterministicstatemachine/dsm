@@ -1666,14 +1666,16 @@ async fn write_past_its_own_flow(
             }
             .object_bytes()
             .expect("F's envelope");
-            let written = crate::sdk::route_seats::write_recorded(
+            // K_ful's write carries B's genesis, which F does not (A41).
+            let written = crate::sdk::route_seats::write_recorded_proven(
                 set,
                 pair.fulfillment(),
                 &pair.keeps_fulfillment(),
                 &f_bytes,
+                &p.b.genesis,
             )
             .await
-            .expect("the nodes keep whatever they are given");
+            .expect("the write runs to its end");
             assert_eq!(
                 written.leader(),
                 crate::sdk::route_seats::AtLeader::Link,
@@ -2818,8 +2820,9 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     );
     assert_eq!(walked, WalkOutcome::Unresolved { attempt: 0 });
 
-    // A signs a claim of its own for B's pair: it is not the trader's, so
-    // at K_root(q) it occupies nothing.
+    // A signs a claim of its own for B's pair: it is not the trader's, so no
+    // member keeps it at K_root(q) (DSM Amendment A41: the trader authorizes,
+    // anyone delivers) and it occupies nothing.
     let substitute = {
         let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("A's AK");
         let att_a = crate::sdk::signing_authority::current_att_a().expect("A's AttA");
@@ -2841,8 +2844,24 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
         &substitute,
     )
     .await
-    .expect("the nodes keep whatever they are given");
-    assert_eq!(written.leader(), crate::sdk::route_seats::AtLeader::Link);
+    .expect("the write runs to its end");
+    assert_eq!(
+        written.leader(),
+        crate::sdk::route_seats::AtLeader::Unanswered,
+        "the leader keeps no claim B did not sign"
+    );
+    let held = crate::sdk::storage_node_sdk::SetClient::new(&set)
+        .expect("a set client")
+        .held_at(
+            dsm::economic::register::economic_root_namespace(),
+            pair.root().routed().key(),
+        )
+        .await;
+    assert!(
+        held.iter()
+            .all(|values| values.as_ref().is_some_and(|v| v.is_empty())),
+        "every member answers, and none holds A's claim: {held:?}"
+    );
     let (still, ..) = read_vault();
     assert!(
         matches!(still, Registration::Unresolved),
@@ -3895,10 +3914,16 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
         signed_by_b(&p, &registered, &m.vault_id, q, unreadable),
         at_q.route(),
     );
+    // Each carries B's genesis, which F does not: B signed it (A41).
     member(at_q.route().leader())
-        .put_cells(&[(behind.namespace.clone(), behind.key, behind.encode())])
+        .put_cells_proven(&[(
+            behind.namespace.clone(),
+            behind.key,
+            behind.encode(),
+            p.b.genesis.to_vec(),
+        )])
         .await
-        .expect("the leader keeps what it is given");
+        .expect("the leader keeps an F B signed");
 
     // Alone, at a member that does not lead K_ful(q + 1).
     let at_next = next.fulfillment();
@@ -3909,9 +3934,14 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
         at_next.route(),
     );
     not_leading
-        .put_cells(&[(aside.namespace.clone(), aside.key, aside.encode())])
+        .put_cells_proven(&[(
+            aside.namespace.clone(),
+            aside.key,
+            aside.encode(),
+            p.b.genesis.to_vec(),
+        )])
         .await
-        .expect("the member keeps what it is given");
+        .expect("the member keeps an F B signed");
 
     // The vault's owner reads B's registration at q past what follows it.
     let (own_a, parents_a) = standing_of(&p.a);
@@ -4089,9 +4119,14 @@ async fn a_position_reads_the_same_before_and_after_a_precommit_is_published() {
         .iter()
         .find(|member| member.member_id().as_bytes() == cell.route().leader())
         .expect("the pair's leader")
-        .put_cells(&[(entry.namespace.clone(), entry.key, entry.encode())])
+        .put_cells_proven(&[(
+            entry.namespace.clone(),
+            entry.key,
+            entry.encode(),
+            p.b.genesis.to_vec(),
+        )])
         .await
-        .expect("the leader keeps it");
+        .expect("the leader keeps an F B signed");
 
     // B trades: its writer finds F_a first at K_ful(q)'s leader and puts
     // nothing of the pair. Past its own flow, B writes its C_q and its
@@ -8422,16 +8457,272 @@ async fn a_succession_proof_counts_only_under_the_authority_its_predecessor_anch
         .expect_err("no proof under the authority A anchored is posted");
     assert!(refused.to_string().contains("none posted"), "{refused}");
 
+    // The successor's proof lives in the successor's own cell: M posts it.
+    m.enter();
     let honest = succession_proof_under(&k_a, &k_a_secret, &p.a.device_id, &m.device_id);
     crate::sdk::recovery_store::put(&cell, &honest.to_bytes())
         .await
         .expect("the proof under K_A");
+    p.b.enter();
     let (found, predecessor) =
         RecoverySDK::succession_proof_anchored_by_predecessor(&m.genesis, &m.device_id)
             .await
             .expect("the proof under the authority A anchored");
     assert_eq!(predecessor, p.a.device_id);
     assert_eq!(found.to_bytes(), honest.to_bytes());
+}
+
+/// A device's recovery cells are its own (owner ruling, 2026-11-19: what a
+/// person pays for is theirs). The 2026-11-19 core audit locked a device out of
+/// recovery for good: a third device copied the device's published authority
+/// anchor, changed its unsigned `authority_signature`, and appended it to the
+/// anchor cell, which every member kept; every reader then counted two anchors
+/// and found none. Now the cell is the anchor's route bound to the owner's cell
+/// lock, and no member keeps a write the owner's lock did not sign: the copy,
+/// sent with the third device's own lock or with no proof at all, is kept by no
+/// member, and the owner's anchor still reads as anchored and can be published
+/// again.
+/// MUTATION CONTROL: letting `dsm::owned_cell::admit_cell_write` take an owned
+/// cell's write unchecked lets every member keep the copy and turns the
+/// "kept by no member" and "still anchored" assertions red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_copied_anchor_is_kept_by_no_member_of_its_owners_cell() {
+    use crate::sdk::recovery_sdk::RecoverySDK;
+    let p = Pair::boot(0, 0).await;
+    let mut m = TestDevice::create("M", 0x4D);
+    m.boot(&p.fleet).await;
+
+    p.a.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("A anchors its recovery authority");
+    let (k_a, _) = RecoverySDK::get_cached_authority_keypair().expect("A's K_A");
+
+    m.enter();
+    let owner = dsm::recovery::CellOwner {
+        genesis: p.a.genesis,
+        device_id: p.a.device_id,
+    };
+    let cell = dsm::recovery::RecoveryCell::AuthorityAnchor {
+        genesis: p.a.genesis,
+    };
+    let held = crate::sdk::recovery_store::entries(&owner, &cell)
+        .await
+        .expect("A's anchor cell");
+    assert_eq!(held.len(), 1, "A's anchor is in A's cell");
+    let mut copy = dsm::recovery::RecoveryAuthorityAnchor::from_bytes(&held[0]).expect("an anchor");
+    copy.authority_signature = vec![0u8];
+    let copy = copy.to_bytes();
+
+    let a_lock = crate::sdk::recovery_store::cell_lock(&p.a.genesis, &p.a.device_id)
+        .await
+        .expect("A's published cell lock");
+    let a_address = cell.address(&a_lock);
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("the pinned set");
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a set client");
+    let m_lock = dsm::crypto::sphincs::generate_keypair_from_seed(
+        dsm::owned_cell::CELL_LOCK_VARIANT,
+        &[0x4D; 32],
+    )
+    .expect("M's lock");
+    let (_, m_proof) = dsm::owned_cell::sign_owned_cell_write(
+        dsm::recovery::RecoveryCell::namespace(),
+        &cell.key(),
+        &m_lock,
+        &copy,
+    )
+    .expect("M signs its own write");
+    let under_m_lock = client
+        .put_proven_cell(
+            dsm::recovery::RecoveryCell::namespace(),
+            &a_address,
+            &copy,
+            &m_proof,
+        )
+        .await;
+    let with_no_proof = client
+        .put_cell(dsm::recovery::RecoveryCell::namespace(), &a_address, &copy)
+        .await;
+    assert_eq!(
+        under_m_lock, 0,
+        "the copy under M's lock is kept by no member"
+    );
+    assert_eq!(
+        with_no_proof, 0,
+        "the copy with no proof is kept by no member"
+    );
+    assert_eq!(
+        crate::sdk::recovery_store::entries(&owner, &cell)
+            .await
+            .expect("A's anchor cell")
+            .len(),
+        1,
+        "A's cell holds A's anchor alone"
+    );
+
+    p.b.enter();
+    RecoverySDK::fetch_and_verify_authority_anchor(&p.a.genesis, &p.a.device_id, &k_a)
+        .await
+        .expect("B still reads A's authority as anchored");
+    p.a.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("A publishes its anchor again");
+}
+
+/// The trader authorizes, anyone delivers (owner, 2026-11-19: "only the owner
+/// authorizes the economic transition, but anyone may deliver its
+/// authenticated proof"; DSM Amendment A41). A's register cell is still
+/// `K_root(G, DevID, q)`, with no lock in it. B writes junk there, and then a
+/// claim B's own key signed naming A's device: no member keeps either, and
+/// the cell reads open. Then A signs its claim and B, holding none of A's
+/// keys, delivers those exact bytes along the route: every member keeps it
+/// and it is final, the claim A authorized.
+/// MUTATION CONTROL: taking a register write unchecked in
+/// `dsm::owned_cell::admit_cell_write` keeps B's own claim and turns the
+/// "kept by no member" assertion red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_register_keeps_the_claim_its_trader_authorized_whoever_delivers_it() {
+    use crate::sdk::economic_registers::{
+        register_economic_root, root_cell, root_claim_settlement, RootClaimSettlement,
+    };
+    use crate::sdk::signing_authority::{current_att_a, current_public_key, current_secret_key};
+    let p = Pair::boot(0, 0).await;
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("the pinned set");
+    let profile =
+        dsm::economic::register::resolve_root_register_profile(NETWORK).expect("the register");
+    let (position, parent) = (40u64, [0x7Au8; 32]);
+    let cell = root_cell(
+        &set,
+        NETWORK,
+        &p.a.genesis,
+        &p.a.device_id,
+        position,
+        &parent,
+    )
+    .expect("A's cell at 40");
+    assert_eq!(
+        *cell.routed().key(),
+        dsm::economic::register::economic_root_register_key(&p.a.genesis, &p.a.device_id, position),
+        "the register's address is K_root itself: no lock enters it"
+    );
+    let body_by = |ak: Vec<u8>, att_a: [u8; 32]| {
+        dsm::economic::claim::EconomicRootClaimBody::new(
+            p.a.genesis,
+            p.a.device_id,
+            position,
+            [0x0E; 32],
+            [0x0F; 32],
+            profile.storage_set_id,
+            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &ak,
+            att_a,
+        )
+        .expect("a claim body")
+    };
+    let members_holding = |bytes: Vec<u8>| {
+        let (set, cell) = (set.clone(), cell.clone());
+        async move {
+            let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a set client");
+            client
+                .held_at(
+                    dsm::economic::register::economic_root_namespace(),
+                    cell.routed().key(),
+                )
+                .await
+                .into_iter()
+                .filter(|held| {
+                    held.as_ref().is_some_and(|values| {
+                        values.iter().any(|v| {
+                            dsm::route_chain::RouteEntry::decode(v)
+                                .is_some_and(|entry| entry.value == bytes)
+                        })
+                    })
+                })
+                .count()
+        }
+    };
+
+    p.b.enter();
+    let junk = b"nobody authorized this".to_vec();
+    let by_b = dsm::economic::claim_envelope::sign_economic_root_claim(
+        &body_by(
+            current_public_key().expect("B's AK"),
+            current_att_a().expect("B's AttA"),
+        ),
+        &current_secret_key().expect("B's AK secret"),
+    )
+    .expect("B signs a claim naming A's device");
+    // Straight at every member, past any client: each entry as the leader's.
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a set client");
+    for value in [&junk, &by_b] {
+        let entry = dsm::route_chain::RouteEntry::at_leader(
+            dsm::economic::register::economic_root_namespace().to_vec(),
+            *cell.routed().key(),
+            value.clone(),
+            cell.routed().route(),
+        );
+        assert_eq!(
+            client
+                .put_cell(
+                    dsm::economic::register::economic_root_namespace(),
+                    cell.routed().key(),
+                    &entry.encode(),
+                )
+                .await,
+            0,
+            "no member keeps a register write A did not authorize"
+        );
+    }
+    // And along the route, as B's own register writer sends it.
+    if let Err(e) = register_economic_root(&set, &cell, &by_b).await {
+        log::info!("B's own claim along the route: {e}");
+    }
+    assert_eq!(
+        members_holding(junk).await,
+        0,
+        "the junk is kept by no member"
+    );
+    assert_eq!(
+        members_holding(by_b.clone()).await,
+        0,
+        "B's own claim is kept by no member"
+    );
+    assert!(
+        matches!(
+            root_claim_settlement(&set, &cell, &by_b).await,
+            Ok(RootClaimSettlement::Pending(..))
+        ),
+        "A's cell reads open"
+    );
+
+    p.a.enter();
+    let by_a = dsm::economic::claim_envelope::sign_economic_root_claim(
+        &body_by(
+            current_public_key().expect("A's AK"),
+            current_att_a().expect("A's AttA"),
+        ),
+        &current_secret_key().expect("A's AK secret"),
+    )
+    .expect("A authorizes its claim");
+    p.b.enter();
+    register_economic_root(&set, &cell, &by_a)
+        .await
+        .expect("B delivers A's claim along the route");
+    assert_eq!(
+        members_holding(by_a.clone()).await,
+        set.len(),
+        "every member keeps the claim A authorized, delivered by B"
+    );
+    assert_eq!(
+        root_claim_settlement(&set, &cell, &by_a)
+            .await
+            .expect("the cell reads"),
+        RootClaimSettlement::Final,
+        "A's claim is final at A's cell"
+    );
 }
 
 /// `device` takes in the tombstone notices posted for it, and whether it then
@@ -8477,15 +8768,21 @@ async fn a_tombstone_is_taken_in_under_the_authority_the_device_anchored() {
         contact_device_id: p.b.device_id,
     };
 
+    // A notice of A's tombstone lives in A's own cell: under same-identity
+    // restore (DSM Amendment A40) the restored A writes it with A's cell lock,
+    // and B reads it as A's contact. Both notices are A's writes, so what
+    // passes the first over is the authority check, not the cell.
+    p.a.enter();
     let forged = succession_proof_under(&k_m, &k_m_secret, &p.a.device_id, &m.device_id);
     crate::sdk::recovery_store::put(&notices, &forged.to_bytes())
         .await
-        .expect("M's notice");
+        .expect("a notice under M's authority, in A's cell");
     assert!(
         !records_tombstone_of(&p.b, &p.a.device_id).await,
         "a tombstone under M's authority is not taken in"
     );
 
+    p.a.enter();
     let honest = succession_proof_under(&k_a, &k_a_secret, &p.a.device_id, &m.device_id);
     crate::sdk::recovery_store::put(&notices, &honest.to_bytes())
         .await
@@ -8584,9 +8881,10 @@ async fn trade_held_at_its_pair(
 /// MR-SOFI-0142, SoFi Amendment S20 and storage spec §9: `K_root(q)` counts
 /// only a claim naming it, so a precommit there counts as nothing. B trades
 /// with its pair held, so its `P` is published and nothing is at the pair.
-/// B's own `P`, exactly as stored, is then put first in the log of
-/// `K_root(q)`'s leader. B's completion writes the pair behind it, and the
-/// position realizes: `P` is still first at the leader and took nothing.
+/// An honest leader refuses B's `P` at `K_root(q)` (DSM Amendment A41); a
+/// hostile leader keeps it, first in its log. B's completion writes the pair
+/// behind it, and the position realizes: `P` is still first at the leader
+/// and took nothing.
 ///
 /// MUTATION CONTROL: the leader rule reading the first value in the leader's
 /// log whether or not it is recognized (`dsm::route_chain::first_at_leader`)
@@ -8625,10 +8923,24 @@ async fn a_precommit_first_at_its_root_cell_takes_nothing_from_the_position() {
         .iter()
         .position(|member| member.member_id().as_bytes() == root_cell.route().leader())
         .expect("the cell's leader");
-    clients.members()[leader]
+    // An honest leader refuses it: K_root(q) keeps only a claim its trader
+    // signed (DSM Amendment A41).
+    let honest = clients.members()[leader]
         .put_cells(&[(entry.namespace.clone(), entry.key, entry.encode())])
-        .await
-        .expect("the leader keeps it");
+        .await;
+    assert!(
+        matches!(honest, Err(..)),
+        "an honest leader keeps no P at K_root(q): {honest:?}"
+    );
+    // A hostile leader keeps it anyway; readers still count it as nothing.
+    p.nodes
+        .plant_cell(
+            clients.members()[leader].member_id(),
+            &entry.namespace,
+            &entry.key,
+            &entry.encode(),
+        )
+        .await;
     let first_at_leader = || async {
         clients
             .held_at(root_cell.namespace(), root_cell.key())
@@ -8651,6 +8963,328 @@ async fn a_precommit_first_at_its_root_cell_takes_nothing_from_the_position() {
     let held = first_at_leader().await;
     assert_eq!(held[0], entry.encode(), "P is still first at the leader");
     assert!(held.len() > 1, "B's claim is behind it");
+}
+
+/// DSM Amendment A41 at `K_ful(q)`, on five storage nodes (owner,
+/// 2026-11-20: "prove that a genuine third-party relay succeeds, while a
+/// forged fulfillment, mismatched genesis, wrong position, or incorrect
+/// destination is rejected", and "the genesis hint must be available
+/// wherever storage-node admission is replayed or revalidated, including
+/// persisted write records"). B trades with its pair held, so B's `F` and
+/// `C_q` exist and nothing is at the pair. Straight at every member, past any
+/// client, no member keeps at B's `K_ful(q)`: B's `F` with no genesis, with
+/// A's genesis, or with a field changed after B signed it; an `F` A signed
+/// naming B's device; B's own `F` for position `q + 1`; B's `F` put at
+/// `K_ful(q + 1)`, or in an entry naming `K_ful(q)` put at `K_ful(q + 1)`.
+/// Then A, holding none of B's keys, delivers B's `F` with B's genesis at
+/// the leader alone and records the write as one that reached the leader; a
+/// resumed write carries the genesis from its record to every later seat,
+/// and every member keeps it. A then writes B's pair, and B's position reads
+/// registered: the third party's relay succeeded.
+/// MUTATION CONTROL: taking a fulfillment write unchecked in
+/// `dsm::owned_cell::admit_cell_write` turns the "kept by no member"
+/// assertions red; a resumed write that drops its recorded genesis turns the
+/// "every member keeps it" assertion red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_fulfillment_cell_keeps_the_traders_f_with_its_genesis_whoever_delivers_it() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (q, root) = trade_held_at_its_pair(&p, &m, &set).await;
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root).expect("pair");
+    let next = position_cells(&set, &p.b.genesis, &p.b.device_id, q + 1, &root).expect("next");
+    let PendingTrade {
+        fulfillment, claim, ..
+    } = pending_trade(&p.b, &set).await;
+    let f_bytes = Publication::Fulfillment {
+        body: &fulfillment.body,
+        signature: &fulfillment.signature,
+    }
+    .object_bytes()
+    .expect("B's F");
+    let cell = pair.fulfillment();
+    let ns = cell.namespace().to_vec();
+    let client = SetClient::new(&set).expect("the set's members");
+    let entry_for = |at: &dsm::route_chain::RoutedCell, value: &[u8]| {
+        RouteEntry::at_leader(ns.clone(), *at.key(), value.to_vec(), at.route()).encode()
+    };
+    let kept_by_members = |key: [u8; 32], entry: Vec<u8>, genesis: Vec<u8>| {
+        let (client, ns) = (&client, ns.clone());
+        async move {
+            // How many members kept it, and each refusal as the member gave it.
+            let mut kept = 0usize;
+            let mut refusals = Vec::new();
+            for member in client.members() {
+                match member
+                    .put_cells_proven(&[(ns.clone(), key, entry.clone(), genesis.clone())])
+                    .await
+                {
+                    Ok(_records) => kept += 1,
+                    Err(why) => refusals.push(format!("{}: {why}", member.member_id())),
+                }
+            }
+            (kept, refusals)
+        }
+    };
+    let holding = |key: [u8; 32], value: Vec<u8>| {
+        let (client, ns) = (&client, ns.clone());
+        async move {
+            client
+                .held_at(&ns, &key)
+                .await
+                .into_iter()
+                .filter(|held| {
+                    held.as_ref().is_some_and(|values| {
+                        values
+                            .iter()
+                            .any(|v| RouteEntry::decode(v).is_some_and(|e| e.value == value))
+                    })
+                })
+                .count()
+        }
+    };
+    let b_genesis = p.b.genesis.to_vec();
+    let k = *cell.key();
+
+    let (kept, refusals) = kept_by_members(k, entry_for(cell, &f_bytes), Vec::new()).await;
+    assert_eq!(kept, 0, "B's F with no genesis: {refusals:?}");
+    let (kept, refusals) =
+        kept_by_members(k, entry_for(cell, &f_bytes), p.a.genesis.to_vec()).await;
+    assert_eq!(kept, 0, "B's F with a mismatched genesis: {refusals:?}");
+    let altered = TraderFulfillmentBody::new(
+        *fulfillment.body.precommit_id(),
+        vec![[0x5D; 32]],
+        fulfillment.body.attempts().to_vec(),
+        q,
+        fulfillment.body.signature_alg(),
+        fulfillment.body.claimant_public_key(),
+        *fulfillment.body.claimant_att_a(),
+    )
+    .expect("a well-formed F");
+    let moved = Publication::Fulfillment {
+        body: &altered,
+        signature: &fulfillment.signature,
+    }
+    .object_bytes()
+    .expect("an F envelope");
+    let (kept, refusals) = kept_by_members(k, entry_for(cell, &moved), b_genesis.clone()).await;
+    assert_eq!(
+        kept, 0,
+        "B's F with a field changed after B signed it: {refusals:?}"
+    );
+    p.a.enter();
+    let a_key = crate::sdk::signing_authority::current_public_key().expect("A's AK");
+    let a_secret = crate::sdk::signing_authority::current_secret_key().expect("A's AK secret");
+    let forged_body = TraderFulfillmentBody::new(
+        *fulfillment.body.precommit_id(),
+        fulfillment.body.policy_fulfillment_set().to_vec(),
+        fulfillment.body.attempts().to_vec(),
+        q,
+        fulfillment.body.signature_alg(),
+        &a_key,
+        *fulfillment.body.claimant_att_a(),
+    )
+    .expect("a well-formed F");
+    let forged = Publication::Fulfillment {
+        body: &forged_body,
+        signature: &dsm::crypto::sphincs::sphincs_sign(
+            &a_secret,
+            &derive::fulfillment_signing_digest(&forged_body),
+        )
+        .expect("A signs"),
+    }
+    .object_bytes()
+    .expect("an F envelope");
+    let (kept, refusals) = kept_by_members(k, entry_for(cell, &forged), b_genesis.clone()).await;
+    assert_eq!(kept, 0, "an F A signed naming B's device: {refusals:?}");
+    let at_next_position = signed_by_b(
+        &p,
+        &fulfillment.body,
+        &m.vault_id,
+        q + 1,
+        *fulfillment.body.precommit_id(),
+    );
+    let (kept, refusals) =
+        kept_by_members(k, entry_for(cell, &at_next_position), b_genesis.clone()).await;
+    assert_eq!(kept, 0, "B's own F for another position: {refusals:?}");
+    let next_cell = next.fulfillment();
+    let (kept, refusals) = kept_by_members(
+        *next_cell.key(),
+        entry_for(next_cell, &f_bytes),
+        b_genesis.clone(),
+    )
+    .await;
+    assert_eq!(kept, 0, "B's F at another position's cell: {refusals:?}");
+    let (kept, refusals) = kept_by_members(
+        *next_cell.key(),
+        entry_for(cell, &f_bytes),
+        b_genesis.clone(),
+    )
+    .await;
+    assert_eq!(
+        kept, 0,
+        "an entry naming K_ful(q) put at K_ful(q + 1): {refusals:?}"
+    );
+    assert_eq!(
+        holding(k, f_bytes.clone()).await,
+        0,
+        "nothing of B's F is at K_ful(q) yet"
+    );
+
+    // A, holding none of B's keys, delivers B's F at the leader, and its
+    // write is recorded as one that reached the leader alone.
+    p.a.enter();
+    let leader = client
+        .member(cell.route().leader())
+        .expect("the cell's leader");
+    let records = leader
+        .put_cells_proven(&[(ns.clone(), k, entry_for(cell, &f_bytes), b_genesis.clone())])
+        .await
+        .expect("the leader keeps B's F, delivered by A with B's genesis");
+    let [leader_record] = <[dsm::storage_cell::ArrivalRecord; 1]>::try_from(records)
+        .expect("one record for one entry");
+    crate::storage::client_db::route_writes::record_write(
+        &ns,
+        &k,
+        &f_bytes,
+        &b_genesis,
+        cell.seed(),
+        cell.committed_set_id(),
+        &[dsm::route_chain::ChainSlot::Link(leader_record)],
+    )
+    .expect("the write is recorded");
+    let recorded = crate::storage::client_db::route_writes::get_write(&ns, &k, &f_bytes)
+        .expect("read the record")
+        .expect("the write is recorded");
+    assert_eq!(
+        recorded.proof.as_slice(),
+        p.b.genesis.as_slice(),
+        "the record keeps the genesis"
+    );
+    crate::handlers::artifact_republish::continue_route_writes()
+        .await
+        .expect("the recorded write continues");
+    assert_eq!(
+        holding(k, f_bytes.clone()).await,
+        set.len(),
+        "every member keeps B's F, carried on from its record with its genesis"
+    );
+
+    // A writes B's pair, and B's position reads registered.
+    crate::sdk::route_seats::write_recorded_position(&set, &pair, &f_bytes, &claim)
+        .await
+        .expect("A carries B's pair");
+    let (own_a, parents_a) = standing_of(&p.a);
+    let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
+    let registration = ctx
+        .verifier()
+        .read_registration(&p.b.genesis, &p.b.device_id, q, &root)
+        .expect("read")
+        .expect("decided")
+        .into_registration();
+    assert!(
+        matches!(&registration, Registration::Registered(f) if f.body == fulfillment.body),
+        "B's position is registered from what A carried: {registration:?}"
+    );
+}
+
+/// DSM Amendment A41: a fulfillment write recorded without its genesis — as
+/// a wallet recorded one before the genesis was recorded with the write — is
+/// not continued without it. B's `F` holds `K_ful(q)`'s leader, recorded
+/// with one slot and no genesis. The background continuation leaves it as
+/// it is: no seat is asked, so none refuses it and its chain is not closed
+/// short. The position's flow then derives the genesis from the position's
+/// cells and carries the same chain to every member, and the record keeps
+/// the genesis from then on.
+/// MUTATION CONTROL: continuing such a write with its empty proof records
+/// every later seat as no response and turns the "still one slot" assertion
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_fulfillment_write_recorded_without_its_genesis_waits_for_its_flow() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (q, root) = trade_held_at_its_pair(&p, &m, &set).await;
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root).expect("pair");
+    let PendingTrade {
+        fulfillment, claim, ..
+    } = pending_trade(&p.b, &set).await;
+    let f_bytes = Publication::Fulfillment {
+        body: &fulfillment.body,
+        signature: &fulfillment.signature,
+    }
+    .object_bytes()
+    .expect("B's F");
+    let cell = pair.fulfillment();
+    let (ns, k) = (cell.namespace().to_vec(), *cell.key());
+    let client = SetClient::new(&set).expect("the set's members");
+    let holding = || async {
+        client
+            .held_at(&ns, &k)
+            .await
+            .into_iter()
+            .filter(|held| {
+                held.as_ref().is_some_and(|values| {
+                    values
+                        .iter()
+                        .any(|v| RouteEntry::decode(v).is_some_and(|e| e.value == f_bytes))
+                })
+            })
+            .count()
+    };
+
+    p.a.enter();
+    let records = client
+        .member(cell.route().leader())
+        .expect("the cell's leader")
+        .put_cells_proven(&[(
+            ns.clone(),
+            k,
+            RouteEntry::at_leader(ns.clone(), k, f_bytes.clone(), cell.route()).encode(),
+            p.b.genesis.to_vec(),
+        )])
+        .await
+        .expect("the leader keeps B's F with B's genesis");
+    let [leader_record] = <[dsm::storage_cell::ArrivalRecord; 1]>::try_from(records)
+        .expect("one record for one entry");
+    crate::storage::client_db::route_writes::record_write(
+        &ns,
+        &k,
+        &f_bytes,
+        &[],
+        cell.seed(),
+        cell.committed_set_id(),
+        &[dsm::route_chain::ChainSlot::Link(leader_record)],
+    )
+    .expect("the write is recorded without its genesis");
+
+    crate::handlers::artifact_republish::continue_route_writes()
+        .await
+        .expect("the continuation runs");
+    let left = crate::storage::client_db::route_writes::get_write(&ns, &k, &f_bytes)
+        .expect("read the record")
+        .expect("the write is recorded");
+    assert_eq!(left.slots.len(), 1, "still one slot: no seat was asked");
+    assert_eq!(holding().await, 1, "the leader alone holds B's F");
+
+    crate::sdk::route_seats::write_recorded_position(&set, &pair, &f_bytes, &claim)
+        .await
+        .expect("the position's flow carries the pair");
+    assert_eq!(
+        holding().await,
+        set.len(),
+        "every member keeps B's F, carried with the genesis from the position's cells"
+    );
+    let kept = crate::storage::client_db::route_writes::get_write(&ns, &k, &f_bytes)
+        .expect("read the record")
+        .expect("the write is recorded");
+    assert_eq!(
+        kept.proof,
+        p.b.genesis.to_vec(),
+        "the record keeps the genesis now"
+    );
 }
 
 /// MR-SOFI-0145 and storage spec §9 rule 7: the bytes at `K_root(q)` are a

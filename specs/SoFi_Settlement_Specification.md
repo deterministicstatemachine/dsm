@@ -1197,6 +1197,10 @@ at the leader of s(q), both or neither, then puts the same bytes on the other me
 it establishes nothing about the conformance of F or the route, and nothing about it has to be established
 anywhere but Core. Kful (q) holds the signed envelope of F and Kroot (q) holds CCB(Cq ). Because Cq is
 computed from F and P , no claim that disagrees with F can be F ’s claim.
+*DSM Amendment A41 (owner, 2026-11-19 and 2026-11-20):* a member keeps at Kroot (q) only a claim its trader's
+key signed for it, and at Kful (q) only an F its trader signed, delivered with the trader's 32-byte genesis as a
+public hint (F carries none) from which, with F's own device and position, the member recomputes the cell; it
+checks nothing of F's conformance, and any caller still relays F.
 
 **Code**
 Cq is SofiResolutionClaim, CORE/sofi/wire/objects.rs:580, class 0x003A.
@@ -2646,7 +2650,7 @@ fi
 grep -q 'verify_claim_attribution' "$node" || { echo "[FAIL] attribution check missing"; exit 1; }
 echo "[OK] the root register accepts only caller signed single root claims"
 
-> **Amendment S2 (owner, 2026-09-22) — this gate is retired.** The root register must not decode or verify caller signatures or check attribution. A node that can check the writer can block, and blocking is an authority a node must not have (§12; DSM Amendment A3). A root claim that is not signed by its device is not a claim; the reader verifies the signature in Core and ignores it.
+> **Amendment S2 (owner, 2026-09-22) — this gate is retired.** The root register must not decode or verify caller signatures or check attribution. A node that can check the writer can block, and blocking is an authority a node must not have (§12; DSM Amendment A3). A root claim that is not signed by its device is not a claim; the reader verifies the signature in Core and ignores it. *Superseded at the register by DSM Amendment A41 (owner, 2026-11-19): "only the owner authorizes the economic transition, but anyone may deliver its authenticated proof", "Trader authorizes the claim, anyone can relay it". A member keeps at `K_root(q)` only a claim its trader's key signed for it, whoever delivers it; it checks the claim's own signature and nothing about who sent it, and the reader still verifies every claim it counts.*
 
 
 **Gate:** build and tests
