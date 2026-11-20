@@ -649,7 +649,6 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn a_round_that_held_no_wait_waits_out_its_floor() {
-        crate::sdk::inbox_poller::clear_stop_for_test();
         let plan = Plan {
             members: Vec::new(),
             addresses: BTreeSet::new(),

@@ -98,10 +98,13 @@ pub(crate) static POLLER_CYCLE_DONE: once_cell::sync::Lazy<Notify> =
 /// holds it off for a pair's life: a running poller is stopped and waited out
 /// before the pair is set up, a start while the hold stands is deferred, and
 /// the poller starts again once the hold is dropped — on teardown, a failing
-/// test's included.
+/// test's included. A hold that starts no poller as it drops puts the stop
+/// back as it found it, so the next test does not find the poller stopping.
 #[cfg(test)]
 #[must_use]
-pub(crate) struct PollerHold(());
+pub(crate) struct PollerHold {
+    stopping_before: bool,
+}
 
 #[cfg(test)]
 pub(crate) async fn hold_off_for_two_device_harness() -> PollerHold {
@@ -109,12 +112,13 @@ pub(crate) async fn hold_off_for_two_device_harness() -> PollerHold {
     if POLLER_RUNNING.load(Ordering::SeqCst) {
         POLLER_START_DEFERRED.store(true, Ordering::SeqCst);
     }
+    let stopping_before = POLLER_STOP.load(Ordering::SeqCst);
     stop_poller();
     while POLLER_RUNNING.load(Ordering::SeqCst) {
         POLLER_WAKE.notify_one();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    PollerHold(())
+    PollerHold { stopping_before }
 }
 
 /// Whether the two-device harness holds the background tasks off: the
@@ -131,8 +135,20 @@ impl Drop for PollerHold {
             && POLLER_START_DEFERRED.swap(false, Ordering::SeqCst)
         {
             start_poller();
+        } else {
+            // No poller runs under a hold: a start is deferred.
+            put_back_the_stop(self.stopping_before);
         }
     }
+}
+
+/// Puts the poller's stop back as a test found it before it stopped the
+/// poller, once no poller runs. Tests stop the poller and leave it so, and the
+/// waiter reads a stopping poller as its own stop: a test of the waiter would
+/// otherwise see whichever test took the serial lock before it.
+#[cfg(test)]
+pub(crate) fn put_back_the_stop(stopping_before: bool) {
+    POLLER_STOP.store(stopping_before, Ordering::SeqCst);
 }
 
 /// Whether the background poller task is running.
@@ -172,8 +188,15 @@ struct RunningFlag;
 impl Drop for RunningFlag {
     fn drop(&mut self) {
         POLLER_RUNNING.store(false, Ordering::SeqCst);
+        #[cfg(test)]
+        POLLER_TASKS_ENDED.fetch_add(1, Ordering::SeqCst);
     }
 }
+
+/// How many poller tasks have ended, however they ended: a test waits a task
+/// out by it where another has cleared the running flag first.
+#[cfg(test)]
+static POLLER_TASKS_ENDED: AtomicU64 = AtomicU64::new(0);
 
 /// Start the inbox poller background task on the SDK runtime.
 ///
@@ -416,13 +439,6 @@ pub(crate) fn complete_cycle_for_test() {
 /// Whether the poller has been told to stop.
 pub(crate) fn poller_stopping() -> bool {
     POLLER_STOP.load(Ordering::SeqCst)
-}
-
-/// No stop asked of the poller: what a test whose code reads
-/// [`poller_stopping`] starts from, whatever a test before it left.
-#[cfg(test)]
-pub(crate) fn clear_stop_for_test() {
-    POLLER_STOP.store(false, Ordering::SeqCst);
 }
 
 /// True while this device owes the network a settlement step that only polling
@@ -876,6 +892,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn a_hold_is_released_when_its_test_fails() {
+        let stopping_before = POLLER_STOP.load(Ordering::SeqCst);
         stop_poller();
         POLLER_RUNNING.store(false, Ordering::SeqCst);
         POLLER_START_DEFERRED.store(false, Ordering::SeqCst);
@@ -891,7 +908,9 @@ mod tests {
             poller_running() && !poller_start_deferred(),
             "the hold was not released as the failing test unwound"
         );
-        stop_poller();
+        stop_poller_and_wait().expect("the released poller stops");
+        // A later test (the waiter's among them) starts from the stop it found.
+        POLLER_STOP.store(stopping_before, Ordering::SeqCst);
     }
 
     /// A poller task that ends by panicking clears the running flag as it
@@ -901,6 +920,8 @@ mod tests {
     async fn a_poller_that_panics_is_no_longer_running() {
         // The real start marks a poller running; its task is stopped before
         // it polls anything.
+        let stopping_before = POLLER_STOP.load(Ordering::SeqCst);
+        let ended_before = POLLER_TASKS_ENDED.load(Ordering::SeqCst);
         start_poller();
         stop_poller();
         assert!(poller_running(), "the poller was started");
@@ -914,15 +935,23 @@ mod tests {
             !poller_running(),
             "a poller that panicked is still reported running, so it can never start again"
         );
+        // The real task ends at its first look at the stop; only then is the
+        // stop put back, or it would poll.
+        while POLLER_TASKS_ENDED.load(Ordering::SeqCst) < ended_before + 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        POLLER_STOP.store(stopping_before, Ordering::SeqCst);
     }
 
     #[test]
     #[serial_test::serial]
     fn stop_poller_sets_flag() {
-        clear_stop_for_test();
+        let stopping_before = POLLER_STOP.load(Ordering::SeqCst);
+        POLLER_STOP.store(false, Ordering::SeqCst);
         POLLER_RUNNING.store(false, Ordering::SeqCst);
         stop_poller();
         assert!(POLLER_STOP.load(Ordering::SeqCst));
+        POLLER_STOP.store(stopping_before, Ordering::SeqCst);
     }
 
     // ── resume_poller when not running calls start_poller ──
@@ -968,11 +997,13 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn stop_then_stop_is_idempotent() {
+        let stopping_before = POLLER_STOP.load(Ordering::SeqCst);
         POLLER_STOP.store(false, Ordering::SeqCst);
         POLLER_RUNNING.store(false, Ordering::SeqCst);
         stop_poller();
         stop_poller();
         assert!(POLLER_STOP.load(Ordering::SeqCst));
+        POLLER_STOP.store(stopping_before, Ordering::SeqCst);
     }
 
     // ── push_inbox_event_to_webview is no-op on non-android ──

@@ -144,6 +144,16 @@ export async function list(): Promise<Session[]> {
   return sessions('connect.list', await query('connect.list', new Uint8Array()));
 }
 
+/**
+ * connect.connectedBy: the application this wallet is connected to by `code`,
+ * or null when that code made no connection that still stands. Answered from
+ * the wallet's own record: nothing the code names is fetched.
+ */
+export async function connectedBy(code: string): Promise<Session | null> {
+  const made = sessions('connect.connectedBy', await query('connect.connectedBy', new pb.ConnectPreviewRequestV1({ code }).toBinary()));
+  return made.length > 0 ? made[0] : null;
+}
+
 /** connect.sync: take in and carry out connected applications' requests now. */
 export async function sync(): Promise<Session[]> {
   return sessions('connect.sync', await invoke('connect.sync', new Uint8Array()));

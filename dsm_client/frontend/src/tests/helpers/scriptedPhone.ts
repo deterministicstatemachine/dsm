@@ -44,9 +44,10 @@ type BridgeHolder = { DsmBridge: unknown };
 
 /**
  * Installs the phone as `window.DsmBridge`: `routes` maps a router route to
- * what it answers, `methods` a bridge method to the bytes Kotlin answers it with.
+ * what it answers (or to what works that out, each time it is asked), `methods`
+ * a bridge method to the bytes Kotlin answers it with.
  */
-export function installScriptedPhone(routes: Record<string, Answer>, methods: Record<string, Uint8Array> = {}): ScriptedPhone {
+export function installScriptedPhone(routes: Record<string, Answer | (() => Answer)>, methods: Record<string, Uint8Array> = {}): ScriptedPhone {
   const phone: ScriptedPhone = { guards: [] };
   const answers = new Map(Object.entries(routes));
   const methodAnswers = new Map(Object.entries(methods));
@@ -62,8 +63,9 @@ export function installScriptedPhone(routes: Record<string, Answer>, methods: Re
       if (request.method === 'nativeBoundaryIngress') {
         const operation = pb.IngressRequest.fromBinary(data).operation;
         const route = operation.case === 'routerQuery' || operation.case === 'routerInvoke' ? operation.value.method : '';
-        const answer = answers.get(route);
-        if (answer === undefined) return failure(`this test's phone answers no route ${route}`);
+        const scripted = answers.get(route);
+        if (scripted === undefined) return failure(`this test's phone answers no route ${route}`);
+        const answer = typeof scripted === 'function' ? scripted() : scripted;
         return success(new pb.IngressResponse({ result: { case: 'okBytes', value: framed(answer) } }).toBinary());
       }
       const bytes = methodAnswers.get(request.method);

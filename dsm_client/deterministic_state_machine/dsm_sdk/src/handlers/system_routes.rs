@@ -712,23 +712,26 @@ mod tests {
     /// the test begins, and the one the wallet started is stopped and waited
     /// out when it ends, however it ends, so no test leaves a poller syncing
     /// behind it.
-    struct PollerOfThisTest;
+    struct PollerOfThisTest {
+        stopping_before: bool,
+    }
 
     impl PollerOfThisTest {
         fn none_running() -> Self {
+            let stopping_before = crate::sdk::inbox_poller::poller_stopping();
             crate::sdk::inbox_poller::stop_poller_and_wait().expect("a poller left running");
-            Self
+            Self { stopping_before }
         }
     }
 
     impl Drop for PollerOfThisTest {
         fn drop(&mut self) {
-            if let Err(e) = crate::sdk::inbox_poller::stop_poller_and_wait() {
-                if std::thread::panicking() {
-                    eprintln!("{e}; later tests run beside it");
-                } else {
-                    panic!("{e}");
+            match crate::sdk::inbox_poller::stop_poller_and_wait() {
+                Ok(()) => crate::sdk::inbox_poller::put_back_the_stop(self.stopping_before),
+                Err(e) if std::thread::panicking() => {
+                    eprintln!("{e}; later tests run beside it")
                 }
+                Err(e) => panic!("{e}"),
             }
         }
     }

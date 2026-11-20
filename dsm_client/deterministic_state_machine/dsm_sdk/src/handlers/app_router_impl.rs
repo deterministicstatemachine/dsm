@@ -2855,6 +2855,7 @@ impl AppRouter for AppRouterImpl {
             // DSM Connect (DSM Amendment A11)
             "connect.preview"
             | "connect.list"
+            | "connect.connectedBy"
             | "connect.pending"
             | "connect.log"
             | "connect.app.requests"

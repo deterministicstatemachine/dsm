@@ -134,6 +134,8 @@ One line per wallet: the connection's id, the wallet's identity, and whether it 
 
 On Android, the wallet's **Apps** screen has **Connect an app**. Scan the starter's QR with **Scan code**, or open the code as a link on the same phone and press **Read**. The wallet shows the same list the terminal printed: who asks, what for, and the caps. The player approves.
 
+When your app and the wallet are on the same phone and a request waits for the player, open that same code as a link again. The wallet is already connected to your app, so it shows what your app has waiting instead of asking to connect, and once the player has approved or declined it the wallet goes back to your app by itself. Nothing in the link is trusted: the wallet finds your connection in its own record and takes your requests in from the endpoint it connected to. On iOS the wallet shows the request and the player returns to your app themselves.
+
 <div class="shots">
 <figure><img src="images/android-connect-code.webp" width="210" alt="Android: the Apps screen with a connect code and the Read button"><figcaption>A code, handed over as a link.</figcaption></figure>
 <figure><img src="images/android-connect-preview.webp" width="210" alt="Android: My Game asks to connect, with the list of grants and their caps"><figcaption>Who asks, and what for.</figcaption></figure>
