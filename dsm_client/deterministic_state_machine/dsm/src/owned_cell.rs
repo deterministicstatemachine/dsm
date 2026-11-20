@@ -436,6 +436,9 @@ pub fn admit_cell_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One field of a signed body changed after signing: its name, and the change.
+    type Alteration<T> = (&'static str, fn(&mut T));
     use crate::crypto::sphincs::generate_keypair_from_seed;
 
     fn lock(seed: u8) -> SphincsKeyPair {
@@ -694,9 +697,6 @@ mod tests {
     /// keeps every altered claim and turns this red; dropping only the
     /// namespace half of the delivered entry's comparison keeps the entry of
     /// another namespace.
-    /// One signed field, named, and how a test changes it after signing.
-    type Alter<T> = (&'static str, fn(&mut T));
-
     #[test]
     fn a_register_keeps_a_claim_only_as_its_trader_signed_it() {
         use crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F as ALG;
@@ -744,7 +744,7 @@ mod tests {
             }
             .encode_to_vec()
         };
-        let altered: [Alter<EconomicRootClaimBody>; 7] = [
+        let altered: [Alteration<EconomicRootClaimBody>; 7] = [
             ("genesis", |b| b.trader_genesis = [0x12; 32]),
             ("position", |b| b.economic_position = 8),
             ("root", |b| b.post_economic_root = [0x1E; 32]),
@@ -861,7 +861,7 @@ mod tests {
             ),
             Ok(())
         );
-        let altered: [Alter<SofiResolutionClaim>; 6] = [
+        let altered: [Alteration<SofiResolutionClaim>; 6] = [
             ("genesis", |c| c.genesis = [0x12; 32]),
             ("device id", |c| c.device_id = [0xD1; 32]),
             ("position", |c| c.position = 8),
