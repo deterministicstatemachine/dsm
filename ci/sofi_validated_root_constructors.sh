@@ -269,10 +269,11 @@ if ! grep -qE 'established: &Established' <<<"$sig"; then
   exit 1
 fi
 # The ladder runs inside the advance: in advance_resolved itself, or in
-# derive_resolved, the private helper advance_resolved and
-# advance_peer_resolved share (DSM Amendment A8, SoFi Amendment S15). The
-# helper must be private, must run the ladder, and must be called from
-# nowhere but those two advances, so no caller can name a verdict.
+# derive_resolved, the private helper advance_resolved, advance_peer_resolved
+# and advance_own_replayed share (DSM Amendment A8, SoFi Amendment S15; a
+# wallet restored from its phrase replays its own positions, DSM Amendment
+# A40). The helper must be private, must run the ladder, and must be called
+# from nowhere but those three advances, so no caller can name a verdict.
 advance_body=$(awk '/^pub fn advance_resolved\(/{f=1} f{print} f&&/^\}/{exit}' "$sofi_lineage")
 helper_body=$(awk '/^fn derive_resolved[(<]/{f=1} f{print} f&&/^\}/{exit}' "$sofi_lineage")
 if ! grep -qE 'resolve_position\(' <<<"$advance_body"; then
@@ -289,9 +290,9 @@ if ! grep -qE 'resolve_position\(' <<<"$advance_body"; then
     exit 1
   fi
   callers=$(awk '/^(pub(\([a-z]+\))? )?fn [a-z_0-9]+/{name=$0; sub(/^(pub(\([a-z]+\))? )?fn /,"",name); sub(/[(<].*/,"",name)} /derive_resolved\(/ && !/fn derive_resolved/{print name}' "$sofi_lineage" | sort -u)
-  outside=$(awk '!/^(advance_resolved|advance_peer_resolved)$/' <<<"$callers")
+  outside=$(awk '!/^(advance_resolved|advance_peer_resolved|advance_own_replayed)$/' <<<"$callers")
   if [ -n "$outside" ]; then
-    echo "[FAIL] derive_resolved runs the ladder for a caller other than the two advances: $outside"
+    echo "[FAIL] derive_resolved runs the ladder for a caller other than the three advances: $outside"
     exit 1
   fi
   if grep -rqE 'derive_resolved\(' "$core/dsm/src" --include='*.rs' --exclude="$(basename "$sofi_lineage")"; then

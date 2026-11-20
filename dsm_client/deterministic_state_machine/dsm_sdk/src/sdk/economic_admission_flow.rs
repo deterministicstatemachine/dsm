@@ -715,8 +715,15 @@ fn own_boundary_ancestry(
     // unloads of received payments (owner, 2026-11-07), in order.
     let chain = client_db::offline_spends::own_offline_hops(bundle)
         .map_err(|e| storage_err("this device's unexposed offline steps", e))?;
-    let funded = match &boundary.account_move.before {
-        dsm::types::offline_account::StepBefore::Boundary { funding_chain, .. } => *funding_chain,
+    // Where the account stood before the boundary: a load or an unload moves its counter and
+    // frontier (option B), so the account's first boundary names where it was, never where it goes.
+    let (funded, before_counter, before_frontier) = match &boundary.account_move.before {
+        dsm::types::offline_account::StepBefore::Boundary {
+            funding_chain,
+            counter,
+            frontier,
+            ..
+        } => (*funding_chain, *counter, *frontier),
         _ => {
             return Err(DsmError::invalid_operation(
                 "offline boundary: Core took another step where a boundary was asked",
@@ -740,8 +747,8 @@ fn own_boundary_ancestry(
             BoundarySince::Opened { frontier, counter }
         }
         (None, None) => BoundarySince::Opened {
-            frontier: boundary.account_move.account.frontier(),
-            counter: boundary.account_move.account.counter(),
+            frontier: before_frontier,
+            counter: before_counter,
         },
         (Some(_), Some(hop)) => BoundarySince::Previous {
             account_root: hop.starts_from(),
@@ -830,11 +837,61 @@ pub(crate) async fn admitted_offline_boundary(
             "offline boundary: no anchor is attached, so the account's anchor cannot be named",
         )
     })?;
+    // A boundary a crash left being signed is finished before any other: the same boundary from
+    // the same head is the same transition, which the board emits again if it committed it.
+    if let Some(left) = client_db::offline_spends::boundary_signing(&bundle)
+        .map_err(|e| storage_err("the boundary being signed", e))?
+    {
+        if (left.kind, left.asset, left.amount) != (kind.code(), asset, amount) {
+            return Err(DsmError::invalid_operation(format!(
+                "offline boundary: a boundary of {} was being signed by the board when this \
+                 wallet stopped; ask for it again to finish it before another",
+                left.amount
+            )));
+        }
+    }
+    // The board signs the boundary at its next counter, as it signs a payment (DSM Amendment A39
+    // draft, option B), from where the account stands, over the device roots the boundary moves:
+    // previewed from the head here, taken again under its lock, and refused there if the head
+    // moved. A board that left the account's root after a payment signs no unload of it.
+    let (boundary_id, counter, frontier) =
+        head.offline_boundary_start(&bundle, kind, &asset, amount)?;
+    let (transition, challenge) = dsm::types::offline_chain::boundary_transition(
+        kind,
+        &devid,
+        &boundary_id,
+        &frontier,
+        counter,
+    )?;
+    let preview =
+        head.cross_offline_boundary(&bundle, kind, &asset, amount, transition.next_root)?;
+    client_db::offline_spends::record_boundary_signing(
+        &bundle,
+        &client_db::offline_spends::BoundarySigning {
+            kind: kind.code(),
+            asset,
+            amount,
+        },
+    )
+    .map_err(|e| storage_err("the boundary being signed", e))?;
+    let release = core.board_signs_boundary(
+        &transition,
+        challenge,
+        preview.pre_device_root,
+        preview.post_device_root,
+        &preview.offline_state_proofs,
+    )?;
     let (outcome, pending) = core.admitted_boundary(
         &bundle,
-        kind,
-        &asset,
-        amount,
+        crate::sdk::core_sdk::OfflineMove {
+            kind,
+            asset,
+            amount,
+        },
+        crate::sdk::core_sdk::BoardSigned {
+            next_frontier: transition.next_root,
+            roots: (preview.pre_device_root, preview.post_device_root),
+        },
         |boundary| {
             let body = OfflineBoundaryBody::of(
                 boundary,
@@ -843,6 +900,7 @@ pub(crate) async fn admitted_offline_boundary(
                 asset,
                 amount,
                 own_boundary_ancestry(&pin, &bundle, boundary)?,
+                release.clone(),
             )?
             .encode()
             .map_err(|e| storage_err("boundary body", e))?;
@@ -951,6 +1009,12 @@ pub(crate) async fn admitted_offline_boundary(
             None::<std::io::Error>,
         )
     })?;
+    // Durable: the board's frontier moves to the boundary's successor.
+    core.finalize_offline_bearer(transition.next_root)?;
+    // The boundary holds its origin cells: every step its board signed since the last boundary,
+    // and its own departure from the root it leaves. A receiver of a payment from that root
+    // settles from the cells; a boundary from a root a payment holds is refused by every checker.
+    write_boundary_cells(&set, &genesis, head.public_key(), &devid, &body).await?;
     let admitted = finish_admission(
         core,
         &network_id,
@@ -966,16 +1030,58 @@ pub(crate) async fn admitted_offline_boundary(
     Ok((outcome, admitted))
 }
 
-/// Settle a payment this device received offline (SA-91): once the payer's
-/// online history exposed the spend — a walk of the payer this device ran
-/// itself recorded the exposure — the payment is credited to the online balance
-/// by an admitted economic transition of its own, funded by that spend and
-/// consumed once. The settlement, its admission and the pending receipt's
-/// settled mark are durable together; then the one finish runs.
+/// Write the origin cells a boundary `body_bytes` of this device holds (DSM Amendment A39 draft,
+/// option B): each board-signed step the boundary carries, at the cell of the root it starts from,
+/// and the boundary's departure, at the cell of the root it leaves.
+async fn write_boundary_cells(
+    set: &crate::sdk::storage_set::StorageSet,
+    genesis: &[u8; 32],
+    owner_key: &[u8],
+    devid: &[u8; 32],
+    body_bytes: &[u8],
+) -> Result<(), DsmError> {
+    use dsm::economic::offline_boundary::OfflineBoundaryBody;
+    let body = OfflineBoundaryBody::decode(body_bytes)
+        .map_err(|e| DsmError::invalid_operation(format!("offline boundary body: {e}")))?;
+    let mut writes = Vec::new();
+    for bytes in &body.ancestry.chain {
+        let step = dsm::types::offline_chain::AccountHop::from_bytes(bytes)?;
+        if step.board_message().is_some() {
+            writes.push(
+                dsm::offline_origin::OriginWrite::new(
+                    owner_key,
+                    *devid,
+                    body.bundle,
+                    &body.ancestry.anchor,
+                    &step,
+                )
+                .encode()
+                .map_err(|e| storage_err("an origin write", e))?,
+            );
+        }
+    }
+    writes.push(
+        dsm::offline_origin::OriginDeparture::of(*genesis, owner_key, *devid, &body)
+            .map_err(|e| storage_err("a departure", e))?
+            .encode()
+            .map_err(|e| storage_err("a departure", e))?,
+    );
+    crate::sdk::origin_cell_flow::put_writes(set, &writes).await
+}
+
+/// Settle a payment this device received offline (SA-91; DSM Amendment A39
+/// draft): once the payer's origin cells hold the payment, final, from the
+/// account the payer's boundary left that this device recorded, the payment is
+/// credited to the online balance by an admitted economic transition of its
+/// own, funded by that spend and consumed once. This device writes the payer's
+/// steps it was carried itself; the payer is never needed. The settlement, its
+/// admission and the pending receipt's settled mark are durable together; then
+/// the one finish runs. A payment the cells do not hold final yet stays pending:
+/// `None`, which is no failure.
 pub(crate) async fn admitted_offline_settlement(
     core: &CoreSDK,
     release_message: [u8; 32],
-) -> Result<AdmittedOutcome, DsmError> {
+) -> Result<Option<AdmittedOutcome>, DsmError> {
     // The admission this flow creates is its own until it returns; the sync
     // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
     let _admission_handler = core.admission_handler();
@@ -994,25 +1100,31 @@ pub(crate) async fn admitted_offline_settlement(
             "offline settlement: the payment was settled at position {position}"
         )));
     }
-    let exposure = client_db::economic_lineage::offline_exposure(&release_message)
-        .map_err(|e| storage_err("the exposure of the payment", e))?
+    let origin = client_db::offline_receipts::offline_origin(&release_message)
+        .map_err(|e| storage_err("the payer's steps the payment was carried with", e))?
         .ok_or_else(|| {
             DsmError::invalid_operation(
-                "offline settlement: the payer's online history has not exposed this spend yet — \
-                 the payment stays pending",
+                "offline settlement: the payer's steps this payment was carried with were not \
+                 kept, so it cannot be proved from the payer's cells",
             )
         })?;
-    if *exposure.genesis() != receipt.payer_genesis
-        || *exposure.device_id() != receipt.payer_device
-        || *exposure.bundle() != receipt.bundle
-        || exposure.payment().asset != receipt.asset
-        || exposure.payment().amount != receipt.amount
-    {
-        return Err(DsmError::invalid_operation(
-            "offline settlement: the exposed payment is not the one this device received",
-        ));
-    }
     let network_id = committed_network_id()?;
+    let cells = canonical_set(&network_id)?;
+    crate::sdk::origin_cell_flow::put_writes(&cells, &origin.writes).await?;
+    let reads = crate::sdk::origin_cell_flow::path(
+        core,
+        &cells,
+        &receipt.bundle,
+        &origin.root,
+        &origin.payment_root,
+    )?;
+    if !crate::sdk::origin_cell_flow::reaches_a_final_step(
+        &reads,
+        &receipt.bundle,
+        &origin.payment_root,
+    ) {
+        return Ok(None);
+    }
     if let Some(pending) = core
         .device_head()
         .and_then(|h| h.pending_economic_admission().cloned())
@@ -1028,13 +1140,77 @@ pub(crate) async fn admitted_offline_settlement(
     let validated = validated_root_or_activate(core)?;
     let (mut tree, pre_state) = producer_tree_and_pre_state(&validated)?;
     let authority = authority_material(&network_id, &genesis)?;
-    let body = OfflineSettlementBody::of(&exposure, receipt.operation.clone())
-        .encode()
-        .map_err(|e| DsmError::invalid_operation(format!("an offline settlement body: {e:?}")))?;
-    let verified = OfflineSettlementBody::verify(&body, &genesis, &devid, &exposure)?;
+    let body = OfflineSettlementBody {
+        payer_genesis: receipt.payer_genesis,
+        payer_device: receipt.payer_device,
+        boundary_position: origin.position,
+        payment_root: origin.payment_root,
+        release_message,
+        bundle: receipt.bundle,
+        asset: receipt.asset,
+        amount: receipt.amount,
+        payment_operation: receipt.operation.clone(),
+    }
+    .encode()
+    .map_err(|e| DsmError::invalid_operation(format!("an offline settlement body: {e:?}")))?;
+    let verified = OfflineSettlementBody::verify(&body, &genesis, &devid, &origin.root, &reads)?;
     let mut built: Option<(EconomicTransitionWitness, EconomicAdmissionManifest)> = None;
+    // The account's board signs the unload of the received payment at its next counter, as it
+    // signs every step of the account (DSM Amendment A39 draft, option B): previewed here, taken
+    // again under the head lock, and refused there if the head moved. A board that committed
+    // exactly this unload before a crash emits it again.
+    let settle_id = dsm::economic::offline_boundary::settlement_id(
+        &genesis,
+        &devid,
+        &receipt.payer_genesis,
+        &receipt.payer_device,
+        &release_message,
+    );
+    if let Some(left) = client_db::offline_spends::boundary_signing(&receipt.receiver_bundle)
+        .map_err(|e| storage_err("the step being signed", e))?
+    {
+        let this = (
+            dsm::types::device_state::OfflineBoundaryKind::Settle.code(),
+            receipt.asset,
+            receipt.amount,
+        );
+        if (left.kind, left.asset, left.amount) != this {
+            return Err(DsmError::invalid_operation(
+                "offline settlement: the board was signing another step of the account when this \
+                 wallet stopped; finish it first",
+            ));
+        }
+    }
+    let (counter, frontier) = head.offline_account_standing(&receipt.receiver_bundle)?;
+    let (transition, challenge) =
+        dsm::types::offline_chain::settle_transition(&devid, &settle_id, &frontier, counter)?;
+    let preview = head.settle_offline_receipt(
+        &receipt.receiver_bundle,
+        &receipt.asset,
+        receipt.amount,
+        transition.next_root,
+    )?;
+    client_db::offline_spends::record_boundary_signing(
+        &receipt.receiver_bundle,
+        &client_db::offline_spends::BoundarySigning {
+            kind: dsm::types::device_state::OfflineBoundaryKind::Settle.code(),
+            asset: receipt.asset,
+            amount: receipt.amount,
+        },
+    )
+    .map_err(|e| storage_err("the unload being signed", e))?;
+    let release = core.board_signs_boundary(
+        &transition,
+        challenge,
+        preview.pre_device_root,
+        preview.post_device_root,
+        &preview.offline_state_proofs,
+    )?;
     let pending = core.admitted_settlement(
         &receipt,
+        transition.next_root,
+        (preview.pre_device_root, preview.post_device_root),
+        &release,
         || {
             let digest = offline_boundary_operation_digest(&body);
             let evidence_addr = offline_boundary_evidence_addr(&body);
@@ -1142,6 +1318,8 @@ pub(crate) async fn admitted_offline_settlement(
             None::<std::io::Error>,
         )
     })?;
+    // Durable: the board's frontier moves to the unload's successor.
+    core.finalize_offline_bearer(transition.next_root)?;
     finish_admission(
         core,
         &network_id,
@@ -1154,15 +1332,16 @@ pub(crate) async fn admitted_offline_settlement(
         Vec::new(),
     )
     .await
+    .map(Some)
 }
 
-/// Settle every payment this device received offline that its payer's online
-/// history now exposes (SA-91). Each payer's positions past the latest boundary
-/// this device recorded of it are scanned by register key, within Core's bound,
-/// and only its offline boundaries validated, one hop each: that records the
-/// spends they exposed. Each exposed payment is settled by its own admitted
-/// transition. A payment its payer has not exposed yet stays pending; it is no
-/// failure. Returns how many were settled, and what could not be done.
+/// Settle every payment this device received offline that its payer's origin
+/// cells now hold final (SA-91; DSM Amendment A39 draft): this device writes
+/// the payer's steps each payment was carried with to the payer's cells, reads
+/// them from the account the payer's boundary left, and settles each payment
+/// they hold by its own admitted transition. The payer is never needed. A
+/// payment its cells do not hold final yet stays pending; it is no failure.
+/// Returns how many were settled, and what could not be done.
 pub(crate) async fn settle_received_offline(core: &CoreSDK) -> (u32, Vec<String>) {
     let mut failures = Vec::new();
     let receipts = match client_db::offline_receipts::pending_offline_receipts() {
@@ -1172,46 +1351,12 @@ pub(crate) async fn settle_received_offline(core: &CoreSDK) -> (u32, Vec<String>
             return (0, failures);
         }
     };
-    let mut scans: std::collections::BTreeMap<([u8; 32], [u8; 32]), u64> =
-        std::collections::BTreeMap::new();
-    for receipt in &receipts {
-        match client_db::economic_lineage::latest_offline_account(
-            &receipt.payer_genesis,
-            &receipt.payer_device,
-            &receipt.bundle,
-        ) {
-            Ok(recorded) => {
-                let from = recorded.map_or(1, |account| account.economic_position() + 1);
-                let start = scans
-                    .entry((receipt.payer_genesis, receipt.payer_device))
-                    .or_insert(from);
-                *start = from.min(*start);
-            }
-            Err(e) => failures.push(format!(
-                "the recorded offline account of a payment's payer: {e}"
-            )),
-        }
-    }
-    for ((genesis, device), from) in scans {
-        if let Err(e) =
-            crate::sdk::economic_registers::scan_payer_offline_boundaries(genesis, device, from)
-                .await
-        {
-            failures.push(format!(
-                "the payer {} of a payment received offline could not be scanned: {e}",
-                crate::util::text_id::encode_base32_crockford(&device)
-            ));
-        }
-    }
     let mut settled = 0u32;
     for receipt in receipts {
-        match client_db::economic_lineage::offline_exposure(&receipt.release_message) {
-            Ok(Some(_)) => match admitted_offline_settlement(core, receipt.release_message).await {
-                Ok(_) => settled += 1,
-                Err(e) => failures.push(format!("a payment received offline: {e}")),
-            },
+        match admitted_offline_settlement(core, receipt.release_message).await {
+            Ok(Some(_)) => settled += 1,
             Ok(None) => {}
-            Err(e) => failures.push(format!("the exposure of a payment received offline: {e}")),
+            Err(e) => failures.push(format!("a payment received offline: {e}")),
         }
     }
     (settled, failures)
@@ -1532,8 +1677,9 @@ async fn finish_locked(
                         )
                         .map(|(verified, ..)| verified)?
                     }
-                    // A settlement is held to the exposure this device's own walk of
-                    // the payer recorded.
+                    // A settlement is held to the payment the payer's origin cells hold,
+                    // read again from the account the payer's boundary left that this
+                    // device recorded with the payment (DSM Amendment A39 draft).
                     dsm::economic::offline_boundary::OfflineBodyKind::Settlement => {
                         let named =
                             dsm::economic::offline_boundary::OfflineSettlementBody::decode(&body)
@@ -1542,16 +1688,28 @@ async fn finish_locked(
                                     "an offline settlement body: {e}"
                                 ))
                             })?;
-                        let exposure =
-                            client_db::economic_lineage::offline_exposure(&named.release_message)
-                                .map_err(|e| storage_err("the exposure the settlement names", e))?
+                        let origin =
+                            client_db::offline_receipts::offline_origin(&named.release_message)
+                                .map_err(|e| storage_err("the payment's kept steps", e))?
                                 .ok_or_else(|| {
                                     DsmError::invalid_operation(
-                                "the settlement names an exposure this device never recorded",
-                            )
+                                        "the settlement names a payment this device kept no \
+                                         steps of",
+                                    )
                                 })?;
+                        let reads = crate::sdk::origin_cell_flow::path(
+                            core,
+                            set,
+                            &named.bundle,
+                            &origin.root,
+                            &named.payment_root,
+                        )?;
                         dsm::economic::offline_boundary::OfflineSettlementBody::verify(
-                            &body, &genesis, &devid, &exposure,
+                            &body,
+                            &genesis,
+                            &devid,
+                            &origin.root,
+                            &reads,
                         )?
                     }
                 };

@@ -25,6 +25,7 @@ describe('AppContent securing device state', () => {
         handleGenerateGenesis={() => {}}
         cancelPhraseBackup={() => {}}
         answerPhraseCheck={() => Promise.resolve()}
+        restore={{ begin: () => {}, cancel: () => {}, submit: () => Promise.resolve() }}
         menuItems={[]}
         currentMenuIndex={0}
         setCurrentMenuIndex={() => {}}

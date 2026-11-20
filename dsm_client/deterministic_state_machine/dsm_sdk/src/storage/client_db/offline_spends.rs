@@ -15,7 +15,7 @@
 //! admission.
 
 use anyhow::{anyhow, Result};
-use rusqlite::{params, Transaction};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 use super::get_connection;
 
@@ -163,4 +163,138 @@ pub fn close_offline_accounts(
     }
     tx.commit()?;
     Ok(payments)
+}
+
+/// A load or an unload this device's board is signing (DSM Amendment A39 draft,
+/// option B): the boundary's kind (its code), asset and amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundarySigning {
+    pub kind: u8,
+    pub asset: [u8; 32],
+    pub amount: u64,
+}
+
+/// Record that the board of the account of `bundle` is about to sign
+/// `signing`, before it is driven.
+pub fn record_boundary_signing(bundle: &[u8; 32], signing: &BoundarySigning) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO offline_boundary_signing(bundle, kind, asset, amount)
+         VALUES(?1, ?2, ?3, ?4)",
+        params![
+            bundle.as_slice(),
+            i64::from(signing.kind),
+            signing.asset.as_slice(),
+            i64::try_from(signing.amount).map_err(|e| anyhow!("an amount overflows: {e}"))?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The boundary the board of the account of `bundle` was left signing, if a
+/// crash left one.
+pub fn boundary_signing(bundle: &[u8; 32]) -> Result<Option<BoundarySigning>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let row = conn
+        .query_row(
+            "SELECT kind, asset, amount FROM offline_boundary_signing WHERE bundle = ?1",
+            params![bundle.as_slice()],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(kind, asset, amount)| {
+        Ok(BoundarySigning {
+            kind: u8::try_from(kind).map_err(|e| anyhow!("a boundary's kind: {e}"))?,
+            asset: <[u8; 32]>::try_from(asset.as_slice())
+                .map_err(|e| anyhow!("a boundary's asset is not 32 bytes: {e}"))?,
+            amount: u64::try_from(amount).map_err(|e| anyhow!("a boundary's amount: {e}"))?,
+        })
+    })
+    .transpose()
+}
+
+/// The boundary of the account of `bundle` is durable: it is no longer being
+/// signed. In the transaction that makes it so.
+pub fn clear_boundary_signing_in_tx(tx: &Transaction<'_>, bundle: &[u8; 32]) -> Result<()> {
+    tx.execute(
+        "DELETE FROM offline_boundary_signing WHERE bundle = ?1",
+        params![bundle.as_slice()],
+    )?;
+    Ok(())
+}
+
+/// Keep the public material of this wallet's own anchor, from the pin its board gave when
+/// attached (DSM Amendment A40): what an origin write of its own steps carries.
+pub fn record_own_anchor(pin: &crate::anchor::AnchorPin) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO own_offline_anchor(bundle, anchor_id, pk_chip, pk_host, \
+         enrolled_counter, birth_commitment) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            pin.bundle.as_slice(),
+            pin.anchor_id.as_slice(),
+            pin.pk_chip,
+            pin.partition_pk,
+            i64::try_from(pin.enrolled_counter)
+                .map_err(|e| anyhow::anyhow!("enrolled counter: {e}"))?,
+            pin.birth_commitment.as_slice()
+        ],
+    )?;
+    Ok(())
+}
+
+/// This wallet's own anchors, by bundle, as their boards gave their pins.
+pub fn own_anchors() -> Result<Vec<([u8; 32], dsm::economic::offline_boundary::BoundaryAnchor)>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+    let mut stmt = conn.prepare(
+        "SELECT bundle, anchor_id, pk_chip, pk_host, enrolled_counter, birth_commitment \
+         FROM own_offline_anchor",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, Vec<u8>>(0)?,
+            r.get::<_, Vec<u8>>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+            r.get::<_, Vec<u8>>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, Vec<u8>>(5)?,
+        ))
+    })?;
+    let d32 = |v: Vec<u8>, what: &str| -> Result<[u8; 32]> {
+        <[u8; 32]>::try_from(v.as_slice()).map_err(|e| anyhow::anyhow!("{what}: {e}"))
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let (bundle, anchor_id, pk_chip, pk_host, enrolled, birth) = row?;
+        out.push((
+            d32(bundle, "bundle")?,
+            dsm::economic::offline_boundary::BoundaryAnchor {
+                anchor_id: d32(anchor_id, "anchor id")?,
+                pk_chip,
+                pk_host,
+                enrolled_counter: u64::try_from(enrolled)
+                    .map_err(|e| anyhow::anyhow!("enrolled counter: {e}"))?,
+                birth_commitment: d32(birth, "birth commitment")?,
+            },
+        ));
+    }
+    Ok(out)
 }

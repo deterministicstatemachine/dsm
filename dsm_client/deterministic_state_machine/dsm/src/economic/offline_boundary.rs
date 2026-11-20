@@ -68,14 +68,14 @@ use crate::types::offline_account::{
 struct LoadBody;
 impl CcbObject for LoadBody {
     const CLASS: u16 = class::OFFLINE_LOAD_BOUNDARY_BODY;
-    const SCHEMA: u16 = 4;
+    const SCHEMA: u16 = 5;
 }
 
 /// Envelope of an unload body.
 struct UnloadBody;
 impl CcbObject for UnloadBody {
     const CLASS: u16 = class::OFFLINE_UNLOAD_BOUNDARY_BODY;
-    const SCHEMA: u16 = 4;
+    const SCHEMA: u16 = 5;
 }
 
 /// The anchor an offline account belongs to, as its bundle `B` commits it:
@@ -132,6 +132,15 @@ pub struct OfflineBoundaryBody {
     pub pre_allocation: Option<u64>,
     /// The account's funding chain before, if a boundary had funded it.
     pub pre_funding_chain: Option<[u8; 32]>,
+    /// The account's counter and frontier before: where its board stood.
+    pub pre_counter: u64,
+    pub pre_frontier: [u8; 32],
+    /// The frontier the board advanced to when it signed the boundary.
+    pub next_frontier: [u8; 32],
+    /// The board's release of the boundary (a `dsm.anchor.OfflineRelease`, its
+    /// offline-state proofs attached): the load or unload signed at the board's
+    /// next counter, as a spend is (DSM Amendment A39 draft, option B).
+    pub release: Vec<u8>,
     /// The account paths of the leaves the boundary writes, in key order.
     pub account_paths: Vec<EncodedPath>,
     /// The device path of the account's leaf against `pre_device_root`.
@@ -152,6 +161,9 @@ pub struct VerifiedOfflineBoundary {
     operation_id: [u8; 32],
     operation_digest: [u8; 32],
     moved: Moved,
+    /// `M`, the root-advance message the account's board signed for a load or an unload: what
+    /// holds the boundary's origin cell. `None` for a settlement.
+    departure: Option<[u8; 32]>,
 }
 
 /// What a verified boundary moved: an offline account (a load or an unload),
@@ -171,6 +183,12 @@ enum Moved {
 impl VerifiedOfflineBoundary {
     pub fn kind(&self) -> OfflineBoundaryKind {
         self.kind
+    }
+    /// `M`, the root-advance message the account's board signed for the
+    /// boundary: the step that holds the origin cell of the root it starts
+    /// from. `None` for a settlement, which moves no offline account.
+    pub fn departure(&self) -> Option<[u8; 32]> {
+        self.departure
     }
     pub fn bundle(&self) -> [u8; 32] {
         self.bundle
@@ -296,10 +314,13 @@ impl OfflineBoundaryBody {
         asset: [u8; 32],
         amount: u64,
         ancestry: BoundaryAncestry,
+        release: Vec<u8>,
     ) -> Result<Self, DsmError> {
         let StepBefore::Boundary {
             allocation,
             funding_chain,
+            counter,
+            frontier,
         } = outcome.account_move.before
         else {
             return Err(DsmError::invalid_operation(
@@ -324,6 +345,10 @@ impl OfflineBoundaryBody {
             pre_account_root: outcome.pre_account_root,
             pre_allocation: allocation,
             pre_funding_chain: funding_chain,
+            pre_counter: counter,
+            pre_frontier: frontier,
+            next_frontier: outcome.account_move.account.frontier(),
+            release,
             account_paths: outcome
                 .account_move
                 .entries
@@ -364,26 +389,32 @@ impl OfflineBoundaryBody {
             }
             None => push_absent(&mut out),
         }
-        // 8: a boundary writes exactly two account leaves — its allocation
-        // and the funding chain — so exactly two paths, in key order.
-        let [first, second] = self.account_paths.as_slice() else {
+        push_u64(&mut out, self.pre_counter); // 8
+        push_digest32(&mut out, &self.pre_frontier); // 9
+        push_digest32(&mut out, &self.next_frontier); // 10
+        push_bytes(&mut out, &self.release)?; // 11
+                                              // 12: a boundary writes exactly four account leaves — its allocation,
+                                              // the funding chain, the counter and the frontier — so four paths, in
+                                              // key order.
+        if self.account_paths.len() != BOUNDARY_WRITES {
             return Err(CcbError::FixedLength {
                 field: "account_paths",
-                expected: 2,
+                expected: BOUNDARY_WRITES,
                 got: self.account_paths.len(),
             });
-        };
-        push_path(&mut out, first)?;
-        push_path(&mut out, second)?;
-        push_path(&mut out, &self.device_path)?; // 9
+        }
+        for path in &self.account_paths {
+            push_path(&mut out, path)?;
+        }
+        push_path(&mut out, &self.device_path)?; // 13
         let anchor = &self.ancestry.anchor;
-        push_digest32(&mut out, &anchor.anchor_id); // 10
-        push_bytes(&mut out, &anchor.pk_chip)?; // 11
-        push_bytes(&mut out, &anchor.pk_host)?; // 12
-        push_u64(&mut out, anchor.enrolled_counter); // 13
-        push_digest32(&mut out, &anchor.birth_commitment); // 14
+        push_digest32(&mut out, &anchor.anchor_id); // 14
+        push_bytes(&mut out, &anchor.pk_chip)?; // 15
+        push_bytes(&mut out, &anchor.pk_host)?; // 16
+        push_u64(&mut out, anchor.enrolled_counter); // 17
+        push_digest32(&mut out, &anchor.birth_commitment); // 18
         match &self.ancestry.since {
-            // 15
+            // 19
             BoundarySince::Opened { frontier, counter } => {
                 out.push(SINCE_OPENED);
                 push_digest32(&mut out, frontier);
@@ -394,7 +425,7 @@ impl OfflineBoundaryBody {
                 push_digest32(&mut out, account_root);
             }
         }
-        // 16: the spends since, each its canonical `OfflineSpendHop` bytes.
+        // 20: the steps since, each its canonical `OfflineAccountHop` bytes.
         if self.ancestry.chain.len() > crate::types::offline_chain::MAX_CHAIN_HOPS {
             return Err(CcbError::FixedLength {
                 field: "chain",
@@ -438,8 +469,15 @@ impl OfflineBoundaryBody {
             0x01 => Some(c.digest32()?),
             got => return Err(DecodeError::Invalid(format!("presence marker {got}"))),
         };
-        // A boundary writes two account leaves: its allocation and the chain.
-        let account_paths = vec![read_path(&mut c)?, read_path(&mut c)?];
+        let pre_counter = c.u64()?;
+        let pre_frontier = c.digest32()?;
+        let next_frontier = c.digest32()?;
+        let release = read_bytes(&mut c)?;
+        // A boundary writes four account leaves: its allocation, the chain, the
+        // counter and the frontier.
+        let account_paths = (0..BOUNDARY_WRITES)
+            .map(|_| read_path(&mut c))
+            .collect::<Result<Vec<_>, _>>()?;
         let device_path = read_path(&mut c)?;
         let anchor_id = c.digest32()?;
         let pk_chip = read_bytes(&mut c)?;
@@ -480,6 +518,10 @@ impl OfflineBoundaryBody {
             pre_account_root,
             pre_allocation,
             pre_funding_chain,
+            pre_counter,
+            pre_frontier,
+            next_frontier,
+            release,
             account_paths,
             device_path,
             ancestry: BoundaryAncestry {
@@ -527,59 +569,123 @@ impl OfflineBoundaryBody {
     > {
         let body = Self::decode(body_bytes)
             .map_err(|e| DsmError::invalid_operation(format!("an offline boundary body: {e}")))?;
-        let operation_id = OfflineBoundaryId {
-            genesis: *genesis,
-            device_id: *device_id,
-            kind: body.kind,
-            bundle: body.bundle,
-            asset: body.asset,
-            amount: body.amount,
-            pre_device_root: body.pre_device_root,
-            pre_account_root: body.pre_account_root,
-        }
-        .operation_id();
-        let step =
-            match body.kind {
-                OfflineBoundaryKind::Load => OfflineAccountStep::Load {
-                    asset: body.asset,
-                    amount: body.amount,
-                    boundary_id: operation_id,
-                },
-                OfflineBoundaryKind::Unload => OfflineAccountStep::Unload {
-                    asset: body.asset,
-                    amount: body.amount,
-                    boundary_id: operation_id,
-                },
-                OfflineBoundaryKind::Settle => return Err(DsmError::invalid_operation(
-                    "an offline boundary body is a load or an unload of the device's own account",
-                )),
-            };
-        let paths = body
-            .account_paths
-            .iter()
-            .map(decode_path)
-            .collect::<Result<Vec<_>, _>>()?;
-        let post_account_root = verify_step(
-            &body.pre_account_root,
-            &step,
-            &StepBefore::Boundary {
-                allocation: body.pre_allocation,
-                funding_chain: body.pre_funding_chain,
-            },
-            &paths,
-        )?;
-        let device_path = decode_path(&body.device_path)?;
-        let key = offline_account_leaf_key(&body.bundle);
-        if fold_path::<DeviceSmtHashes>(&key, Some(&body.pre_account_root), &device_path)
-            != body.pre_device_root
-        {
+        let payments = verify_ancestry(&body, device_id, owner_key)?;
+        let verified = verify_boundary_step(&body, body_bytes, genesis, device_id)?;
+        Ok((verified, payments))
+    }
+
+    /// Verify the body at `body_bytes` as the departure of a boundary of the
+    /// device `(genesis, device_id)` from the root it starts from (DSM Amendment
+    /// A39 draft): the boundary with no steps carried, as its origin cell holds
+    /// it. `B` recomputes from the anchor it names and the owner's online key
+    /// `owner_key`; the account step folds; the board signed it. The steps
+    /// since the last boundary are each at their own cell.
+    pub fn verify_departure(
+        body_bytes: &[u8],
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        owner_key: &[u8],
+    ) -> Result<VerifiedOfflineBoundary, DsmError> {
+        let body = Self::decode(body_bytes)
+            .map_err(|e| DsmError::invalid_operation(format!("an offline boundary body: {e}")))?;
+        if !body.ancestry.chain.is_empty() {
             return Err(DsmError::invalid_operation(
-                "the boundary's device root does not commit the offline account it states",
+                "a boundary's departure carries no steps: each is at its own cell",
             ));
         }
-        let post_device_root =
-            fold_path::<DeviceSmtHashes>(&key, Some(&post_account_root), &device_path);
-        let payments = verify_ancestry(&body, device_id, owner_key)?;
+        require_anchor_of(&body, device_id, owner_key)?;
+        verify_boundary_step(&body, body_bytes, genesis, device_id)
+    }
+
+    /// The boundary as its departure: the same boundary with no steps carried.
+    pub fn departure(&self) -> Self {
+        Self {
+            ancestry: BoundaryAncestry {
+                chain: Vec::new(),
+                ..self.ancestry.clone()
+            },
+            ..self.clone()
+        }
+    }
+}
+
+/// The account step of a boundary folded, its device leaf folded, and the
+/// board's release of it checked: what a boundary is, whether or not the steps
+/// since the last boundary are carried with it.
+fn verify_boundary_step(
+    body: &OfflineBoundaryBody,
+    body_bytes: &[u8],
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+) -> Result<VerifiedOfflineBoundary, DsmError> {
+    let operation_id = OfflineBoundaryId {
+        genesis: *genesis,
+        device_id: *device_id,
+        kind: body.kind,
+        bundle: body.bundle,
+        asset: body.asset,
+        amount: body.amount,
+        pre_device_root: body.pre_device_root,
+        pre_account_root: body.pre_account_root,
+    }
+    .operation_id();
+    let step = match body.kind {
+        OfflineBoundaryKind::Load => OfflineAccountStep::Load {
+            asset: body.asset,
+            amount: body.amount,
+            boundary_id: operation_id,
+            next_frontier: body.next_frontier,
+        },
+        OfflineBoundaryKind::Unload => OfflineAccountStep::Unload {
+            asset: body.asset,
+            amount: body.amount,
+            boundary_id: operation_id,
+            next_frontier: body.next_frontier,
+        },
+        OfflineBoundaryKind::Settle => {
+            return Err(DsmError::invalid_operation(
+                "an offline boundary body is a load or an unload of the device's own account",
+            ))
+        }
+    };
+    let paths = body
+        .account_paths
+        .iter()
+        .map(decode_path)
+        .collect::<Result<Vec<_>, _>>()?;
+    let post_account_root = verify_step(
+        &body.pre_account_root,
+        &step,
+        &StepBefore::Boundary {
+            allocation: body.pre_allocation,
+            funding_chain: body.pre_funding_chain,
+            counter: body.pre_counter,
+            frontier: body.pre_frontier,
+        },
+        &paths,
+    )?;
+    let device_path = decode_path(&body.device_path)?;
+    let key = offline_account_leaf_key(&body.bundle);
+    if fold_path::<DeviceSmtHashes>(&key, Some(&body.pre_account_root), &device_path)
+        != body.pre_device_root
+    {
+        return Err(DsmError::invalid_operation(
+            "the boundary's device root does not commit the offline account it states",
+        ));
+    }
+    let post_device_root =
+        fold_path::<DeviceSmtHashes>(&key, Some(&post_account_root), &device_path);
+    // The board signed this very boundary, at its next counter, from where the
+    // account stood, after every step since the last boundary (DSM Amendment A39
+    // draft, option B).
+    {
+        let departure = verify_boundary_release(
+            body,
+            device_id,
+            &operation_id,
+            &post_device_root,
+            &post_account_root,
+        )?;
         let verified = VerifiedOfflineBoundary {
             kind: body.kind,
             bundle: body.bundle,
@@ -594,8 +700,9 @@ impl OfflineBoundaryBody {
                 post_account_root,
                 since: body.ancestry.since,
             },
+            departure: Some(departure),
         };
-        Ok((verified, payments))
+        Ok(verified)
     }
 }
 
@@ -603,22 +710,29 @@ impl OfflineBoundaryBody {
 struct SettlementBody;
 impl CcbObject for SettlementBody {
     const CLASS: u16 = class::OFFLINE_SETTLEMENT_BODY;
-    const SCHEMA: u16 = 2;
+    const SCHEMA: u16 = 3;
 }
 
-/// The body of an offline settlement (SA-91): a receiver's admission of value
-/// it received offline. It names the payer's spend by the root-advance message
-/// `M` the payer's anchor signed for it, and the economic position of the
-/// payer's boundary that exposed it online. Its credit is funded by that spend
-/// and consumed once, as an unload's by its own debit: the settlement's
-/// identity is `H(G ‖ DevID ‖ G_payer ‖ DevID_payer ‖ M)`, one per receiver and
-/// spend, and the source it consumes is derived from it.
+/// The body of an offline settlement (SA-91; DSM Amendment A39 draft): a
+/// receiver's admission of value it received offline. It names the payer's
+/// spend by the root-advance message `M` the payer's anchor signed for it, the
+/// economic position of the payer's boundary whose account the receiver
+/// recorded before it took the payment, and the account root the payment's own
+/// step starts from. The payment is proved from the payer's origin cells, from
+/// that account to the payment, each final: the payer is never needed. Its
+/// credit is funded by that spend and consumed once: the settlement's identity
+/// is `H(G ‖ DevID ‖ G_payer ‖ DevID_payer ‖ M)`, one per receiver and spend,
+/// and the source it consumes is derived from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfflineSettlementBody {
     pub payer_genesis: [u8; 32],
     pub payer_device: [u8; 32],
-    /// The economic position of the payer's boundary that exposed the spend.
-    pub exposed_at: u64,
+    /// The economic position of the payer's boundary whose account the
+    /// payment's history starts from.
+    pub boundary_position: u64,
+    /// The account root the payment's own step starts from: the last cell of
+    /// the path.
+    pub payment_root: [u8; 32],
     /// `M`, the root-advance message the payer's anchor signed for the spend.
     pub release_message: [u8; 32],
     /// The payer's anchor bundle.
@@ -632,48 +746,31 @@ pub struct OfflineSettlementBody {
 }
 
 impl OfflineSettlementBody {
-    /// The settlement of the payment `exposure` records, which was the
-    /// bearer transfer `payment_operation`.
-    pub fn of(
-        exposure: &crate::economic::peer_lineage::PeerOfflineExposure,
-        payment_operation: Vec<u8>,
-    ) -> Self {
-        let payment = exposure.payment();
-        Self {
-            payer_genesis: *exposure.genesis(),
-            payer_device: *exposure.device_id(),
-            exposed_at: exposure.economic_position(),
-            release_message: payment.release_message,
-            bundle: *exposure.bundle(),
-            asset: payment.asset,
-            amount: payment.amount,
-            payment_operation,
-        }
-    }
-
     /// The body's canonical bytes, fields in registry order.
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
         push_envelope::<SettlementBody>(&mut out);
         push_digest32(&mut out, &self.payer_genesis); // 1
         push_digest32(&mut out, &self.payer_device); // 2
-        push_u64(&mut out, self.exposed_at); // 3
-        push_digest32(&mut out, &self.release_message); // 4
-        push_digest32(&mut out, &self.bundle); // 5
-        push_digest32(&mut out, &self.asset); // 6
-        push_u64(&mut out, self.amount); // 7
-        push_bytes(&mut out, &self.payment_operation)?; // 8
+        push_u64(&mut out, self.boundary_position); // 3
+        push_digest32(&mut out, &self.payment_root); // 4
+        push_digest32(&mut out, &self.release_message); // 5
+        push_digest32(&mut out, &self.bundle); // 6
+        push_digest32(&mut out, &self.asset); // 7
+        push_u64(&mut out, self.amount); // 8
+        push_bytes(&mut out, &self.payment_operation)?; // 9
         Ok(out)
     }
 
-    /// Decode a body, strictly: its class, schema 1, every field, nothing after.
+    /// Decode a body, strictly: its class, schema 3, every field, nothing after.
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
         c.envelope(SettlementBody::CLASS, SettlementBody::SCHEMA)?;
         let body = Self {
             payer_genesis: c.digest32()?,
             payer_device: c.digest32()?,
-            exposed_at: c.u64()?,
+            boundary_position: c.u64()?,
+            payment_root: c.digest32()?,
             release_message: c.digest32()?,
             bundle: c.digest32()?,
             asset: c.digest32()?,
@@ -700,27 +797,46 @@ impl OfflineSettlementBody {
     }
 
     /// Verify the body at `body_bytes` as a settlement of the device
-    /// `(genesis, device_id)`, against `exposure`: the payment a boundary of
-    /// the payer's online history exposed, as a walk of the payer this
-    /// verifier ran itself found it. The body must name exactly that payment —
-    /// the payer, the position of the boundary, `M`, the bundle, the asset and
-    /// the amount — and the payment must be to this device.
+    /// `(genesis, device_id)`. `start` is the account the payer's boundary at
+    /// `boundary_position` left, as a check of the payer this verifier ran or
+    /// recorded found it, and `reads` the payer's origin cells from it through
+    /// the cell of `payment_root`. The cells must hold, each final, the one
+    /// history from `start` to the payment `M`; the payment must be to this
+    /// device, of the body's asset and amount, and the bearer transfer the
+    /// payer's anchor signed.
     pub fn verify(
         body_bytes: &[u8],
         genesis: &[u8; 32],
         device_id: &[u8; 32],
-        exposure: &crate::economic::peer_lineage::PeerOfflineExposure,
+        start: &[u8; 32],
+        reads: &[crate::offline_origin::OriginRead],
     ) -> Result<VerifiedOfflineBoundary, DsmError> {
         let body = Self::decode(body_bytes)
             .map_err(|e| DsmError::invalid_operation(format!("an offline settlement body: {e}")))?;
-        if body != Self::of(exposure, body.payment_operation.clone()) {
+        match reads.last() {
+            Some(last)
+                if *last.key()
+                    == crate::offline_origin::origin_key(&body.bundle, &body.payment_root) => {}
+            Some(..) | None => {
+                return Err(DsmError::invalid_operation(
+                    "the settlement's path does not end at the cell its payment starts from",
+                ))
+            }
+        }
+        let payment = crate::offline_origin::payment_at_cells(
+            &body.bundle,
+            start,
+            reads,
+            &body.release_message,
+        )?;
+        if payment.recipient != *device_id {
             return Err(DsmError::invalid_operation(
-                "the settlement does not name the payment the payer's boundary exposed",
+                "the payment the payer's cells hold is not to the device that settles it",
             ));
         }
-        if exposure.payment().recipient != *device_id {
+        if payment.asset != body.asset || payment.amount != body.amount {
             return Err(DsmError::invalid_operation(
-                "the exposed payment is not to the device that settles it",
+                "the settlement does not name the payment the payer's cells hold",
             ));
         }
         // The payment was the bearer transfer the anchor signed, to this
@@ -728,7 +844,7 @@ impl OfflineSettlementBody {
         // this device and this genesis, the asset and the amount. A device id
         // alone names no one lineage (SA-133).
         if crate::types::operations::bearer_payload_hash(&body.payment_operation)
-            != exposure.payment().payload_hash
+            != payment.payload_hash
         {
             return Err(DsmError::invalid_operation(
                 "the settlement's payment is not the transfer the payer's anchor signed",
@@ -766,6 +882,7 @@ impl OfflineSettlementBody {
             operation_id: body.operation_id(genesis, device_id),
             operation_digest: offline_boundary_operation_digest(body_bytes),
             moved: Moved::Settlement,
+            departure: None,
         })
     }
 }
@@ -817,6 +934,101 @@ pub fn offline_body_kind(bytes: &[u8]) -> Result<OfflineBodyKind, DsmError> {
 
 /// The ancestry marker of an account's first boundary.
 const SINCE_OPENED: u8 = 0x01;
+/// That the board of the account signed this boundary: its release is the
+/// board's signed advance of exactly the transition [`boundary_transition`]
+/// builds for it — this kind, from the account's frontier and counter, to its own
+/// device, its payload the boundary's operation id — under the keys the anchor
+/// the body names commits, and its device roots before and after commit the
+/// account before and after the boundary, at the counter's step and the advanced
+/// frontier. Answers `M`, which names the boundary at its origin cell.
+///
+/// [`boundary_transition`]: crate::types::offline_chain::boundary_transition
+fn verify_boundary_release(
+    body: &OfflineBoundaryBody,
+    device_id: &[u8; 32],
+    operation_id: &[u8; 32],
+    post_device_root: &[u8; 32],
+    post_account_root: &[u8; 32],
+) -> Result<[u8; 32], DsmError> {
+    use crate::types::offline_account::verify_offline_state_at;
+    use crate::types::offline_chain::{boundary_transition, Ed25519Chip, SphincsHost};
+    use anchor_core::accept::verify_cert_frontier_and_sigs;
+    use anchor_core::root_advance::transition_digest;
+    use prost::Message;
+    let refused =
+        |why: &str| DsmError::invalid_operation(format!("the boundary's board release: {why}"));
+    let release = anchor_core::proto::pb::OfflineRelease::decode(body.release.as_slice())
+        .map_err(|e| refused(&e.to_string()))?
+        .to_release()
+        .map_err(|e| refused(&format!("{e:?}")))?;
+    let (expected, challenge) = boundary_transition(
+        body.kind,
+        device_id,
+        operation_id,
+        &body.pre_frontier,
+        body.pre_counter,
+    )?;
+    let cert = &release.cert;
+    if anchor_core::root_advance::enc_transition(&release.transition.as_transition())
+        != anchor_core::root_advance::enc_transition(&expected.as_transition())
+    {
+        return Err(refused("it is not the transition of this boundary"));
+    }
+    if cert.anchor_bundle != body.bundle || cert.anchor_id != body.ancestry.anchor.anchor_id {
+        return Err(refused("it is not the account's own board's"));
+    }
+    if cert.receiver_challenge != challenge
+        || cert.recipient != *device_id
+        || cert.prev_frontier != body.pre_frontier
+        || cert.next_frontier != expected.next_root
+        || cert.next_frontier != body.next_frontier
+        || cert.anchor_counter != body.pre_counter
+        || cert.next_anchor_counter != expected.next_anchor_counter
+        || transition_digest(&expected.as_transition(), &challenge) != cert.transition_digest
+    {
+        return Err(refused(
+            "its certificate does not sign this boundary's advance",
+        ));
+    }
+    verify_cert_frontier_and_sigs::<Ed25519Chip, SphincsHost>(
+        cert,
+        &body.ancestry.anchor.pk_chip,
+        &body.ancestry.anchor.pk_host,
+    )
+    .map_err(|e| refused(&format!("the board did not sign it: {e:?}")))?;
+    if cert.sender_device_root_before != body.pre_device_root
+        || cert.sender_device_root_after != *post_device_root
+    {
+        return Err(refused("its device roots are not the boundary's"));
+    }
+    let before = verify_offline_state_at(
+        &cert.sender_device_root_before,
+        &body.bundle,
+        &cert.prev_frontier,
+        cert.anchor_counter,
+        &release.offline_state_proof_before,
+    )
+    .map_err(|e| refused(&format!("its device root before: {e}")))?;
+    let after = verify_offline_state_at(
+        &cert.sender_device_root_after,
+        &body.bundle,
+        &cert.next_frontier,
+        cert.next_anchor_counter,
+        &release.offline_state_proof_after,
+    )
+    .map_err(|e| refused(&format!("its device root after: {e}")))?;
+    if before != body.pre_account_root || after != *post_account_root {
+        return Err(refused(
+            "its device roots do not commit the account before and after the boundary",
+        ));
+    }
+    Ok(cert.root_advance_message)
+}
+
+/// The account leaves a load or an unload writes: its allocation, the funding
+/// chain, the counter and the frontier.
+const BOUNDARY_WRITES: usize = 4;
+
 /// The ancestry marker of a boundary after the first.
 const SINCE_PREVIOUS: u8 = 0x02;
 
@@ -825,13 +1037,13 @@ fn read_bytes(c: &mut Cursor<'_>) -> Result<Vec<u8>, DecodeError> {
     Ok(c.take(len)?.to_vec())
 }
 
-/// The account's ancestry since its last boundary, verified against `body`.
-fn verify_ancestry(
+/// That `B` recomputes from the anchor `body` names, the owner's online key
+/// `owner_key`, its device id and the offline-bearer policy.
+fn require_anchor_of(
     body: &OfflineBoundaryBody,
     device_id: &[u8; 32],
     owner_key: &[u8],
-) -> Result<Vec<crate::types::offline_chain::ChainPayment>, DsmError> {
-    use crate::types::offline_chain::{verify_account_hops, ChainAnchor};
+) -> Result<(), DsmError> {
     let anchor = &body.ancestry.anchor;
     crate::crypto::anchor_enrollment::require_bundle_of(
         crate::crypto::anchor_enrollment::PinKeys {
@@ -847,7 +1059,18 @@ fn verify_ancestry(
             policy: &crate::types::operations::canonical_offline_bearer_policy().policy_id,
             birth_commitment: &anchor.birth_commitment,
         },
-    )?;
+    )
+}
+
+/// The account's ancestry since its last boundary, verified against `body`.
+fn verify_ancestry(
+    body: &OfflineBoundaryBody,
+    device_id: &[u8; 32],
+    owner_key: &[u8],
+) -> Result<Vec<crate::types::offline_chain::ChainPayment>, DsmError> {
+    use crate::types::offline_chain::{verify_account_hops, ChainAnchor};
+    let anchor = &body.ancestry.anchor;
+    require_anchor_of(body, device_id, owner_key)?;
     let hops = body
         .ancestry
         .chain
@@ -890,88 +1113,82 @@ fn verify_ancestry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::device_state::DeviceState;
 
     const ASSET: [u8; 32] = [0xA1; 32];
-    const OPENED: [u8; 32] = [0x01; 32];
 
-    /// The anchor of the test device's account: pin material whose bundle
-    /// recomputes for the device it belongs to.
-    fn anchor() -> BoundaryAnchor {
+    use crate::types::offline_chain::fixture::Payer;
+
+    /// The anchor `p`'s account belongs to, as a boundary body names it.
+    fn anchor_of(p: &Payer) -> BoundaryAnchor {
         BoundaryAnchor {
-            anchor_id: [0xA0; 32],
-            pk_chip: vec![0xC1; 32],
-            pk_host: vec![0xC2; 64],
-            enrolled_counter: 16,
-            birth_commitment: [0xB7; 32],
+            anchor_id: p.pin.anchor_id,
+            pk_chip: p.pin.pk_chip.clone(),
+            pk_host: p.pin.pk_host.clone(),
+            enrolled_counter: u64::from(p.enrolled_counter),
+            birth_commitment: p.birth_commitment,
         }
     }
 
-    /// The bundle `B` of [`anchor`] provisioned for `dev`.
-    fn bundle_of(dev: &DeviceState) -> [u8; 32] {
-        let a = anchor();
-        anchor_core::enrollment::anchor_bundle(
-            dev.public_key(),
-            &a.anchor_id,
-            &a.pk_chip,
-            &a.pk_host,
-            16,
-            &dev.devid(),
-            &crate::types::operations::canonical_offline_bearer_policy().policy_id,
-            &a.birth_commitment,
-        )
+    /// Where `p`'s account stands: its counter and frontier.
+    fn standing(p: &Payer) -> (u64, [u8; 32]) {
+        let account = p
+            .head
+            .offline_account(&p.pin.bundle)
+            .expect("the account is open");
+        (account.counter(), account.frontier())
     }
 
-    fn device() -> DeviceState {
-        let dev = crate::types::device_state::tests::fresh_device(0xE1)
-            .created_token(ASSET, 100)
-            .expect("token created");
-        let bundle = bundle_of(&dev);
-        dev.open_offline_account(&bundle, OPENED, 0)
-            .expect("account opened")
-    }
-
-    fn body_of(
-        dev: &DeviceState,
+    /// The body of the boundary `outcome` of `p`, its board's `release`, naming
+    /// `since` and carrying `chain`.
+    fn body_bytes(
+        p: &Payer,
+        outcome: &OfflineBoundaryOutcome,
         kind: OfflineBoundaryKind,
         amount: u64,
         since: BoundarySince,
-    ) -> (OfflineBoundaryOutcome, Vec<u8>) {
-        let bundle = bundle_of(dev);
-        let outcome = dev
-            .cross_offline_boundary(&bundle, kind, &ASSET, amount)
-            .expect("the device takes the boundary");
-        let bytes = OfflineBoundaryBody::of(
-            &outcome,
+        chain: Vec<Vec<u8>>,
+        release: &[u8],
+    ) -> Vec<u8> {
+        OfflineBoundaryBody::of(
+            outcome,
             kind,
-            bundle,
-            ASSET,
+            p.pin.bundle,
+            p.token,
             amount,
             BoundaryAncestry {
-                anchor: anchor(),
+                anchor: anchor_of(p),
                 since,
-                chain: Vec::new(),
+                chain,
             },
+            release.to_vec(),
         )
         .expect("body")
         .encode()
-        .expect("encode");
-        (outcome, bytes)
+        .expect("encode")
     }
 
-    fn account_root(dev: &DeviceState) -> [u8; 32] {
-        dev.offline_account(&bundle_of(dev))
-            .expect("the account is open")
-            .root()
+    /// `p`'s board signs the boundary `kind` of `amount`; its body names
+    /// `since` and carries no steps. Answers the outcome, the release and the
+    /// body.
+    fn signed(
+        p: &mut Payer,
+        kind: OfflineBoundaryKind,
+        amount: u64,
+        since: BoundarySince,
+    ) -> (OfflineBoundaryOutcome, Vec<u8>, Vec<u8>) {
+        let (outcome, release) = p.boundary(kind, amount);
+        let bytes = body_bytes(p, &outcome, kind, amount, since, Vec::new(), &release);
+        (outcome, release, bytes)
     }
 
-    fn verify(dev: &DeviceState, bytes: &[u8]) -> Result<VerifiedOfflineBoundary, DsmError> {
-        OfflineBoundaryBody::verify(bytes, &dev.genesis(), &dev.devid(), dev.public_key()).map(
-            |(verified, exposed)| {
-                assert!(exposed.is_empty(), "no spends, no exposure");
-                verified
-            },
+    fn verify(p: &Payer, bytes: &[u8]) -> Result<VerifiedOfflineBoundary, DsmError> {
+        OfflineBoundaryBody::verify(
+            bytes,
+            &p.head.genesis(),
+            &p.head.devid(),
+            p.head.public_key(),
         )
+        .map(|(verified, _)| verified)
     }
 
     fn refused<T: core::fmt::Debug>(result: Result<T, DsmError>, reason: &str) {
@@ -981,25 +1198,24 @@ mod tests {
 
     #[test]
     fn a_boundary_verifies_to_the_device_and_account_it_leaves() {
-        let dev = device();
-        let (load, bytes) = body_of(
-            &dev,
+        let mut p = Payer::opened(0xE1);
+        let (counter, frontier) = standing(&p);
+        let (load, _, bytes) = signed(
+            &mut p,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened {
-                frontier: OPENED,
-                counter: 0,
-            },
+            BoundarySince::Opened { frontier, counter },
         );
-        let verified = verify(&dev, &bytes).expect("the load verifies");
+        let verified = verify(&p, &bytes).expect("the load verifies");
         assert_eq!(verified.operation_id(), load.operation_id);
         assert_eq!(
             verified.post_device_root(),
             Some(load.new_device_state.root())
         );
-        assert_eq!(
-            verified.post_account_root(),
-            Some(account_root(&load.new_device_state))
+        assert_eq!(verified.post_account_root(), Some(p.account_root()));
+        assert!(
+            verified.departure().is_some(),
+            "the board's message names it"
         );
         assert_eq!(
             OfflineBoundaryBody::decode(&bytes)
@@ -1009,16 +1225,16 @@ mod tests {
             bytes,
             "the one encoding round-trips"
         );
-        let after_load = account_root(&load.new_device_state);
-        let (unload, bytes) = body_of(
-            &load.new_device_state,
+        let after_load = p.account_root();
+        let (unload, _, bytes) = signed(
+            &mut p,
             OfflineBoundaryKind::Unload,
             12,
             BoundarySince::Previous {
                 account_root: after_load,
             },
         );
-        let verified = verify(&dev, &bytes).expect("unload");
+        let verified = verify(&p, &bytes).expect("unload");
         assert_eq!(verified.kind(), OfflineBoundaryKind::Unload);
         assert_eq!(
             verified.post_device_root(),
@@ -1030,6 +1246,11 @@ mod tests {
                 account_root: after_load
             })
         );
+        assert_eq!(
+            standing(&p).0,
+            counter + 2,
+            "each boundary moved the counter"
+        );
     }
 
     /// A body that misstates what the account held, or names another device,
@@ -1037,27 +1258,26 @@ mod tests {
     /// identity and is refused.
     #[test]
     fn a_misstated_boundary_is_refused() {
-        let dev = device();
-        let (load, _) = body_of(
-            &dev,
+        let mut p = Payer::opened(0xE2);
+        let opened_root = p.head.root();
+        let (counter, frontier) = standing(&p);
+        signed(
+            &mut p,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened {
-                frontier: OPENED,
-                counter: 0,
-            },
+            BoundarySince::Opened { frontier, counter },
         );
-        let funded = load.new_device_state;
-        let (_, bytes) = body_of(
-            &funded,
+        let funded = p.account_root();
+        let (_, _, bytes) = signed(
+            &mut p,
             OfflineBoundaryKind::Unload,
             10,
             BoundarySince::Previous {
-                account_root: account_root(&funded),
+                account_root: funded,
             },
         );
         let honest = OfflineBoundaryBody::decode(&bytes).expect("decode");
-        let check = |body: &OfflineBoundaryBody| verify(&dev, &body.encode().expect("encode"));
+        let check = |body: &OfflineBoundaryBody| verify(&p, &body.encode().expect("encode"));
         refused(
             check(&OfflineBoundaryBody {
                 pre_allocation: Some(1_000),
@@ -1074,15 +1294,124 @@ mod tests {
         );
         refused(
             check(&OfflineBoundaryBody {
-                pre_device_root: dev.root(),
+                pre_device_root: opened_root,
                 ..honest.clone()
             }),
             "does not commit the offline account",
         );
         // The same bytes under another device's identity are another boundary.
-        let other =
-            OfflineBoundaryBody::verify(&bytes, &dev.genesis(), &[0x55; 32], dev.public_key());
+        let other = OfflineBoundaryBody::verify(
+            &bytes,
+            &p.head.genesis(),
+            &[0x55; 32],
+            p.head.public_key(),
+        );
         refused(other, "does not recompute for its owner");
+    }
+
+    /// DSM Amendment A39 draft, option B: a load or an unload is its board's signed advance. A
+    /// body carrying another boundary's release, another board's, or one whose frontier is not
+    /// the one the account advanced to is refused: no boundary moves an account its board did not
+    /// sign.
+    /// MUTATION CONTROL: dropping the release check turns this red.
+    #[test]
+    fn a_boundary_its_board_did_not_sign_is_refused() {
+        let mut p = Payer::opened(0xE3);
+        let (counter, frontier) = standing(&p);
+        let (_, load_release, _) = signed(
+            &mut p,
+            OfflineBoundaryKind::Load,
+            30,
+            BoundarySince::Opened { frontier, counter },
+        );
+        let funded = p.account_root();
+        let (unload, _, bytes) = signed(
+            &mut p,
+            OfflineBoundaryKind::Unload,
+            10,
+            BoundarySince::Previous {
+                account_root: funded,
+            },
+        );
+        verify(&p, &bytes).expect("the honest unload");
+        let since = BoundarySince::Previous {
+            account_root: funded,
+        };
+        let another_boundarys = body_bytes(
+            &p,
+            &unload,
+            OfflineBoundaryKind::Unload,
+            10,
+            since,
+            Vec::new(),
+            &load_release,
+        );
+        refused(
+            verify(&p, &another_boundarys),
+            "the boundary's board release:",
+        );
+        let mut stranger = Payer::opened(0xE4);
+        let (s_counter, s_frontier) = standing(&stranger);
+        let (_, strangers_release, _) = signed(
+            &mut stranger,
+            OfflineBoundaryKind::Load,
+            30,
+            BoundarySince::Opened {
+                frontier: s_frontier,
+                counter: s_counter,
+            },
+        );
+        let another_boards = body_bytes(
+            &p,
+            &unload,
+            OfflineBoundaryKind::Unload,
+            10,
+            since,
+            Vec::new(),
+            &strangers_release,
+        );
+        refused(verify(&p, &another_boards), "the boundary's board release:");
+        let honest = OfflineBoundaryBody::decode(&bytes).expect("decode");
+        refused(
+            verify(
+                &p,
+                &OfflineBoundaryBody {
+                    next_frontier: [0x4E; 32],
+                    ..honest
+                }
+                .encode()
+                .expect("encode"),
+            ),
+            "the boundary's board release:",
+        );
+    }
+
+    /// DSM Amendment A39 draft, option B: a payer cannot unload what it already paid offline,
+    /// whether or not the payment's receiver has published it. A wallet rolled back to before
+    /// its payment asks its board for an unload of the whole allocation from there: the board,
+    /// which signed the payment from that root and left it, refuses, so no such unload exists to
+    /// be admitted.
+    /// MUTATION CONTROL: a board that signs from a root it left (`PrevRootMismatch` dropped in
+    /// anchor-core's prepare) turns this red.
+    #[test]
+    fn a_payer_cannot_unload_what_it_paid_offline() {
+        let mut p = Payer::loaded(0xE5, 40);
+        let before_payment = p.head.clone();
+        let (paid, _, _) = p.spend([0xB0; 32], 30);
+        assert_eq!(paid.release().cert.recipient, [0xB0; 32]);
+        // The receiver has published nothing. The wallet rolls back to before the payment.
+        p.head = before_payment;
+        let refused_to_sign = p
+            .try_boundary(OfflineBoundaryKind::Unload, 40)
+            .expect_err("the board refuses to sign from a root it left");
+        assert!(
+            matches!(
+                refused_to_sign,
+                anchor_core::appliance::ApplianceError::PrevRootMismatch
+                    | anchor_core::appliance::ApplianceError::IndexMismatch
+            ),
+            "{refused_to_sign:?}"
+        );
     }
 
     /// Schema 2: `B` recomputes from the anchor the body names and the
@@ -1092,25 +1421,23 @@ mod tests {
     /// this red.
     #[test]
     fn a_boundary_whose_bundle_is_not_its_owners_is_refused() {
-        let dev = device();
-        let (_, bytes) = body_of(
-            &dev,
+        let mut p = Payer::opened(0xE6);
+        let (counter, frontier) = standing(&p);
+        let (_, _, bytes) = signed(
+            &mut p,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened {
-                frontier: OPENED,
-                counter: 0,
-            },
+            BoundarySince::Opened { frontier, counter },
         );
         refused(
-            OfflineBoundaryBody::verify(&bytes, &dev.genesis(), &dev.devid(), &[0x0F; 64]),
+            OfflineBoundaryBody::verify(&bytes, &p.head.genesis(), &p.head.devid(), &[0x0F; 64]),
             "does not recompute for its owner",
         );
         let honest = OfflineBoundaryBody::decode(&bytes).expect("decode");
         let mut other_keys = honest.clone();
         other_keys.ancestry.anchor.pk_chip = vec![0xC9; 32];
         refused(
-            verify(&dev, &other_keys.encode().expect("encode")),
+            verify(&p, &other_keys.encode().expect("encode")),
             "does not recompute for its owner",
         );
     }
@@ -1120,51 +1447,50 @@ mod tests {
     /// MUTATION CONTROL: dropping the opened-empty check turns this red.
     #[test]
     fn a_first_boundary_starts_from_the_account_opened_empty() {
-        let dev = device();
-        let (load, _) = body_of(
-            &dev,
+        let mut p = Payer::opened(0xE7);
+        let opened = p.account_root();
+        let (counter, frontier) = standing(&p);
+        let (load, release, _) = signed(
+            &mut p,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened {
-                frontier: OPENED,
-                counter: 0,
-            },
+            BoundarySince::Opened { frontier, counter },
         );
-        let (_, second) = body_of(
-            &load.new_device_state,
+        let (_, _, second) = signed(
+            &mut p,
             OfflineBoundaryKind::Load,
             5,
-            BoundarySince::Opened {
-                frontier: OPENED,
-                counter: 0,
-            },
+            BoundarySince::Opened { frontier, counter },
         );
-        refused(
-            verify(&dev, &second),
-            "starts from the account opened empty",
-        );
-        let (_, misplaced) = body_of(
-            &dev,
+        refused(verify(&p, &second), "starts from the account opened empty");
+        let misplaced = body_bytes(
+            &p,
+            &load,
             OfflineBoundaryKind::Load,
             30,
             BoundarySince::Opened {
                 frontier: [0x02; 32],
-                counter: 0,
+                counter,
             },
+            Vec::new(),
+            &release,
         );
         refused(
-            verify(&dev, &misplaced),
+            verify(&p, &misplaced),
             "is not the one its steps since the last boundary leave",
         );
-        let (_, unnamed) = body_of(
-            &dev,
+        let unnamed = body_bytes(
+            &p,
+            &load,
             OfflineBoundaryKind::Load,
             30,
             BoundarySince::Previous {
-                account_root: account_root(&dev),
+                account_root: opened,
             },
+            Vec::new(),
+            &release,
         );
-        refused(verify(&dev, &unnamed), "names the boundary before it");
+        refused(verify(&p, &unnamed), "names the boundary before it");
     }
 
     /// The funding chain is a hash chain: a later boundary's identity hashes
@@ -1172,34 +1498,26 @@ mod tests {
     /// identity. Change the earlier load and every later identity changes.
     #[test]
     fn the_funding_chain_commits_every_earlier_boundary() {
-        let dev = device();
-        let bundle = bundle_of(&dev);
         let chain_after = |first: u64| {
-            let first = dev
-                .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &ASSET, first)
-                .expect("first load");
-            let second = first
-                .new_device_state
-                .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &ASSET, 5)
-                .expect("second load");
-            let body = OfflineBoundaryBody::of(
+            let mut p = Payer::opened(0xE8);
+            let (earlier, _) = p.boundary(OfflineBoundaryKind::Load, first);
+            let after_first = p.account_root();
+            let (second, release) = p.boundary(OfflineBoundaryKind::Load, 5);
+            let body = OfflineBoundaryBody::decode(&body_bytes(
+                &p,
                 &second,
                 OfflineBoundaryKind::Load,
-                bundle,
-                ASSET,
                 5,
-                BoundaryAncestry {
-                    anchor: anchor(),
-                    since: BoundarySince::Previous {
-                        account_root: account_root(&first.new_device_state),
-                    },
-                    chain: Vec::new(),
+                BoundarySince::Previous {
+                    account_root: after_first,
                 },
-            )
+                Vec::new(),
+                &release,
+            ))
             .expect("body");
             assert_eq!(
                 body.pre_funding_chain,
-                Some(first.operation_id),
+                Some(earlier.operation_id),
                 "the second load's body names the first load's identity"
             );
             second.operation_id
@@ -1209,21 +1527,19 @@ mod tests {
 
     #[test]
     fn a_body_that_does_not_decode_is_refused() {
-        let dev = device();
-        let (_, bytes) = body_of(
-            &dev,
+        let mut p = Payer::opened(0xE9);
+        let (counter, frontier) = standing(&p);
+        let (_, _, bytes) = signed(
+            &mut p,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened {
-                frontier: OPENED,
-                counter: 0,
-            },
+            BoundarySince::Opened { frontier, counter },
         );
         let mut trailing = bytes.clone();
         trailing.push(0);
-        refused(verify(&dev, &trailing), "an offline boundary body:");
+        refused(verify(&p, &trailing), "an offline boundary body:");
         refused(
-            verify(&dev, &bytes[..bytes.len() - 1]),
+            verify(&p, &bytes[..bytes.len() - 1]),
             "an offline boundary body:",
         );
     }
@@ -1236,52 +1552,30 @@ mod tests {
     /// boundary's account turns this red.
     #[test]
     fn a_boundary_carries_every_spend_since_the_last() {
-        use crate::types::offline_chain::fixture::Payer;
         let mut payer = Payer::loaded(0x61, 40);
         let after_load = payer.account_root();
         let (first, _, _) = payer.spend([0xB0; 32], 10);
         let (second, _, _) = payer.spend([0xB1; 32], 5);
-        let unload = payer
-            .head
-            .cross_offline_boundary(
-                &payer.pin.bundle,
-                OfflineBoundaryKind::Unload,
-                &payer.token,
-                25,
-            )
-            .expect("the unload of what is left");
-        let anchor = BoundaryAnchor {
-            anchor_id: payer.pin.anchor_id,
-            pk_chip: payer.pin.pk_chip.clone(),
-            pk_host: payer.pin.pk_host.clone(),
-            enrolled_counter: u64::from(payer.enrolled_counter),
-            birth_commitment: payer.birth_commitment,
-        };
-        let body = |chain: Vec<Vec<u8>>| {
-            OfflineBoundaryBody::of(
-                &unload,
-                OfflineBoundaryKind::Unload,
-                payer.pin.bundle,
-                payer.token,
-                25,
-                BoundaryAncestry {
-                    anchor: anchor.clone(),
-                    since: BoundarySince::Previous {
-                        account_root: after_load,
-                    },
-                    chain,
-                },
-            )
-            .expect("body")
-            .encode()
-            .expect("encode")
-        };
+        let (unload, release) = payer.boundary(OfflineBoundaryKind::Unload, 25);
         let hop = |h: &crate::types::offline_chain::SpendHop| {
             crate::types::offline_chain::AccountHop::Spend(h.clone()).to_bytes()
         };
+        let body = |chain: Vec<Vec<u8>>| {
+            body_bytes(
+                &payer,
+                &unload,
+                OfflineBoundaryKind::Unload,
+                25,
+                BoundarySince::Previous {
+                    account_root: after_load,
+                },
+                chain,
+                &release,
+            )
+        };
         let (verified, exposed) = OfflineBoundaryBody::verify(
             &body(vec![hop(&first), hop(&second)]),
-            &payer.genesis,
+            &payer.head.genesis(),
             &payer.head.devid(),
             payer.head.public_key(),
         )
@@ -1297,7 +1591,7 @@ mod tests {
         refused(
             OfflineBoundaryBody::verify(
                 &body(vec![hop(&first)]),
-                &payer.genesis,
+                &payer.head.genesis(),
                 &payer.head.devid(),
                 payer.head.public_key(),
             ),
@@ -1321,96 +1615,133 @@ mod tests {
         .to_bytes()
     }
 
-    /// The exposure of a spend of 7 of `ASSET` to `receiver`, whose anchor
-    /// transition carried `payment`'s payload hash.
-    fn exposed(
+    /// A payment of `amount` to `receiver` held, final, at the payer's origin
+    /// cell: the settlement body naming it, the account the payer's load left,
+    /// and the read of the cell (DSM Amendment A39 draft).
+    fn held_at_cells(
         receiver: [u8; 32],
-        payment: &[u8],
-    ) -> crate::economic::peer_lineage::PeerOfflineExposure {
-        use crate::types::offline_chain::{AccountPoint, ChainPayment};
-        let point = |b: u8, counter: u64| AccountPoint {
-            root: [b; 32],
-            counter,
-            frontier: [b ^ 0x0F; 32],
-        };
-        crate::economic::peer_lineage::PeerOfflineExposure::rehydrate_recorded(
-            [0x31; 32],
-            [0x32; 32],
-            4,
-            [0x33; 32],
-            ChainPayment {
-                recipient: receiver,
-                asset: ASSET,
-                amount: 7,
-                release_message: [0x34; 32],
-                payload_hash: crate::types::operations::bearer_payload_hash(payment),
-                before: point(0x41, 0),
-                after: point(0x42, 1),
+        amount: u64,
+    ) -> (
+        OfflineSettlementBody,
+        [u8; 32],
+        Vec<crate::offline_origin::OriginRead>,
+    ) {
+        use crate::offline_origin::{resolution, OriginCell, OriginWrite};
+        use crate::types::offline_chain::fixture::{bearer_op, Payer};
+        let mut p = Payer::loaded(0x51, 40);
+        let start = p.account_root();
+        let step = crate::types::offline_chain::AccountHop::Spend(p.spend(receiver, amount).0);
+        let write = OriginWrite::new(
+            p.head.public_key(),
+            p.head.devid(),
+            p.pin.bundle,
+            &BoundaryAnchor {
+                anchor_id: p.pin.anchor_id,
+                pk_chip: p.pin.pk_chip.clone(),
+                pk_host: p.pin.pk_host.clone(),
+                enrolled_counter: u64::from(p.enrolled_counter),
+                birth_commitment: p.birth_commitment,
             },
+            &step,
+        );
+        let cell = OriginCell::new(
+            &p.pin.bundle,
+            &start,
+            &crate::route_chain::fixtures::committed_set(),
+            &crate::route_chain::fixtures::committed_set_id(),
         )
+        .expect("a cell over the fixture set");
+        let mut seats = crate::route_chain::fixtures::Cell::at(cell.routed());
+        seats.write(&write.encode().expect("bytes"), 2, &[]);
+        let read = resolution(&cell, &seats.evidence()).expect("the leader is read");
+        let body = OfflineSettlementBody {
+            payer_genesis: p.genesis,
+            payer_device: p.head.devid(),
+            boundary_position: 4,
+            payment_root: start,
+            release_message: step.board_message().expect("signed"),
+            bundle: p.pin.bundle,
+            asset: p.token,
+            amount,
+            payment_operation: bearer_op(receiver, p.token, &p.token_policy, amount).to_bytes(),
+        };
+        (body, start, vec![read])
     }
 
-    /// SA-91. A settlement names exactly the payment a boundary of the
-    /// payer's online history exposed, to the device that settles it; its
-    /// identity is that device's one settlement of that spend.
-    /// MUTATION CONTROL: dropping the check that the body is the exposed
-    /// payment, or that the payment is to this device, turns this red.
+    /// The fixture payer's bearer transfers name this genesis.
+    const PAYEE_GENESIS: [u8; 32] = [0x6E; 32];
+
+    /// SA-91, DSM Amendment A39 draft. A settlement names exactly the payment
+    /// the payer's origin cells hold, final, from the account the payer's
+    /// boundary left, to the device that settles it; its identity is that
+    /// device's one settlement of that spend. The payer is never needed.
+    /// MUTATION CONTROL: dropping the check that the payment is to this device,
+    /// or that the body names the payment the cells hold, turns this red.
     #[test]
-    fn a_settlement_is_held_to_the_payment_exposed_to_its_device() {
+    fn a_settlement_is_held_to_the_payment_its_payers_cells_hold() {
         let receiver = [0xB0; 32];
-        let payment = bearer_payment(receiver, [0x0B; 32], 7);
-        let exposure = exposed(receiver, &payment);
-        let honest = OfflineSettlementBody::of(&exposure, payment);
+        let (honest, start, reads) = held_at_cells(receiver, 7);
         let bytes = honest.encode().expect("encodes");
         assert_eq!(
             OfflineSettlementBody::decode(&bytes).expect("decode"),
             honest,
             "the one encoding round-trips"
         );
-        let verified = OfflineSettlementBody::verify(&bytes, &[0x0B; 32], &receiver, &exposure)
-            .expect("the settlement of the exposed payment");
+        let verified =
+            OfflineSettlementBody::verify(&bytes, &PAYEE_GENESIS, &receiver, &start, &reads)
+                .expect("the settlement of the payment the cells hold");
         assert_eq!(verified.kind(), OfflineBoundaryKind::Settle);
         assert_eq!(
             verified.operation_id(),
-            honest.operation_id(&[0x0B; 32], &receiver)
+            honest.operation_id(&PAYEE_GENESIS, &receiver)
         );
-        assert_eq!((verified.asset(), verified.amount()), (ASSET, 7));
+        assert_eq!((verified.asset(), verified.amount()), (honest.asset, 7));
         assert_eq!(
             verified.post_account_root(),
             None,
             "no offline account moves"
         );
-        for misstated in [
-            OfflineSettlementBody {
-                amount: 8,
-                ..honest.clone()
-            },
-            OfflineSettlementBody {
-                release_message: [0x35; 32],
-                ..honest.clone()
-            },
-            OfflineSettlementBody {
-                exposed_at: 5,
-                ..honest.clone()
-            },
-            OfflineSettlementBody {
-                payer_device: [0x36; 32],
-                ..honest.clone()
-            },
+        for (misstated, why) in [
+            (
+                OfflineSettlementBody {
+                    amount: 8,
+                    ..honest.clone()
+                },
+                "does not name the payment the payer's cells hold",
+            ),
+            (
+                OfflineSettlementBody {
+                    release_message: [0x35; 32],
+                    ..honest.clone()
+                },
+                "another history",
+            ),
+            (
+                OfflineSettlementBody {
+                    payment_root: [0x36; 32],
+                    ..honest.clone()
+                },
+                "does not end at the cell its payment starts from",
+            ),
         ] {
             refused(
                 OfflineSettlementBody::verify(
                     &misstated.encode().expect("encodes"),
-                    &[0x0B; 32],
+                    &PAYEE_GENESIS,
                     &receiver,
-                    &exposure,
+                    &start,
+                    &reads,
                 ),
-                "does not name the payment the payer's boundary exposed",
+                why,
             );
         }
         refused(
-            OfflineSettlementBody::verify(&bytes, &[0x0C; 32], &[0xB1; 32], &exposure),
+            OfflineSettlementBody::verify(&bytes, &PAYEE_GENESIS, &[0xB1; 32], &start, &reads),
             "is not to the device that settles it",
+        );
+        refused(
+            OfflineSettlementBody::verify(&bytes, &PAYEE_GENESIS, &receiver, &[0x37; 32], &reads),
+            "it is not the cell of the root the path stands at",
         );
         assert_eq!(
             offline_body_kind(&bytes).expect("a body"),
@@ -1428,23 +1759,22 @@ mod tests {
     #[test]
     fn a_settlement_pays_only_the_lineage_its_payment_named() {
         let receiver = [0xB0; 32];
-        let payment = bearer_payment(receiver, [0x0B; 32], 7);
-        let exposure = exposed(receiver, &payment);
-        let body = OfflineSettlementBody::of(&exposure, payment.clone())
-            .encode()
-            .expect("encodes");
-        OfflineSettlementBody::verify(&body, &[0x0B; 32], &receiver, &exposure)
+        let (honest, start, reads) = held_at_cells(receiver, 7);
+        let body = honest.encode().expect("encodes");
+        OfflineSettlementBody::verify(&body, &PAYEE_GENESIS, &receiver, &start, &reads)
             .expect("the payee's lineage settles its payment");
         refused(
-            OfflineSettlementBody::verify(&body, &[0x0C; 32], &receiver, &exposure),
+            OfflineSettlementBody::verify(&body, &[0x0C; 32], &receiver, &start, &reads),
             "is not a bearer transfer to this lineage",
         );
-        let other = bearer_payment(receiver, [0x0C; 32], 7);
-        let carried = OfflineSettlementBody::of(&exposure, other)
-            .encode()
-            .expect("encodes");
+        let carried = OfflineSettlementBody {
+            payment_operation: bearer_payment(receiver, [0x0C; 32], 7),
+            ..honest
+        }
+        .encode()
+        .expect("encodes");
         refused(
-            OfflineSettlementBody::verify(&carried, &[0x0C; 32], &receiver, &exposure),
+            OfflineSettlementBody::verify(&carried, &[0x0C; 32], &receiver, &start, &reads),
             "is not the transfer the payer's anchor signed",
         );
     }
@@ -1457,35 +1787,40 @@ mod tests {
     /// turns the first half red; ignoring the counter turns the second red.
     #[test]
     fn a_first_boundary_starts_at_the_counter_the_account_opened_at() {
-        let dev = crate::types::device_state::tests::fresh_device(0xE1)
-            .created_token(ASSET, 100)
-            .expect("token created");
-        let bundle = bundle_of(&dev);
-        let dev = dev
-            .open_offline_account(&bundle, OPENED, 4)
-            .expect("account opened at the board's counter");
-        let (load, bytes) = body_of(
-            &dev,
+        // A board already used: it signed a load and an unload, and the wallet's account
+        // reopened empty at the counter and frontier the board stands at (the 11-15 upgrade).
+        let mut p = Payer::opened(0xEA);
+        p.boundary(OfflineBoundaryKind::Load, 10);
+        p.boundary(OfflineBoundaryKind::Unload, 10);
+        let (counter, frontier) = standing(&p);
+        assert_eq!(counter, 2);
+        p.head = crate::types::device_state::tests::fresh_device(0xEA)
+            .created_token(p.token, 100)
+            .expect("token created")
+            .open_offline_account(&p.pin.bundle, frontier, counter)
+            .expect("account reopened at the board's counter");
+        let (load, release, bytes) = signed(
+            &mut p,
             OfflineBoundaryKind::Load,
             30,
-            BoundarySince::Opened {
-                frontier: OPENED,
-                counter: 4,
-            },
+            BoundarySince::Opened { frontier, counter },
         );
-        let verified = verify(&dev, &bytes).expect("the load verifies from counter 4");
+        let verified = verify(&p, &bytes).expect("the load verifies from the board's counter");
         assert_eq!(verified.operation_id(), load.operation_id);
-        let (_, from_zero) = body_of(
-            &dev,
+        let from_zero = body_bytes(
+            &p,
+            &load,
             OfflineBoundaryKind::Load,
             30,
             BoundarySince::Opened {
-                frontier: OPENED,
+                frontier,
                 counter: 0,
             },
+            Vec::new(),
+            &release,
         );
         refused(
-            verify(&dev, &from_zero),
+            verify(&p, &from_zero),
             "the boundary's account is not the one its steps since the last boundary leave",
         );
     }

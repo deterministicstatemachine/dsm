@@ -8,10 +8,12 @@
 //! here, in the transaction that commits the step, named by the root-advance
 //! message `M` the payer's anchor signed. It is neither online balance nor
 //! offline allocation, so it can be spent neither way. It is settled by an
-//! admitted economic transition of its own once the payer's online history
-//! exposes the spend (`economic_admission_flow::admitted_offline_settlement`),
+//! admitted economic transition of its own once the payer's origin cells hold
+//! the payment, final, from the account the payer's boundary left (DSM
+//! Amendment A39 draft; `economic_admission_flow::admitted_offline_settlement`),
 //! which marks it settled in the transaction that makes the settlement
-//! durable.
+//! durable. The payer's steps the payment was carried with are kept with it
+//! ([`OfflineOrigin`]), so this device writes them to the payer's cells itself.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -268,4 +270,86 @@ mod tests {
             .expect_err("the same payment received twice");
         assert!(twice.to_string().contains("UNIQUE"), "{twice}");
     }
+}
+
+/// The payer's steps a payment received offline was carried with (DSM Amendment
+/// A39 draft): the account the payer's boundary at `position` left, the root the
+/// payment's own step starts from, and each step from that account through the
+/// payment as a write at the payer's origin cell of the root it starts from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineOrigin {
+    pub release_message: [u8; 32],
+    pub position: u64,
+    pub root: [u8; 32],
+    pub payment_root: [u8; 32],
+    /// Each an `0x0078 OfflineOriginWrite`'s bytes, in path order.
+    pub writes: Vec<Vec<u8>>,
+}
+
+/// Keep `origin`, in the transaction of the step that received its payment.
+pub fn record_offline_origin_in_tx(tx: &Transaction<'_>, origin: &OfflineOrigin) -> Result<()> {
+    tx.execute(
+        "INSERT INTO pending_offline_origin(release_message, origin_position, origin_root,
+             payment_root)
+         VALUES(?1, ?2, ?3, ?4)",
+        params![
+            origin.release_message.as_slice(),
+            i64::try_from(origin.position).map_err(|e| anyhow!("position overflow: {e}"))?,
+            origin.root.as_slice(),
+            origin.payment_root.as_slice(),
+        ],
+    )?;
+    for (seq, write) in origin.writes.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO pending_offline_origin_write(release_message, seq, write)
+             VALUES(?1, ?2, ?3)",
+            params![
+                origin.release_message.as_slice(),
+                i64::try_from(seq).map_err(|e| anyhow!("step place overflow: {e}"))?,
+                write
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// The payer's steps the payment `release_message` was carried with, as this
+/// device kept them; `None` for a payment kept before they were.
+pub fn offline_origin(release_message: &[u8; 32]) -> Result<Option<OfflineOrigin>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let row = conn
+        .query_row(
+            "SELECT origin_position, origin_root, payment_root FROM pending_offline_origin
+             WHERE release_message = ?1",
+            params![release_message.as_slice()],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((position, root, payment_root)) = row else {
+        return Ok(None);
+    };
+    let mut stmt = conn.prepare(
+        "SELECT write FROM pending_offline_origin_write WHERE release_message = ?1 ORDER BY seq",
+    )?;
+    let writes = stmt
+        .query_map(params![release_message.as_slice()], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(Some(OfflineOrigin {
+        release_message: *release_message,
+        position: u64::try_from(position).map_err(|e| anyhow!("an origin's position: {e}"))?,
+        root: digest32(root, "an origin's account root")?,
+        payment_root: digest32(payment_root, "an origin's payment root")?,
+        writes,
+    }))
 }

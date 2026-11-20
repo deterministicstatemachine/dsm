@@ -41,6 +41,37 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   request with what it found, its chip included. The
   phone's procedure and `provision-otp.sh` no longer write a secret, and refuse
   a page 49 someone else wrote.
+- **An offline payment is final without its payer (DSM Amendment A39).**
+  Every step an offline account's board signs has an origin cell, keyed by the
+  account root it starts from, which holds the first step written there: one
+  history per account, whoever writes it. A receiver keeps the payer's steps it
+  was carried and settles from the payer's cells alone; the payer never has to
+  come back online. Every load, unload and unload of received money is now
+  signed by the board at its next counter, as a payment is, so a payer cannot
+  unload money it already paid offline, published or not. A load or unload
+  holds its cells, or every checker refuses it. With a broken board, a payment
+  and a conflicting step from one root never both count. The board's firmware
+  is unchanged: it signs every action but a receive alike.
+- **Restore a wallet from its 24 words (DSM Amendment A40).** Under Create /
+  INITIALIZE, a new option restores a wallet that exists on the network: the
+  same identity (genesis, device id, keys), checked against the wallet's own
+  directory entry before anything is installed, back at its last online
+  balance. The balance comes from the wallet's own register, re-verified from
+  its start to its head with the check any device runs for a peer, its leaves
+  rebuilt from each step's witness. SoFi trades and escrow releases that
+  realized come back too: the restore works out what each one paid exactly as
+  the lost phone did, from SoFi's public objects, and keeps it only when it
+  matches the root the network holds. A position still open holds the restore
+  until it resolves. Words of no wallet on the network restore
+  nothing. Contacts come back from the wallet's own backup on the nodes:
+  sealed under a key only the 24 words give, taken once the wallet has been
+  still about 20 seconds (any new step cancels it), and installed only when it
+  is the wallet as the register's head shows it. A board's offline account
+  comes back from the network: the wallet puts its own offline steps at their
+  origin cells once online, and a restore advances the backed-up account
+  through them, using it only when it matches the board's counter exactly.
+  Connect sessions, local history and anything since the last backup do not
+  come back.
 
 ---
 

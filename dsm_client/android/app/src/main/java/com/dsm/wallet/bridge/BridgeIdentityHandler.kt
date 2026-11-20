@@ -188,8 +188,54 @@ internal object BridgeIdentityHandler {
         keyGenesisHash: String,
         keyGenesisEnvelope: String,
         mnemonic: String,
+    ): ByteArray = installWallet(
+        route = "system.createGenesisV2",
+        prefs = prefs,
+        sdkContextInitialized = sdkContextInitialized,
+        logTag = logTag,
+        keyDeviceId = keyDeviceId,
+        keyGenesisHash = keyGenesisHash,
+        keyGenesisEnvelope = keyGenesisEnvelope,
+        mnemonic = mnemonic,
+    )
+
+    /**
+     * A wallet that exists on the DSM network, restored on this phone from its 24 words. Routes to
+     * `system.restoreFromPhrase`, which re-derives the same identity, checks the network holds it,
+     * and brings it back at its last online balance; on success the identity is persisted exactly
+     * as for a new wallet.
+     */
+    fun restoreFromPhrase(
+        prefs: SharedPreferences,
+        sdkContextInitialized: AtomicBoolean,
+        logTag: String,
+        keyDeviceId: String,
+        keyGenesisHash: String,
+        keyGenesisEnvelope: String,
+        mnemonic: String,
+    ): ByteArray = installWallet(
+        route = "system.restoreFromPhrase",
+        prefs = prefs,
+        sdkContextInitialized = sdkContextInitialized,
+        logTag = logTag,
+        keyDeviceId = keyDeviceId,
+        keyGenesisHash = keyGenesisHash,
+        keyGenesisEnvelope = keyGenesisEnvelope,
+        mnemonic = mnemonic,
+    )
+
+    /** A wallet installed by `route` from `mnemonic`, its public identity persisted on success. */
+    private fun installWallet(
+        route: String,
+        prefs: SharedPreferences,
+        sdkContextInitialized: AtomicBoolean,
+        logTag: String,
+        keyDeviceId: String,
+        keyGenesisHash: String,
+        keyGenesisEnvelope: String,
+        mnemonic: String,
     ): ByteArray {
-        require(mnemonic.isNotBlank()) { "createGenesisV2: mnemonic is required" }
+        require(mnemonic.isNotBlank()) { "$route: mnemonic is required" }
         return try {
             val req = WalletCreateGenesisV2Request.newBuilder()
                 .setMnemonic(mnemonic)
@@ -198,11 +244,11 @@ internal object BridgeIdentityHandler {
                 .setCodec(Codec.CODEC_PROTO)
                 .setBody(ByteString.copyFrom(req.toByteArray()))
                 .build()
-            val envelopeBytes = routerInvoke("system.createGenesisV2", arg.toByteArray())
+            val envelopeBytes = routerInvoke(route, arg.toByteArray())
 
             val errorCode = getFramedErrorEnvelopeCode(envelopeBytes)
             if (errorCode != 0) {
-                Log.w(logTag, "createGenesisV2: native returned error envelope code=$errorCode")
+                Log.w(logTag, "$route: native returned error envelope code=$errorCode")
                 return envelopeBytes
             }
 
@@ -215,14 +261,14 @@ internal object BridgeIdentityHandler {
                 .apply()
             // The Rust route already initialized the SDK context (wallet unlocked this session).
             sdkContextInitialized.set(true)
-            Log.i(logTag, "createGenesisV2: identity persisted + SDK context initialized")
+            Log.i(logTag, "$route: identity persisted + SDK context initialized")
             // The appliance has an identity now; advertising follows it.
             com.dsm.wallet.ui.MainActivity.getActiveInstance()?.let { act ->
                 act.runOnUiThread { act.startBleForIdentity() }
             }
             envelopeBytes
         } catch (t: Throwable) {
-            Log.e(logTag, "createGenesisV2 failed", t)
+            Log.e(logTag, "$route failed", t)
             clearGenesisArtifacts(
                 prefs = prefs,
                 sdkContextInitialized = sdkContextInitialized,

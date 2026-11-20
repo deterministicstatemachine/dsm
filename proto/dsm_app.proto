@@ -2107,12 +2107,18 @@ message StepWriteOfflineReceive {
 }
 
 // The unload of a payment received offline, as an offline account's step: the account as it stood
-// before, and what it held received of the payment's asset. After is derived — less the payment's
-// amount — by folding account_path from pre_account_root.
+// before, what it held received of the payment's asset, and the counter and frontier its board
+// signed the unload at (DSM Amendment A39 draft, option B). After is derived — less the payment's
+// amount, the counter's step and the frontier's advance — by folding account_paths from
+// pre_account_root.
 message StepWriteOfflineSettle {
+  reserved 3;
   bytes pre_account_root = 1 [(dsm_fixed_len)=32];
   uint64 pre_received = 2;
-  SmtPath account_path = 3;
+  uint64 pre_counter = 4;
+  bytes pre_frontier = 5 [(dsm_fixed_len)=32];
+  bytes next_frontier = 6 [(dsm_fixed_len)=32];
+  repeated SmtPath account_paths = 7;
 }
 
 // A leaf-to-root path in the one canonical encoding: the 256-bit set of heights
@@ -2162,6 +2168,9 @@ message OfflineSettleHop {
   bytes asset = 2 [(dsm_fixed_len)=32];
   uint64 amount = 3;
   bytes settlement_id = 4 [(dsm_fixed_len)=32];
+  // The board's release of the unload (a dsm.anchor.OfflineRelease, its offline-state proofs
+  // attached): signed at the board's next counter, as every step of the account is.
+  bytes release = 5 [(dsm_max_len)=262144];
 }
 
 // One step of an offline account between two of its boundaries: a spend, a receive, or the unload

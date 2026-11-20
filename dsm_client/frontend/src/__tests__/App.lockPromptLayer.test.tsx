@@ -53,10 +53,6 @@ jest.mock('../inputs/providers/StateBoyInputProvider', () => ({
   StateBoyInputProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-jest.mock('../hooks/useGenesisFlow', () => ({
-  useGenesisFlow: () => ({ handleGenerateGenesis: jest.fn() }),
-}));
-
 const mockTour = { active: false, index: 0 };
 jest.mock('../components/tour/tourStore', () => ({
   useTourStore: () => mockTour,

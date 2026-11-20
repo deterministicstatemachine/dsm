@@ -4850,6 +4850,76 @@ impl BilateralBleHandler {
             }
         };
 
+        // The payer's steps this payment was carried with, from the account the payer's boundary
+        // left that this device recorded, through the payment's own step: each a write at the
+        // payer's origin cell of the root it starts from. This device writes them and settles from
+        // the cells; the payer is never needed (DSM Amendment A39 draft).
+        let offline_origin = {
+            let recorded = bearer_origin.recorded.as_ref().ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "receiver confirm: no account of the payer is recorded to settle the payment \
+                     from",
+                )
+            })?;
+            let witness = verified
+                .receipt()
+                .step_writes
+                .iter()
+                .find_map(|write| match &write.leaf {
+                    dsm::types::receipt_types::ReceiptLeaf::OfflineAccount(witness) => {
+                        Some((**witness).clone())
+                    }
+                    dsm::types::receipt_types::ReceiptLeaf::Relationship
+                    | dsm::types::receipt_types::ReceiptLeaf::OfflineReceive(_) => None,
+                })
+                .ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "receiver confirm: the payer's receipt writes no offline account",
+                    )
+                })?;
+            let payment = dsm::types::offline_chain::AccountHop::Spend(
+                dsm::types::offline_chain::SpendHop::new(
+                    &confirm_request.offline_release,
+                    witness,
+                    policy_commit,
+                    amount.value(),
+                )?,
+            );
+            let board = dsm::economic::offline_boundary::BoundaryAnchor {
+                anchor_id: payer_disclosure.anchor_id,
+                pk_chip: payer_disclosure.chip_pk.clone(),
+                pk_host: payer_disclosure.partition_pk.clone(),
+                enrolled_counter: u64::from(payer_disclosure.enrolled_counter),
+                birth_commitment: payer_disclosure.birth_commitment,
+            };
+            let writes = sender_chain
+                .iter()
+                .chain(core::iter::once(&payment))
+                .map(|step| {
+                    dsm::offline_origin::OriginWrite::new(
+                        &sender_contact.public_key,
+                        session.counterparty_device_id,
+                        anchor.bundle,
+                        &board,
+                        step,
+                    )
+                    .encode()
+                    .map_err(|e| {
+                        DsmError::invalid_operation(format!(
+                            "receiver confirm: a write of the payer's step: {e:?}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, DsmError>>()?;
+            crate::storage::client_db::offline_receipts::OfflineOrigin {
+                release_message: paid.cert.root_advance_message,
+                position: recorded.economic_position(),
+                root: *recorded.account_root(),
+                payment_root: payment.starts_from(),
+                writes,
+            }
+        };
+
         let router = crate::bridge::app_router().ok_or_else(|| {
             DsmError::state_machine(
                 "receiver confirm: app_router not installed; cannot commit advance",
@@ -5109,6 +5179,11 @@ impl BilateralBleHandler {
                     &pending_receipt,
                 )
                 .map_err(|e| storage("the payment received offline", e))?;
+                crate::storage::client_db::offline_receipts::record_offline_origin_in_tx(
+                    tx,
+                    &offline_origin,
+                )
+                .map_err(|e| storage("the payer's steps the payment was carried with", e))?;
                 // The receive is one of the account's steps: its next boundary carries it.
                 let witness = counter_signed
                     .step_writes

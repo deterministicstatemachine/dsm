@@ -57,3 +57,25 @@ describe('useNativeSessionBridge outside the recovery phrase', () => {
     expect(appRuntimeStore.getSnapshot().appState).toBe('needs_genesis');
   });
 });
+
+describe('useNativeSessionBridge while a wallet is being restored from its words', () => {
+  beforeEach(() => {
+    mountBridge();
+    publish({ phase: 'needs_genesis', identity_status: 'missing' });
+    act(() => {
+      appRuntimeStore.setAppState('restore_phrase');
+      appRuntimeStore.setError('no wallet made from these words is on the network');
+    });
+  });
+
+  it('keeps the words screen and the reason a restore was refused while no wallet exists', () => {
+    publish({ phase: 'needs_genesis', identity_status: 'missing' });
+    expect(appRuntimeStore.getSnapshot().appState).toBe('restore_phrase');
+    expect(appRuntimeStore.getSnapshot().error).toBe('no wallet made from these words is on the network');
+  });
+
+  it('follows the session once the restored wallet is ready', () => {
+    publish({ phase: 'wallet_ready', identity_status: 'ready' });
+    expect(appRuntimeStore.getSnapshot().appState).toBe('wallet_ready');
+  });
+});

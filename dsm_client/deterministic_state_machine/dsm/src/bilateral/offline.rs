@@ -2660,7 +2660,8 @@ mod receive_rule_tests {
             &origin(&recorded, &payer, std::slice::from_ref(&first), None),
         )
         .expect("the second spend is taken with the chain");
-        assert_eq!((start.counter, start.frontier), (1, second_leaves.frontier));
+        // The board-signed load took counter step 0 and the first spend step 1.
+        assert_eq!((start.counter, start.frontier), (2, second_leaves.frontier));
         spend_starts_at_the_record(
             &first_receipt,
             &first_leaves,

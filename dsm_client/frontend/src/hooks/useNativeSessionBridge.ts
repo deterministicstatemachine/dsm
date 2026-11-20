@@ -48,6 +48,17 @@ export function useNativeSessionBridge({ themes, setThemeIndex }: Args): NativeS
     // wallet exists until the phrase is checked. Its exits are the user's own
     // (cancel → needs_genesis) or genesis's (securing_device, wallet_ready,
     // error).
+    // `restore_phrase` is held too, and keeps its own error: a restore the
+    // network refused reports `needs_genesis` while its reason stays on the
+    // screen beside the words.
+    if (
+      currentAppState === 'restore_phrase' &&
+      (nextAppState === 'needs_genesis' ||
+        nextAppState === 'runtime_loading' ||
+        nextAppState === 'loading')
+    ) {
+      return;
+    }
     if (
       (currentAppState === 'securing_device' || currentAppState === 'backup_phrase') &&
       (nextAppState === 'needs_genesis' ||

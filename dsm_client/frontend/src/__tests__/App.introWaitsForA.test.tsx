@@ -60,10 +60,6 @@ jest.mock('../inputs/providers/StateBoyInputProvider', () => ({
   },
 }));
 
-jest.mock('../hooks/useGenesisFlow', () => ({
-  useGenesisFlow: () => ({ handleGenerateGenesis: jest.fn() }),
-}));
-
 jest.mock('../hooks/useThemeAssets', () => ({
   useThemeAssets: () => ({
     chameleonSrc: '',
