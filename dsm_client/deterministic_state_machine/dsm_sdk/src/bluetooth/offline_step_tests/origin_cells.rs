@@ -44,17 +44,58 @@ fn inflated(step: &AccountHop, amount: u64) -> AccountHop {
     AccountHop::Spend(SpendHop::from_proto(wire).expect("decodes"))
 }
 
+/// `bytes` at the origin cell of `root` of `bundle`, as a hostile leader holds
+/// them: an honest leader refuses anything but a step its board signed for the
+/// cell (DSM Amendment A41; owner, 2026-11-21: "sure protect them"), which is
+/// seen first; then they are put straight in the leader's store, past its
+/// check.
+async fn planted_at_a_hostile_leader(
+    pair: &Pair,
+    set: &crate::sdk::storage_set::StorageSet,
+    bundle: &[u8; 32],
+    root: &[u8; 32],
+    bytes: &[u8],
+) {
+    let honest = origin_cell_flow::put(set, bundle, root, bytes)
+        .await
+        .expect("the write runs to its end");
+    assert_eq!(
+        honest,
+        AtLeader::Unanswered,
+        "an honest leader keeps nothing but a board-signed step at an origin cell"
+    );
+    let cell = dsm::offline_origin::OriginCell::new(
+        bundle,
+        root,
+        &crate::sdk::storage_set::as_ccb_members(set).expect("the set's members"),
+        &set.id(),
+    )
+    .expect("the origin cell");
+    let routed = cell.routed();
+    let leader = String::from_utf8(routed.route().leader().to_vec()).expect("member ids are UTF-8");
+    let entry = dsm::route_chain::RouteEntry::at_leader(
+        routed.namespace().to_vec(),
+        *routed.key(),
+        bytes.to_vec(),
+        routed.route(),
+    );
+    pair.nodes
+        .plant_cell(&leader, routed.namespace(), routed.key(), &entry.encode())
+        .await;
+}
+
 /// Invalid competing steps never displace a payment, on the nodes. A pays B
 /// offline and is never heard from again. Ahead of the real step at its cell's
 /// leader go noise, the step re-encoded around its signatures, the step with
-/// an inflated amount, and the step as another device's; then B writes the step
+/// an inflated amount, and the step as another device's — each refused by an
+/// honest leader and held by a hostile one; then B writes the step
 /// A carried it. The cell holds the real step, passing over each of the others
 /// with its reason, and B proves its payment from the nodes alone. Writing the
 /// step again changes nothing, and no other device can claim the payment.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn invalid_steps_never_displace_a_payment_on_the_nodes() {
-    let (_pair, a, b, appliance, payment) = bearer_pair().await;
+    let (pair, a, b, appliance, payment) = bearer_pair().await;
     offline_step(&a, &b, payment).await;
 
     a.device.enter();
@@ -83,13 +124,8 @@ async fn invalid_steps_never_displace_a_payment_on_the_nodes() {
         (overpaid.encode().expect("bytes"), "an inflated amount"),
         (stranger.encode().expect("bytes"), "another device's"),
     ] {
-        let at = origin_cell_flow::put(&set, &pin.bundle, &start, &bytes)
-            .await
-            .expect(what);
-        assert!(
-            matches!(at, AtLeader::Link | AtLeader::Taken),
-            "{what}: the leader took it"
-        );
+        planted_at_a_hostile_leader(&pair, &set, &pin.bundle, &start, &bytes).await;
+        log::info!("{what}: refused by an honest leader, held by a hostile one");
     }
 
     // A is gone. With only those at the leader, nothing holds the cell: a
@@ -290,14 +326,15 @@ async fn a_cloned_board_paying_two_receivers_settles_once_on_the_nodes() {
 }
 
 /// A flooded cell still settles its payment. Before B writes the step A carried
-/// it, the cell's leader takes 30 values of 300 KiB that are no write — about
+/// it, a hostile leader holds 30 values of 300 KiB that are no write (an honest
+/// one refuses them) — about
 /// 9 MiB, more than a reader's budget at one cell. A reader keeps only the
 /// leader's first recognized value, so the flood never reaches it: B's step
 /// holds the cell and B settles, and nothing settles in its place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_flooded_cell_still_settles_its_payment() {
-    let (_pair, a, b, appliance, payment) = bearer_pair().await;
+    let (pair, a, b, appliance, payment) = bearer_pair().await;
     offline_step(&a, &b, payment).await;
     a.device.enter();
     let pin = appliance.payer.pin();
@@ -307,15 +344,12 @@ async fn a_flooded_cell_still_settles_its_payment() {
     let real = write_of(&pin, &own_key(), a.device.device_id, &step);
 
     let set = set();
-    let junk = vec![0x4A_u8; 300 * 1024];
-    for n in 0..30 {
-        let at = origin_cell_flow::put(&set, &pin.bundle, &start, &junk)
-            .await
-            .expect("the leader keeps whatever it is sent");
-        assert!(
-            matches!(at, AtLeader::Link | AtLeader::Taken),
-            "flood value {n}: the leader answered"
-        );
+    for n in 0..30u64 {
+        // Each value distinct: a writer finds a value the leader already
+        // holds and puts nothing.
+        let mut junk = vec![0x4A_u8; 300 * 1024];
+        junk[..8].copy_from_slice(&n.to_be_bytes());
+        planted_at_a_hostile_leader(&pair, &set, &pin.bundle, &start, &junk).await;
     }
     b.device.enter();
     origin_cell_flow::write(&set, &real)
