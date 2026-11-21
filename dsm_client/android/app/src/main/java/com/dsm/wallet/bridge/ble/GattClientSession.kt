@@ -41,8 +41,12 @@ class GattClientSession(
     companion object {
         /** Disconnect if GATT connection isn't established within 15 seconds. */
         private const val CONNECTION_TIMEOUT_MS = 15_000L
-        /** Number of notification chunks to receive before sending ACK write-back. */
-        private const val NOTIFICATION_ACK_WINDOW = 10
+        /**
+         * Number of notification chunks to receive before sending ACK write-back.
+         * Must equal [GattServerHost.NOTIFICATION_WINDOW_SIZE]: the server waits on
+         * an ACK at each of its window boundaries.
+         */
+        private const val NOTIFICATION_ACK_WINDOW = GattServerHost.NOTIFICATION_WINDOW_SIZE
         /** How many times a refused start of service discovery is tried, and how far apart. */
         private const val SERVICE_DISCOVERY_START_ATTEMPTS = 6
         private const val SERVICE_DISCOVERY_RETRY_MS = 500L

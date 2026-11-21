@@ -77,8 +77,13 @@ class GattServerHost(private val context: Context) {
     companion object {
         /** Marker byte for transport-level chunk ACK frames (client → server). */
         const val CHUNK_ACK_MARKER: Byte = 0xFF.toByte()
-        /** Number of notification chunks to send before pausing for an ACK. */
-        const val NOTIFICATION_WINDOW_SIZE = 10
+        /**
+         * Number of notification chunks to send before pausing for an ACK. A
+         * window of 10 stopped the sender about 56 times on a 564-chunk confirm,
+         * each a round trip (rig run 2026-11-21); 32 matches the receiver's
+         * persistence batch (`ble_frame_coordinator::PERSIST_BATCH`).
+         */
+        const val NOTIFICATION_WINDOW_SIZE = 32
 
         // Attempts of one transfer; each after the first resumes at the window whose ACK timed
         // out (transport-level; see sendChunkedNotifications).

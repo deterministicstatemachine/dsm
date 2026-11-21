@@ -23,6 +23,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ### Fixed
 
 - A payment no longer waits on the owner's baseline duty (SoFi Amendment S24). The syncs `wallet.send` runs on its own path leave it to the next sync, and while the background poller runs, a sync starts the pass beside it, one at a time, instead of awaiting it. The pass walks every vault the device created from its genesis; on the rig phones (2026-11-21) it added ~22 s to every send and ~15 s to every receipt. Sends went from 33–37 s to 10 s at the sender, and from 40–48 s to 23 s at the receiver.
+- An offline payment's frames cross Bluetooth about ten times faster. The receiver wrote each chunk to its database in its own synced transaction (~50–70 ms a chunk) before it acknowledged; it now writes a frame's first chunk at once and the rest 32 at a time, one transaction each, and a process that dies mid-frame takes again only what was not written. The GATT server sends 32 notifications between acknowledgements instead of 10. On the rig phones (2026-11-21) the 255- and 297-chunk frames went from ~21 s to 2.2–2.5 s and a 1 ERA offline payment from 147.7 s to 114.3 s; the board commits (~30 s a side) and the confirm, the one frame sent as notifications (~45 ms a chunk), are most of what is left.
 
 ### Security
 
