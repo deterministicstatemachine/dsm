@@ -366,6 +366,47 @@ impl TestDevice {
         }
     }
 
+    /// `method` for `amount` ERA, entered as the wallet shows it. An admission the
+    /// fleet has not yet made final is held, and finished by resuming it exactly
+    /// as the device resumes it before anything else; a refusal with nothing held
+    /// is returned.
+    pub async fn offline_boundary(&self, method: &str, amount: &str) -> Result<(), String> {
+        let result = self
+            .invoke(
+                method,
+                &crate::generated::OfflineCashRequest {
+                    token_id: "ERA".to_string(),
+                    amount: amount.to_string(),
+                },
+            )
+            .await;
+        if result.success {
+            return Ok(());
+        }
+        let core = self.router().core_sdk.clone();
+        let mut error = format!("{:?}", result.error_message);
+        for resumed in 1..=4u64 {
+            let Some(pending) = core
+                .device_head()
+                .and_then(|head| head.pending_economic_admission().cloned())
+            else {
+                return Err(error);
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(250 * resumed)).await;
+            match crate::sdk::economic_admission_flow::resume_pending_admission(
+                &core,
+                economic_fixtures::NETWORK,
+                pending,
+            )
+            .await
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => error = e.to_string(),
+            }
+        }
+        Err(error)
+    }
+
     /// The device's spendable ERA as the canonical state machine holds it.
     pub fn era_balance(&self) -> u64 {
         self.enter();

@@ -164,6 +164,10 @@ class GattServerHost(private val context: Context) {
             serviceReadyDeferred?.complete(success)
         }
 
+        override fun onPhyUpdate(device: BluetoothDevice?, txPhy: Int, rxPhy: Int, status: Int) {
+            Log.i("GattServerHost", "PHY for ${device?.address}: tx=$txPhy rx=$rxPhy status=$status")
+        }
+
         override fun onNotificationSent(device: BluetoothDevice?, status: Int) {
             val deviceAddress = device?.address ?: return
             val success = status == BluetoothGatt.GATT_SUCCESS
