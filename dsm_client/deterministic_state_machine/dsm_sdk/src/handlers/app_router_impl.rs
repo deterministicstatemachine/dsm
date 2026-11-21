@@ -633,7 +633,7 @@ impl AppRouterImpl {
             push_pending: true,
             limit: 50,
         };
-        match self.run_storage_sync_request(preflight_sync).await {
+        match self.run_payment_path_sync_request(preflight_sync).await {
             Ok(resp) => {
                 if !resp.errors.is_empty() {
                     log::warn!(
@@ -690,7 +690,7 @@ impl AppRouterImpl {
                 }
             }
             match self
-                .run_storage_sync_request(crate::sdk::inbox_poller::poll_sync_request())
+                .run_payment_path_sync_request(crate::sdk::inbox_poller::poll_sync_request())
                 .await
             {
                 Ok(resp) => {

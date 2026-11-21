@@ -71,6 +71,13 @@ static CYCLE_DONE: once_cell::sync::Lazy<Notify> = once_cell::sync::Lazy::new(No
 static POLLER_RUNNING: AtomicBool = AtomicBool::new(false);
 static POLLER_STOP: AtomicBool = AtomicBool::new(false);
 
+/// Whether the background poller is running: the device's own syncs then
+/// come round on their own, so work a sync owes but a payment never waits on
+/// can run beside them (`vault_baseline::start_owned_baselines`).
+pub(crate) fn poller_running() -> bool {
+    POLLER_RUNNING.load(Ordering::SeqCst)
+}
+
 /// Shared notify for immediate wake-up (app foreground, bilateral commit).
 static POLLER_WAKE: once_cell::sync::Lazy<Arc<Notify>> =
     once_cell::sync::Lazy::new(|| Arc::new(Notify::new()));
@@ -149,12 +156,6 @@ impl Drop for PollerHold {
 #[cfg(test)]
 pub(crate) fn put_back_the_stop(stopping_before: bool) {
     POLLER_STOP.store(stopping_before, Ordering::SeqCst);
-}
-
-/// Whether the background poller task is running.
-#[cfg(test)]
-pub(crate) fn poller_running() -> bool {
-    POLLER_RUNNING.load(Ordering::SeqCst)
 }
 
 /// Whether a start is deferred until the harness's hold is released.

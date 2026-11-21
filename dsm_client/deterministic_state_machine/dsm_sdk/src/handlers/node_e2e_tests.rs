@@ -5398,6 +5398,51 @@ async fn an_online_owner_publishes_a_baseline_after_each_realized_generation() {
     }
 }
 
+/// A payment never waits on the owner's baseline duty: the syncs `wallet.send`
+/// runs on its own path leave it to the next sync (rig run 2026-11-21, where
+/// that duty walked every vault the payer created, closed ones too, from its
+/// genesis on each send). B trades on A's vault; A then pays B, and A's send
+/// publishes no baseline; A's next ordinary sync publishes the one at the
+/// generation the trade realized.
+///
+/// MUTATION CONTROL: running the baseline duty on the payment path again (the
+/// `SyncPath::Payment` branch in `push_owed`) turns this red at the first
+/// assertion after the send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payment_leaves_the_owners_baseline_to_the_next_sync() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 5).await;
+    p.a.enter();
+    assert!(
+        crate::storage::client_db::sofi_vault_head::owner_baseline(&m.vault_id, 1)
+            .expect("A's record")
+            .is_none(),
+        "no sync of A's ran since the trade realized"
+    );
+
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.a.enter();
+    assert!(
+        crate::storage::client_db::sofi_vault_head::owner_baseline(&m.vault_id, 1)
+            .expect("A's record")
+            .is_none(),
+        "A's send published a baseline: the payment waited on the owner's duty"
+    );
+
+    let synced = p.a.sync().await;
+    assert!(synced.errors.is_empty(), "{:?}", synced.errors);
+    p.a.enter();
+    assert!(
+        crate::storage::client_db::sofi_vault_head::owner_baseline(&m.vault_id, 1)
+            .expect("A's record")
+            .is_some(),
+        "A's next ordinary sync published the baseline at generation 1"
+    );
+}
+
 /// SoFi Amendment S24, end to end. After three trades, B forgets the vault
 /// and adopts the baseline A published at its head: B's chain starts there,
 /// at generation 3, and nothing below it is read or recorded. B then trades

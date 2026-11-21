@@ -20,6 +20,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   same for every application. The wallet finds the connection in its own record
   (`connect.connectedBy`, a new query) and fetches nothing the link names.
 
+### Fixed
+
+- A payment no longer waits on the owner's baseline duty (SoFi Amendment S24). The syncs `wallet.send` runs on its own path leave it to the next sync, and while the background poller runs, a sync starts the pass beside it, one at a time, instead of awaiting it. The pass walks every vault the device created from its genesis; on the rig phones (2026-11-21) it added ~22 s to every send and ~15 s to every receipt. Sends went from 33–37 s to 10 s at the sender, and from 40–48 s to 23 s at the receiver.
+
 ### Security
 
 - **A board pays or is paid offline only under the owner's stamp (DSM
