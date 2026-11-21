@@ -69,10 +69,7 @@ skip = [
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-ignore = [
-    # Explicitly ignore the unmaintained yaml-rust advisory (from config crate)
-    "RUSTSEC-2024-0320"
-]
+ignore = []
 
 # Source registry validation
 [sources]
