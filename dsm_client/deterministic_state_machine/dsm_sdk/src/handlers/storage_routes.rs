@@ -1422,7 +1422,6 @@ impl AppRouterImpl {
         }
 
         for mut pair in pairs {
-            let pair_started = std::time::Instant::now();
             // Everything below reads the pair's meaning from the staged
             // signed material, re-derived now — never from a copy's wrapper.
             let v = match verified_pair(&pair) {
@@ -1595,10 +1594,6 @@ impl AppRouterImpl {
                         hint,
                         evidence_bytes: &v.evidence_bytes,
                     };
-                    log::info!(
-                        "[storage.sync] timing: pair verified, prevalidation starts at {} ms",
-                        pair_started.elapsed().as_millis()
-                    );
                     match crate::sdk::economic_admission_flow::prevalidate_incoming_transfer_admission(
                         &self.core_sdk,
                         &sender_genesis,
@@ -1666,10 +1661,6 @@ impl AppRouterImpl {
                 let _rel_guard = rel_lock.lock_owned().await;
 
                 let sender_b32_for_apply = sender_b32.clone();
-                log::info!(
-                    "[storage.sync] timing: prevalidated, apply starts at {} ms",
-                    pair_started.elapsed().as_millis()
-                );
                 let decision = accept_bound_pair(&v, |v| {
                     // The verified transfer must be byte-identical to what
                     // prevalidation validated.
@@ -1742,10 +1733,6 @@ impl AppRouterImpl {
                             signed_child,
                             transition_entropy,
                             |outcome, b_pair| {
-                                log::info!(
-                                    "[storage.sync] timing: advance prepared, B artifacts start at {} ms",
-                                    pair_started.elapsed().as_millis()
-                                );
                                 let b_art = rr::generate_b_artifacts_from_inbound(
                                     receipt,
                                     &signed_sigma,
@@ -1760,10 +1747,6 @@ impl AppRouterImpl {
                                         "B-side acceptance artifacts: {e}"
                                     ))
                                 })?;
-                                log::info!(
-                                    "[storage.sync] timing: B artifacts signed, admission build starts at {} ms",
-                                    pair_started.elapsed().as_millis()
-                                );
                                 // The recipient's admission, from the EXACT
                                 // prepared successor: countersign wire bytes →
                                 // EK steps → acceptance bundle → PeerDebit
@@ -1788,10 +1771,6 @@ impl AppRouterImpl {
                                         &rel_key,
                                     )?;
                                 *admission_build.borrow_mut() = Some(built);
-                                log::info!(
-                                    "[storage.sync] timing: admission built at {} ms",
-                                    pair_started.elapsed().as_millis()
-                                );
                                 Ok(b_art)
                             },
                             |tx, _outcome, artifacts| {
@@ -1873,10 +1852,7 @@ impl AppRouterImpl {
                         continue;
                     }
                 };
-                log::info!(
-                    "[storage.sync] ADR 0003 completion: {name} {acceptance:?} at {} ms",
-                    pair_started.elapsed().as_millis()
-                );
+                log::info!("[storage.sync] ADR 0003 completion: {name} {acceptance:?}");
                 // The credit is applied and accepted durably: the page shows it
                 // now, not after this device's own admission and release that
                 // follow, which held the receiver's screen ~3.7 s on the rig
