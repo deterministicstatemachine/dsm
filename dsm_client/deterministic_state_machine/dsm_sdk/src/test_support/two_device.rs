@@ -318,6 +318,45 @@ impl TestDevice {
         dsm::core::bilateral_transaction_manager::compute_smt_key(&self.device_id, &peer.device_id)
     }
 
+    /// Whether a send of this device's to `peer` is committed with its
+    /// delivery left to the re-drive: its outbox row stands at
+    /// `submission_uncertain`. The Send route answers before its delivery
+    /// ends, so where a send stands is read here, not from the answer.
+    pub fn send_left_to_the_redrive(&self, peer: &TestDevice) -> bool {
+        self.enter();
+        let rel = self.rel_key_with(peer);
+        client_db::unsettled_sender_outbox()
+            .expect("the outbox")
+            .iter()
+            .any(|row| {
+                row.relationship_key == rel && row.status == client_db::OUTBOX_SUBMISSION_UNCERTAIN
+            })
+    }
+
+    /// Why a send of this device's can never complete, read from the send's
+    /// history row. The Send route answers before a send's admission is
+    /// finished, so a send whose admission then cannot land says so there.
+    pub fn failed_send_reason(&self) -> Option<String> {
+        self.enter();
+        client_db::get_transaction_history(None, Some(16), None)
+            .expect("the device's history")
+            .into_iter()
+            .find(|row| row.status == client_db::HISTORY_STATUS_FAILED)
+            .and_then(|row| row.metadata.get(client_db::HISTORY_FAILURE_KEY).cloned())
+            .map(|why| String::from_utf8(why).expect("the reason is text"))
+    }
+
+    /// Whether this device's head carries an economic admission not finished
+    /// yet: a send's, held for resume.
+    pub fn admission_held(&self) -> bool {
+        self.enter();
+        self.router()
+            .core_sdk
+            .device_head()
+            .and_then(|head| head.pending_economic_admission().cloned())
+            .is_some()
+    }
+
     /// Fund with economic ancestry: `whole_era` ERA, in faucet claims of the
     /// fixed payout (100.00 ERA each). Amounts must be multiples of the
     /// payout — a fixture asking for anything else is asking for value the

@@ -1764,7 +1764,11 @@ async fn write_past_its_own_flow(
 /// claim of another fulfillment is first at the leader of B's next root cell
 /// when B pays A. B's writer records the cell taken and puts nothing of its
 /// own claim anywhere on the route, and the payment reports the position
-/// held by that claim: lost, never a leader to retry.
+/// held by that claim: lost, never a leader to retry. The Send screen is
+/// answered once the debit is committed (owner, 2026-11-21: "Admission after
+/// answering"), so the report is the send's history row, marked failed with
+/// the reason once its admission, run beside the answer, finds the position
+/// held.
 /// MUTATION CONTROL: reading another claim first at the leader as an open
 /// cell puts B's claim at the leader and carries it along the route; this
 /// turns red.
@@ -1800,13 +1804,22 @@ async fn a_payment_at_a_position_another_claim_holds_is_lost_and_puts_nothing() 
     let before = client.held_at(root_cell.namespace(), root_cell.key()).await;
 
     let sent = p.b.send(&p.a, 5).await;
-    assert!(!sent.success, "the payment lands at no position");
-    let why = sent.error_message.clone().expect("a reason");
+    assert!(sent.success, "{:?}", sent.error_message);
+    let why =
+        p.b.failed_send_reason()
+            .expect("the payment lands at no position, and its row says so");
     assert!(why.contains(&format!("position {q} is held by")), "{why}");
     assert_eq!(
         client.held_at(root_cell.namespace(), root_cell.key()).await,
         before,
         "B's claim is put at no member of its root cell's route"
+    );
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_eq!(
+        p.a.era_balance(),
+        crate::economic_fixtures::whole_era(500),
+        "nothing of a payment that cannot land reaches the payee"
     );
 }
 

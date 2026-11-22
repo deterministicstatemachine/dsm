@@ -2242,6 +2242,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     incoming: &IncomingTransfer<'_>,
     rel_key: &[u8; 32],
 ) -> Result<RecipientAdmissionPrereqs, PrevalidationRefusal> {
+    let prevalidate_started = std::time::Instant::now();
     let incomplete = |m: String| PrevalidationRefusal::Incomplete(m);
     let terminal = |m: String| PrevalidationRefusal::Terminal(m);
 
@@ -2321,6 +2322,10 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         }
     })?;
 
+    log::info!(
+        "[prevalidate] timing: the sender's step validated at {} ms",
+        prevalidate_started.elapsed().as_millis()
+    );
     // ── The sender-side conjuncts — the SAME implementation the verifier's
     // credit arm runs post-accept, so the two can never drift ──────────────
     dsm::economic::provenance::prevalidate_sender_debit(
@@ -2376,6 +2381,10 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         }
     }
 
+    log::info!(
+        "[prevalidate] timing: closure publication starts at {} ms",
+        prevalidate_started.elapsed().as_millis()
+    );
     // ── The exact recorded closure, Stored on the set ──────────────────────
     // Every attempt publishes what it read; an object already proven Stored
     // is known per exact address and is not read back again. Take the
@@ -2386,6 +2395,10 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         .await
         .map_err(incomplete)?;
 
+    log::info!(
+        "[prevalidate] timing: closure Stored at {} ms",
+        prevalidate_started.elapsed().as_millis()
+    );
     // ── The prepared admission for the exact signed op the apply will see ──
     let signed_op = dsm::types::operations::Operation::decode_and_bind_signed(
         canonical_operation_bytes,

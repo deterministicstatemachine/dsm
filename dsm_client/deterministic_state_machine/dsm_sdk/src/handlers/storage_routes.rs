@@ -1422,6 +1422,7 @@ impl AppRouterImpl {
         }
 
         for mut pair in pairs {
+            let pair_started = std::time::Instant::now();
             // Everything below reads the pair's meaning from the staged
             // signed material, re-derived now — never from a copy's wrapper.
             let v = match verified_pair(&pair) {
@@ -1594,6 +1595,10 @@ impl AppRouterImpl {
                         hint,
                         evidence_bytes: &v.evidence_bytes,
                     };
+                    log::info!(
+                        "[storage.sync] timing: pair verified, prevalidation starts at {} ms",
+                        pair_started.elapsed().as_millis()
+                    );
                     match crate::sdk::economic_admission_flow::prevalidate_incoming_transfer_admission(
                         &self.core_sdk,
                         &sender_genesis,
@@ -1661,6 +1666,10 @@ impl AppRouterImpl {
                 let _rel_guard = rel_lock.lock_owned().await;
 
                 let sender_b32_for_apply = sender_b32.clone();
+                log::info!(
+                    "[storage.sync] timing: prevalidated, apply starts at {} ms",
+                    pair_started.elapsed().as_millis()
+                );
                 let decision = accept_bound_pair(&v, |v| {
                     // The verified transfer must be byte-identical to what
                     // prevalidation validated.
@@ -1733,6 +1742,10 @@ impl AppRouterImpl {
                             signed_child,
                             transition_entropy,
                             |outcome, b_pair| {
+                                log::info!(
+                                    "[storage.sync] timing: advance prepared, B artifacts start at {} ms",
+                                    pair_started.elapsed().as_millis()
+                                );
                                 let b_art = rr::generate_b_artifacts_from_inbound(
                                     receipt,
                                     &signed_sigma,
@@ -1747,6 +1760,10 @@ impl AppRouterImpl {
                                         "B-side acceptance artifacts: {e}"
                                     ))
                                 })?;
+                                log::info!(
+                                    "[storage.sync] timing: B artifacts signed, admission build starts at {} ms",
+                                    pair_started.elapsed().as_millis()
+                                );
                                 // The recipient's admission, from the EXACT
                                 // prepared successor: countersign wire bytes →
                                 // EK steps → acceptance bundle → PeerDebit
@@ -1771,6 +1788,10 @@ impl AppRouterImpl {
                                         &rel_key,
                                     )?;
                                 *admission_build.borrow_mut() = Some(built);
+                                log::info!(
+                                    "[storage.sync] timing: admission built at {} ms",
+                                    pair_started.elapsed().as_millis()
+                                );
                                 Ok(b_art)
                             },
                             |tx, _outcome, artifacts| {
@@ -1852,7 +1873,10 @@ impl AppRouterImpl {
                         continue;
                     }
                 };
-                log::info!("[storage.sync] ADR 0003 completion: {name} {acceptance:?}");
+                log::info!(
+                    "[storage.sync] ADR 0003 completion: {name} {acceptance:?} at {} ms",
+                    pair_started.elapsed().as_millis()
+                );
                 // The credit is applied and accepted durably: the page shows it
                 // now, not after this device's own admission and release that
                 // follow, which held the receiver's screen ~3.7 s on the rig
@@ -3089,22 +3113,28 @@ impl AppRouterImpl {
             self.deliver_owed_write_authorizations(storage_endpoints, None)
                 .await,
         );
-        match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
-            Ok(n) => report.pushed += n,
-            Err(e) => report
-                .errors
-                .push(format!("artifact republish sweep failed: {e}")),
-        }
-        if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
-            report.errors.push(e);
-        }
         // The owner's duty (SoFi Amendment S24): a baseline at the head of
         // every vault this device created. One not published is reported and
         // the sync goes on: it costs a fresh reader speed, never an admission,
-        // so a sync on a payment's path leaves it to the next sync.
+        // so a sync on a payment's path leaves it to the next sync. The same
+        // goes for the two backlog sweeps: the frozen artifacts still owed the
+        // set and the route writes still short of their route's end (a wallet
+        // backup's, for one) are this device's standing debts, none of them
+        // the payment's. A payment publishes its own evidence and writes its
+        // own claim itself. On the rig phones (2026-11-21) continuing a
+        // backup's route write held a send's pre-send sync 1.1 s.
         if path == SyncPath::Payment {
-            log::info!("[storage.sync] owner baselines left to the next sync: this one is on a payment's path");
+            log::info!("[storage.sync] backlog sweeps and owner baselines left to the next sync: this one is on a payment's path");
         } else {
+            match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
+                Ok(n) => report.pushed += n,
+                Err(e) => report
+                    .errors
+                    .push(format!("artifact republish sweep failed: {e}")),
+            }
+            if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
+                report.errors.push(e);
+            }
             match crate::sdk::economic_admission_flow::committed_network_id()
                 .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
             {

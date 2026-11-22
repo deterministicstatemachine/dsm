@@ -182,419 +182,6 @@ struct OnlineSendArtifacts {
     extra_artifacts: Vec<crate::storage::client_db::SenderOutboxArtifact>,
 }
 
-/// How long a send's caller waits for its delivery.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum DeliveryWait {
-    /// Until the frozen send reaches its quorum or is left to the sweep: an
-    /// application's payment is carried out only once it is delivered.
-    Awaited,
-    /// Not at all: the Send screen is answered once the debit and its
-    /// admission are committed, and the delivery runs beside it.
-    InBackground,
-}
-
-/// Background deliveries this process has started and not finished.
-pub(crate) static BACKGROUND_DELIVERIES: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
-/// Told each time a background delivery finishes.
-pub(crate) static DELIVERIES_SETTLED: once_cell::sync::Lazy<tokio::sync::Notify> =
-    once_cell::sync::Lazy::new(tokio::sync::Notify::new);
-
-/// A committed online send, ready for its delivery: everything the delivery
-/// reads, owned, so it can run beside the call that committed it.
-struct CommittedDelivery {
-    core_sdk: Arc<CoreSDK>,
-    wallet: Arc<WalletSDK>,
-    outbox_record: crate::storage::client_db::SenderOutboxRecord,
-    extra_artifacts: Vec<crate::storage::client_db::SenderOutboxArtifact>,
-    storage_endpoints: Vec<String>,
-    from_device_id: [u8; 32],
-    sender_proposal: crate::storage::client_db::SenderOnlineProposal,
-    submission_id: String,
-    signed_tx_id: String,
-    receipt_canonical_bytes: Vec<u8>,
-    token_id: String,
-    state_hash: Vec<u8>,
-    chain_tip_arr: [u8; 32],
-    to_device_id_str: String,
-    /// The debit's economic admission, finished before anything is delivered.
-    admission: AdmissionToFinish,
-    /// When the send began, for its timing lines.
-    started: std::time::Instant,
-}
-
-/// What a committed send's economic admission needs to finish: publish,
-/// validate, register and read back final (3.5b).
-struct AdmissionToFinish {
-    network: Vec<u8>,
-    set: crate::sdk::storage_set::StorageSet,
-    validated: dsm::economic::lineage::ValidatedEconomicRoot,
-    parts: crate::sdk::economic_admission_flow::DsmAdmissionParts,
-    pending: dsm::economic::admission::PendingEconomicAdmission,
-}
-
-impl CommittedDelivery {
-    /// Deliver the frozen send: the one delivery operation the sweep makes too,
-    /// then the outbox status, the message id and the local tip, forward-only
-    /// (§16.6).
-    async fn deliver(self) -> OnlineSent {
-        let CommittedDelivery {
-            core_sdk,
-            wallet,
-            outbox_record,
-            extra_artifacts,
-            storage_endpoints,
-            from_device_id,
-            sender_proposal,
-            submission_id,
-            signed_tx_id,
-            receipt_canonical_bytes,
-            token_id,
-            state_hash,
-            chain_tip_arr,
-            to_device_id_str,
-            admission,
-            started,
-        } = self;
-        // The debit committed HELD (correction A): finish the admission —
-        // publish, register, validate, admit — and only its terminal
-        // transaction promotes the outbox row to deliverable. A failure here
-        // leaves everything resumable and NOTHING delivered.
-        if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
-            &core_sdk,
-            &admission.network,
-            &admission.set,
-            &admission.validated,
-            admission.parts.witness,
-            admission.parts.manifest,
-            crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm,
-            admission.pending,
-            Vec::new(),
-        )
-        .await
-        {
-            // An invalid admission cannot land: its inputs are frozen, so a
-            // resume fails the same way. Anything else holds it for resume.
-            return match e {
-                dsm::types::error::DsmError::InvalidOperation(_) => {
-                    stranded_send(format!("its economic admission cannot land: {e}"))
-                }
-                _ => undelivered_send(
-                    &wallet,
-                    &token_id,
-                    &state_hash,
-                    format!(
-                        "its economic admission is held for resume and nothing is delivered yet; \
-                         it completes once storage is reachable: {e}"
-                    ),
-                ),
-            };
-        }
-        log::info!(
-            "[wallet.send] timing: admitted at {} ms",
-            started.elapsed().as_millis()
-        );
-        let mut b0x_succeeded = false;
-        let mut b0x_message_id: Option<String> = None;
-
-        // Duplicate-traffic suppression against the periodic sweep, which may
-        // observe the row while this call is on the wire. Optimization only:
-        // correctness rests on deterministic ids, frozen bytes, CAS status and
-        // node-side dedup, and a concurrent double-drive is merely wasteful.
-        let _in_flight = crate::storage::client_db::DeliveryInFlight::claim(
-            &outbox_record.relationship_key,
-            &outbox_record.canonical_parent,
-            &outbox_record.proposal_nonce,
-        );
-
-        // Durably marked BEFORE entering the network call, so a crash
-        // mid-call can never leave a row that merely LOOKS pre-submit. A mark
-        // that does not land sends nothing: the row stays deliverable and the
-        // reconciliation sweep drives it.
-        if let Err(e) = crate::storage::client_db::set_sender_outbox_status(
-            &outbox_record.relationship_key,
-            &outbox_record.canonical_parent,
-            &outbox_record.proposal_nonce,
-            crate::storage::client_db::OUTBOX_SUBMITTING,
-        ) {
-            return undelivered_send(
-                &wallet,
-                &token_id,
-                &state_hash,
-                format!(
-                    "the outbox row could not be marked submitting, so nothing is sent yet and \
-                     the reconciliation sweep sends it: {e}"
-                ),
-            );
-        }
-
-        // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
-        let sender_b32_for_b0x = crate::util::text_id::encode_base32_crockford(&from_device_id);
-        match crate::sdk::b0x_sdk::B0xSDK::new(
-            sender_b32_for_b0x,
-            core_sdk.clone(),
-            storage_endpoints,
-        ) {
-            Ok(mut b0x_sdk) => {
-                // ONE delivery operation for the WHOLE frozen logical send —
-                // the transfer envelope AND every frozen A-side artifact —
-                // under the ids and route they were frozen with. This is the
-                // same call the recovery sweep makes, so first attempt and
-                // retry cannot drift. It reports success only when every half
-                // reached quorum; a transfer-only quorum is not delivery.
-                //
-                // No outer timeout: the transport bounds itself through its
-                // retry schedule. An arbitrary deadline sized for one envelope
-                // was how a still-viable quorum attempt got reported as
-                // uncertain.
-                let retry = crate::sdk::b0x_sdk::B0xRetryConfig::default();
-                let delivery = b0x_sdk
-                    .deliver_frozen_logical_send(&outbox_record, &extra_artifacts, &retry)
-                    .await;
-                match delivery {
-                    Ok(delivered) => {
-                        log::info!(
-                            "[wallet.send] ✅ Delivered frozen send to b0x: transfer={} artifacts={}",
-                            delivered.transfer_id,
-                            delivered.artifact_ids.len()
-                        );
-                        b0x_succeeded = true;
-                        b0x_message_id = Some(delivered.transfer_id.clone());
-                        // §16.6 proposal authority: bind the wire identity to
-                        // the persisted proposal (exactly once). Guarded on
-                        // `proposed` so a late completion can never drag a
-                        // step that already finalized back to `submitted`.
-                        match crate::storage::client_db::mark_sender_proposal_submitted_if_proposed(
-                            &sender_proposal.relationship_key,
-                            &sender_proposal.canonical_parent,
-                            &submission_id,
-                        ) {
-                            Ok(true) => {}
-                            Ok(false) => log::info!(
-                                "[wallet.send] §16.6 proposal already past `proposed`; leaving it"
-                            ),
-                            Err(e) => log::error!(
-                                "[wallet.send] §16.6 proposal message-id bind failed: {e}"
-                            ),
-                        }
-                        // Wake our own inbox poller so we pick up the recipient's
-                        // ACK faster — reduces tip-drift on subsequent sends.
-                        crate::sdk::inbox_poller::resume_poller();
-                        // Record network success for connectivity monitoring
-                        // Backfill the receipt into the local transaction record
-                        // so the sender's history shows "Verified" instead of "N/A".
-                        if let Err(e) = crate::storage::client_db::update_transaction_proof_data(
-                            &signed_tx_id,
-                            &receipt_canonical_bytes,
-                        ) {
-                            log::warn!("[wallet.send] Failed to persist receipt locally: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        // Record network failure for connectivity monitoring
-
-                        log::error!("[wallet.send] ❌ frozen send not fully delivered: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                // Record network failure for connectivity monitoring
-
-                log::error!("[wallet.send] ❌ B0xSDK init failed: {}", e);
-            }
-        }
-
-        // =====================================================================
-        // ATOMIC ROLLBACK: If b0x delivery failed, restore canonical state,
-        // shared SMT, persisted transaction/projection rows, and in-memory caches.
-        // =====================================================================
-        // =====================================================================
-        // §16.6 DEFECT ZERO — FORWARD-ONLY AFTER THE DURABLE COMMIT.
-        //
-        // A submission failure here is NOT proof of non-delivery. A quorum may
-        // have accepted the envelope while the response was lost, the socket
-        // timed out, or the process was killed. Rolling the debit back on that
-        // evidence is exactly how a creditable message ends up stranded against
-        // restored funds — the live hazard this work exists to remove.
-        //
-        // So the debit, proposal, gate, pending EK head and outbox row all
-        // STAY. The row moves to `submission_uncertain` and the reconciliation
-        // sweep resubmits the byte-identical stored envelope. The node keeps
-        // both copies (it deduplicates nothing, storage spec §8); the recipient
-        // takes the message once, by the id it recorded as consumed.
-        // =====================================================================
-        // Both status writes below are compare-and-set FROM `submitting`. While
-        // this call was on the wire the recipient may already have accepted and
-        // replied, and a concurrent storage.sync may have finalized the row to
-        // `gc_pending`; an unconditional write here would drag it back and
-        // strand it outside both the unsettled set and the GC set.
-        if !b0x_succeeded {
-            if let Err(e) = crate::storage::client_db::advance_sender_outbox_status_if(
-                &outbox_record.relationship_key,
-                &outbox_record.canonical_parent,
-                &outbox_record.proposal_nonce,
-                &[crate::storage::client_db::OUTBOX_SUBMITTING],
-                crate::storage::client_db::OUTBOX_SUBMISSION_UNCERTAIN,
-            ) {
-                log::error!(
-                    "[wallet.send] could not record submission_uncertain; the row stays \
-                     submitting and the sweep resubmits it: {e}"
-                );
-            }
-            log::warn!(
-                "[wallet.send] §16.6 submission outcome UNKNOWN — retaining debit, gate and \
-                 outbox; reconciling forward (a timeout is not proof of non-delivery)"
-            );
-            return undelivered_send(
-                &wallet,
-                &token_id,
-                &state_hash,
-                "its delivery outcome is unknown; the transfer is retained and retried \
-                 automatically"
-                    .to_string(),
-            );
-        }
-        if let Err(e) = crate::storage::client_db::advance_sender_outbox_status_if(
-            &outbox_record.relationship_key,
-            &outbox_record.canonical_parent,
-            &outbox_record.proposal_nonce,
-            &[crate::storage::client_db::OUTBOX_SUBMITTING],
-            crate::storage::client_db::OUTBOX_SUBMITTED,
-        ) {
-            log::error!(
-                "[wallet.send] delivered, but could not record submitted; the row stays \
-                 submitting and the sweep resubmits it (the recipient takes it once): {e}"
-            );
-        }
-
-        // Record a single outstanding online transition for this relationship.
-        // The shared contact tip remains at h_n until the recipient ACKs the prior
-        // message; only the sender's local restore tip advances to h_{n+1}.
-        {
-            // The gate is ALREADY durable — it was committed atomically with the
-            // proposal, the pending EK head and the outbox row before anything
-            // was submitted. Nothing here may fail the transfer: the two former
-            // rollback sites (missing message id, gate-persist failure) are gone
-            // because neither is evidence that the message was not delivered.
-            //
-            // The returned storage message id is GC metadata ONLY. Finalization
-            // keys on the receipt commitment, so a missing or unbindable id
-            // costs nothing but a later spool cleanup.
-            let new_tip_b32 =
-                crate::util::text_id::encode_base32_crockford(&outbox_record.projection_target);
-            match b0x_message_id {
-                Some(ref msg_id) => {
-                    if let Err(e) = crate::storage::client_db::bind_sender_outbox_message_ids(
-                        &outbox_record.relationship_key,
-                        &outbox_record.canonical_parent,
-                        &outbox_record.proposal_nonce,
-                        msg_id,
-                    ) {
-                        log::warn!(
-                            "[wallet.send] §16.6 message-id bind failed (GC metadata only, \
-                             transfer unaffected): {e}"
-                        );
-                    }
-                }
-                None => log::warn!(
-                    "[wallet.send] §16.6 no storage message id returned — transfer stands \
-                     (finalization keys on the receipt commitment); spool GC will rely on \
-                     the deterministic submission id"
-                ),
-            }
-            log::info!(
-                "[wallet.send] §16.6 Pending online transition already durable: parent={} next={}",
-                &crate::util::text_id::encode_base32_crockford(&chain_tip_arr)[..8],
-                &new_tip_b32[..8]
-            );
-            // Keep in-memory bilateral_chains cache on the sender's local successor tip so
-            // the app state matches the optimistic local transition. The persisted pending
-            // online outbox gate blocks the next send until the recipient catches up.
-            if let Err(e) =
-                wallet.update_bilateral_chain_tip(&to_device_id_str, &new_tip_b32, &new_tip_b32, 0)
-            {
-                log::warn!(
-                    "[wallet.send] §16.6 In-memory bilateral_chains cache sync failed: {}",
-                    e
-                );
-            }
-            // Canonical contacts.chain_tip stays at T_n. Only local_bilateral_chain_tip
-            // was advanced to T_{n+1} by record_pending_online_transition above.
-            // The pending-gate interlock requires ACK or storage.sync finalization
-            // before the canonical tip advances, keeping recipient polling aligned
-            // with the sender's actual finalized relationship tip.
-        }
-
-        OnlineSent::Delivered(committed_answer(
-            &wallet,
-            &token_id,
-            &state_hash,
-            "Transfer successful".to_string(),
-        ))
-    }
-}
-
-/// The answer to a send whose debit is committed: an `OnlineTransferResponse`
-/// naming the committed state, delivered or not.
-fn committed_answer(
-    wallet: &WalletSDK,
-    token_id: &str,
-    state_hash: &[u8],
-    message: String,
-) -> AppResult {
-    let new_balance = match wallet.get_balance(token_id) {
-        Ok(bal) => Some(bal.value()),
-        Err(e) => {
-            log::error!(
-                "[wallet.send] committed, but the post-send {token_id} balance could not be \
-                 read: {e}"
-            );
-            None
-        }
-    };
-    pack_envelope_ok(generated::envelope::Payload::OnlineTransferResponse(
-        generated::OnlineTransferResponse {
-            success: true,
-            transaction_hash: Some(generated::Hash32 {
-                v: state_hash.to_vec(),
-            }),
-            message,
-            new_balance,
-        },
-    ))
-}
-
-/// A committed send that can never complete, for `why`.
-fn stranded_send(why: String) -> OnlineSent {
-    log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
-    OnlineSent::Stranded {
-        answer: err(format!(
-            "wallet.send: the debit is committed on this device and this payment cannot \
-             complete: {why}"
-        )),
-        why,
-    }
-}
-
-/// A committed send not delivered yet, for `why`.
-fn undelivered_send(
-    wallet: &WalletSDK,
-    token_id: &str,
-    state_hash: &[u8],
-    why: String,
-) -> OnlineSent {
-    log::warn!("[wallet.send] the debit is committed and not delivered yet: {why}");
-    OnlineSent::Undelivered {
-        answer: committed_answer(
-            wallet,
-            token_id,
-            state_hash,
-            format!("Sent: {why}. The debit stands; do not resend."),
-        ),
-        why,
-    }
-}
-
 impl AppRouterImpl {
     async fn repair_contact_identity_from_directory(
         &self,
@@ -1582,7 +1169,7 @@ impl AppRouterImpl {
         // assembled: the debit registers before anything is deliverable. The
         // admission is this handler's until it returns; the sync leaves it
         // alone meanwhile, and finishes it after if it is held for resume.
-        let _admission_handler = self.core_sdk.admission_handler();
+        let admission_handler = self.core_sdk.admission_handler();
         let econ_network = match crate::sdk::economic_admission_flow::committed_network_id() {
             Ok(n) => n,
             Err(e) => {
@@ -2215,6 +1802,7 @@ impl AppRouterImpl {
                 validated: econ_validated,
                 parts: econ_parts_final,
                 pending: pending_admission,
+                handler: admission_handler,
             },
             started,
         };
@@ -2690,6 +2278,437 @@ fn repair_contact_decision(
     contact_record.verified = true;
     contact_record.needs_online_reconcile = false;
     Ok(ContactRepair::Repaired(contact_record))
+}
+
+/// How long a send's caller waits for its delivery.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DeliveryWait {
+    /// Until the frozen send reaches its quorum or is left to the sweep: an
+    /// application's payment is carried out only once it is delivered.
+    Awaited,
+    /// Not at all: the Send screen is answered once the debit and its
+    /// admission are committed, and the delivery runs beside it.
+    InBackground,
+}
+
+/// Background deliveries this process has started and not finished.
+pub(crate) static BACKGROUND_DELIVERIES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+/// Told each time a background delivery finishes.
+pub(crate) static DELIVERIES_SETTLED: once_cell::sync::Lazy<tokio::sync::Notify> =
+    once_cell::sync::Lazy::new(tokio::sync::Notify::new);
+
+/// A committed online send, ready for its delivery: everything the delivery
+/// reads, owned, so it can run beside the call that committed it.
+struct CommittedDelivery {
+    core_sdk: Arc<CoreSDK>,
+    wallet: Arc<WalletSDK>,
+    outbox_record: crate::storage::client_db::SenderOutboxRecord,
+    extra_artifacts: Vec<crate::storage::client_db::SenderOutboxArtifact>,
+    storage_endpoints: Vec<String>,
+    from_device_id: [u8; 32],
+    sender_proposal: crate::storage::client_db::SenderOnlineProposal,
+    submission_id: String,
+    signed_tx_id: String,
+    receipt_canonical_bytes: Vec<u8>,
+    token_id: String,
+    state_hash: Vec<u8>,
+    chain_tip_arr: [u8; 32],
+    to_device_id_str: String,
+    /// The debit's economic admission, finished before anything is delivered.
+    admission: AdmissionToFinish,
+    /// When the send began, for its timing lines.
+    started: std::time::Instant,
+}
+
+/// What a committed send's economic admission needs to finish: publish,
+/// validate, register and read back final (3.5b).
+struct AdmissionToFinish {
+    network: Vec<u8>,
+    set: crate::sdk::storage_set::StorageSet,
+    validated: dsm::economic::lineage::ValidatedEconomicRoot,
+    parts: crate::sdk::economic_admission_flow::DsmAdmissionParts,
+    pending: dsm::economic::admission::PendingEconomicAdmission,
+    /// This send's hold on the device's pending admission, kept until the
+    /// admission is finished or held for resume: the sync leaves the admission
+    /// to the send meanwhile, as it did while the send awaited it.
+    handler: crate::sdk::core_sdk::AdmissionHandler,
+}
+
+impl CommittedDelivery {
+    /// Deliver the frozen send: the one delivery operation the sweep makes too,
+    /// then the outbox status, the message id and the local tip, forward-only
+    /// (§16.6).
+    async fn deliver(self) -> OnlineSent {
+        let CommittedDelivery {
+            core_sdk,
+            wallet,
+            outbox_record,
+            extra_artifacts,
+            storage_endpoints,
+            from_device_id,
+            sender_proposal,
+            submission_id,
+            signed_tx_id,
+            receipt_canonical_bytes,
+            token_id,
+            state_hash,
+            chain_tip_arr,
+            to_device_id_str,
+            admission,
+            started,
+        } = self;
+        // The debit committed HELD (correction A): finish the admission —
+        // publish, register, validate, admit — and only its terminal
+        // transaction promotes the outbox row to deliverable. A failure here
+        // leaves everything resumable and NOTHING delivered.
+        let finished = crate::sdk::economic_admission_flow::finish_admission(
+            &core_sdk,
+            &admission.network,
+            &admission.set,
+            &admission.validated,
+            admission.parts.witness,
+            admission.parts.manifest,
+            crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm,
+            admission.pending,
+            Vec::new(),
+        )
+        .await;
+        // Finished or held for resume, the admission is no longer this send's.
+        drop(admission.handler);
+        if let Err(e) = finished {
+            // An invalid admission cannot land: its inputs are frozen, so a
+            // resume fails the same way. Anything else holds it for resume.
+            return match e {
+                dsm::types::error::DsmError::InvalidOperation(_) => {
+                    // The Send screen may have been answered already: the
+                    // send's history row is where it says it cannot complete.
+                    let why = format!("its economic admission cannot land: {e}");
+                    let why = match crate::storage::client_db::record_send_cannot_complete(
+                        &signed_tx_id,
+                        &why,
+                    ) {
+                        Ok(()) => why,
+                        Err(unmarked) => {
+                            format!("{why} (and its history row could not be marked: {unmarked})")
+                        }
+                    };
+                    stranded_send(why)
+                }
+                _ => undelivered_send(
+                    &wallet,
+                    &token_id,
+                    &state_hash,
+                    format!(
+                        "its economic admission is held for resume and nothing is delivered yet; \
+                         it completes once storage is reachable: {e}"
+                    ),
+                ),
+            };
+        }
+        log::info!(
+            "[wallet.send] timing: admitted at {} ms",
+            started.elapsed().as_millis()
+        );
+        let mut b0x_succeeded = false;
+        let mut b0x_message_id: Option<String> = None;
+
+        // Duplicate-traffic suppression against the periodic sweep, which may
+        // observe the row while this call is on the wire. Optimization only:
+        // correctness rests on deterministic ids, frozen bytes, CAS status and
+        // node-side dedup, and a concurrent double-drive is merely wasteful.
+        let _in_flight = crate::storage::client_db::DeliveryInFlight::claim(
+            &outbox_record.relationship_key,
+            &outbox_record.canonical_parent,
+            &outbox_record.proposal_nonce,
+        );
+
+        // Durably marked BEFORE entering the network call, so a crash
+        // mid-call can never leave a row that merely LOOKS pre-submit. A mark
+        // that does not land sends nothing: the row stays deliverable and the
+        // reconciliation sweep drives it.
+        if let Err(e) = crate::storage::client_db::set_sender_outbox_status(
+            &outbox_record.relationship_key,
+            &outbox_record.canonical_parent,
+            &outbox_record.proposal_nonce,
+            crate::storage::client_db::OUTBOX_SUBMITTING,
+        ) {
+            return undelivered_send(
+                &wallet,
+                &token_id,
+                &state_hash,
+                format!(
+                    "the outbox row could not be marked submitting, so nothing is sent yet and \
+                     the reconciliation sweep sends it: {e}"
+                ),
+            );
+        }
+
+        // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
+        let sender_b32_for_b0x = crate::util::text_id::encode_base32_crockford(&from_device_id);
+        match crate::sdk::b0x_sdk::B0xSDK::new(
+            sender_b32_for_b0x,
+            core_sdk.clone(),
+            storage_endpoints,
+        ) {
+            Ok(mut b0x_sdk) => {
+                // ONE delivery operation for the WHOLE frozen logical send —
+                // the transfer envelope AND every frozen A-side artifact —
+                // under the ids and route they were frozen with. This is the
+                // same call the recovery sweep makes, so first attempt and
+                // retry cannot drift. It reports success only when every half
+                // reached quorum; a transfer-only quorum is not delivery.
+                //
+                // No outer timeout: the transport bounds itself through its
+                // retry schedule. An arbitrary deadline sized for one envelope
+                // was how a still-viable quorum attempt got reported as
+                // uncertain.
+                let retry = crate::sdk::b0x_sdk::B0xRetryConfig::default();
+                let delivery = b0x_sdk
+                    .deliver_frozen_logical_send(&outbox_record, &extra_artifacts, &retry)
+                    .await;
+                match delivery {
+                    Ok(delivered) => {
+                        log::info!(
+                            "[wallet.send] ✅ Delivered frozen send to b0x: transfer={} artifacts={}",
+                            delivered.transfer_id,
+                            delivered.artifact_ids.len()
+                        );
+                        b0x_succeeded = true;
+                        b0x_message_id = Some(delivered.transfer_id.clone());
+                        // §16.6 proposal authority: bind the wire identity to
+                        // the persisted proposal (exactly once). Guarded on
+                        // `proposed` so a late completion can never drag a
+                        // step that already finalized back to `submitted`.
+                        match crate::storage::client_db::mark_sender_proposal_submitted_if_proposed(
+                            &sender_proposal.relationship_key,
+                            &sender_proposal.canonical_parent,
+                            &submission_id,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => log::info!(
+                                "[wallet.send] §16.6 proposal already past `proposed`; leaving it"
+                            ),
+                            Err(e) => log::error!(
+                                "[wallet.send] §16.6 proposal message-id bind failed: {e}"
+                            ),
+                        }
+                        // Wake our own inbox poller so we pick up the recipient's
+                        // ACK faster — reduces tip-drift on subsequent sends.
+                        crate::sdk::inbox_poller::resume_poller();
+                        // Record network success for connectivity monitoring
+                        // Backfill the receipt into the local transaction record
+                        // so the sender's history shows "Verified" instead of "N/A".
+                        if let Err(e) = crate::storage::client_db::update_transaction_proof_data(
+                            &signed_tx_id,
+                            &receipt_canonical_bytes,
+                        ) {
+                            log::warn!("[wallet.send] Failed to persist receipt locally: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        // Record network failure for connectivity monitoring
+
+                        log::error!("[wallet.send] ❌ frozen send not fully delivered: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                // Record network failure for connectivity monitoring
+
+                log::error!("[wallet.send] ❌ B0xSDK init failed: {}", e);
+            }
+        }
+
+        // =====================================================================
+        // ATOMIC ROLLBACK: If b0x delivery failed, restore canonical state,
+        // shared SMT, persisted transaction/projection rows, and in-memory caches.
+        // =====================================================================
+        // =====================================================================
+        // §16.6 DEFECT ZERO — FORWARD-ONLY AFTER THE DURABLE COMMIT.
+        //
+        // A submission failure here is NOT proof of non-delivery. A quorum may
+        // have accepted the envelope while the response was lost, the socket
+        // timed out, or the process was killed. Rolling the debit back on that
+        // evidence is exactly how a creditable message ends up stranded against
+        // restored funds — the live hazard this work exists to remove.
+        //
+        // So the debit, proposal, gate, pending EK head and outbox row all
+        // STAY. The row moves to `submission_uncertain` and the reconciliation
+        // sweep resubmits the byte-identical stored envelope. The node keeps
+        // both copies (it deduplicates nothing, storage spec §8); the recipient
+        // takes the message once, by the id it recorded as consumed.
+        // =====================================================================
+        // Both status writes below are compare-and-set FROM `submitting`. While
+        // this call was on the wire the recipient may already have accepted and
+        // replied, and a concurrent storage.sync may have finalized the row to
+        // `gc_pending`; an unconditional write here would drag it back and
+        // strand it outside both the unsettled set and the GC set.
+        if !b0x_succeeded {
+            if let Err(e) = crate::storage::client_db::advance_sender_outbox_status_if(
+                &outbox_record.relationship_key,
+                &outbox_record.canonical_parent,
+                &outbox_record.proposal_nonce,
+                &[crate::storage::client_db::OUTBOX_SUBMITTING],
+                crate::storage::client_db::OUTBOX_SUBMISSION_UNCERTAIN,
+            ) {
+                log::error!(
+                    "[wallet.send] could not record submission_uncertain; the row stays \
+                     submitting and the sweep resubmits it: {e}"
+                );
+            }
+            log::warn!(
+                "[wallet.send] §16.6 submission outcome UNKNOWN — retaining debit, gate and \
+                 outbox; reconciling forward (a timeout is not proof of non-delivery)"
+            );
+            return undelivered_send(
+                &wallet,
+                &token_id,
+                &state_hash,
+                "its delivery outcome is unknown; the transfer is retained and retried \
+                 automatically"
+                    .to_string(),
+            );
+        }
+        if let Err(e) = crate::storage::client_db::advance_sender_outbox_status_if(
+            &outbox_record.relationship_key,
+            &outbox_record.canonical_parent,
+            &outbox_record.proposal_nonce,
+            &[crate::storage::client_db::OUTBOX_SUBMITTING],
+            crate::storage::client_db::OUTBOX_SUBMITTED,
+        ) {
+            log::error!(
+                "[wallet.send] delivered, but could not record submitted; the row stays \
+                 submitting and the sweep resubmits it (the recipient takes it once): {e}"
+            );
+        }
+
+        // Record a single outstanding online transition for this relationship.
+        // The shared contact tip remains at h_n until the recipient ACKs the prior
+        // message; only the sender's local restore tip advances to h_{n+1}.
+        {
+            // The gate is ALREADY durable — it was committed atomically with the
+            // proposal, the pending EK head and the outbox row before anything
+            // was submitted. Nothing here may fail the transfer: the two former
+            // rollback sites (missing message id, gate-persist failure) are gone
+            // because neither is evidence that the message was not delivered.
+            //
+            // The returned storage message id is GC metadata ONLY. Finalization
+            // keys on the receipt commitment, so a missing or unbindable id
+            // costs nothing but a later spool cleanup.
+            let new_tip_b32 =
+                crate::util::text_id::encode_base32_crockford(&outbox_record.projection_target);
+            match b0x_message_id {
+                Some(ref msg_id) => {
+                    if let Err(e) = crate::storage::client_db::bind_sender_outbox_message_ids(
+                        &outbox_record.relationship_key,
+                        &outbox_record.canonical_parent,
+                        &outbox_record.proposal_nonce,
+                        msg_id,
+                    ) {
+                        log::warn!(
+                            "[wallet.send] §16.6 message-id bind failed (GC metadata only, \
+                             transfer unaffected): {e}"
+                        );
+                    }
+                }
+                None => log::warn!(
+                    "[wallet.send] §16.6 no storage message id returned — transfer stands \
+                     (finalization keys on the receipt commitment); spool GC will rely on \
+                     the deterministic submission id"
+                ),
+            }
+            log::info!(
+                "[wallet.send] §16.6 Pending online transition already durable: parent={} next={}",
+                &crate::util::text_id::encode_base32_crockford(&chain_tip_arr)[..8],
+                &new_tip_b32[..8]
+            );
+            // Keep in-memory bilateral_chains cache on the sender's local successor tip so
+            // the app state matches the optimistic local transition. The persisted pending
+            // online outbox gate blocks the next send until the recipient catches up.
+            if let Err(e) =
+                wallet.update_bilateral_chain_tip(&to_device_id_str, &new_tip_b32, &new_tip_b32, 0)
+            {
+                log::warn!(
+                    "[wallet.send] §16.6 In-memory bilateral_chains cache sync failed: {}",
+                    e
+                );
+            }
+            // Canonical contacts.chain_tip stays at T_n. Only local_bilateral_chain_tip
+            // was advanced to T_{n+1} by record_pending_online_transition above.
+            // The pending-gate interlock requires ACK or storage.sync finalization
+            // before the canonical tip advances, keeping recipient polling aligned
+            // with the sender's actual finalized relationship tip.
+        }
+
+        OnlineSent::Delivered(committed_answer(
+            &wallet,
+            &token_id,
+            &state_hash,
+            "Transfer successful".to_string(),
+        ))
+    }
+}
+
+/// The answer to a send whose debit is committed: an `OnlineTransferResponse`
+/// naming the committed state, delivered or not.
+fn committed_answer(
+    wallet: &WalletSDK,
+    token_id: &str,
+    state_hash: &[u8],
+    message: String,
+) -> AppResult {
+    let new_balance = match wallet.get_balance(token_id) {
+        Ok(bal) => Some(bal.value()),
+        Err(e) => {
+            log::error!(
+                "[wallet.send] committed, but the post-send {token_id} balance could not be \
+                 read: {e}"
+            );
+            None
+        }
+    };
+    pack_envelope_ok(generated::envelope::Payload::OnlineTransferResponse(
+        generated::OnlineTransferResponse {
+            success: true,
+            transaction_hash: Some(generated::Hash32 {
+                v: state_hash.to_vec(),
+            }),
+            message,
+            new_balance,
+        },
+    ))
+}
+
+/// A committed send that can never complete, for `why`.
+fn stranded_send(why: String) -> OnlineSent {
+    log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
+    OnlineSent::Stranded {
+        answer: err(format!(
+            "wallet.send: the debit is committed on this device and this payment cannot \
+             complete: {why}"
+        )),
+        why,
+    }
+}
+
+/// A committed send not delivered yet, for `why`.
+fn undelivered_send(
+    wallet: &WalletSDK,
+    token_id: &str,
+    state_hash: &[u8],
+    why: String,
+) -> OnlineSent {
+    log::warn!("[wallet.send] the debit is committed and not delivered yet: {why}");
+    OnlineSent::Undelivered {
+        answer: committed_answer(
+            wallet,
+            token_id,
+            state_hash,
+            format!("Sent: {why}. The debit stands; do not resend."),
+        ),
+        why,
+    }
 }
 
 #[cfg(test)]

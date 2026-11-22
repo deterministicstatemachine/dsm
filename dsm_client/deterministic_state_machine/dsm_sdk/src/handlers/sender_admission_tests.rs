@@ -547,6 +547,9 @@ async fn a_send_pays_the_contact_chosen_not_the_first_of_its_alias() {
             "the send to {}: {:?}",
             chosen.slot, sent.error_message
         );
+        // The Send route answers once the debit is committed: what it
+        // delivers beside the answer ends before the next device is entered.
+        crate::test_support::two_device::background_deliveries_settled().await;
     }
     c.sync().await;
     p.b.sync().await;
@@ -1592,7 +1595,7 @@ async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admissio
     let first = p.a.send(&p.b, 10).await;
     let said = crate::test_support::two_device::committed_send_message(&first);
     assert!(
-        said.contains("held for resume"),
+        p.a.admission_held(),
         "the first send is committed and held: {said}"
     );
     p.a.enter();
@@ -1636,7 +1639,7 @@ async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admissio
     let held_again = p.a.send(&p.b, 5).await;
     let msg = crate::test_support::two_device::committed_send_message(&held_again);
     assert!(
-        msg.contains("held for resume"),
+        p.a.admission_held(),
         "the second send is committed and held for resume, got: {msg}"
     );
     p.a.enter();
@@ -1692,8 +1695,8 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
     let held = p.a.send(&p.b, 10).await;
     let msg = crate::test_support::two_device::committed_send_message(&held);
     assert!(
-        msg.contains("held for resume") && msg.contains("nothing is delivered yet"),
-        "the committed send names the held admission, got: {msg}"
+        p.a.admission_held(),
+        "the committed send's admission is held, got: {msg}"
     );
     assert_eq!(
         p.a.era_balance(),
