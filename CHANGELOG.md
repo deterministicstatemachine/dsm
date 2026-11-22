@@ -36,6 +36,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Security
 
+- `url` is 2.5.9 in the three lockfiles that carry it (the workspace's, the SDK's, the Android anchor's), with `form_urlencoded` 1.2.3: RUSTSEC-2026-0592 (2026-11-20), a stack overflow in `Url::origin()` on nested `blob:` URLs, is fixed there. The security audit refused 2.5.8.
 - **A board pays or is paid offline only under the owner's stamp (DSM
   Amendment A38).** Every board is set up by the owner before it ships, and he
   signs its public identity (anchor id, `pk_host`, `pk_chip`) with his stamp
