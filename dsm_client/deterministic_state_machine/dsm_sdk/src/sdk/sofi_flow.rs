@@ -759,6 +759,26 @@ async fn heads_at_once(
     .await
 }
 
+/// Vault heads walked at once at most, where the list is as long as what was
+/// published makes it.
+const HEADS_AT_ONCE: usize = 16;
+
+/// [`heads_at_once`] over a list of any length — the vaults bound to a cell,
+/// the vaults a wallet created — [`HEADS_AT_ONCE`] at a time, in the order
+/// given. One at a time, each vault of the list cost its whole walk before
+/// the next began.
+pub(crate) async fn heads_in_turns(
+    set: &StorageSet,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_ids: &[D32],
+) -> Vec<Result<(VaultAtHead, VaultChain), DsmError>> {
+    let mut heads = Vec::with_capacity(vault_ids.len());
+    for chunk in vault_ids.chunks(HEADS_AT_ONCE) {
+        heads.extend(heads_at_once(set, verifier, chunk).await);
+    }
+    heads
+}
+
 /// `vault_id` at the head of its walked `chain`, witnessed for this device.
 pub(crate) async fn head_of(
     set: &StorageSet,
@@ -1177,9 +1197,10 @@ fn route_ends(hops: &[Hop]) -> Result<Option<RouteEnds>, DsmError> {
 /// Geneses accepted at once.
 const GENESES_AT_ONCE: usize = 16;
 
-/// What accepting the vaults of a route's tokens ahead came to: a report
-/// only. What a vault of a token is, is decided by `vaults_of_token`.
-struct AcceptedAhead {
+/// What accepting vaults' geneses ahead came to: a report only. What a vault
+/// of a token is, is decided by `vaults_of_token`; what a vault of a cell is,
+/// by `vaults_of_cell`.
+pub(crate) struct AcceptedAhead {
     candidates: usize,
     accepted: usize,
     not_accepted: Vec<String>,
@@ -1208,11 +1229,7 @@ impl core::fmt::Display for AcceptedAhead {
 /// vault before a quote. Call from a thread that may block.
 fn accept_ahead(verifier: &Verifier<'_, LiveSofiReads<'_>>, tokens: &[D32]) -> AcceptedAhead {
     use dsm::sofi::resolve::SofiReads as _;
-    let mut report = AcceptedAhead {
-        candidates: 0,
-        accepted: 0,
-        not_accepted: Vec::new(),
-    };
+    let mut unread = Vec::new();
     let mut vault_ids: Vec<D32> = Vec::new();
     for token in tokens {
         match verifier.reads.vault_token_candidates(token) {
@@ -1223,12 +1240,54 @@ fn accept_ahead(verifier: &Verifier<'_, LiveSofiReads<'_>>, tokens: &[D32]) -> A
                     }
                 }
             }
-            Err(failure) => report
-                .not_accepted
-                .push(format!("the token index: {failure}")),
+            Err(failure) => unread.push(format!("the token index: {failure}")),
         }
     }
-    report.candidates = vault_ids.len();
+    let mut report = geneses_ahead(verifier, &vault_ids);
+    report.not_accepted.splice(0..0, unread);
+    report
+}
+
+/// Accept the genesis of every vault published under `verdict_cell`'s
+/// locator at once ([`geneses_ahead`]), so `vaults_of_cell` finds each one
+/// already accepted for this operation. Call from a thread that may block.
+pub(crate) fn accept_cell_ahead(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    verdict_cell: &D32,
+) -> AcceptedAhead {
+    use dsm::sofi::resolve::SofiReads as _;
+    match verifier.reads.escrow_cell_candidates(verdict_cell) {
+        Ok(Discovered::Complete(found) | Discovered::Partial(found)) => {
+            let mut vault_ids: Vec<D32> = Vec::with_capacity(found.len());
+            for vault_id in found {
+                if !vault_ids.contains(&vault_id) {
+                    vault_ids.push(vault_id);
+                }
+            }
+            geneses_ahead(verifier, &vault_ids)
+        }
+        Err(failure) => AcceptedAhead {
+            candidates: 0,
+            accepted: 0,
+            not_accepted: vec![format!("the cell index: {failure}")],
+        },
+    }
+}
+
+/// Accept the genesis of each of `vault_ids` at once, [`GENESES_AT_ONCE`] at
+/// a time, through the verifier's own `vault_genesis`, which keeps each one
+/// it accepts for the rest of the operation. Nothing is decided here: what
+/// asks for a vault's genesis next asks the verifier, and finds it kept.
+/// Call from a thread that may block.
+pub(crate) fn geneses_ahead(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_ids: &[D32],
+) -> AcceptedAhead {
+    let mut report = AcceptedAhead {
+        candidates: vault_ids.len(),
+        accepted: 0,
+        not_accepted: Vec::new(),
+    };
     for chunk in vault_ids.chunks(GENESES_AT_ONCE) {
         let outcomes: Vec<Result<VaultGenesis, String>> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
