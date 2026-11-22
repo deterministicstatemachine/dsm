@@ -176,6 +176,13 @@ export interface TokenBalanceView {
   tokenName: string;
   /** The available balance in base units. */
   baseUnits: bigint;
+  /**
+   * What Rust reports as held and committed to something in flight, in base
+   * units; `baseUnits` is already net of it. The wallet still holds it. Every
+   * row Rust answers carries it (`balanceView`); absent on a holding Rust did
+   * not answer, such as a practice wallet's, which has nothing in flight.
+   */
+  lockedBaseUnits?: bigint;
   decimals: number;
   /** Display form of `baseUnits`, rendered by Rust. Never computed here. */
   displayAmount: string;

@@ -47,6 +47,28 @@ describe('what a wallet home lists', () => {
     expect(tickers(homeListed([row('ERA', 1n, 'protocol'), empty]))).toEqual(['ERA']);
   });
 
+  // Rust reports the balance net of what is committed in flight (`locked`): a
+  // token whose whole holding is in flight is still the wallet's.
+  it('counts what is locked in flight as something held', () => {
+    const inFlight = balanceView(
+      new pb.BalanceGetResponse({
+        tokenId: 'dBTC', symbol: 'dBTC', tokenName: 'dBTC', available: 0n, locked: 9n, displayAmount: '0',
+        holding: pb.BalanceHolding.CURRENCY, protocolDefined: 'dBTC'.length > 0,
+      }),
+    );
+    expect(inFlight.lockedBaseUnits).toBe(9n);
+    expect(tickers(homeListed([row('ERA', 1n, 'protocol'), inFlight]))).toEqual(['ERA', 'dBTC']);
+  });
+
+  // The appliance has not stated the allocation yet: the row would show the
+  // balance, zero, so it is not listed until an allocation with something in
+  // it is stated.
+  it('does not list a token at zero for an offline allocation not yet stated', () => {
+    const unknown = row('dBTC', 0n, 'protocol');
+    expect(unknown.offline).toBeUndefined();
+    expect(tickers(homeListed([row('ERA', 1n, 'protocol'), unknown]))).toEqual(['ERA']);
+  });
+
   it('goes by what Rust says the protocol defines, not by a ticker', () => {
     // A token someone created and named dBTC is theirs to list at zero.
     expect(tickers(homeListed([row('ERA', 1n, 'protocol'), row('dBTC', 0n, 'created')])))

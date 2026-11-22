@@ -47,6 +47,7 @@ describe('wallet.ts', () => {
               new pb.BalanceGetResponse({
                 tokenId: 'RIGB',
                 available: 100000n,
+                locked: 2500n,
                 symbol: 'RIGB',
                 decimals: 2,
                 tokenName: 'Rig Bucks',
@@ -73,6 +74,7 @@ describe('wallet.ts', () => {
           symbol: 'ERA',
           tokenName: 'ERA',
           baseUnits: 1000n,
+          lockedBaseUnits: 0n,
           decimals: 0,
           displayAmount: '1000',
           canonicalTokenId: undefined,
@@ -92,6 +94,8 @@ describe('wallet.ts', () => {
           symbol: 'RIGB',
           tokenName: 'Rig Bucks',
           baseUnits: 100000n,
+          // What Rust reports committed in flight, carried beside the balance.
+          lockedBaseUnits: 2500n,
           decimals: 2,
           displayAmount: '1000.00',
           canonicalTokenId: 'CANON1CAL',
