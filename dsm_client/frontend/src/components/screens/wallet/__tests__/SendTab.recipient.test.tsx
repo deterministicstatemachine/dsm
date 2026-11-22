@@ -32,7 +32,7 @@ const NFF = contact('RXDC8XQMZ7JHAB', 'rxdc8xqm', ['ERA', 'RIGB']);
 const baseProps = (contacts: any[]) =>
   ({
     contacts,
-    balances: [{ tokenId: 'RIGB', symbol: 'RIGB', balance: '1000', decimals: 0 }],
+    balances: [{ tokenId: 'RIGB', symbol: 'RIGB', baseUnits: 1000n, balance: '1000', decimals: 0 }],
     onSend: jest.fn(),
     setError: jest.fn(),
   }) as any;

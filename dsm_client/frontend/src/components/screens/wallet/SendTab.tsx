@@ -112,15 +112,20 @@ function SendTabInner({
     [contacts, sendForm.selectedContactKey],
   );
 
-  // Only what Rust listed. With no balances there is nothing to send, and the
-  // form says so rather than offering a token the wallet does not hold. Once
-  // a recipient is chosen, only the tokens Rust says that contact can be sent:
-  // a contact credits no token it has not added, so none is offered.
+  // Only what Rust listed, and of that only what there is something of to
+  // send (owner, 2026-11-22): a token held at zero is not offered. An online
+  // send spends the balance; an offline send spends the offline allocation,
+  // which is unknown, not zero, until the appliance has stated it. With
+  // nothing to send the form says so. Once a recipient is chosen, only the
+  // tokens Rust says that contact can be sent: a contact credits no token it
+  // has not added, so none is offered.
   const tokenOptions: TokenBalanceView[] = useMemo(
-    () => (selectedContact
-      ? balances.filter((b) => selectedContact.sendableTokenIds.includes(b.tokenId))
-      : balances),
-    [balances, selectedContact],
+    () => balances
+      .filter((b) => (txMode === 'offline'
+        ? b.offline === undefined || b.offline.baseUnits > 0n
+        : b.baseUnits > 0n))
+      .filter((b) => selectedContact === null || selectedContact.sendableTokenIds.includes(b.tokenId)),
+    [balances, selectedContact, txMode],
   );
 
   const selectedSendBalance = useMemo(
