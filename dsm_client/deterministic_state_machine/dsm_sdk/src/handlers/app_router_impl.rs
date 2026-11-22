@@ -217,6 +217,20 @@ struct CommittedDelivery {
     state_hash: Vec<u8>,
     chain_tip_arr: [u8; 32],
     to_device_id_str: String,
+    /// The debit's economic admission, finished before anything is delivered.
+    admission: AdmissionToFinish,
+    /// When the send began, for its timing lines.
+    started: std::time::Instant,
+}
+
+/// What a committed send's economic admission needs to finish: publish,
+/// validate, register and read back final (3.5b).
+struct AdmissionToFinish {
+    network: Vec<u8>,
+    set: crate::sdk::storage_set::StorageSet,
+    validated: dsm::economic::lineage::ValidatedEconomicRoot,
+    parts: crate::sdk::economic_admission_flow::DsmAdmissionParts,
+    pending: dsm::economic::admission::PendingEconomicAdmission,
 }
 
 impl CommittedDelivery {
@@ -239,7 +253,47 @@ impl CommittedDelivery {
             state_hash,
             chain_tip_arr,
             to_device_id_str,
+            admission,
+            started,
         } = self;
+        // The debit committed HELD (correction A): finish the admission —
+        // publish, register, validate, admit — and only its terminal
+        // transaction promotes the outbox row to deliverable. A failure here
+        // leaves everything resumable and NOTHING delivered.
+        if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
+            &core_sdk,
+            &admission.network,
+            &admission.set,
+            &admission.validated,
+            admission.parts.witness,
+            admission.parts.manifest,
+            crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm,
+            admission.pending,
+            Vec::new(),
+        )
+        .await
+        {
+            // An invalid admission cannot land: its inputs are frozen, so a
+            // resume fails the same way. Anything else holds it for resume.
+            return match e {
+                dsm::types::error::DsmError::InvalidOperation(_) => {
+                    stranded_send(format!("its economic admission cannot land: {e}"))
+                }
+                _ => undelivered_send(
+                    &wallet,
+                    &token_id,
+                    &state_hash,
+                    format!(
+                        "its economic admission is held for resume and nothing is delivered yet; \
+                         it completes once storage is reachable: {e}"
+                    ),
+                ),
+            };
+        }
+        log::info!(
+            "[wallet.send] timing: admitted at {} ms",
+            started.elapsed().as_millis()
+        );
         let mut b0x_succeeded = false;
         let mut b0x_message_id: Option<String> = None;
 
@@ -508,6 +562,18 @@ fn committed_answer(
             new_balance,
         },
     ))
+}
+
+/// A committed send that can never complete, for `why`.
+fn stranded_send(why: String) -> OnlineSent {
+    log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
+    OnlineSent::Stranded {
+        answer: err(format!(
+            "wallet.send: the debit is committed on this device and this payment cannot \
+             complete: {why}"
+        )),
+        why,
+    }
 }
 
 /// A committed send not delivered yet, for `why`.
@@ -2128,36 +2194,6 @@ impl AppRouterImpl {
             Some(p) => p,
             None => return self.stranded("the admission parts are missing".to_string()),
         };
-        if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
-            &self.core_sdk,
-            &econ_network,
-            &econ_set,
-            &econ_validated,
-            econ_parts_final.witness,
-            econ_parts_final.manifest,
-            crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm,
-            pending_admission,
-            Vec::new(),
-        )
-        .await
-        {
-            // An invalid admission cannot land: its inputs are frozen, so a
-            // resume fails the same way. Anything else holds it for resume.
-            return match e {
-                dsm::types::error::DsmError::InvalidOperation(_) => {
-                    self.stranded(format!("its economic admission cannot land: {e}"))
-                }
-                _ => self.undelivered(
-                    &token_id,
-                    &new_state.hash,
-                    format!(
-                        "its economic admission is held for resume and nothing is delivered yet; \
-                         it completes once storage is reachable: {e}"
-                    ),
-                ),
-            };
-        }
-
         let delivery = CommittedDelivery {
             core_sdk: self.core_sdk.clone(),
             wallet: self.wallet.clone(),
@@ -2173,20 +2209,34 @@ impl AppRouterImpl {
             state_hash: new_state.hash.to_vec(),
             chain_tip_arr,
             to_device_id_str: to_device_id_str.clone(),
+            admission: AdmissionToFinish {
+                network: econ_network,
+                set: econ_set,
+                validated: econ_validated,
+                parts: econ_parts_final,
+                pending: pending_admission,
+            },
+            started,
         };
         log::info!(
-            "[wallet.send] timing: committed and admitted at {} ms",
+            "[wallet.send] timing: committed at {} ms",
             started.elapsed().as_millis()
         );
         match wait {
             DeliveryWait::Awaited => delivery.deliver().await,
             DeliveryWait::InBackground => {
-                // The debit and its admission are committed: the payment
-                // stands and will be delivered whatever becomes of this call
-                // (§16.6). The Send screen is answered now; the delivery runs
-                // beside it, and a delivery this one does not finish is the
-                // reconciliation sweep's, as it always was. On the rig phones
-                // (2026-11-21) the delivery was ~4 s of an 11.5 s send.
+                // The debit is committed with its pending admission (owner,
+                // 2026-11-21: "Admission after answering"). The Send screen is
+                // answered now; the admission (publish, validate, register,
+                // read back final) and then the delivery run beside it, in
+                // that order, so nothing reaches the recipient before the
+                // debit is admitted. An admission held for resume is the
+                // sync's and a delivery left unfinished is the reconciliation
+                // sweep's, as they always were (§16.6). An admission that can
+                // never land (a copy of this wallet spent from the position
+                // first) fails here, after the screen said sent, and the
+                // payment is never delivered. On the rig phones the admission
+                // and the delivery were ~2.6 s and ~1 s of the send.
                 let answer = committed_answer(
                     &self.wallet,
                     &token_id,
@@ -2209,6 +2259,9 @@ impl AppRouterImpl {
                              committed debit"
                         ),
                     }
+                    // Whatever it came to, the page reads the sender's balance
+                    // and history again: a send that cannot land says so there.
+                    crate::host::post_event("dsm-wallet-refresh", &[]);
                     BACKGROUND_DELIVERIES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     DELIVERIES_SETTLED.notify_waiters();
                 });
@@ -2401,19 +2454,7 @@ impl AppRouterImpl {
 
     /// A committed send that can never complete, for `why`.
     fn stranded(&self, why: String) -> OnlineSent {
-        log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
-        OnlineSent::Stranded {
-            answer: err(format!(
-                "wallet.send: the debit is committed on this device and this payment cannot \
-                 complete: {why}"
-            )),
-            why,
-        }
-    }
-
-    /// A committed send not delivered yet, for `why`.
-    fn undelivered(&self, token_id: &str, state_hash: &[u8], why: String) -> OnlineSent {
-        undelivered_send(&self.wallet, token_id, state_hash, why)
+        stranded_send(why)
     }
 }
 

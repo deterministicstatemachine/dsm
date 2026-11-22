@@ -202,10 +202,11 @@ async fn listed(d: &TestDevice, ticker: &str) -> u64 {
     }
 }
 
-/// The Send screen is answered once the debit and its admission are
-/// committed, and the delivery runs beside it: on the rig phones it was ~4 s
-/// of an 11.5 s send (2026-11-21). The transfer still reaches the recipient,
-/// whole, once that delivery finishes.
+/// The Send screen is answered once the debit is committed, and its economic
+/// admission and then its delivery run beside it (owner, 2026-11-21:
+/// "Admission after answering"; on the rig phones they were ~2.6 s and ~1 s of
+/// the send). The transfer still reaches the recipient, whole, once they
+/// finish.
 /// MUTATION CONTROL: the Send route awaiting its delivery
 /// (`DeliveryWait::Awaited` in `process_online_transfer_logic`) turns this red
 /// at "answered once committed".
