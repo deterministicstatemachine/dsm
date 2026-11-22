@@ -524,7 +524,6 @@ impl AppRouterImpl {
         intent: OnlineSendIntent,
         wait: DeliveryWait,
     ) -> OnlineSent {
-        let started = std::time::Instant::now();
         let from_device_id = self.device_id_bytes;
         let to_device_id = intent.to_device_id;
         // §9.5: the signed transfer binds the policy the send names. Its ticker
@@ -636,21 +635,12 @@ impl AppRouterImpl {
                 )));
             }
         }
-        log::info!(
-            "[wallet.send] timing: the recipient's directory entry read and proven at {} ms",
-            started.elapsed().as_millis()
-        );
         let preflight_sync = generated::StorageSyncRequest {
             pull_inbox: true,
             push_pending: true,
             limit: 50,
         };
-        let preflight = self.run_payment_path_sync_request(preflight_sync).await;
-        log::info!(
-            "[wallet.send] timing: the pre-send sync done at {} ms",
-            started.elapsed().as_millis()
-        );
-        match preflight {
+        match self.run_payment_path_sync_request(preflight_sync).await {
             Ok(resp) => {
                 if !resp.errors.is_empty() {
                     log::warn!(
@@ -1065,10 +1055,6 @@ impl AppRouterImpl {
         };
 
         // Sign the WalletTransaction (local wallet-level signature for record keeping)
-        log::info!(
-            "[wallet.send] timing: signing starts at {} ms",
-            started.elapsed().as_millis()
-        );
         let signed_tx = match self.wallet.sign_transaction(&unsigned_tx) {
             Ok(tx) => tx,
             Err(e) => return OnlineSent::NotDebited(err(format!("sign_transaction failed: {e}"))),
@@ -1804,12 +1790,7 @@ impl AppRouterImpl {
                 pending: pending_admission,
                 handler: admission_handler,
             },
-            started,
         };
-        log::info!(
-            "[wallet.send] timing: committed at {} ms",
-            started.elapsed().as_millis()
-        );
         match wait {
             DeliveryWait::Awaited => delivery.deliver().await,
             DeliveryWait::InBackground => {
@@ -2317,8 +2298,6 @@ struct CommittedDelivery {
     to_device_id_str: String,
     /// The debit's economic admission, finished before anything is delivered.
     admission: AdmissionToFinish,
-    /// When the send began, for its timing lines.
-    started: std::time::Instant,
 }
 
 /// What a committed send's economic admission needs to finish: publish,
@@ -2356,7 +2335,6 @@ impl CommittedDelivery {
             chain_tip_arr,
             to_device_id_str,
             admission,
-            started,
         } = self;
         // The debit committed HELD (correction A): finish the admission —
         // publish, register, validate, admit — and only its terminal
@@ -2406,10 +2384,6 @@ impl CommittedDelivery {
                 ),
             };
         }
-        log::info!(
-            "[wallet.send] timing: admitted at {} ms",
-            started.elapsed().as_millis()
-        );
         let mut b0x_succeeded = false;
         let mut b0x_message_id: Option<String> = None;
 

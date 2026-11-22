@@ -522,7 +522,7 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	1542	dsm::crypto::sphincs::SphincsVariant::SPX128f,
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	4245	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	4699	foreign.add_sig_a(dsm::crypto::sphincs::sphincs_sign(&ek_sk, &target).expect("the EK signs"));
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	935	match dsm::crypto::sphincs::sphincs_verify(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	925	match dsm::crypto::sphincs::sphincs_verify(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	113	use dsm::crypto::sphincs::{generate_keypair, sphincs_sign, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	184	let kp = generate_keypair(SphincsVariant::SPX256f).expect("a key");
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	194	let signature = sphincs_sign(&kp.secret_key, &dsm::authored_object::statement(&body))
