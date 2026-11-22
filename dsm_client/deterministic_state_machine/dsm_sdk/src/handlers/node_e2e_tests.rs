@@ -202,6 +202,55 @@ async fn listed(d: &TestDevice, ticker: &str) -> u64 {
     }
 }
 
+/// The Send screen is answered once the debit and its admission are
+/// committed, and the delivery runs beside it: on the rig phones it was ~4 s
+/// of an 11.5 s send (2026-11-21). The transfer still reaches the recipient,
+/// whole, once that delivery finishes.
+/// MUTATION CONTROL: the Send route awaiting its delivery
+/// (`DeliveryWait::Awaited` in `process_online_transfer_logic`) turns this red
+/// at "answered once committed".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_send_screen_is_answered_at_commit_and_the_transfer_still_arrives() {
+    let p = Pair::boot(100, 0).await;
+    p.a.enter();
+    let answered =
+        p.a.invoke(
+            "wallet.sendSmart",
+            &generated::OnlineTransferSmartRequest {
+                recipient_device_id: p.b.device_id.to_vec(),
+                amount: crate::handlers::wallet_routes::format_base_units_for_display(
+                    10,
+                    crate::handlers::wallet_routes::token_decimals("ERA").expect("ERA's decimals"),
+                ),
+                token_id: "ERA".to_string(),
+                memo: "answered at commit".to_string(),
+            },
+        )
+        .await;
+    assert!(answered.success, "{:?}", answered.error_message);
+    // Read from the answer, not by entering A again: entering a device starts
+    // its process over, which would cut the delivery running beside it.
+    match payload(&answered) {
+        Payload::OnlineTransferResponse(r) => {
+            assert_eq!(
+                r.message, "Sent. Delivering to the recipient.",
+                "answered once committed"
+            );
+            assert_eq!(
+                r.new_balance,
+                Some(crate::economic_fixtures::whole_era(100) - 10),
+                "the debit is committed when the screen is answered"
+            );
+        }
+        other => panic!("wallet.sendSmart answered {other:?}"),
+    }
+    crate::test_support::two_device::background_deliveries_settled().await;
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    assert_eq!(p.b.era_balance(), 10, "B takes the transfer");
+}
+
 /// DSM Amendment A7: a transfer arrives, and no node ever held anything but
 /// sealed, header-less envelopes — the memo is nowhere in any node's bytes.
 ///

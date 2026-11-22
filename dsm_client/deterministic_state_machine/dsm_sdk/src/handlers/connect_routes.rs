@@ -1292,12 +1292,15 @@ impl AppRouterImpl {
             } => {
                 // Paid in the token the grant names, by its commit: never by a
                 // ticker, which an application may give its own coin.
-                let sent = Box::pin(self.send_online(OnlineSendIntent {
-                    to_device_id: session.app_device_id,
-                    policy_commit: *policy_commit,
-                    amount: *amount,
-                    memo: payment_memo(&session.session_id, seq, memo),
-                }))
+                let sent = Box::pin(self.send_online(
+                    OnlineSendIntent {
+                        to_device_id: session.app_device_id,
+                        policy_commit: *policy_commit,
+                        amount: *amount,
+                        memo: payment_memo(&session.session_id, seq, memo),
+                    },
+                    super::app_router_impl::DeliveryWait::Awaited,
+                ))
                 .await;
                 match sent {
                     // A committed debit is paid, delivered or not: it stands

@@ -1853,6 +1853,16 @@ impl AppRouterImpl {
                     }
                 };
                 log::info!("[storage.sync] ADR 0003 completion: {name} {acceptance:?}");
+                // The credit is applied and accepted durably: the page shows it
+                // now, not after this device's own admission and release that
+                // follow, which held the receiver's screen ~3.7 s on the rig
+                // phones (2026-11-21). The sync's end refreshes it again.
+                match acceptance {
+                    crate::handlers::recipient_accept::Acceptance::AcceptedFresh => {
+                        crate::host::post_event("dsm-wallet-refresh", &[]);
+                    }
+                    crate::handlers::recipient_accept::Acceptance::AcceptedDuplicate => {}
+                }
                 // CONVERGE from durable state — tip sync, CAS both heads,
                 // enqueue the B reply. Idempotent when already complete. On
                 // failure the pair stays accepted and

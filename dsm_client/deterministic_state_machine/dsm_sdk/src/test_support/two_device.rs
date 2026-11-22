@@ -440,18 +440,24 @@ impl TestDevice {
         let decimals = crate::handlers::wallet_routes::token_decimals(token_id)
             .expect("the harness sends tokens this device can name");
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
-        self.invoke(
-            "wallet.sendSmart",
-            &generated::OnlineTransferSmartRequest {
-                recipient_device_id: to.device_id.to_vec(),
-                amount: crate::handlers::wallet_routes::format_base_units_for_display(
-                    amount, decimals,
-                ),
-                token_id: token_id.to_string(),
-                memo: format!("{}->{} #{seq}", self.slot, to.slot),
-            },
-        )
-        .await
+        let answered = self
+            .invoke(
+                "wallet.sendSmart",
+                &generated::OnlineTransferSmartRequest {
+                    recipient_device_id: to.device_id.to_vec(),
+                    amount: crate::handlers::wallet_routes::format_base_units_for_display(
+                        amount, decimals,
+                    ),
+                    token_id: token_id.to_string(),
+                    memo: format!("{}->{} #{seq}", self.slot, to.slot),
+                },
+            )
+            .await;
+        // The Send route answers once the debit is committed and delivers
+        // beside it: what a test reads on the recipient's side next waits for
+        // that delivery, as a recipient's next poll would.
+        background_deliveries_settled().await;
+        answered
     }
 
     /// `storage.sync` (pull + push), the query the inbox poller makes, through
@@ -602,6 +608,20 @@ impl Pair {
             }
         }
         holders
+    }
+}
+
+/// Returns once no background delivery started by `wallet.send` is still
+/// running (`app_router_impl::BACKGROUND_DELIVERIES`): what a test that reads
+/// the recipient's side next waits on.
+pub(crate) async fn background_deliveries_settled() {
+    use crate::handlers::app_router_impl::{BACKGROUND_DELIVERIES, DELIVERIES_SETTLED};
+    loop {
+        let settled = DELIVERIES_SETTLED.notified();
+        if BACKGROUND_DELIVERIES.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return;
+        }
+        settled.await;
     }
 }
 
