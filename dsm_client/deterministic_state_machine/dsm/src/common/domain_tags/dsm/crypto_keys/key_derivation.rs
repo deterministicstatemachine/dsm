@@ -33,6 +33,9 @@ pub const TAG_DSM_DEVICE_DIRECTORY_KEY: TaggedHashDomain<'static> =
 /// The digest a device's AK signs for its own directory entry.
 pub const TAG_DSM_DEVICE_DIRECTORY_ENTRY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/device-directory-entry/v1");
+/// The digest a device's AK signs for the list of tokens it has added.
+pub const TAG_DSM_DEVICE_TOKEN_LIST: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/device-token-list/v1");
 pub const TAG_DSM_ML_KEM_KEYGEN_D: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/ml-kem-keygen-d");
 pub const TAG_DSM_ML_KEM_KEYGEN_Z: TaggedHashDomain<'static> =

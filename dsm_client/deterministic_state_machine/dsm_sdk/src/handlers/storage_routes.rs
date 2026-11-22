@@ -3111,6 +3111,25 @@ impl AppRouterImpl {
             if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
                 report.errors.push(e);
             }
+            // The tokens this device has added, stated for its contacts: a
+            // list is written only when it has added one its last list does
+            // not state, so a sync that finds nothing new reads its own
+            // database and nothing else.
+            match crate::sdk::economic_admission_flow::committed_network_id()
+                .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+            {
+                Ok(set) => {
+                    if let Err(e) =
+                        crate::sdk::contact_tokens::publish_own_token_list(&self.core_sdk, &set)
+                            .await
+                    {
+                        report.errors.push(format!("own token list: {e}"));
+                    }
+                }
+                Err(e) => report
+                    .errors
+                    .push(format!("own token list: no committed set: {e}")),
+            }
             match crate::sdk::economic_admission_flow::committed_network_id()
                 .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
             {

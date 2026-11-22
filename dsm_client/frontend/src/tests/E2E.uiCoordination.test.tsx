@@ -506,6 +506,14 @@ describe('EventBridge — REAL DOM event-bin propagation', () => {
     unsub();
   });
 
+  test('REAL: the native contact.tokens topic → contact.tokens on the bus', () => {
+    let heard = 0;
+    const unsub = bridgeEvents.on('contact.tokens', () => { heard += 1; });
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic: 'contact.tokens', payload: new Uint8Array(0) } }));
+    expect(heard).toBe(1);
+    unsub();
+  });
+
   test('REAL: the native dsm-env-config-error topic → env.config.error with its message on the bus', () => {
     const spy = jest.fn();
     const unsub = bridgeEvents.on('env.config.error', spy);

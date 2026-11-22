@@ -635,6 +635,30 @@ impl AppRouterImpl {
                 )));
             }
         }
+        // The recipient is sent only a token it has added (owner, 2026-11-21):
+        // it credits no other, and the transfer it refuses would hold the
+        // relationship. What this device kept of the recipient's own lists
+        // answers, with nothing read from the network; a token missing from it
+        // has the recipient's lists read once more before the send is refused.
+        // Nothing is debited either way.
+        match self
+            .recipient_takes(&spool_set, &to_device_id, &policy_commit)
+            .await
+        {
+            Ok(takes) if takes => {}
+            Ok(_) => {
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: nothing was sent: the recipient has not added {token_id}. They \
+                     add it with ADD TOKEN, and it can be sent once their wallet has stated it"
+                )))
+            }
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: nothing was sent: whether the recipient has added {token_id} \
+                     could not be read: {e}"
+                )))
+            }
+        }
         let preflight_sync = generated::StorageSyncRequest {
             pull_inbox: true,
             push_pending: true,
@@ -2021,6 +2045,53 @@ impl AppRouterImpl {
         Ok((rc, ek_material))
     }
 
+    /// Publish this device's list of the tokens it has added, now that it
+    /// has added one. A list that is not written now is the next sync's: it
+    /// publishes whatever the last published list does not state, and reports
+    /// why when it cannot.
+    pub(crate) async fn state_tokens_added(&self) {
+        let stated = match crate::sdk::economic_admission_flow::committed_network_id()
+            .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+        {
+            Ok(set) => {
+                match crate::sdk::contact_tokens::publish_own_token_list(&self.core_sdk, &set).await
+                {
+                    Ok(own) => format!("{own:?}"),
+                    Err(e) => format!("left to the next sync: {e}"),
+                }
+            }
+            Err(e) => format!("left to the next sync: no pinned set: {e}"),
+        };
+        log::info!("[contact tokens] own list after a token was added: {stated}");
+    }
+
+    /// Whether the contact `device_id` can be sent `policy_commit`: from what
+    /// this device kept of its lists, and, for a token missing from them,
+    /// after its lists are read once more from `set`.
+    async fn recipient_takes(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        device_id: &[u8; 32],
+        policy_commit: &[u8; 32],
+    ) -> Result<bool, dsm::types::error::DsmError> {
+        let kept = crate::sdk::contact_tokens::contact_takes(device_id, policy_commit)?;
+        if kept {
+            return Ok(kept);
+        }
+        let contact = crate::storage::client_db::get_contact_by_device_id(device_id)
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("the recipient's contact: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?
+            .ok_or_else(|| {
+                dsm::types::error::DsmError::invalid_operation("the recipient is not a contact")
+            })?;
+        crate::sdk::contact_tokens::refresh_contact(set, &contact).await?;
+        crate::sdk::contact_tokens::contact_takes(device_id, policy_commit)
+    }
+
     /// A committed send that can never complete, for `why`.
     fn stranded(&self, why: String) -> OnlineSent {
         stranded_send(why)
@@ -3131,7 +3202,18 @@ impl AppRouter for AppRouterImpl {
             | "connect.duelSettle"
             | "connect.duelCollect" => Box::pin(self.handle_connect_invoke(i)).await,
             // Token
-            "token.create" | "token.burn" | "tokens.publishPolicy" | "tokens.addByAnchor" => {
+            // A token created is one more this device can be sent: its list
+            // says so at once, so a contact need not wait on this device's
+            // next sync to offer it. A token added states it itself
+            // (`add_by_anchor`).
+            "token.create" => {
+                let answered = Box::pin(self.handle_token_invoke(i)).await;
+                if answered.success {
+                    self.state_tokens_added().await;
+                }
+                answered
+            }
+            "token.burn" | "tokens.publishPolicy" | "tokens.addByAnchor" => {
                 Box::pin(self.handle_token_invoke(i)).await
             }
             // Preferences

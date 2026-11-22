@@ -21,6 +21,8 @@ export interface BilateralRelationshipDTO {
   relationship: DomainRelationshipState; // where the relationship stands (DSM Amendment A33)
   genesisVerifiedOnline: boolean;   // genesis hash verified via storage node
   sendStatus?: pb.RelationshipSendStatus;
+  /** The tokens this wallet can send the contact, by token id, as Rust states them. */
+  sendableTokenIds: string[];
   /** The details the wallet holds for the contact, when any were set. */
   profile?: PersonProfile;
 }

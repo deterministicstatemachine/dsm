@@ -90,6 +90,7 @@ export function mapContactList(list: BilateralRelationshipDTO[]): DomainContact[
       sendCheckState: sendStatus?.sendCheckState,
       sendBlockReason: sendStatus?.sendBlockReason,
       sendBlockMessage: sendStatus?.sendBlockMessage,
+      sendableTokenIds: c.sendableTokenIds,
       profile: c.profile,
     };
   });

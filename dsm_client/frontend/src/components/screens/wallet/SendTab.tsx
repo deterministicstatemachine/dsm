@@ -107,20 +107,27 @@ function SendTabInner({
     if (status.connected) await loadWalletDataRef.current();
   }, []);
 
+  const selectedContact = useMemo(
+    () => contacts.find((c) => c.deviceId === sendForm.selectedContactKey) ?? null,
+    [contacts, sendForm.selectedContactKey],
+  );
+
   // Only what Rust listed. With no balances there is nothing to send, and the
-  // form says so rather than offering a token the wallet does not hold.
-  const tokenOptions: TokenBalanceView[] = balances;
+  // form says so rather than offering a token the wallet does not hold. Once
+  // a recipient is chosen, only the tokens Rust says that contact can be sent:
+  // a contact credits no token it has not added, so none is offered.
+  const tokenOptions: TokenBalanceView[] = useMemo(
+    () => (selectedContact
+      ? balances.filter((b) => selectedContact.sendableTokenIds.includes(b.tokenId))
+      : balances),
+    [balances, selectedContact],
+  );
 
   const selectedSendBalance = useMemo(
     () => tokenOptions.find((b) => b.tokenId === sendForm.token) ?? null,
     [tokenOptions, sendForm.token],
   );
 
-
-  const selectedContact = useMemo(
-    () => contacts.find((c) => c.deviceId === sendForm.selectedContactKey) ?? null,
-    [contacts, sendForm.selectedContactKey],
-  );
 
   useEffect(() => {
     if (tokenOptions.length === 0) return;

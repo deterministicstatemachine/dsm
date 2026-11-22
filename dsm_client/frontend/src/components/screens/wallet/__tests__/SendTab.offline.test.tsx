@@ -22,7 +22,15 @@ jest.mock('../../../../services/dsmClient', () => ({
 import { dsmClient } from '../../../../services/dsmClient';
 import SendTab from '../SendTab';
 
-const D3 = { deviceId: 'NJ2C7P4CXGNY59', alias: 'nj2c7p4c' } as any;
+import type { DomainContact } from '../../../../domain/types';
+
+/** A contact as contacts.list answers one: its genesis named, so verified, and the tokens it can be sent. */
+function contact(deviceId: string, alias: string, sendableTokenIds: string[]): DomainContact {
+  const genesisHash = `G-${alias}`;
+  return { alias, deviceId, genesisHash, pairing: 'idle', relationship: 'established', genesisVerifiedOnline: genesisHash.length > 2, signingPublicKey: `K-${alias}`, sendableTokenIds };
+}
+
+const D3 = contact('NJ2C7P4CXGNY59', 'nj2c7p4c', ['ERA']);
 
 describe('SendTab offline', () => {
   it('Offline switches the send to offline, offers funding and the appliance, and sends nothing', async () => {

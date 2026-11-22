@@ -205,6 +205,11 @@ dsm_client/deterministic_state_machine/dsm/src/core/identity/directory.rs	160	le
 dsm_client/deterministic_state_machine/dsm/src/core/identity/directory.rs	208	match sphincs::sphincs_verify(&b.ak_public_key, &b.signing_digest(), &self.signature) {
 dsm_client/deterministic_state_machine/dsm/src/core/identity/directory.rs	460	let d0_signature = sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm/src/core/identity/directory.rs	474	sphincs::sphincs_sign(&genesis.ak_secret, &t0.signing_digest()).expect("AK signs T_0");
+dsm_client/deterministic_state_machine/dsm/src/core/identity/token_list.rs	96	list.signature = sphincs::sphincs_sign(ak_secret_key, &list.signing_digest())?;
+dsm_client/deterministic_state_machine/dsm/src/core/identity/token_list.rs	147	match sphincs::sphincs_verify(ak_public_key, &self.signing_digest(), &self.signature) {
+dsm_client/deterministic_state_machine/dsm/src/core/identity/token_list.rs	187	use crate::crypto::sphincs::generate_keypair_from_seed;
+dsm_client/deterministic_state_machine/dsm/src/core/identity/token_list.rs	188	use crate::crypto::sphincs::SphincsVariant;
+dsm_client/deterministic_state_machine/dsm/src/core/identity/token_list.rs	194	generate_keypair_from_seed(SphincsVariant::SPX256f, &[seed; 32]).expect("an AK")
 dsm_client/deterministic_state_machine/dsm/src/core/relationship_write_grant.rs	45	generate_keypair_from_seed, public_key_bytes, sphincs_verify, SphincsKeyPair, SphincsVariant,
 dsm_client/deterministic_state_machine/dsm/src/core/relationship_write_grant.rs	61	pub const WRITE_KEY_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
 dsm_client/deterministic_state_machine/dsm/src/core/relationship_write_grant.rs	272	let valid = sphincs_verify(pk, target, sig)
@@ -522,7 +527,7 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	1542	dsm::crypto::sphincs::SphincsVariant::SPX128f,
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	4245	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/offline_step_tests.rs	4699	foreign.add_sig_a(dsm::crypto::sphincs::sphincs_sign(&ek_sk, &target).expect("the EK signs"));
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	925	match dsm::crypto::sphincs::sphincs_verify(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	949	match dsm::crypto::sphincs::sphincs_verify(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	113	use dsm::crypto::sphincs::{generate_keypair, sphincs_sign, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	184	let kp = generate_keypair(SphincsVariant::SPX256f).expect("a key");
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	194	let signature = sphincs_sign(&kp.secret_key, &dsm::authored_object::statement(&body))
@@ -571,10 +576,10 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_write_a
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_write_authorization_tests.rs	251	let second = dsm::crypto::sphincs::generate_keypair(WRITE_KEY_VARIANT).expect("a key");
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_write_authorization_tests.rs	259	dsm::crypto::sphincs::sphincs_sign(&second.secret_key, &offer.possession_target())
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_write_authorization_tests.rs	360	let stranger = dsm::crypto::sphincs::generate_keypair(WRITE_KEY_VARIANT).expect("a key");
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	728	let signature = dsm::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	863	let signature = dsm::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	1077	let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	1516	dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	731	let signature = dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	866	let signature = dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	1080	let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	1519	dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/storage_routes.rs	801	cert.signature_a = dsm::crypto::sphincs::sphincs_sign(&ek_sk_a, &target)
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	1853	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a signer key");
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	2177	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a sender key");

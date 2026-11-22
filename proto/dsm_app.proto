@@ -3101,6 +3101,17 @@ message DeviceDirectoryEntryV1 {
   DeviceDirectoryEntryBodyV1 body = 1;
   bytes signature                 = 2 [(dsm_max_len)=65536]; // SPHINCS+ by AK over the body digest
 }
+// The tokens a device has added (owner, 2026-11-21): kept in the device's own
+// directory cell beside its entry, so a contact reads which tokens the device
+// can be sent before it offers one. policy_commits are 32 bytes each, distinct
+// and ascending; the signature is SPHINCS+ by the device's AK over the digest
+// of this message with the signature empty.
+message DeviceTokenListV1 {
+  bytes genesis   = 1 [(dsm_fixed_len)=32];
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+  repeated bytes policy_commits = 3 [(dsm_fixed_len)=32];
+  bytes signature = 4 [(dsm_max_len)=65536];
+}
 
 // ===================== SoFi routes (SoFi §27) =====================
 // The app reaches SoFi only through these routes (handlers/sofi_routes.rs).
@@ -3800,6 +3811,11 @@ message ContactAddResponse {
   ContactProfileV1 profile = 15;
   // Where the relationship stands on this device (DSM Amendment A33).
   RelationshipState relationship_state = 16;
+  // The tokens this wallet can send the contact (owner, 2026-11-21), by the
+  // ids balance.list names them with: the protocol's own assets, and each
+  // token of this wallet's the contact has added, as its own signed lists
+  // state. The Send screen offers the contact no other. Set on contacts.list.
+  repeated string sendable_token_ids = 17;
 }
 
 // Where BLE pairing with a contact stands, as the SDK's pairing loop has it.

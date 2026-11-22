@@ -230,10 +230,21 @@ pub fn start_poller() {
 
         let mut cadence = Cadence::new();
 
+        // The wallet reads its contacts' token lists each time it opens
+        // (owner, 2026-11-21): when its poller starts, and each time the app
+        // comes back to the screen.
+        crate::sdk::contact_tokens::wallet_opened();
+        let mut shown = crate::sdk::session_manager::app_in_foreground();
+
         loop {
             if POLLER_STOP.load(Ordering::SeqCst) {
                 break;
             }
+            let showing = crate::sdk::session_manager::app_in_foreground();
+            if showing && !shown {
+                crate::sdk::contact_tokens::wallet_opened();
+            }
+            shown = showing;
 
             let (processed, pulled, more_pending) = run_inbox_sync_cycle_counted("poll").await;
             if processed > 0 {

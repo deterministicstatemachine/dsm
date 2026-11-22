@@ -74,6 +74,7 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
     relationship,
     genesisVerifiedOnline: c.genesisVerifiedOnline,
     sendStatus: c.sendStatus,
+    sendableTokenIds: c.sendableTokenIds,
     profile: c.profile ? profileOf(c.profile) : undefined,
   };
 }

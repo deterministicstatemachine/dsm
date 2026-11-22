@@ -18,8 +18,16 @@ import '@testing-library/jest-dom';
 import SendTab from '../SendTab';
 import { deviceFingerprint } from '../../../../domain/displayName';
 
-const D3 = { deviceId: 'NJ2C7P4CXGNY59', alias: 'nj2c7p4c' } as any;
-const NFF = { deviceId: 'RXDC8XQMZ7JHAB', alias: 'rxdc8xqm' } as any;
+import type { DomainContact } from '../../../../domain/types';
+
+/** A contact as contacts.list answers one: its genesis named, so verified, and the tokens it can be sent. */
+function contact(deviceId: string, alias: string, sendableTokenIds: string[]): DomainContact {
+  const genesisHash = `G-${alias}`;
+  return { alias, deviceId, genesisHash, pairing: 'idle', relationship: 'established', genesisVerifiedOnline: genesisHash.length > 2, signingPublicKey: `K-${alias}`, sendableTokenIds };
+}
+
+const D3 = contact('NJ2C7P4CXGNY59', 'nj2c7p4c', ['ERA', 'RIGB']);
+const NFF = contact('RXDC8XQMZ7JHAB', 'rxdc8xqm', ['ERA', 'RIGB']);
 
 const baseProps = (contacts: any[]) =>
   ({

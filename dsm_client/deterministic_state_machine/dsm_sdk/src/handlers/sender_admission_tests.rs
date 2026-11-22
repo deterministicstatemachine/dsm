@@ -666,6 +666,23 @@ async fn a_non_transferable_token_refuses_its_transfer() {
     );
     let position = admitted_position();
 
+    // B has added NOTX: A's wallet sends a contact only a token it has added,
+    // so what refuses this transfer is the token's own policy.
+    p.b.enter();
+    let adopted = p
+        .b
+        .router()
+        .invoke(crate::bridge::AppInvoke {
+            method: "tokens.addByAnchor".to_string(),
+            args: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
+        })
+        .await;
+    assert!(
+        adopted.success,
+        "B adopts NOTX: {:?}",
+        adopted.error_message
+    );
+
     let sent = p.a.send_token(&p.b, "NOTX", 25).await;
     assert!(
         !sent.success,
@@ -686,20 +703,6 @@ async fn a_non_transferable_token_refuses_its_transfer() {
         "nothing left pending"
     );
 
-    p.b.enter();
-    let adopted = p
-        .b
-        .router()
-        .invoke(crate::bridge::AppInvoke {
-            method: "tokens.addByAnchor".to_string(),
-            args: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
-        })
-        .await;
-    assert!(
-        adopted.success,
-        "B adopts NOTX: {:?}",
-        adopted.error_message
-    );
     p.a.enter();
     let b_contact = client_db::get_contact_by_device_id(&p.b.device_id)
         .expect("A's contacts")

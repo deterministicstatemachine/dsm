@@ -47,6 +47,10 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
     contactsStore.handleBleMapped(detail);
   }, []);
   useBridgeEvent('contact.bleUpdated', contactsStore.handleBleUpdated, []);
+  // What each contact can be sent is in the list; Rust says when it changed.
+  useBridgeEvent('contact.tokens', () => {
+    contactsStore.scheduleRefreshContacts('contact tokens read');
+  }, []);
   // The list Rust holds once there is an identity. Whether the radio
   // advertises is native policy (it follows the identity), not the screen's.
   useBridgeEvent('identity.ready', () => {
