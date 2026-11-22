@@ -1203,6 +1203,13 @@ impl AppRouterImpl {
     /// Record `seq` as processed with its signed answer and `spend` counted
     /// against its grant. The answer is then owed until it is delivered
     /// ([`deliver_owed`]); the request is never carried out again.
+    ///
+    /// A request carried out may have moved what the wallet holds with
+    /// nobody at the wallet's screen (a payment or a commitment under the
+    /// grant, an object taken): the page is told to read its balances and
+    /// history again. Found on the rig, 2026-11-22: a wallet that committed
+    /// 150 STEEL to an application's structure under its grant went on
+    /// showing 300 until the app was restarted.
     fn finish(
         &self,
         session: &store::WalletSession,
@@ -1212,6 +1219,7 @@ impl AppRouterImpl {
         spend: Option<([u8; 32], u64)>,
         grant_use: store::GrantUse,
     ) -> Result<(), String> {
+        let carried_out = matches!(executed.outcome, generated::ConnectOutcome::CarriedOut);
         let response = signed_response(&generated::AppResponseBodyV1 {
             session_id: session.session_id.to_vec(),
             seq,
@@ -1231,7 +1239,11 @@ impl AppRouterImpl {
             &response,
             grant_use,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        if carried_out {
+            crate::host::post_event("dsm-wallet-refresh", &[]);
+        }
+        Ok(())
     }
 
     /// Carry out one request through the routes the player uses by hand.
