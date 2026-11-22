@@ -231,7 +231,9 @@ mod tests {
     // +4 for owned cells (owner ruling, 2026-11-19): a device's cell lock, an
     // owned cell's address, and the two write proofs (an owned cell's, a
     // directory cell's).
-    const EXPECTED_TAG_COUNT: usize = 462;
+    // +1 for the list of tokens a device has added (owner, 2026-11-21): what
+    // its AK signs over that list, kept in its own directory cell.
+    const EXPECTED_TAG_COUNT: usize = 463;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

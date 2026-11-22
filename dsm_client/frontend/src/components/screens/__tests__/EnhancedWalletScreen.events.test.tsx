@@ -61,6 +61,8 @@ function contactDto(alias: string, fill: number, bleAddress?: string) {
     publicKey: new Uint8Array(64).fill(fill + 2),
     genesisVerifiedOnline: true,
     bleAddress,
+    // What contacts.list states the contact can be sent: the protocol's own assets.
+    sendableTokenIds: ['ERA', 'dBTC'],
   };
 }
 
