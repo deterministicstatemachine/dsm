@@ -15,6 +15,7 @@ members = [
     "crates/aggregation",
     "crates/lean_vm",
     "crates/sidecar",
+    "crates/vault_step",
     "crates/stable_prover/*",
     "crates/experimental_prover/*",
     "bench",
