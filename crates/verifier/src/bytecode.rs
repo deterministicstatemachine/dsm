@@ -109,7 +109,7 @@ fn is_valid_encoding_of_a_leanisa_program(stacked_bytecode: &[u64]) -> bool {
         (0..3).all(|s| slot(s) == 0)
             && match (0..=OP_BLAKE3).find(|&op| slot(3) == 1 << op) {
                 Some(OP_DEREF) => matches!((slot(7), slot(8)), (0, 0) | (1, 0) | (0, 1)) && zero_from(9),
-                Some(OP_BLAKE3) => zero_from(11),
+                Some(OP_BLAKE3) => zero_from(14),
                 Some(OP_KECCAK) => {
                     slot(12) <= 1 && slot(13) <= 1 && matches!((slot(14), slot(15)), (0, 0) | (1, 0) | (1, 1))
                 }

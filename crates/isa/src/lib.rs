@@ -119,8 +119,11 @@ pub enum Op {
     /// `BLAKE3`: one BLAKE3 compression. Its message block is the four independently addressed cells `m` (two 64-bit
     /// limbs each, little-endian words), its chaining value the two consecutive cells from `cv`, its metadata the cell
     /// `md` (the chunk counter in the low limb; the block length, then the flags, as the high limb's two 32-bit words),
-    /// and it writes the new chaining value to the two consecutive cells from `out`. The provers prove it by Flock.
-    Blake3 { m: [u32; 4], cv: u32, out: u32, md: u32 },
+    /// and it writes the new chaining value to the two consecutive cells from `out`. The block it compresses is the
+    /// message XOR three 32-byte inputs (two consecutive cells each, from `x`, `y`, `w`) placed at the byte offsets a
+    /// 25-byte prefix leaves: `x` at bytes 25..57, the first 7 bytes of `y` at 57..64, the last 25 of `w` at 0..25. The
+    /// provers prove it by Flock.
+    Blake3 { m: [u32; 4], cv: u32, out: u32, md: u32, x: u32, y: u32, w: u32 },
 }
 
 /// How many of a `KECCAK`'s thirteen output cells it writes, from `out` on: the first, the first two (a

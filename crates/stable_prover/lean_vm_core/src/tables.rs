@@ -908,33 +908,66 @@ impl Table for KeccakTable {
 
 // ---- BLAKE3 ---------------------------------------------------------------------
 
-/// `BLAKE3`: one BLAKE3 compression. The four message cells are addressed independently at `fp·o_i`, the chaining
-/// value and the output are consecutive pairs at `fp·o_v` and `fp·o_out`, and the metadata cell is at `fp·o_md`. The
-/// eighteen value limbs are listed for the flushes, but `cpu` treats them as virtual: each is a slot of `q_flock`
+/// `BLAKE3`: one BLAKE3 compression. The four message cells are addressed independently at `fp·o_i`; the chaining
+/// value, the output and the X, Y, W inputs are consecutive pairs; the metadata cell is at `fp·o_md`. The value limbs
+/// are listed for the flushes, but `cpu` treats them as virtual: each is a slot of `q_flock`
 /// (`verifier::layout::qflock_slot`), whose claims route there, and Flock's reduction proves the compression. The
-/// table has no identity of its own.
+/// table has no identity of its own. Its columns are the verifier's, by name (`verifier::layout::BLAKE3_COLUMNS`).
 struct Blake3Table;
 
 pub(crate) mod blake3t {
-    pub const PC: usize = 0;
-    pub const FP: usize = 1;
-    pub const O0: usize = 2; // the seven offset operands, in bytecode slot order: m0..m3, cv, out, md
-    pub const V: usize = O0 + 7; // the value limbs, (lo, hi) per cell: m0..m3, out0, out1, cv0, cv1, md
-    pub const R0: usize = V + 18; // one read count per cell, in flush order
-    pub const RBC: usize = R0 + 9;
-    pub const N: usize = RBC + 1;
-}
+    use verifier::layout::BLAKE3_COLUMNS;
 
-/// The value-limb pair of the cell at flush position `c` ([`crate::blake3flock::CELLS`]), in
-/// `verifier::layout::BLAKE3_COLUMNS` order (message, output, chaining value, metadata).
-const fn blake3_value(c: usize) -> usize {
-    blake3t::V
-        + 2 * match c {
-            0..4 => c,
-            4 | 5 => c + 2, // cv0, cv1 after the two output cells
-            6 | 7 => c - 2, // out0, out1
-            _ => 8,
+    /// The local index of the column named `name`.
+    pub const fn col(name: &str) -> usize {
+        let mut i = 0;
+        while i < BLAKE3_COLUMNS.len() {
+            if const_eq(BLAKE3_COLUMNS[i], name) {
+                return i;
+            }
+            i += 1;
         }
+        panic!("no such BLAKE3 column")
+    }
+
+    const fn const_eq(a: &str, b: &str) -> bool {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    pub const PC: usize = col("pc");
+    pub const FP: usize = col("fp");
+    /// The operands, in bytecode slot order: m0..m3, cv, out, md, x, y, w.
+    pub const OPERANDS: [usize; 10] = [
+        col("o_0"),
+        col("o_1"),
+        col("o_2"),
+        col("o_3"),
+        col("o_v"),
+        col("o_out"),
+        col("o_md"),
+        col("o_x"),
+        col("o_y"),
+        col("o_w"),
+    ];
+    /// Per cell in flush order (`crate::blake3flock::CELLS`): its value limbs and its read count.
+    pub const CELL_NAMES: [&str; 15] = [
+        "m0", "m1", "m2", "m3", "cv0", "cv1", "out0", "out1", "md", "x0", "x1", "y0", "y1", "w0", "w1",
+    ];
+    pub const RBC: usize = col("cnt_bc");
+    pub const N: usize = BLAKE3_COLUMNS.len();
+    pub const R0: usize = col("cnt_m0");
+    pub const R_LAST: usize = col("cnt_w1");
 }
 
 impl Table for Blake3Table {
@@ -946,40 +979,51 @@ impl Table for Blake3Table {
     }
     /// Zeros, but for the value limbs: they are `q_flock`'s words, so a padding row holds Flock's padding instance.
     fn padding(&self) -> Vec<F64> {
-        use verifier::layout::{BLAKE3_COLUMNS, BLAKE3_SLOTS, blake3_padding_words};
-        let words = blake3_padding_words();
+        use verifier::layout::{BLAKE3_COLUMNS, blake3_padding_word, blake3_slot};
         (0..blake3t::N)
-            .map(|local| {
-                let slot = BLAKE3_SLOTS.iter().position(|&s| s == Some(BLAKE3_COLUMNS[local]));
-                F64(slot.map_or(0, |s| words[s]))
-            })
+            .map(|local| F64(blake3_slot(BLAKE3_COLUMNS[local]).map_or(0, blake3_padding_word)))
             .collect()
     }
     fn flushes(&self, f: &mut FlushBuilder) {
         use blake3t::*;
         f.state_step(PC, FP);
-        let operands: Vec<Coord> = (O0..O0 + 7).map(Col).collect();
+        let operands: Vec<Coord> = OPERANDS.iter().map(|&o| Col(o)).collect();
         f.bytecode(PC, RBC, OP_BLAKE3, &operands);
         for (c, &(operand, step)) in crate::blake3flock::CELLS.iter().enumerate() {
-            let v = blake3_value(c);
-            f.memory(Prod(FP, O0 + operand, step), R0 + c, v, v + 1);
+            let name = CELL_NAMES[c];
+            let lo = col_named(&format!("{name}_lo"));
+            let hi = col_named(&format!("{name}_hi"));
+            let count = col_named(&format!("cnt_{name}"));
+            f.memory(Prod(FP, OPERANDS[operand], step), count, lo, hi);
         }
     }
     /// Every column but the value limbs, which are `q_flock`'s and have no window here.
     fn fill(&self, ctx: &FillCtx, out: &mut [&mut [F64]]) {
         use blake3t::*;
         let rows = &ctx.trace.blake3;
-        let offsets = |r: &Brow| match ctx.prog[r.pc as usize] {
-            Op::Blake3 { m, cv, out, md } => [m[0], m[1], m[2], m[3], cv, out, md],
-            op => unreachable!("a BLAKE3 row's pc {} holds {op:?}", r.pc),
-        };
+        let offsets = |r: &Brow| crate::blake3flock::operands(&ctx.prog[r.pc as usize]);
         ctx.col(out, rows, PC, |r| ctx.g_at(r.pc));
         ctx.col(out, rows, FP, |r| ctx.g_at(r.fp));
-        ctx.cols(out, rows, O0, |r| offsets(r).map(|o| ctx.g_at(o)));
-        ctx.cols(out, rows, R0, |r| r.r.map(|k| ctx.g_at(k)));
+        for (k, &column) in OPERANDS.iter().enumerate() {
+            ctx.col(out, rows, column, |r| ctx.g_at(offsets(r)[k]));
+        }
+        for c in 0..crate::blake3flock::N_CELLS {
+            let column = col_named(&format!("cnt_{}", CELL_NAMES[c]));
+            ctx.col(out, rows, column, |r| ctx.g_at(r.r[c]));
+        }
         ctx.col(out, rows, RBC, |r| ctx.g_at(r.bytecode_read));
     }
 }
+
+/// A `BLAKE3` column's local index by its (runtime) name.
+fn col_named(name: &str) -> usize {
+    verifier::layout::BLAKE3_COLUMNS
+        .iter()
+        .position(|&n| n == name)
+        .unwrap_or_else(|| panic!("no BLAKE3 column {name}"))
+}
+// The read counts are one contiguous run, in flush order, then `cnt_bc`.
+const _: () = assert!(blake3t::R_LAST + 1 == blake3t::RBC && blake3t::R_LAST - blake3t::R0 + 1 == 15);
 
 /// The fewest committed columns of a table's row, `SET`'s: a run of `n` steps commits at least `n` times it, which
 /// bounds the steps of a provable run (the interpreter's step limit).

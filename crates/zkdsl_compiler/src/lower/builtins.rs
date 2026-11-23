@@ -75,25 +75,32 @@ impl FnLower<'_> {
         self.keccak_finish(out);
     }
 
-    /// `blake3(a, b, cv, md, out)`: one BLAKE3 compression, one `BLAKE3` instruction. `a`, `b`, `cv` and `out` are
-    /// two-cell `StackBuf` runs (a cell's two limbs are four little-endian 32-bit words), the message block `a ‖ b`;
-    /// `md` is a cell, the chunk counter in its low limb and `block_len | flags << 32` in its high one. A statement:
-    /// it writes the new chaining value into `out`, and a pre-written `out` asserts it (write-once).
+    /// `blake3(a, b, cv, md, out, x=, y=, w=)`: one BLAKE3 compression, one `BLAKE3` instruction. `a`, `b`, `cv`,
+    /// `out` and the optional `x`, `y`, `w` are two-cell `StackBuf` runs (a cell's two limbs are four little-endian
+    /// 32-bit words), the message block `a ‖ b`; `md` is a cell, the chunk counter in its low limb and
+    /// `block_len | flags << 32` in its high one. The block compressed is the message XOR `x` at bytes 25..57, the
+    /// first 7 bytes of `y` at 57..64 and the last 25 of `w` at 0..25 (each zero when omitted). A statement: it writes
+    /// the new chaining value into `out`, and a pre-written `out` asserts it (write-once).
     fn lower_blake3(&mut self, args: &[Expr]) {
-        if args.len() != 5 || args.iter().any(|a| matches!(a, Expr::Call(name, _) if name.starts_with("__kw_"))) {
-            self.fail("blake3 takes five positional arguments: (a, b, cv, md, out)")
-        }
+        let kwargs = self.keccak_kwargs(args, "blake3", &["a", "b", "cv", "md", "out"], &["x", "y", "w"]);
         let mut run = |e: &Expr, what: &str| match self.try_cell_run(e) {
             Ok(CellRun::Stack { base, len: 2 }) => base,
             _ => self.fail(format!("blake3's `{what}` must be a two-cell StackBuf run")),
         };
         let (a, b, cv, out) = (run(&args[0], "a"), run(&args[1], "b"), run(&args[2], "cv"), run(&args[4], "out"));
+        let mut opt = |key: &str| kwargs.get(key).map(|e| run(e, key));
+        let (x, y, w) = (opt("x"), opt("y"), opt("w"));
         let md = self.expr(&args[3]);
+        // An omitted input is two zero cells: the scope's shared padding run holds four from +1.
+        let zero = if x.is_none() || y.is_none() || w.is_none() { self.keccak_pad_run() + 1 } else { 0 };
         self.emit(LOp::Blake3 {
             m: [a, a + 1, b, b + 1],
             cv,
             md,
             c: out,
+            x: x.unwrap_or(zero),
+            y: y.unwrap_or(zero),
+            w: w.unwrap_or(zero),
         });
     }
 

@@ -390,17 +390,21 @@ fn flushes_keccak() -> Flushes {
 
 fn flushes_blake3() -> Flushes {
     let [pc, fp, cnt_bc] = cols(BLAKE3_COLUMNS, ["pc", "fp", "cnt_bc"]);
-    let operands = cols(BLAKE3_COLUMNS, ["o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md"]);
+    let operands = cols(
+        BLAKE3_COLUMNS,
+        ["o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md", "o_x", "o_y", "o_w"],
+    );
     let mut flushes = Flushes::default();
     flushes.state_step(pc, fp);
     flushes.bytecode(pc, cnt_bc, OP_BLAKE3, operands.map(|i| col(i, 0)).to_vec());
-    // The nine cells accessed, as (cell, operand, offset from it): four addressed message cells, the consecutive
-    // chaining-value and output pairs, then the metadata cell (the chunk counter, then the block length and the flags).
-    // Each holds two of q_flock's words, a low limb and a high one.
+    // The fifteen cells accessed, as (cell, operand, offset from it): four addressed message cells, the consecutive
+    // chaining-value and output pairs, the metadata cell (the chunk counter, then the block length and the flags), then
+    // the X, Y and W pairs the circuit places into the block. Each holds two of q_flock's words, a low limb and a high one.
     #[rustfmt::skip]
     let cells = [("m0", "o_0", 0), ("m1", "o_1", 0), ("m2", "o_2", 0), ("m3", "o_3", 0),
                  ("cv0", "o_v", 0), ("cv1", "o_v", 1), ("out0", "o_out", 0), ("out1", "o_out", 1),
-                 ("md", "o_md", 0)];
+                 ("md", "o_md", 0), ("x0", "o_x", 0), ("x1", "o_x", 1), ("y0", "o_y", 0), ("y1", "o_y", 1),
+                 ("w0", "o_w", 0), ("w1", "o_w", 1)];
     for (cell, operand, exponent) in cells {
         let names = [operand, &format!("cnt_{cell}"), &format!("{cell}_lo"), &format!("{cell}_hi")];
         let [address, count, lo, hi] = cols(BLAKE3_COLUMNS, names);
@@ -422,39 +426,48 @@ pub const N_TABLES: usize = 7;
 /// then the read counts.
 #[rustfmt::skip]
 pub const BLAKE3_COLUMNS: &[&str] = &[
-    "pc", "fp", "o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md",
+    "pc", "fp", "o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md", "o_x", "o_y", "o_w",
     "m0_lo", "m0_hi", "m1_lo", "m1_hi", "m2_lo", "m2_hi", "m3_lo", "m3_hi",
     "out0_lo", "out0_hi", "out1_lo", "out1_hi", "cv0_lo", "cv0_hi", "cv1_lo", "cv1_hi", "md_lo", "md_hi",
-    "cnt_m0", "cnt_m1", "cnt_m2", "cnt_m3", "cnt_cv0", "cnt_cv1", "cnt_out0", "cnt_out1", "cnt_md", "cnt_bc",
+    "x0_lo", "x0_hi", "x1_lo", "x1_hi", "y0_lo", "y0_hi", "y1_lo", "y1_hi", "w0_lo", "w0_hi", "w1_lo", "w1_hi",
+    "cnt_m0", "cnt_m1", "cnt_m2", "cnt_m3", "cnt_cv0", "cnt_cv1", "cnt_out0", "cnt_out1", "cnt_md",
+    "cnt_x0", "cnt_x1", "cnt_y0", "cnt_y1", "cnt_w0", "cnt_w1", "cnt_bc",
 ];
 
 /// Which of Flock's 64-bit words each value limb is: the chaining value (words 0..4), the output (4..8), the message
-/// block (10..18), then the metadata (18, 19). Word 8 holds the constant wire, and no memory cell carries 8 or 9.
+/// block (10..18), the metadata (18, 19), then X, Y, W (181..193). Word 8 holds the constant wire.
 #[rustfmt::skip]
-pub const BLAKE3_SLOTS: [Option<&str>; 20] = [
-    Some("cv0_lo"), Some("cv0_hi"), Some("cv1_lo"), Some("cv1_hi"), Some("out0_lo"), Some("out0_hi"), Some("out1_lo"), Some("out1_hi"), None, None,
-    Some("m0_lo"), Some("m0_hi"), Some("m1_lo"), Some("m1_hi"), Some("m2_lo"), Some("m2_hi"), Some("m3_lo"), Some("m3_hi"), Some("md_lo"), Some("md_hi"),
+pub const BLAKE3_SLOTS: [(&str, usize); 30] = [
+    ("cv0_lo", 0), ("cv0_hi", 1), ("cv1_lo", 2), ("cv1_hi", 3), ("out0_lo", 4), ("out0_hi", 5), ("out1_lo", 6),
+    ("out1_hi", 7), ("m0_lo", 10), ("m0_hi", 11), ("m1_lo", 12), ("m1_hi", 13), ("m2_lo", 14), ("m2_hi", 15),
+    ("m3_lo", 16), ("m3_hi", 17), ("md_lo", 18), ("md_hi", 19),
+    ("x0_lo", 181), ("x0_hi", 182), ("x1_lo", 183), ("x1_hi", 184), ("y0_lo", 185), ("y0_hi", 186),
+    ("y1_lo", 187), ("y1_hi", 188), ("w0_lo", 189), ("w0_hi", 190), ("w1_lo", 191), ("w1_hi", 192),
 ];
 
-/// Flock's padding instance, `blake3(0^64)` as one block, in [`BLAKE3_SLOTS`] order: the IV, the digest, a zero
-/// message, then the metadata (chunk 0; 64 bytes and the one-block flags).
-pub fn blake3_padding_words() -> [u64; 20] {
+/// The word of Flock's padding instance, `blake3(0^64)` as one block, at `slot`: the IV, the digest, a zero message,
+/// the metadata (chunk 0; 64 bytes and the one-block flags), zero X, Y, W.
+pub fn blake3_padding_word(slot: usize) -> u64 {
     let (counter, len, flags) = blake3::ONE_BLOCK;
     let digest = blake3::compress(&blake3::IV, &[0; 16], counter, len, flags);
-    std::array::from_fn(|slot| match slot {
+    match slot {
         0..4 => blake3::limb(blake3::IV[2 * slot], blake3::IV[2 * slot + 1]),
         4..8 => blake3::limb(digest[2 * (slot - 4)], digest[2 * (slot - 4) + 1]),
         18 => counter,
         19 => blake3::limb(len, flags),
         _ => 0,
-    })
+    }
+}
+
+/// The slot a `BLAKE3` column's name is, if it is a value limb.
+pub fn blake3_slot(name: &str) -> Option<usize> {
+    BLAKE3_SLOTS.iter().find(|(n, _)| *n == name).map(|&(_, slot)| slot)
 }
 
 /// The word of q_flock the global column `column` IS, if it is one of the `BLAKE3` value limbs.
 pub fn qflock_slot(column: usize) -> Option<usize> {
     let local = column.checked_sub(GLOBAL_COLUMN_BASES[OP_BLAKE3])?;
-    let name = *BLAKE3_COLUMNS.get(local)?;
-    BLAKE3_SLOTS.iter().position(|&slot| slot == Some(name))
+    blake3_slot(BLAKE3_COLUMNS.get(local)?)
 }
 
 #[rustfmt::skip]
@@ -533,10 +546,9 @@ pub fn tables() -> Vec<Table> {
     let mut keccak = table(OP_KECCAK, keccak_columns(), flushes_keccak(), |_| vec![]);
     // A padding row is zero, but for BLAKE3's value limbs: they are q_flock's words, so they hold its padding instance.
     let mut blake3 = table(OP_BLAKE3, named(BLAKE3_COLUMNS), flushes_blake3(), |_| vec![]);
-    let padding = blake3_padding_words();
     for (local, value) in blake3.padding.iter_mut().enumerate() {
-        if let Some(slot) = BLAKE3_SLOTS.iter().position(|&s| s == Some(BLAKE3_COLUMNS[local])) {
-            *value = E::new(padding[slot], 0);
+        if let Some(slot) = blake3_slot(BLAKE3_COLUMNS[local]) {
+            *value = E::new(blake3_padding_word(slot), 0);
         }
     }
     // A padding row is zero, but for KECCAK's output lanes: a padding row permutes zeros.

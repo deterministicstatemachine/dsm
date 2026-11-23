@@ -99,6 +99,9 @@ pub(crate) enum LOp {
         cv: Off,
         md: Off,
         c: Off,
+        x: Off,
+        y: Off,
+        w: Off,
     },
 }
 

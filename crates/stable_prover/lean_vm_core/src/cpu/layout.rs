@@ -357,10 +357,7 @@ pub(crate) fn build(program: &Program, exec: &Execution, l: Layout) -> Witness {
         use crate::blake3flock::{CELLS, compression};
         let blocks = parallel::map_collect(tr.blake3.len(), |i| {
             let row = &tr.blake3[i];
-            let offsets = match program.prog[row.pc as usize] {
-                Op::Blake3 { m, cv, out, md } => [m[0], m[1], m[2], m[3], cv, out, md],
-                op => unreachable!("a BLAKE3 row's pc {} holds {op:?}", row.pc),
-            };
+            let offsets = crate::blake3flock::operands(&program.prog[row.pc as usize]);
             let cells = CELLS.map(|(operand, step)| exec.mem.word((row.fp + offsets[operand] + step) as usize));
             compression(&cells)
         });

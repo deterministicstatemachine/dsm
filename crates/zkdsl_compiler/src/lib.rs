@@ -283,8 +283,8 @@ pub fn disassemble(prog: &[Op]) -> String {
                     layout(*in_odd)
                 )
             }
-            Op::Blake3 { m, cv, out, md } => format!(
-                "BLAKE3 fp[{out}..+2] = blake3_compress(cv=fp[{cv}..+2], m=fp[{}],fp[{}],fp[{}],fp[{}], md=fp[{md}])",
+            Op::Blake3 { m, cv, out, md, x, y, w } => format!(
+                "BLAKE3 fp[{out}..+2] = blake3_compress(cv=fp[{cv}..+2], m=fp[{}],fp[{}],fp[{}],fp[{}], md=fp[{md}], x=fp[{x}..+2], y=fp[{y}..+2], w=fp[{w}..+2])",
                 m[0], m[1], m[2], m[3]
             ),
         };
@@ -354,11 +354,14 @@ fn resolve(op: &LOp, entry: &HashMap<String, u32>, sentinel: u32, pc0: u32, fram
             out_odd: *out_odd,
             out_cells: *out_cells,
         },
-        LOp::Blake3 { m, cv, md, c } => Op::Blake3 {
+        LOp::Blake3 { m, cv, md, c, x, y, w } => Op::Blake3 {
             m: *m,
             cv: *cv,
             out: *c,
             md: *md,
+            x: *x,
+            y: *y,
+            w: *w,
         },
     }
 }

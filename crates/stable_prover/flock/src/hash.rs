@@ -148,7 +148,14 @@ pub const COUNTER_HI_BASE: usize = COUNTER_LO_BASE + WORD_BITS; // 1184
 pub const FINAL_BASE: usize = COUNTER_HI_BASE + WORD_BITS; // 1216
 pub const LAST_NODE_BASE: usize = FINAL_BASE + WORD_BITS; // 1248
 pub const GS_BASE: usize = LAST_NODE_BASE + WORD_BITS; // 1280
-pub const USEFUL_BITS: usize = GS_BASE + N_G * G_STRIDE; // 16,000
+/// Three 32-byte inputs the circuit places into the message block itself, exactly, at the byte offsets a 25-byte
+/// prefix leaves (a 24-byte DSM domain tag and its NUL): `X` at bytes 25..57, the first 7 bytes of `Y` at 57..64, and
+/// the last 25 bytes of `W` at 0..25. The block hashed is the message slots XOR those placements, so a tree node
+/// `tag ‖ 0 ‖ L ‖ R` is two compressions with `L`, `R` in their natural limbs: `X = L, Y = R`, then `W = R`.
+pub const X_BASE: usize = GS_BASE + N_G * G_STRIDE; // 11,584
+pub const Y_BASE: usize = X_BASE + SLOT_BITS;
+pub const W_BASE: usize = Y_BASE + SLOT_BITS;
+pub const USEFUL_BITS: usize = W_BASE + SLOT_BITS; // 12,352
 
 const _: () = assert!(USEFUL_BITS <= K, "BLAKE2s does not fit the 2^K_LOG block");
 
@@ -225,8 +232,34 @@ pub fn blake2s_compress(h: &[u32; 8], m: &[u32; 16], t: u64, f0: u32, f1: u32) -
     std::array::from_fn(|i| v[i] ^ v[i + 8])
 }
 
-/// One BLAKE2s compression input: `(h, m, t, f0, f1)`.
-pub type Compression = ([u32; 8], [u32; 16], u64, u32, u32);
+/// One compression input: `(h, m, t, f0, f1, xyw)`, `xyw` the words of `X`, `Y`, `W` ([`X_BASE`]); the block hashed is
+/// [`effective_message`].
+pub type Compression = ([u32; 8], [u32; 16], u64, u32, u32, [u32; 24]);
+
+/// The z position of the `X`/`Y`/`W` bit the circuit places at block bit `bit`, if any.
+pub fn reloc_source(bit: usize) -> Option<usize> {
+    let (p, k) = (bit / 8, bit % 8);
+    match p {
+        0..25 => Some(W_BASE + 8 * (p + 7) + k),
+        25..57 => Some(X_BASE + 8 * (p - 25) + k),
+        57..64 => Some(Y_BASE + 8 * (p - 57) + k),
+        _ => None,
+    }
+}
+
+/// The block a compression hashes: the message slots XOR the placed `X`, `Y`, `W` bytes.
+pub fn effective_message(m: &[u32; 16], xyw: &[u32; 24]) -> [u32; 16] {
+    let mut out = *m;
+    for bit in 0..512 {
+        if let Some(src) = reloc_source(bit) {
+            let s = src - X_BASE;
+            if (xyw[s / 32] >> (s % 32)) & 1 == 1 {
+                out[bit / 32] ^= 1 << (bit % 32);
+            }
+        }
+    }
+    out
+}
 
 /// BLAKE3's initial chaining value, its IV (the key words of an unkeyed hash).
 pub const fn param_iv() -> [u32; 8] {
@@ -243,7 +276,7 @@ pub const PINNED_F1: u32 = 1 | 2 | 8;
 /// A one-block hash [`Compression`] of `m`: its first 8 words are exactly `blake3(m)` for a 64-byte message. The
 /// circuit itself accepts arbitrary chaining values, counters, block lengths and flags.
 pub fn pinned_compression(m: [u32; 16]) -> Compression {
-    (param_iv(), m, PINNED_T, PINNED_F0, PINNED_F1)
+    (param_iv(), m, PINNED_T, PINNED_F0, PINNED_F1, [0; 24])
 }
 
 /// The padding instance: `blake3(0^64)`. Fills unused trailing slots so every
@@ -273,11 +306,22 @@ fn forward_walk(sink: &mut crate::gf2::RowValues, w: &[F128]) {
         (CV_BASE, 8 * WORD_BITS),
         (MSG_BASE, 16 * WORD_BITS),
         (COUNTER_LO_BASE, 4 * WORD_BITS),
+        (X_BASE, 3 * SLOT_BITS),
     ] {
         for s in base..base + len {
             sink.bconst(s, w[s]);
         }
     }
+    // The effective message words: the slots, XOR the placed X/Y/W bits.
+    let msg: [WireWord; 16] = std::array::from_fn(|i| {
+        let mut word = wire_from_slot_base(w, m_bit(i, 0));
+        for (j, bit) in word.iter_mut().enumerate() {
+            if let Some(src) = reloc_source(WORD_BITS * i + j) {
+                *bit += w[src];
+            }
+        }
+        word
+    });
 
     let mut state: [WireWord; 16] = std::array::from_fn(|_| [F128::ZERO; WORD_BITS]);
     for wd in 0..8 {
@@ -298,8 +342,8 @@ fn forward_walk(sink: &mut crate::gf2::RowValues, w: &[F128]) {
             let g = r * N_G_PER_ROUND + g_in_round;
             let [la, lb, lc, ld] = G_LANES[g_in_round];
             let (a, b, c, d) = (state[la], state[lb], state[lc], state[ld]);
-            let mx = wire_from_slot_base(w, m_bit(SIGMA[r][2 * g_in_round], 0));
-            let my = wire_from_slot_base(w, m_bit(SIGMA[r][2 * g_in_round + 1], 0));
+            let mx = msg[SIGMA[r][2 * g_in_round]];
+            let my = msg[SIGMA[r][2 * g_in_round + 1]];
 
             let a_1 = walk_add3_fused(sink, w, &a, &b, &mx, g_slot(g, G_ADD3_A1));
             let d_1 = wire_rotr(&wire_xor(&d, &a_1), 16);
@@ -367,6 +411,7 @@ fn marginal_walk_side(side: MatrixSide, u: &[F128]) -> Vec<F128> {
         (CV_BASE, 8 * WORD_BITS),
         (MSG_BASE, 16 * WORD_BITS),
         (COUNTER_LO_BASE, 4 * WORD_BITS),
+        (X_BASE, 3 * SLOT_BITS),
     ] {
         for s in base..base + len {
             let (a, b) = side.split(u[s]);
@@ -374,6 +419,15 @@ fn marginal_walk_side(side: MatrixSide, u: &[F128]) -> Vec<F128> {
             u_bconst += b;
         }
     }
+    // A message word's adjoint lands on its slot and on the X/Y/W bit placed there.
+    let add_msg = |m: &mut Vec<F128>, word: usize, adj: &WireWord| {
+        for i in 0..WORD_BITS {
+            m[m_bit(word, i)] += adj[i];
+            if let Some(src) = reloc_source(WORD_BITS * word + i) {
+                m[src] += adj[i];
+            }
+        }
+    };
 
     // Finalization rows `out[w] = h[w] ^ v[w] ^ v[w+8]`: A is that affine word,
     // B = [Z_CONST]. Seed the lane adjoints with the A side, and take the `h`
@@ -411,10 +465,7 @@ fn marginal_walk_side(side: MatrixSide, u: &[F128]) -> Vec<F128> {
             // a_2 = a_1 + b_1 + my
             let (mut aa1, ab1_a2, amy) = back_add3_fused(&mut m, u, &aa2, g_slot(g, G_ADD3_A2), side);
             ab1 = wire_xor(&ab1, &ab1_a2);
-            let my_base = m_bit(SIGMA[r][2 * g_in_round + 1], 0);
-            for i in 0..WORD_BITS {
-                m[my_base + i] += amy[i];
-            }
+            add_msg(&mut m, SIGMA[r][2 * g_in_round + 1], &amy);
             // b_1 = rotr(b ^ c_1, 12)
             let t = wire_rotl(&ab1, 12);
             let mut ab = t;
@@ -428,10 +479,7 @@ fn marginal_walk_side(side: MatrixSide, u: &[F128]) -> Vec<F128> {
             // a_1 = a + b + mx
             let (aa, ab_a1, amx) = back_add3_fused(&mut m, u, &aa1, g_slot(g, G_ADD3_A1), side);
             ab = wire_xor(&ab, &ab_a1);
-            let mx_base = m_bit(SIGMA[r][2 * g_in_round], 0);
-            for i in 0..WORD_BITS {
-                m[mx_base + i] += amx[i];
-            }
+            add_msg(&mut m, SIGMA[r][2 * g_in_round], &amx);
 
             adj[la] = aa;
             adj[lb] = ab;
@@ -533,6 +581,7 @@ fn build_block_witness_ab_packed_into(
     t: u64,
     f0: u32,
     f1: u32,
+    xyw: &[u32; 24],
     z: &mut [u64],
     a: &mut [u64],
     b: &mut [u64],
@@ -556,6 +605,10 @@ fn build_block_witness_ab_packed_into(
     write_lin_word_ab_packed(COUNTER_HI_BASE, (t >> 32) as u32, z, a, b);
     write_lin_word_ab_packed(FINAL_BASE, f0, z, a, b);
     write_lin_word_ab_packed(LAST_NODE_BASE, f1, z, a, b);
+    for (j, &word) in xyw.iter().enumerate() {
+        write_lin_word_ab_packed(X_BASE + WORD_BITS * j, word, z, a, b);
+    }
+    let m = &effective_message(m, xyw);
 
     let mut v = initial_state(h, t, f0, f1);
     for r in 0..N_ROUNDS {
@@ -632,7 +685,7 @@ pub fn generate_witness_with_ab_packed_and_lincheck(
         Some(&padding),
         n_blocks_log,
         K_LOG,
-        |&(ref h, ref m, t, f0, f1), z, a, b| build_block_witness_ab_packed_into(h, m, t, f0, f1, z, a, b),
+        |&(ref h, ref m, t, f0, f1, ref xyw), z, a, b| build_block_witness_ab_packed_into(h, m, t, f0, f1, xyw, z, a, b),
     )
 }
 
@@ -872,10 +925,6 @@ mod tests {
         unpack_bits(&z, (1usize << n_blocks_log) * K)
     }
 
-    /// Full BLAKE2s-256 over the compression function, so the known-answer
-    /// vectors below exercise `blake2s_compress` end to end (multi-block,
-    /// counter, and the final-block flag).
-
     /// Every slot a layout region claims is the output of one non-degenerate
     /// row, and every slot outside is padding. Guards the sub-block tiling:
     /// an overlap would leave a product unconstrained, and the overwritten row
@@ -900,6 +949,7 @@ mod tests {
         claim(MSG_BASE, 16 * WORD_BITS);
         claim(COUNTER_LO_BASE, 4 * WORD_BITS);
         claim(GS_BASE, N_G * G_STRIDE);
+        claim(X_BASE, 3 * SLOT_BITS);
         for s in 0..K {
             // A row is empty exactly when it sums nothing; at a random `w` a
             // non-empty row is nonzero but for a `2^-192` accident.
@@ -917,9 +967,10 @@ mod tests {
         let mut rng = Rng::new(0xB25C0DE);
         let h: [u32; 8] = std::array::from_fn(|_| rng.next_u32());
         let m: [u32; 16] = std::array::from_fn(|_| rng.next_u32());
-        let blocks = vec![(h, m, 0x1234_5678_9ABC_DEF0u64, u32::MAX, 0u32)];
+        let xyw: [u32; 24] = std::array::from_fn(|_| rng.next_u32());
+        let blocks = vec![(h, m, 0x1234_5678_9ABC_DEF0u64, u32::MAX, 0u32, xyw)];
         let z = generate_witness(&blocks, 3);
-        let expected = blake2s_compress(&h, &m, 0x1234_5678_9ABC_DEF0, u32::MAX, 0);
+        let expected = blake2s_compress(&h, &effective_message(&m, &xyw), 0x1234_5678_9ABC_DEF0, u32::MAX, 0);
         for w in 0..8 {
             let got = (0..WORD_BITS).fold(0u32, |acc, b| acc | ((z[out_bit(w, b)] as u32) << b));
             assert_eq!(got, expected[w], "out[{w}] mismatch");
@@ -940,6 +991,7 @@ mod tests {
                         64 * (i as u64 + 1),
                         if i % 2 == 0 { u32::MAX } else { 0 },
                         0,
+                        std::array::from_fn(|_| rng.next_u32()),
                     )
                 })
                 .collect();

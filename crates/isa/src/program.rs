@@ -103,7 +103,10 @@ fn encode(op: &Op) -> [u64; 1 + BYTECODE_OPERANDS] {
             cv,
             out,
             md,
-        } => put(OP_BLAKE3, &[m0, m1, m2, m3, cv, out, md], &[]),
+            x,
+            y,
+            w,
+        } => put(OP_BLAKE3, &[m0, m1, m2, m3, cv, out, md, x, y, w], &[]),
     }
     tuple
 }

@@ -685,15 +685,15 @@ pub fn execute(
                 });
                 pc += 1;
             }
-            Op::Blake3 { m: msg, cv, out, md } => {
-                use crate::blake3flock::{CELLS, OUT_CELLS, compression, output};
-                let offsets = [msg[0], msg[1], msg[2], msg[3], cv, out, md];
-                let mut cells = [0; 9];
+            Op::Blake3 { .. } => {
+                use crate::blake3flock::{CELLS, N_CELLS, OUT_CELLS, compression, operands, output};
+                let offsets = operands(&op);
+                let mut cells = [0; N_CELLS];
                 for (cell, &(operand, step)) in cells.iter_mut().zip(&CELLS) {
                     *cell = at(at(fp, offsets[operand])?, step)?;
                 }
                 // Flock proves the output; the run computes it for the later reads.
-                let mut values = [F128::ZERO; 9];
+                let mut values = [F128::ZERO; N_CELLS];
                 for (c, value) in values.iter_mut().enumerate() {
                     if !OUT_CELLS.contains(&c) {
                         *value = m.read(cells[c]);
@@ -704,7 +704,7 @@ pub fn execute(
                     m.put(cells[c], v).map_err(fail)?;
                 }
                 // In flush order, so a cell two operands alias pairs each read with its own count.
-                let mut r = [0; 9];
+                let mut r = [0; N_CELLS];
                 for (count, &cell) in r.iter_mut().zip(&cells) {
                     *count = m.bump_access_count(cell);
                 }

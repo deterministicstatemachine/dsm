@@ -57,7 +57,7 @@ pub(crate) struct Krow {
 pub(crate) struct Brow {
     pub(crate) pc: u32,
     pub(crate) fp: u32,
-    pub(crate) r: [u32; 9],
+    pub(crate) r: [u32; crate::blake3flock::N_CELLS],
     pub(crate) bytecode_read: u32,
 }
 

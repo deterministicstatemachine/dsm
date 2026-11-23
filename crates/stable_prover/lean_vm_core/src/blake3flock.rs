@@ -14,9 +14,14 @@ use primitives::transcript::ProverState;
 use verifier::layout::QFLOCK_SLOT_BITS;
 
 /// The cells a `BLAKE3` row accesses, in flush order (`verifier::layout`'s): the four message cells, the chaining
-/// value's two, the output's two, then the metadata cell, as (offset operand, step from it). The operands are in
-/// bytecode slot order: `m0..m3`, `cv`, `out`, `md`.
-pub(crate) const CELLS: [(usize, u32); 9] = [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (4, 1), (5, 0), (5, 1), (6, 0)];
+/// value's two, the output's two, the metadata cell, then the X, Y and W pairs, as (offset operand, step from it). The
+/// operands are in bytecode slot order: `m0..m3`, `cv`, `out`, `md`, `x`, `y`, `w`.
+pub(crate) const N_CELLS: usize = 15;
+pub(crate) const N_OPERANDS: usize = 10;
+#[rustfmt::skip]
+pub(crate) const CELLS: [(usize, u32); N_CELLS] = [
+    (0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (4, 1), (5, 0), (5, 1), (6, 0), (7, 0), (7, 1), (8, 0), (8, 1), (9, 0), (9, 1),
+];
 /// Where the two output cells sit in [`CELLS`].
 pub(crate) const OUT_CELLS: [usize; 2] = [6, 7];
 
@@ -26,7 +31,7 @@ fn words(limb: u64) -> [u32; 2] {
 
 /// The compression a `BLAKE3` instruction applies, from the values of its cells in [`CELLS`] order (the output cells
 /// ignored): a cell's two limbs are four little-endian words.
-pub(crate) fn compression(cells: &[F128; 9]) -> Compression {
+pub(crate) fn compression(cells: &[F128; N_CELLS]) -> Compression {
     let mut m = [0u32; 16];
     for k in 0..4 {
         let [a, b] = words(cells[k].c0);
@@ -41,12 +46,26 @@ pub(crate) fn compression(cells: &[F128; 9]) -> Compression {
     }
     let md = cells[8];
     let [block_len, flags] = words(md.c1);
-    (cv, m, md.c0, block_len, flags)
+    let mut xyw = [0u32; 24];
+    for k in 0..6 {
+        let [a, b] = words(cells[9 + k].c0);
+        let [c, d] = words(cells[9 + k].c1);
+        xyw[4 * k..4 * k + 4].copy_from_slice(&[a, b, c, d]);
+    }
+    (cv, m, md.c0, block_len, flags, xyw)
+}
+
+/// The operands of a `BLAKE3` instruction, in bytecode slot order.
+pub(crate) fn operands(op: &crate::cpu::Op) -> [u32; N_OPERANDS] {
+    match *op {
+        crate::cpu::Op::Blake3 { m, cv, out, md, x, y, w } => [m[0], m[1], m[2], m[3], cv, out, md, x, y, w],
+        op => unreachable!("not a BLAKE3: {op:?}"),
+    }
 }
 
 /// The two cells a compression writes: the new chaining value.
 pub(crate) fn output(c: &Compression) -> [F128; 2] {
-    let h = blake2s_compress(&c.0, &c.1, c.2, c.3, c.4);
+    let h = blake2s_compress(&c.0, &flock::hash::effective_message(&c.1, &c.5), c.2, c.3, c.4);
     let limb = |k: usize| h[2 * k] as u64 | (h[2 * k + 1] as u64) << 32;
     [F128::new(limb(0), limb(1)), F128::new(limb(2), limb(3))]
 }

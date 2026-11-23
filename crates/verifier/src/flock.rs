@@ -308,6 +308,19 @@ fn rotate_right(word: Word, amount: usize) -> Word {
     std::array::from_fn(|bit| word[(bit + amount) & 31])
 }
 
+/// The bit of X, Y, W (counted from X's first) the circuit places at block bit `bit`: `X` at bytes 25..57, the first 7
+/// bytes of `Y` at 57..64, the last 25 of `W` at 0..25. The 25-byte prefix is a 24-byte DSM tag and its NUL, so a tree
+/// node `tag ‖ 0 ‖ L ‖ R` takes `L` and `R` in their natural limbs.
+pub fn relocation_source(bit: usize) -> Option<usize> {
+    let (p, k) = (bit / 8, bit % 8);
+    match p {
+        0..25 => Some(512 + 8 * (p + 7) + k),
+        25..57 => Some(8 * (p - 25) + k),
+        57..64 => Some(256 + 8 * (p - 57) + k),
+        _ => None,
+    }
+}
+
 /// Compute `A0 w` and `B0 w` by one forward walk of the circuit.
 pub fn blake3_row_values(column_weights: &[E]) -> (Vec<E>, Vec<E>) {
     let size = 1 << BLAKE3_R1CS_LOG_SIZE;
@@ -319,13 +332,15 @@ pub fn blake3_row_values(column_weights: &[E]) -> (Vec<E>, Vec<E>) {
     let last_node_flag = 1248;
     let gates_base = 1280;
     let gate_stride = 184;
+    // X, Y, W: three 32-byte inputs the circuit places into the block (`relocation_source`).
+    let x_base = gates_base + gate_stride * SIGMA.len() * G_LANES.len();
     let mut rows = RowValues {
         column_weights,
         left_values: vec![ZERO; size],
         right_values: vec![ZERO; size],
     };
 
-    for (base, length) in [(0, 256), (message_base, 512), (counter_low, 128)] {
+    for (base, length) in [(0, 256), (message_base, 512), (counter_low, 128), (x_base, 768)] {
         for row in base..base + length {
             rows.left_values[row] = column_weights[row];
             rows.right_values[row] = column_weights[constant];
@@ -347,13 +362,23 @@ pub fn blake3_row_values(column_weights: &[E]) -> (Vec<E>, Vec<E>) {
         state[12 + word] = rows.slots(base);
     }
 
+    // The effective message words: the slots, XOR the placed X/Y/W bits.
+    let message: [Word; 16] = std::array::from_fn(|i| {
+        let mut word = rows.slots(message_base + 32 * i);
+        for (j, bit) in word.iter_mut().enumerate() {
+            if let Some(source) = relocation_source(32 * i + j) {
+                *bit += column_weights[x_base + source];
+            }
+        }
+        word
+    });
     for (round_index, sigma) in SIGMA.iter().enumerate() {
         for (gate_index, &[lane_a, lane_b, lane_c, lane_d]) in G_LANES.iter().enumerate() {
             let gate = round_index * 8 + gate_index;
             let gate_base = gates_base + gate_stride * gate;
             let (a, b, c, d) = (state[lane_a], state[lane_b], state[lane_c], state[lane_d]);
-            let mx = rows.slots(message_base + 32 * sigma[2 * gate_index]);
-            let my = rows.slots(message_base + 32 * sigma[2 * gate_index + 1]);
+            let mx = message[sigma[2 * gate_index]];
+            let my = message[sigma[2 * gate_index + 1]];
             let a1 = rows.add3(a, b, mx, gate_base);
             let d1 = rotate_right(xor(d, a1), 16);
             let c1 = rows.add(c, d1, gate_base + 61);
