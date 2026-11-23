@@ -154,7 +154,10 @@ pub fn prove_packed_padded(
     // Prover and verifier use the same tower-valued challenges directly.
     // The sampled coordinates, degree one each in the eq sum: their count over |E| (the verifier's grind).
     let r_rest = equality_tail(m, |n| {
-        ps.grind(verifier::flock::FLOCK_POINT_GRIND_BITS);
+        // A VM proof always samples one at least (m >= FLOCK_K_LOG); a grind needs a challenge after it.
+        if n > 0 {
+            ps.grind(verifier::flock::FLOCK_POINT_GRIND_BITS);
+        }
         ps.sample_vec(n)
     });
 
@@ -405,11 +408,14 @@ mod tests {
             let mut ps = primitives::transcript::ProverState::from_label(b"flock-test-v0");
             let claim = prove_packed(&a_p, &b_p, &c_p, m, &mut ps);
 
-            // Shape checks: the streamed proof is round1 ‖ (m − K_SKIP)
-            // message pairs ‖ (final_a, final_b). C rides the sumcheck, so
+            // Shape checks: the streamed proof is the grinds' nonces (the sampled point's, if it samples any, and
+            // the skip point's), round1 ‖ (m − K_SKIP) message pairs ‖ (final_a, final_b). C rides the sumcheck, so
             // there is no second Λ-vector and no transmitted ĉ.
             let stream = ps.into_proof().stream;
-            assert_eq!(stream.len(), (1 << K_SKIP) + 2 * (m - K_SKIP) + 2, "m={m}");
+            let nonce = |bits: u32| usize::from(bits > 0);
+            let nonces = usize::from(m > K_SKIP + N_INNER) * nonce(verifier::flock::FLOCK_POINT_GRIND_BITS)
+                + nonce(verifier::flock::FLOCK_SKIP_GRIND_BITS);
+            assert_eq!(stream.len(), nonces + (1 << K_SKIP) + 2 * (m - K_SKIP) + 2, "m={m}");
             assert_eq!(claim.mlv_challenges.len(), m - K_SKIP, "m={m}");
 
             // Claim's eval fields agree with the streamed final evals (both are

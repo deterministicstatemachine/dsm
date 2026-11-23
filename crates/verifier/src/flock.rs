@@ -94,7 +94,9 @@ fn verify_flock_zerocheck(log_n: usize, transcript: &mut Transcript) -> Result<Z
     // The sampled coordinates, degree one each in the eq sum: their count over |E|, at most 32 for every announced
     // height (log_n <= BLAKE3_R1CS_LOG_SIZE + MAX_TABLE_LOG), so one grind fits every proof.
     let n_sampled = log_n - FLOCK_K_SKIP - N_FIXED_CHALLENGES;
-    transcript.grind_check(FLOCK_POINT_GRIND_BITS)?;
+    if n_sampled > 0 {
+        transcript.grind_check(FLOCK_POINT_GRIND_BITS)?;
+    }
     let sampled = transcript.samples(n_sampled);
     r.extend(sampled.into_iter().map(Some));
 
