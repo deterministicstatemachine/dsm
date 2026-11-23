@@ -203,54 +203,80 @@ async fn a_backup_behind_the_register_is_never_installed() {
     );
 }
 
-/// An attempt at a backup cut short leaves no gap. After backup 1, an attempt
-/// at backup 2 stops after a later part, before part 0. The next attempt still
-/// writes backup 2, under an attempt of its own, and the latest the cells hold
-/// is backup 2, with exactly the body that attempt wrote.
+/// A device holds one backup, and a backup cut short is written over. After
+/// generation 1, an attempt at generation 2 stops after its start and first
+/// part, as the wallet's next step would cut it. The next backup goes as
+/// generation 3: every member then holds 3 whole and nothing of 1 or of the
+/// one cut short, and a restore reads 3 back with exactly the body it wrote.
+///
+/// MUTATION CONTROL: taking the next generation from the last whole one
+/// instead of the last used (dropping `record_latest` before the write in
+/// `back_up_now`) makes the next backup reuse 2, which every member refuses,
+/// and this goes red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
-async fn an_attempt_cut_short_leaves_no_gap() {
+async fn a_backup_cut_short_is_written_over() {
     let pair = Pair::boot(100, 0).await;
     back_up(&pair.a, 1).await;
     pair.a.enter();
     let set = crate::sdk::storage_set::canonical_set(economic_fixtures::NETWORK).expect("the set");
     let keys = crate::sdk::wallet_backup_flow::keys().expect("the keys");
-    let cut_short = dsm::wallet_backup::new_attempt();
-    let place = dsm::wallet_backup::Place::of(1, cut_short);
-    let cell = dsm::wallet_backup::BackupCell::new(
-        &keys,
-        2,
-        place,
-        &crate::sdk::storage_set::as_ccb_members(&set).expect("the members"),
-        &set.id(),
-    )
-    .expect("the cell");
-    let stray = keys
-        .seal(2, 1, 2, &cut_short, b"a later part of an attempt cut short")
-        .expect("sealed");
-    let left = crate::sdk::route_seats::write_recorded(&set, cell.routed(), &cell.keeps(), &stray)
-        .await
-        .expect("the stray part");
-    assert!(matches!(
-        left.leader(),
-        crate::sdk::route_seats::AtLeader::Link
-    ));
-
-    back_up(&pair.a, 2).await;
-    pair.a.enter();
     let own = (pair.a.genesis, pair.a.device_id);
-    let latest = tokio::task::spawn_blocking(move || {
-        crate::sdk::wallet_backup_flow::latest(&set, own, &keys)
-    })
-    .await
-    .expect("the read finished")
-    .expect("the backups")
-    .expect("a backup");
+    let lock = crate::sdk::wallet_backup_flow::slot_lock(own).expect("the lock");
+    let slot = keys.slot(&lock.public_key);
+    let sealed: Vec<Vec<u8>> = [b"cut".as_slice(), b"short".as_slice()]
+        .iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            keys.seal(&slot, 2, u32::try_from(i).expect("an index"), 2, chunk)
+                .expect("sealed")
+        })
+        .collect();
+    let digests: Vec<[u8; 32]> = sealed
+        .iter()
+        .map(|p| dsm::wallet_backup::part_digest(p))
+        .collect();
+    let (_, start) = keys.start(&lock, 2, &digests).expect("the start");
+    crate::sdk::wallet_backup_flow::record_latest(2).expect("generation 2 used");
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("the members");
+    for member in client.members() {
+        member.backup_start(&slot, &start).await.expect("started");
+        member
+            .backup_part(&slot, 2, 0, &sealed[0])
+            .await
+            .expect("the first part");
+    }
+
+    back_up(&pair.a, 3).await;
+    pair.a.enter();
+    for member in client.members() {
+        let held = member.backup_slot(&slot).await.expect("the slot");
+        assert_eq!(
+            (held.generation, held.highest_generation),
+            (3, 3),
+            "{} holds 3 whole",
+            member.member_id()
+        );
+        assert_eq!(
+            member.backup_whole_part(&slot, 1, 0).await.expect("read"),
+            None,
+            "nothing of 1"
+        );
+        assert_eq!(
+            member.backup_whole_part(&slot, 2, 0).await.expect("read"),
+            None,
+            "nothing of the one cut short"
+        );
+    }
+    let latest = crate::sdk::wallet_backup_flow::latest(&set, own, &keys)
+        .await
+        .expect("the slot")
+        .expect("a backup");
     let taken = crate::sdk::wallet_backup_flow::snapshot()
         .expect("the snapshot")
         .expect("still");
-    assert_eq!(latest.0, 2, "the latest is backup 2");
-    assert_eq!(latest.1, taken, "with the body its own attempt wrote");
+    assert_eq!(latest.0, 3, "the backup is generation 3");
+    assert_eq!(latest.1, taken, "with the body it wrote");
 }
 
 /// The rows of `table` this device holds, and the rows of it a backup taken
@@ -274,29 +300,15 @@ fn held_and_carried(table: &str) -> (usize, usize) {
     (usize::try_from(held).expect("a count"), carried)
 }
 
-/// The parts of this wallet's backups it still keeps a write record of.
-fn recorded_backup_parts() -> i64 {
-    let binding = crate::storage::client_db::get_connection().expect("the store");
-    let conn = binding.lock().expect("the store's lock");
-    conn.query_row(
-        "SELECT COUNT(*) FROM route_chain_write WHERE namespace = ?1",
-        [dsm::common::domain_tags::TAG_DSM_WALLET_BACKUP_CELL.source_bytes()],
-        |r| r.get(0),
-    )
-    .expect("the count")
-}
-
 /// A and B pay each other three times each, so each wallet keeps a record of
 /// six payments, besides the step that made them contacts. A's backup carries only each contact's latest step and the
-/// steps in flight, not the earlier payments, and once every seat holds its
-/// parts A forgets its own record of writing them. A's phone is lost;
+/// steps in flight, not the earlier payments. A's phone is lost;
 /// restored from its words, A takes a payment from B and pays B from there,
 /// so the trimmed backup is everything A needs to carry on with B both ways.
 ///
 /// MUTATION CONTROL: with `kept_rows` answering `SELECT * FROM {table}` for
 /// every table, the backup carries all three of A's sends and goes red on the
-/// first carried count; with `forget_writes_held_everywhere` forgetting
-/// nothing, the parts stay recorded and it goes red there (run 2026-11-23).
+/// first carried count (run 2026-11-23).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn a_backup_carries_each_contacts_latest_step_not_every_payment() {
@@ -337,14 +349,6 @@ async fn a_backup_carries_each_contacts_latest_step_not_every_payment() {
     assert!(replies_carried <= 1, "and at most that payment's reply");
 
     back_up(&pair.a, 1).await;
-    pair.a.enter();
-    assert!(recorded_backup_parts() > 0, "A recorded writing its backup");
-    crate::sdk::wallet_backup_flow::forget_parts_held_everywhere().expect("forgotten");
-    assert_eq!(
-        recorded_backup_parts(),
-        0,
-        "every seat holds every part, so A keeps no record of writing them"
-    );
     let a_before = pair.a.era_balance();
     let b_before = pair.b.era_balance();
 

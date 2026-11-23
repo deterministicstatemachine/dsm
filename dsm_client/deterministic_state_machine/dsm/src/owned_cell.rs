@@ -41,7 +41,7 @@ pub const CELL_LOCK_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
 /// A lock's public key length, `PK.seed ‖ PK.root`.
 pub const CELL_LOCK_LEN: usize = 64;
 /// The longest signature a proof carries (SPX256f is 49,856 bytes).
-const SIGNATURE_MAX_LEN: usize = 65_535;
+pub(crate) const SIGNATURE_MAX_LEN: usize = 65_535;
 
 /// Who may write a cell of a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +81,11 @@ pub enum CellOwnership {
     /// AttA derive a device that, with that genesis and `F`'s position,
     /// derives this cell, and which verifies under its own key.
     Fulfillment,
+    /// A namespace no member keeps a write in any more: the wallet backup
+    /// cells of before 2026-11-23, replaced by each device's one backup slot
+    /// (owner, 2026-11-23: "adjust the code after that so that there's no
+    /// longer that spot").
+    Retired,
 }
 
 /// The namespaces of owned cells.
@@ -90,7 +95,9 @@ fn owned_namespaces() -> [&'static [u8]; 1] {
 
 /// Who may write a cell of `namespace`.
 pub fn ownership(namespace: &[u8]) -> CellOwnership {
-    if namespace == DIRECTORY_NAMESPACE {
+    if namespace == crate::common::domain_tags::RETIRED_WALLET_BACKUP_CELLS {
+        CellOwnership::Retired
+    } else if namespace == DIRECTORY_NAMESPACE {
         CellOwnership::Directory
     } else if namespace == crate::economic::register::economic_root_namespace() {
         CellOwnership::Register
@@ -233,6 +240,8 @@ pub enum CellWriteRefusal {
     Signature,
     /// The signature could not be checked.
     Crypto(String),
+    /// No member keeps a write in this namespace any more.
+    Retired,
 }
 
 impl core::fmt::Display for CellWriteRefusal {
@@ -266,13 +275,14 @@ impl core::fmt::Display for CellWriteRefusal {
             ),
             Self::Signature => write!(f, "the proof's key did not sign this write"),
             Self::Crypto(why) => write!(f, "the signature could not be checked: {why}"),
+            Self::Retired => write!(f, "no member keeps a write in this namespace any more"),
         }
     }
 }
 
 impl std::error::Error for CellWriteRefusal {}
 
-fn strict<M: prost::Message + Default>(
+pub(crate) fn strict<M: prost::Message + Default>(
     bytes: &[u8],
     wire: &str,
     max_tag: u32,
@@ -309,13 +319,13 @@ fn directory_write_field_limit(tag: u32) -> Option<FieldLimit> {
     }
 }
 
-fn fixed32(bytes: &[u8]) -> Result<[u8; 32], CellWriteRefusal> {
+pub(crate) fn fixed32(bytes: &[u8]) -> Result<[u8; 32], CellWriteRefusal> {
     bytes
         .try_into()
         .map_err(|e: core::array::TryFromSliceError| CellWriteRefusal::Wire(e.to_string()))
 }
 
-fn signed_by(
+pub(crate) fn signed_by(
     public_key: &[u8],
     target: &[u8; 32],
     signature: &[u8],
@@ -367,6 +377,7 @@ pub fn admit_cell_write(
     proof: &[u8],
 ) -> Result<(), CellWriteRefusal> {
     match ownership(namespace) {
+        CellOwnership::Retired => Err(CellWriteRefusal::Retired),
         CellOwnership::Open => {
             if proof.is_empty() {
                 Ok(())

@@ -20,11 +20,12 @@
 use std::time::Duration;
 
 use dsm::types::error::DsmError;
-use dsm::wallet_backup::{BackupCell, BackupKeys, BackupRead, Place};
+use dsm::wallet_backup::BackupKeys;
 use rusqlite::types::Value;
 
-use crate::sdk::route_seats::{write_recorded, AtLeader};
-use crate::sdk::storage_set::{as_ccb_members, StorageSet};
+use crate::sdk::route_seats::AtLeader;
+use crate::sdk::storage_node_sdk::SetClient;
+use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
 
@@ -497,9 +498,10 @@ pub fn head_of(
     Ok(head)
 }
 
-// ── the cells ───────────────────────────────────────────────────────────────
+// ── the slot ────────────────────────────────────────────────────────────────
 
-/// The last backup this wallet wrote or restored; 0 when none.
+/// The last generation this wallet used for a backup or restored, or the
+/// highest a member named; 0 when none.
 pub fn latest_written() -> Result<u64, DsmError> {
     match crate::storage::client_db::get_setting(LATEST).map_err(|e| storage("setting", e))? {
         Some(n) => n.parse().map_err(|e| storage("setting", e)),
@@ -507,153 +509,265 @@ pub fn latest_written() -> Result<u64, DsmError> {
     }
 }
 
-/// Record `n` as the last backup this wallet wrote or restored.
+/// Record `n` as the last generation this wallet used or restored, or the
+/// highest a member named: the next backup is written as a higher one.
 pub fn record_latest(n: u64) -> Result<(), DsmError> {
     crate::storage::client_db::set_setting(LATEST, &n.to_string())
         .map_err(|e| storage("setting", e))
 }
 
-/// The most one part of a backup carries: a sealed part is one cell value at
-/// its largest.
+/// The most one part of a backup carries.
 pub const PART: usize = dsm::wallet_backup::MAX_PART;
 
-/// Write `body` as backup `n` in one attempt of its own, in parts of at most
-/// [`PART`], each leader first: the later parts under the attempt, then part 0,
-/// which names the attempt and the count of parts, at the backup's own cell. An
-/// attempt cut short leaves only cells no later attempt uses. Answers the
-/// leader's answer for part 0, or for the later part it stopped at.
+/// The cell lock of the device `own` names, `(genesis, device id)`: the key
+/// its slot is bound to and the one that starts every write of it. It comes
+/// from the wallet seed, so a wallet restored from its words has it again.
+pub(crate) fn slot_lock(own: (D32, D32)) -> Result<dsm::crypto::sphincs::SphincsKeyPair, DsmError> {
+    let seed = crate::fetch_wallet_seed()
+        .map_err(|e| DsmError::invalid_operation(format!("wallet backup: wallet locked: {e}")))?;
+    let s_master = crate::init::smaster_of(seed.as_slice(), &own.0, &own.1);
+    dsm::owned_cell::derive_cell_lock_keypair(&s_master, &own.1)
+}
+
+/// This device's `(genesis, device id)`.
+fn own_device() -> Result<(D32, D32), DsmError> {
+    let id32 = |v: Option<Vec<u8>>, what: &str| -> Result<D32, DsmError> {
+        let bytes = v.ok_or_else(|| storage(what, "none yet"))?;
+        D32::try_from(bytes.as_slice()).map_err(|e| storage(what, e))
+    };
+    Ok((
+        id32(crate::sdk::app_state::AppState::get_genesis_hash(), "genesis")?,
+        id32(crate::sdk::app_state::AppState::get_device_id(), "device id")?,
+    ))
+}
+
+/// How a write of a backup came out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Written {
+    /// At least the set's quorum of members hold it as their whole backup.
+    Whole,
+    /// A member holds a start of `highest`, not lower than this one: the next
+    /// backup is written after it.
+    Superseded { highest: u64 },
+    /// Fewer than the quorum hold it whole: `whole` of `members`, and what
+    /// the others answered.
+    Short {
+        whole: usize,
+        members: usize,
+        why: Vec<String>,
+    },
+}
+
+/// How one member took a write.
+enum AtMember {
+    Whole,
+    Superseded(u64),
+}
+
+/// Write `sealed`, generation `generation` of `slot`, at `member`: the start,
+/// then every part in order.
+async fn write_at(
+    member: &crate::sdk::storage_node_sdk::MemberClient,
+    slot: &D32,
+    generation: u64,
+    start: &[u8],
+    sealed: &[Vec<u8>],
+) -> Result<AtMember, String> {
+    use crate::sdk::storage_node_sdk::SlotAnswer;
+    let mut held = match member.backup_start(slot, start).await? {
+        SlotAnswer::Taken(held) => held,
+        SlotAnswer::Superseded(held) => return Ok(AtMember::Superseded(held.highest_generation)),
+    };
+    if held.generation != generation {
+        for (part, bytes) in sealed.iter().enumerate() {
+            let part = u32::try_from(part).map_err(|e| format!("part {part}: {e}"))?;
+            held = match member.backup_part(slot, generation, part, bytes).await? {
+                SlotAnswer::Taken(held) => held,
+                SlotAnswer::Superseded(held) => {
+                    return Ok(AtMember::Superseded(held.highest_generation))
+                }
+            };
+        }
+    }
+    if held.generation == generation {
+        Ok(AtMember::Whole)
+    } else {
+        Err(format!(
+            "every part sent, and the member holds generation {} whole",
+            held.generation
+        ))
+    }
+}
+
+/// Write `body` as generation `generation` of this wallet's slot on the
+/// device whose cell lock is `lock`, at every member of `set` at once: the
+/// start the lock signs, then the parts, each no larger than [`PART`].
 pub async fn write(
     set: &StorageSet,
     keys: &BackupKeys,
-    n: u64,
+    lock: &dsm::crypto::sphincs::SphincsKeyPair,
+    generation: u64,
     body: &Body,
 ) -> Result<Written, DsmError> {
     let bytes = body.encode()?;
     let chunks: Vec<&[u8]> = bytes.chunks(PART).collect();
-    let parts = u32::try_from(chunks.len()).map_err(|e| storage("parts", e))?;
-    let attempt = dsm::wallet_backup::new_attempt();
-    let members = as_ccb_members(set)?;
-    for (index, chunk) in chunks.iter().enumerate().rev() {
-        let part = u32::try_from(index).map_err(|e| storage("part", e))?;
-        let place = Place::of(part, attempt);
-        let cell = BackupCell::new(keys, n, place, &members, &set.id())
-            .map_err(|e| storage("cell", format!("{e:?}")))?;
-        let sealed = keys.seal(n, part, parts, &attempt, chunk)?;
-        let report = write_recorded(set, cell.routed(), &cell.keeps(), &sealed).await?;
-        match (place, report.leader()) {
-            (_, AtLeader::Link) => {}
-            (Place::First, AtLeader::Taken) => return Ok(Written::NumberTaken),
-            (Place::Later { .. }, AtLeader::Taken) | (_, AtLeader::Unanswered) => {
-                return Ok(Written::Stopped { part })
-            }
+    if chunks.len() > dsm::wallet_backup::MAX_PARTS {
+        return Err(storage(
+            "size",
+            format!(
+                "{} bytes is more than {} parts",
+                bytes.len(),
+                dsm::wallet_backup::MAX_PARTS
+            ),
+        ));
+    }
+    let count = u32::try_from(chunks.len()).map_err(|e| storage("parts", e))?;
+    let slot = keys.slot(&lock.public_key);
+    let sealed = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let i = u32::try_from(i).map_err(|e| storage("part", e))?;
+            keys.seal(&slot, generation, i, count, chunk)
+        })
+        .collect::<Result<Vec<_>, DsmError>>()?;
+    let digests: Vec<D32> = sealed
+        .iter()
+        .map(|p| dsm::wallet_backup::part_digest(p))
+        .collect();
+    let (slot, start) = keys.start(lock, generation, &digests)?;
+    let client = SetClient::new(set)?;
+    let answers = futures::future::join_all(
+        client
+            .members()
+            .iter()
+            .map(|m| write_at(m, &slot, generation, &start, &sealed)),
+    )
+    .await;
+    let mut whole = 0usize;
+    let mut highest = None;
+    let mut why = Vec::new();
+    for (member, answer) in client.members().iter().zip(answers) {
+        match answer {
+            Ok(AtMember::Whole) => whole += 1,
+            Ok(AtMember::Superseded(h)) => highest = highest.max(Some(h)),
+            Err(e) => why.push(format!("{}: {e}", member.member_id())),
         }
     }
-    Ok(Written::Whole)
-}
-
-/// How a write of a backup came out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Written {
-    /// Every part holds its cell, part 0 last: the backup is written.
-    Whole,
-    /// Part 0's cell already holds a whole backup of this wallet's: the number
-    /// is used, and the next backup goes after it.
-    NumberTaken,
-    /// The write stopped at `part` without part 0: nothing of it is relied on,
-    /// and the number stays free for the next attempt.
-    Stopped { part: u32 },
-}
-
-/// What the cell of the part of backup `n` at `place` holds, read from the
-/// set's seats. Reads that do not decide it yet are a storage error, never an
-/// open cell.
-pub fn read(
-    set: &StorageSet,
-    own: (D32, D32),
-    keys: &BackupKeys,
-    n: u64,
-    place: Place,
-) -> Result<BackupRead, DsmError> {
-    let ctx = crate::sdk::sofi_reads::VerifierContext::new(set, Some(own), None)?;
-    ctx.verifier()
-        .read_backup_cell(keys, n, place)
-        .map_err(crate::sdk::sofi_reads::verifier_error)?
-        .map_err(|missing| {
-            storage(
-                &format!("backup {n} part {}", place.index()),
-                format!("not decided yet: {missing:?}"),
-            )
-        })
-}
-
-/// The part of backup `n` at `place` once final, `None` when its cell is
-/// open. A cell held by a write not final yet is an error to try again on.
-fn settled_part(
-    set: &StorageSet,
-    own: (D32, D32),
-    keys: &BackupKeys,
-    n: u64,
-    place: Place,
-) -> Result<Option<dsm::wallet_backup::Opened>, DsmError> {
-    let at = read(set, own, keys, n, place)?;
-    if at.open() {
-        return Ok(None);
-    }
-    at.settled().cloned().map(Some).ok_or_else(|| {
-        storage(
-            &format!("backup {n} part {}", place.index()),
-            "held, not final yet; try again shortly",
-        )
+    let quorum = usize::try_from(set.quorum()).map_err(|e| storage("quorum", e))?;
+    Ok(match highest {
+        _ if whole >= quorum => Written::Whole,
+        Some(highest) => Written::Superseded { highest },
+        None => Written::Short {
+            whole,
+            members: client.members().len(),
+            why,
+        },
     })
 }
 
-/// The latest backup the cells hold, by its number: backup `n`'s part 0 holds
-/// its cell only once its later parts do, and `n` is written only once
-/// `n − 1`'s part 0 holds its cell, so the part 0 cells fill in order with no
-/// gap, and the latest is found by doubling, then halving, on part 0. Its later
-/// parts are read under the attempt part 0 names, and each must be final.
-pub fn latest(
+/// The latest backup the members of `set` hold whole in the slot of the
+/// device `own` names, `(genesis, device id)`, with its generation: the
+/// highest whole one whose every part a member serves as the digest that
+/// member names and that opens under this wallet's key as that part. `None`
+/// only when every member answered that it holds none; a read that does not
+/// decide it is an error to try again on.
+pub async fn latest(
     set: &StorageSet,
     own: (D32, D32),
     keys: &BackupKeys,
 ) -> Result<Option<(u64, Body)>, DsmError> {
-    let head = |n: u64| settled_part(set, own, keys, n, Place::First);
-    let Some(first) = head(1)? else {
+    let lock = slot_lock(own)?;
+    let slot = keys.slot(&lock.public_key);
+    let client = SetClient::new(set)?;
+    let states =
+        futures::future::join_all(client.members().iter().map(|m| m.backup_slot(&slot))).await;
+    let mut unanswered = 0usize;
+    let mut why = Vec::new();
+    let mut held: Vec<(u64, Vec<D32>, usize)> = Vec::new();
+    for (at, state) in states.into_iter().enumerate() {
+        let member = client.members().get(at).map(|m| m.member_id().to_string());
+        let named = dsm::wallet_backup::digests_of;
+        match state.map(|state| (state.generation, named(&state.part_digests))) {
+            Ok((0, _)) => {}
+            Ok((generation, Ok(digests))) => held.push((generation, digests, at)),
+            Ok((generation, Err(e))) => why.push(format!("{member:?}: generation {generation}: {e}")),
+            Err(e) => {
+                unanswered += 1;
+                why.push(format!("{member:?}: {e}"));
+            }
+        }
+    }
+    held.sort_by_key(|h| std::cmp::Reverse(h.0));
+    for (generation, digests, _) in &held {
+        let servers: Vec<usize> = held
+            .iter()
+            .filter(|(g, d, _)| g == generation && d == digests)
+            .map(|(_, _, at)| *at)
+            .collect();
+        match read_whole(&client, &slot, keys, *generation, digests, &servers).await {
+            Ok(body) => return Ok(Some((*generation, body))),
+            Err(e) => why.push(format!("generation {generation}: {e}")),
+        }
+    }
+    if held.is_empty() && unanswered == 0 {
         return Ok(None);
-    };
-    let (mut lo, mut lo_head) = (1u64, first);
-    let mut hi = 2u64;
-    while let Some(found) = head(hi)? {
-        (lo, lo_head) = (hi, found);
-        hi = hi
-            .checked_mul(2)
-            .ok_or_else(|| storage("latest", "backup numbers exhausted"))?;
     }
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        match head(mid)? {
-            Some(found) => (lo, lo_head) = (mid, found),
-            None => hi = mid,
+    Err(storage(
+        "slot",
+        format!(
+            "no whole backup read back from the members that answered ({unanswered} did not); \
+             not decided yet: {}",
+            why.join("; ")
+        ),
+    ))
+}
+
+/// Generation `generation` of `slot`, read part by part from the members at
+/// `servers`, each part taken only as its digest and as that part when it
+/// opens.
+async fn read_whole(
+    client: &SetClient,
+    slot: &D32,
+    keys: &BackupKeys,
+    generation: u64,
+    digests: &[D32],
+    servers: &[usize],
+) -> Result<Body, DsmError> {
+    let count = u32::try_from(digests.len()).map_err(|e| storage("parts", e))?;
+    let mut bytes = Vec::new();
+    for (part, digest) in digests.iter().enumerate() {
+        let part = u32::try_from(part).map_err(|e| storage("part", e))?;
+        let mut found = None;
+        let mut why = Vec::new();
+        for member in servers.iter().filter_map(|at| client.members().get(*at)) {
+            let served = member.backup_whole_part(slot, generation, part).await;
+            let opened = match served {
+                Ok(Some(sealed)) if dsm::wallet_backup::part_digest(&sealed) == *digest => {
+                    keys.open(slot, generation, part, &sealed)
+                        .map_err(|refusal| format!("{refusal:?}"))
+                }
+                Ok(Some(_other)) => Err("not the digest it names".to_string()),
+                Ok(None) => Err("holds no such part".to_string()),
+                Err(e) => Err(e),
+            };
+            match opened {
+                Ok(opened) if opened.parts == count => {
+                    found = Some(opened.chunk);
+                    break;
+                }
+                Ok(opened) => why.push(format!(
+                    "{}: names {} parts, not {count}",
+                    member.member_id(),
+                    opened.parts
+                )),
+                Err(e) => why.push(format!("{}: {e}", member.member_id())),
+            }
         }
+        let chunk = found.ok_or_else(|| storage(&format!("part {part}"), why.join("; ")))?;
+        bytes.extend_from_slice(&chunk);
     }
-    let mut bytes = lo_head.chunk;
-    for part in 1..lo_head.parts {
-        let place = Place::of(part, lo_head.attempt);
-        let found = settled_part(set, own, keys, lo, place)?.ok_or_else(|| {
-            storage(
-                &format!("backup {lo} part {part}"),
-                "missing though part 0 is written",
-            )
-        })?;
-        if found.parts != lo_head.parts {
-            return Err(storage(
-                &format!("backup {lo} part {part}"),
-                "names another count of parts",
-            ));
-        }
-        bytes.extend_from_slice(&found.chunk);
-    }
-    Ok(Some((lo, Body::decode(&bytes)?)))
+    Body::decode(&bytes)
 }
 
 // ── backing up once the wallet is still ────────────────────────────────────
@@ -686,7 +800,8 @@ pub fn activity_mark() -> Result<D32, DsmError> {
 /// What one backup attempt came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attempt {
-    /// Backup `n` holds its cell.
+    /// Generation `n` is the whole backup at the set's quorum of members,
+    /// written over the one before.
     Written(u64),
     /// Nothing written now, and why.
     NotNow(NotNow),
@@ -700,6 +815,7 @@ pub enum Attempt {
 /// change of it while the write is under way cancels the write.
 pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmError> {
     let keys = keys()?;
+    let lock = slot_lock(own_device()?)?;
     let body = match snapshot()? {
         Ok(body) => body,
         Err(not_now) => return Ok(Attempt::NotNow(not_now)),
@@ -707,9 +823,12 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
     if activity_mark()? != mark {
         return Ok(Attempt::Cancelled);
     }
-    let n = latest_written()?
+    let generation = latest_written()?
         .checked_add(1)
-        .ok_or_else(|| storage("number", "backup numbers exhausted"))?;
+        .ok_or_else(|| storage("generation", "backup generations exhausted"))?;
+    // The generation is used from here: an attempt the wallet's next step
+    // cuts short is written over by the next, which goes higher.
+    record_latest(generation)?;
     let moved = async {
         loop {
             tokio::time::sleep(WATCH).await;
@@ -724,21 +843,24 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
         }
     };
     tokio::select! {
-        written = write(set, &keys, n, &body) => match written? {
-            Written::Whole => {
-                record_latest(n)?;
-                Ok(Attempt::Written(n))
+        written = write(set, &keys, &lock, generation, &body) => match written? {
+            Written::Whole => Ok(Attempt::Written(generation)),
+            // A member took a start at least this high: one this wallet wrote
+            // from another device, or before it was restored. The next backup
+            // goes after it.
+            Written::Superseded { highest } => {
+                record_latest(highest)?;
+                Err(storage(
+                    &format!("generation {generation}"),
+                    format!("a member holds {highest}; the next backup goes after it"),
+                ))
             }
-            // A whole backup of this wallet's holds the number already: one
-            // an earlier attempt finished. The next backup goes after it.
-            Written::NumberTaken => {
-                record_latest(n)?;
-                Err(storage(&format!("backup {n}"), "the number is used; the next goes after it"))
-            }
-            // Nothing of this attempt is relied on, and the number stays free.
-            Written::Stopped { part } => Err(storage(
-                &format!("backup {n} part {part}"),
-                "the write stopped before part 0; the next attempt takes the number",
+            Written::Short { whole, members, why } => Err(storage(
+                &format!("generation {generation}"),
+                format!(
+                    "whole at {whole} of {members} members ({}); the next attempt writes it over",
+                    why.join("; ")
+                ),
             )),
         },
         () = moved => Ok(Attempt::Cancelled),
@@ -764,23 +886,22 @@ pub fn start() {
     *running = Some(crate::runtime::get_runtime().spawn(run()));
 }
 
-/// Forget this wallet's record of every backup part each seat of its route
-/// holds: nothing continues such a write, and a backup is read back from the
-/// nodes, never from this record.
-pub fn forget_parts_held_everywhere() -> Result<usize, DsmError> {
-    let forgotten = crate::storage::client_db::route_writes::forget_writes_held_everywhere(
-        dsm::common::domain_tags::TAG_DSM_WALLET_BACKUP_CELL.source_bytes(),
-        dsm::route_chain::ROUTE_LEN,
+/// Forget this phone's records of writing the backup cells of before the
+/// slot: no member takes a write there any more, so nothing of them is left
+/// to continue.
+fn forget_old_backup_writes() -> Result<(), DsmError> {
+    let forgotten = crate::storage::client_db::route_writes::forget_writes_in(
+        dsm::common::domain_tags::RETIRED_WALLET_BACKUP_CELLS,
     )
-    .map_err(|e| storage("forgetting the parts every seat holds", e))?;
+    .map_err(|e| storage("forgetting the old backup cells' writes", e))?;
     if forgotten > 0 {
-        log::info!("[wallet backup] forgot {forgotten} parts every seat holds");
+        log::info!("[wallet backup] forgot {forgotten} writes of the old backup cells");
     }
-    Ok(forgotten)
+    Ok(())
 }
 
 async fn run() {
-    if let Err(e) = forget_parts_held_everywhere() {
+    if let Err(e) = forget_old_backup_writes() {
         log::warn!("{e}");
     }
     let mut seen: Option<D32> = None;
@@ -825,10 +946,7 @@ async fn run() {
         match back_up_now(&set, mark).await {
             Ok(Attempt::Written(n)) => {
                 backed_up = Some(mark);
-                log::info!("[wallet backup] backup {n} written");
-                if let Err(e) = forget_parts_held_everywhere() {
-                    log::warn!("{e}");
-                }
+                log::info!("[wallet backup] generation {n} written over the last");
             }
             Ok(Attempt::NotNow(why)) => log::debug!("[wallet backup] not now: {why:?}"),
             Ok(Attempt::Cancelled) => log::info!("[wallet backup] cancelled: the wallet moved"),

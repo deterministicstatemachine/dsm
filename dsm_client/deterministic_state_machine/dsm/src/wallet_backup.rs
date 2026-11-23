@@ -1,54 +1,59 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! A wallet's sealed backups on storage nodes (DSM Amendment A40).
+//! A wallet's sealed backup on storage nodes (DSM Amendment A40).
 //!
 //! What a phone holds to carry on with its contacts — each relationship's
 //! chain tip and its key chain, the write grants, the device head — lives only
-//! on the phone. A wallet therefore writes a backup of it to the storage nodes,
+//! on the phone. A wallet therefore keeps a backup of it on the storage nodes,
 //! sealed under a key only its 24 words give, and a wallet restored from those
-//! words reads the latest one back:
+//! words reads it back. The network's own record of every payment is the full
+//! history; the backup is one per device and is written over (owner,
+//! 2026-11-23: "There only should be one backup per phone, per device,
+//! basically, and of course, there's the full history for the mirroring", and
+//! "It should replace it. It should be a separate thing, and yes, it needs the
+//! key to do such a thing"):
 //!
 //! ```text
-//! k   = H(DSM/wallet-backup/key/v1 ‖ wallet_seed)        the seal's key
-//! l   = H(DSM/wallet-backup/locator/v1 ‖ wallet_seed)    finds the cells
-//! K_n,0   = H(DSM/wallet-backup/v1 ‖ l ‖ n ‖ 0)            part 0 of backup n
-//! K_n,i,a = H(DSM/wallet-backup/v1 ‖ l ‖ n ‖ i ‖ a)        part i > 0, attempt a
-//! s       = H(DSM/wallet-backup/seed/v1 ‖ K)               a cell's route seed
-//! write   = nonce(24) ‖ XChaCha20-Poly1305(k, nonce, aad = K,
-//!                                          n ‖ i ‖ parts ‖ a ‖ chunk)
+//! k = H(DSM/wallet-backup/key/v1 ‖ wallet_seed)       the seal's key
+//! l = H(DSM/wallet-backup/locator/v1 ‖ wallet_seed)   the slot's secret route
+//! S = H(DSM/wallet-backup/slot/v1 ‖ l ‖ lock)          the device's one slot
+//! part_i = nonce(24) ‖ XChaCha20-Poly1305(k, nonce, aad = S,
+//!                                         g ‖ i ‖ parts ‖ chunk_i)
+//! d_i = H(DSM/wallet-backup/part/v1 ‖ part_i)
+//! start = l, lock, g, d_0 … d_{parts−1},
+//!         sig_lock(H(DSM/wallet-backup/slot-write/v1 ‖ S ‖ g ‖ parts ‖ d_0 … ))
 //! ```
 //!
-//! A backup is split into parts no larger than one cell value. Each attempt at
-//! writing backup `n` draws its own attempt id `a`; its later parts go to
-//! cells under `a`, and part 0, which names `a` and the count of parts, goes
-//! to the backup's own cell `K_n,0`, last. Each cell holds the first write
-//! recognized at its leader and is final by storage §9 as every cell is. A
-//! write is recognized only when it opens under `k` as its cell's own part: no
-//! node and no other party can make one, and no node can tell where the next
-//! backup goes, since `l` is secret. An attempt cut short leaves only cells no
-//! later attempt uses, so backup `n` is written only once `n − 1`'s part 0
-//! holds its cell, the backups fill `K_1,0, K_2,0, …` with no gap, and the
-//! latest is the last part 0 holding its cell.
+//! `lock` is the device's cell lock, the key its directory entry publishes and
+//! its master seed alone derives. A write of the slot starts with the start,
+//! naming the generation `g` and every part's digest under the lock's
+//! signature; a member then takes a part only when its digest is the one the
+//! start names. Each member holds one whole backup per slot and at most one
+//! being written: a start with a higher generation than any it took replaces
+//! the one being written (an attempt the wallet's next step cut short is
+//! written over), and the one being written replaces the whole one the moment
+//! the member holds its every part. Nothing else ever reaches the slot, and an
+//! older start, replayed, is refused, since its generation is lower.
 //!
-//! Whether the latest backup is current is the restore's to decide: its body
-//! names the register position it was taken at, and only a backup taken at the
+//! Whether the backup is current is the restore's to decide: its body names
+//! the register position it was taken at, and only a backup taken at the
 //! position the restore re-verified is installed. An older one is never used,
-//! so a node that withholds the latest backup can keep contacts from coming
+//! so a member that withholds the latest backup can keep contacts from coming
 //! back, but can never roll them back. What the body holds is the SDK's.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 
 use crate::common::domain_tags::{
-    TAG_DSM_WALLET_BACKUP_CELL, TAG_DSM_WALLET_BACKUP_KEY, TAG_DSM_WALLET_BACKUP_LOCATOR,
-    TAG_DSM_WALLET_BACKUP_SEED,
+    TAG_DSM_WALLET_BACKUP_KEY, TAG_DSM_WALLET_BACKUP_LOCATOR, TAG_DSM_WALLET_BACKUP_PART,
+    TAG_DSM_WALLET_BACKUP_SLOT, TAG_DSM_WALLET_BACKUP_SLOT_WRITE,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::route_chain::{
-    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
-    CellReading, ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
-};
+use crate::crypto::sphincs::{sphincs_sign, SphincsKeyPair};
+use crate::owned_cell::{fixed32, signed_by, strict, CellWriteRefusal, CELL_LOCK_LEN};
 use crate::types::error::DsmError;
+use crate::types::proto::BackupSlotStartV1;
+use crate::types::receipt_types::FieldLimit;
 
 type D32 = [u8; 32];
 
@@ -58,73 +63,41 @@ const NONCE_LEN: usize = 24;
 /// A Poly1305 tag.
 const TAG_LEN: usize = 16;
 
-/// One attempt at writing a backup: its later parts lie under it.
-pub type AttemptId = [u8; 16];
+/// What a part names before its bytes: the generation, the part's index and
+/// the count of parts.
+const HEADER_LEN: usize = 8 + 4 + 4;
 
-/// What a part names before its bytes: the backup's number, the part's, the
-/// count of parts and the attempt.
-const HEADER_LEN: usize = 8 + 4 + 4 + 16;
-
-/// A fresh attempt id, for one attempt at writing a backup.
-pub fn new_attempt() -> AttemptId {
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&crate::crypto::rng::random_bytes(16));
-    out
-}
-
-/// Where a part of a backup lies: part 0 at the backup's own cell, every later
-/// part under the attempt part 0 names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Place {
-    First,
-    Later { index: u32, attempt: AttemptId },
-}
-
-impl Place {
-    /// The place of part `index` of an attempt.
-    pub fn of(index: u32, attempt: AttemptId) -> Self {
-        match index {
-            0 => Self::First,
-            index => Self::Later { index, attempt },
-        }
-    }
-
-    pub fn index(&self) -> u32 {
-        match self {
-            Self::First => 0,
-            Self::Later { index, .. } => *index,
-        }
-    }
-}
-
-/// The most one part of a backup carries: a sealed part is exactly one cell
+/// The most one part carries, so a sealed part is no larger than one cell
 /// value at its largest (`route_chain::MAX_VALUE_LEN`).
 pub const MAX_PART: usize = crate::route_chain::MAX_VALUE_LEN - NONCE_LEN - TAG_LEN - HEADER_LEN;
 
-/// Why a write is not a wallet's backup at a cell. Nothing about its bytes is
+/// The most parts one backup has: a backup is at most this many times
+/// [`MAX_PART`].
+pub const MAX_PARTS: usize = 64;
+
+/// Why a part is not a wallet's backup at its slot. Nothing about its bytes is
 /// revealed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackupRefusal {
-    /// Shorter than a nonce and a backup number.
+    /// Shorter than a nonce and a header.
     Short,
-    /// It does not open under this wallet's key at this cell.
+    /// It does not open under this wallet's key at this slot.
     DoesNotOpen,
-    /// It opens, but as another backup, part or attempt than the cell's.
-    OtherBackup { named: u64, part: u32 },
+    /// It opens, but as another generation or part than the one read.
+    OtherPart { generation: u64, part: u32 },
     /// It names a part past its own count.
     NoSuchPart { part: u32, parts: u32 },
 }
 
-/// One part of a backup as its write opens: how many parts the backup has, and
-/// this part's bytes.
+/// One part of a backup as it opens: how many parts the backup has, and this
+/// part's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Opened {
     pub parts: u32,
-    pub attempt: AttemptId,
     pub chunk: Vec<u8>,
 }
 
-/// The keys of one wallet's backups, from its wallet seed. Held only by the
+/// The keys of one wallet's backup, from its wallet seed. Held only by the
 /// wallet; never written anywhere.
 #[derive(Clone)]
 pub struct BackupKeys {
@@ -136,6 +109,41 @@ impl core::fmt::Debug for BackupKeys {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("BackupKeys(..)")
     }
+}
+
+/// A device's backup slot: its secret route bound to its cell lock.
+pub fn slot_address(route: &D32, lock_public_key: &[u8]) -> D32 {
+    let mut h = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_SLOT);
+    h.update(route);
+    h.update(lock_public_key);
+    *h.finalize().as_bytes()
+}
+
+/// A sealed part's digest, as a start names it and a member checks it.
+pub fn part_digest(part: &[u8]) -> D32 {
+    let mut h = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_PART);
+    h.update(part);
+    *h.finalize().as_bytes()
+}
+
+/// What the cell lock signs to start generation `generation` of `slot`, whose
+/// parts have `digests`: `H(tag ‖ S ‖ u64be(g) ‖ u32be(parts) ‖ d_0 … )`. Every
+/// field has a fixed length once the count is known, so the signed bytes have
+/// one reading.
+fn start_target(slot: &D32, generation: u64, digests: &[D32]) -> Result<D32, StartRefusal> {
+    if digests.len() > MAX_PARTS {
+        return Err(StartRefusal::TooManyParts);
+    }
+    let parts = u32::try_from(digests.len())
+        .map_err(|e| StartRefusal::Wire(format!("the count of parts: {e}")))?;
+    let mut h = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_SLOT_WRITE);
+    h.update(slot);
+    h.update(&generation.to_be_bytes());
+    h.update(&parts.to_be_bytes());
+    for d in digests {
+        h.update(d);
+    }
+    Ok(*h.finalize().as_bytes())
 }
 
 impl BackupKeys {
@@ -152,35 +160,35 @@ impl BackupKeys {
         }
     }
 
-    /// The cell of the part of the `n`-th backup at `place`.
-    pub fn cell_key(&self, n: u64, place: &Place) -> D32 {
-        let mut h = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_CELL);
-        h.update(&self.locator);
-        h.update(&n.to_le_bytes());
-        h.update(&place.index().to_le_bytes());
-        if let Place::Later { attempt, .. } = place {
-            h.update(attempt);
-        }
-        *h.finalize().as_bytes()
+    /// This wallet's backup slot on the device whose cell lock is
+    /// `lock_public_key`.
+    pub fn slot(&self, lock_public_key: &[u8]) -> D32 {
+        slot_address(&self.locator, lock_public_key)
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new((&self.seal).into())
     }
 
-    /// The write of `chunk` as part `part` of attempt `attempt` at the `n`-th
-    /// backup, which has `parts` parts, under a fresh nonce.
+    /// `chunk` sealed as part `part` of the `parts` of generation `generation`
+    /// at `slot`, under a fresh nonce.
     pub fn seal(
         &self,
-        n: u64,
+        slot: &D32,
+        generation: u64,
         part: u32,
         parts: u32,
-        attempt: &AttemptId,
         chunk: &[u8],
     ) -> Result<Vec<u8>, DsmError> {
         if part >= parts {
             return Err(DsmError::invalid_operation(format!(
                 "wallet backup: part {part} of {parts}"
+            )));
+        }
+        if chunk.len() > MAX_PART {
+            return Err(DsmError::invalid_operation(format!(
+                "wallet backup: a part of {} bytes, past {MAX_PART}",
+                chunk.len()
             )));
         }
         // The nonce: 24 bytes from the OS, drawn a word at a time.
@@ -193,19 +201,17 @@ impl BackupKeys {
         }
         let nonce = XNonce::from_slice(&nonce_bytes);
         let mut plain = Vec::with_capacity(HEADER_LEN + chunk.len());
-        plain.extend_from_slice(&n.to_le_bytes());
+        plain.extend_from_slice(&generation.to_le_bytes());
         plain.extend_from_slice(&part.to_le_bytes());
         plain.extend_from_slice(&parts.to_le_bytes());
-        plain.extend_from_slice(attempt);
         plain.extend_from_slice(chunk);
-        let key = self.cell_key(n, &Place::of(part, *attempt));
         let sealed = self
             .cipher()
             .encrypt(
                 nonce,
                 Payload {
                     msg: &plain,
-                    aad: &key,
+                    aad: slot,
                 },
             )
             .map_err(|chacha20poly1305::aead::Error| {
@@ -216,34 +222,36 @@ impl BackupKeys {
         Ok(out)
     }
 
-    /// The part of the `n`-th backup at `place` as `write` holds it, or why
-    /// it is not that part.
-    pub fn open(&self, n: u64, place: &Place, write: &[u8]) -> Result<Opened, BackupRefusal> {
-        let (nonce, sealed) = write
+    /// Part `part` of generation `generation` at `slot` as `sealed` holds it,
+    /// or why it is not that part.
+    pub fn open(
+        &self,
+        slot: &D32,
+        generation: u64,
+        part: u32,
+        sealed: &[u8],
+    ) -> Result<Opened, BackupRefusal> {
+        let (nonce, body) = sealed
             .split_first_chunk::<NONCE_LEN>()
             .ok_or(BackupRefusal::Short)?;
-        let key = self.cell_key(n, place);
-        let part = place.index();
         let plain = self
             .cipher()
             .decrypt(
                 XNonce::from_slice(nonce),
                 Payload {
-                    msg: sealed,
-                    aad: &key,
+                    msg: body,
+                    aad: slot,
                 },
             )
             .map_err(|chacha20poly1305::aead::Error| BackupRefusal::DoesNotOpen)?;
         let (named, rest) = plain.split_first_chunk::<8>().ok_or(BackupRefusal::Short)?;
         let (named_part, rest) = rest.split_first_chunk::<4>().ok_or(BackupRefusal::Short)?;
-        let (parts, rest) = rest.split_first_chunk::<4>().ok_or(BackupRefusal::Short)?;
-        let (attempt, chunk) = rest.split_first_chunk::<16>().ok_or(BackupRefusal::Short)?;
+        let (parts, chunk) = rest.split_first_chunk::<4>().ok_or(BackupRefusal::Short)?;
         let (named, named_part) = (u64::from_le_bytes(*named), u32::from_le_bytes(*named_part));
         let parts = u32::from_le_bytes(*parts);
-        let other_attempt = matches!(place, Place::Later { attempt: a, .. } if a != attempt);
-        if named != n || named_part != part || other_attempt {
-            return Err(BackupRefusal::OtherBackup {
-                named,
+        if named != generation || named_part != part {
+            return Err(BackupRefusal::OtherPart {
+                generation: named,
                 part: named_part,
             });
         }
@@ -252,200 +260,159 @@ impl BackupKeys {
         }
         Ok(Opened {
             parts,
-            attempt: *attempt,
             chunk: chunk.to_vec(),
         })
     }
-}
 
-/// The cell of one part of a wallet's `n`-th backup on the network's pinned
-/// set.
-pub struct BackupCell {
-    keys: BackupKeys,
-    n: u64,
-    place: Place,
-    cell: RoutedCell,
-}
-
-impl BackupCell {
-    /// The cell of the part of backup `n` at `place`. `members` must
-    /// re-derive `committed_set_id`.
-    pub fn new(
-        keys: &BackupKeys,
-        n: u64,
-        place: Place,
-        members: &crate::ccb::StorageSetMembers,
-        committed_set_id: &D32,
-    ) -> Result<Self, CellError> {
-        let key = keys.cell_key(n, &place);
-        let mut seed = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_SEED);
-        seed.update(&key);
-        let routed = RoutedCell::new(
-            TAG_DSM_WALLET_BACKUP_CELL.source_bytes(),
-            key,
-            seed.finalize().as_bytes(),
-            members,
-            committed_set_id,
-        )?;
-        Ok(Self {
-            keys: keys.clone(),
-            n,
-            place,
-            cell: routed,
-        })
-    }
-
-    pub fn n(&self) -> u64 {
-        self.n
-    }
-
-    pub fn place(&self) -> Place {
-        self.place
-    }
-
-    pub fn routed(&self) -> &RoutedCell {
-        &self.cell
-    }
-
-    /// The recognizer of a write at this cell: its body, named by the digest
-    /// of the write's exact bytes. Why each other write is not one is kept in
-    /// `refused`.
-    fn recognize<'c>(
-        &'c self,
-        refused: &'c std::cell::RefCell<Vec<BackupRefusal>>,
-    ) -> impl Fn(&[u8]) -> Option<(D32, Opened)> + 'c {
-        move |bytes| match self.keys.open(self.n, &self.place, bytes) {
-            Ok(opened) => Some((write_id(bytes), opened)),
-            Err(refusal) => {
-                refused.borrow_mut().push(refusal);
-                None
-            }
-        }
-    }
-
-    /// What a reader keeps of a seat's log at this cell: copies of writes that
-    /// open under the wallet's key here.
-    pub fn keeps(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
-        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
-            let refused = std::cell::RefCell::new(Vec::new());
-            let recognize = self.recognize(&refused);
-            recognize(bytes).is_some()
-        })
+    /// The start of generation `generation` of this wallet's slot on the
+    /// device whose cell lock is `lock`, for parts with `digests`: the slot
+    /// and the start's bytes, signed by the lock.
+    pub fn start(
+        &self,
+        lock: &SphincsKeyPair,
+        generation: u64,
+        digests: &[D32],
+    ) -> Result<(D32, Vec<u8>), DsmError> {
+        use prost::Message;
+        let slot = self.slot(&lock.public_key);
+        let target = start_target(&slot, generation, digests)
+            .map_err(|why| DsmError::invalid_operation(format!("wallet backup: {why}")))?;
+        let start = BackupSlotStartV1 {
+            route: self.locator.to_vec(),
+            lock_public_key: lock.public_key.clone(),
+            generation: generation.to_be_bytes().to_vec(),
+            part_digests: digests.concat(),
+            write_signature: sphincs_sign(&lock.secret_key, &target)?,
+        };
+        let bytes = start.encode_to_vec();
+        admit_start(&slot, &bytes)
+            .map_err(|why| DsmError::invalid_operation(format!("wallet backup: {why}")))?;
+        Ok((slot, bytes))
     }
 }
 
-/// What a reader finds at a backup cell: the storage fact, and the backup
-/// holding the cell with the exact bytes of its write.
+/// Why a member takes no start at a slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackupRead {
-    n: u64,
-    fact: CellFact,
-    held: Option<(Opened, Vec<u8>)>,
-    passed_over: Vec<BackupRefusal>,
+pub enum StartRefusal {
+    /// The start is not its strict wire form, or its route or lock is not its
+    /// length: why.
+    Wire(String),
+    /// The slot is not the route bound to the lock the start carries.
+    WrongAddress,
+    /// The start names no parts.
+    NoParts,
+    /// The start names more than [`MAX_PARTS`] parts.
+    TooManyParts,
+    /// Generation 0 names no backup.
+    GenerationZero,
+    /// The lock did not sign this start, or it could not be checked: why.
+    Signature(String),
 }
 
-impl BackupRead {
-    pub fn n(&self) -> u64 {
-        self.n
-    }
-
-    pub fn fact(&self) -> CellFact {
-        self.fact
-    }
-
-    /// Why each value the leader holds ahead of the backup counts as nothing.
-    pub fn passed_over(&self) -> &[BackupRefusal] {
-        &self.passed_over
-    }
-
-    /// Whether no write holds the cell.
-    pub fn open(&self) -> bool {
-        matches!(self.fact, CellFact::Open)
-    }
-
-    /// The part once its write is final (storage spec §9 rule 7).
-    pub fn settled(&self) -> Option<&Opened> {
-        match (&self.held, self.fact) {
-            (
-                Some((opened, _)),
-                CellFact::Held {
-                    state: ChainState::Final,
-                    ..
-                },
-            ) => Some(opened),
-            (Some(..), CellFact::Held { .. } | CellFact::Open) | (None, _) => None,
+impl core::fmt::Display for StartRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Wire(why) => write!(f, "the start is not its wire form: {why}"),
+            Self::WrongAddress => write!(f, "the slot is not the address the start binds"),
+            Self::NoParts => write!(f, "the start names no parts"),
+            Self::TooManyParts => write!(f, "the start names more than {MAX_PARTS} parts"),
+            Self::GenerationZero => write!(f, "generation 0 names no backup"),
+            Self::Signature(why) => write!(f, "the lock did not sign the start: {why}"),
         }
     }
 }
 
-/// A write's name at its cell: the digest of its exact bytes.
-fn write_id(bytes: &[u8]) -> D32 {
-    let mut h = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_CELL);
-    h.update(bytes);
-    *h.finalize().as_bytes()
+impl std::error::Error for StartRefusal {}
+
+impl From<CellWriteRefusal> for StartRefusal {
+    fn from(why: CellWriteRefusal) -> Self {
+        match why {
+            CellWriteRefusal::Wire(why) => Self::Wire(why),
+            other => Self::Signature(other.to_string()),
+        }
+    }
 }
 
-/// The route-chain reading of a backup cell (storage spec §9): open, or the
-/// first recognized write at its leader and how far its chain has gone.
-/// Evidence that does not decide the cell yet is [`Missing`], never an answer.
-pub fn resolution(cell: &BackupCell, evidence: &CellEvidence) -> Result<BackupRead, Missing> {
-    let refused = std::cell::RefCell::new(Vec::new());
-    let reading = evaluate(&cell.cell, evidence, cell.recognize(&refused))?;
-    let fact = reading.fact();
-    let held = match reading {
-        CellReading::Held { object, value, .. } => Some((object, value)),
-        CellReading::Open => None,
-    };
-    Ok(BackupRead {
-        n: cell.n,
-        fact,
-        held,
-        passed_over: refused.into_inner(),
+fn start_field_limit(tag: u32) -> Option<FieldLimit> {
+    match tag {
+        1 => Some(FieldLimit::Fixed(32)),
+        2 => Some(FieldLimit::Fixed(CELL_LOCK_LEN)),
+        3 => Some(FieldLimit::Fixed(8)),
+        4 => Some(FieldLimit::Max(32 * MAX_PARTS)),
+        5 => Some(FieldLimit::Max(crate::owned_cell::SIGNATURE_MAX_LEN)),
+        _ => None,
+    }
+}
+
+/// The digests `bytes` lists, 32 bytes each in order: why not when its
+/// length is not a whole number of digests.
+pub fn digests_of(bytes: &[u8]) -> Result<Vec<D32>, String> {
+    let (whole, rest) = bytes.as_chunks::<32>();
+    if !rest.is_empty() {
+        return Err(format!(
+            "{} bytes of part digests are not a whole number of digests",
+            bytes.len()
+        ));
+    }
+    Ok(whole.to_vec())
+}
+
+/// A start a member takes at `slot`: the generation and the parts' digests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Start {
+    pub generation: u64,
+    pub part_digests: Vec<D32>,
+}
+
+/// The one check a member runs before it takes a start at `slot`: the start
+/// is its strict wire form, the slot is its route bound to its lock, it names
+/// a generation and between one and [`MAX_PARTS`] parts, and the lock signed
+/// exactly this. The protocol running, the same on every member, with no list
+/// of owners and no state, as `dsm::owned_cell`'s check is.
+pub fn admit_start(slot: &D32, bytes: &[u8]) -> Result<Start, StartRefusal> {
+    let start: BackupSlotStartV1 = strict(bytes, "backup slot start", 5, start_field_limit)?;
+    let route = fixed32(&start.route)?;
+    if slot_address(&route, &start.lock_public_key) != *slot {
+        return Err(StartRefusal::WrongAddress);
+    }
+    let generation = u64::from_be_bytes(
+        <[u8; 8]>::try_from(start.generation.as_slice())
+            .map_err(|e| StartRefusal::Wire(format!("the generation: {e}")))?,
+    );
+    if generation == 0 {
+        return Err(StartRefusal::GenerationZero);
+    }
+    let part_digests = digests_of(&start.part_digests).map_err(StartRefusal::Wire)?;
+    if part_digests.is_empty() {
+        return Err(StartRefusal::NoParts);
+    }
+    if part_digests.len() > MAX_PARTS {
+        return Err(StartRefusal::TooManyParts);
+    }
+    let target = start_target(slot, generation, &part_digests)?;
+    signed_by(&start.lock_public_key, &target, &start.write_signature)?;
+    Ok(Start {
+        generation,
+        part_digests,
     })
-}
-
-/// The recognizer of the one write a read found holding the cell, by its
-/// exact bytes, so a completion proof is about the same leader link.
-fn held_write(read: &BackupRead) -> impl Fn(&[u8]) -> Option<(D32, Opened)> + '_ {
-    move |bytes| match &read.held {
-        Some((opened, value)) if value.as_slice() == bytes => {
-            Some((write_id(bytes), opened.clone()))
-        }
-        Some(..) | None => None,
-    }
-}
-
-/// The completion proof of the backup `read` found final at the cell; `None`
-/// while no chain of it has three links, or when the read found the cell open.
-pub fn completion(
-    cell: &BackupCell,
-    read: &BackupRead,
-    evidence: &CellEvidence,
-) -> Result<Option<(Opened, CompletionProof)>, Missing> {
-    completion_proof(&cell.cell, evidence, held_write(read))
-}
-
-/// Check a kept completion proof of the backup `read` found at the cell
-/// against the reads in `evidence`.
-pub fn check_completion(
-    cell: &BackupCell,
-    read: &BackupRead,
-    evidence: &CellEvidence,
-    proof: &CompletionProof,
-) -> Result<Opened, ProofRefusal> {
-    check_completion_proof(&cell.cell, evidence, proof, held_write(read))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::sphincs::generate_keypair_from_seed;
 
     fn keys(seed: u8) -> BackupKeys {
         BackupKeys::of_wallet_seed(&[seed; 64])
     }
 
-    /// The keys are the drafted hashes of the wallet seed, and each backup has
-    /// its own cell.
+    fn lock(seed: u8) -> SphincsKeyPair {
+        generate_keypair_from_seed(crate::owned_cell::CELL_LOCK_VARIANT, &[seed; 32])
+            .expect("a lock")
+    }
+
+    /// The keys and the slot are the drafted hashes, and each wallet on each
+    /// device has its own slot.
     #[test]
     fn the_derivations_are_the_drafted_hashes() {
         let seed = [0x5A; 64];
@@ -453,110 +420,154 @@ mod tests {
         let mut h = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_LOCATOR);
         h.update(&seed);
         let locator = *h.finalize().as_bytes();
-        let attempt = [0x0A; 16];
-        let mut c = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_CELL);
-        c.update(&locator);
-        c.update(&7u64.to_le_bytes());
-        c.update(&2u32.to_le_bytes());
-        c.update(&attempt);
-        let later = Place::of(2, attempt);
-        assert_eq!(k.cell_key(7, &later), *c.finalize().as_bytes());
-        let mut first = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_CELL);
-        first.update(&locator);
-        first.update(&7u64.to_le_bytes());
-        first.update(&0u32.to_le_bytes());
-        assert_eq!(
-            k.cell_key(7, &Place::of(0, attempt)),
-            *first.finalize().as_bytes(),
-            "part 0 lies at the backup's own cell, whatever the attempt"
-        );
-        assert_ne!(
-            k.cell_key(7, &later),
-            k.cell_key(8, &later),
-            "each backup its own cells"
-        );
-        assert_ne!(
-            k.cell_key(7, &later),
-            k.cell_key(7, &Place::of(2, [0x0B; 16])),
-            "each attempt its own later cells"
-        );
-        assert_ne!(
-            k.cell_key(7, &later),
-            keys(0x5B).cell_key(7, &later),
-            "another wallet's cells"
-        );
+        let lock = [0x0C; 64];
+        let mut s = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_SLOT);
+        s.update(&locator);
+        s.update(&lock);
+        assert_eq!(k.slot(&lock), *s.finalize().as_bytes());
+        assert_ne!(k.slot(&lock), keys(0x5B).slot(&lock), "another wallet");
+        assert_ne!(k.slot(&lock), k.slot(&[0x0D; 64]), "another device's lock");
+        let mut d = dsm_domain_hasher(TAG_DSM_WALLET_BACKUP_PART);
+        d.update(b"a part");
+        assert_eq!(part_digest(b"a part"), *d.finalize().as_bytes());
     }
 
-    /// A part opens only under its own wallet's key, at its own cell, as the
-    /// backup, part and attempt it names; any other bytes, or a flipped bit,
-    /// open nothing.
+    /// A part opens only under its own wallet's key, at its own slot, as the
+    /// generation and part it names; any other bytes, or a flipped bit, open
+    /// nothing.
     #[test]
-    fn a_backup_opens_only_as_itself() {
+    fn a_part_opens_only_as_itself() {
         let k = keys(1);
-        let attempt = [0x0A; 16];
-        let at = Place::of(1, attempt);
-        let write = k
-            .seal(3, 1, 2, &attempt, b"the resume set")
-            .expect("sealed");
+        let slot = k.slot(&[0x0C; 64]);
+        let sealed = k.seal(&slot, 3, 1, 2, b"the resume set").expect("sealed");
         assert_eq!(
-            k.open(3, &at, &write),
+            k.open(&slot, 3, 1, &sealed),
             Ok(Opened {
                 parts: 2,
-                attempt,
                 chunk: b"the resume set".to_vec()
             })
         );
-        let refused = |n, place: Place, w: &[u8]| k.open(n, &place, w);
         assert_eq!(
-            refused(4, at, &write),
-            Err(BackupRefusal::DoesNotOpen),
-            "another backup"
+            k.open(&slot, 4, 1, &sealed),
+            Err(BackupRefusal::OtherPart {
+                generation: 3,
+                part: 1
+            }),
+            "another generation"
         );
         assert_eq!(
-            refused(3, Place::First, &write),
-            Err(BackupRefusal::DoesNotOpen),
+            k.open(&slot, 3, 0, &sealed),
+            Err(BackupRefusal::OtherPart {
+                generation: 3,
+                part: 1
+            }),
             "another part"
         );
         assert_eq!(
-            refused(3, Place::of(1, [0x0B; 16]), &write),
+            k.open(&k.slot(&[0x0D; 64]), 3, 1, &sealed),
             Err(BackupRefusal::DoesNotOpen),
-            "another attempt"
+            "another slot"
         );
         assert_eq!(
-            keys(2).open(3, &at, &write),
+            keys(2).open(&slot, 3, 1, &sealed),
             Err(BackupRefusal::DoesNotOpen),
             "another key"
         );
-        let mut flipped = write.clone();
+        let mut flipped = sealed.clone();
         let last = flipped.len() - 1;
         flipped[last] ^= 1;
         assert_eq!(
-            k.open(3, &at, &flipped),
+            k.open(&slot, 3, 1, &flipped),
             Err(BackupRefusal::DoesNotOpen),
             "a flipped bit"
         );
-        assert_eq!(k.open(3, &at, b"short"), Err(BackupRefusal::Short));
-        let head = k.seal(3, 0, 2, &attempt, b"first").expect("part 0");
-        assert_eq!(
-            k.open(3, &Place::First, &head).map(|o| o.attempt),
-            Ok(attempt),
-            "part 0 names its attempt"
-        );
-        let past = k
-            .seal(3, 2, 2, &attempt, b"x")
-            .expect_err("no part past the count");
+        assert_eq!(k.open(&slot, 3, 1, b"short"), Err(BackupRefusal::Short));
+        let past = k.seal(&slot, 3, 2, 2, b"x").expect_err("no part past the count");
         assert!(past.to_string().contains("part 2 of 2"), "{past}");
         let full = k
-            .seal(5, 0, 1, &attempt, &vec![0xAB; MAX_PART])
+            .seal(&slot, 5, 0, 1, &vec![0xAB; MAX_PART])
             .expect("a full part");
         assert_eq!(
             full.len(),
             crate::route_chain::MAX_VALUE_LEN,
             "one cell value at its largest"
         );
-        let again = k
-            .seal(3, 1, 2, &attempt, b"the resume set")
-            .expect("sealed");
-        assert_ne!(again, write, "a fresh nonce for every seal");
+        let over = k
+            .seal(&slot, 5, 0, 1, &vec![0xAB; MAX_PART + 1])
+            .expect_err("no part past MAX_PART");
+        assert!(over.to_string().contains("past"), "{over}");
+        let again = k.seal(&slot, 3, 1, 2, b"the resume set").expect("sealed");
+        assert_ne!(again, sealed, "a fresh nonce for every seal");
+    }
+
+    /// A member takes a start only at the slot its route and lock bind, signed
+    /// by that lock over exactly its generation and digests.
+    #[test]
+    fn a_start_is_taken_only_as_its_lock_signed_it() {
+        use prost::Message;
+        let k = keys(1);
+        let owner = lock(7);
+        let digests = [part_digest(b"one"), part_digest(b"two")];
+        let (slot, bytes) = k.start(&owner, 9, &digests).expect("a start");
+        assert_eq!(slot, k.slot(&owner.public_key));
+        assert_eq!(
+            admit_start(&slot, &bytes),
+            Ok(Start {
+                generation: 9,
+                part_digests: digests.to_vec()
+            })
+        );
+        assert_eq!(
+            admit_start(&k.slot(&lock(8).public_key), &bytes),
+            Err(StartRefusal::WrongAddress),
+            "another device's slot"
+        );
+        let decoded = BackupSlotStartV1::decode(bytes.as_slice()).expect("decoded");
+        let tampered = |f: &dyn Fn(&mut BackupSlotStartV1)| {
+            let mut s = decoded.clone();
+            f(&mut s);
+            admit_start(&slot, &s.encode_to_vec())
+        };
+        assert!(
+            matches!(tampered(&|s| s.generation = 10u64.to_be_bytes().to_vec()), Err(StartRefusal::Signature(_))),
+            "another generation"
+        );
+        assert!(
+            matches!(
+                tampered(&|s| s.part_digests[32..].copy_from_slice(&part_digest(b"three"))),
+                Err(StartRefusal::Signature(_))
+            ),
+            "another part"
+        );
+        assert!(
+            matches!(
+                tampered(&|s| s.part_digests.truncate(32)),
+                Err(StartRefusal::Signature(_))
+            ),
+            "a part dropped"
+        );
+        let stranger = lock(8);
+        let (_, theirs) = k.start(&stranger, 9, &digests).expect("their start");
+        let mut forged = BackupSlotStartV1::decode(theirs.as_slice()).expect("decoded");
+        forged.lock_public_key = owner.public_key.clone();
+        assert!(
+            matches!(
+                admit_start(&slot, &forged.encode_to_vec()),
+                Err(StartRefusal::Signature(_))
+            ),
+            "a stranger's signature under the owner's lock"
+        );
+        let zero = k.start(&owner, 0, &digests).expect_err("no generation 0");
+        assert!(zero.to_string().contains("generation 0"), "{zero}");
+        let none = k.start(&owner, 1, &[]).expect_err("no parts");
+        assert!(none.to_string().contains("field 4"), "{none}");
+        let many = k
+            .start(&owner, 1, &vec![part_digest(b"one"); MAX_PARTS + 1])
+            .expect_err("too many parts");
+        assert!(many.to_string().contains("more than"), "{many}");
+        assert!(matches!(
+            admit_start(&slot, &[0xFF, 0x01]),
+            Err(StartRefusal::Wire(_))
+        ));
     }
 }

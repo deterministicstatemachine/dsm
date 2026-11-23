@@ -295,12 +295,12 @@ dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	14
 dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	218	let ok = crate::crypto::sphincs::sphincs_verify(proven_ak, &digest, &ev.sigma_dsm)
 dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	33	generate_keypair_from_seed, sphincs_sign, sphincs_verify, SphincsKeyPair, SphincsVariant,
 dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	40	pub const CELL_LOCK_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	172	write_signature: sphincs_sign(&lock.secret_key, &target)?,
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	201	write_signature: sphincs_sign(ak_secret, &target)?,
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	323	if sphincs_verify(public_key, target, signature)
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	442	use crate::crypto::sphincs::generate_keypair_from_seed;
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	490	write_signature: sphincs_sign(&stranger.secret_key, &target).expect("signed"),
-dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	849	crate::crypto::sphincs::sphincs_sign(&trader.sk, &digest).expect("signs");
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	179	write_signature: sphincs_sign(&lock.secret_key, &target)?,
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	208	write_signature: sphincs_sign(ak_secret, &target)?,
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	333	if sphincs_verify(public_key, target, signature)
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	453	use crate::crypto::sphincs::generate_keypair_from_seed;
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	501	write_signature: sphincs_sign(&stranger.secret_key, &target).expect("signed"),
+dsm_client/deterministic_state_machine/dsm/src/owned_cell.rs	860	crate::crypto::sphincs::sphincs_sign(&trader.sk, &digest).expect("signs");
 dsm_client/deterministic_state_machine/dsm/src/recovery/activation.rs	242	use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm/src/recovery/activation.rs	252	let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
 dsm_client/deterministic_state_machine/dsm/src/recovery/assembly.rs	303	use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
@@ -479,6 +479,9 @@ dsm_client/deterministic_state_machine/dsm/src/vault/limbo_vault.rs	3251	crate::
 dsm_client/deterministic_state_machine/dsm/src/vault/limbo_vault.rs	3279	crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
 dsm_client/deterministic_state_machine/dsm/src/verification/receipt_verification.rs	366	use crate::crypto::sphincs::sphincs_verify;
 dsm_client/deterministic_state_machine/dsm/src/verification/receipt_verification.rs	395	let sig_ok = sphincs_verify(ek_pk, signing_target, sig).map_err(|e| {
+dsm_client/deterministic_state_machine/dsm/src/wallet_backup.rs	52	use crate::crypto::sphincs::{sphincs_sign, SphincsKeyPair};
+dsm_client/deterministic_state_machine/dsm/src/wallet_backup.rs	285	write_signature: sphincs_sign(&lock.secret_key, &target)?,
+dsm_client/deterministic_state_machine/dsm/src/wallet_backup.rs	403	use crate::crypto::sphincs::generate_keypair_from_seed;
 dsm_client/deterministic_state_machine/dsm/tests/authority_resolver_obligations.rs	25	use dsm::crypto::sphincs::sphincs_sign;
 dsm_client/deterministic_state_machine/dsm/tests/authority_resolver_obligations.rs	55	grk_signature: sphincs_sign(&grk.secret_key, &msg).expect("fixture"),
 dsm_client/deterministic_state_machine/dsm/tests/authority_resolver_obligations.rs	63	delegate_signature: sphincs_sign(&key.secret_key, &msg).expect("fixture"),

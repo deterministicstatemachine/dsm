@@ -233,7 +233,10 @@ mod tests {
     // directory cell's).
     // +1 for the list of tokens a device has added (owner, 2026-11-21): what
     // its AK signs over that list, kept in its own directory cell.
-    const EXPECTED_TAG_COUNT: usize = 463;
+    // +1 for each device's one backup slot (owner, 2026-11-23): the backup
+    // cell and its route seed go, the slot, its start and its part digest
+    // come.
+    const EXPECTED_TAG_COUNT: usize = 464;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
@@ -365,7 +368,11 @@ mod tests {
     /// sources declares one, registered or not.
     #[test]
     fn no_tag_reuses_a_retired_domain() {
-        const RETIRED: &[&str] = &["DSM/sofi/route-outcome/v2"];
+        const RETIRED: &[&str] = &[
+            "DSM/sofi/route-outcome/v2",
+            "DSM/wallet-backup/v1",
+            "DSM/wallet-backup/seed/v1",
+        ];
         for tag in all_tags() {
             assert!(
                 !RETIRED

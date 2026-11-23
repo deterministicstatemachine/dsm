@@ -1311,51 +1311,6 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(Ok(read))
     }
 
-    /// What the cell of a part of a wallet's `n`-th backup holds (DSM
-    /// Amendment A40),
-    /// read from the set's seats. A backup final at its cell is relied on only
-    /// through its completion proof, checked against fresh reads; reads that
-    /// do not decide the cell yet are the inner `Err`.
-    pub fn read_backup_cell(
-        &self,
-        keys: &crate::wallet_backup::BackupKeys,
-        n: u64,
-        place: crate::wallet_backup::Place,
-    ) -> Result<Result<crate::wallet_backup::BackupRead, CellMissing>, VerifierFailure> {
-        let cell =
-            crate::wallet_backup::BackupCell::new(keys, n, place, self.members, &self.set_id)
-                .map_err(|e| VerifierFailure::Refused(format!("backup cell: {e:?}")))?;
-        let evidence = self.reads.cell(cell.routed(), &cell.keeps())?;
-        let read = match crate::wallet_backup::resolution(&cell, &evidence) {
-            Ok(read) => read,
-            Err(missing) => return Ok(Err(missing)),
-        };
-        if let CellFact::Held {
-            state: ChainState::Final,
-            ..
-        } = read.fact()
-        {
-            let (.., proof) = crate::wallet_backup::completion(&cell, &read, &evidence)
-                .map_err(|missing| {
-                    VerifierFailure::Read(format!("backup cell completion: {missing:?}"))
-                })?
-                .ok_or_else(|| {
-                    VerifierFailure::Read(
-                        "backup cell completion: a final backup has no completion proof"
-                            .to_string(),
-                    )
-                })?;
-            if let Err(missing) =
-                self.rely_on_final(cell.routed(), &cell.keeps(), &evidence, proof, |ev, p| {
-                    crate::wallet_backup::check_completion(&cell, &read, ev, p).map(drop)
-                })?
-            {
-                return Ok(Err(missing));
-            }
-        }
-        Ok(Ok(read))
-    }
-
     /// The start and match cells of a computed escrow vault as a Release
     /// reads them (SoFi Amendment S22): the start cell first, and the match
     /// cell only once a Start holds it. A Start, a Withdraw or an occupant

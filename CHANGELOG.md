@@ -22,6 +22,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Fixed
 
+- **Each device keeps one wallet backup on the nodes, written over each time
+  (DSM Amendment A40; owner, 2026-11-23).** A backup used to go to new cells
+  every time, and the nodes kept every one, including attempts the wallet's
+  next payment cut short. Now each device has one backup slot on every node,
+  apart from the cells, and only its cell lock starts a write of it. A node
+  holds one whole backup per slot and at most one being written: the next
+  backup writes over the one being written and replaces the whole one once
+  every part has arrived. The network's record of every payment is unchanged
+  and stays the full history. Nodes at schema 4 add the slot tables in place
+  on start, with nothing else touched, and no longer take writes to the old
+  backup cells; phones drop their records of writing them.
+
 - **A wallet backup no longer copies every payment the wallet ever made, and
   the phone no longer keeps a copy of every backup it wrote (DSM Amendment
   A40).** On the beta nodes, backups were 4.23 GB of the 4.44 GB each node held:
@@ -30,8 +42,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   with the square of a wallet's payments. A backup now carries the steps in
   flight and each contact's latest step, so its size follows the wallet's
   contacts. Every other table, the offline account's among them, is carried
-  whole as before. Once each of the five seats holds a backup part, the phone
-  forgets its record of writing it (2.16 GB on one phone). What a restore
+  whole as before. The phone no longer keeps a record of writing backup
+  parts (2.16 GB on one phone). What a restore
   installs and how a receiver accepts a step are unchanged.
 
 - **A payment after a quiet spell no longer waits on its payer's earlier
