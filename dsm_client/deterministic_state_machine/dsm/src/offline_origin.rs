@@ -414,6 +414,11 @@ pub fn write_occupying(bytes: &[u8], cell: &D32) -> Result<OriginStep, OriginRef
 
 // ── the cell ───────────────────────────────────────────────────────────────
 
+/// The namespace of origin cells at a member: the cell domain's own bytes.
+pub fn namespace() -> &'static [u8] {
+    TAG_DSM_OFFLINE_ORIGIN_CELL.source_bytes()
+}
+
 /// The origin cell at `K_off` as Core derives it: the key, and the route seeded
 /// by `s_off` over the network's pinned set.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,7 +438,7 @@ impl OriginCell {
     ) -> Result<Self, CellError> {
         let key = origin_key(bundle, account_root);
         let routed = RoutedCell::new(
-            TAG_DSM_OFFLINE_ORIGIN_CELL.source_bytes(),
+            namespace(),
             key,
             &origin_seed(&key),
             members,
@@ -930,6 +935,148 @@ mod tests {
         // The right path settles.
         let paid = payment_at_cells(&p.pin.bundle, &loaded, &[r0, r1], &m2).expect("settles");
         assert_eq!((paid.recipient, paid.amount), (R2, 10));
+    }
+
+    /// What a member keeps at an origin cell (DSM Amendment A41; owner,
+    /// 2026-11-21: "sure protect them"): exactly what a reader counts there.
+    /// The board's spend from the cell's root is kept at the leader and as a
+    /// relayed copy at a later seat, whoever delivers it, with no proof; so is
+    /// the departure of a boundary leaving that root; and a broken board's
+    /// two valid steps from one root are both kept, the leader's first
+    /// deciding the cell as before. Refused: noise, the spend re-encoded
+    /// around its signatures, the spend claiming another amount, the spend
+    /// written as another device's, the payer's later step sent to this
+    /// root's cell, the spend in an entry naming another cell or namespace,
+    /// a write carrying a proof, and bytes that are no route entry.
+    /// MUTATION CONTROL: taking an origin write unchecked in
+    /// `dsm::owned_cell::admit_cell_write` keeps the forgeries and turns this
+    /// red.
+    #[test]
+    fn a_member_keeps_at_an_origin_cell_only_a_step_its_board_signed_from_anyone() {
+        use crate::economic::offline_boundary::{BoundaryAncestry, BoundarySince, OfflineBoundaryBody};
+        use crate::owned_cell::{admit_cell_write, CellWriteRefusal};
+        use crate::route_chain::{ChainSlot, RouteEntry};
+        use crate::types::device_state::OfflineBoundaryKind;
+        let mut p = Payer::loaded(0x38, 40);
+        let mut clone = Payer::loaded(0x38, 40);
+        let loaded = p.account_root();
+        let real = spend(&mut p, R1, 10);
+        let later = spend(&mut p, R2, 5);
+        let k = origin_key(&p.pin.bundle, &loaded);
+        let entry_at = |ns: &[u8], key: D32, value: Vec<u8>, position: usize| {
+            RouteEntry {
+                namespace: ns.to_vec(),
+                key,
+                value,
+                seat: b"dsm-node-1".to_vec(),
+                position,
+                chain: (0..position).map(|_| ChainSlot::NoResponse).collect(),
+            }
+            .encode()
+        };
+        let admit = |value: Vec<u8>| admit_cell_write(namespace(), &k, &value, &[]);
+        let refused = |r: Result<(), CellWriteRefusal>| {
+            matches!(r, Err(CellWriteRefusal::StepNotAuthorized(_)))
+        };
+
+        let good = write_of(&p, &real);
+        assert_eq!(admit(entry_at(namespace(), k, bytes_of(&good), 0)), Ok(()));
+        assert_eq!(
+            admit(entry_at(namespace(), k, bytes_of(&good), 3)),
+            Ok(()),
+            "a relayed copy at a later seat"
+        );
+
+        let (unload, release) = clone.boundary(OfflineBoundaryKind::Unload, 40);
+        let body = OfflineBoundaryBody::of(
+            &unload,
+            OfflineBoundaryKind::Unload,
+            clone.pin.bundle,
+            clone.token,
+            40,
+            BoundaryAncestry {
+                anchor: anchor_of(&clone),
+                since: BoundarySince::Previous {
+                    account_root: loaded,
+                },
+                chain: Vec::new(),
+            },
+            release,
+        )
+        .expect("body");
+        let departure = OriginDeparture::of(
+            clone.head.genesis(),
+            clone.head.public_key(),
+            clone.head.devid(),
+            &body,
+        )
+        .expect("a departure")
+        .encode()
+        .expect("bytes");
+        assert_eq!(
+            admit(entry_at(namespace(), k, departure, 0)),
+            Ok(()),
+            "a departure leaving the cell's root, the same board's other valid step"
+        );
+
+        let mut reencoded = good.clone();
+        reencoded.step.extend_from_slice(&[0x78, 0x01]);
+        let AccountHop::Spend(hop) = &real else {
+            panic!("a spend")
+        };
+        let mut wire = hop.to_proto();
+        wire.amount = 30;
+        let inflated = write_of(
+            &p,
+            &AccountHop::Spend(
+                crate::types::offline_chain::SpendHop::from_proto(wire).expect("decodes"),
+            ),
+        );
+        let mut stranger = good.clone();
+        stranger.device_id = [0x5E; 32];
+        let elsewhere = write_of(&p, &later);
+        for (bytes, what) in [
+            (b"noise".to_vec(), "noise"),
+            (bytes_of(&reencoded), "the spend re-encoded"),
+            (bytes_of(&inflated), "the spend claiming another amount"),
+            (bytes_of(&stranger), "the spend as another device's"),
+            (
+                bytes_of(&elsewhere),
+                "the payer's later step at this root's cell",
+            ),
+        ] {
+            assert!(refused(admit(entry_at(namespace(), k, bytes, 0))), "{what}");
+        }
+
+        let other_root = origin_key(&p.pin.bundle, &R1);
+        assert_eq!(
+            admit(entry_at(namespace(), other_root, bytes_of(&good), 0)),
+            Err(CellWriteRefusal::WrongAddress),
+            "the spend in an entry naming another cell"
+        );
+        assert_eq!(
+            admit(entry_at(
+                crate::app_cell::namespace(),
+                k,
+                bytes_of(&good),
+                0
+            )),
+            Err(CellWriteRefusal::WrongAddress),
+            "the spend in an entry naming another namespace"
+        );
+        assert_eq!(
+            admit_cell_write(
+                namespace(),
+                &k,
+                &entry_at(namespace(), k, bytes_of(&good), 0),
+                &[0x0A]
+            ),
+            Err(CellWriteRefusal::ProofOnOpenCell)
+        );
+        assert_eq!(
+            admit(b"not a route entry".to_vec()),
+            Err(CellWriteRefusal::ClaimNotAuthorized)
+        );
     }
 
     /// DSM Amendment A39 draft, option B, with a broken board: a clone of a board signs both a

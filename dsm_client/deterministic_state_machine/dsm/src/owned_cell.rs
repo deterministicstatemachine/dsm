@@ -81,6 +81,18 @@ pub enum CellOwnership {
     /// AttA derive a device that, with that genesis and `F`'s position,
     /// derives this cell, and which verifies under its own key.
     Fulfillment,
+    /// An offline account's origin cell `K_off = H(DSM/offline-origin/v1 ‖ B
+    /// ‖ R)` (DSM Amendment A39): the account's, its authority the board's
+    /// signatures under `B`, and anyone holding a step delivers it (its
+    /// payer, its receiver, a later payee). Owner, 2026-11-21, asked whether
+    /// to protect origin cells as the other cells are: "sure protect them". A
+    /// write carries no proof; it is kept only when its value is a route
+    /// entry for this cell carrying a write that proves its own authority
+    /// there — a step the board signed starting from the cell's root, or the
+    /// departure of a boundary leaving it — the check every reader makes.
+    /// Nothing of an offline step between boards changes: members take part
+    /// only when a step is published for settling.
+    OfflineOrigin,
 }
 
 /// The namespaces of owned cells.
@@ -96,6 +108,8 @@ pub fn ownership(namespace: &[u8]) -> CellOwnership {
         CellOwnership::Register
     } else if namespace == crate::sofi::registration::fulfillment_namespace() {
         CellOwnership::Fulfillment
+    } else if namespace == crate::offline_origin::namespace() {
+        CellOwnership::OfflineOrigin
     } else if namespace == crate::app_cell::namespace() {
         CellOwnership::Application
     } else if owned_namespaces().contains(&namespace) {
@@ -223,6 +237,9 @@ pub enum CellWriteRefusal {
     /// An application cell's write is a route entry for this cell carrying
     /// no write a writer of its committed set signed for it: why.
     WriteNotAuthorized(String),
+    /// An origin cell's write is a route entry for this cell carrying no step
+    /// its board signed from the cell's root, nor a departure leaving it: why.
+    StepNotAuthorized(String),
     /// A fulfillment cell's write carries no 32-byte genesis hint: why.
     GenesisHint(String),
     /// A fulfillment cell's write is a route entry for this cell carrying no
@@ -255,6 +272,10 @@ impl core::fmt::Display for CellWriteRefusal {
             Self::WriteNotAuthorized(why) => write!(
                 f,
                 "the application cell write carries no write a writer of its set signed: {why}"
+            ),
+            Self::StepNotAuthorized(why) => write!(
+                f,
+                "the origin cell write carries no step its board signed for this cell: {why}"
             ),
             Self::GenesisHint(why) => write!(
                 f,
@@ -401,6 +422,13 @@ pub fn admit_cell_write(
             match crate::sofi::registration::fulfillment_naming_cell(&entry.value, &genesis, key) {
                 Ok(_fulfillment) => Ok(()),
                 Err(why) => Err(CellWriteRefusal::FulfillmentNotAuthorized(why.to_string())),
+            }
+        }
+        CellOwnership::OfflineOrigin => {
+            let entry = delivered_entry(namespace, key, value, proof)?;
+            match crate::offline_origin::write_occupying(&entry.value, key) {
+                Ok(_step) => Ok(()),
+                Err(why) => Err(CellWriteRefusal::StepNotAuthorized(format!("{why:?}"))),
             }
         }
         CellOwnership::Application => {
