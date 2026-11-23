@@ -17,6 +17,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as connect from '../../dsm/connect';
 import { onConnectLink, takeConnectLink } from '../../dsm/connectLink';
 import { returnToConnectCaller } from '../../dsm/WebViewBridge';
+import { bridgeEvents } from '../../bridge/bridgeEvents';
 import { encodeBase32Crockford } from '../../utils/textId';
 import { Disclosure, Notice, ScreenFrame, ScreenTabs, middleTruncate } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
@@ -25,9 +26,6 @@ import { ScreenGuard } from '../common/ScreenGuard';
 type AppsTab = 'apps' | 'waiting';
 
 type Status = { kind: 'info' | 'success' | 'error'; text: string };
-
-/** How often the screen asks Rust for the sessions and waiting requests. */
-const REFRESH_MS = 3000;
 
 function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -225,15 +223,17 @@ export default function AppsScreen(): React.JSX.Element {
     return onConnectLink(show);
   }, [refresh]);
 
+  // The sessions and waiting requests are read on opening the screen, and
+  // again whenever Rust says they changed (`connect.changed`): never on a
+  // timer.
   useEffect(() => {
-    const tick = () => {
+    const read = () => {
       refresh().catch((e: unknown) =>
         setStatus({ kind: 'error', text: `Reading connected apps failed: ${messageOf(e)}` }),
       );
     };
-    tick();
-    const timer = window.setInterval(tick, REFRESH_MS);
-    return () => window.clearInterval(timer);
+    read();
+    return bridgeEvents.on('connect.changed', read);
   }, [refresh]);
 
   const run = useCallback(

@@ -261,6 +261,14 @@ export function initializeEventBridge(): void {
         return;
       }
 
+      // The connected applications or the requests waiting for the player
+      // changed; the page reads them again. No payload.
+      if (topic === 'connect.changed') {
+        bridgeEvents.emit('connect.changed', undefined);
+        emit(topic, bytes);
+        return;
+      }
+
       // Inbox sync result pushed from Rust inbox_poller (Invariant #7 compliant).
       // Payload is StorageSyncResponse protobuf bytes.
       if (topic === 'inbox.updated') {

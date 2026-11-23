@@ -8,10 +8,13 @@
 //! at the next poll.
 //!
 //! A wait reads nothing and moves nothing: the sync it wakes reads the spools
-//! exactly as a poll does. The inbox poller keeps running beside it as the
-//! safety net, at a slower cadence while the waits cover the fleet
-//! ([`covers_fleet`]), and at its own cadence whenever they do not: a fleet
-//! that does not serve waits yet, a member down, no connection.
+//! exactly as a poll does. While the waits cover the fleet ([`covers_fleet`])
+//! the poller keeps no timer for arrivals: the waits are the only thing an
+//! open wallet with nothing to do asks of the nodes. A device with no route
+//! to read (no contact) has nothing that can arrive, and is covered with no
+//! wait at all. Whenever the waits stop covering the fleet — a fleet that
+//! does not serve waits yet, a member down, no connection — the poller is
+//! woken to sync, and polls at its own cadence until they cover it again.
 //!
 //! The waiter runs while the poller runs, and stops with it.
 
@@ -38,9 +41,9 @@ const SYNC_WAIT: Duration = Duration::from_secs(60);
 /// waiter into a loop. It is a sleep, not a clock read.
 const MIN_ROUND: Duration = Duration::from_secs(5);
 
-/// How long the waiter rests when it has nothing to wait on (no identity, no
-/// contact) or could not work out what to, before it looks again. A sync
-/// that completes meanwhile ends the rest early.
+/// How long the waiter rests when every member rests or it could not work out
+/// what to wait on, before it looks again. A sync that completes meanwhile
+/// ends the rest early.
 const IDLE_REST: Duration = Duration::from_secs(30);
 
 /// Wakes in a row whose sync took nothing before the waiter backs off. A
@@ -74,9 +77,26 @@ pub(crate) fn covers_fleet() -> bool {
     MEMBERS_HOLDING.load(Ordering::SeqCst) >= MEMBERS_NEEDED.load(Ordering::SeqCst)
 }
 
+/// Record that waits are held on `holding` members of the `needed` that
+/// cover the fleet. When the fleet was covered and is no longer, the poller,
+/// which keeps no timer while it is, is woken: it syncs what may have landed
+/// meanwhile and times its syncs again.
+fn record_coverage(holding: usize, needed: usize) {
+    let was_covered = covers_fleet();
+    MEMBERS_NEEDED.store(needed, Ordering::SeqCst);
+    MEMBERS_HOLDING.store(holding, Ordering::SeqCst);
+    if was_covered && !covers_fleet() {
+        log::info!(
+            "[inbox_waiter] waits held on {holding} of the {needed} members that cover the \
+             fleet: the poller syncs and times its syncs"
+        );
+        crate::sdk::inbox_poller::wake();
+    }
+}
+
 /// The fleet is no longer known to be covered.
 fn uncovered() {
-    MEMBERS_HOLDING.store(0, Ordering::SeqCst);
+    record_coverage(0, MEMBERS_NEEDED.load(Ordering::SeqCst));
 }
 
 /// The members needed to cover a fleet of `members` whose deliveries are
@@ -120,6 +140,18 @@ struct MemberPlan {
     endpoint: String,
     client: reqwest::Client,
     marks: Vec<(String, u64)>,
+}
+
+/// What the waiter has to wait on.
+enum Planned {
+    /// Waits on these members.
+    Waits(Plan),
+    /// No route to read: no identity, or no contact. Nothing can arrive, so
+    /// there is nothing to wait on or poll for until the routes change, and a
+    /// contact added wakes a sync that replans.
+    NothingToHear,
+    /// Every member is resting; the poller reads meanwhile.
+    AllResting,
 }
 
 /// What a round waits on.
@@ -219,8 +251,13 @@ async fn run() {
     let mut idle_wakes = IdleWakes::new();
     while !crate::sdk::inbox_poller::poller_stopping() {
         let plan = match plan(&resting) {
-            Ok(Some(plan)) => plan,
-            Ok(None) => {
+            Ok(Planned::Waits(plan)) => plan,
+            Ok(Planned::NothingToHear) => {
+                record_coverage(0, 0);
+                wait_for_next_cycle(crate::sdk::inbox_poller::cycles_completed()).await;
+                continue;
+            }
+            Ok(Planned::AllResting) => {
                 uncovered();
                 wait_for_cycle_after(crate::sdk::inbox_poller::cycles_completed(), IDLE_REST).await;
                 continue;
@@ -236,8 +273,7 @@ async fn run() {
         let floor = tokio::time::sleep(MIN_ROUND);
         tokio::pin!(floor);
         let round = hold(&plan, &resting, &mut holding).await;
-        MEMBERS_NEEDED.store(plan.needed, Ordering::SeqCst);
-        MEMBERS_HOLDING.store(holding.len(), Ordering::SeqCst);
+        record_coverage(holding.len(), plan.needed);
         match round {
             Round::Stopped => break,
             Round::Replan => continue,
@@ -299,13 +335,13 @@ pub(crate) fn backoff_after(idle_wakes: u32) -> Option<Duration> {
 }
 
 /// This device's routes and where each member's spool at each was read to,
-/// or `None` when there is nothing to wait on yet.
-fn plan(resting: &Resting) -> Result<Option<Plan>, String> {
+/// or why there is nothing to wait on.
+fn plan(resting: &Resting) -> Result<Planned, String> {
     let Some(device) = crate::sdk::app_state::AppState::get_device_id() else {
-        return Ok(None);
+        return Ok(Planned::NothingToHear);
     };
     let Some(genesis) = crate::sdk::app_state::AppState::get_genesis_hash() else {
-        return Ok(None);
+        return Ok(Planned::NothingToHear);
     };
     let device: [u8; 32] = device
         .as_slice()
@@ -318,7 +354,7 @@ fn plan(resting: &Resting) -> Result<Option<Plan>, String> {
     let contacts = crate::storage::client_db::get_all_contacts()
         .map_err(|e| format!("contacts unreadable: {e}"))?;
     if contacts.is_empty() {
-        return Ok(None);
+        return Ok(Planned::NothingToHear);
     }
     let addresses: BTreeSet<String> =
         crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
@@ -328,7 +364,7 @@ fn plan(resting: &Resting) -> Result<Option<Plan>, String> {
         .map(|tagged| tagged.address)
         .collect();
     if addresses.is_empty() {
-        return Ok(None);
+        return Ok(Planned::NothingToHear);
     }
 
     let network = crate::sdk::economic_admission_flow::committed_network_id()
@@ -369,9 +405,9 @@ fn plan(resting: &Resting) -> Result<Option<Plan>, String> {
     // Every member resting: there is nothing to hold until one is back, and
     // the poller reads meanwhile.
     if members.is_empty() {
-        return Ok(None);
+        return Ok(Planned::AllResting);
     }
-    Ok(Some(Plan {
+    Ok(Planned::Waits(Plan {
         members,
         addresses,
         needed: members_to_cover(set.members().len(), quorum_k),
@@ -438,11 +474,13 @@ async fn hold(plan: &Plan, resting: &Resting, holding: &mut HashSet<String>) -> 
                         );
                         holding.remove(&endpoint);
                         resting.rest(endpoint);
+                        record_coverage(holding.len(), plan.needed);
                     }
                     Err(e) => {
                         log::warn!("[inbox_waiter] wait at {endpoint} failed: {e}");
                         holding.remove(&endpoint);
                         resting.rest(endpoint);
+                        record_coverage(holding.len(), plan.needed);
                     }
                 }
             }
@@ -511,6 +549,28 @@ async fn wait_for_cycle_after(before: u64, limit: Duration) {
             () = &mut cycle_done => {}
             () = &mut stop => return,
             () = &mut limit_passed => return,
+        }
+    }
+}
+
+/// Wait until a poller cycle after the `before`-th has completed, or the
+/// poller stops: with no time limit.
+async fn wait_for_next_cycle(before: u64) {
+    loop {
+        let cycle_done = crate::sdk::inbox_poller::cycle_done();
+        tokio::pin!(cycle_done);
+        cycle_done.as_mut().enable();
+        let stop = WAITER_STOP.notified();
+        tokio::pin!(stop);
+        stop.as_mut().enable();
+        if crate::sdk::inbox_poller::cycles_completed() > before
+            || crate::sdk::inbox_poller::poller_stopping()
+        {
+            return;
+        }
+        tokio::select! {
+            () = &mut cycle_done => {}
+            () = &mut stop => return,
         }
     }
 }
