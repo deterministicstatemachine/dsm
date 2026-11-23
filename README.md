@@ -95,7 +95,7 @@ CI publishes the storage-node binary, the app-host binaries, the frontend bundle
 | Storage fleet: 5 pinned members; a value is final once its route chain has the leader's link and two more | proven on real devices | the live fleet every run above wrote to; `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members |
 | Offline protocol: appliance core, verifier, SPHINCS+, RP2350 firmware, TrustZone monitor, TROPIC01 | proven on real devices | the three-signature release produced on the RP2350 + TROPIC01 appliance and accepted on an Android phone; silicon proof log in [docs/bench-proofs/](docs/bench-proofs/) |
 | dBTC: origin admission, burn-gated withdrawal, successor vaults | being replaced; not functional | the code stays in the tree as material for its replacement, and nothing in this release runs it; see [dBTC](#dbtc) |
-| Token emissions (DJTE) | core-only | winner selection and the emission trees in `dsm/src/emissions`; nothing calls them. The faucet is a release of the native ERA reserve |
+| ERA emissions | core-only | the current design (draft of 2026-11-01) releases the Source DLV's ERA in bursts as the storage network reaches new highs in active nodes, to enrolled appliances; it is not built. `dsm/src/emissions` holds the earlier join-triggered design's winner selection and emission trees, and nothing calls them. The faucet is a release of the native ERA reserve |
 | Formal models: TLA+, Lean 4, vertical validation | checked in CI | `formal-validation` and `lean` CI jobs; see [Formal verification](#formal-verification) |
 
 ## Workspace map
