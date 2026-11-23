@@ -251,3 +251,106 @@ fn invalid_steps_are_refused() {
     assert_eq!(traced, seen.len(), "a lie the malicious prover could not even commit");
     assert_eq!(seen.len(), 15);
 }
+
+/// A lie's own fully consistent statement and root: the tree root its paths fold to with its leaves, and the statement
+/// it would publish from there, so only the check under test can refuse it.
+fn consistent(bad: &mut StepWitness, post: &VaultStateLeaf) -> (D32, StepPublic) {
+    // The lie's own tree: its state leaf and, when present, its trader's relationship leaf.
+    let mut tree = Tree::new();
+    let state_key = vault_state_key(&bad.vault_id);
+    tree.insert(state_key, vault_state_leaf_value(&bad.state));
+    let rel_key = relationship_key(&bad.trader_genesis, &bad.trader_device_id, &bad.vault_id);
+    if bad.relationship_present {
+        tree.insert(rel_key, vault_relationship_leaf_value(&bad.trader_genesis, &bad.trader_device_id, &bad.relationship_base));
+    }
+    bad.state_path = tree.path(&state_key);
+    bad.relationship_path = tree.path(&rel_key);
+    let pre = tree.root();
+    let (folded, public) = statement_for(bad, &pre, post).expect("paths fold");
+    assert_eq!(folded, pre);
+    (pre, public)
+}
+
+/// Closes and releases of every kind prove and verify: the owner's close, computed terms, and signed terms of 1, 3 and
+/// 16 branches (the last spanning several BLAKE3 chunks), with the trader's leaf present or absent.
+#[test]
+fn closes_and_releases_prove() {
+    use vault_step::fixture::{Terms, terminal};
+    let p = program();
+    for (seed, release) in [
+        (1, None),
+        (2, Some(Terms::Computed)),
+        (3, Some(Terms::Signed { branches: 1 })),
+        (4, Some(Terms::Signed { branches: 3 })),
+        (5, Some(Terms::Signed { branches: 16 })),
+    ] {
+        let f = terminal(seed, release, seed % 2 == 0, 2);
+        let (witness, public) = hints(&f.witness, &f.r_prev, &f.public);
+        let t = std::time::Instant::now();
+        let (proof, stats) = prove(&p, &witness, public, 1).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+        verify(&p, &public, &proof).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+        let size = match &f.witness.kind {
+            Kind::Release(r) => r.terms.len(),
+            _ => 0,
+        };
+        eprintln!("TERMINAL {release:?} terms={size}B cycles={} prove_ms={:.0}", stats.cycles, t.elapsed().as_secs_f64() * 1e3);
+    }
+}
+
+/// Lies about a close, a release and a market vault's release policy are refused, by the prover and by the verifier.
+#[test]
+fn terminal_lies_are_refused() {
+    use vault_step::fixture::{Terms, terminal};
+    let p = program();
+    let mut seen = Vec::new();
+    let mut lie = |what: &str, mut bad: StepWitness, post: VaultStateLeaf| {
+        let (r_prev, public) = consistent(&mut bad, &post);
+        let (witness, _) = hints(&bad, &r_prev, &public);
+        seen.push(refused(&p, what, &witness, cells(&public.digest())));
+    };
+    // A close by anyone but the origin owner; a close of a vault whose id is not the owner's derivation.
+    let c = terminal(1, None, true, 2);
+    let retired = retire_vault_post(&c.witness.state).unwrap();
+    let mut bad = c.witness.clone();
+    bad.trader_genesis[0] ^= 1;
+    lie("close by a non-owner", bad, retired.clone());
+    let mut bad = c.witness.clone();
+    bad.state.create_position += 1;
+    let post = retire_vault_post(&bad.state).unwrap();
+    lie("close of a vault the owner did not derive", bad, post);
+    // A release to a trader the named branch does not pay; naming another branch's outcome; a partial release; terms
+    // other than the ones the slots name; the computed kind's another recipient.
+    for terms in [Terms::Signed { branches: 3 }, Terms::Computed] {
+        let r = terminal(4, Some(terms), true, 2);
+        let retired = retire_vault_post(&r.witness.state).unwrap();
+        let mut bad = r.witness.clone();
+        bad.trader_device_id[7] ^= 1;
+        lie(&format!("{terms:?} release to a trader the branch does not pay"), bad, retired.clone());
+        let mut bad = r.witness.clone();
+        if let Kind::Release(rel) = &mut bad.kind {
+            let view = decode_escrow(&rel.terms).unwrap();
+            rel.outcome = view.branches.iter().find(|b| b.0 != rel.outcome).unwrap().0.clone();
+        }
+        lie(&format!("{terms:?} release naming another branch's outcome"), bad, retired.clone());
+        let mut bad = r.witness.clone();
+        bad.state.reserve_b = 1;
+        let post = retire_vault_post(&bad.state).unwrap();
+        lie(&format!("{terms:?} release of part of the vault"), bad, post);
+        let mut bad = r.witness.clone();
+        if let Kind::Release(rel) = &mut bad.kind {
+            let at = rel.terms.len() - 40;
+            rel.terms[at] ^= 1; // a recipient's byte: still terms, not the slots'
+        }
+        lie(&format!("{terms:?} release under other terms"), bad, retired.clone());
+    }
+    // A swap on a market vault whose release policy is not the one beta profile.
+    let s = fixture(1, true, 3, 0);
+    let mut bad = s.witness.clone();
+    bad.state.release_policy[0] ^= 1;
+    let post = swap_vault_post(&bad.state, bad.fee_bps, &bad.hop).unwrap();
+    lie("swap on a vault naming another release policy", bad, post);
+    let traced = seen.iter().filter(|r| matches!(r, Refusal::Verifier)).count();
+    eprintln!("VERIFIER REFUSED {traced} of {} terminal lies", seen.len());
+    assert_eq!(traced, seen.len());
+    assert_eq!(seen.len(), 11);
+}

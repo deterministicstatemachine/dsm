@@ -28,6 +28,15 @@ pub const TAG_FEE_POLICY_OBJECT: &[u8] = b"DSM/fee-policy-object/v1";
 pub const TAG_STORAGE_OBJECT: &[u8] = b"DSM/storage-object";
 pub const TAG_SMT_LEAF: &[u8] = b"DSM/economic-smt-leaf/v1";
 pub const TAG_SMT_NODE: &[u8] = b"DSM/economic-smt-node/v1";
+pub const TAG_VAULT_ID: &[u8] = b"DSM/sofi/vault-id/v1";
+pub const TAG_RELEASE_POLICY_OBJECT: &[u8] = b"DSM/release-policy-object/v1";
+pub const TAG_ESCROW_TERMS_OBJECT: &[u8] = b"DSM/escrow/terms-object/v1";
+pub const TAG_ESCROW_OUTCOME_TABLE: &[u8] = b"DSM/escrow/outcome-table/v1";
+pub const TAG_ESCROW_VERDICT_CELL: &[u8] = b"DSM/escrow/verdict-cell/v1";
+pub const TAG_ESCROW_COMPUTED_TABLE: &[u8] = b"DSM/escrow/computed-table/v1";
+pub const TAG_ESCROW_COMPUTED_MATCH: &[u8] = b"DSM/escrow/computed-match/v1";
+/// Not Core's: this research build's digest of what a release names, its verdict cell and outcome (`op_digest`).
+pub const TAG_RELEASE_OP: &[u8] = b"DSM/research/vault-release-op/v1";
 /// Not Core's: this research build's statement digest. 31 bytes, so with its NUL every field is limb-aligned.
 pub const TAG_STATEMENT: &[u8] = b"DSM/research/vault-step-stmt/v1";
 
@@ -47,6 +56,19 @@ pub const SCHEMA_V1: u16 = 1;
 pub const FAMILY_CONSTANT_PRODUCT_EXACT_INPUT: u16 = 0x0001;
 pub const BETA_VERSION: u16 = 1;
 pub const VAULT_STATUS_ACTIVE: u16 = 0x0001;
+pub const VAULT_STATUS_RETIRED: u16 = 0x0002;
+pub const CLASS_RELEASE_POLICY: u16 = 0x0009;
+pub const CLASS_ESCROW_TERMS: u16 = 0x0063;
+pub const CLASS_ESCROW_COMPUTED_TERMS: u16 = 0x0067;
+pub const SCHEMA_V2: u16 = 2;
+pub const FAMILY_OWNER_LOCAL_FULL_CLOSE: u16 = 0x0001;
+/// `sigalg::SPHINCS_PLUS_SPX256F`, the one signature algorithm, and its key width.
+pub const SPX256F: u16 = 0x0002;
+pub const SPX256F_KEY: usize = 64;
+pub const ESCROW_MAX_OUTCOME_BYTES: usize = 64;
+pub const ESCROW_MAX_BRANCHES: usize = 16;
+pub const ESCROW_MAX_SIGNERS: usize = 4;
+pub const COMPUTED_LABELS: [&[u8]; 3] = [b"a-wins", b"b-wins", b"void"];
 pub const BPS_DENOMINATOR: u32 = 10_000;
 
 fn env(out: &mut Vec<u8>, class: u16) {
@@ -125,6 +147,189 @@ pub fn vault_relationship_leaf_bytes(genesis: &D32, device_id: &D32, leaf: &D32)
     out.extend(device_id);
     out.extend(leaf);
     out
+}
+
+/// `ccb::ReleasePolicy::beta_owner_local_full_close().encode()`: the one release policy a market vault names.
+pub fn release_policy_bytes() -> Vec<u8> {
+    let mut out = Vec::new();
+    env(&mut out, CLASS_RELEASE_POLICY);
+    out.extend(FAMILY_OWNER_LOCAL_FULL_CLOSE.to_be_bytes());
+    out.extend(BETA_VERSION.to_be_bytes());
+    out
+}
+pub fn release_policy_addr() -> D32 {
+    immutable_addr(TAG_RELEASE_POLICY_OBJECT, &release_policy_bytes())
+}
+
+/// `sofi::escrow::terms_address_of`.
+pub fn terms_address_of(bytes: &[u8]) -> D32 {
+    immutable_addr(TAG_ESCROW_TERMS_OBJECT, bytes)
+}
+
+/// `derive::vault_id`: `H(vault-id/v1 ‖ G_o ‖ DevID_o ‖ u64be(p_create))`.
+pub fn vault_id(owner_genesis: &D32, owner_device_id: &D32, create_position: u64) -> D32 {
+    h(TAG_VAULT_ID, &[owner_genesis, owner_device_id, &create_position.to_be_bytes()])
+}
+
+/// Escrow terms as a release reads them (`EscrowKind::decode`, `verdict_cell_of` / `match_cell_of`, `recipient`):
+/// the cell the terms bind the vault to, and each branch's label and recipient. Signed terms (`0x0063`) or computed
+/// terms (`0x0067`); anything else, or any byte left over, does not decode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EscrowView {
+    pub cell: D32,
+    pub branches: Vec<(Vec<u8>, D32, D32)>,
+    /// Signed terms' outcome table as `τ` hashes it (`OutcomeTable::digest_preimage`); empty for computed terms.
+    pub table: Vec<u8>,
+}
+
+struct Cursor<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
+        let out = self.b.get(self.i..self.i + n).ok_or("short")?;
+        self.i += n;
+        Ok(out)
+    }
+    fn u16(&mut self) -> Result<u16, &'static str> {
+        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
+    }
+    fn u32(&mut self) -> Result<usize, &'static str> {
+        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()) as usize)
+    }
+    fn d32(&mut self) -> Result<D32, &'static str> {
+        Ok(self.take(32)?.try_into().unwrap())
+    }
+    fn count(&mut self, min: usize, max: usize) -> Result<usize, &'static str> {
+        let n = self.u32()?;
+        if n < min || n > max { Err("count") } else { Ok(n) }
+    }
+    /// `read_var_bytes`.
+    fn var(&mut self, max: usize) -> Result<&'a [u8], &'static str> {
+        let n = self.count(1, max)?;
+        self.take(n)
+    }
+    /// `read_key`: the algorithm and a key of its width; its canonical bytes.
+    fn key(&mut self) -> Result<&'a [u8], &'static str> {
+        let start = self.i;
+        if self.u16()? != SPX256F || self.u32()? != SPX256F_KEY {
+            return Err("key");
+        }
+        self.take(SPX256F_KEY)?;
+        Ok(&self.b[start..self.i])
+    }
+}
+
+pub fn decode_escrow(bytes: &[u8]) -> Result<EscrowView, &'static str> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    let class = c.u16()?;
+    let schema = c.u16()?;
+    let _token = c.d32()?;
+    let y = c.d32()?;
+    let view = match (class, schema) {
+        (CLASS_ESCROW_TERMS, SCHEMA_V1) => {
+            let n = c.count(1, ESCROW_MAX_BRANCHES)?;
+            // τ's preimage (`OutcomeTable::digest_preimage`): u8 counts where the terms have u32s, no recipients.
+            let mut table = vec![n as u8];
+            let mut branches = Vec::new();
+            let mut last: Option<&[u8]> = None;
+            for _ in 0..n {
+                let label = c.var(ESCROW_MAX_OUTCOME_BYTES)?;
+                if last.is_some_and(|l| l >= label) {
+                    return Err("branches not strictly ascending");
+                }
+                last = Some(label);
+                table.extend((label.len() as u32).to_be_bytes());
+                table.extend(label);
+                let ns = c.count(1, ESCROW_MAX_SIGNERS)?;
+                table.push(ns as u8);
+                let mut last_key: Option<&[u8]> = None;
+                for _ in 0..ns {
+                    let key = c.key()?;
+                    if last_key.is_some_and(|k| k >= key) {
+                        return Err("signers not strictly ascending");
+                    }
+                    last_key = Some(key);
+                    table.extend(key);
+                }
+                branches.push((label.to_vec(), c.d32()?, c.d32()?));
+            }
+            let tau = h(TAG_ESCROW_OUTCOME_TABLE, &[&table]);
+            EscrowView {
+                cell: h(TAG_ESCROW_VERDICT_CELL, &[&y, &tau]),
+                branches,
+                table,
+            }
+        }
+        (CLASS_ESCROW_COMPUTED_TERMS, SCHEMA_V2) => {
+            // The computed table's canonical bytes, `τ_c`'s preimage: program, setup digest, two keys, two commitments.
+            let start = c.i;
+            c.take(64)?;
+            let a = c.key()?;
+            let b = c.key()?;
+            if a == b {
+                return Err("session keys not distinct");
+            }
+            c.take(64)?;
+            let tau_c = h(TAG_ESCROW_COMPUTED_TABLE, &[&bytes[start..c.i]]);
+            if c.count(3, 3)? != 3 {
+                return Err("count");
+            }
+            let mut branches = Vec::new();
+            for want in COMPUTED_LABELS {
+                let label = c.var(ESCROW_MAX_OUTCOME_BYTES)?;
+                if label != want {
+                    return Err("computed labels");
+                }
+                branches.push((label.to_vec(), c.d32()?, c.d32()?));
+            }
+            EscrowView {
+                cell: h(TAG_ESCROW_COMPUTED_MATCH, &[&y, &tau_c]),
+                branches,
+                table: Vec::new(),
+            }
+        }
+        _ => return Err("not escrow terms"),
+    };
+    if c.i != bytes.len() {
+        return Err("trailing bytes");
+    }
+    Ok(view)
+}
+
+/// `validation::retire_vault_post`: the next generation, every reserve released, retired.
+pub fn retire_vault_post(state: &VaultStateLeaf) -> Result<VaultStateLeaf, &'static str> {
+    Ok(VaultStateLeaf {
+        generation: state.generation.checked_add(1).ok_or("vault generation")?,
+        reserve_a: 0,
+        reserve_b: 0,
+        status: VAULT_STATUS_RETIRED,
+        ..state.clone()
+    })
+}
+
+/// What a release names (`SettlementBody::Release`): the verdict cell and the outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Release {
+    pub terms: Vec<u8>,
+    pub verdict_cell: D32,
+    pub outcome: Vec<u8>,
+}
+
+/// This research build's digest of what a release names: `H(vault-release-op ‖ K_verdict ‖ u32be(|o|) ‖ o)`.
+pub fn release_op_digest(verdict_cell: &D32, outcome: &[u8]) -> D32 {
+    h(TAG_RELEASE_OP, &[verdict_cell, &(outcome.len() as u32).to_be_bytes(), outcome])
+}
+
+/// The operation a step is (`SettlementBody`'s three branches): a swap hop, the owner's full close, or an escrow
+/// vault's release.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Swap,
+    Close,
+    Release(Release),
 }
 
 // ── sofi/derive.rs ──────────────────────────────────────────────────────────
@@ -323,7 +528,10 @@ pub struct StepWitness {
     pub token_a: D32,
     pub token_b: D32,
     pub fee_bps: u32,
+    /// The hop, for a swap; zero otherwise.
     pub hop: Hop,
+    /// Which operation the step is.
+    pub kind: Kind,
     pub trader_genesis: D32,
     pub trader_device_id: D32,
     /// The relationship base `h_j`; whether the vault's tree held it before (else the leaf was absent).
@@ -349,6 +557,8 @@ pub struct StepPublic {
     pub generation: u64,
     pub external_commitment: D32,
     pub attempt_key: D32,
+    /// A release's `release_op_digest`; zeros for a swap or a close.
+    pub op_digest: D32,
 }
 
 impl StepPublic {
@@ -363,6 +573,7 @@ impl StepPublic {
                 &self.generation.to_be_bytes(),
                 &self.external_commitment,
                 &self.attempt_key,
+                &self.op_digest,
             ],
         )
     }
@@ -371,18 +582,66 @@ impl StepPublic {
 /// Every check of `docs/plans/2026-11-22-vault-step-proof-statement.md` 1..9, as Core makes them, from the witness;
 /// the public values if they all pass. `r_prev` is the claimed pre-root.
 pub fn step(w: &StepWitness, r_prev: &D32) -> Result<StepPublic, &'static str> {
-    // 2, and the policies the state commits: the market policy decodes only with a strictly ordered pair.
-    if w.token_a >= w.token_b {
-        return Err("TokenPairNotStrictlyOrdered");
+    if w.state.status != VAULT_STATUS_ACTIVE {
+        return Err("VaultIsNotActive");
     }
-    if w.state.market_policy != market_policy_addr(&w.token_a, &w.token_b) {
-        return Err("market policy does not address");
-    }
-    if w.fee_bps >= BPS_DENOMINATOR || w.state.fee_policy != fee_policy_addr(w.fee_bps) {
-        return Err("fee policy does not address");
-    }
-    // 1, 3, 4, 5.
-    let post = swap_vault_post(&w.state, w.fee_bps, &w.hop)?;
+    let s = &w.state;
+    let post = match &w.kind {
+        Kind::Swap | Kind::Close => {
+            // A market's three policies (`Policies::resolve`): the market policy decodes only with a strictly ordered
+            // pair, the fee policy with a fee below the denominator, the release policy is the one beta profile.
+            if w.token_a >= w.token_b {
+                return Err("TokenPairNotStrictlyOrdered");
+            }
+            if s.market_policy != market_policy_addr(&w.token_a, &w.token_b) {
+                return Err("market policy does not address");
+            }
+            if w.fee_bps >= BPS_DENOMINATOR || s.fee_policy != fee_policy_addr(w.fee_bps) {
+                return Err("fee policy does not address");
+            }
+            if s.release_policy != release_policy_addr() {
+                return Err("release policy does not address");
+            }
+            if w.kind == Kind::Swap {
+                swap_vault_post(s, w.fee_bps, &w.hop)?
+            } else {
+                // `validate_close`: the origin owner, the owner's own vault id, everything out.
+                if (w.trader_genesis, w.trader_device_id) != (s.owner_genesis, s.owner_device_id) {
+                    return Err("NotTheVaultOwner");
+                }
+                if vault_id(&s.owner_genesis, &s.owner_device_id, s.create_position) != w.vault_id {
+                    return Err("VaultIdIsNotTheOwnersDerivation");
+                }
+                retire_vault_post(s)?
+            }
+        }
+        Kind::Release(r) => {
+            // `validate_release`: the owner's own vault id, the whole held amount, escrow terms all three slots name,
+            // the cell they bind, and the named outcome's branch paying this trader.
+            if vault_id(&s.owner_genesis, &s.owner_device_id, s.create_position) != w.vault_id {
+                return Err("VaultIdIsNotTheOwnersDerivation");
+            }
+            if s.reserve_a == 0 || s.reserve_b != 0 {
+                return Err("ReleaseIsNotTheWholeAmount");
+            }
+            let addr = terms_address_of(&r.terms);
+            if s.market_policy != addr || s.fee_policy != addr || s.release_policy != addr {
+                return Err("TermsAreNotEscrow");
+            }
+            let view = decode_escrow(&r.terms)?;
+            if view.cell != r.verdict_cell {
+                return Err("VerdictCellIsNotTheTerms");
+            }
+            match view.branches.iter().find(|(label, _, _)| *label == r.outcome) {
+                None => return Err("OutcomeHasNoBranch"),
+                Some((_, g, d)) if (*g, *d) != (w.trader_genesis, w.trader_device_id) => {
+                    return Err("NotTheBranchRecipient");
+                }
+                Some(_) => {}
+            }
+            retire_vault_post(s)?
+        }
+    };
     let (pre_root, public) = statement_for(w, r_prev, &post)?;
     if pre_root != *r_prev {
         return Err("PreRootMismatch");
@@ -427,6 +686,10 @@ pub fn statement_for(w: &StepWitness, r_prev: &D32, post: &VaultStateLeaf) -> Re
             generation: post.generation,
             external_commitment: w.external_commitment,
             attempt_key: successor_attempt_key(&w.vault_id, r_prev, w.attempt),
+            op_digest: match &w.kind {
+                Kind::Release(r) => release_op_digest(&r.verdict_cell, &r.outcome),
+                _ => [0; 32],
+            },
         },
     ))
 }

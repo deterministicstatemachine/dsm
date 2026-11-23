@@ -390,8 +390,9 @@ FLOCK_SKIP_GRIND_BITS = FLOCK_SKIP_GRIND_BITS_PLACEHOLDER
 FLOCK_ROUND_GRIND_BITS = FLOCK_ROUND_GRIND_BITS_PLACEHOLDER
 FLOCK_ALPHA_GRIND_BITS = FLOCK_ALPHA_GRIND_BITS_PLACEHOLDER
 # Research build: a node may prove one SoFi vault step (guests/vault_step.py, spliced in after these). Its statement
-# carries VS_CELLS vault-chain cells (statement.rs `vault_cells`): v, R_first, R_last, E, K, the generation, a 1.
-VS_CELLS = 12
+# carries VS_CELLS vault-chain cells (statement.rs `vault_cells`): v, R_first, R_last, E, K, the generation, a 1, and
+# the last step's op digest (a release's; zeros otherwise).
+VS_CELLS = 14
 B3_IV0 = B3_IV0_PLACEHOLDER
 B3_IV1 = B3_IV1_PLACEHOLDER
 
@@ -5033,7 +5034,7 @@ def main():
     child_vaults_size = n_children_g ** VS_CELLS
     child_vaults = HeapBuf(child_vaults_size)
     own_vault = HeapBuf(VS_CELLS)
-    vs_out = HeapBuf(14)
+    vs_out = HeapBuf(16)
 
     # ---- the claim lists ----
     g_squares = exponent_tables()

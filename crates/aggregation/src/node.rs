@@ -329,6 +329,7 @@ pub fn aggregate_with_vault<P: Prover>(
                 generation: public.generation,
                 external_commitment: public.external_commitment,
                 attempt_key: public.attempt_key,
+                op_digest: public.op_digest,
             })
         }
     };

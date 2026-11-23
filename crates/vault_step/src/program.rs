@@ -52,6 +52,15 @@ pub fn placeholders() -> BTreeMap<String, String> {
         ("TAG_FEE_OBJ_PLACEHOLDER", byte_list(TAG_FEE_POLICY_OBJECT)),
         ("TAG_STORAGE_OBJ_PLACEHOLDER", byte_list(TAG_STORAGE_OBJECT)),
         ("TAG_STATEMENT_PLACEHOLDER", byte_list(TAG_STATEMENT)),
+        ("TAG_VAULT_ID_PLACEHOLDER", byte_list(TAG_VAULT_ID)),
+        ("TAG_TERMS_OBJ_PLACEHOLDER", byte_list(TAG_ESCROW_TERMS_OBJECT)),
+        ("TAG_OUTCOME_TABLE_PLACEHOLDER", byte_list(TAG_ESCROW_OUTCOME_TABLE)),
+        ("TAG_VERDICT_CELL_PLACEHOLDER", byte_list(TAG_ESCROW_VERDICT_CELL)),
+        ("TAG_COMPUTED_TABLE_PLACEHOLDER", byte_list(TAG_ESCROW_COMPUTED_TABLE)),
+        ("TAG_COMPUTED_MATCH_PLACEHOLDER", byte_list(TAG_ESCROW_COMPUTED_MATCH)),
+        ("TAG_RELEASE_OP_PLACEHOLDER", byte_list(TAG_RELEASE_OP)),
+        ("RELEASE_ADDR0_PLACEHOLDER", literal(cells(&release_policy_addr())[0])),
+        ("RELEASE_ADDR1_PLACEHOLDER", literal(cells(&release_policy_addr())[1])),
         ("NODE_M_PLACEHOLDER", prefix_cells(TAG_SMT_NODE)),
         ("LEAF_M_PLACEHOLDER", prefix_cells(TAG_SMT_LEAF)),
         ("ATTEMPT_M_PLACEHOLDER", prefix_cells(TAG_SUCC_ATTEMPT)),
@@ -107,6 +116,45 @@ fn gap_be(a: &D32, b: &D32) -> D32 {
 
 pub type Witness = Vec<(String, Vec<Vec<F128>>)>;
 
+/// `length_split`'s hint for an n-byte message: n - 1 = 64 (a + 16 b) + l - 1, l in 1..64.
+fn length_split(n: usize) -> Vec<F128> {
+    let q = (n - 1) / 64;
+    let l = n - 64 * q;
+    [q % 16, q / 16, l % 16, l / 16].into_iter().map(|e| gp(e as u64)).collect()
+}
+
+/// A byte string's nibble digits, low nibble first, zero-padded to `len` nibbles.
+fn nibble_digits(bytes: &[u8], len: usize) -> Vec<F128> {
+    let mut out: Vec<F128> = bytes.iter().flat_map(|b| [gp(u64::from(b & 15)), gp(u64::from(b >> 4))]).collect();
+    out.resize(len, gp(0));
+    out
+}
+
+/// A release's streams, in the order `release_terms` pops them.
+fn release_hints(r: &Release, put: &mut impl FnMut(&'static str, Vec<F128>)) {
+    let n = r.terms.len();
+    put("vs_tlen", digits_u128(n as u128, 4));
+    let total = TAG_ESCROW_TERMS_OBJECT.len() + 1 + n;
+    put("vs_hlen", length_split(total));
+    let blocks = total.div_ceil(64);
+    let padded = nibble_digits(&r.terms, 128 * blocks);
+    for b in padded.chunks(128) {
+        put("vs_terms", b.to_vec());
+    }
+    let lo = r.outcome.len();
+    put("vs_olen", vec![gp((lo % 16) as u64), gp((lo / 16) as u64)]);
+    put("vs_outcome", nibble_digits(&r.outcome, 128));
+    let view = decode_escrow(&r.terms).expect("terms that decode");
+    let j = view.branches.iter().position(|b| b.0 == r.outcome).expect("the outcome's branch");
+    put("vs_branch", vec![gp(j as u64)]);
+    if r.terms[1] == CLASS_ESCROW_TERMS as u8 {
+        let q = TAG_ESCROW_OUTCOME_TABLE.len() + 1 + view.table.len();
+        put("vs_qlen", digits_u128(q as u128, 4));
+        put("vs_hlen", length_split(q));
+    }
+    put("vs_hlen", length_split(TAG_RELEASE_OP.len() + 37 + lo));
+}
+
 /// The hint streams of a step and its public input, the statement's two cells.
 pub fn hints(w: &StepWitness, r_prev: &D32, public: &StepPublic) -> (Witness, [F128; 2]) {
     let mut streams: BTreeMap<&str, Vec<Vec<F128>>> = BTreeMap::new();
@@ -144,21 +192,32 @@ pub fn hints(w: &StepWitness, r_prev: &D32, public: &StepPublic) -> (Witness, [F
     put("vs_digits", digits_u128(u128::from(w.fee_bps), 8));
     let bit = |b: bool| F128::from(u128::from(b));
     put("vs_flags", vec![bit(w.hop.in_is_a), bit(w.relationship_present)]);
+    let (term, rel, computed) = match &w.kind {
+        Kind::Swap => (false, false, false),
+        Kind::Close => (true, false, false),
+        Kind::Release(r) => (true, true, r.terms[1] == CLASS_ESCROW_COMPUTED_TERMS as u8),
+    };
+    put("vs_kind", vec![bit(term), bit(rel), bit(computed)]);
     put("vs_digits", digits_be256(&gap_be(&w.token_a, &w.token_b)));
+    if let Kind::Release(r) = &w.kind {
+        release_hints(r, &mut put);
+    }
     let fee_c = BPS_DENOMINATOR - w.fee_bps;
-    put("vs_digits", digits_u128(u128::from(fee_c), 4));
     let (r_in, r_out) = if w.hop.in_is_a {
         (s.reserve_a, s.reserve_b)
     } else {
         (s.reserve_b, s.reserve_a)
     };
-    let after_fee = u128::from(w.hop.amount_in) * u128::from(fee_c);
-    let den = u128::from(r_in) * u128::from(BPS_DENOMINATOR) + after_fee;
-    let num = u128::from(r_out) * after_fee;
-    let rem = num % den;
-    put("vs_digits", digits_u128(rem, 21));
-    put("vs_digits", digits_u128(den - rem - 1, 21));
-    put("vs_digits", digits_u128(u128::from(r_out - w.hop.amount_out), 16));
+    if !term {
+        put("vs_digits", digits_u128(u128::from(fee_c), 4));
+        let after_fee = u128::from(w.hop.amount_in) * u128::from(fee_c);
+        let den = u128::from(r_in) * u128::from(BPS_DENOMINATOR) + after_fee;
+        let num = u128::from(r_out) * after_fee;
+        let rem = num % den;
+        put("vs_digits", digits_u128(rem, 21));
+        put("vs_digits", digits_u128(den - rem - 1, 21));
+        put("vs_digits", digits_u128(u128::from(r_out - w.hop.amount_out), 16));
+    }
     let path = |p: &[D32]| p.iter().flat_map(cells).collect::<Vec<_>>();
     put("vs_state_path", path(&w.state_path));
     put("vs_relationship_path", path(&w.relationship_path));

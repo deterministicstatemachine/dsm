@@ -137,7 +137,8 @@ def bigEndian (b : List UInt8) : ℕ := b.foldl (fun acc x ↦ 256 * acc + x.toN
 
 /-- **A run of consecutive steps of one vault**, as a node's statement carries it (`VaultChain`,
 `crates/claims/src/lib.rs`): the vault, the tree root the run starts from and the one it ends at,
-the last step's new generation, its external commitment and its attempt key. -/
+the last step's new generation, its external commitment, its attempt key, and the digest of what a release names
+(`op_digest`; zeros for a swap or a close). -/
 structure VaultChain where
   vaultId : List UInt8
   rFirst : List UInt8
@@ -145,16 +146,18 @@ structure VaultChain where
   generation : ℕ
   externalCommitment : List UInt8
   attemptKey : List UInt8
+  opDigest : List UInt8
 
-/-- The cells a statement absorbs for its vault chain, `12` (`VAULT_CELLS`): each 32-byte field's two
-cells, the generation's 16 digits `d_k` as `Σ d_k g^(4k)`, and the marker `1`; zeros without a
-chain (`vault_cells`, `crates/aggregation/src/statement.rs`). -/
+/-- The cells a statement absorbs for its vault chain, `14` (`VAULT_CELLS`): each 32-byte field's two
+cells, the generation's 16 digits `d_k` as `Σ d_k g^(4k)`, the marker `1`, then the op digest's two
+cells; zeros without a chain (`vault_cells`, `crates/aggregation/src/statement.rs`). -/
 def vaultCells : Option VaultChain → List E
-  | none => List.replicate 12 0
+  | none => List.replicate 14 0
   | some v =>
     cells32 v.vaultId ++ cells32 v.rFirst ++ cells32 v.rLast ++ cells32 v.externalCommitment ++
       cells32 v.attemptKey ++
-      [((List.range 16).map fun k ↦ intCell (v.generation / 16 ^ k % 16) * gpow (4 * k)).sum, intCell 1]
+      [((List.range 16).map fun k ↦ intCell (v.generation / 16 ^ k % 16) * gpow (4 * k)).sum, intCell 1] ++
+      cells32 v.opDigest
 
 /-! ## The step's witness and its hints -/
 
@@ -169,6 +172,14 @@ structure StateLeaf where
   reserveA : ℕ
   reserveB : ℕ
 
+/-- Which operation a step is (`Kind`, `reference.rs`; `SettlementBody`'s three branches): a swap hop,
+the owner's full close, or an escrow vault's release naming its terms' bytes, its verdict cell and its
+outcome. -/
+inductive Kind where
+  | swap
+  | close
+  | release (terms verdictCell outcome : List UInt8)
+
 /-- **What a node holds a vault step by** (`VaultStep`, `crates/aggregation/src/node.rs`, of a
 `StepWitness`, `reference.rs`): the vault, its state leaf, its tokens and fee, the hop, the trader,
 the relationship leaf's base and whether it is present, the external commitment, the successor
@@ -182,6 +193,7 @@ structure StepWitness where
   inIsA : Bool
   amountIn : ℕ
   amountOut : ℕ
+  kind : Kind
   traderGenesis : List UInt8
   traderDeviceId : List UInt8
   relationshipBase : List UInt8
@@ -192,13 +204,64 @@ structure StepWitness where
   relationshipPath : List (List UInt8)
   rPrev : List UInt8
 
+/-- A big-endian integer of `n` bytes at byte `i`. -/
+def beAt (b : List UInt8) (i n : ℕ) : ℕ :=
+  (List.range n).foldl (fun acc k ↦ 256 * acc + (b.getD (i + k) 0).toNat) 0
+
+/-- Signed terms' branches from byte `i`, `k` of them: each label, and the outcome table's bytes so far
+(`decode_escrow`: `u32 |o| ‖ o ‖ u8 n ‖ signers` per branch). -/
+def signedWalk (b : List UInt8) : ℕ → ℕ → List (List UInt8) × ℕ → List (List UInt8) × ℕ
+  | 0, _, acc => acc
+  | k + 1, i, (labels, table) =>
+    let l := beAt b i 4
+    let ns := beAt b (i + 4 + l) 4
+    signedWalk b k (i + 8 + l + 70 * ns + 64)
+      (labels ++ [(b.drop (i + 4)).take l], table + 5 + l + 70 * ns)
+
+/-- Escrow terms' branch labels and their outcome table's length (`decode_escrow`): signed terms
+(`0x0063`) walked, computed terms (`0x0067`) their three fixed labels and no table. -/
+def escrowLabels (b : List UInt8) : List (List UInt8) × ℕ :=
+  if b.getD 1 0 = 0x63 then signedWalk b (beAt b 68 4) 72 ([], 1)
+  else (["a-wins", "b-wins", "void"].map (·.toUTF8.toList), 0)
+
+/-- `length_split`'s hint for an `n`-byte message: `n - 1 = 64 (a + 16 b) + l - 1`, `l ∈ 1..64`. -/
+def lengthSplit (n : ℕ) : List E :=
+  let q := (n - 1) / 64
+  let l := n - 64 * q
+  [gpow (q % 16), gpow (q / 16), gpow (l % 16), gpow (l / 16)]
+
+/-- A byte string's nibble digits, low nibble first, zero-padded to `len` (`nibble_digits`). -/
+def nibbleDigits (bytes : List UInt8) (len : ℕ) : List E :=
+  let d := bytes.flatMap fun x ↦ [gpow (x.toNat % 16), gpow (x.toNat / 16)]
+  d ++ List.replicate (len - d.length) (gpow 0)
+
+/-- A release's pushes, stream by stream (`release_hints`, `program.rs`): the terms' length, their
+blocks, the outcome's length and bytes, its branch, the outcome table's length (signed terms), and
+each dynamic hash's length split: the terms', the table's, the op digest's. -/
+def releasePushes (terms outcome : List UInt8) : List (String × List E) :=
+  let total := 27 + terms.length
+  let blocks := (total + 63) / 64
+  let padded := nibbleDigits terms (128 * blocks)
+  let (labels, table) := escrowLabels terms
+  let j := (labels.findIdx? (· == outcome)).getD 0
+  let signed := terms.getD 1 0 = 0x63
+  [("vs_branch", [gpow j])] ++
+    [("vs_hlen", lengthSplit total)] ++
+    (if signed then [("vs_hlen", lengthSplit (28 + table))] else []) ++
+    [("vs_hlen", lengthSplit (69 + outcome.length)),
+      ("vs_olen", [gpow (outcome.length % 16), gpow (outcome.length / 16)]),
+      ("vs_outcome", nibbleDigits outcome 128)] ++
+    (if signed then [("vs_qlen", digits (28 + table) 4)] else []) ++
+    (List.range blocks).map (fun i ↦ ("vs_terms", (padded.drop (128 * i)).take 128)) ++
+    [("vs_tlen", digits terms.length 4)]
+
 /-- `BPS_DENOMINATOR`. -/
 def bpsDenominator : ℕ := 10000
 
 /-- The `vs_digits` entries, in the order the step puts them: the state's and the hop's integers
-(16 digits each), the fee (8), the token gap `b - a - 1` (64), the fee's complement (4), the
-price's remainder and its slack to the divisor (21 each), and the reserve left after the payout (16)
-(`hints`, `program.rs`). -/
+(16 digits each), the fee (8), the token gap `b - a - 1` (64), and, for a swap only, the fee's
+complement (4), the price's remainder and its slack to the divisor (21 each), and the reserve left after
+the payout (16) (`hints`, `program.rs`). -/
 def digitEntries (w : StepWitness) : List (List E) :=
   let s := w.state
   let feeC := bpsDenominator - w.feeBps
@@ -208,8 +271,10 @@ def digitEntries (w : StepWitness) : List (List E) :=
   let rem := rOut * afterFee % den
   [s.createPosition, s.generation, s.reserveA, s.reserveB, w.amountIn, w.amountOut, w.attempt].map
       (digits · 16) ++
-    [digits w.feeBps 8, digits (bigEndian w.tokenB - bigEndian w.tokenA - 1) 64, digits feeC 4,
-      digits rem 21, digits (den - rem - 1) 21, digits (rOut - w.amountOut) 16]
+    [digits w.feeBps 8, digits (bigEndian w.tokenB - bigEndian w.tokenA - 1) 64] ++
+    match w.kind with
+    | .swap => [digits feeC 4, digits rem 21, digits (den - rem - 1) 21, digits (rOut - w.amountOut) 16]
+    | _ => []
 
 /-- The `vs_value` entries: twelve 32-byte values' cells (`hints`, `program.rs`). -/
 def valueEntries (w : StepWitness) : List (List E) :=
@@ -222,12 +287,21 @@ pushes them (`hints`, whose `BTreeMap` orders the streams; `aggregate_with_vault
 def stepPushes (w : StepWitness) : List (String × List E) :=
   let stateKey := vaultStateKey w.vaultId
   let relKey := relationshipKey w.traderGenesis w.traderDeviceId w.vaultId
-  [("vs_attempt_is_zero", [bitCell (w.attempt == 0)])] ++
+  let rel := match w.kind with
+    | .release terms _ outcome => releasePushes terms outcome
+    | _ => []
+  let byName := fun (n : String) ↦ rel.filter (·.1 == n)
+  let kindBits := match w.kind with
+    | .swap => [false, false, false]
+    | .close => [true, false, false]
+    | .release terms _ _ => [true, true, terms.getD 1 0 = 0x67]
+  [("vs_attempt_is_zero", [bitCell (w.attempt == 0)])] ++ byName "vs_branch" ++
     (digitEntries w).map ("vs_digits", ·) ++
     [("vs_divergence", [gpow (divergence stateKey relKey)]),
-      ("vs_flags", [bitCell w.inIsA, bitCell w.relationshipPresent]),
-      ("vs_relationship_path", w.relationshipPath.flatMap cells32),
-      ("vs_state_path", w.statePath.flatMap cells32)] ++
+      ("vs_flags", [bitCell w.inIsA, bitCell w.relationshipPresent])] ++ byName "vs_hlen" ++
+    [("vs_kind", kindBits.map bitCell)] ++ byName "vs_olen" ++ byName "vs_outcome" ++ byName "vs_qlen" ++
+    [("vs_relationship_path", w.relationshipPath.flatMap cells32),
+      ("vs_state_path", w.statePath.flatMap cells32)] ++ byName "vs_terms" ++ byName "vs_tlen" ++
     (valueEntries w).map ("vs_value", ·)
 
 end LeanVM.Vault

@@ -27,8 +27,8 @@ pub struct AggregateClaims {
 }
 
 /// Research build: a run of consecutive steps of one SoFi vault, as a reader sees it: the vault, the tree root the
-/// run starts from and the one it ends at, the last step's new generation, its external commitment and its attempt
-/// key.
+/// run starts from and the one it ends at, the last step's new generation, its external commitment, its attempt key,
+/// and, when it is a release, the digest of the verdict cell and outcome it names (zeros otherwise).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VaultChain {
     pub vault_id: [u8; 32],
@@ -37,6 +37,7 @@ pub struct VaultChain {
     pub generation: u64,
     pub external_commitment: [u8; 32],
     pub attempt_key: [u8; 32],
+    pub op_digest: [u8; 32],
 }
 
 /// Which covered claims an aggregation proves.
@@ -130,18 +131,20 @@ impl AggregateClaims {
 
 impl VaultChain {
     /// The byte length of [`Self::to_bytes`].
-    pub const BYTES: usize = 5 * 32 + 8;
+    pub const BYTES: usize = 6 * 32 + 8;
 
-    /// The vault, the first root, the last root, the generation (`u64`), the external commitment and the attempt key.
+    /// The vault, the first root, the last root, the generation (`u64`), the external commitment, the attempt key and
+    /// the op digest.
     pub fn to_bytes(&self) -> [u8; Self::BYTES] {
         let mut out = [0; Self::BYTES];
-        let parts: [&[u8]; 6] = [
+        let parts: [&[u8]; 7] = [
             &self.vault_id,
             &self.r_first,
             &self.r_last,
             &self.generation.to_le_bytes(),
             &self.external_commitment,
             &self.attempt_key,
+            &self.op_digest,
         ];
         let mut at = 0;
         for part in parts {
@@ -161,6 +164,7 @@ impl VaultChain {
             generation: u64::from_le_bytes(bytes[96..104].try_into().unwrap()),
             external_commitment: d32(104),
             attempt_key: d32(136),
+            op_digest: d32(168),
         }
     }
 }
@@ -178,6 +182,7 @@ mod tests {
             generation: 0x0102_0304_0506_0708,
             external_commitment: [5; 32],
             attempt_key: [6; 32],
+            op_digest: [7; 32],
         };
         for (da_commitment, vault) in [(None, None), (Some([9; 32]), None), (None, Some(vault)), (Some([9; 32]), Some(vault))] {
             let claims = AggregateClaims {

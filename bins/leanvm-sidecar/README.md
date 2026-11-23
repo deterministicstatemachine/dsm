@@ -90,7 +90,7 @@ Keys, signatures and proofs are the libraries' `to_bytes`. Signatures may come i
 | leanXMSS claims | count, then per claim: pubkey (32 bytes), message (32 bytes) |
 | leanSPHINCS claims | count, then per claim: pubkey (32 bytes), message (32 bytes) |
 | DA commitment | `u8`: 0, or 1 then the root (32 bytes) |
-| vault chain (research build) | `u8`: 0, or 1 then the vault, the first root, the last root (32 bytes each), the generation (`u64`), the external commitment and the attempt key (32 bytes each) |
+| vault chain (research build) | `u8`: 0, or 1 then the vault, the first root, the last root (32 bytes each), the generation (`u64`), the external commitment, the attempt key and the op digest (32 bytes each; a release's, zeros otherwise) |
 
 A proof verifies only against claim lists strictly sorted by their 64 bytes; a response's claims are. Output claims may come in any order.
 

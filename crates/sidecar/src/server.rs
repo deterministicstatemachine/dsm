@@ -504,6 +504,7 @@ mod tests {
                 generation: 12,
                 external_commitment: [13; 32],
                 attempt_key: [14; 32],
+                op_digest: [15; 32],
             }),
         };
         let child = (only.clone(), vec![6, 7, 8]);

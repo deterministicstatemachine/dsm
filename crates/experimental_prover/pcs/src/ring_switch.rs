@@ -74,9 +74,10 @@ use primitives::multilinear::eq_table_serial;
 /// The batching map's challenges: `f_0..f_7`, then `g_0..g_7`.
 pub(crate) const MAP_CHALLENGES: usize = 16;
 
-/// The map misses a nonzero error with probability at most this many over `|E|`, one per stage. The WHIR list-size
-/// soundness accounting adds it to the batching numerator.
-pub(crate) const RING_SWITCH_ERROR_NUMERATOR: usize = 2;
+/// The map misses a nonzero error with probability at most this many over `|E|`: two per ring-switched claim, one per
+/// stage, and two claims (`q_keccak`'s and, research build, `q_flock`'s) share one map, union-bounded. The WHIR
+/// list-size soundness accounting adds it to the batching numerator.
+pub(crate) const RING_SWITCH_ERROR_NUMERATOR: usize = 4;
 
 /// The coordinate batching weights: `weights[w] = Phi(b_w)`, where `b_w = x^i·y^j` (`w = 64j + i`)
 /// is the `w`-th `F_2`-coordinate basis element of `E` (the order `transpose_s_hat` produces), and

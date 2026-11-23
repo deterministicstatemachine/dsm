@@ -20,7 +20,7 @@ pub fn fixture(seed: u64, present: bool, others: usize, attempt: u64) -> Fixture
     if token_a > token_b {
         std::mem::swap(&mut token_a, &mut token_b);
     }
-    let (owner_genesis, owner_device_id, release_policy, storage_set_id) = (d32(), d32(), d32(), d32());
+    let (owner_genesis, owner_device_id, _, storage_set_id) = (d32(), d32(), d32(), d32());
     let (trader_genesis, trader_device_id, relationship_base, external_commitment) = (d32(), d32(), d32(), d32());
     let fee_bps = 30;
     let mut rng = StdRng::seed_from_u64(seed ^ 0x5eed);
@@ -30,7 +30,7 @@ pub fn fixture(seed: u64, present: bool, others: usize, attempt: u64) -> Fixture
         create_position: rng.random_range(1..1 << 40),
         market_policy: market_policy_addr(&token_a, &token_b),
         fee_policy: fee_policy_addr(fee_bps),
-        release_policy,
+        release_policy: release_policy_addr(),
         storage_set_id,
         generation: rng.random_range(0..1 << 20),
         reserve_a: rng.random_range(1 << 40..1 << 60),
@@ -76,6 +76,7 @@ pub fn fixture(seed: u64, present: bool, others: usize, attempt: u64) -> Fixture
         token_b,
         fee_bps,
         hop,
+        kind: Kind::Swap,
         trader_genesis,
         trader_device_id,
         relationship_base,
@@ -110,7 +111,7 @@ pub fn chain(seed: u64, steps: usize) -> Vec<Fixture> {
         create_position: rng.random_range(1..1 << 40),
         market_policy: market_policy_addr(&token_a, &token_b),
         fee_policy: fee_policy_addr(fee_bps),
-        release_policy: d32(&mut rng),
+        release_policy: release_policy_addr(),
         storage_set_id: d32(&mut rng),
         generation: rng.random_range(0..1 << 20),
         reserve_a: rng.random_range(1 << 50..1 << 60),
@@ -160,6 +161,7 @@ pub fn chain(seed: u64, steps: usize) -> Vec<Fixture> {
                 amount_in,
                 amount_out,
             },
+            kind: Kind::Swap,
             trader_genesis,
             trader_device_id,
             relationship_base,
@@ -189,6 +191,186 @@ pub fn chain(seed: u64, steps: usize) -> Vec<Fixture> {
     out
 }
 
+/// Signed escrow terms' bytes (`EscrowTerms::encode`): each branch a label, its signers' keys (strictly ascending)
+/// and its recipient.
+pub fn signed_terms(token: &D32, y: &D32, branches: &[(Vec<u8>, Vec<[u8; SPX256F_KEY]>, D32, D32)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend(CLASS_ESCROW_TERMS.to_be_bytes());
+    out.extend(SCHEMA_V1.to_be_bytes());
+    out.extend(token);
+    out.extend(y);
+    out.extend((branches.len() as u32).to_be_bytes());
+    for (label, keys, g, d) in branches {
+        out.extend((label.len() as u32).to_be_bytes());
+        out.extend(label);
+        out.extend((keys.len() as u32).to_be_bytes());
+        for key in keys {
+            out.extend(SPX256F.to_be_bytes());
+            out.extend((SPX256F_KEY as u32).to_be_bytes());
+            out.extend(key);
+        }
+        out.extend(g);
+        out.extend(d);
+    }
+    out
+}
+
+/// Computed escrow terms' bytes (`ComputedEscrowTerms::encode`): the table's program, setup digest, two session
+/// keys and two start commitments, then the three branches' recipients.
+pub fn computed_terms(token: &D32, y: &D32, table: [&D32; 2], keys: [[u8; SPX256F_KEY]; 2], starts: [&D32; 2], recipients: [(D32, D32); 3]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend(CLASS_ESCROW_COMPUTED_TERMS.to_be_bytes());
+    out.extend(SCHEMA_V2.to_be_bytes());
+    out.extend(token);
+    out.extend(y);
+    out.extend(table[0]);
+    out.extend(table[1]);
+    for key in keys {
+        out.extend(SPX256F.to_be_bytes());
+        out.extend((SPX256F_KEY as u32).to_be_bytes());
+        out.extend(key);
+    }
+    out.extend(starts[0]);
+    out.extend(starts[1]);
+    out.extend(3u32.to_be_bytes());
+    for (label, (g, d)) in COMPUTED_LABELS.iter().zip(recipients) {
+        out.extend((label.len() as u32).to_be_bytes());
+        out.extend(*label);
+        out.extend(g);
+        out.extend(d);
+    }
+    out
+}
+
+/// Which terms a release fixture's vault holds.
+#[derive(Clone, Copy, Debug)]
+pub enum Terms {
+    /// Signed terms with this many branches, each with up to four signers and labels of up to 64 bytes.
+    Signed { branches: usize },
+    Computed,
+}
+
+/// A valid close (`Kind::Close`, the owner closing) or release (`Kind::Release`, the trader one branch pays) from
+/// `seed`: the vault's own id, its state leaf and the trader's relationship leaf in a tree with `others` other
+/// traders' leaves.
+pub fn terminal(seed: u64, release: Option<Terms>, present: bool, others: usize) -> Fixture {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let d32 = |rng: &mut StdRng| -> D32 { rng.random() };
+    let (owner_genesis, owner_device_id) = (d32(&mut rng), d32(&mut rng));
+    let create_position = rng.random_range(1..1 << 40);
+    let vault_id = vault_id(&owner_genesis, &owner_device_id, create_position);
+    let (mut token_a, mut token_b) = (d32(&mut rng), d32(&mut rng));
+    if token_a > token_b {
+        std::mem::swap(&mut token_a, &mut token_b);
+    }
+    let fee_bps = 30;
+    let mut state = VaultStateLeaf {
+        owner_genesis,
+        owner_device_id,
+        create_position,
+        market_policy: market_policy_addr(&token_a, &token_b),
+        fee_policy: fee_policy_addr(fee_bps),
+        release_policy: release_policy_addr(),
+        storage_set_id: d32(&mut rng),
+        generation: rng.random_range(0..1 << 20),
+        reserve_a: rng.random_range(1 << 40..1 << 60),
+        reserve_b: rng.random_range(1 << 40..1 << 60),
+        status: VAULT_STATUS_ACTIVE,
+    };
+    let (mut trader_genesis, mut trader_device_id) = (owner_genesis, owner_device_id);
+    let kind = match release {
+        None => Kind::Close,
+        Some(terms) => {
+            let (token, y) = (d32(&mut rng), d32(&mut rng));
+            let mut recipients: Vec<(D32, D32)> = Vec::new();
+            let bytes = match terms {
+                Terms::Signed { branches } => {
+                    let mut labels: Vec<Vec<u8>> = (0..branches)
+                        .map(|i| {
+                            let len = rng.random_range(1..=ESCROW_MAX_OUTCOME_BYTES);
+                            let mut l: Vec<u8> = (0..len).map(|_| rng.random()).collect();
+                            l[0] = i as u8; // distinct, so strictly ascending once sorted
+                            l
+                        })
+                        .collect();
+                    labels.sort();
+                    let rows: Vec<_> = labels
+                        .into_iter()
+                        .map(|label| {
+                            let mut keys: Vec<[u8; SPX256F_KEY]> = (0..rng.random_range(1..=ESCROW_MAX_SIGNERS))
+                                .map(|_| std::array::from_fn(|_| rng.random()))
+                                .collect();
+                            keys.sort();
+                            keys.dedup();
+                            let r = (d32(&mut rng), d32(&mut rng));
+                            recipients.push(r);
+                            (label, keys, r.0, r.1)
+                        })
+                        .collect();
+                    signed_terms(&token, &y, &rows)
+                }
+                Terms::Computed => {
+                    let r: [(D32, D32); 3] = std::array::from_fn(|_| (d32(&mut rng), d32(&mut rng)));
+                    recipients = r.to_vec();
+                    let keys: [[u8; SPX256F_KEY]; 2] = std::array::from_fn(|_| std::array::from_fn(|_| rng.random()));
+                    computed_terms(&token, &y, [&d32(&mut rng), &d32(&mut rng)], keys, [&d32(&mut rng), &d32(&mut rng)], r)
+                }
+            };
+            let view = decode_escrow(&bytes).expect("fixture terms decode");
+            let pick = rng.random_range(0..view.branches.len());
+            (trader_genesis, trader_device_id) = recipients[pick];
+            let addr = terms_address_of(&bytes);
+            (state.market_policy, state.fee_policy, state.release_policy) = (addr, addr, addr);
+            state.reserve_b = 0;
+            Kind::Release(Release {
+                verdict_cell: view.cell,
+                outcome: view.branches[pick].0.clone(),
+                terms: bytes,
+            })
+        }
+    };
+    let relationship_base = d32(&mut rng);
+    let mut tree = Tree::new();
+    let state_key = vault_state_key(&vault_id);
+    tree.insert(state_key, vault_state_leaf_value(&state));
+    let rel_key = relationship_key(&trader_genesis, &trader_device_id, &vault_id);
+    if present {
+        tree.insert(rel_key, vault_relationship_leaf_value(&trader_genesis, &trader_device_id, &relationship_base));
+    }
+    for _ in 0..others {
+        let (g, d, base) = (d32(&mut rng), d32(&mut rng), d32(&mut rng));
+        tree.insert(relationship_key(&g, &d, &vault_id), vault_relationship_leaf_value(&g, &d, &base));
+    }
+    let r_prev = tree.root();
+    let witness = StepWitness {
+        vault_id,
+        state,
+        token_a,
+        token_b,
+        fee_bps,
+        hop: Hop {
+            in_is_a: false,
+            amount_in: 0,
+            amount_out: 0,
+        },
+        kind,
+        trader_genesis,
+        trader_device_id,
+        relationship_base,
+        relationship_present: present,
+        external_commitment: d32(&mut rng),
+        attempt: rng.random_range(0..3),
+        state_path: tree.path(&state_key),
+        relationship_path: tree.path(&rel_key),
+    };
+    let public = step(&witness, &r_prev).expect("a valid terminal step");
+    Fixture {
+        witness,
+        r_prev,
+        public,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -202,6 +384,41 @@ mod tests {
     }
 
     use super::*;
+
+    /// Closes and releases of every kind are valid steps, retire the vault and only a release has an op digest; the
+    /// largest signed terms take several BLAKE3 chunks.
+    #[test]
+    fn terminal_steps_are_valid() {
+        let mut biggest = 0;
+        for (seed, release) in [
+            (1, None),
+            (2, Some(Terms::Computed)),
+            (3, Some(Terms::Signed { branches: 1 })),
+            (4, Some(Terms::Signed { branches: 3 })),
+            (5, Some(Terms::Signed { branches: ESCROW_MAX_BRANCHES })),
+        ] {
+            let f = terminal(seed, release, seed % 2 == 0, 2);
+            assert_eq!(f.public.generation, f.witness.state.generation + 1);
+            assert_eq!(f.public.op_digest == [0; 32], release.is_none());
+            if let Kind::Release(r) = &f.witness.kind {
+                biggest = biggest.max(r.terms.len());
+                // Another outcome, another cell, or a trader no branch pays: refused.
+                let mut bad = f.witness.clone();
+                if let Kind::Release(r) = &mut bad.kind {
+                    r.verdict_cell[0] ^= 1;
+                }
+                assert_eq!(step(&bad, &f.r_prev), Err("VerdictCellIsNotTheTerms"));
+                let mut bad = f.witness.clone();
+                bad.trader_genesis[0] ^= 1;
+                assert!(step(&bad, &f.r_prev).is_err());
+            } else {
+                let mut bad = f.witness.clone();
+                bad.trader_device_id[3] ^= 1;
+                assert_eq!(step(&bad, &f.r_prev), Err("NotTheVaultOwner"));
+            }
+        }
+        assert!(biggest > 1024, "the largest terms span several chunks: {biggest}");
+    }
 
     /// The reference accepts a valid step, its post-root is the tree's after the two writes, and each kind of bad
     /// step is refused.

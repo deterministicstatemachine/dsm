@@ -65,7 +65,7 @@ pub(super) const STATEMENT_HEADER: usize = 8 + VAULT_CELLS;
 /// Research build: the vault chain's cells in the statement header, after the DA digest: the vault, the first and
 /// last roots, the external commitment and the attempt key (two cells each, a value's little-endian limbs), the
 /// generation as one cell (`vault_step.py`'s `int_limb` of its digits), and 1 marking a chain; zeros for none.
-pub(super) const VAULT_CELLS: usize = 12;
+pub(super) const VAULT_CELLS: usize = 14;
 
 pub(super) fn vault_cells(vault: &Option<claims::VaultChain>) -> Vec<F128> {
     let Some(v) = vault else {
@@ -80,6 +80,7 @@ pub(super) fn vault_cells(vault: &Option<claims::VaultChain>) -> Vec<F128> {
         .into_iter()
         .flatten()
         .chain([generation, F128::from(1u128)])
+        .chain(cells(&v.op_digest))
         .collect()
 }
 
