@@ -262,6 +262,59 @@ fn forged_opening_hints_are_rejected() {
     }
 }
 
+/// Flock's part of a child's verification and the matrix batch ride in as hints: a forged lincheck matrix part, a
+/// forged batch round or a forged reduced value fails the guest's run; a forged leaf matrix value changes the
+/// statement, which the guest's own digest then refuses; and a proof whose deferred matrix point is moved verifies
+/// for nothing, the outer verifier recomputing the values there.
+#[test]
+fn forged_flock_hints_are_rejected() {
+    let signers = get_signers::<StableProver>(SMALL_LEAF_SIZE);
+    let child = prove(&[], &signers, &[]);
+    let forgeries: [Forgery; 4] = [
+        Box::new(|hints: &mut Hints| hints.entry_mut("flock_matrix", 0)[0] += F128::ONE),
+        Box::new(|hints: &mut Hints| hints.entry_mut("mat_stars_hint", 0)[0] += F128::ONE),
+        Box::new(|hints: &mut Hints| hints.entry_mut("mat_stars_hint", 0)[1] += F128::ONE),
+        Box::new(|hints: &mut Hints| hints.entry_mut("mat_sumcheck_msgs", 0)[3] += F128::ONE),
+    ];
+    for forgery in forgeries {
+        assert_forgery_rejected(forgery, std::slice::from_ref(&child), vec![], vec![], &[]);
+    }
+    for value in [1, 2] {
+        assert_forgery_rejected(
+            Box::new(move |hints: &mut Hints| hints.entry_mut("leaf_defer", 0)[value] += F128::ONE),
+            &[],
+            signers.clone(),
+            vec![],
+            &[],
+        );
+    }
+    // The child's own Flock words, as the guest reads them off its proof stream: each tampered one is refused.
+    let defer = super::deferred::DeferredClaim::recompute(child.1.bytecode_point.clone(), child.1.matrix_point.clone());
+    let pi = super::statement::statement_digest(&child.0, &defer);
+    let summary = verifier::verify_execution(
+        unified_guest().bytecode(),
+        &lean_vm_core::cpu::public_input_bytes(&pi),
+        &child.1.proof,
+    )
+    .expect("the child verifies");
+    let flock = summary.flock_scalars;
+    for at in [flock.start, flock.start + 70, (flock.start + flock.end) / 2, flock.end - 1] {
+        assert_forgery_rejected(
+            Box::new(move |hints: &mut Hints| hints.entry_mut("stream", 0)[at] += F128::ONE),
+            std::slice::from_ref(&child),
+            vec![],
+            vec![],
+            &[],
+        );
+    }
+    let node = prove(std::slice::from_ref(&child), &[], &[]);
+    let mut moved = node.1.clone();
+    moved.matrix_point[5] += F128::ONE;
+    assert!(!moved.verify(&node.0), "a moved deferred matrix point verifies nothing");
+    let bytes = node.1.to_bytes();
+    assert!(super::AggregateProof::from_bytes(&bytes).is_some_and(|p| p.verify(&node.0)));
+}
+
 #[test]
 fn guest_column_selectors_match_native_eq() {
     let kbc = 18;
