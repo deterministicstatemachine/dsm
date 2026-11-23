@@ -859,3 +859,44 @@ fn malformed_raw_signatures_are_errors() {
         );
     }
 }
+
+/// Measurement, not a check (research build): one per-trade node, a child of 16 leanXMSS signatures verified in the
+/// VM plus `VAULT_B3` chained BLAKE3 compressions (the vault step's hashing stand-in), at rate 1/2. The whole
+/// `aggregate` call timed, median of three; one native verify; the proof's bytes; the process's peak memory.
+#[test]
+#[ignore = "benchmark"]
+fn vault_bench() {
+    StableProver::init();
+    let signers = get_signers::<StableProver>(16);
+    let (child_claims, child_proof, _) =
+        super::aggregate::<StableProver>(&[], signers, vec![], None, OutputClaims::All, 1).expect("child");
+    assert!(child_proof.verify(&child_claims));
+    let child = (child_claims, child_proof);
+    let mut times = Vec::new();
+    let mut last = None;
+    for _ in 0..3 {
+        let t = std::time::Instant::now();
+        let out = super::aggregate::<StableProver>(std::slice::from_ref(&child), vec![], vec![], None, OutputClaims::All, 1)
+            .expect("node");
+        times.push(t.elapsed().as_secs_f64() * 1e3);
+        last = Some(out);
+    }
+    let (claims, node, stats) = last.unwrap();
+    let t = std::time::Instant::now();
+    assert!(node.verify(&claims), "the node verifies");
+    let verify_ms = t.elapsed().as_secs_f64() * 1e3;
+    times.sort_by(f64::total_cmp);
+    let hwm = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM:")).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .unwrap_or_default();
+    println!(
+        "VAULT b3={} cycles={} blake3_rows={} keccak_rows={} prove_median_ms={:.1} verify_ms={verify_ms:.2} proof_kib={:.1} {hwm}",
+        std::env::var("VAULT_B3").unwrap_or_else(|_| "0".into()),
+        stats.cycles,
+        stats.table_heights[verifier::layout::OP_BLAKE3],
+        stats.table_heights[verifier::layout::OP_KECCAK],
+        times[1],
+        node.to_bytes().len() as f64 / 1024.0
+    );
+}

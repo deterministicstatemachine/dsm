@@ -389,6 +389,10 @@ FLOCK_POINT_GRIND_BITS = FLOCK_POINT_GRIND_BITS_PLACEHOLDER
 FLOCK_SKIP_GRIND_BITS = FLOCK_SKIP_GRIND_BITS_PLACEHOLDER
 FLOCK_ROUND_GRIND_BITS = FLOCK_ROUND_GRIND_BITS_PLACEHOLDER
 FLOCK_ALPHA_GRIND_BITS = FLOCK_ALPHA_GRIND_BITS_PLACEHOLDER
+# The research bench's BLAKE3 chain (bench_blake3_chain): IV cells and one-block metadata.
+B3_IV0 = B3_IV0_PLACEHOLDER
+B3_IV1 = B3_IV1_PLACEHOLDER
+B3_MD = B3_MD_PLACEHOLDER
 
 # ------------------------------------------------------ statements and deferral
 # A node defers one claim on the stacked bytecode. DEFER_SIZE is the region one
@@ -4963,6 +4967,42 @@ def da_column_offsets(zs):
 # ================================ the aggregation node ==============================
 
 
+# ------------------------------------------------------------ research bench only
+# A stand-in for a vault step's own hashing, for measuring a per-trade node: n chained
+# one-block BLAKE3 compressions, x_(i+1) = blake3(x_i || x_i), from a hinted seed, the last
+# asserted against a hinted digest. Not part of the statement; n = 0 outside the bench.
+
+
+def b3_step(x0, x1):
+    x = StackBuf(2)
+    x[0] = x0
+    x[1] = x1
+    cv = StackBuf(2)
+    cv[0] = B3_IV0
+    cv[1] = B3_IV1
+    y = StackBuf(2)
+    blake3(x, x, cv, B3_MD, y)
+    return y[0], y[1]
+
+
+def bench_blake3_chain():
+    n_g = hint_witness("b3_n")
+    c0 = HeapBuf(n_g * GEN)
+    c1 = HeapBuf(n_g * GEN)
+    ends = StackBuf(4)
+    hint_witness(ends, "b3_ends")  # the seed's two cells, then the expected last
+    assert_gpow(n_g)
+    c0[1] = ends[0]
+    c1[1] = ends[1]
+    for xi in mul_range(1, n_g):
+        y0, y1 = b3_step(c0[xi], c1[xi])
+        c0[xi * GEN] = y0
+        c1[xi * GEN] = y1
+    assert c0[n_g] == ends[2]
+    assert c1[n_g] == ends[3]
+    return
+
+
 def main():
     # One node of an aggregation tree: n_raw_lean_xmss leanXMSS signatures, n_raw_lean_sphincs
     # leanSPHINCS signatures and n_children sub-proofs OF THIS SAME BYTECODE. A claim of
@@ -5150,6 +5190,7 @@ def main():
     else:
         aggregate_claims(n_children_g, child_pi, child_fresh, child_carried, defer_stmt, g_squares * GEN ** WIN_TAB_AT)
 
+    bench_blake3_chain()
     own_0, own_1 = statement_digest(seed_0, seed_1, xd_0, xd_1, sd_0, sd_1, da[1], da[GEN], defer_stmt)
     pub_ptr = GEN ** 0
     assert pub_ptr[1] == own_0

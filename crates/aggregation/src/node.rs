@@ -279,6 +279,18 @@ pub fn aggregate<P: Prover>(
         }
     }
     hints.push("da_pick", vec![count(da_pick)]);
+    // Research bench only: `VAULT_B3` chained one-block BLAKE3 compressions, a stand-in for a vault step's hashing.
+    let n_b3: usize = std::env::var("VAULT_B3").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let seed: [u32; 8] = std::array::from_fn(|i| 0x0101_0101u32.wrapping_mul(i as u32 + 7));
+    let mut x = seed;
+    for _ in 0..n_b3 {
+        let mut block = [0u32; 16];
+        block[..8].copy_from_slice(&x);
+        block[8..].copy_from_slice(&x);
+        x = verifier::blake3::compress(&verifier::blake3::IV, &block, 0, 64, 1 | 2 | 8);
+    }
+    hints.push("b3_n", vec![count(n_b3)]);
+    hints.push("b3_ends", [b3_cells(&seed), b3_cells(&x)].concat());
 
     let claims = AggregateClaims {
         lean_xmss: cover.lean_xmss.signers,
@@ -308,4 +320,10 @@ fn sorted_claims<K: Ord + Copy, S>(raw: &mut Vec<(K, [u8; 32], S)>) -> Vec<(K, [
     raw.sort_by_key(|(pk, message, _)| (*pk, *message));
     raw.dedup_by_key(|(pk, message, _)| (*pk, *message));
     raw.iter().map(|(pk, message, _)| (*pk, *message)).collect()
+}
+
+/// Eight BLAKE3 words as the two memory cells holding them.
+pub(super) fn b3_cells(words: &[u32; 8]) -> [F128; 2] {
+    let limb = |k: usize| verifier::blake3::limb(words[2 * k], words[2 * k + 1]);
+    [F128::new(limb(0), limb(1)), F128::new(limb(2), limb(3))]
 }
