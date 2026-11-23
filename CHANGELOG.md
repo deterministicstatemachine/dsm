@@ -22,6 +22,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Fixed
 
+- **A wallet backup no longer copies every payment the wallet ever made, and
+  the phone no longer keeps a copy of every backup it wrote (DSM Amendment
+  A40).** On the beta nodes, backups were 4.23 GB of the 4.44 GB each node held:
+  each one carried the full record of every past payment (about 57 MB on the
+  busiest phone), and a new one is written after every payment, so storage grew
+  with the square of a wallet's payments. A backup now carries the steps in
+  flight and each contact's latest step, so its size follows the wallet's
+  contacts. Every other table, the offline account's among them, is carried
+  whole as before. Once each of the five seats holds a backup part, the phone
+  forgets its record of writing it (2.16 GB on one phone). What a restore
+  installs and how a receiver accepts a step are unchanged.
+
 - **A payment after a quiet spell no longer waits on its payer's earlier
   steps.** A receiver checks each of a payer's steps since the state it kept of
   the payer (the owner's ruling of 2026-11-15); until now it did so only when

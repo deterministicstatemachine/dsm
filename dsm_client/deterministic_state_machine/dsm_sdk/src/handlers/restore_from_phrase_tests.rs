@@ -252,3 +252,135 @@ async fn an_attempt_cut_short_leaves_no_gap() {
     assert_eq!(latest.0, 2, "the latest is backup 2");
     assert_eq!(latest.1, taken, "with the body its own attempt wrote");
 }
+
+/// The rows of `table` this device holds, and the rows of it a backup taken
+/// now carries.
+fn held_and_carried(table: &str) -> (usize, usize) {
+    let held: i64 = {
+        let binding = crate::storage::client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store's lock");
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .expect("the count")
+    };
+    let body = crate::sdk::wallet_backup_flow::snapshot()
+        .expect("the snapshot")
+        .expect("still");
+    let carried = body
+        .tables
+        .iter()
+        .find(|t| t.name == table)
+        .map(|t| t.rows.len())
+        .expect("the table is carried");
+    (usize::try_from(held).expect("a count"), carried)
+}
+
+/// The parts of this wallet's backups it still keeps a write record of.
+fn recorded_backup_parts() -> i64 {
+    let binding = crate::storage::client_db::get_connection().expect("the store");
+    let conn = binding.lock().expect("the store's lock");
+    conn.query_row(
+        "SELECT COUNT(*) FROM route_chain_write WHERE namespace = ?1",
+        [dsm::common::domain_tags::TAG_DSM_WALLET_BACKUP_CELL.source_bytes()],
+        |r| r.get(0),
+    )
+    .expect("the count")
+}
+
+/// A and B pay each other three times each, so each wallet keeps a record of
+/// six payments, besides the step that made them contacts. A's backup carries only each contact's latest step and the
+/// steps in flight, not the earlier payments, and once every seat holds its
+/// parts A forgets its own record of writing them. A's phone is lost;
+/// restored from its words, A takes a payment from B and pays B from there,
+/// so the trimmed backup is everything A needs to carry on with B both ways.
+///
+/// MUTATION CONTROL: with `kept_rows` answering `SELECT * FROM {table}` for
+/// every table, the backup carries all three of A's sends and goes red on the
+/// first carried count; with `forget_writes_held_everywhere` forgetting
+/// nothing, the parts stay recorded and it goes red there (run 2026-11-23).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn a_backup_carries_each_contacts_latest_step_not_every_payment() {
+    let pair = Pair::boot(200, 0).await;
+    for round in 0..3u64 {
+        let paid = pair.a.send(&pair.b, era(20)).await;
+        assert!(
+            paid.success,
+            "A pays B, round {round}: {:?}",
+            paid.error_message
+        );
+        pair.b.sync().await;
+        pair.a.sync().await;
+        let back = pair.b.send(&pair.a, era(5)).await;
+        assert!(
+            back.success,
+            "B pays A, round {round}: {:?}",
+            back.error_message
+        );
+        pair.a.sync().await;
+        pair.b.sync().await;
+    }
+    pair.a.sync().await;
+    pair.a.enter();
+    let (sends_held, sends_carried) = held_and_carried("sender_outbox");
+    let (taken_held, taken_carried) = held_and_carried("acceptance_fold_journal");
+    let (_, replies_carried) = held_and_carried("recipient_outbound_reply");
+    assert_eq!(sends_held, 3, "A holds a record of each of its three sends");
+    assert_eq!(sends_carried, 1, "the backup carries A's latest send to B");
+    assert_eq!(
+        taken_held, 4,
+        "A holds a record of each payment it took and of the step that made B its contact"
+    );
+    assert_eq!(
+        taken_carried, 1,
+        "the backup carries the latest payment A took"
+    );
+    assert!(replies_carried <= 1, "and at most that payment's reply");
+
+    back_up(&pair.a, 1).await;
+    pair.a.enter();
+    assert!(recorded_backup_parts() > 0, "A recorded writing its backup");
+    crate::sdk::wallet_backup_flow::forget_parts_held_everywhere().expect("forgotten");
+    assert_eq!(
+        recorded_backup_parts(),
+        0,
+        "every seat holds every part, so A keeps no record of writing them"
+    );
+    let a_before = pair.a.era_balance();
+    let b_before = pair.b.era_balance();
+
+    let mut restored = pair.a.on_a_new_device("A-restored");
+    let answer = restore(&economic_fixtures::test_mnemonic(pair.a.seed)).await;
+    assert!(answer.success, "the restore: {:?}", answer.error_message);
+    restored.start(&pair.fleet);
+    assert_eq!(restored.era_balance(), a_before);
+
+    let taken = pair.b.send(&restored, era(4)).await;
+    assert!(
+        taken.success,
+        "B pays the restored A: {:?}",
+        taken.error_message
+    );
+    restored.sync().await;
+    pair.b.sync().await;
+    assert_eq!(
+        restored.era_balance(),
+        a_before + era(4),
+        "the restored A took it"
+    );
+
+    let again = restored.send(&pair.b, era(7)).await;
+    assert!(
+        again.success,
+        "the restored A pays B: {:?}",
+        again.error_message
+    );
+    pair.b.sync().await;
+    restored.sync().await;
+    pair.b.sync().await;
+    assert_eq!(
+        pair.b.era_balance(),
+        b_before - era(4) + era(7),
+        "B took it"
+    );
+    assert_eq!(restored.era_balance(), a_before + era(4) - era(7));
+}

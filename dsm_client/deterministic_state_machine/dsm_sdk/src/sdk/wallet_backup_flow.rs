@@ -297,6 +297,54 @@ impl<'a> Reader<'a> {
 
 // ── taking and installing ───────────────────────────────────────────────────
 
+/// A journal row a backup carries: one still in flight (prepared, applied,
+/// or awaiting the sender's finality), or one at or after its contact's
+/// latest accepted step. Earlier steps are history the relationship has moved
+/// past: nothing a restored wallet does with that contact reads them.
+const KEPT_JOURNAL: &str = "(j.status IN ('prepared', 'applied') \
+     OR (j.status != 'rejected' AND j.peer_finalized = 0) \
+     OR j.rowid >= COALESCE((SELECT MAX(l.rowid) FROM acceptance_fold_journal l \
+                              WHERE l.relationship_key = j.relationship_key \
+                                AND l.status != 'rejected'), 0))";
+
+/// A send a backup carries: one not complete, or its contact's latest.
+const KEPT_SEND: &str = "(o.status != 'complete' \
+     OR o.rowid >= (SELECT MAX(l.rowid) FROM sender_outbox l \
+                     WHERE l.relationship_key = o.relationship_key))";
+
+/// The rows of `table` a backup carries, in the order the wallet wrote them.
+/// Four tables keep a record of every payment ever sent or taken; a backup
+/// carries only the steps in flight and each contact's latest step (DSM
+/// Amendment A40: "the steps in flight", "each relationship's chain tip"),
+/// so its size follows the wallet's contacts, not every payment it ever made.
+/// Every other table is carried whole, the offline account's among them.
+fn kept_rows(table: &str) -> String {
+    match table {
+        "acceptance_fold_journal" => format!(
+            "SELECT j.* FROM acceptance_fold_journal j WHERE {KEPT_JOURNAL} ORDER BY j.rowid"
+        ),
+        "recipient_outbound_reply" => format!(
+            "SELECT r.* FROM recipient_outbound_reply r \
+              WHERE r.submitted = 0 OR r.held = 1 \
+                 OR EXISTS (SELECT 1 FROM acceptance_fold_journal j \
+                             WHERE j.commitment = r.commitment AND {KEPT_JOURNAL}) \
+              ORDER BY r.rowid"
+        ),
+        "sender_outbox" => {
+            format!("SELECT o.* FROM sender_outbox o WHERE {KEPT_SEND} ORDER BY o.rowid")
+        }
+        "sender_outbox_artifacts" => format!(
+            "SELECT a.* FROM sender_outbox_artifacts a \
+              WHERE EXISTS (SELECT 1 FROM sender_outbox o \
+                             WHERE o.relationship_key = a.relationship_key \
+                               AND o.canonical_parent = a.canonical_parent \
+                               AND o.proposal_nonce = a.proposal_nonce AND {KEPT_SEND}) \
+              ORDER BY a.rowid"
+        ),
+        other => format!("SELECT * FROM {other}"),
+    }
+}
+
 /// Why no backup was taken now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotNow {
@@ -343,9 +391,7 @@ pub fn snapshot() -> Result<Result<Body, NotNow>, DsmError> {
     };
     let mut tables = Vec::with_capacity(BACKUP_TABLES.len());
     for name in BACKUP_TABLES {
-        let mut stmt = tx
-            .prepare(&format!("SELECT * FROM {name}"))
-            .map_err(|e| storage(name, e))?;
+        let mut stmt = tx.prepare(&kept_rows(name)).map_err(|e| storage(name, e))?;
         let columns: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
         let width = columns.len();
         let rows = stmt
@@ -718,7 +764,25 @@ pub fn start() {
     *running = Some(crate::runtime::get_runtime().spawn(run()));
 }
 
+/// Forget this wallet's record of every backup part each seat of its route
+/// holds: nothing continues such a write, and a backup is read back from the
+/// nodes, never from this record.
+pub fn forget_parts_held_everywhere() -> Result<usize, DsmError> {
+    let forgotten = crate::storage::client_db::route_writes::forget_writes_held_everywhere(
+        dsm::common::domain_tags::TAG_DSM_WALLET_BACKUP_CELL.source_bytes(),
+        dsm::route_chain::ROUTE_LEN,
+    )
+    .map_err(|e| storage("forgetting the parts every seat holds", e))?;
+    if forgotten > 0 {
+        log::info!("[wallet backup] forgot {forgotten} parts every seat holds");
+    }
+    Ok(forgotten)
+}
+
 async fn run() {
+    if let Err(e) = forget_parts_held_everywhere() {
+        log::warn!("{e}");
+    }
     let mut seen: Option<D32> = None;
     let mut still_ticks: u64 = 0;
     let mut backed_up: Option<D32> = None;
@@ -762,6 +826,9 @@ async fn run() {
             Ok(Attempt::Written(n)) => {
                 backed_up = Some(mark);
                 log::info!("[wallet backup] backup {n} written");
+                if let Err(e) = forget_parts_held_everywhere() {
+                    log::warn!("{e}");
+                }
             }
             Ok(Attempt::NotNow(why)) => log::debug!("[wallet backup] not now: {why:?}"),
             Ok(Attempt::Cancelled) => log::info!("[wallet backup] cancelled: the wallet moved"),

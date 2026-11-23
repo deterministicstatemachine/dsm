@@ -213,3 +213,60 @@ pub fn open_writes(route_len: usize, limit: u32) -> Result<Vec<RecordedWrite>> {
     }
     Ok(out)
 }
+
+/// Forget every recorded write in `namespace` that holds a link at each of
+/// the `route_len` positions of its route: every seat holds the value, so
+/// nothing is left to continue and the record only takes room. A write with a
+/// position that did not answer or was taken stays recorded. Returns how many
+/// writes were forgotten.
+pub fn forget_writes_held_everywhere(namespace: &[u8], route_len: usize) -> Result<usize> {
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the store's lock is poisoned: {e}"))?;
+    let tx = conn.transaction()?;
+    let route_len_sql = i64::try_from(route_len).map_err(|e| anyhow!("route length: {e}"))?;
+    let finished: Vec<([u8; 32], [u8; 32])> = {
+        let mut stmt = tx.prepare(
+            "SELECT w.cell_key, w.value_digest FROM route_chain_write w
+              WHERE w.namespace = ?1
+                AND (SELECT COUNT(*) FROM route_chain_write_slot s
+                      WHERE s.namespace = w.namespace AND s.cell_key = w.cell_key
+                        AND s.value_digest = w.value_digest) = ?2",
+        )?;
+        let rows = stmt.query_map(params![namespace, route_len_sql], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, digest) = row?;
+            out.push((
+                digest32(key, "cell key")?,
+                digest32(digest, "value digest")?,
+            ));
+        }
+        out
+    };
+    let mut forgotten = 0usize;
+    for (cell_key, digest) in finished {
+        let slots = slots_of(&tx, namespace, &cell_key, &digest)?;
+        if slots.len() != route_len || !slots.iter().all(|s| matches!(s, ChainSlot::Link(_))) {
+            continue;
+        }
+        for table in [
+            "route_chain_write_slot",
+            "route_chain_write_proof",
+            "route_chain_write",
+        ] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE namespace = ?1 AND cell_key = ?2 AND value_digest = ?3"
+                ),
+                params![namespace, cell_key.as_slice(), digest.as_slice()],
+            )?;
+        }
+        forgotten += 1;
+    }
+    tx.commit()?;
+    Ok(forgotten)
+}
