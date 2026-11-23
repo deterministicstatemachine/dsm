@@ -23,21 +23,21 @@ const PHI_BASIS: [u64; 8] = [
 ];
 
 /// `PHI[value]`: the F2-linear image of the byte `value` in the PHI basis.
-fn phi(value: usize) -> E {
+pub fn phi(value: usize) -> E {
     let bits = (0..8).filter(|bit| value >> bit & 1 == 1);
     E::new(bits.fold(0, |acc, bit| acc ^ PHI_BASIS[bit]), 0)
 }
 
 /// The old generator's first two limbs (hex digits of pi), as the prover's `medium_generator`.
 const MEDIUM_GENERATOR: E = E::new(0x243F6A8885A308D3, 0x13198A2E03707344);
-const N_FIXED_CHALLENGES: usize = 7;
+pub const N_FIXED_CHALLENGES: usize = 7;
 /// The grind before the zerocheck's sampled coordinates: their count is at most 32.
 pub const FLOCK_POINT_GRIND_BITS: u32 = grinding_bits(32);
 const _: () = assert!(BLAKE3_R1CS_LOG_SIZE + crate::layout::MAX_TABLE_LOG - FLOCK_K_SKIP - N_FIXED_CHALLENGES <= 32);
 /// The grind before the univariate-skip challenge: P is of degree 2 (2^k_skip - 1) in it.
 pub const FLOCK_SKIP_GRIND_BITS: u32 = grinding_bits(2 * (K_BITS as u128 - 1));
 
-fn fixed_challenges() -> [E; N_FIXED_CHALLENGES] {
+pub fn fixed_challenges() -> [E; N_FIXED_CHALLENGES] {
     let medium = |power: u32| {
         let value = MEDIUM_GENERATOR.pow(1 << power);
         value * (ONE + value).inv()
@@ -57,7 +57,7 @@ fn fixed_challenges() -> [E; N_FIXED_CHALLENGES] {
 ///
 /// PHI is F2-linear in its index, so `PHI[i] + PHI[j] = PHI[i ^ j]`, and over a power-of-two prefix
 /// `j -> i ^ j` only permutes the block. Every node is left the same product.
-fn window_denominator(count: usize) -> E {
+pub fn window_denominator(count: usize) -> E {
     (1..count).fold(ONE, |acc, k| acc * phi(k)).inv()
 }
 

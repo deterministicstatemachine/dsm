@@ -1,6 +1,6 @@
 //! The aggregate, its wire format and its native verification.
 
-use super::deferred::{DeferredBytecodeClaim, bytecode_vars};
+use super::deferred::{DeferredClaim, MATRIX_VARS, bytecode_vars};
 use super::guest::unified_guest;
 use super::statement::statement_digest;
 use claims::AggregateClaims;
@@ -13,6 +13,8 @@ use primitives::field::F128;
 pub struct AggregateProof {
     /// The point of the deferred bytecode claim, `bytecode_vars()` long; its value is computed from it.
     pub(super) bytecode_point: Vec<F128>,
+    /// The point of the deferred matrix claim, `MATRIX_VARS` long; its values are computed from it.
+    pub(super) matrix_point: Vec<F128>,
     pub(super) proof: verifier::Proof,
 }
 
@@ -44,17 +46,22 @@ pub(super) fn is_sorted(claims: &AggregateClaims) -> bool {
 
 impl AggregateProof {
     pub fn to_bytes(&self) -> Vec<u8> {
-        encode(&self.bytecode_point, &self.proof.to_bytes())
+        encode(&[&self.bytecode_point[..], &self.matrix_point].concat(), &self.proof.to_bytes())
     }
 
     /// Decode a proof, `None` if the bytes are not one. This does not verify: call [`Self::verify`].
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let (bytecode_point, proof) = decode(bytes)?;
-        if bytecode_point.len() != bytecode_vars() {
+        let (mut bytecode_point, proof) = decode(bytes)?;
+        if bytecode_point.len() != bytecode_vars() + MATRIX_VARS {
             return None;
         }
+        let matrix_point = bytecode_point.split_off(bytecode_vars());
         let proof = verifier::Proof::from_bytes(proof)?;
-        Some(Self { bytecode_point, proof })
+        Some(Self {
+            bytecode_point,
+            matrix_point,
+            proof,
+        })
     }
 
     /// Whether this proves `claims`: the lists are sorted, the deferred claim holds, and the stark
@@ -64,7 +71,7 @@ impl AggregateProof {
         if !is_sorted(claims) {
             return false;
         }
-        let defer = DeferredBytecodeClaim::recompute(self.bytecode_point.clone());
+        let defer = DeferredClaim::recompute(self.bytecode_point.clone(), self.matrix_point.clone());
         let pi = statement_digest(claims, &defer);
         let verdict = verifier::verify_execution(unified_guest().bytecode(), &public_input_bytes(&pi), &self.proof);
         if let Err(error) = &verdict {

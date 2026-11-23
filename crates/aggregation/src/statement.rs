@@ -1,7 +1,7 @@
 //! Claim-list digests and a node's public statement.
 
 use super::cells::{cell_bytes, count, pack_16_bytes};
-use super::deferred::DeferredBytecodeClaim;
+use super::deferred::DeferredClaim;
 use super::guest::fs_seed;
 use super::{AggregateClaims, LeanSphincsClaim, LeanXmssClaim};
 use fiat_shamir_prover::merkle::hash_to_scalars;
@@ -78,7 +78,7 @@ fn cell_hash(cells: impl IntoIterator<Item = F128>) -> [F128; 2] {
 /// preimage from every other use of the hash here. The header cells, then the
 /// deferred cells, each hashed as its two lanes. Each claim list's digest binds its
 /// own length through the hash's padding, so the pair binds both lists whole.
-pub(super) fn statement_digest(claims: &AggregateClaims, defer: &DeferredBytecodeClaim) -> [F128; 2] {
+pub(super) fn statement_digest(claims: &AggregateClaims, defer: &DeferredClaim) -> [F128; 2] {
     let header: [[F128; 2]; STATEMENT_HEADER / 2] = [
         fs_seed(),
         claim_list_digest(claims.lean_xmss.iter().map(lean_xmss_claim_cells)),

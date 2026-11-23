@@ -20,6 +20,7 @@ lean_da.workspace = true
 # The protocol's structure (bus blocks, stacking, grinds, the stacked bytecode), from the reference prover.
 lean_vm_core = { package = "stable_lean_vm_core", path = "../stable_prover/lean_vm_core" }
 pcs = { package = "stable_pcs", path = "../stable_prover/pcs" }
+flock = { path = "../stable_prover/flock" }
 primitives = { package = "stable_primitives", path = "../stable_prover/primitives" }
 rand = { workspace = true, optional = true }
 tracing.workspace = true

@@ -73,6 +73,128 @@ impl DeferredBytecodeClaim {
     }
 }
 
+/// Cells of a child's fresh Flock claim: the lincheck's matrix part, its `alpha`, the skip point, the zerocheck's
+/// first `FLOCK_NUM_LINCHECK_ROUNDS` coordinates, the lincheck's round challenges, then the 64 slices.
+pub(super) const FLOCK_FRESH: usize = 3 + 2 * verifier::layout::FLOCK_NUM_LINCHECK_ROUNDS + verifier::layout::K_BITS;
+/// Variables of a deferred matrix claim's point: the rows', then the columns'.
+pub(super) const MATRIX_VARS: usize = 2 * verifier::layout::BLAKE3_R1CS_LOG_SIZE;
+
+/// The claim on Flock's `A0`, `B0` a child's verification raises: its lincheck's matrix part, `sum_(r, c) (A0 + alpha
+/// B0)[r][c] U(r) W(c)`, `U` the quirky eq table at `(z_skip, zchi)` and `W` the slices times eq at the lincheck's
+/// challenges, bound top-down (`verifier::flock::matrix_term`). A guest takes it from a hint and defers it.
+#[derive(Clone, Debug)]
+pub(super) struct FreshFlockClaim {
+    pub(super) matrix: F128,
+    pub(super) alpha: F128,
+    pub(super) z_skip: F128,
+    pub(super) zchi: Vec<F128>,
+    pub(super) rs: Vec<F128>,
+    pub(super) s: Vec<F128>,
+}
+
+impl FreshFlockClaim {
+    pub(super) fn of(flock: &verifier::flock::FlockClaims) -> Self {
+        let lift = |v: &[verifier::E]| v.iter().copied().map(from_scalar).collect::<Vec<_>>();
+        Self {
+            matrix: from_scalar(flock.matrix),
+            alpha: from_scalar(flock.alpha),
+            z_skip: from_scalar(flock.z_skip),
+            zchi: lift(&flock.chi[..verifier::layout::FLOCK_NUM_LINCHECK_ROUNDS]),
+            rs: lift(&flock.round_challenges),
+            s: lift(&flock.s),
+        }
+    }
+
+    /// In the guest's `defer_out` order, after the bytecode's.
+    pub(super) fn cells(&self) -> Vec<F128> {
+        let mut cells = vec![self.matrix, self.alpha, self.z_skip];
+        cells.extend(&self.zchi);
+        cells.extend(&self.rs);
+        cells.extend(&self.s);
+        assert_eq!(cells.len(), FLOCK_FRESH);
+        cells
+    }
+
+    /// The row weights `U` and the column weights `W` of its bilinear form.
+    fn weights(&self) -> (Vec<F128>, Vec<F128>) {
+        let k = verifier::layout::BLAKE3_R1CS_LOG_SIZE;
+        let rows = flock::lincheck::build_quirky_eq_table(self.z_skip, &self.zchi, verifier::layout::FLOCK_K_SKIP);
+        let columns = (0..1usize << k)
+            .map(|col| {
+                let mut w = self.s[col % verifier::layout::K_BITS];
+                for (j, &rj) in self.rs.iter().enumerate() {
+                    w *= if (col >> (k - 1 - j)) & 1 == 1 { rj } else { F128::ONE + rj };
+                }
+                w
+            })
+            .collect();
+        (rows, columns)
+    }
+}
+
+/// The claim on Flock's matrices a node defers: their multilinear extensions at one point. Only the point is
+/// transmitted; the values are recomputed from it on receipt, as the bytecode's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DeferredMatrixClaim {
+    pub(super) point: Vec<F128>,
+    pub(super) a: F128,
+    pub(super) b: F128,
+}
+
+impl DeferredMatrixClaim {
+    /// What a leaf defers: the all-zeros point.
+    pub(super) fn leaf() -> Self {
+        Self::recompute(vec![F128::ZERO; MATRIX_VARS])
+    }
+
+    /// The claim at `point`, evaluated by the `verifier` crate (a forward walk of the BLAKE3 circuit).
+    pub(super) fn recompute(point: Vec<F128>) -> Self {
+        let scalars: Vec<_> = point.iter().map(to_scalar).collect();
+        let (a, b) = verifier::flock::matrix_values(&scalars).expect("a point of MATRIX_VARS coordinates");
+        Self {
+            point,
+            a: from_scalar(a),
+            b: from_scalar(b),
+        }
+    }
+
+    pub(super) fn cells(&self) -> Vec<F128> {
+        let mut cells = self.point.clone();
+        cells.extend([self.a, self.b]);
+        cells
+    }
+}
+
+/// Everything a node defers: the bytecode claim, then the matrix claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DeferredClaim {
+    pub(super) bytecode: DeferredBytecodeClaim,
+    pub(super) matrix: DeferredMatrixClaim,
+}
+
+impl DeferredClaim {
+    pub(super) fn leaf() -> Self {
+        Self {
+            bytecode: DeferredBytecodeClaim::leaf(),
+            matrix: DeferredMatrixClaim::leaf(),
+        }
+    }
+
+    pub(super) fn recompute(bytecode_point: Vec<F128>, matrix_point: Vec<F128>) -> Self {
+        Self {
+            bytecode: DeferredBytecodeClaim::recompute(bytecode_point),
+            matrix: DeferredMatrixClaim::recompute(matrix_point),
+        }
+    }
+
+    /// The cells the statement digest absorbs, in the guest's `defer_stmt` order.
+    pub(super) fn cells(&self) -> Vec<F128> {
+        let mut cells = self.bytecode.cells();
+        cells.extend(self.matrix.cells());
+        cells
+    }
+}
+
 /// The rows of [`BLOCK`] entries of the stacked bytecode that hold its populated slots: every other row is
 /// structurally zero.
 fn bytecode_rows() -> Range<usize> {
@@ -156,6 +278,8 @@ fn round_msg(u: &[F128], m: &[F128]) -> (F128, F128) {
 
 /// The grind before the batching challenge, whose powers weigh at most `2 MAX_RECURSIONS` claims.
 pub(super) const BATCH_LAM_GRIND_BITS: u32 = grinding_bits(2 * super::MAX_RECURSIONS as u128 - 1);
+/// The grind before the matrix batch's challenge, whose powers weigh at most `3 MAX_RECURSIONS` claims.
+pub(super) const MAT_LAM_GRIND_BITS: u32 = grinding_bits(3 * super::MAX_RECURSIONS as u128 - 1);
 
 /// One round of a batching sumcheck, in the transcript order the guest mirrors
 /// word for word: observe `(g1, g_inf)`, grind for the round's degree two, squeeze the fold challenge, record
@@ -192,7 +316,9 @@ pub(super) fn aggregate_deferred_claims<P: Prover>(
     public_inputs: &[[F128; 2]],
     claims: &[DeferredBytecodeClaim],
     mut sums: Vec<Vec<F128>>,
-) -> (SubHints, DeferredBytecodeClaim) {
+    fresh_flock: &[FreshFlockClaim],
+    carried_matrix: &[DeferredMatrixClaim],
+) -> (SubHints, DeferredClaim) {
     let kbcv = bytecode_vars();
 
     // The count and each child's words are padded with zeros to whole rates, so the
@@ -205,11 +331,21 @@ pub(super) fn aggregate_deferred_claims<P: Prover>(
     };
     transcript.observe(count(public_inputs.len()));
     pad(&mut transcript, 1);
-    for (public_input, pair) in public_inputs.iter().zip(claims.chunks(2)) {
+    for (((public_input, pair), fresh), carried) in public_inputs
+        .iter()
+        .zip(claims.chunks(2))
+        .zip(fresh_flock)
+        .zip(carried_matrix)
+    {
+        // The guest's order: the statement, the fresh region (bytecode, then Flock), the carried region (bytecode,
+        // then matrices).
         let words: Vec<F128> = public_input
             .iter()
             .copied()
-            .chain(pair.iter().flat_map(|claim| claim.cells()))
+            .chain(pair[0].cells())
+            .chain(fresh.cells())
+            .chain(pair[1].cells())
+            .chain(carried.cells())
             .collect();
         for &value in &words {
             transcript.observe(value);
@@ -282,10 +418,99 @@ pub(super) fn aggregate_deferred_claims<P: Prover>(
     );
 
     drop(_span);
-    let hints = vec![("bc_sumcheck_msgs", messages), ("bc_star_hint", vec![value])];
-    let reduced = DeferredBytecodeClaim {
-        bytecode_point: challenges,
-        bytecode_value: value,
+    let (mat_messages, matrix) = matrix_batch(&mut transcript, fresh_flock, carried_matrix);
+    let hints = vec![
+        ("bc_sumcheck_msgs", messages),
+        ("bc_star_hint", vec![value]),
+        ("mat_sumcheck_msgs", mat_messages),
+        ("mat_stars_hint", vec![matrix.a, matrix.b]),
+    ];
+    let reduced = DeferredClaim {
+        bytecode: DeferredBytecodeClaim {
+            bytecode_point: challenges,
+            bytecode_value: value,
+        },
+        matrix,
     };
     (hints, reduced)
+}
+
+/// The matrix batch, after the bytecode's, in the transcript order the guest mirrors: a grind and one challenge
+/// `lam`, child `i`'s fresh claim taking `lam^(3i)` (its `B0` part times its `alpha`) and its carried `A0` and `B0`
+/// claims `lam^(3i + 1)`, `lam^(3i + 2)`; then one sumcheck over the `MATRIX_VARS` variables of `A0` and `B0`, rows
+/// first, its rounds those of [`absorb_round`]. The row rounds run on each claim's row tables `(A0 W, B0 W)`, the
+/// circuit walked forward once per claim; the column rounds on the column marginals at the row challenges, walked
+/// backward once. Returns the hints (the nonce, if the grind sends one, then the rounds) and the claim they reduce to.
+fn matrix_batch(
+    transcript: &mut FiatShamirState<F128>,
+    fresh: &[FreshFlockClaim],
+    carried: &[DeferredMatrixClaim],
+) -> (Vec<F128>, DeferredMatrixClaim) {
+    let _span = tracing::info_span!("Matrix batch").entered();
+    let k = verifier::layout::BLAKE3_R1CS_LOG_SIZE;
+    let nonce = transcript.grind::<Sequential>(MAT_LAM_GRIND_BITS);
+    let lam = transcript.sample();
+    let mut messages: Vec<F128> = nonce.map(|nonce| F128::new(nonce, 0)).into_iter().collect();
+    // One group per claim: its row weights, its column weights, and the coefficient each matrix enters with.
+    let (mut us, mut ws, mut ga, mut gb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut claim = F128::ZERO;
+    let mut power = F128::ONE;
+    for (f, c) in fresh.iter().zip(carried) {
+        let (u, w) = f.weights();
+        us.push(u);
+        ws.push(w);
+        ga.push(power);
+        gb.push(power * f.alpha);
+        us.push(eq_table(&c.point[..k]));
+        ws.push(eq_table(&c.point[k..]));
+        ga.push(power * lam);
+        gb.push(power * lam * lam);
+        claim += power * (f.matrix + lam * (c.a + lam * c.b));
+        power *= lam * lam * lam;
+    }
+    // Each claim's row tables, `(A0 W, B0 W)`, by one forward walk of the circuit.
+    let mut ms: Vec<(Vec<F128>, Vec<F128>)> = ws.iter().map(|w| flock::hash::row_values_walk(w)).collect();
+    // A fresh claim's value is its bilinear form: the hint the guest took is this.
+    for (t, f) in fresh.iter().enumerate() {
+        let (u, (ma, mb)) = (&us[2 * t], &ms[2 * t]);
+        let form: F128 = u.iter().zip(ma.iter().zip(mb)).map(|(&u, (&a, &b))| u * (a + f.alpha * b)).sum();
+        assert_eq!(form, f.matrix, "a child's fresh matrix claim is its bilinear form");
+    }
+    let mut challenges = Vec::new();
+    for _ in 0..k {
+        let msg = (0..us.len()).fold((F128::ZERO, F128::ZERO), |acc, t| {
+            let (a1, ai) = round_msg(&us[t], &ms[t].0);
+            let (b1, bi) = round_msg(&us[t], &ms[t].1);
+            (acc.0 + ga[t] * a1 + gb[t] * b1, acc.1 + ga[t] * ai + gb[t] * bi)
+        });
+        let r = absorb_round(transcript, &mut messages, &mut challenges, &mut claim, msg);
+        for u in us.iter_mut() {
+            fold_lsb(u, r);
+        }
+        for (ma, mb) in ms.iter_mut() {
+            fold_lsb(ma, r);
+            fold_lsb(mb, r);
+        }
+    }
+    // The column marginals at the row challenges, `A0^T eq` and `B0^T eq`, by one backward walk.
+    let (mut acol, mut bcol) = flock::hash::marginal_walk_pair(&eq_table(&challenges));
+    let (mut wa, mut wb) = (vec![F128::ZERO; 1 << k], vec![F128::ZERO; 1 << k]);
+    for t in 0..us.len() {
+        let (sa, sb) = (ga[t] * us[t][0], gb[t] * us[t][0]);
+        for j in 0..1 << k {
+            wa[j] += sa * ws[t][j];
+            wb[j] += sb * ws[t][j];
+        }
+    }
+    for _ in 0..k {
+        let (a1, ai) = round_msg(&acol, &wa);
+        let (b1, bi) = round_msg(&bcol, &wb);
+        let r = absorb_round(transcript, &mut messages, &mut challenges, &mut claim, (a1 + b1, ai + bi));
+        for table in [&mut acol, &mut bcol, &mut wa, &mut wb] {
+            fold_lsb(table, r);
+        }
+    }
+    let (a, b) = (acol[0], bcol[0]);
+    assert_eq!(claim, a * wa[0] + b * wb[0], "the matrix batch's terminal");
+    (messages, DeferredMatrixClaim { point: challenges, a, b })
 }

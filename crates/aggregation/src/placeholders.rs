@@ -95,6 +95,7 @@ struct ClaimDescriptor {
     buffer: usize,
     column: usize,
     qkeccak_slot: usize,
+    qflock_slot: usize,
     /// The kappa source `(src, adj)` of the claim's low dimension.
     source: (usize, usize),
 }
@@ -108,6 +109,8 @@ const POINT_BUF_RHO: usize = 1;
 const POINT_BUF_PI: usize = 2;
 const POINT_BUF_QKECCAK_RHO: usize = 3;
 const POINT_BUF_KECCAK_OUT: usize = 4;
+/// The table point on a slot of `q_flock`: a `BLAKE3` value limb.
+const POINT_BUF_QFLOCK_RHO: usize = 5;
 
 /// A greedy (Paar) straight-line program computing each row's sum, or product where a row repeats an input:
 /// value `inputs + k` is op `k`, the sum or product of two earlier values, the pair most rows share first.
@@ -227,7 +230,35 @@ fn constants(ph: &mut Placeholders) {
     // into its two K limbs.
     let y_tower = F128::new(0, 1);
     let shape = KECCAK_MIN_SHAPE;
+    // Flock's verifier constants (verifier::flock), as the guest's literals.
+    let lift = |e: verifier::E| lean_vm_core::cpu::from_scalar(e);
+    let flock_fixed: Vec<F128> = verifier::flock::fixed_challenges().into_iter().map(lift).collect();
+    let flock_phi: Vec<F128> = (0..2 * verifier::layout::K_BITS).map(|v| lift(verifier::flock::phi(v))).collect();
+    let flock_den128 = lift(verifier::flock::window_denominator(2 * verifier::layout::K_BITS));
+    let flock_den64 = lift(verifier::flock::window_denominator(verifier::layout::K_BITS));
     let constants: &[(&str, &dyn Literal)] = &[
+        // Flock's reduction of the BLAKE3 table, and the deferral of its lincheck's matrix part.
+        ("TABLE_BLAKE3", &verifier::layout::OP_BLAKE3),
+        ("QFLOCK_SLOT_LOG", &verifier::layout::QFLOCK_SLOT_BITS),
+        ("QFLOCK_VARS_CAP", &(33 + verifier::layout::QFLOCK_SLOT_BITS)),
+        ("FLOCK_K_LOG", &verifier::layout::BLAKE3_R1CS_LOG_SIZE),
+        ("FLOCK_K_SKIP", &verifier::layout::FLOCK_K_SKIP),
+        ("FLOCK_LC_ROUNDS", &verifier::layout::FLOCK_NUM_LINCHECK_ROUNDS),
+        ("FLOCK_N_FIXED", &verifier::flock::N_FIXED_CHALLENGES),
+        ("FLOCK_PIN", &verifier::layout::BLAKE3_CONSTANT_COLUMN),
+        ("FLOCK_ROUNDS_CAP", &(verifier::layout::BLAKE3_R1CS_LOG_SIZE + verifier::MAX_TABLE_LOG + 1)),
+        ("FLOCK_FIXED", &flock_fixed),
+        ("FLOCK_PHI", &flock_phi),
+        ("FLOCK_DEN128", &flock_den128),
+        ("FLOCK_DEN64", &flock_den64),
+        ("FLOCK_POINT_GRIND_BITS", &verifier::flock::FLOCK_POINT_GRIND_BITS),
+        ("FLOCK_SKIP_GRIND_BITS", &verifier::flock::FLOCK_SKIP_GRIND_BITS),
+        ("FLOCK_ROUND_GRIND_BITS", &grinding_bits(3)),
+        ("FLOCK_ALPHA_GRIND_BITS", &grinding_bits(3)),
+        ("FLOCK_FRESH", &super::deferred::FLOCK_FRESH),
+        ("MATRIX_VARS", &super::deferred::MATRIX_VARS),
+        ("MAT_LAM_GRIND_BITS", &super::deferred::MAT_LAM_GRIND_BITS),
+        ("MAT_LAM_WORDS", &nonces(super::deferred::MAT_LAM_GRIND_BITS)),
         // Buffer caps and memory bounds.
         ("STREAM_CAP", &STREAM_CAP),
         ("QW", &QUERY_WINDOW_BITS),
@@ -435,21 +466,24 @@ fn claim_placeholders(ph: &mut Placeholders, pool: &[ClaimSite], kbc: usize) {
         .collect();
     let compact_col = |column: usize| compact[column].expect("a claim targets a committed column");
     let qkeccak = compact_col(QKECCAK);
+    let qflock = compact_col(verifier::layout::QFLOCK);
     let claims: Vec<ClaimDescriptor> = (pool.iter())
         .map(|site| match *site {
-            ClaimSite::Framework { column, source } => (POINT_BUF_ZETA, compact_col(column), 0, source),
+            ClaimSite::Framework { column, source } => (POINT_BUF_ZETA, compact_col(column), 0, 0, source),
             // A table column's claim is at its table's chi[..tau].
-            ClaimSite::TableColumn { column, table } => match keccak_value(column) {
-                None => (POINT_BUF_RHO, compact_col(column), 0, (2 + table, 0)),
-                Some(KeccakLane::Slot(slot)) => (POINT_BUF_QKECCAK_RHO, qkeccak, slot, (2 + table, 0)),
-                Some(KeccakLane::Output(_)) => (POINT_BUF_KECCAK_OUT, qkeccak, 0, (2 + table, 0)),
+            ClaimSite::TableColumn { column, table } => match (keccak_value(column), verifier::layout::qflock_slot(column)) {
+                (_, Some(slot)) => (POINT_BUF_QFLOCK_RHO, qflock, 0, slot, (2 + table, 0)),
+                (None, None) => (POINT_BUF_RHO, compact_col(column), 0, 0, (2 + table, 0)),
+                (Some(KeccakLane::Slot(slot)), _) => (POINT_BUF_QKECCAK_RHO, qkeccak, slot, 0, (2 + table, 0)),
+                (Some(KeccakLane::Output(_)), _) => (POINT_BUF_KECCAK_OUT, qkeccak, 0, 0, (2 + table, 0)),
             },
-            ClaimSite::MemoryLimb { column } => (POINT_BUF_PI, compact_col(column), 0, (1, 0)),
+            ClaimSite::MemoryLimb { column } => (POINT_BUF_PI, compact_col(column), 0, 0, (1, 0)),
         })
-        .map(|(buffer, column, qkeccak_slot, source)| ClaimDescriptor {
+        .map(|(buffer, column, qkeccak_slot, qflock_slot, source)| ClaimDescriptor {
             buffer,
             column,
             qkeccak_slot,
+            qflock_slot,
             source,
         })
         .collect();
@@ -464,6 +498,12 @@ fn claim_placeholders(ph: &mut Placeholders, pool: &[ClaimSite], kbc: usize) {
             .iter()
             .flat_map(|c| (0..SLOT_LOG).map(move |k| (c.qkeccak_slot >> k) & 1)),
     );
+    ph.list(
+        "CLAIM_QFLOCK_SLOT_BITS",
+        claims
+            .iter()
+            .flat_map(|c| (0..verifier::layout::QFLOCK_SLOT_BITS).map(move |k| (c.qflock_slot >> k) & 1)),
+    );
     // The output lanes' claims, consecutive in the pool: the reduction's claim on the output.
     let out_pool = claims
         .iter()
@@ -476,9 +516,11 @@ fn claim_placeholders(ph: &mut Placeholders, pool: &[ClaimSite], kbc: usize) {
     ph.set("KECCAK_OUT_POOL", out_pool);
     // The stacked opening batches the ring-switched claim, the pool's on-stack claims and the
     // Keccak reduction's claim on its output word and level 0's OOD claim; the batching is accounted for up to a cap.
-    let stacked = 2 + claims.iter().filter(|c| c.buffer != POINT_BUF_KECCAK_OUT).count() + 1;
+    // Two ring-switched claims now, q_keccak's and q_flock's.
+    let stacked = 3 + claims.iter().filter(|c| c.buffer != POINT_BUF_KECCAK_OUT).count() + 1;
     assert!(stacked <= verifier::MAX_STACKED_CLAIMS, "too many stacked claims");
     ph.set("QKECCAK_COMMITTED_COL", qkeccak);
+    ph.set("QFLOCK_COMMITTED_COL", qflock);
 }
 
 /// The Keccak reduction's RMFE projection and embedding as straight-line programs, and its iota and linear layer, as
@@ -792,15 +834,17 @@ fn bytecode_placeholders(ph: &mut Placeholders, sides: &[Vec<Block>; 3], kbc: us
         .flat_map(|b| &b.coords)
         .filter(|c| matches!(c, Coord::Public(_)));
     ph.set("BYTECODE_COLS", public.count() / 2);
-    let defer_size = kbc + BUS_BITS + 1;
+    // The fresh region: the bytecode claim's point and value, then the Flock claim's cells.
+    let defer_size = kbc + BUS_BITS + 1 + super::deferred::FLOCK_FRESH;
     ph.set("DEFER_SIZE", defer_size);
     ph.set("BYTECODE_VARS", kbc + BUS_BITS);
     let agg_seed = FiatShamirState::<F128>::from_label(RECURSION_AGG_LABEL).capacity_cells();
     for (c, cell) in agg_seed.iter().enumerate() {
         ph.set(&format!("AGG_SEED_{c}"), cell);
     }
-    // A child's words: its statement's two, its fresh claim, and its carried claim's cells.
-    let child_words = 2 + 2 * defer_size;
+    // A child's words: its statement's two, its fresh claims, and its carried claims' cells (the bytecode's, then the
+    // matrix point and its two values).
+    let child_words = 2 + defer_size + kbc + BUS_BITS + 1 + super::deferred::MATRIX_VARS + 2;
     ph.set(
         "AGG_CHILD_PAD",
         child_words.next_multiple_of(RATE_SCALARS) - child_words,

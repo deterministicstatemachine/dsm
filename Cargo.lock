@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "claims",
  "fiat_shamir_prover",
+ "flock",
  "isa",
  "keccak256",
  "lean_da",

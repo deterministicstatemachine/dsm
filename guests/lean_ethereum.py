@@ -359,6 +359,36 @@ CLAIM_KAPPA_ADJ = CLAIM_KAPPA_ADJ_PLACEHOLDER
 CLAIM_QKECCAK_SLOT_BITS = CLAIM_QKECCAK_SLOT_BITS_PLACEHOLDER
 QKECCAK_COMMITTED_COL = QKECCAK_COMMITTED_COL_PLACEHOLDER
 QKECCAK_VARS_CAP = QKECCAK_VARS_CAP_PLACEHOLDER
+# A BLAKE3 value limb's claim is POINT_BUF_QFLOCK_RHO: the table point on a slot of q_flock,
+# committed slot-major like q_keccak, CLAIM_QFLOCK_SLOT_BITS its slot's bits.
+POINT_BUF_QFLOCK_RHO = 5
+CLAIM_QFLOCK_SLOT_BITS = CLAIM_QFLOCK_SLOT_BITS_PLACEHOLDER
+QFLOCK_COMMITTED_COL = QFLOCK_COMMITTED_COL_PLACEHOLDER
+QFLOCK_SLOT_LOG = QFLOCK_SLOT_LOG_PLACEHOLDER
+QFLOCK_VARS_CAP = QFLOCK_VARS_CAP_PLACEHOLDER
+
+# ------------------------------------------- Flock: the BLAKE3 table's validity
+# verifier::flock. One compression per block of 2^FLOCK_K_LOG witness bits: the univariate
+# skip binds FLOCK_K_SKIP of them, its 2^FLOCK_K_SKIP-node window the FLOCK_PHI nodes past
+# the first 2^FLOCK_K_SKIP (whose values the zerocheck makes zero); the zerocheck's first
+# FLOCK_N_FIXED coordinates are the FLOCK_FIXED constants, the rest sampled; the lincheck
+# binds the FLOCK_LC_ROUNDS word bits. FLOCK_DEN128 and FLOCK_DEN64 are the windows'
+# barycentric denominators, inverted. The lincheck's matrix part is deferred.
+TABLE_BLAKE3 = TABLE_BLAKE3_PLACEHOLDER
+FLOCK_K_LOG = FLOCK_K_LOG_PLACEHOLDER
+FLOCK_K_SKIP = FLOCK_K_SKIP_PLACEHOLDER
+FLOCK_LC_ROUNDS = FLOCK_LC_ROUNDS_PLACEHOLDER
+FLOCK_N_FIXED = FLOCK_N_FIXED_PLACEHOLDER
+FLOCK_PIN = FLOCK_PIN_PLACEHOLDER
+FLOCK_ROUNDS_CAP = FLOCK_ROUNDS_CAP_PLACEHOLDER
+FLOCK_FIXED = FLOCK_FIXED_PLACEHOLDER
+FLOCK_PHI = FLOCK_PHI_PLACEHOLDER
+FLOCK_DEN128 = FLOCK_DEN128_PLACEHOLDER
+FLOCK_DEN64 = FLOCK_DEN64_PLACEHOLDER
+FLOCK_POINT_GRIND_BITS = FLOCK_POINT_GRIND_BITS_PLACEHOLDER
+FLOCK_SKIP_GRIND_BITS = FLOCK_SKIP_GRIND_BITS_PLACEHOLDER
+FLOCK_ROUND_GRIND_BITS = FLOCK_ROUND_GRIND_BITS_PLACEHOLDER
+FLOCK_ALPHA_GRIND_BITS = FLOCK_ALPHA_GRIND_BITS_PLACEHOLDER
 
 # ------------------------------------------------------ statements and deferral
 # A node defers one claim on the stacked bytecode. DEFER_SIZE is the region one
@@ -370,8 +400,26 @@ BYTECODE_LOG = BYTECODE_LOG_PLACEHOLDER  # log rows of the bytecode blocks
 DEFER_SIZE = DEFER_SIZE_PLACEHOLDER
 BYTECODE_VARS = BYTECODE_VARS_PLACEHOLDER  # = BYTECODE_LOG + LOG2_BYTECODE_COLS
 FRESH_BC_VALUE = BYTECODE_VARS
-DEFER_STMT_CELLS = BYTECODE_VARS + 1
+# A node also defers a claim on Flock's matrices A0, B0. Its fresh region, after the
+# bytecode's: the lincheck's matrix part, alpha, the skip point, the zerocheck's first
+# FLOCK_LC_ROUNDS coordinates, the lincheck's challenges, then the 64 slices. Its carried
+# one, after the bytecode's: the MATRIX_VARS point (rows, then columns), then A0's and B0's values.
+FLOCK_FRESH = FLOCK_FRESH_PLACEHOLDER
+MATRIX_VARS = MATRIX_VARS_PLACEHOLDER
+FRESH_FLOCK = BYTECODE_VARS + 1
+FF_MATRIX = 0
+FF_ALPHA = 1
+FF_ZSKIP = 2
+FF_ZCHI = 3
+FF_RS = FF_ZCHI + FLOCK_LC_ROUNDS
+FF_S = FF_RS + FLOCK_LC_ROUNDS
 DEFER_STMT_BC_VALUE = BYTECODE_VARS
+DEFER_STMT_MAT_POINT = BYTECODE_VARS + 1
+DEFER_STMT_MAT_A = DEFER_STMT_MAT_POINT + MATRIX_VARS
+DEFER_STMT_MAT_B = DEFER_STMT_MAT_A + 1
+DEFER_STMT_CELLS = DEFER_STMT_MAT_B + 1
+MAT_LAM_GRIND_BITS = MAT_LAM_GRIND_BITS_PLACEHOLDER
+MAT_LAM_WORDS = MAT_LAM_WORDS_PLACEHOLDER
 # The aggregation transcript's seeded capacity, and the zeros padding a child's words
 # to whole rates (so every child starts with a full rate waiting).
 AGG_SEED_0 = AGG_SEED_0_PLACEHOLDER
@@ -3277,6 +3325,147 @@ def verify_keccak(fs0, fs1, fs2, fs3, fs4, cursor, tau_g, chi, output_lanes, z_v
 
 
 @inline
+def flock_lag_nums(z, out, base: Const):
+    # out[i] = prod_(k < 64, k != i) (z + FLOCK_PHI[base + k]): the Lagrange numerators of the
+    # 64-node window from base, by prefix and suffix products.
+    d = StackBuf(64)
+    for k in unroll(0, 64):
+        d[k] = z + FLOCK_PHI[base + k]
+    pre = StackBuf(64)
+    pre[0] = 1
+    for k in unroll(1, 64):
+        pre[k] = pre[k - 1] * d[k - 1]
+    suf = 1
+    for kk in unroll(0, 64):
+        k = 63 - kk
+        out[k] = pre[k] * suf
+        if const(k != 0):
+            suf = suf * d[k]
+    return
+
+
+def verify_flock(fs0, fs1, fs2, fs3, fs4, cursor, tau_g, chis, rs, slices, tabs):
+    # Flock's reduction of the BLAKE3 table's validity, verifier::flock step for step: the
+    # zerocheck (a univariate skip round, then m - FLOCK_K_SKIP eq-weighted rounds, m =
+    # FLOCK_K_LOG + tau, tau the BLAKE3 table's certified log height), then the lincheck.
+    # The lincheck's matrix part is DEFERRED: advice here, batched by aggregate_claims across
+    # the children, evaluated by the outermost verifier. Fills chis (the zerocheck's
+    # challenges), rs (the lincheck's) and slices; returns the sponge, the cursor, the skip
+    # point, alpha and the matrix part.
+    n_rounds_g = tau_g * GEN ** (FLOCK_K_LOG - FLOCK_K_SKIP)
+    n_sampled_g = tau_g * GEN ** (FLOCK_K_LOG - FLOCK_K_SKIP - FLOCK_N_FIXED)
+    # Every run this function keeps, allocated before its first call.
+    pts = HeapBuf(n_sampled_g ** FS_CELLS)
+    rounds = HeapBuf((n_rounds_g * GEN) ** ROUND_SLOTS)
+    r = HeapBuf(FLOCK_ROUNDS_CAP)
+    for i in unroll(0, FLOCK_N_FIXED):
+        r[GEN ** i] = FLOCK_FIXED[i]
+    sampled = r * GEN ** FLOCK_N_FIXED
+    # The grind, then the sampled coordinates, the first drawn by the grind's permutation, a
+    # permutation each after it.
+    sp = fs_cap(fs0, fs1, fs2, fs3, fs4)
+    rate = StackBuf(8)
+    sp, first, cursor = fs_grind_squeeze(sp, rate, 0, cursor, tabs, FLOCK_POINT_GRIND_BITS)
+    sampled[GEN ** 0] = first
+    fs_store(pts, 0, 1, sp)
+    for xj in mul_range(GEN, n_sampled_g):
+        prev = pts * (xj * INV_GEN) ** FS_CELLS
+        row_sp = fs_load(prev, 0, 1)
+        no_rate = StackBuf(8)
+        nsp, rv = squeeze(row_sp, no_rate, 0)
+        sampled[xj] = rv
+        fs_store(pts * xj ** FS_CELLS, 0, 1, nsp)
+    sp = fs_load(pts * (n_sampled_g * INV_GEN) ** FS_CELLS, 0, 1)
+    # Round 1: P = P^AB + P^C on the 64 Lambda nodes, then the skip point after its grind.
+    p = StackBuf(64)
+    rate = StackBuf(8)
+    for i in unroll(0, 64):
+        if i % 4 == 0:
+            if i != 0:
+                sp = fs_perm(sp, rate, 4)
+                rate = StackBuf(8)
+        w, cursor = fs_next(rate, i % 4, cursor)
+        p[i] = w
+    sp, z_skip, cursor = fs_grind_squeeze(sp, rate, 4, cursor, tabs, FLOCK_SKIP_GRIND_BITS)
+    # P(z_skip) over all 128 nodes, the first 64 values zero: the S half's product times the
+    # Lambda half's numerators, one denominator for all.
+    nums = StackBuf(64)
+    flock_lag_nums(z_skip, nums, 64)
+    s_half = 1
+    for k in unroll(0, 64):
+        s_half = s_half * (z_skip + FLOCK_PHI[k])
+    vp = 0
+    for i in unroll(0, 64):
+        vp = vp + nums[i] * p[i]
+    claim = vp * s_half * FLOCK_DEN128
+    # The eq-weighted rounds, m - FLOCK_K_SKIP of them: c1 and c2 are sent, the eq split fixes c0.
+    fs_store(rounds, ROUND_FS, 1, sp)
+    rounds[GEN ** ROUND_CURSOR] = cursor
+    rounds[GEN ** ROUND_CLAIM] = claim
+    for xi in mul_range(1, n_rounds_g):
+        rd = rounds * xi ** ROUND_SLOTS
+        rsp = fs_load(rd, ROUND_FS, 1)
+        cur = rd[GEN ** ROUND_CURSOR]
+        rclaim = rd[GEN ** ROUND_CLAIM]
+        rr = StackBuf(8)
+        c1, cur = fs_next(rr, 0, cur)
+        c2, cur = fs_next(rr, 1, cur)
+        nsp, chi, cur = fs_grind_squeeze(rsp, rr, 2, cur, tabs, FLOCK_ROUND_GRIND_BITS)
+        chis[xi] = chi
+        c0 = rclaim + r[xi] * (c1 + c2)
+        nxt = rd * GEN ** ROUND_SLOTS
+        fs_store(nxt, ROUND_FS, 1, nsp)
+        nxt[GEN ** ROUND_CURSOR] = cur
+        nxt[GEN ** ROUND_CLAIM] = c0 + chi * (c1 + chi * c2)
+    end = rounds * n_rounds_g ** ROUND_SLOTS
+    sp = fs_load(end, ROUND_FS, 1)
+    cursor = end[GEN ** ROUND_CURSOR]
+    claim = end[GEN ** ROUND_CLAIM]
+    # a, b at the point; c is what the terminal identity leaves.
+    rate = StackBuf(8)
+    va, cursor = fs_next(rate, 0, cursor)
+    vb, cursor = fs_next(rate, 1, cursor)
+    vc = claim + va * vb
+    sp, alpha, cursor = fs_grind_squeeze(sp, rate, 2, cursor, tabs, FLOCK_ALPHA_GRIND_BITS)
+    # The lincheck: the two matrix identities, the c claim and the constant-wire pin, batched.
+    alpha2 = alpha * alpha
+    alpha3 = alpha2 * alpha
+    lc = va + alpha * vb + alpha2 * vc + alpha3
+    fs0, fs1, fs2, fs3, fs4, cursor, lc = keccak_plain_rounds(sp[8], sp[9], sp[10], sp[11], sp[12], 0, 0, cursor, lc, rs, tabs, FLOCK_LC_ROUNDS, 0)
+    sp = fs_cap(fs0, fs1, fs2, fs3, fs4)
+    rate = StackBuf(8)
+    for z in unroll(0, BASE_FIELD_BITS):
+        if z % 4 == 0:
+            if z != 0:
+                sp = fs_perm(sp, rate, 4)
+                rate = StackBuf(8)
+        w, cursor = fs_next(rate, z % 4, cursor)
+        slices[GEN ** z] = w
+    sp = fs_perm(sp, rate, 4)
+    # The terminal: the deferred matrix part, plus the c term (C = I: eq(chi_in, chi_in') times
+    # the slices' Lagrange combination at the skip point) and the pin (the constant column's
+    # slice at its high bits' eq), chi_in' the lincheck's challenges reversed.
+    matpart = hint_witness("flock_matrix")
+    snums = StackBuf(64)
+    flock_lag_nums(z_skip, snums, 0)
+    cval = 0
+    for i in unroll(0, 64):
+        cval = cval + snums[i] * slices[GEN ** i]
+    cval = cval * FLOCK_DEN64
+    ceq = 1
+    for t in unroll(0, FLOCK_LC_ROUNDS):
+        ceq = ceq * (1 + chis[GEN ** t] + rs[GEN ** (FLOCK_LC_ROUNDS - 1 - t)])
+    pin = slices[GEN ** (FLOCK_PIN % 64)]
+    for t in unroll(0, FLOCK_LC_ROUNDS):
+        if (FLOCK_PIN // 64 // 2 ** t) % 2 == 1:
+            pin = pin * rs[GEN ** (FLOCK_LC_ROUNDS - 1 - t)]
+        else:
+            pin = pin * (1 + rs[GEN ** (FLOCK_LC_ROUNDS - 1 - t)])
+    assert lc == matpart + alpha2 * ceq * cval + alpha3 * pin
+    return sp[8], sp[9], sp[10], sp[11], sp[12], cursor, z_skip, alpha, matpart
+
+
+@inline
 def ring_psi(out, r: Const, v, g):
     # out[r] = Psi(v) = sum_b g_b v^(2^b), the inner stage: 7 squarings and 8 products.
     psi = g[0] * v
@@ -3432,7 +3621,7 @@ def selector_tables(point, point1):
     return sel_eq
 
 
-def check_opening_terminal(g_squares, zeta, chi, rm, g_bus_mu, g_zc_n, g_log_mem, tau_keccak_g, kappa_base, lam_cl, col_offsets, z_vals, c_table, point, point1, inner_total, yr_at_tail, sumcheck_target, ood_z, gmv):
+def check_opening_terminal(g_squares, zeta, chi, rm, g_bus_mu, g_zc_n, g_log_mem, tau_keccak_g, kappa_base, lam_cl, col_offsets, z_vals, c_table, point, point1, inner_total, yr_at_tail, sumcheck_target, ood_z, gmv, tau_flock_g, flock_z):
     # Evaluate each transparent weight at the complete point in witness order.
     # A claim is its low point followed by the certified column's selector bits;
     # a q_keccak lane puts its slot's bits between the two.
@@ -3443,6 +3632,8 @@ def check_opening_terminal(g_squares, zeta, chi, rm, g_bus_mu, g_zc_n, g_log_mem
     eq_prefix_chain(chi_eq_chain, 1, chi, point1, g_zc_n)
     slot_point = point * tau_keccak_g
     slot_point1 = point1 * tau_keccak_g
+    fslot_point = point * tau_flock_g
+    fslot_point1 = point1 * tau_flock_g
     pi_chain = HeapBuf(SIZE_BITS + 1)
     pi_chain[GEN ** 0] = 1
     pi_chain[GEN ** 1] = rm + point1[GEN ** 0]
@@ -3464,7 +3655,7 @@ def check_opening_terminal(g_squares, zeta, chi, rm, g_bus_mu, g_zc_n, g_log_mem
         selectors[c] = match(log(kappa_g), range(0, N_COLUMN_LOGS), lambda kappa: column_selector(offset, sel_eq, sel_g, kappa))
 
     inner_sum = inner_total
-    lam_pow = lam_cl  # the pool's powers, as verify_sub batched it
+    lam_pow = lam_cl * lam_cl  # the pool's powers, as verify_sub batched it: after the two ring claims'
     for j in unroll(0, N_CLAIMS):
         if CLAIM_POINT_BUF[j] != POINT_BUF_KECCAK_OUT:
             col = CLAIM_COMMITTED_COL[j]
@@ -3491,6 +3682,20 @@ def check_opening_terminal(g_squares, zeta, chi, rm, g_bus_mu, g_zc_n, g_log_mem
                         slot_eq *= slot_factor
                 low_eq = slot_eq * chi_eq_chain[cplen_g]
                 nlow_adj = CLAIM_KAPPA_ADJ[j] + QKECCAK_SLOT_LOG
+            if CLAIM_POINT_BUF[j] == POINT_BUF_QFLOCK_RHO:
+                fslot_eq = GEN ** 0
+                for kk in unroll(0, QFLOCK_SLOT_LOG):
+                    k = QFLOCK_SLOT_LOG - 1 - kk
+                    if CLAIM_QFLOCK_SLOT_BITS[QFLOCK_SLOT_LOG * j + k] == 1:
+                        fslot_factor = fslot_point[GEN ** k]
+                    else:
+                        fslot_factor = fslot_point1[GEN ** k]
+                    if kk == 0:
+                        fslot_eq = fslot_factor
+                    else:
+                        fslot_eq *= fslot_factor
+                low_eq = fslot_eq * chi_eq_chain[cplen_g]
+                nlow_adj = CLAIM_KAPPA_ADJ[j] + QFLOCK_SLOT_LOG
             # The claim's low dimension is its column's kappa: by construction when
             # the two share a kappa source, else checked.
             if const(CLAIM_KAPPA_SRC[j] != COL_KAPPA_SRC[col]):
@@ -3516,6 +3721,15 @@ def check_opening_terminal(g_squares, zeta, chi, rm, g_bus_mu, g_zc_n, g_log_mem
     eq_prefix_chain(out_eq_chain, 1, z_vals, point1, qkeccakv_g)
     rs_weight = ring_switch_weight(z_vals * GEN ** QKECCAK_VARS_CAP, point1, c_table, qkeccakv_g)
     inner_sum += (rs_weight + lam_out * out_eq_chain[qkeccakv_g]) * selectors[QKECCAK_COMMITTED_COL]
+    # Flock's ring-switched claim on q_flock, over the whole column, at lam_cl^1.
+    qflockv_g = tau_flock_g * GEN ** QFLOCK_SLOT_LOG
+    if const(COL_KAPPA_SRC[QFLOCK_COMMITTED_COL] != TABLE_BLAKE3 + 2):
+        assert qflockv_g == kb[COL_KAPPA_SRC[QFLOCK_COMMITTED_COL]] * GEN ** COL_KAPPA_ADJ[QFLOCK_COMMITTED_COL]
+    else:
+        if const(COL_KAPPA_ADJ[QFLOCK_COMMITTED_COL] != QFLOCK_SLOT_LOG):
+            assert qflockv_g == kb[COL_KAPPA_SRC[QFLOCK_COMMITTED_COL]] * GEN ** COL_KAPPA_ADJ[QFLOCK_COMMITTED_COL]
+    rs_flock = ring_switch_weight(flock_z, point1, c_table, qflockv_g)
+    inner_sum += lam_cl * rs_flock * selectors[QFLOCK_COMMITTED_COL]
     # The OOD sample's claim, after the output word's: eq(z, .) over the stack's m variables.
     ood_chain = HeapBuf(MAX_STACK_LOG + 1)
     eq_prefix_chain(ood_chain, lam_out * lam_cl, ood_z, point1, gmv)
@@ -3659,6 +3873,21 @@ def verify_sub(pi_0, pi_1, seed_0, seed_1, g_squares, defer_out):
     z_vals = HeapBuf(2 * QKECCAK_VARS_CAP)
     slices = HeapBuf(BASE_FIELD_BITS)
     fs0, fs1, fs2, fs3, fs4, cursor, keccak_word = verify_keccak(fs0, fs1, fs2, fs3, fs4, cursor, tau_keccak_g, chi, col_eval_words * GEN ** (KECCAK_OUT_POOL - N_BUS_CLAIMS), z_vals, slices, tabs, stream)
+
+    # ---- BLAKE3 validity, by Flock (its lincheck's matrix part deferred) ----
+    tau_flock_g = dims_g[GEN ** (TABLE_BLAKE3 + 1)]  # the BLAKE3 table's certified tau
+    flock_chis = HeapBuf(FLOCK_ROUNDS_CAP)
+    flock_rs = HeapBuf(FLOCK_LC_ROUNDS)
+    flock_slices = HeapBuf(BASE_FIELD_BITS)
+    fs0, fs1, fs2, fs3, fs4, cursor, flock_zskip, flock_alpha, flock_matrix = verify_flock(fs0, fs1, fs2, fs3, fs4, cursor, tau_flock_g, flock_chis, flock_rs, flock_slices, tabs)
+    # The slices' point over q_flock's words, which are committed slot-major: the instance
+    # coordinates (the zerocheck's past the word bits), then the word bits (the lincheck's
+    # challenges, reversed).
+    flock_z = HeapBuf(QFLOCK_VARS_CAP)
+    for xk in mul_range(1, tau_flock_g):
+        flock_z[xk] = flock_chis[xk * GEN ** FLOCK_LC_ROUNDS]
+    for t in unroll(0, FLOCK_LC_ROUNDS):
+        flock_z[tau_flock_g * GEN ** t] = flock_rs[GEN ** (FLOCK_LC_ROUNDS - 1 - t)]
     sp = fs_cap(fs0, fs1, fs2, fs3, fs4)
 
     # ---- stacked mixed opening: ring-switch front + claim combination ----
@@ -3687,6 +3916,7 @@ def verify_sub(pi_0, pi_1, seed_0, seed_1, g_squares, defer_out):
                 for t in unroll(0, RING_MAP_WIDTH):
                     power = power * power
     target_in = ring_switch_target(slices, map_challenges)
+    target_flock = ring_switch_target(flock_slices, map_challenges)
     # ONE batching challenge for the whole pool: N_CLAIMS - 1 fewer Fiat-Shamir
     # hashes than a challenge per claim, and none for the values themselves,
     # `fs_next` having bound every one it read and the public-input ones deriving
@@ -3696,8 +3926,9 @@ def verify_sub(pi_0, pi_1, seed_0, seed_1, g_squares, defer_out):
     # lanes' claims, which the Keccak reduction consumed), and the Keccak reduction's
     # claim on its committed outputs the power after the pool's last.
     sp, lam_cl = squeeze(sp, rate, 0)
-    target = target_in
-    lam_pow = lam_cl
+    # q_keccak's ring-switched claim takes lam_cl^0, q_flock's lam_cl^1, the pool lam_cl^2 on.
+    target = target_in + lam_cl * target_flock
+    lam_pow = lam_cl * lam_cl
     for j in unroll(0, N_CLAIMS):
         if CLAIM_POINT_BUF[j] != POINT_BUF_KECCAK_OUT:
             if const(j // N_BUS_CLAIMS == 0):
@@ -3720,7 +3951,7 @@ def verify_sub(pi_0, pi_1, seed_0, seed_1, g_squares, defer_out):
     # is outside the recursively verified proof and intentionally unconstrained.
 
     # ---- generalized eval_b terminal (runtime claim shapes) ----
-    check_opening_terminal(g_squares, zeta, chi, rm, g_bus_mu, g_zc_n, g_log_mem, tau_keccak_g, kappa_base, lam_cl, col_offsets, z_vals, c_table, point, point1, inner_total, yr_at_tail, sumcheck_target, ood_z, gmv)
+    check_opening_terminal(g_squares, zeta, chi, rm, g_bus_mu, g_zc_n, g_log_mem, tau_keccak_g, kappa_base, lam_cl, col_offsets, z_vals, c_table, point, point1, inner_total, yr_at_tail, sumcheck_target, ood_z, gmv, tau_flock_g, flock_z)
 
     # ---- export this sub-proof's deferred-claim data to the caller (FRESH_*) ----
     for k in unroll(0, BYTECODE_LOG):
@@ -3728,6 +3959,14 @@ def verify_sub(pi_0, pi_1, seed_0, seed_1, g_squares, defer_out):
     for k in unroll(0, LOG2_BYTECODE_COLS):
         defer_out[GEN ** (BYTECODE_LOG + k)] = bc_point[GEN ** k]
     defer_out[GEN ** FRESH_BC_VALUE] = bc_value
+    defer_out[GEN ** (FRESH_FLOCK + FF_MATRIX)] = flock_matrix
+    defer_out[GEN ** (FRESH_FLOCK + FF_ALPHA)] = flock_alpha
+    defer_out[GEN ** (FRESH_FLOCK + FF_ZSKIP)] = flock_zskip
+    for k in unroll(0, FLOCK_LC_ROUNDS):
+        defer_out[GEN ** (FRESH_FLOCK + FF_ZCHI + k)] = flock_chis[GEN ** k]
+        defer_out[GEN ** (FRESH_FLOCK + FF_RS + k)] = flock_rs[GEN ** k]
+    for k in unroll(0, BASE_FIELD_BITS):
+        defer_out[GEN ** (FRESH_FLOCK + FF_S + k)] = flock_slices[GEN ** k]
     return
 
 
@@ -4898,10 +5137,16 @@ def main():
         # point. The value rides a hint and is checked nowhere here: the outer
         # verifier recomputes it and rebuilds the statement, so a lie changes the
         # public input rather than the claim.
-        leaf_value = hint_witness("leaf_defer")
+        leaf_values = StackBuf(3)
+        hint_witness(leaf_values, "leaf_defer")
         for k in unroll(0, BYTECODE_VARS):
             defer_stmt[GEN ** k] = 0
-        defer_stmt[GEN ** DEFER_STMT_BC_VALUE] = leaf_value
+        defer_stmt[GEN ** DEFER_STMT_BC_VALUE] = leaf_values[0]
+        # Flock's matrices too, at the all-zeros point, their values the outer verifier's to recompute.
+        for k in unroll(0, MATRIX_VARS):
+            defer_stmt[GEN ** (DEFER_STMT_MAT_POINT + k)] = 0
+        defer_stmt[GEN ** DEFER_STMT_MAT_A] = leaf_values[1]
+        defer_stmt[GEN ** DEFER_STMT_MAT_B] = leaf_values[2]
     else:
         aggregate_claims(n_children_g, child_pi, child_fresh, child_carried, defer_stmt, g_squares * GEN ** WIN_TAB_AT)
 
@@ -5022,4 +5267,73 @@ def aggregate_claims(n_children_g, child_pi, child_fresh, child_carried, defer_s
     for k in unroll(0, BYTECODE_VARS):
         defer_stmt[GEN ** k] = bc_point[GEN ** k]
     defer_stmt[GEN ** DEFER_STMT_BC_VALUE] = bytecode_star
+
+    # ---- the matrix batch (MATRIX_VARS variables, 3 claims per child) ----
+    # After a grind, one challenge lam_m: child i's fresh claim takes lam_m^(3i), its B0 part
+    # times its alpha, and its carried claims on A0 and B0 lam_m^(3i+1) and lam_m^(3i+2). One
+    # sumcheck over A0 and B0's variables, rows then columns, reduces them to a* and b* at
+    # one point, against the claims' weights there: a fresh claim's U(rows) W(columns), a
+    # carried one's eq.
+    mat_msgs = HeapBuf(MAT_LAM_WORDS + BC_ROUND_WORDS * MATRIX_VARS)
+    hint_witness(mat_msgs[0:MAT_LAM_WORDS + BC_ROUND_WORDS * MATRIX_VARS], "mat_sumcheck_msgs")
+    mat_stars = StackBuf(2)
+    hint_witness(mat_stars, "mat_stars_hint")
+    msp = fs_cap(fs0, fs1, fs2, fs3, fs4)
+    mrate = StackBuf(8)
+    msp, lam_m, mcur = fs_grind_squeeze(msp, mrate, 0, mat_msgs, tabs, MAT_LAM_GRIND_BITS)
+    lam_m3 = lam_m * lam_m * lam_m
+    m_chain = HeapBuf((n_children_g * GEN) ** PAIR_SLOTS)
+    m_chain[GEN ** 0] = 1
+    m_chain[GEN ** 1] = 0
+    for xc in mul_range(1, n_children_g):
+        row = m_chain * xc ** PAIR_SLOTS
+        pw = row[GEN ** 0]
+        fresh = fresh_row[xc]
+        carried = carried_row[xc]
+        nxt = row * GEN ** PAIR_SLOTS
+        nxt[GEN ** 0] = pw * lam_m3
+        nxt[GEN ** 1] = row[GEN ** 1] + pw * (fresh[GEN ** (FRESH_FLOCK + FF_MATRIX)] + lam_m * (carried[GEN ** DEFER_STMT_MAT_A] + lam_m * carried[GEN ** DEFER_STMT_MAT_B]))
+    m_end = m_chain * n_children_g ** PAIR_SLOTS
+    mat_point = HeapBuf(MATRIX_VARS)
+    fs0, fs1, fs2, fs3, fs4, m_running = batch_sumcheck(msp[8], msp[9], msp[10], msp[11], msp[12], mcur, m_end[GEN ** 1], mat_point, tabs, MATRIX_VARS)
+    # The weights at r* = (r_row, r_col): the eq tables of each half's low FLOCK_K_SKIP
+    # coordinates, shared, then per child its U(r_row) W(r_col) and its carried point's eq.
+    eq_rows = HeapBuf(2 ** (FLOCK_K_SKIP + 1) - 2)
+    eqtree(mat_point, eq_rows, FLOCK_K_SKIP)
+    eq_cols = HeapBuf(2 ** (FLOCK_K_SKIP + 1) - 2)
+    eqtree(mat_point * GEN ** FLOCK_K_LOG, eq_cols, FLOCK_K_SKIP)
+    w_sums = HeapBuf((n_children_g * GEN) ** PAIR_SLOTS)
+    w_sums[GEN ** 0] = 0
+    w_sums[GEN ** 1] = 0
+    for xc in mul_range(1, n_children_g):
+        fresh = fresh_row[xc]
+        carried = carried_row[xc]
+        row_nums = StackBuf(64)
+        flock_lag_nums(fresh[GEN ** (FRESH_FLOCK + FF_ZSKIP)], row_nums, 0)
+        u = 0
+        for i in unroll(0, 64):
+            u = u + row_nums[i] * eq_rows[GEN ** (2 ** FLOCK_K_SKIP - 2 + i)]
+        u = u * FLOCK_DEN64
+        for k in unroll(0, FLOCK_LC_ROUNDS):
+            u = u * (1 + fresh[GEN ** (FRESH_FLOCK + FF_ZCHI + k)] + mat_point[GEN ** (FLOCK_K_SKIP + k)])
+        w = 0
+        for i in unroll(0, 64):
+            w = w + fresh[GEN ** (FRESH_FLOCK + FF_S + i)] * eq_cols[GEN ** (2 ** FLOCK_K_SKIP - 2 + i)]
+        for j in unroll(0, FLOCK_LC_ROUNDS):
+            w = w * (1 + fresh[GEN ** (FRESH_FLOCK + FF_RS + j)] + mat_point[GEN ** (2 * FLOCK_K_LOG - 1 - j)])
+        uw = u * w
+        eq_carried = 1
+        for k in unroll(0, MATRIX_VARS):
+            eq_carried = eq_carried * (1 + carried[GEN ** (DEFER_STMT_MAT_POINT + k)] + mat_point[GEN ** k])
+        pw = m_chain[xc ** PAIR_SLOTS]
+        row = w_sums * xc ** PAIR_SLOTS
+        nxt = row * GEN ** PAIR_SLOTS
+        nxt[GEN ** 0] = row[GEN ** 0] + pw * (uw + lam_m * eq_carried)
+        nxt[GEN ** 1] = row[GEN ** 1] + pw * (fresh[GEN ** (FRESH_FLOCK + FF_ALPHA)] * uw + lam_m * lam_m * eq_carried)
+    w_end = w_sums * n_children_g ** PAIR_SLOTS
+    assert m_running == mat_stars[0] * w_end[GEN ** 0] + mat_stars[1] * w_end[GEN ** 1]
+    for k in unroll(0, MATRIX_VARS):
+        defer_stmt[GEN ** (DEFER_STMT_MAT_POINT + k)] = mat_point[GEN ** k]
+    defer_stmt[GEN ** DEFER_STMT_MAT_A] = mat_stars[0]
+    defer_stmt[GEN ** DEFER_STMT_MAT_B] = mat_stars[1]
     return

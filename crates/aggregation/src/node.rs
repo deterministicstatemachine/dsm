@@ -4,7 +4,9 @@
 use super::cells::count;
 use super::child::gen_verify;
 use super::coverage::plan_coverage;
-use super::deferred::{DeferredBytecodeClaim, aggregate_deferred_claims, bytecode_sums};
+use super::deferred::{
+    DeferredBytecodeClaim, DeferredClaim, DeferredMatrixClaim, FreshFlockClaim, aggregate_deferred_claims, bytecode_sums,
+};
 use super::error::AggregateError;
 use super::guest::{fs_seed, unified_guest};
 #[cfg(test)]
@@ -99,10 +101,17 @@ pub fn aggregate<P: Prover>(
     let _span = tracing::info_span!("Replay children").entered();
     let carried_points: Vec<Vec<F128>> = children.iter().map(|(_, proof)| proof.bytecode_point.clone()).collect();
     let carried_sums = bytecode_sums::<P>(&carried_points);
-    let carried: Vec<DeferredBytecodeClaim> = carried_points
+    let carried_matrix: Vec<DeferredMatrixClaim> = P::map_collect(children.len(), |i| {
+        DeferredMatrixClaim::recompute(children[i].1.matrix_point.clone())
+    });
+    let carried: Vec<DeferredClaim> = carried_points
         .into_iter()
         .zip(&carried_sums)
-        .map(|(point, sums)| DeferredBytecodeClaim::from_sums(point, sums))
+        .zip(carried_matrix)
+        .map(|((point, sums), matrix)| DeferredClaim {
+            bytecode: DeferredBytecodeClaim::from_sums(point, sums),
+            matrix,
+        })
         .collect();
     let public_inputs: Vec<[F128; 2]> = children
         .iter()
@@ -218,6 +227,8 @@ pub fn aggregate<P: Prover>(
             }
         }
         hints.push("child_defer", carried[i].cells());
+        // The lincheck's matrix part, which the guest's `verify_flock` takes as advice and defers.
+        hints.push("flock_matrix", vec![from_scalar(summaries[i].flock.matrix)]);
         let child_da = verifier::da::digest(claims.da_commitment);
         hints.push("child_da", hash_to_scalars(&child_da).to_vec());
         hints.extend(verified?);
@@ -225,23 +236,29 @@ pub fn aggregate<P: Prover>(
     drop(_span);
 
     let defer = if children.is_empty() {
-        let leaf = DeferredBytecodeClaim::leaf();
-        hints.push("leaf_defer", vec![leaf.bytecode_value]);
+        let leaf = DeferredClaim::leaf();
+        hints.push(
+            "leaf_defer",
+            vec![leaf.bytecode.bytecode_value, leaf.matrix.a, leaf.matrix.b],
+        );
         leaf
     } else {
         let _span = tracing::info_span!("Batch deferred claims").entered();
         // Each child's fresh claim, then its carried one: the batch's order.
         let fresh = (fresh_points.into_iter().zip(&fresh_sums))
             .map(|(point, sums)| DeferredBytecodeClaim::from_sums(point, sums));
+        let carried_matrix: Vec<DeferredMatrixClaim> = carried.iter().map(|c| c.matrix.clone()).collect();
         let claims: Vec<_> = fresh
             .zip(carried)
-            .flat_map(|(fresh, carried)| [fresh, carried])
+            .flat_map(|(fresh, carried)| [fresh, carried.bytecode])
             .collect();
         let sums = fresh_sums
             .into_iter()
             .zip(carried_sums)
             .flat_map(|(fresh, carried)| [fresh, carried]);
-        let (batch_hints, reduced) = aggregate_deferred_claims::<P>(&public_inputs, &claims, sums.collect());
+        let fresh_flock: Vec<FreshFlockClaim> = summaries.iter().map(|s| FreshFlockClaim::of(&s.flock)).collect();
+        let (batch_hints, reduced) =
+            aggregate_deferred_claims::<P>(&public_inputs, &claims, sums.collect(), &fresh_flock, &carried_matrix);
         hints.extend(batch_hints);
         reduced
     };
@@ -278,7 +295,8 @@ pub fn aggregate<P: Prover>(
         AggregateError::ProvingFailed
     })?;
     let proof = AggregateProof {
-        bytecode_point: defer.bytecode_point,
+        bytecode_point: defer.bytecode.bytecode_point,
+        matrix_point: defer.matrix.point,
         proof,
     };
     Ok((claims, proof, stats))
