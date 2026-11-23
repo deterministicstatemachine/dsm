@@ -35,6 +35,14 @@ use crate::storage::client_db::types::ChunkPersistenceParams;
 /// Using 400 gives ~460 total, safely under 514 with headroom.
 /// A 29KB SPHINCS+ signature fits in ~75 chunks (~30s) vs 168 at 180 bytes.
 const MAX_BLE_CHUNK_SIZE: usize = 400;
+/// How many chunks a frame in reassembly takes before they are persisted
+/// together, in one transaction. A frame's first chunk is persisted when it
+/// is taken, so the frame is on disk for its expiry and eviction from the
+/// start; a frame that completes deletes its rows, so the chunks it took
+/// since its last batch are never written. A chunk taken but not yet
+/// persisted is one a process that dies mid-frame takes again from the
+/// peer's retransmission.
+const PERSIST_BATCH: usize = 32;
 /// The most frames in reassembly on this device at once. Past it, the frame
 /// that has gone longest without taking a chunk makes room, never the oldest
 /// one: a frame that is arriving goes only if every other frame here took a
@@ -323,6 +331,9 @@ struct ReassemblyBuffer {
     frame_type: BleFrameType,
     shape: FrameShape,
     received_chunks: HashMap<u16, Vec<u8>>,
+    /// Chunks taken but not persisted yet, with their checksums: written
+    /// [`PERSIST_BATCH`] at a time.
+    unpersisted: Vec<(u16, u32)>,
     /// Transport-only: wall-clock instant when this buffer was created.
     /// Used for reassembly timeout enforcement and a link's own eviction.
     created_at: Instant,
@@ -339,9 +350,40 @@ impl ReassemblyBuffer {
             frame_type,
             shape,
             received_chunks: HashMap::new(),
+            unpersisted: Vec::new(),
             created_at: now,
             last_chunk_at: now,
         }
+    }
+
+    /// Persist the chunks taken since the last batch, in one transaction.
+    fn persist_taken(&mut self, link: &str) -> Result<(), DsmError> {
+        let batch: Vec<ChunkPersistenceParams<'_>> = self
+            .unpersisted
+            .iter()
+            .filter_map(|(index, checksum)| {
+                self.received_chunks
+                    .get(index)
+                    .map(|data| ChunkPersistenceParams {
+                        peer_link: link,
+                        frame_commitment: &self.frame_commitment,
+                        chunk_index: *index,
+                        frame_type: self.frame_type as i32,
+                        total_chunks: self.shape.total_chunks,
+                        payload_len: self.shape.payload_len,
+                        chunk_data: data,
+                        checksum: *checksum,
+                    })
+            })
+            .collect();
+        crate::storage::client_db::persist_ble_chunks(&batch).map_err(|e| {
+            DsmError::storage(
+                format!("BLE reassembly: persisting a batch of chunks: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        self.unpersisted.clear();
+        Ok(())
     }
 
     fn is_complete(&self) -> bool {
@@ -834,22 +876,31 @@ impl BleFrameCoordinator {
         }
 
         // Deduplicate: a chunk already held (from hydration or a retransmit)
-        // is not taken twice. A chunk is persisted when it is taken, so the
-        // rows kept for a link are only those of its frames in reassembly.
-        if let std::collections::hash_map::Entry::Vacant(slot) = buffer.received_chunks.entry(seq) {
-            crate::storage::client_db::persist_ble_chunk(ChunkPersistenceParams {
-                peer_link: &key.link,
-                frame_commitment: &key.commitment,
-                chunk_index: seq,
-                frame_type: header.frame_type,
-                total_chunks: shape.total_chunks,
-                payload_len: shape.payload_len,
-                chunk_data: &chunk.data,
-                checksum: header.checksum,
-            })
-            .map_err(|e| storage("persisting a chunk", e))?;
-            slot.insert(chunk.data);
+        // is not taken twice. The rows kept for a link are only those of its
+        // frames in reassembly.
+        if !buffer.received_chunks.contains_key(&seq) {
+            // The frame's first chunk is on disk at once; later ones go in
+            // batches of PERSIST_BATCH, one transaction each.
+            if buffer.received_chunks.is_empty() {
+                crate::storage::client_db::persist_ble_chunk(ChunkPersistenceParams {
+                    peer_link: &key.link,
+                    frame_commitment: &key.commitment,
+                    chunk_index: seq,
+                    frame_type: header.frame_type,
+                    total_chunks: shape.total_chunks,
+                    payload_len: shape.payload_len,
+                    chunk_data: &chunk.data,
+                    checksum: header.checksum,
+                })
+                .map_err(|e| storage("persisting a chunk", e))?;
+            } else {
+                buffer.unpersisted.push((seq, header.checksum));
+            }
+            buffer.received_chunks.insert(seq, chunk.data);
             buffer.last_chunk_at = Instant::now();
+            if buffer.unpersisted.len() >= PERSIST_BATCH && !buffer.is_complete() {
+                buffer.persist_taken(&key.link)?;
+            }
         }
 
         if !buffer.is_complete() {
@@ -1240,6 +1291,59 @@ mod tests {
                 .await
                 .keys()
                 .any(|k| k.link == LINK_B));
+        });
+    }
+
+    /// A frame's chunks reach the database [`PERSIST_BATCH`] at a time, one
+    /// transaction each, after its first: a write per chunk held a confirm of
+    /// 564 chunks to about 8 KB/s on the rig (2026-11-21). A process that dies
+    /// mid-frame hydrates what was written and takes the rest again.
+    /// MUTATION CONTROL: persisting every chunk as it is taken turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn a_frames_chunks_are_persisted_in_batches_and_hydrated_after_a_restart() {
+        init_test_db();
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let chunks = test_coordinator()
+                .encode_message(
+                    BleFrameType::BilateralConfirm,
+                    &payload(0x52, (PERSIST_BATCH + 8) * MAX_BLE_CHUNK_SIZE),
+                )
+                .expect("chunks");
+            assert!(chunks.len() > PERSIST_BATCH + 2, "{} chunks", chunks.len());
+            let commitment = commitment_of(&chunks[0]);
+            let rows = || {
+                crate::storage::client_db::load_persisted_chunks(LINK_A, &commitment)
+                    .expect("rows")
+                    .len()
+            };
+
+            let first = test_coordinator();
+            feed(&first, LINK_A, &chunks[..PERSIST_BATCH])
+                .await
+                .expect("a batch less one");
+            assert_eq!(
+                rows(),
+                1,
+                "only the first chunk is written before a batch fills"
+            );
+            feed(&first, LINK_A, &chunks[PERSIST_BATCH..PERSIST_BATCH + 2])
+                .await
+                .expect("the batch fills");
+            assert_eq!(rows(), PERSIST_BATCH + 1, "the batch went in together");
+
+            // The process dies; a new one takes the whole frame again and
+            // hydrates what was written.
+            let second = test_coordinator();
+            match feed(&second, LINK_A, &chunks).await.expect("the frame") {
+                FrameIngressResult::MessageComplete { message } => assert_eq!(
+                    message.payload,
+                    payload(0x52, (PERSIST_BATCH + 8) * MAX_BLE_CHUNK_SIZE)
+                ),
+                other => panic!("the frame did not complete: {other:?}"),
+            }
+            assert_eq!(rows(), 0, "a completed frame leaves no rows");
         });
     }
 

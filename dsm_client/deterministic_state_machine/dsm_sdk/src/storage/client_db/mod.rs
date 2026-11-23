@@ -28,6 +28,7 @@ pub mod cert_chain;
 mod cert_resync;
 pub mod completion_proofs;
 pub mod connect;
+pub mod contact_tokens;
 mod contacts;
 pub mod counterparty_canonical_heads;
 pub mod duel_matches;
@@ -657,6 +658,11 @@ fn get_database_path() -> Result<PathBuf> {
 /// Still 49, additively (DSM Amendment A41): `route_chain_write_proof`, the
 /// proof a recorded write's copies carry (a fulfillment cell's genesis), is a
 /// new table a database made at 49 takes at its next open.
+///
+/// Still 49, additively (owner, 2026-11-21): `contact_added_tokens`, the
+/// tokens each contact has added, and `own_token_list`, the list this device
+/// last published, are new tables a database made at 49 takes at its next
+/// open. No version moves, so a wallet bound to a board opens as it is.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 49;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -763,6 +769,20 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS own_directory_entry(
             id         INTEGER PRIMARY KEY CHECK (id = 1),
             entry      BLOB NOT NULL
+        );
+
+        -- The tokens each contact has added, read from the contact's own
+        -- signed lists, and the list this device last published of its own
+        -- (owner, 2026-11-21). New tables a database made at 49 takes at its
+        -- next open; no version moves.
+        CREATE TABLE IF NOT EXISTS contact_added_tokens(
+            device_id      BLOB NOT NULL,
+            policy_commit  BLOB NOT NULL,
+            PRIMARY KEY (device_id, policy_commit)
+        );
+        CREATE TABLE IF NOT EXISTS own_token_list(
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            list       BLOB NOT NULL
         );
 
         -- v17: how many storage.sync runs completed on this device.

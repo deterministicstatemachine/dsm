@@ -3101,6 +3101,17 @@ message DeviceDirectoryEntryV1 {
   DeviceDirectoryEntryBodyV1 body = 1;
   bytes signature                 = 2 [(dsm_max_len)=65536]; // SPHINCS+ by AK over the body digest
 }
+// The tokens a device has added (owner, 2026-11-21): kept in the device's own
+// directory cell beside its entry, so a contact reads which tokens the device
+// can be sent before it offers one. policy_commits are 32 bytes each, distinct
+// and ascending; the signature is SPHINCS+ by the device's AK over the digest
+// of this message with the signature empty.
+message DeviceTokenListV1 {
+  bytes genesis   = 1 [(dsm_fixed_len)=32];
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+  repeated bytes policy_commits = 3 [(dsm_fixed_len)=32];
+  bytes signature = 4 [(dsm_max_len)=65536];
+}
 
 // ===================== SoFi routes (SoFi §27) =====================
 // The app reaches SoFi only through these routes (handlers/sofi_routes.rs).
@@ -3800,6 +3811,11 @@ message ContactAddResponse {
   ContactProfileV1 profile = 15;
   // Where the relationship stands on this device (DSM Amendment A33).
   RelationshipState relationship_state = 16;
+  // The tokens this wallet can send the contact (owner, 2026-11-21), by the
+  // ids balance.list names them with: the protocol's own assets, and each
+  // token of this wallet's the contact has added, as its own signed lists
+  // state. The Send screen offers the contact no other. Set on contacts.list.
+  repeated string sendable_token_ids = 17;
 }
 
 // Where BLE pairing with a contact stands, as the SDK's pairing loop has it.
@@ -5147,6 +5163,31 @@ message DirectoryCellWriteV1 {
   bytes ak_public_key   = 2 [(dsm_fixed_len)=64];
   bytes att_a           = 3 [(dsm_fixed_len)=32];
   bytes write_signature = 4 [(dsm_max_len)=65535];
+}
+
+// The start of a write of a wallet's backup to its one slot (DSM Amendment
+// A40; owner, 2026-11-23: "There only should be one backup per phone, per
+// device"). The slot's address is the route bound to the device's cell lock;
+// the lock signs the slot, the generation and the digest of every part, so a
+// member takes a part only when its digest is the one the lock signed. A
+// member holds one whole backup per slot and at most one being written: a
+// start with a higher generation replaces the one being written, and the one
+// being written replaces the whole one once every part is held.
+message BackupSlotStartV1 {
+  bytes route           = 1 [(dsm_fixed_len)=32];
+  bytes lock_public_key = 2 [(dsm_fixed_len)=64];
+  bytes generation      = 3 [(dsm_fixed_len)=8]; // u64, big-endian
+  bytes part_digests    = 4 [(dsm_max_len)=2048]; // 32 bytes per part, in order
+  bytes write_signature = 5 [(dsm_max_len)=65535];
+}
+
+// What a member holds at a backup slot: the whole backup's generation and its
+// parts' digests (generation 0 and no digests when it holds none), and the
+// highest generation any start it took named.
+message BackupSlotV1 {
+  uint64 generation         = 1;
+  bytes  part_digests       = 2 [(dsm_max_len)=2048]; // 32 bytes per part, in order
+  uint64 highest_generation = 3;
 }
 
 // Several keys taken in ONE local transaction at the member: all of them or

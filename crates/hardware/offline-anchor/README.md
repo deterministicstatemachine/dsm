@@ -38,7 +38,7 @@ Datasheets: [Secure Tropic Click (MIKROE-6559)](https://www.mouser.com/datasheet
 
 ## 2. Wiring
 
-The firmware fixes the pin map (`crates/dsm-anchor-secure-monitor/src/anchor_glue.rs`), so the wiring below is the only one that works.
+The firmware fixes the pin map (`crates/dsm-anchor-secure-monitor/src/anchor_glue.rs`). The wiring below, on the Pico's right side, is the one every image is built for by default.
 
 | Wire | Signal | Pico 2 W | Pico pin | Click pad (left header) | Direction | Suggested colour |
 |---|---|---|---|---|---|---|
@@ -50,6 +50,19 @@ The firmware fixes the pin map (`crates/dsm-anchor-secure-monitor/src/anchor_glu
 | W6 | Ground | GND | 23 (or 38) | GND | return | black |
 
 **Bus:** RP2350 SPI0, mode 0 (CPOL 0, CPHA 0), 1 MHz, 8-bit frames. CS is an ordinary push-pull GPIO that the firmware drives.
+
+**The left side instead.** A board wired on the Pico's left side uses SPI1, and its images are built with the `chip_on_spi1` feature (for example `--features bench_self_enroll,chip_on_spi1`). Nothing else changes, and the bus stays Secure either way. The pins are fixed by the RP2350's SPI1, so the signals cannot be mirrored straight across from the right side:
+
+| Signal | Pico 2 W | Pico pin | Click pad |
+|---|---|---|---|
+| SPI MISO | GP12 | 16 | **SDO** |
+| Chip select | GP13 | 17 | CS |
+| Ground | GND | 18 | GND |
+| SPI SCK | GP14 | 19 | SCK |
+| SPI MOSI | GP15 | 20 | **SDI** |
+| +3.3 V | 3V3(OUT) | 36 | 3V3 |
+
+A board wired this way runs no image built without the feature: the default images drive the right side, and its chip never answers (every warm-up status reads `ff`).
 
 > [!WARNING]
 > **3.3 V only.** The TROPIC01 runs from the Pico's 3V3(OUT), pin 36. Never connect VBUS or VSYS (5 V) to the Click.

@@ -231,17 +231,10 @@ async fn a_cloned_board_paying_two_receivers_settles_once_on_the_nodes() {
     let installed = boards(board_a.clone());
 
     pair.a.enter();
-    let loaded = pair
-        .a
-        .invoke(
-            "wallet.loadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "20.00".to_string(),
-            },
-        )
-        .await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    pair.a
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     pair.b.sync().await;
     c_device.sync().await;
     let mut copy = pair.a.backed_up_into("A-copy");
@@ -496,17 +489,10 @@ async fn a_restored_wallet_carries_on_offline_from_its_cells() {
         (c_device.device_id, board_c.clone()),
     ]);
     pair.a.enter();
-    let loaded = pair
-        .a
-        .invoke(
-            "wallet.loadOffline",
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: "20.00".to_string(),
-            },
-        )
-        .await;
-    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    pair.a
+        .offline_boundary("wallet.loadOffline", "20.00")
+        .await
+        .expect("the load");
     pair.b.sync().await;
     c_device.sync().await;
     pair.a.enter();
@@ -576,5 +562,163 @@ async fn a_restored_wallet_carries_on_offline_from_its_cells() {
         after.allocation(&era),
         Some(whole_era(2)),
         "the restored A paid C offline"
+    );
+}
+
+/// Losing the board and restoring the wallet spends nothing a second time (DSM Amendments A39
+/// and A40). A holds 100 ERA and loads 40 onto its board, which leaves 60 online, and its
+/// wallet backs up, holding the account at 40. A pays B 30 offline; B writes nothing. A's board
+/// is then destroyed and its phone lost, before either reaches the network again. Restored
+/// from its words on a new device, A holds 60 ERA online, from its register: the 40 left its
+/// online balance when the load was admitted, and a restore does not bring them back. The
+/// restored wallet records the account as its backup held it, at 40, and asks for it back:
+/// - with no board, nothing signs an unload, and none is admitted;
+/// - on a new board born for the same wallet, the account is not that board's: it signs
+///   nothing, and none is admitted;
+/// - online, it sends 60 and no more.
+///
+/// B, who was needed for none of that, settles its 30 from A's cells. A holds 60 and B 30; the
+/// 10 left on the destroyed board are gone with it, and nothing is counted twice.
+///
+/// MUTATION CONTROL: with a load that leaves the online balance whole (the debit dropped from
+/// `DeviceState`'s boundary), A still reads 100 ERA after loading 40, and this goes red at its
+/// first balance (run 2026-11-22). The refusals an unload meets below it each have their own
+/// control in Core (`offline_boundary`'s tests).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lost_board_and_a_restore_spend_nothing_a_second_time() {
+    let pair = Pair::boot(100, 0).await;
+    let board_a = HostAppliance::birth(&pair.a, [0xA9; 32], 16);
+    let board_b = HostAppliance::birth(&pair.b, [0xB9; 32], 16);
+    let both = HostAppliance::install_each(vec![
+        (pair.a.device_id, board_a.clone()),
+        (pair.b.device_id, board_b.clone()),
+    ]);
+    pair.a.enter();
+    pair.a
+        .offline_boundary("wallet.loadOffline", "40.00")
+        .await
+        .expect("the load");
+    assert_eq!(
+        pair.a.era_balance(),
+        whole_era(60),
+        "the load left A's online balance"
+    );
+    pair.b.sync().await;
+    pair.a.enter();
+    let mark = crate::sdk::wallet_backup_flow::activity_mark().expect("the mark");
+    let backed = crate::sdk::wallet_backup_flow::back_up_now(&set(), mark)
+        .await
+        .expect("the backup");
+    assert_eq!(backed, crate::sdk::wallet_backup_flow::Attempt::Written(1));
+
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    offline_step(&a, &b, bearer_transfer(&b, whole_era(30))).await;
+    let bundle = board_a.pin().bundle;
+
+    // A's board is destroyed: only B's is left to attach.
+    drop(both);
+    let only_b = HostAppliance::install_each(vec![(pair.b.device_id, board_b.clone())]);
+
+    // A's phone is lost too: its wallet comes back from its words on a new device.
+    let mut restored = pair.a.on_a_new_device("A-restored");
+    let request = dsm::types::proto::WalletCreateGenesisV2Request {
+        mnemonic: crate::economic_fixtures::test_mnemonic(pair.a.seed),
+    };
+    let args = dsm::types::proto::ArgPack {
+        codec: dsm::types::proto::Codec::Proto as i32,
+        body: prost::Message::encode_to_vec(&request),
+        ..Default::default()
+    };
+    let answer = crate::handlers::system_routes::handle_restore_from_phrase(
+        &prost::Message::encode_to_vec(&args),
+    )
+    .await;
+    assert!(answer.success, "the restore: {:?}", answer.error_message);
+    restored.start(&pair.fleet);
+    assert_eq!(
+        restored.era_balance(),
+        whole_era(60),
+        "the last online balance: a restore does not undo the load"
+    );
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let recorded = restored
+        .router()
+        .core_sdk
+        .device_head()
+        .and_then(|head| head.offline_account(&bundle).cloned())
+        .expect("the restored wallet's record of its offline account");
+    assert_eq!(
+        recorded.allocation(&era),
+        Some(whole_era(40)),
+        "the backup's account, from before the payment"
+    );
+
+    // With no board, nothing signs an unload.
+    restored.enter();
+    let boardless = restored
+        .offline_boundary("wallet.unloadOffline", "40.00")
+        .await
+        .expect_err("an unload was admitted with no board to sign it");
+    assert!(
+        boardless.contains("connect your anchor device to manage offline cash"),
+        "{boardless}"
+    );
+    assert_eq!(restored.era_balance(), whole_era(60), "nothing came back");
+
+    // On a new board born for the same wallet, the account is not that board's.
+    drop(only_b);
+    let board_new = HostAppliance::birth(&restored, [0xAA; 32], 16);
+    let unsigned = board_new.chip_counter();
+    let _installed = HostAppliance::install_each(vec![
+        (restored.device_id, board_new.clone()),
+        (pair.b.device_id, board_b.clone()),
+    ]);
+    restored.enter();
+    let another_board = restored
+        .offline_boundary("wallet.unloadOffline", "40.00")
+        .await
+        .expect_err("a new board unloaded the lost board's account");
+    assert!(
+        another_board.contains("an unload names an asset the account does not hold"),
+        "{another_board}"
+    );
+    assert_eq!(
+        board_new.chip_counter(),
+        unsigned,
+        "the new board signed nothing"
+    );
+    assert_eq!(restored.era_balance(), whole_era(60), "nothing came back");
+
+    // Online, the restored wallet has its 60 and no more.
+    let too_much = restored.send(&pair.b, whole_era(61)).await;
+    assert!(
+        !too_much.success,
+        "the restored wallet sent more than its online balance"
+    );
+    assert!(
+        too_much
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("insufficient funds")),
+        "{:?}",
+        too_much.error_message
+    );
+    assert_eq!(restored.era_balance(), whole_era(60), "nothing was sent");
+
+    // B was needed for none of that: it settles its payment from A's cells.
+    b.device.enter();
+    let moved = unload_received(&b).await;
+    assert_eq!((moved.moved, moved.waiting), (1, 0), "{}", moved.message);
+    assert_eq!(
+        pair.b.era_balance(),
+        whole_era(30),
+        "B holds what it was paid"
+    );
+    assert_eq!(
+        restored.era_balance(),
+        whole_era(60),
+        "B's settlement took nothing more from A"
     );
 }

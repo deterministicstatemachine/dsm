@@ -41,8 +41,12 @@ class GattClientSession(
     companion object {
         /** Disconnect if GATT connection isn't established within 15 seconds. */
         private const val CONNECTION_TIMEOUT_MS = 15_000L
-        /** Number of notification chunks to receive before sending ACK write-back. */
-        private const val NOTIFICATION_ACK_WINDOW = 10
+        /**
+         * Number of notification chunks to receive before sending ACK write-back.
+         * Must equal [GattServerHost.NOTIFICATION_WINDOW_SIZE]: the server waits on
+         * an ACK at each of its window boundaries.
+         */
+        private const val NOTIFICATION_ACK_WINDOW = GattServerHost.NOTIFICATION_WINDOW_SIZE
         /** How many times a refused start of service discovery is tried, and how far apart. */
         private const val SERVICE_DISCOVERY_START_ATTEMPTS = 6
         private const val SERVICE_DISCOVERY_RETRY_MS = 500L
@@ -306,6 +310,18 @@ class GattClientSession(
         } catch (e: SecurityException) {
             Log.w("GattClientSession", "requestConnectionPriority failed: ${e.message}")
         }
+        // The LE 2M PHY, where both radios have it: a server's notifications to this client
+        // were measured at one 501-byte chunk per 45 ms on 1M (2026-11-20, two SM-A165M), the
+        // two large frames of every offline payment. A radio without 2M keeps 1M.
+        try {
+            bluetoothGatt?.setPreferredPhy(
+                BluetoothDevice.PHY_LE_2M_MASK,
+                BluetoothDevice.PHY_LE_2M_MASK,
+                BluetoothDevice.PHY_OPTION_NO_PREFERRED
+            )
+        } catch (e: SecurityException) {
+            Log.w("GattClientSession", "setPreferredPhy failed: ${e.message}")
+        }
         ops.enqueue(
             CccdWrite(BleConstants.TX_RESPONSE_UUID, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, { ok ->
                 txResponseSubscribed = ok
@@ -396,6 +412,10 @@ class GattClientSession(
                 emitEvent(BleSessionEvent.ServiceDiscoveryCompleted(deviceAddress, false))
                 emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.SERVICE_DISCOVERY_FAILED, "service_discovery", status))
             }
+        }
+
+        override fun onPhyUpdate(gatt: BluetoothGatt?, txPhy: Int, rxPhy: Int, status: Int) {
+            Log.i("GattClientSession", "PHY for $deviceAddress: tx=$txPhy rx=$rxPhy status=$status")
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {

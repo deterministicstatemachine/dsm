@@ -18,6 +18,7 @@ describe('domain mappers', () => {
       bleAddress,
       pairing: bleAddress ? 'paired' as const : 'idle' as const,
       relationship: 'established' as const,
+      sendableTokenIds: ['ERA', 'GRN'],
     });
 
     // The address is Rust's: the contact carries it as Rust holds it, and none
@@ -26,6 +27,12 @@ describe('domain mappers', () => {
     it('carries the BLE address Rust holds, as it holds it, and none where it holds none', () => {
       expect(mapContactList([contact('aa:bb:cc:dd:ee:ff')])[0].bleAddress).toBe('aa:bb:cc:dd:ee:ff');
       expect(mapContactList([contact(undefined)])[0].bleAddress).toBeUndefined();
+    });
+
+    // Which tokens a contact can be sent is Rust's to say: the page carries the
+    // list as it came, and the Send screen offers the contact no other token.
+    it('carries the tokens Rust says the contact can be sent', () => {
+      expect(mapContactList([contact(undefined)])[0].sendableTokenIds).toEqual(['ERA', 'GRN']);
     });
   });
 

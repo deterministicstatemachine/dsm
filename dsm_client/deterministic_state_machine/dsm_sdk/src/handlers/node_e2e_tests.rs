@@ -202,6 +202,56 @@ async fn listed(d: &TestDevice, ticker: &str) -> u64 {
     }
 }
 
+/// The Send screen is answered once the debit is committed, and its economic
+/// admission and then its delivery run beside it (owner, 2026-11-21:
+/// "Admission after answering"; on the rig phones they were ~2.6 s and ~1 s of
+/// the send). The transfer still reaches the recipient, whole, once they
+/// finish.
+/// MUTATION CONTROL: the Send route awaiting its delivery
+/// (`DeliveryWait::Awaited` in `process_online_transfer_logic`) turns this red
+/// at "answered once committed".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_send_screen_is_answered_at_commit_and_the_transfer_still_arrives() {
+    let p = Pair::boot(100, 0).await;
+    p.a.enter();
+    let answered =
+        p.a.invoke(
+            "wallet.sendSmart",
+            &generated::OnlineTransferSmartRequest {
+                recipient_device_id: p.b.device_id.to_vec(),
+                amount: crate::handlers::wallet_routes::format_base_units_for_display(
+                    10,
+                    crate::handlers::wallet_routes::token_decimals("ERA").expect("ERA's decimals"),
+                ),
+                token_id: "ERA".to_string(),
+                memo: "answered at commit".to_string(),
+            },
+        )
+        .await;
+    assert!(answered.success, "{:?}", answered.error_message);
+    // Read from the answer, not by entering A again: entering a device starts
+    // its process over, which would cut the delivery running beside it.
+    match payload(&answered) {
+        Payload::OnlineTransferResponse(r) => {
+            assert_eq!(
+                r.message, "Sent. Delivering to the recipient.",
+                "answered once committed"
+            );
+            assert_eq!(
+                r.new_balance,
+                Some(crate::economic_fixtures::whole_era(100) - 10),
+                "the debit is committed when the screen is answered"
+            );
+        }
+        other => panic!("wallet.sendSmart answered {other:?}"),
+    }
+    crate::test_support::two_device::background_deliveries_settled().await;
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    assert_eq!(p.b.era_balance(), 10, "B takes the transfer");
+}
+
 /// DSM Amendment A7: a transfer arrives, and no node ever held anything but
 /// sealed, header-less envelopes — the memo is nowhere in any node's bytes.
 ///
@@ -1714,7 +1764,11 @@ async fn write_past_its_own_flow(
 /// claim of another fulfillment is first at the leader of B's next root cell
 /// when B pays A. B's writer records the cell taken and puts nothing of its
 /// own claim anywhere on the route, and the payment reports the position
-/// held by that claim: lost, never a leader to retry.
+/// held by that claim: lost, never a leader to retry. The Send screen is
+/// answered once the debit is committed (owner, 2026-11-21: "Admission after
+/// answering"), so the report is the send's history row, marked failed with
+/// the reason once its admission, run beside the answer, finds the position
+/// held.
 /// MUTATION CONTROL: reading another claim first at the leader as an open
 /// cell puts B's claim at the leader and carries it along the route; this
 /// turns red.
@@ -1750,13 +1804,22 @@ async fn a_payment_at_a_position_another_claim_holds_is_lost_and_puts_nothing() 
     let before = client.held_at(root_cell.namespace(), root_cell.key()).await;
 
     let sent = p.b.send(&p.a, 5).await;
-    assert!(!sent.success, "the payment lands at no position");
-    let why = sent.error_message.clone().expect("a reason");
+    assert!(sent.success, "{:?}", sent.error_message);
+    let why =
+        p.b.failed_send_reason()
+            .expect("the payment lands at no position, and its row says so");
     assert!(why.contains(&format!("position {q} is held by")), "{why}");
     assert_eq!(
         client.held_at(root_cell.namespace(), root_cell.key()).await,
         before,
         "B's claim is put at no member of its root cell's route"
+    );
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_eq!(
+        p.a.era_balance(),
+        crate::economic_fixtures::whole_era(500),
+        "nothing of a payment that cannot land reaches the payee"
     );
 }
 
@@ -5396,6 +5459,51 @@ async fn an_online_owner_publishes_a_baseline_after_each_realized_generation() {
             "the baseline at generation {generation} is published and is the owner's"
         );
     }
+}
+
+/// A payment never waits on the owner's baseline duty: the syncs `wallet.send`
+/// runs on its own path leave it to the next sync (rig run 2026-11-21, where
+/// that duty walked every vault the payer created, closed ones too, from its
+/// genesis on each send). B trades on A's vault; A then pays B, and A's send
+/// publishes no baseline; A's next ordinary sync publishes the one at the
+/// generation the trade realized.
+///
+/// MUTATION CONTROL: running the baseline duty on the payment path again (the
+/// `SyncPath::Payment` branch in `push_owed`) turns this red at the first
+/// assertion after the send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payment_leaves_the_owners_baseline_to_the_next_sync() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 5).await;
+    p.a.enter();
+    assert!(
+        crate::storage::client_db::sofi_vault_head::owner_baseline(&m.vault_id, 1)
+            .expect("A's record")
+            .is_none(),
+        "no sync of A's ran since the trade realized"
+    );
+
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.a.enter();
+    assert!(
+        crate::storage::client_db::sofi_vault_head::owner_baseline(&m.vault_id, 1)
+            .expect("A's record")
+            .is_none(),
+        "A's send published a baseline: the payment waited on the owner's duty"
+    );
+
+    let synced = p.a.sync().await;
+    assert!(synced.errors.is_empty(), "{:?}", synced.errors);
+    p.a.enter();
+    assert!(
+        crate::storage::client_db::sofi_vault_head::owner_baseline(&m.vault_id, 1)
+            .expect("A's record")
+            .is_some(),
+        "A's next ordinary sync published the baseline at generation 1"
+    );
 }
 
 /// SoFi Amendment S24, end to end. After three trades, B forgets the vault
@@ -9799,4 +9907,250 @@ async fn a_vault_pairs_two_device_tokens_of_two_creators() {
     realized_trade(&p, &m, 10).await;
     assert_eq!(balance(&p.b, &tkn), out, "B holds what the vault priced");
     assert_eq!(balance(&p.b, &tkb), 5_000 - 2_000 - 10);
+}
+
+/// Two-hop trades in a row over one pair of vaults leave both vaults tradable
+/// (found on the rig, 2026-11-22). A opens a vault of ERA against MID and one
+/// of MID against FAR. B trades as the rig's wallet did: one hop into MID,
+/// then two hops through MID into FAR, five times over. A two-hop trade's leg
+/// in one vault is established through the other vault's chain, and that
+/// chain reaches only as far as this one stood when it was asked for: it is
+/// asked for again once this one has moved on. B's next trade is drafted and
+/// realizes, and so is one of A's own, against the head B's trades left.
+///
+/// MUTATION CONTROL: with a sibling's chain kept as first handed over
+/// (`establish_siblings` passing over a vault it already holds a chain of),
+/// the third round's two-hop trade is the last any verifier establishes: B's
+/// trade after it is refused, `CoreDoesNotFold`, as the rig's wallet's was
+/// (run 2026-11-22).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn two_hop_trades_in_a_row_over_one_pair_of_vaults_leave_both_tradable() {
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let mid = create_token(&p.a, "MID", 1_000_000).await;
+    let far = create_token(&p.a, "FAR", 1_000_000).await;
+    let first = create_vault(&p.a, (era, 2_000), (mid, 200_000)).await;
+    let second = create_vault(&p.a, (mid, 100_000), (far, 5_000)).await;
+    adopt(&p.b, &mid).await;
+    adopt(&p.b, &far).await;
+    let one_hop = |d: &TestDevice| {
+        args(&generated::SofiTradeRequest {
+            vault_id: first.to_vec(),
+            token_in_policy_commit: era.to_vec(),
+            amount_in_entered: entered(d, &era, 100),
+            min_amount_out_entered: entered(d, &mid, 1),
+            token_out_policy_commit: mid.to_vec(),
+        })
+    };
+    let two_hops = |d: &TestDevice| {
+        args(&generated::SofiRouteRequest {
+            vault_ids: vec![first.to_vec(), second.to_vec()],
+            token_in_policy_commit: era.to_vec(),
+            amount_in_entered: entered(d, &era, 100),
+            min_amount_out_entered: entered(d, &far, 1),
+            token_out_policy_commit: far.to_vec(),
+        })
+    };
+    for _round in 1..=5u32 {
+        realized_through(&p.b, "sofi.trade", one_hop(&p.b)).await;
+        realized_through(&p.b, "sofi.route", two_hops(&p.b)).await;
+    }
+    let held_far = balance(&p.b, &far);
+    assert!(held_far > 0, "B holds what its five two-hop trades gave it");
+
+    // B again, one hop, on the head its two-hop trades left.
+    realized_through(&p.b, "sofi.trade", one_hop(&p.b)).await;
+    // And another trader against the same head: the vaults' owner.
+    realized_through(&p.a, "sofi.trade", one_hop(&p.a)).await;
+}
+
+/// What one online payment asks of each storage node, by kind: `METHOD /path`
+/// with the path's variable tail left out. The sender's send and the
+/// receiver's sync that takes the payment up, nothing else.
+async fn asked_by_one_payment(
+    p: &Pair,
+    from: &TestDevice,
+    to: &TestDevice,
+) -> Vec<BTreeMap<String, usize>> {
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let sent = from.send(to, 1).await;
+    assert!(
+        sent.success,
+        "{} pays {}: {:?}",
+        from.slot, to.slot, sent.error_message
+    );
+    let by_sender: Vec<usize> = p
+        .nodes
+        .nodes
+        .iter()
+        .map(|node| node.requests().len())
+        .collect();
+    to.sync().await;
+    from.sync().await;
+    println!("SCALE one payment: the sender asked each node {by_sender:?}");
+    let kinds: Vec<BTreeMap<String, usize>> = p
+        .nodes
+        .nodes
+        .iter()
+        .map(|node| {
+            let mut kinds = BTreeMap::new();
+            for asked in node.requests() {
+                let kind = asked
+                    .split('/')
+                    .take(5)
+                    .map(|part| if part.len() > 24 { "<id>" } else { part })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                *kinds.entry(kind).or_insert(0) += 1;
+            }
+            kinds
+        })
+        .collect();
+    println!(
+        "SCALE one payment, by kind at the first node: {:?}",
+        kinds.first()
+    );
+    kinds
+}
+
+/// An online payment asks the storage nodes the same whatever else the
+/// network has carried (owner, 2026-11-22: show how it scales). A pays B once
+/// and the requests each of the five nodes is asked are counted. Then the
+/// network carries more: C and D join, each funded, and pay each other twenty
+/// times, and A pays B ten times more. A's next payment to B stores exactly
+/// what the earlier one stored at each node, and asks the five nodes no more
+/// than 2% more reads: the work of a payment is its own relationship's, never
+/// the network's history or the other wallets on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_online_payment_asks_the_nodes_the_same_whatever_else_the_network_carries() {
+    let p = Pair::boot(500, 200).await;
+    // The first payment of a relationship opens it; the one after is the measure.
+    asked_by_one_payment(&p, &p.a, &p.b).await;
+    let before = asked_by_one_payment(&p, &p.a, &p.b).await;
+
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    let mut d = TestDevice::create("D", 0x0D);
+    d.boot(&p.fleet).await;
+    c.fund_admitted(100).await;
+    d.fund_admitted(100).await;
+    c.add_and_establish(&d).await;
+    d.add_and_establish(&c).await;
+    for n in 0..20 {
+        let (x, y) = if n % 2 == 0 { (&c, &d) } else { (&d, &c) };
+        let sent = x.send(y, 1).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        y.sync().await;
+        x.sync().await;
+    }
+    for _ in 0..10 {
+        let sent = p.a.send(&p.b, 1).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        p.b.sync().await;
+        p.a.sync().await;
+    }
+    let after = asked_by_one_payment(&p, &p.a, &p.b).await;
+
+    let total = |asked: &[BTreeMap<String, usize>]| -> usize {
+        asked.iter().map(|node| node.values().sum::<usize>()).sum()
+    };
+    for (i, (was, now)) in before.iter().zip(&after).enumerate() {
+        println!(
+            "SCALE node {i}: {} requests before, {} after: {now:?}",
+            was.values().sum::<usize>(),
+            now.values().sum::<usize>()
+        );
+    }
+    // Every write the same, at every node: a payment stores what it stored.
+    for (i, (was, now)) in before.iter().zip(&after).enumerate() {
+        let writes = |asked: &BTreeMap<String, usize>| -> Vec<(String, usize)> {
+            asked
+                .iter()
+                .filter(|(kind, _)| kind.starts_with("POST"))
+                .map(|(kind, n)| (kind.clone(), *n))
+                .collect()
+        };
+        assert_eq!(
+            writes(now),
+            writes(was),
+            "node {i} stored more for one payment"
+        );
+    }
+    // The reads within 2%: a node is asked whether it holds a copy (HEAD)
+    // according to which copies it already has, not to the network's size.
+    let (was, now) = (total(&before), total(&after));
+    assert!(
+        now * 100 <= was * 102,
+        "one payment asked the five nodes {now} times after the network grew, {was} before"
+    );
+}
+
+/// The position of `peer` that `d` kept the highest state at, if any.
+fn kept_position_of(d: &TestDevice, peer: &TestDevice) -> Option<u64> {
+    d.enter();
+    crate::storage::client_db::economic_lineage::kept_state_below(
+        &peer.genesis,
+        &peer.device_id,
+        u64::MAX,
+    )
+    .expect("the kept state reads")
+    .map(|kept| kept.economic_position())
+}
+
+/// The rig run of 2026-11-22: a wallet's first payment after a while took
+/// 63–95 s to show, because the payer had made steps since and the receiver
+/// checked each of them (the owner's ruling of 2026-11-15) only once the
+/// payment came. On five real nodes A pays C five times while B, A's other
+/// contact, is idle; B's kept state of A stays where it was. The pass the
+/// background poller runs after each cycle walks B's contacts, and B then
+/// holds a state of A proved at least five positions further, so A's next
+/// payment to B is checked from there.
+///
+/// MUTATION CONTROL: with `walk_contacts` returning before its loop, B's kept
+/// position of A does not move and the second assertion is red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_poller_walks_a_contact_forward_before_its_payment_arrives() {
+    let p = Pair::boot(500, 200).await;
+    let first = p.a.send(&p.b, 1).await;
+    assert!(first.success, "{:?}", first.error_message);
+    p.b.sync().await;
+    p.a.sync().await;
+
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    p.a.add_and_establish(&c).await;
+    c.add_and_establish(&p.a).await;
+    let before = kept_position_of(&p.b, &p.a).expect("B kept a state of A");
+    for _ in 0..5 {
+        let sent = p.a.send(&c, 1).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        c.sync().await;
+        p.a.sync().await;
+    }
+    assert_eq!(
+        kept_position_of(&p.b, &p.a),
+        Some(before),
+        "B was idle while A paid C"
+    );
+
+    p.b.enter();
+    crate::sdk::economic_registers::walk_contacts().await;
+    let after = kept_position_of(&p.b, &p.a).expect("B kept a state of A");
+    assert!(
+        after >= before + 5,
+        "B's pass over its contacts proved A from {before} only to {after}"
+    );
+
+    let sent = p.a.send(&p.b, 1).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    assert!(
+        kept_position_of(&p.b, &p.a).expect("B kept a state of A") > after,
+        "B took A's payment"
+    );
 }

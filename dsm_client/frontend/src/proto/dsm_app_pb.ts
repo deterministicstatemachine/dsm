@@ -19564,6 +19564,67 @@ export class DeviceDirectoryEntryV1 extends Message<DeviceDirectoryEntryV1> {
 }
 
 /**
+ * The tokens a device has added (owner, 2026-11-21): kept in the device's own
+ * directory cell beside its entry, so a contact reads which tokens the device
+ * can be sent before it offers one. policy_commits are 32 bytes each, distinct
+ * and ascending; the signature is SPHINCS+ by the device's AK over the digest
+ * of this message with the signature empty.
+ *
+ * @generated from message dsm.DeviceTokenListV1
+ */
+export class DeviceTokenListV1 extends Message<DeviceTokenListV1> {
+  /**
+   * @generated from field: bytes genesis = 1;
+   */
+  genesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated bytes policy_commits = 3;
+   */
+  policyCommits: Uint8Array[] = [];
+
+  /**
+   * @generated from field: bytes signature = 4;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceTokenListV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTokenListV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "policy_commits", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 4, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTokenListV1 {
+    return new DeviceTokenListV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTokenListV1 {
+    return new DeviceTokenListV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTokenListV1 {
+    return new DeviceTokenListV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTokenListV1 | PlainMessage<DeviceTokenListV1> | undefined, b: DeviceTokenListV1 | PlainMessage<DeviceTokenListV1> | undefined): boolean {
+    return proto3.util.equals(DeviceTokenListV1, a, b);
+  }
+}
+
+/**
  * sofi.createVault (§28). The beta market family is constant product with
  * exact input and the beta release family is the owner's full close, so the
  * owner chooses the pair, the reserves and the fee. The storage set is the
@@ -23805,6 +23866,16 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
    */
   relationshipState = RelationshipState.UNSPECIFIED;
 
+  /**
+   * The tokens this wallet can send the contact (owner, 2026-11-21), by the
+   * ids balance.list names them with: the protocol's own assets, and each
+   * token of this wallet's the contact has added, as its own signed lists
+   * state. The Send screen offers the contact no other. Set on contacts.list.
+   *
+   * @generated from field: repeated string sendable_token_ids = 17;
+   */
+  sendableTokenIds: string[] = [];
+
   constructor(data?: PartialMessage<ContactAddResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -23826,6 +23897,7 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
     { no: 14, name: "pairing", kind: "enum", T: proto3.getEnumType(ContactPairingPhase) },
     { no: 15, name: "profile", kind: "message", T: ContactProfileV1 },
     { no: 16, name: "relationship_state", kind: "enum", T: proto3.getEnumType(RelationshipState) },
+    { no: 17, name: "sendable_token_ids", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactAddResponse {

@@ -45,7 +45,23 @@ async fn a_receiver_that_never_added_the_token_is_not_credited_until_it_adopts()
         "precondition: B never added ADPT"
     );
 
+    // A's own wallet does not send it (owner, 2026-11-21): B has stated no
+    // ADPT, so the send is refused before anything is debited.
+    let unsent = p.a.send_token(&p.b, "ADPT", 100).await;
+    let why = unsent
+        .error_message
+        .clone()
+        .expect("a refused send says why");
+    assert!(
+        why.contains("the recipient has not added ADPT"),
+        "A's wallet refuses a token B has not added: {why}"
+    );
+    assert_eq!(head_balance(&p.a), 1_000, "nothing was debited");
+    // A wallet that does not check sends it anyway: A's holds ADPT as a token
+    // B added, as a changed wallet would. What follows is B's side alone.
     p.a.enter();
+    client_db::contact_tokens::keep_added(&p.b.device_id, &std::collections::BTreeSet::from([pc]))
+        .expect("A keeps ADPT for B");
     let sent = p.a.send_token(&p.b, "ADPT", 100).await;
     assert!(sent.success, "{:?}", sent.error_message);
     for node in &p.nodes.nodes {
@@ -100,6 +116,77 @@ async fn a_receiver_that_never_added_the_token_is_not_credited_until_it_adopts()
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
     assert_eq!(head_balance(&p.b), 100, "credited once B adopted");
+}
+
+/// A token is sent only to a contact that has added it (owner, 2026-11-21).
+/// A creates a token and sends it to B, which has not added it: A's wallet
+/// refuses, and nothing is debited. B adds the token, which states it in B's
+/// own signed list on the storage nodes; A's next send reads B's lists once
+/// more, finds the token, and goes through; B is credited.
+/// MUTATION CONTROL (run 2026-11-22): `contact_takes` answering for every
+/// token turns this red at "a refused send says why"; `recipient_takes` not
+/// reading the recipient's lists again, and `add_by_anchor` not publishing
+/// the adopter's list, each turn it red at "A sends once B has added it".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_token_is_sent_only_to_a_contact_that_has_added_it() {
+    use crate::bridge::AppRouter;
+    let p = Pair::boot(100, 0).await;
+    p.a.enter();
+    let pc = crate::economic_fixtures::create_asset(p.a.router(), "ONLY", 0, 1_000).await;
+    let held = |d: &TestDevice| {
+        d.enter();
+        d.router()
+            .core_sdk
+            .device_head()
+            .expect("a booted device has a head")
+            .balance(&pc)
+    };
+
+    let unsent = p.a.send_token(&p.b, "ONLY", 100).await;
+    let why = unsent
+        .error_message
+        .clone()
+        .expect("a refused send says why");
+    assert!(
+        why.contains("the recipient has not added ONLY"),
+        "A's wallet refuses a token B has not added: {why}"
+    );
+    assert_eq!(held(&p.a), 1_000, "nothing was debited");
+    p.a.enter();
+    assert!(
+        client_db::contact_tokens::added_by(&p.b.device_id)
+            .expect("what A kept for B")
+            .is_empty(),
+        "A keeps nothing for a contact that has stated nothing"
+    );
+
+    p.b.enter();
+    let adopted =
+        p.b.router()
+            .invoke(crate::bridge::AppInvoke {
+                method: "tokens.addByAnchor".to_string(),
+                args: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
+            })
+            .await;
+    assert!(adopted.success, "B adds ONLY: {:?}", adopted.error_message);
+
+    let sent = p.a.send_token(&p.b, "ONLY", 100).await;
+    assert!(
+        sent.success,
+        "A sends once B has added it: {:?}",
+        sent.error_message
+    );
+    p.a.enter();
+    assert_eq!(
+        client_db::contact_tokens::added_by(&p.b.device_id).expect("what A kept for B"),
+        std::collections::BTreeSet::from([pc]),
+        "A keeps what B's list states"
+    );
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    assert_eq!(held(&p.b), 100, "B is credited the token it added");
+    assert_eq!(held(&p.a), 900, "A paid it once");
 }
 
 /// The full transfer with BOTH admissions, asserted at the economic layer:

@@ -35,9 +35,10 @@ use crate::sdk::economic_admission_flow::{
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
 use crate::sdk::route_seats::{write_recorded, AtLeader};
 use crate::sdk::sofi_flow::{
-    chain_past_withheld_pairs, context, exercise_draft, head_of, identity, own_setup_ref,
-    publication_addr, refuse, relationship_base, require_stored, set_up_with, sign, standing,
-    storage, trader_core, vault_at_head, vault_core, PositionOutcome, Search, SIGNATURE_ALG,
+    accept_cell_ahead, chain_past_withheld_pairs, context, exercise_draft, geneses_ahead, head_of,
+    heads_in_turns, identity, own_setup_ref, publication_addr, refuse, relationship_base,
+    require_stored, set_up_with, sign, standing, storage, trader_core, vault_at_head, vault_core,
+    PositionOutcome, Search, VaultAtHead, SIGNATURE_ALG,
 };
 use crate::sdk::sofi_publish::{publish, LOCATOR_BUDGET};
 use crate::sdk::sofi_reads::{verifier_error, LiveSofiReads, VerifierContext};
@@ -807,6 +808,11 @@ async fn view_of(
     vault_id: &D32,
 ) -> Result<EscrowVaultView, DsmError> {
     let (vault, ..) = vault_at_head(set, verifier, vault_id).await?;
+    view_at(&vault)
+}
+
+/// An escrow vault as its walked head shows it.
+fn view_at(vault: &VaultAtHead) -> Result<EscrowVaultView, DsmError> {
     let (verdict_cell, external_commitment, token, branches, program, computed) = match &vault.terms
     {
         VaultTerms::Escrow(terms) => (
@@ -828,7 +834,7 @@ async fn view_of(
         VaultTerms::Market(..) => return Err(refuse("the vault is not an escrow vault")),
     };
     Ok(EscrowVaultView {
-        vault_id: *vault_id,
+        vault_id: vault.vault_id,
         owner_genesis: vault.state.owner_genesis,
         owner_device_id: vault.state.owner_device_id,
         verdict_cell,
@@ -887,6 +893,10 @@ async fn locked_of(
 ) -> Result<(Vec<EscrowVaultView>, Search), DsmError> {
     let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
     let verifier = ctx.verifier();
+    // Every candidate under the cell's locator is accepted at once, so the
+    // discovery below finds each one already accepted for this operation.
+    let ahead = tokio::task::block_in_place(|| accept_cell_ahead(&verifier, verdict_cell));
+    log::info!("[escrow] cell lookup: {ahead}");
     let (vaults, mut search) = match verifier
         .vaults_of_cell(verdict_cell)
         .map_err(verifier_error)?
@@ -904,15 +914,19 @@ async fn locked_of(
             .collect(),
         None => vaults,
     };
-    let mut out = Vec::with_capacity(vaults.len());
-    for accepted in vaults {
-        match view_of(set, &verifier, accepted.vault_id()).await {
+    // The vaults are walked to their heads at once: a vault's walk needs
+    // nothing another's finds first.
+    let vault_ids: Vec<D32> = vaults.iter().map(|accepted| *accepted.vault_id()).collect();
+    let at_heads = heads_in_turns(set, &verifier, &vault_ids).await;
+    let mut out = Vec::with_capacity(vault_ids.len());
+    for (vault_id, at_head) in vault_ids.iter().zip(at_heads) {
+        match at_head.and_then(|(vault, ..)| view_at(&vault)) {
             Ok(view) => out.push(view),
             // A vault whose head is not established is not shown as it
             // stands, so the search is partial, and says why.
             Err(why) => {
                 search = Search::Partial;
-                out_of_reach(accepted.vault_id(), &why);
+                out_of_reach(vault_id, &why);
             }
         }
     }
@@ -937,16 +951,22 @@ pub async fn own_vaults(
     let standing = standing(core)?;
     let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
-    let mut out = Vec::new();
-    for creation in standing.local.vault_creations() {
-        match verifier
-            .vault_genesis(&creation.vault_id)
-            .map_err(verifier_error)?
-        {
+    let created: Vec<D32> = standing
+        .local
+        .vault_creations()
+        .iter()
+        .map(|creation| creation.vault_id)
+        .collect();
+    // Each creation's genesis is accepted at once, then asked for in turn.
+    let ahead = tokio::task::block_in_place(|| geneses_ahead(&verifier, &created));
+    log::info!("[escrow] own vaults: {ahead}");
+    let mut escrow_vaults = Vec::new();
+    for vault_id in &created {
+        match verifier.vault_genesis(vault_id).map_err(verifier_error)? {
             VaultGenesis::Accepted(genesis)
                 if genesis.escrow().is_some() || genesis.computed().is_some() =>
             {
-                out.push(view_of(set, &verifier, &creation.vault_id).await?);
+                escrow_vaults.push(*vault_id);
             }
             // A market vault is `sofi.vaults`'.
             VaultGenesis::Accepted(..) => {}
@@ -960,6 +980,12 @@ pub async fn own_vaults(
                 return Err(refuse(format!("vault genesis refused: {why}")))
             }
         }
+    }
+    // The escrow vaults are walked to their heads at once, and shown in the
+    // order their creations are kept.
+    let mut out = Vec::with_capacity(escrow_vaults.len());
+    for at_head in heads_in_turns(set, &verifier, &escrow_vaults).await {
+        out.push(view_at(&at_head?.0)?);
     }
     Ok(out)
 }

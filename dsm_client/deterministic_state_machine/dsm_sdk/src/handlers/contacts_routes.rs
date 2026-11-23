@@ -158,6 +158,11 @@ impl AppRouterImpl {
                         Ok(profile) => profile,
                         Err(e) => return err(format!("contacts.list: {e}")),
                     };
+                    item.sendable_token_ids =
+                        match crate::sdk::contact_tokens::sendable_token_ids(&contact.device_id) {
+                            Ok(ids) => ids,
+                            Err(e) => return err(format!("contacts.list: {e}")),
+                        };
                     let session = crate::bluetooth::get_pairing_orchestrator()
                         .get_session_status(&contact.device_id)
                         .await;
@@ -496,6 +501,7 @@ mod tests {
             send_status: None,
             pairing: generated::ContactPairingPhase::Paired as i32,
             relationship_state: generated::RelationshipState::Unspecified as i32,
+            sendable_token_ids: vec!["ERA".into()],
             profile: Some(generated::ContactProfileV1 {
                 display_name: "Carol Diaz".into(),
                 email: "carol@example.com".into(),

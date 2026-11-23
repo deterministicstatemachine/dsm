@@ -67,3 +67,18 @@ it('says so when the wallet holds no state object', () => {
   fireEvent.click(screen.getByRole('switch', { name: 'Show state objects' }));
   expect(screen.getByText('No state objects yet.')).toBeInTheDocument();
 });
+
+// A token the protocol defines, other than the wallet's main currency, is not
+// a row while the wallet holds none of it (owner, 2026-11-22).
+it('does not list a second protocol token the wallet holds nothing of', () => {
+  const defined = (ticker: string, held: bigint): TokenBalanceView => balanceView(
+    new pb.BalanceGetResponse({
+      tokenId: ticker, symbol: ticker, tokenName: ticker, available: held, displayAmount: held.toString(),
+      holding: pb.BalanceHolding.CURRENCY, protocolDefined: ticker.length > 0,
+    }),
+  );
+  renderTab([defined('ERA', 0n), defined('dBTC', 0n), coin]);
+  expect(screen.getByText('ERA')).toBeInTheDocument();
+  expect(screen.getByText('WILD')).toBeInTheDocument();
+  expect(screen.queryByText('dBTC')).not.toBeInTheDocument();
+});

@@ -225,6 +225,24 @@ pub(crate) fn backfill_transaction_proof_with_conn(
     Ok(())
 }
 
+/// The status of a send's history row once the send can never complete.
+pub const HISTORY_STATUS_FAILED: &str = "failed";
+/// The metadata key a failed send's reason is kept under.
+pub const HISTORY_FAILURE_KEY: &str = "failure";
+
+/// Mark the history row of the send `tx_id` as one that can never complete,
+/// for `why`: its debit is committed on this device and nothing was, or will
+/// be, delivered. The Send screen is answered before a send's admission is
+/// finished, so the row is where a send that then cannot land says so.
+pub fn record_send_cannot_complete(tx_id: &str, why: &str) -> Result<()> {
+    let mut row = get_transaction(tx_id)?
+        .ok_or_else(|| anyhow::anyhow!("no history row for the send {tx_id}"))?;
+    row.status = HISTORY_STATUS_FAILED.to_string();
+    row.metadata
+        .insert(HISTORY_FAILURE_KEY.to_string(), why.as_bytes().to_vec());
+    store_transaction(&row)
+}
+
 /// Backfill receipt bytes into an existing transaction record.
 ///
 /// Only updates if the current `proof_data` is NULL or empty, so this is safe

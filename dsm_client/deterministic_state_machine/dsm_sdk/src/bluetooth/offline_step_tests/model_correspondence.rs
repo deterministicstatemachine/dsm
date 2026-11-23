@@ -64,17 +64,11 @@ impl World {
         let offline: Vec<OfflineDevice> = devices.iter().map(OfflineDevice::new).collect();
         for &i in loaded {
             offline[i].device.enter();
-            let load = offline[i]
+            offline[i]
                 .device
-                .invoke(
-                    "wallet.loadOffline",
-                    &crate::generated::OfflineCashRequest {
-                        token_id: "ERA".to_string(),
-                        amount: "20.00".to_string(),
-                    },
-                )
-                .await;
-            assert!(load.success, "the load: {:?}", load.error_message);
+                .offline_boundary("wallet.loadOffline", "20.00")
+                .await
+                .expect("the load");
             for (a, b) in relationships {
                 let counterparty = if *b == i {
                     *a

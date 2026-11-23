@@ -213,3 +213,26 @@ pub fn open_writes(route_len: usize, limit: u32) -> Result<Vec<RecordedWrite>> {
     }
     Ok(out)
 }
+
+/// Forget every recorded write in `namespace`: a namespace no member keeps a
+/// write in any more, so nothing of it is left to continue. Returns how many
+/// writes were forgotten.
+pub fn forget_writes_in(namespace: &[u8]) -> Result<usize> {
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the store's lock is poisoned: {e}"))?;
+    let tx = conn.transaction()?;
+    for table in ["route_chain_write_slot", "route_chain_write_proof"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE namespace = ?1"),
+            params![namespace],
+        )?;
+    }
+    let forgotten = tx.execute(
+        "DELETE FROM route_chain_write WHERE namespace = ?1",
+        params![namespace],
+    )?;
+    tx.commit()?;
+    Ok(forgotten)
+}

@@ -32,6 +32,7 @@ function listed(alias: string, deviceId: Uint8Array<ArrayBuffer>): pb.ContactAdd
     signingPublicKey: new Uint8Array(64).fill(0x30),
     pairing: pb.ContactPairingPhase.IDLE,
     relationshipState: pb.RelationshipState.ESTABLISHED,
+    sendableTokenIds: ['ERA', 'RIGB'],
   });
 }
 

@@ -147,22 +147,21 @@ async fn a_payout_a_payer_has_spent_funds_no_second_receiver() {
     for _ in 0..2 {
         c.sync().await;
     }
-    assert!(
-        !as_it_is.success,
-        "a copy restored as it is pays nobody a second time: {:?}",
-        as_it_is.error_message
-    );
+    // The Send screen is answered once the debit is committed; the admission
+    // run beside it finds the position held, marks the send's row, and
+    // delivers nothing.
+    let stopped = unchanged.failed_send_reason();
     assert_eq!(
         c.era_balance(),
         0,
         "C is credited nothing by the unchanged copy"
     );
     assert!(
-        as_it_is
-            .error_message
+        stopped
             .as_deref()
             .is_some_and(|why| why.contains("held by another root claim")),
-        "the unchanged copy is stopped at the position A's payment holds: {:?}",
+        "the unchanged copy is stopped at the position A's payment holds: {stopped:?} (answered \
+         {:?})",
         as_it_is.error_message
     );
 

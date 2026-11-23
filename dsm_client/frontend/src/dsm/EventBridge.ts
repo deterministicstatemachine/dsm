@@ -289,6 +289,15 @@ export function initializeEventBridge(): void {
         return;
       }
 
+      // Rust read a contact's token lists and keeps a token it did not keep
+      // before; the page reads its contacts again (contacts.list carries what
+      // each can be sent). No payload.
+      if (topic === 'contact.tokens') {
+        bridgeEvents.emit('contact.tokens', undefined);
+        emit(topic, bytes);
+        return;
+      }
+
       // Pairing completion relay from native.
       // Payload is expected to be counterparty device_id bytes (32 bytes).
       if (topic === 'dsm-contact-ble-updated') {

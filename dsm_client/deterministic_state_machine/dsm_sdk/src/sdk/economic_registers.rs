@@ -579,6 +579,73 @@ pub(crate) async fn walk_contact(genesis: [u8; 32], device_id: [u8; 32]) -> Resu
     Ok(())
 }
 
+/// How long a background pass over the contacts holds off the next one once
+/// it has walked them. A contact with nothing new costs one read of its next
+/// cell.
+const CONTACT_PASS_SPACING: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One background pass over the contacts at a time, its spacing included.
+static CONTACT_PASS: once_cell::sync::Lazy<std::sync::Arc<tokio::sync::Mutex<()>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+
+/// Start a pass that walks every contact from the state kept of it toward its
+/// head ([`walk_contacts`]), unless one is running or still spacing itself
+/// out ([`CONTACT_PASS_SPACING`]). The background poller starts it after each
+/// of its cycles, so that a contact's payment finds the contact's steps since
+/// the last one already checked and reads only its own (rig run 2026-11-22:
+/// a payment after idle waited 63–95 s on its payer's steps since).
+pub(crate) fn start_contact_walks() {
+    let Ok(held) = CONTACT_PASS.clone().try_lock_owned() else {
+        return;
+    };
+    tokio::spawn(async move {
+        walk_contacts().await;
+        tokio::time::sleep(CONTACT_PASS_SPACING).await;
+        drop(held);
+    });
+}
+
+/// Walk each contact from the state this device kept of it toward its head,
+/// one at a time ([`walk_contact`]). The check each step gets is the one a
+/// payment from the contact gives it (the owner's ruling of 2026-11-15,
+/// specs/README.md); this only runs it before the payment arrives. A contact
+/// that cannot be walked now is walked by the next pass, or by its payment.
+pub(crate) async fn walk_contacts() {
+    let contacts = match crate::storage::client_db::get_all_contacts() {
+        Ok(contacts) => contacts,
+        Err(e) => {
+            log::warn!("[kept state] the contacts could not be read: {e}");
+            return;
+        }
+    };
+    log::info!(
+        "[kept state] a pass over {} contacts starts",
+        contacts.len()
+    );
+    let mut walked = 0usize;
+    for contact in contacts {
+        let (Ok(genesis), Ok(device_id)) = (
+            <[u8; 32]>::try_from(contact.genesis_hash.as_slice()),
+            <[u8; 32]>::try_from(contact.device_id.as_slice()),
+        ) else {
+            log::warn!(
+                "[kept state] contact {} holds no 32-byte genesis and device id",
+                contact.alias
+            );
+            continue;
+        };
+        if let Err(e) = walk_contact(genesis, device_id).await {
+            log::info!(
+                "[kept state] contact {} not walked this pass: {e}",
+                text_id::encode_base32_crockford(&device_id)
+            );
+            continue;
+        }
+        walked += 1;
+    }
+    log::info!("[kept state] the pass walked {walked} contacts");
+}
+
 /// This wallet's own lineage as the register on `network_id` holds it,
 /// re-verified from its activation root and its leaves folded from every
 /// step's witness (`replay_own_lineage`): what a wallet restored from its

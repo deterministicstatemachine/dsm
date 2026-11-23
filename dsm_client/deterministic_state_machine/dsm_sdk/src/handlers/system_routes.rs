@@ -305,28 +305,21 @@ pub(crate) async fn handle_restore_from_phrase(args: &[u8]) -> AppResult {
         }
     }
 
-    // 5. Its contacts: the latest backup it kept on the nodes (DSM Amendment A40), installed
-    //    only when it is the wallet as it stood at the register's head. Backups the cells do not
-    //    decide yet roll the restore back, so contacts that are there are never given up.
+    // 5. Its contacts: the backup its device keeps in its one slot on the nodes (DSM Amendment
+    //    A40), installed only when it is the wallet as it stood at the register's head. A slot the
+    //    reads do not decide yet rolls the restore back, so contacts that are there are never
+    //    given up.
     let keys = match crate::sdk::wallet_backup_flow::keys() {
         Ok(keys) => keys,
         Err(e) => return rolled_back_error(format!("{ROUTE}: the backup keys: {e}")),
     };
-    let backups = {
-        let (set, keys) = (set.clone(), keys.clone());
-        tokio::task::spawn_blocking(move || {
-            crate::sdk::wallet_backup_flow::latest(&set, (g, devid), &keys)
-        })
-        .await
-    };
-    let latest = match backups {
-        Ok(Ok(latest)) => latest,
-        Ok(Err(e)) => {
+    let latest = match crate::sdk::wallet_backup_flow::latest(&set, (g, devid), &keys).await {
+        Ok(latest) => latest,
+        Err(e) => {
             return rolled_back_error(format!(
-                "{ROUTE}: this wallet's backups: {e}; try again shortly"
+                "{ROUTE}: this wallet's backup: {e}; try again shortly"
             ))
         }
-        Err(e) => return rolled_back_error(format!("{ROUTE}: reading the backups stopped: {e}")),
     };
     let installed_backup = match latest {
         Some((n, body)) => {

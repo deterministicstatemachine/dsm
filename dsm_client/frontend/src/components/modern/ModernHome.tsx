@@ -13,6 +13,7 @@ import type { ScreenType } from '../../types/app';
 import { TokenMark } from '../TokenMark';
 import { ActivityItem, Icon, activityRows, holdings, mainBalance, type IconName } from './parts';
 import { modernNav } from './modernNav';
+import { homeListed } from '../../domain/holdings';
 
 const RECENT = 3;
 
@@ -30,7 +31,7 @@ export default function ModernHome(): React.JSX.Element {
   const wallet = useWallet();
   const { contacts } = useContacts();
   const main = mainBalance(wallet.balances);
-  const held = holdings(wallet.balances);
+  const held = holdings(homeListed(wallet.balances));
   // Fungible tokens, or the one-of-a-kind objects (creatures, items): the same switch the DGen wallet has.
   const [shown, setShown] = useState<'currency' | 'object'>('currency');
   const showingObjects = shown === 'object';
