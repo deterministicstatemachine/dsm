@@ -46,7 +46,7 @@ These apps are already plugged into DSM: [Irrefutable Labs' repositories](https:
 </tr>
 <tr>
 <td width="290"><a href="https://github.com/Irrefutable-Labs/sennite-factions"><img src="guide/src/images/apps/sennite.webp" alt="Sennite: Factions title screen" width="280"></a></td>
-<td><b><a href="https://github.com/Irrefutable-Labs/sennite-factions">Sennite: Factions</a></b>: a battle royale for Android phones, built in Unreal Engine, where a faction's base is funded by its members' own DSM vaults. Heroes, skins and weapons are bought with the game's D-bucks from the player's wallet and chosen once the wallet proves it owns them; building materials are objects in the wallet, committed to the faction's base. A match's prize is locked before it starts, one vault per member's share, and the winners collect it in their own wallets.</td>
+<td><b><a href="https://github.com/Irrefutable-Labs/sennite-factions">Sennite: Factions</a></b>: a battle royale for Android phones, built in Unreal Engine, where factions build a base together from their members' own materials. Members invite new players in and vote to remove a member; every invitation, removal vote and change to the base is DSM state, so building materials are finite. D-bucks buy heroes, skins and weapons from the host's store, players trade with each other peer to peer, and a match's prize is locked before it starts and collected in the winners' own wallets.</td>
 </tr>
 </table>
 
