@@ -24,7 +24,7 @@ gated pulls of `KECCAK` output cells (leanVM main `40f877dc`, `memory_coords_if`
 serves `constraintSoundness`.
 
 **The argument.** A memory message `(addr, count, v)` is read as the triple of its address, count
-and limbs (`memMsgOf`, injective). The witness pulls the reads of the six tables, their gated
+and limbs (`memMsgOf`, injective). The witness pulls the reads of the seven tables, their gated
 reads, and the memory block's finalizes, and pushes the reads bumped by `g`, the gated reads at
 the gated counter, and the block's seeds `(g^i, 1, m_i)`, one per word of the image
 (`Soundness.Bus`); `SatisfiedBy.mem_balanced` makes the two lists permutations of each other.
@@ -32,9 +32,9 @@ Every gate is `0` or `1` (`opRecs_bits`): a row's bytecode coordinates are the p
 (`opRecs_bc_sound`), whose output flags decode. So a gated read at flag `1` pulls `(a, c, v)` and
 pushes `(a, g·c, v)`, a read; at flag `0` it pulls and pushes the one tuple `(a, c, v)`, which
 `perm_cancel_mid` drops from both sides (`mem_triples_perm`). The counts of the reads are nonzero
-(`CountsNonzero`, which covers every memory pull of the six tables), there are fewer than
+(`CountsNonzero`, which covers every memory pull of the seven tables), there are fewer than
 `2^64 - 1` reads (`opReads_length_lt`, from `Caps`: at most twenty-six reads per row, `2^30` rows
-per table, six tables), and each finalize has a seed's key. So `lookup_sound` makes every read's
+per table, seven tables), and each finalize has a seed's key. So `lookup_sound` makes every read's
 key, its address and limbs, a seed's: `(g^i, m_i)`, which is a correct read of word `i`
 (`MemoryImage.read_gpow`, as `κ ≤ 30`). A pull of multiplicity `1` is a read a row makes or a
 finalize (`mem_pull_of_mult`), hence a correct read (`mem_channel_sound`).
@@ -96,12 +96,12 @@ theorem tripleOfMemMsg_memMsgOf (a c : K) (v : Vector K 2) :
 
 /-! ## The memory pair -/
 
-/-- The reads the rows of the six tables make: each row's reads and gated reads at flag `1`. -/
+/-- The reads the rows of the seven tables make: each row's reads and gated reads at flag `1`. -/
 def opReads (w : EnsembleWitness (leanIsaEnsemble prog κ)) (f : Air.Flat.Table K × Array K → RowRec) :
     List (K × K × Vector K 2) :=
   (opPairs w).flatMap fun p ↦ (f p).real
 
-/-- The cancelled pairs of the rows of the six tables: their gated reads at flag `0`. -/
+/-- The cancelled pairs of the rows of the seven tables: their gated reads at flag `0`. -/
 def opSkips (w : EnsembleWitness (leanIsaEnsemble prog κ)) (f : Air.Flat.Table K × Array K → RowRec) :
     List (K × K × Vector K 2) :=
   (opPairs w).flatMap fun p ↦ (f p).skips
@@ -238,11 +238,11 @@ theorem mem_reads_seeded (h : SatisfiedByB prog input w) {f : Air.Flat.Table K �
     exact ⟨i, rfl, rfl⟩
 
 /-- A memory pull of multiplicity `1` of a satisfying witness is a read a row makes or a
-finalize: the memory block pulls the finalizes; a row of the six tables pulls at `1` only the
+finalize: the memory block pulls the finalizes; a row of the seven tables pulls at `1` only the
 reads it makes (`OpRow`); the verifier and the bytecode block pull no memory. -/
 theorem mem_pull_of_mult (h : SatisfiedByB prog input w) {f : Air.Flat.Table K × Array K → RowRec}
     (hf : OpRecs w f) {mfin : Fin (2 ^ (imageOf w.data).1) → K}
-    (hmb : tableSends (tableAt w 6) = memSeedSends (imageOf w.data).2 mfin) :
+    (hmb : tableSends (tableAt w 7) = memSeedSends (imageOf w.data).2 mfin) :
     ∀ i ∈ w.interactions, i.channel.name = MemPull.name → i.mult = 1 →
       i.msg ∈ (opReads w f ++ (List.finRange (2 ^ (imageOf w.data).1)).map fun i : Fin _ ↦
         (addressOfIndex i, mfin i, limbsOf (imageOf w.data).2 i)).map memMsgOfTriple := by
@@ -268,19 +268,19 @@ theorem mem_pull_of_mult (h : SatisfiedByB prog input w) {f : Air.Flat.Table K �
     exact List.mem_flatMap.mpr ⟨row, hrow, List.mem_map.mpr
       ⟨_, List.mem_filter.mpr ⟨hsend, by simp [hn]⟩, rfl⟩⟩
   · obtain ⟨j, rfl⟩ := mem_tables_iff.mp ht
-    by_cases hj : (j : ℕ) < 6
-    · -- A row of the six tables: a read it makes.
+    by_cases hj : (j : ℕ) < 7
+    · -- A row of the seven tables: a read it makes.
       have hp : (tableAt w j, row) ∈ opPairs w := by
         unfold opPairs
         refine List.mem_flatMap.mpr ⟨tableAt w j, ?_, List.mem_map_of_mem hrow⟩
-        have hlen : w.tables.length = 8 := w.same_length.symm
+        have hlen : w.tables.length = 9 := w.same_length.symm
         rw [List.mem_iff_getElem]
         exact ⟨j, by rw [List.length_take, hlen]; omega, by simp [tableAt]⟩
       have := (hf _ hp).2.2.1 i hir hn hm
       refine List.mem_map.mpr ?_
       obtain ⟨y, hy, hyeq⟩ := List.mem_map.mp this
       exact ⟨y, List.mem_append_left _ (List.mem_flatMap.mpr ⟨_, hp, hy⟩), hyeq⟩
-    · obtain rfl | rfl : j = 6 ∨ j = 7 := by
+    · obtain rfl | rfl : j = 7 ∨ j = 8 := by
         revert hj; fin_cases j <;> decide
       · -- The memory block: a finalize.
         rw [hmb, chanOf_memSeed_pull] at hchan

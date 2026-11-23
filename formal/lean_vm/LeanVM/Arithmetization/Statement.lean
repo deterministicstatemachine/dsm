@@ -1,7 +1,7 @@
 /-
   LeanVM.Arithmetization.Statement
 
-  The constraint statement of leanISA: the ensemble of the six opcode tables, the two seed
+  The constraint statement of leanISA: the ensemble of the seven opcode tables, the two seed
   blocks and the verifier; bus balance as a multiset equality; the checks the verifier makes
   on the announced instance; what the fixed columns and the derived prover data give; the relation
   `SatisfiedBy` that `constraintSoundness` and `constraintCompleteness` connect to
@@ -18,6 +18,7 @@ public import LeanVM.Arithmetization.Tables.SetConstant
 public import LeanVM.Arithmetization.Tables.Deref
 public import LeanVM.Arithmetization.Tables.Jump
 public import LeanVM.Arithmetization.Tables.Keccak
+public import LeanVM.Arithmetization.Tables.Blake3
 public import Clean.Air.FlatEnsemble
 
 @[expose] public section
@@ -34,7 +35,7 @@ is transcribed: the caps (`crates/verifier/src/lib.rs` and
 `crates/verifier/src/layout.rs`, the
 announcement checks of `walk` and `build_layout`, which replace `read_public` of `a386121f`;
 §6.2 "Instance caps", `06-bus-interactions.tex`), the nonzero count product (§6.2 "The count
-product"; `cpu/layout.rs`, the count channel of the six tables' read-count columns), the public words against the committed memory (§8.2,
+product"; `cpu/layout.rs`, the count channel of the seven tables' read-count columns), the public words against the committed memory (§8.2,
 `08-end-to-end-protocol.tex`), the public parts of the bus the verifier forms itself, the
 index column and the program's share of the bytecode blocks (§8.6; §6.5,
 `06-bus-interactions.tex`), and the `KECCAK` validity the Keccak reduction proves
@@ -42,7 +43,7 @@ index column and the program's share of the bytecode blocks (§8.6; §6.5,
 the M3 constraint system and its ensemble, a statement with no soundness or completeness theorem:
 it is what `constraintSoundness` and `constraintCompleteness` are about.
 
-**The ensemble.** `leanIsaEnsemble prog κ` is Clean's `Ensemble`: the six opcode tables
+**The ensemble.** `leanIsaEnsemble prog κ` is Clean's `Ensemble`: the seven opcode tables
 (`opcodeComponent`, rows by demand) and the two seed blocks of `Boundary` as its components, each
 named as leanVM names it (Clean keys the prover data by name), the six channels of `Channels`, and
 the verifier `leanIsaVerifier prog`, a `Verifier.Program`. The two blocks are preallocated
@@ -78,9 +79,9 @@ three pairs `(StatePull, StatePush)`, `(MemPull, MemPush)`, `(BytecodePull, Byte
 direction Clean now tags every interaction with agrees (a `*.pull` channel carries pulls only).
 
 **The verifier's checks.** `CountsNonzero w` is the nonzero count product: every read pull of
-the six tables carries a nonzero count, message index `1` (bus coordinate 2) of a memory or
+the seven tables carries a nonzero count, message index `1` (bus coordinate 2) of a memory or
 bytecode tuple (§6.2 "The count product"; `layout.rs`, the count channel
-stacks the read-count columns of the six tables and nothing else, so the finalize counts of
+stacks the read-count columns of the seven tables and nothing else, so the finalize counts of
 the two blocks are outside it, as §6.2 "Nothing checks the finalize counts" says). `Caps w` is
 the M3 part of the announcement checks (`read_public` at `a386121f`; `walk` and
 `build_layout`, `verifier/src/lib.rs` and `verifier/src/layout.rs`, behind the
@@ -162,7 +163,7 @@ are proved in `LeanVM.Arithmetization.Soundness` (`mem_channel_sound`,
 * A channel is identified by its name, never by the sign of a multiplicity:
   `messagesOn` filters by `RawChannel.name`, and a push on the pull channel of a pair
   would count as a pull (`memRead` and `bytecodeRead` never do that).
-* The count product covers the six tables' read counts and nothing else: `CountsNonzero`
+* The count product covers the seven tables' read counts and nothing else: `CountsNonzero`
   quantifies over `w.tables.take 6`, and a finalize count of `0` is rejected by balance alone
   (§6.2).
 * The permutation is not a constraint of the table and not a bus fact: `KeccakRowsValid` is
@@ -206,16 +207,16 @@ def opcodeComponent {Row : TypeMap} [ProvableType Row] (c : GeneralFormalCircuit
 /-! ## The ensemble -/
 
 /-- The leanISA ensemble of the public program `prog` with a memory of `2^κ` words (`κ` the
-announced `log_mem`): the six opcode tables, the memory and bytecode blocks, preallocated with
+announced `log_mem`): the seven opcode tables, the memory and bytecode blocks, preallocated with
 their index and entry columns fixed, the six channels, and the verifier `leanIsaVerifier prog`
 (`layout.rs`). The instance is a function of the program and `log_mem`, as leanVM's
 `layout(prog, log_mem, …)` is. -/
 def leanIsaEnsemble (prog : LeanIsaProgram) (κ : ℕ) : Ensemble K PublicIO where
   tables := [opcodeComponent xorTable, opcodeComponent mulTable, opcodeComponent setTable,
     opcodeComponent derefTable, opcodeComponent jumpTable, opcodeComponent keccakTable,
-    memComponent κ, bytecodeComponent prog]
+    opcodeComponent blake3Table, memComponent κ, bytecodeComponent prog]
   unique_names := by
-    show ["XOR", "MUL", "SET", "DEREF", "JUMP", "KECCAK", "mem", "bytecode"].Nodup
+    show ["XOR", "MUL", "SET", "DEREF", "JUMP", "KECCAK", "BLAKE3", "mem", "bytecode"].Nodup
     decide
   channels := [StatePull.toRaw, StatePush.toRaw, MemPull.toRaw, MemPush.toRaw,
     BytecodePull.toRaw, BytecodePush.toRaw]
@@ -227,7 +228,7 @@ def leanIsaEnsemble (prog : LeanIsaProgram) (κ : ℕ) : Ensemble K PublicIO whe
   -- as Clean's elaboration lists them.
   tables_channels := by
     simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq]
-    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · show [StatePull.toRaw, BytecodePull.toRaw] ++ List.replicate 3 MemPull.toRaw ++
         [StatePush.toRaw, MemPush.toRaw, BytecodePush.toRaw] ⊆ _
       simp [List.subset_def]
@@ -246,6 +247,9 @@ def leanIsaEnsemble (prog : LeanIsaProgram) (κ : ℕ) : Ensemble K PublicIO whe
     · show [StatePull.toRaw, BytecodePull.toRaw] ++ List.replicate 26 MemPull.toRaw ++
         [StatePush.toRaw, MemPush.toRaw, BytecodePush.toRaw, MemPull.toRaw] ⊆ _
       simp [List.subset_def]
+    · show [StatePull.toRaw, BytecodePull.toRaw] ++ List.replicate 15 MemPull.toRaw ++
+        [StatePush.toRaw, MemPush.toRaw, BytecodePush.toRaw] ⊆ _
+      simp [List.subset_def]
     · show [MemPull.toRaw] ++ [MemPush.toRaw] ⊆ _
       simp [List.subset_def]
     · show [BytecodePull.toRaw] ++ [BytecodePush.toRaw] ⊆ _
@@ -257,22 +261,26 @@ def leanIsaEnsemble (prog : LeanIsaProgram) (κ : ℕ) : Ensemble K PublicIO whe
 variable {prog : LeanIsaProgram} {κ : ℕ}
 
 /-- The witness's table of component `j`, in the order of the ensemble's `tables`: `XOR`,
-`MUL_NATIVE`, `SET_CONSTANT`, `DEREF`, `JUMP`, `KECCAK`, then the memory block and the
-bytecode block. -/
-def tableAt (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 8) : Air.Flat.Table K :=
+`MUL_NATIVE`, `SET_CONSTANT`, `DEREF`, `JUMP`, `KECCAK`, `BLAKE3`, then the memory block and
+the bytecode block. -/
+def tableAt (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 9) : Air.Flat.Table K :=
   w.tables[(j : ℕ)]'(by rw [← w.same_length]; exact j.isLt)
 
 /-- The rows of the `KECCAK` table. -/
 abbrev keccakRows (w : EnsembleWitness (leanIsaEnsemble prog κ)) : List (Array K) :=
   (tableAt w 5).table
 
+/-- The rows of the `BLAKE3` table. -/
+abbrev blake3Rows (w : EnsembleWitness (leanIsaEnsemble prog κ)) : List (Array K) :=
+  (tableAt w 6).table
+
 /-- The rows of the memory block. -/
 abbrev memBlockRows (w : EnsembleWitness (leanIsaEnsemble prog κ)) : List (Array K) :=
-  (tableAt w 6).table
+  (tableAt w 7).table
 
 /-- The rows of the bytecode block. -/
 abbrev bytecodeBlockRows (w : EnsembleWitness (leanIsaEnsemble prog κ)) : List (Array K) :=
-  (tableAt w 7).table
+  (tableAt w 8).table
 
 /-- The messages the witness sends on the channel `c`, in table and row order: every
 interaction on the channel of that name. -/
@@ -294,6 +302,10 @@ def memRowAt (w : EnsembleWitness (leanIsaEnsemble prog κ)) (row : Array K) : M
 def keccakRowAt (w : EnsembleWitness (leanIsaEnsemble prog κ)) (row : Array K) : KeccakRow K :=
   valueFromOffset KeccakRow 0 (Environment.fromArray row w.data)
 
+/-- A raw row of the `BLAKE3` table, read as its typed row, likewise. -/
+def blake3RowAt (w : EnsembleWitness (leanIsaEnsemble prog κ)) (row : Array K) : Blake3Row K :=
+  valueFromOffset Blake3Row 0 (Environment.fromArray row w.data)
+
 /-! ## Balance -/
 
 /-- Pushed and pulled messages of a channel pair form the same multiset (specification §5.1):
@@ -304,13 +316,13 @@ def BalancedPair (w : EnsembleWitness (leanIsaEnsemble prog κ)) (pull push : Ra
 
 /-! ## The verifier's checks -/
 
-/-- Every read pull of the six tables carries a nonzero count, message index `1` (bus
+/-- Every read pull of the seven tables carries a nonzero count, message index `1` (bus
 coordinate 2) of the memory and bytecode tuples: the nonzero count product (§6.2 "The count
 product"; `layout.rs`). The finalize counts of the two blocks are outside it
 (§6.2). Both tuples have at least two coordinates (`MemMsg`, `BytecodeMsg`), so the
 bound is never the reason the conjunct holds. -/
 def CountsNonzero (w : EnsembleWitness (leanIsaEnsemble prog κ)) : Prop :=
-  ∀ t ∈ w.tables.take 6, ∀ i ∈ t.interactions,
+  ∀ t ∈ w.tables.take 7, ∀ i ∈ t.interactions,
     (i.channel.name = MemPull.name ∨ i.channel.name = BytecodePull.name) →
       ∀ h : 1 < i.msg.size, i.msg[1] ≠ 0
 
@@ -368,6 +380,14 @@ discharges it from the Keccak region. -/
 def KeccakRowsValid (w : EnsembleWitness (leanIsaEnsemble prog κ)) : Prop :=
   ∀ row ∈ keccakRows w, KeccakRelation (keccakRowAt w row)
 
+/-! ## The `BLAKE3` validity (research build) -/
+
+/-- Every row of the `BLAKE3` table satisfies the compression relation on its limbs
+(`Blake3Relation`, the component's `Assumptions`): what Flock's reduction (`verify_flock`)
+proves on the limbs committed in `q_flock`. Like `KeccakRowsValid`, enforced outside the bus. -/
+def Blake3RowsValid (w : EnsembleWitness (leanIsaEnsemble prog κ)) : Prop :=
+  ∀ row ∈ blake3Rows w, Blake3Relation (blake3RowAt w row)
+
 /-! ## The statement -/
 
 /-- The witness `w` satisfies the constraint system of `prog` on `input`, its memory announced
@@ -396,6 +416,8 @@ structure SatisfiedBy (prog : LeanIsaProgram) (input : PublicInput)
   caps : Caps w
   /-- Every `KECCAK` row permutes. -/
   keccak_valid : KeccakRowsValid w
+  /-- Every `BLAKE3` row compresses (research build). -/
+  blake3_valid : Blake3RowsValid w
   /-- The first word of the image is `input₀ + input₁·y` (§8.2). -/
   word0_eq : (imageOf w.data).2.read (addressOfIndex 0) = some input.word0
   /-- The second word of the image is `input₂ + input₃·y` (§8.2). -/
@@ -447,9 +469,14 @@ theorem keccakRowAt_toElements (w : EnsembleWitness (leanIsaEnsemble prog κ))
     (r : KeccakRow K) : keccakRowAt w (toElements r).toArray = r :=
   rowAt_toElements w.data r
 
+/-- `blake3RowAt` inverts `toElements`. -/
+theorem blake3RowAt_toElements (w : EnsembleWitness (leanIsaEnsemble prog κ))
+    (r : Blake3Row K) : blake3RowAt w (toElements r).toArray = r :=
+  rowAt_toElements w.data r
+
 /-- A table of the witness is `tableAt w j` for some `j`. -/
 theorem mem_tables_iff {w : EnsembleWitness (leanIsaEnsemble prog κ)} {t : Air.Flat.Table K} :
-    t ∈ w.tables ↔ ∃ j : Fin 8, tableAt w j = t := by
+    t ∈ w.tables ↔ ∃ j : Fin 9, tableAt w j = t := by
   rw [List.mem_iff_getElem]
   constructor
   · rintro ⟨i, hi, rfl⟩
@@ -458,15 +485,16 @@ theorem mem_tables_iff {w : EnsembleWitness (leanIsaEnsemble prog κ)} {t : Air.
     exact ⟨j, _, rfl⟩
 
 /-- The component of `tableAt w j` is the ensemble's `j`-th. -/
-theorem tableAt_component (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 8) :
+theorem tableAt_component (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 9) :
     (tableAt w j).component = (leanIsaEnsemble prog κ).tables[(j : ℕ)] :=
   (w.same_circuits j j.isLt).symm
 
-/-- The `KECCAK` validity is the whole of Clean's `w.Assumptions`: the `KECCAK` component's
-`Assumptions` is `KeccakRelation` and every other component's is `True`. This is the form
-Clean's `Table.weakSoundness` takes in `constraintSoundness`. -/
+/-- The `KECCAK` and `BLAKE3` validities are the whole of Clean's `w.Assumptions`: the `KECCAK`
+component's `Assumptions` is `KeccakRelation`, the `BLAKE3` component's `Blake3Relation`, and every
+other component's is `True`. This is the form Clean's `Table.weakSoundness` takes in
+`constraintSoundness`. -/
 theorem assumptions_of_keccakRowsValid {w : EnsembleWitness (leanIsaEnsemble prog κ)}
-    (h : KeccakRowsValid w) : w.Assumptions := by
+    (h : KeccakRowsValid w) (h3 : Blake3RowsValid w) : w.Assumptions := by
   intro t ht
   have hd : t.data = w.data := w.same_data t ht
   obtain ⟨j, rfl⟩ := mem_tables_iff.mp ht
@@ -480,6 +508,7 @@ theorem assumptions_of_keccakRowsValid {w : EnsembleWitness (leanIsaEnsemble pro
   · exact trivial
   · exact trivial
   · rw [hd]; exact h row hrow
+  · rw [hd]; exact h3 row hrow
   · exact trivial
   · exact trivial
 
@@ -521,14 +550,14 @@ theorem names_nodup (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
   rw [← w.tables_map_component, List.map_map] at h
   exact h
 
-theorem tableAt_mem (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 8) :
+theorem tableAt_mem (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 9) :
     tableAt w j ∈ w.tables := List.getElem_mem _
 
 /-- **The image is the memory block.** The prover data's `"mem"` table, which `imageOf` reads, is
 Clean's derivation from the witness: the memory block's rows cut at two cells, its limbs. -/
 theorem memRows_data (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
     memRows w.data = ((memBlockRows w).map (Air.Flat.rowPrefix 2)).toArray := by
-  have h := Air.Flat.deriveProverData_eq_of_mem w.tables (names_nodup w) (tableAt_mem w 6) 2
+  have h := Air.Flat.deriveProverData_eq_of_mem w.tables (names_nodup w) (tableAt_mem w 7) 2
   rw [tableAt_component] at h
   exact h
 
@@ -538,7 +567,7 @@ theorem memBlock_fixed (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
     (memBlockRows w).length = (UInt64.ofNat (2 ^ κ)).toNat ∧
       ∀ i (hi : i < (memBlockRows w).length), (memMode κ).FixedAt (UInt64.ofNat i)
         (fromElements (Air.Flat.rowPrefix (size MemRow) (memBlockRows w)[i])) := by
-  have h := (tableAt w 6).fixed_rows_match
+  have h := (tableAt w 7).fixed_rows_match
   rw [tableAt_component] at h
   exact h
 
@@ -548,7 +577,7 @@ theorem bytecodeBlock_fixed (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
     (bytecodeBlockRows w).length = (UInt64.ofNat (2 ^ prog.logSize)).toNat ∧
       ∀ i (hi : i < (bytecodeBlockRows w).length), (bytecodeMode prog).FixedAt (UInt64.ofNat i)
         (fromElements (Air.Flat.rowPrefix (size BytecodeRow) (bytecodeBlockRows w)[i])) := by
-  have h := (tableAt w 7).fixed_rows_match
+  have h := (tableAt w 8).fixed_rows_match
   rw [tableAt_component] at h
   exact h
 
@@ -620,7 +649,7 @@ theorem bytecodeRowsAreTheProgram (w : EnsembleWitness (leanIsaEnsemble prog κ)
   have hfix := (bytecodeMode_fixedAt prog (i := UInt64.ofNat k) (by rw [hnat]; exact hk2) _).mp
     ((bytecodeBlock_fixed w).2 k hk)
   have hw : (bytecodeBlockRows w)[k].size = size BytecodeRow := by
-    rw [(tableAt w 7).uniform_width _ (List.getElem_mem hk), tableAt_component]; rfl
+    rw [(tableAt w 8).uniform_width _ (List.getElem_mem hk), tableAt_component]; rfl
   rw [List.getElem_ofFn]
   conv_lhs => rw [← toElements_rowPrefix hw, hfix]
   congr 3
@@ -644,7 +673,7 @@ theorem seedRowsAreTheImage (w : EnsembleWitness (leanIsaEnsemble prog κ)) (hκ
     fun i ↦ (memRowAt w ((memBlockRows w)[(i : ℕ)]'(hlt i))).cntFin,
     List.ext_getElem (by rw [List.length_ofFn, hlen, hfst]) fun k hk hk' ↦ ?_⟩
   have hw : (memBlockRows w)[k].size = size MemRow := by
-    rw [(tableAt w 6).uniform_width _ (List.getElem_mem hk), tableAt_component]; rfl
+    rw [(tableAt w 7).uniform_width _ (List.getElem_mem hk), tableAt_component]; rfl
   rw [List.getElem_ofFn]
   conv_lhs => rw [← toElements_rowPrefix hw, ← memRowAt_eq w]
   have himg := imageOf_apply hws ⟨k, by simpa using hk'⟩

@@ -155,6 +155,12 @@ theorem keccak_constraints (env : Environment K) :
   rw [Component.constraintsHold_iff]
   simp only [circuit_norm, opcodeComponent, keccakTable, memRead, memReadIf, bytecodeRead, -BitVec.reduceNeg]
 
+/-- The `BLAKE3` table asserts nothing (research build): the compression is Flock's. -/
+theorem blake3_constraints (env : Environment K) :
+    (opcodeComponent blake3Table).operations.ConstraintsHold env := by
+  rw [Component.constraintsHold_iff]
+  simp only [circuit_norm, opcodeComponent, blake3Table, memRead, bytecodeRead, -BitVec.reduceNeg]
+
 /-- The memory block asserts nothing. -/
 theorem mem_constraints (κ : ℕ) (env : Environment K) :
     (memComponent κ).operations.ConstraintsHold env := by

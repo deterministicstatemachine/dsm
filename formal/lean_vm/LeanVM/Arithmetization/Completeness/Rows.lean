@@ -138,6 +138,10 @@ noncomputable def readAddrs {κ : ℕ} (mem : MemoryImage κ) (fp : K) : LeanIsa
         fp * (g ^ 2 * ocap),
         fp * (g ^ 3 * ocap)] ++
         (List.range outCells.cellCount).map fun k ↦ fp * (g ^ k * oout)
+  | .blake3 om ocv oout omd ox oy ow =>
+      [fp * om 0, fp * om 1, fp * om 2, fp * om 3, fp * ocv, fp * (g * ocv), fp * (g ^ 0 * oout),
+        fp * (g ^ 1 * oout), fp * omd, fp * ox, fp * (g * ox), fp * oy, fp * (g * oy), fp * ow,
+        fp * (g * ow)]
 
 /-- The reads of an instruction's row: each cell it reads, with its count (`cnt` at its position)
 and the limbs the image holds there. -/
@@ -167,7 +171,7 @@ noncomputable def skipsOf {κ : ℕ} (mem : MemoryImage κ) (fp : K) (cnt : ℕ 
               (cellLanes outOdd (Fin.ofNat 13 c)).2])
   | _ => []
 
-/-! ## The six instructions -/
+/-! ## The seven instructions -/
 
 /-- The `XOR` row of an execution sends the `XOR` messages: the third read carries the limbs of
 the word at `fp·o_C`, which the execution makes the sum. -/
@@ -468,6 +472,21 @@ theorem keccak_exec_sends {κ : ℕ} {mem : MemoryImage κ} {pc fp : K} {om : Fi
       bcMsgOf, laneLimb, cellLanes, busEntry, Registers.next, layoutFlagWord, keccakOutputFlags, keccakOutLanes,
       CharTwo.add_self_eq_zero, add_add_self_left]
 
+/-- The `BLAKE3` row of an execution sends the `BLAKE3` messages (research build): its fifteen
+reads carry the limbs the image holds at their cells. -/
+theorem blake3_exec_sends {κ : ℕ} {mem : MemoryImage κ} {pc fp : K} {om : Fin 4 → K}
+    {ocv oout omd ox oy ow : K} {next : Registers K}
+    (hexec : execute mem ⟨pc, fp⟩ (.blake3 om ocv oout omd ox oy ow) = some next)
+    (cnt : ℕ → K) (rbc : K) (data : ProverData K) :
+    rowSends (opcodeComponent blake3Table)
+        (Environment.fromArray (rawRow (blake3RowOf mem pc fp om ocv oout omd ox oy ow
+          (Vector.ofFn fun j ↦ cnt j) rbc)) data) =
+      sendsOf pc fp next rbc (busEntry (.blake3 om ocv oout omd ox oy ow))
+        (readsOf mem fp cnt (.blake3 om ocv oout omd ox oy ow)) := by
+  obtain ⟨-, -, -, -, -, rfl⟩ := (execute_blake3_eq_some_iff _ _ _ _ _ _ _ _ _ _).mp hexec
+  rw [rowSends_mk, blake3_sends_gen _ _ _ _ (eval_rowVar _ data)]
+  simp [sendsOf, readsOf, readAddrs, memMsgOf, bcMsgOf, busEntry, Registers.next, blake3RowOf]
+
 /-! ## Every cell an instruction reads is an address -/
 
 /-- Every cell an executing instruction reads is an address of the image: the execution reads it
@@ -526,6 +545,28 @@ theorem readAddrs_valid {κ : ℕ} {mem : MemoryImage κ} {pc fp : K} {ins : Lea
     · exact ⟨_, by simpa [keccakInputCellOffset] using hin ⟨12, by decide⟩⟩
     · have hk13 : k < 13 := lt_of_lt_of_le hk (by cases outCells <;> decide)
       exact ⟨_, hout ⟨k, hk13⟩ hk⟩
+  | blake3 om ocv oout omd ox oy ow =>
+    obtain ⟨input, output, hin, hout, -, -⟩ :=
+      (execute_blake3_eq_some_iff _ _ _ _ _ _ _ _ _ _).mp hexec
+    intro a ha
+    simp only [readAddrs, List.mem_cons, List.not_mem_nil, or_false] at ha
+    rcases ha with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl |
+      rfl | rfl
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 0⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 1⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 2⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 3⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 4⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 5⟩
+    · exact ⟨_, hout 0 (by decide)⟩
+    · exact ⟨_, hout 1 (by decide)⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 6⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 7⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 8⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 9⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 10⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 11⟩
+    · exact ⟨_, by simpa [blake3InputCellOffset] using hin 12⟩
 
 /-! ## The row of an instruction -/
 
@@ -537,6 +578,7 @@ def opComponent : Opcode → Component K
   | .deref => opcodeComponent derefTable
   | .jump => opcodeComponent jumpTable
   | .keccak => opcodeComponent keccakTable
+  | .blake3 => opcodeComponent blake3Table
 
 /-- The width of a raw row of each opcode's table: the row's columns, and for `JUMP` its two
 local witnesses. -/
@@ -547,6 +589,7 @@ def opWidth : Opcode → ℕ
   | .deref => size DerefRow
   | .jump => size JumpRow + 2
   | .keccak => size KeccakRow
+  | .blake3 => size Blake3Row
 
 /-- The raw row of an instruction executed from `(pc, fp)` over the image `mem`: the typed row of
 its table with the read counts `cnt` (positionally, in the order the circuit reads) and the
@@ -565,6 +608,8 @@ noncomputable def rowOf {κ : ℕ} (mem : MemoryImage κ) (pc fp : K) (cnt : ℕ
   | .keccak om otail ob8 ocap oout inOdd outOdd outCells =>
       rawRow (keccakRowOf mem pc fp om otail ob8 ocap oout inOdd outOdd outCells
         (Vector.ofFn fun j ↦ cnt j) rbc)
+  | .blake3 om ocv oout omd ox oy ow =>
+      rawRow (blake3RowOf mem pc fp om ocv oout omd ox oy ow (Vector.ofFn fun j ↦ cnt j) rbc)
 
 /-- The raw row of an instruction has the width of its table. -/
 theorem rowOf_size {κ : ℕ} (mem : MemoryImage κ) (pc fp : K) (cnt : ℕ → K) (rbc : K) (ins :
@@ -609,5 +654,9 @@ theorem rowOf_sends {κ : ℕ} {mem : MemoryImage κ} {pc fp : K} {ins : LeanIsa
   | keccak om otail ob8 ocap oout inOdd outOdd outCells =>
     simp only [LeanIsaInstruction.opcode, opComponent]
     rw [rowOf, keccak_exec_sends hexec]
+  | blake3 om ocv oout omd ox oy ow =>
+    simp only [LeanIsaInstruction.opcode, opComponent]
+    rw [rowOf, blake3_exec_sends hexec]
+    simp [skipsOf, skipSends]
 
 end LeanVM.Arithmetization

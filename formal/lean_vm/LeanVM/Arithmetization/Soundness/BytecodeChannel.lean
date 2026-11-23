@@ -24,7 +24,7 @@ program's at the pulled counter. It assumes the constraint statement `SatisfiedB
 
 **The argument** is the memory channel's (`Soundness.MemChannel`) on the triples
 `(pc, count, entry)` (`bcMsgOf`): the bytecode block seeds `(g^k, 1, entry (prog.code k))` for
-every slot `k` and finalizes the same keys, every row of the six tables reads one entry with a
+every slot `k` and finalizes the same keys, every row of the seven tables reads one entry with a
 nonzero count (`CountsNonzero`), and there are at most `6 · 2^30` rows (`Caps`). So `lookup_sound`
 makes every pulled `(pc, e)` a seed's `(g^k, entry (prog.code k))`. The strong form implies the
 pull's guarantee, that the entry decodes (`decode_entry`), and is what joins a row's instruction
@@ -109,13 +109,13 @@ theorem flatMap_singleton_eq_map' {α : Type*} {β : Type} (f : α → β) (l : 
   | nil => rfl
   | cons x xs ih => simp [ih]
 
-/-- The bytecode read of a row of the six tables, as a triple. -/
+/-- The bytecode read of a row of the seven tables, as a triple. -/
 def RowRec.bcRead (x : RowRec) : K × K × Vector K 13 := (x.pc, x.rbc, x.e)
 
 /-- A bytecode read pushed back: its count multiplied by `g`. -/
 def bumpBc (x : K × K × Vector K 13) : K × K × Vector K 13 := (x.1, g * x.2.1, x.2.2)
 
-/-- The bytecode messages a row of the six tables pulls. -/
+/-- The bytecode messages a row of the seven tables pulls. -/
 theorem chanOf_rowRec_bcPull (x : RowRec) :
     chanOf BytecodePull.name x.sends = [bcMsgOfTriple x.bcRead] := by
   rw [RowRec.sends, chanOf, List.filter_append, List.map_append, sendsOf_bcPull,
@@ -123,7 +123,7 @@ theorem chanOf_rowRec_bcPull (x : RowRec) :
     List.append_nil]
   rfl
 
-/-- The bytecode messages a row of the six tables pushes. -/
+/-- The bytecode messages a row of the seven tables pushes. -/
 theorem chanOf_rowRec_bcPush (x : RowRec) :
     chanOf BytecodePush.name x.sends = [bcMsgOfTriple (bumpBc x.bcRead)] := by
   rw [RowRec.sends, chanOf, List.filter_append, List.map_append, sendsOf_bcPush,
@@ -237,7 +237,7 @@ theorem bytecode_guarantee (h : SatisfiedByB prog input w) :
   obtain ⟨k, -, he⟩ := bytecode_channel_sound h i hi hname m hm
   exact ⟨prog.instructions k, by rw [he]; exact decode_entry _⟩
 
-/-- The bytecode read of every row of the six tables is the program's: its counter is `g^k` for a
+/-- The bytecode read of every row of the seven tables is the program's: its counter is `g^k` for a
 slot `k` and its coordinates are the entry there. -/
 theorem opRecs_bc_sound (h : SatisfiedByB prog input w) {f : Air.Flat.Table K × Array K → RowRec}
     (hf : OpRecs w f) {p : Air.Flat.Table K × Array K} (hp : p ∈ opPairs w) :

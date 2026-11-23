@@ -27,7 +27,7 @@ row semantics computes from its component and its row, whatever the prover data
 derived data, send what the eight tables they were built from send (`skelWitness_flatMap`). For the memory pair and the
 bytecode pair the rows are the reads of one list of skeletons, numbered by the chain
 (`Completeness.Bus`), so `chain_balance` (`Completeness.Balance`) balances them against the blocks'
-seeds and finalizes; the six tables hold the rows in another order than the list, which is a
+seeds and finalizes; the seven tables hold the rows in another order than the list, which is a
 permutation (`regroup_perm`). The state pair is the hypothesis `hstate` regrouped the same way.
 The `JUMP` table is the one component with constraints, and its two residuals hold of the honest
 witnesses (`flags_complete`).
@@ -157,7 +157,7 @@ theorem chanOf_flatMap {α : Type} (n : String) (l : List α) (F : α → List (
   simp only [chanOf, List.filter_flatMap, List.map_flatMap]
 
 /-- Everything the witness sends, in the ensemble's order: the verifier's two messages, the
-rows of the six tables, the memory block, the bytecode block. -/
+rows of the seven tables, the memory block, the bytecode block. -/
 noncomputable def skelSends (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ) (S : List Skel) :
     List (String × Array K) :=
   [(StatePush.name, #[1, 1]), (StatePull.name, #[prog.pcFinal, 1])] ++
@@ -206,7 +206,7 @@ theorem chanOf_eq_nil {n : String} {l : List (String × Array K)} (h : ∀ x ∈
   rw [List.filter_eq_nil_iff.mpr (fun x hx ↦ by simpa using h x hx)]
   rfl
 
-/-- The witness's messages on a channel: the verifier's, the rows' of the six tables in
+/-- The witness's messages on a channel: the verifier's, the rows' of the seven tables in
 order, the memory block's, the bytecode block's, up to the regrouping of the rows. -/
 theorem chanOf_skelSends_perm (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ) (S : List Skel)
     (n : String) :
@@ -411,7 +411,7 @@ theorem bc_pair_perm (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ) (
 
 /-- **The state pair balances**, from the hypothesis that the skeletons' states and successors
 balance with the initial and final states: the rows' pulls and pushes are those states, regrouped
-by the six tables. -/
+by the seven tables. -/
 theorem state_pair_perm (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ) (S : List Skel)
     (hstate : (#[1, 1] :: S.map fun sk ↦ #[(nextOf img sk).pc, (nextOf img sk).fp]).Perm
       (#[prog.pcFinal, 1] :: S.map fun sk ↦ #[sk.pc, sk.fp])) :
@@ -506,7 +506,7 @@ theorem skelWitness_constraints (prog : LeanIsaProgram) (input : PublicInput) {�
   rw [Air.Flat.Table.environment, hc]
   generalize t.data = data
   simp only [skelTables, List.mem_cons, List.not_mem_nil, or_false] at ht₀
-  rcases ht₀ with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  rcases ht₀ with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
   · exact xor_constraints _
   · exact mul_constraints _
   · exact set_constraints _
@@ -525,7 +525,9 @@ theorem skelWitness_constraints (prog : LeanIsaProgram) (input : PublicInput) {�
     | setConstant _ _ => simp [LeanIsaInstruction.opcode] at h
     | deref _ _ _ _ => simp [LeanIsaInstruction.opcode] at h
     | keccak _ _ _ _ _ _ _ => simp [LeanIsaInstruction.opcode] at h
+    | blake3 _ _ _ _ _ _ _ => simp [LeanIsaInstruction.opcode] at h
   · exact keccak_constraints _
+  · exact blake3_constraints _
   · exact mem_constraints κ _
   · exact bytecode_constraints prog _
 
@@ -579,7 +581,7 @@ theorem mem_interactions_sends (t : Air.Flat.Table K) {i : Interaction K}
   exact List.mem_flatMap.mpr ⟨row, hrow,
     List.mem_map_of_mem (f := fun i : Interaction K ↦ (i.channel.name, i.msg)) hi⟩
 
-/-- **Every read pull of the six tables carries a nonzero count.** -/
+/-- **Every read pull of the seven tables carries a nonzero count.** -/
 theorem skelWitness_counts_nonzero (prog : LeanIsaProgram) (input : PublicInput) {κ : ℕ}
     (img : MemoryImage κ) (S : List Skel) (hκ : κ ≤ maxLogMem)
     (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows)
@@ -588,20 +590,20 @@ theorem skelWitness_counts_nonzero (prog : LeanIsaProgram) (input : PublicInput)
   have hR : ∀ r ∈ skelRows img S, ∃ next, execute img r.sk.regs r.sk.ins = some next :=
     fun r hr ↦ hS _ (mem_mkRows_sk hr)
   intro t ht i hi hn h
-  -- The first six tables of the witness are the opcode tables, but for their data.
+  -- The first seven tables of the witness are the opcode tables, but for their data.
   have hm : (t.component, t.table) ∈
-      ((skelWitness prog input img S hκ hrows).tables.take 6).map
+      ((skelWitness prog input img S hκ hrows).tables.take 7).map
         fun t ↦ (t.component, t.table) := List.mem_map_of_mem ht
   rw [List.map_take] at hm
   change (t.component, t.table) ∈ ((skelWitnessTables prog img S hκ hrows).map
-    fun t ↦ (t.component, t.table)).take 6 at hm
+    fun t ↦ (t.component, t.table)).take 7 at hm
   rw [skelWitnessTables_map, ← List.map_take, List.mem_map] at hm
   obtain ⟨t₀, ht₀, he⟩ := hm
   have hop : ∃ op, t₀.component = opComponent op ∧ t₀.table = opRows img (skelRows img S) op := by
     simp only [skelTables, List.take, List.mem_cons, List.not_mem_nil, or_false] at ht₀
-    rcases ht₀ with rfl | rfl | rfl | rfl | rfl | rfl
+    rcases ht₀ with rfl | rfl | rfl | rfl | rfl | rfl | rfl
     exacts [⟨.xor, rfl, rfl⟩, ⟨.mulNative, rfl, rfl⟩, ⟨.setConstant, rfl, rfl⟩,
-      ⟨.deref, rfl, rfl⟩, ⟨.jump, rfl, rfl⟩, ⟨.keccak, rfl, rfl⟩]
+      ⟨.deref, rfl, rfl⟩, ⟨.jump, rfl, rfl⟩, ⟨.keccak, rfl, rfl⟩, ⟨.blake3, rfl, rfl⟩]
   obtain ⟨op, hc, htab⟩ := hop
   have hmem := mem_interactions_sends _ hi
   obtain ⟨hc', htab'⟩ := Prod.mk.inj he
@@ -639,6 +641,34 @@ theorem skelWitness_keccak_valid (prog : LeanIsaProgram) (input : PublicInput) {
   | setConstant _ _ => simp [LeanIsaInstruction.opcode] at hr2
   | deref _ _ _ _ => simp [LeanIsaInstruction.opcode] at hr2
   | jump _ _ _ => simp [LeanIsaInstruction.opcode] at hr2
+  | blake3 _ _ _ _ _ _ _ => simp [LeanIsaInstruction.opcode] at hr2
+
+/-- **Every `BLAKE3` row compresses** (research build): the row of an executing instruction
+satisfies the relation its execution checks. -/
+theorem skelWitness_blake3_valid (prog : LeanIsaProgram) (input : PublicInput) {κ : ℕ}
+    (img : MemoryImage κ) (S : List Skel) (hκ : κ ≤ maxLogMem)
+    (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows)
+    (hS : ∀ sk ∈ S, ∃ next, execute img sk.regs sk.ins = some next) :
+    Blake3RowsValid (skelWitness prog input img S hκ hrows) := by
+  intro row hrow
+  have hrow' : row ∈ opRows img (skelRows img S) .blake3 := by
+    rw [blake3Rows, skelWitness_tableAt_table prog input img S hκ hrows 6] at hrow
+    exact hrow
+  obtain ⟨⟨⟨pc, fp, ins⟩, exps, bc⟩, hr, rfl⟩ := List.mem_map.mp hrow'
+  obtain ⟨hr1, hr2⟩ := List.mem_filter.mp hr
+  simp only [decide_eq_true_eq] at hr2
+  obtain ⟨next, hn⟩ := hS _ (mem_mkRows_sk hr1)
+  cases ins with
+  | blake3 om ocv oout omd ox oy ow =>
+    simp only [PRow.raw, rowOf, rawRow]
+    rw [blake3RowAt_toElements]
+    exact blake3RowOf_relation hn ..
+  | xor _ _ _ => simp [LeanIsaInstruction.opcode] at hr2
+  | mulNative _ _ _ => simp [LeanIsaInstruction.opcode] at hr2
+  | setConstant _ _ => simp [LeanIsaInstruction.opcode] at hr2
+  | deref _ _ _ _ => simp [LeanIsaInstruction.opcode] at hr2
+  | jump _ _ _ => simp [LeanIsaInstruction.opcode] at hr2
+  | keccak _ _ _ _ _ _ _ _ => simp [LeanIsaInstruction.opcode] at hr2
 
 /-- **The public words are the image's first two words.** -/
 theorem skelWitness_words (prog : LeanIsaProgram) (input : PublicInput) {κ : ℕ}
@@ -671,7 +701,8 @@ theorem skelWitness_caps (prog : LeanIsaProgram) (input : PublicInput) {κ : ℕ
       rw [opRows, List.length_map, skelRows, length_filter_mkRows]
       exact hrows op
     simp only [skelTables, List.mem_cons, List.not_mem_nil, or_false] at ht₀
-    rcases ht₀ with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    rcases ht₀ with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    · exact hop _
     · exact hop _
     · exact hop _
     · exact hop _
@@ -731,6 +762,7 @@ theorem skelWitness_satisfiedBy (prog : LeanIsaProgram) (input : PublicInput) {�
       counts_nonzero := skelWitness_counts_nonzero prog input img S hκ hrows hex
       caps := skelWitness_caps prog input img S hκmin hκ hrows
       keccak_valid := skelWitness_keccak_valid prog input img S hκ hrows hex
+      blake3_valid := skelWitness_blake3_valid prog input img S hκ hrows hex
       word0_eq := hwa
       word1_eq := hwb }
 

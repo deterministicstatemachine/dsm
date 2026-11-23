@@ -256,14 +256,14 @@ theorem skelWitness_represents (prog : LeanIsaProgram) (input : PublicInput) {T 
 
 /-- **Constraint completeness, with the row counts.** A valid execution whose run has at most
 `2^maxLogRows` rows of every opcode has a witness, at the trace's memory log-size, satisfying the
-constraint statement and representing it, whose six opcode tables, in the ensemble's order, hold
+constraint statement and representing it, whose seven opcode tables, in the ensemble's order, hold
 exactly the run's rows. -/
 theorem constraintCompleteness_rows {prog : LeanIsaProgram} {input : PublicInput} {t :
     Execution prog}
     (h : ValidExecution prog input t) (hrows : ∀ op, t.runRows op ≤ 2 ^ maxLogRows) :
     ∃ w : EnsembleWitness (leanIsaEnsemble prog t.logMemorySize),
       SatisfiedBy prog input w ∧ AssignmentRepresents w t ∧
-        ∀ j : Fin 6, (tableAt w ⟨j, by omega⟩).table.length = t.runRows (tableOpcode j) := by
+        ∀ j : Fin 7, (tableAt w ⟨j, by omega⟩).table.length = t.runRows (tableOpcode j) := by
   obtain ⟨⟨hmin, hcap, hw0, hw1⟩, hrun⟩ := h
   have hS : ∀ sk ∈ t.runSkels, SkelOk prog t.memory sk := by
     intro sk hsk
@@ -285,11 +285,12 @@ theorem constraintCompleteness_rows {prog : LeanIsaProgram} {input : PublicInput
   · intro j
     rw [skelWitness_tableAt_table]
     fin_cases j
-    exacts [hlen .xor, hlen .mulNative, hlen .setConstant, hlen .deref, hlen .jump, hlen .keccak]
+    exacts [hlen .xor, hlen .mulNative, hlen .setConstant, hlen .deref, hlen .jump, hlen .keccak,
+      hlen .blake3]
 
 /-- **Constraint completeness**. A valid execution of at most `2^maxLogRows` steps has a witness,
 at the trace's memory log-size, satisfying the constraint statement and representing it: the rows
-of the run in the six tables, the image as the memory block and the program as the bytecode
+of the run in the seven tables, the image as the memory block and the program as the bytecode
 block, with the counts that balance the buses (`constraintCompleteness_rows`, which also gives
 the tables' row counts). -/
 theorem constraintCompleteness {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}

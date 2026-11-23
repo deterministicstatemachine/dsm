@@ -1,7 +1,7 @@
 /-
   LeanVM.Arithmetization.Completeness.Witness
 
-  The witness of a list of skeletons: the prover data of an image, the eight tables, and what the
+  The witness of a list of skeletons: the prover data of an image, the nine tables, and what the
   bus carries.
 -/
 
@@ -38,7 +38,7 @@ the verifier's two messages, then each table's, in the ensemble's order, as the 
 ## Wrong readings excluded
 
 * The tables are filtered from one list of rows, not built one at a time: the numbers of a cell's
-  reads run across all six tables, so that the memory pair balances (`Completeness.Balance`).
+  reads run across all seven tables, so that the memory pair balances (`Completeness.Balance`).
 * The memory block's finalize count of a cell is `g` to the number of reads of it, never the
   number: `cntFin = g^(readBump …)`, the count a read of the cell would carry next.
 -/
@@ -258,7 +258,7 @@ noncomputable def bcBlock (prog : LeanIsaProgram) (fin : K → ℕ) : Air.Flat.T
         pow_maxLogRows_le)
     (bcBlockRaw_fixed prog fin)
 
-/-- The eight tables of a list of skeletons, each with its own data. -/
+/-- The nine tables of a list of skeletons, each with its own data. -/
 noncomputable def skelTables (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ) (S : List Skel)
     (hκ : κ ≤ maxLogMem) (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) :
     List (Air.Flat.Table K) :=
@@ -267,14 +267,14 @@ noncomputable def skelTables (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryIma
   [opTable img (skelRows img S) .xor (h _), opTable img (skelRows img S) .mulNative (h _),
     opTable img (skelRows img S) .setConstant (h _), opTable img (skelRows img S) .deref (h _),
     opTable img (skelRows img S) .jump (h _), opTable img (skelRows img S) .keccak (h _),
-    memBlock img (skelMemFin img S) hκ, bcBlock prog (skelBcFin S)]
+    opTable img (skelRows img S) .blake3 (h _), memBlock img (skelMemFin img S) hκ, bcBlock prog (skelBcFin S)]
 
-/-- The eight tables' components are the ensemble's. -/
+/-- The nine tables' components are the ensemble's. -/
 theorem skelTables_components (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ)
     (S : List Skel) (hκ : κ ≤ maxLogMem) (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) :
     (skelTables prog img S hκ hrows).map (·.component) = (leanIsaEnsemble prog κ).tables := rfl
 
-/-- The eight tables' names are distinct. -/
+/-- The nine tables' names are distinct. -/
 theorem skelTables_names (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ) (S : List Skel)
     (hκ : κ ≤ maxLogMem) (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) :
     ((skelTables prog img S hκ hrows).map fun t ↦ t.component.circuit.name).Nodup := by
@@ -282,13 +282,13 @@ theorem skelTables_names (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage �
   rw [← skelTables_components prog img S hκ hrows, List.map_map] at h
   exact h
 
-/-- The tables of the witness: the eight tables with Clean's derived data. -/
+/-- The tables of the witness: the nine tables with Clean's derived data. -/
 noncomputable def skelWitnessTables (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ)
     (S : List Skel) (hκ : κ ≤ maxLogMem) (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) :
     List (Air.Flat.Table K) :=
   Air.Flat.withDerivedData (skelTables prog img S hκ hrows) (skelTables_names prog img S hκ hrows)
 
-/-- The witness's tables are the eight tables but for their data. -/
+/-- The witness's tables are the nine tables but for their data. -/
 theorem skelWitnessTables_map (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ)
     (S : List Skel) (hκ : κ ≤ maxLogMem) (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) :
     (skelWitnessTables prog img S hκ hrows).map (fun t ↦ (t.component, t.table)) =
@@ -319,17 +319,17 @@ noncomputable def skelWitness (prog : LeanIsaProgram) (input : PublicInput) {κ 
 
 /-! ## Reading the witness back
 
-The witness's tables are the eight tables with the derived data: the same components and rows
+The witness's tables are the nine tables with the derived data: the same components and rows
 (`skelWitnessTables_map`), so everything a table's rows send or satisfy, which Clean's row
-semantics computes from the component and the row, is read off the eight tables. -/
+semantics computes from the component and the row, is read off the nine tables. -/
 
-/-- The eight tables. -/
+/-- The nine tables. -/
 theorem skelTables_length (prog : LeanIsaProgram) {κ : ℕ} (img : MemoryImage κ) (S : List Skel)
     (hκ : κ ≤ maxLogMem) (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) :
-    (skelTables prog img S hκ hrows).length = 8 := rfl
+    (skelTables prog img S hκ hrows).length = 9 := rfl
 
 /-- A function of the components and rows, summed over the witness's tables, is summed over the
-eight tables. -/
+nine tables. -/
 theorem skelWitness_flatMap (prog : LeanIsaProgram) (input : PublicInput) {κ : ℕ}
     (img : MemoryImage κ) (S : List Skel) (hκ : κ ≤ maxLogMem)
     (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) {α : Type}
@@ -341,7 +341,7 @@ theorem skelWitness_flatMap (prog : LeanIsaProgram) (input : PublicInput) {κ : 
           (fun p ↦ F p.1 p.2) := by rw [List.flatMap_map]; rfl
     _ = _ := by rw [h, List.flatMap_map]
 
-/-- A table of the witness has the component and the rows of one of the eight tables. -/
+/-- A table of the witness has the component and the rows of one of the nine tables. -/
 theorem mem_skelWitness_tables {prog : LeanIsaProgram} {input : PublicInput} {κ : ℕ}
     {img : MemoryImage κ} {S : List Skel} {hκ : κ ≤ maxLogMem}
     {hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows} {t : Air.Flat.Table K}
@@ -354,10 +354,10 @@ theorem mem_skelWitness_tables {prog : LeanIsaProgram} {input : PublicInput} {κ
   obtain ⟨t₀, ht₀, he⟩ := hm
   exact ⟨t₀, ht₀, (congrArg Prod.fst he).symm, (congrArg Prod.snd he).symm⟩
 
-/-- The rows of the witness's table `j` are the `j`-th of the eight tables'. -/
+/-- The rows of the witness's table `j` are the `j`-th of the nine tables'. -/
 theorem skelWitness_tableAt_table (prog : LeanIsaProgram) (input : PublicInput) {κ : ℕ}
     (img : MemoryImage κ) (S : List Skel) (hκ : κ ≤ maxLogMem)
-    (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) (j : Fin 8) :
+    (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) (j : Fin 9) :
     (tableAt (skelWitness prog input img S hκ hrows) j).table =
       ((skelTables prog img S hκ hrows)[(j : ℕ)]'(by
         rw [skelTables_length]; exact j.isLt)).table := by
@@ -374,7 +374,7 @@ theorem skelWitness_memBlockRows (prog : LeanIsaProgram) (input : PublicInput) {
     (img : MemoryImage κ) (S : List Skel) (hκ : κ ≤ maxLogMem)
     (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) :
     memBlockRows (skelWitness prog input img S hκ hrows) = memBlockRaw img (skelMemFin img S) :=
-  skelWitness_tableAt_table prog input img S hκ hrows 6
+  skelWitness_tableAt_table prog input img S hκ hrows 7
 
 /-- A memory row's first two cells are its limbs. -/
 theorem rowPrefix_two_rawRow {prog : LeanIsaProgram} {κ : ℕ}

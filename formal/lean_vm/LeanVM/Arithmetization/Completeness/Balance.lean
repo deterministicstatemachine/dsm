@@ -34,7 +34,7 @@ current messages (`swap_perm`), and a swap is a push and a pull.
 `mapIdx_eq_zipWith` turns a row's reads, indexed by position, into the zip with their numbers;
 `shift_perm` is the state pair's chain, `r₀` and the successors of the run's states against the
 last state and the run's states; `regroup_perm` regroups a list by a key into a nodup list of
-keys, how the rows of the six tables are the rows of the run in another order.
+keys, how the rows of the seven tables are the rows of the run in another order.
 
 ## Wrong readings excluded
 

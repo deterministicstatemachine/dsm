@@ -27,7 +27,7 @@ step count the length of the run `Soundness.StateWalk` extracts from the balance
 (`exists_walk`, specification Proposition 6.1). It is a valid execution: the memory window is
 `Caps`', the two public words are `SatisfiedBy.word0_eq` and `word1_eq` (§8.2), and the run is
 that one. The witness represents it: the image is the trace's by construction, and every step of
-the run is a row of one of the six tables (the walk is made of rows), whose state pull and push are
+the run is a row of one of the seven tables (the walk is made of rows), whose state pull and push are
 the step's two states.
 
 **Composition.** Per-table soundness is Clean's instantiated soundness theorem of each of the opcode

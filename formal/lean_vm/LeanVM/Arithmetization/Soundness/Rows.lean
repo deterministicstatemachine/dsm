@@ -160,6 +160,13 @@ theorem executeWithB_free_of_executeWith {read : K → Option E} {r next : Regis
     unfold guard
     simp only [keccakFree, hc, ↓reduceIte]
     rfl
+  | blake3 om ocv oout omd ox oy ow =>
+    simp only [executeWith, executeWithB, Option.bind_eq_bind, Option.bind_eq_some_iff] at h ⊢
+    obtain ⟨input, hin, output, hout, u, -, hnext⟩ := h
+    refine ⟨input, hin, output, hout, (), ?_, hnext⟩
+    unfold guard
+    simp only [keccakFree, ↓reduceIte]
+    rfl
   | _ => exact h
 
 /-- A row with no gated read: its memory pulls are its reads. -/
@@ -191,7 +198,7 @@ theorem opRow_of_assumptions {c : Component K} {env : Environment K} (hA : c.Cir
     fun hc hg ↦ (hd hA hc hg).imp fun _ h ↦
       ⟨h.1, executeWithB_free_of_executeWith h.2.1, h.2.2⟩⟩
 
-/-! ## The six tables -/
+/-! ## The seven tables -/
 
 /-- An `XOR` row has the shape and, under the guarantees, steps. -/
 theorem xor_opRow (env : Environment K) : OpRow (opcodeComponent xorTable) env := by
@@ -533,6 +540,100 @@ theorem keccak_opRow (env : Environment K) : OpRow (opcodeComponent keccakTable)
       by simp [keccakRecOf, busEntry, h1, h2, h3, h4, KeccakRow.oms], keccak_free_exec hb',
       fun _ ↦ rfl⟩
 
+/-! ## The `BLAKE3` table (research build) -/
+
+set_option maxHeartbeats 16000000 in
+/-- The `BLAKE3` table without its assumption: the same circuit, sound for the row's bindings
+alone (the compression is Flock's, not the bus's). -/
+def blake3TableFree : GeneralFormalCircuit K Blake3Row Registers :=
+  { blake3Table with
+    Assumptions := fun _ _ ↦ True
+    Spec := fun r next data ↦ Blake3Bindings (imageOf data).2 r ∧ next = Registers.next ⟨r.pc, r.fp⟩
+    soundness := by
+      circuit_proof_start [blake3Table, StatePull, StatePush, MemPull, MemPush, BytecodePull,
+        BytecodePush, memRead, bytecodeRead]
+      obtain ⟨-, h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14⟩ := h_holds
+      obtain ⟨_, _, hom, _, _, _, _, _, _, hm0, hm1, hm2, hm3, ho0, ho1, hc0, hc1, hmd, hx0, hx1,
+        hy0, hy1, hw0, hw1, _, _⟩ := h_input
+      subst hom hm0 hm1 hm2 hm3 ho0 ho1 hc0 hc1 hmd hx0 hx1 hy0 hy1 hw0 hw1
+      refine ⟨⟨fun c ↦ ?_, fun c hc ↦ ?_⟩, rfl⟩
+      · fin_cases c
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h0 ⊢; exact h0
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h1 ⊢; exact h1
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h2 ⊢; exact h2
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h3 ⊢; exact h3
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h4 ⊢; exact h4
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h5 ⊢; exact h5
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h8 ⊢; exact h8
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h9 ⊢; exact h9
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h10 ⊢; exact h10
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h11 ⊢; exact h11
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h12 ⊢; exact h12
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h13 ⊢; exact h13
+        · simp [Blake3Row.inCells, Blake3Row.oms, blake3InputCellOffset_eq, Blake3Row.word, Vector.getElem_map] at h14 ⊢; exact h14
+      · fin_cases c
+        · simp [Blake3Row.outCells, Blake3Row.word, Vector.getElem_map] at h6 ⊢; exact h6
+        · simp [Blake3Row.outCells, Blake3Row.word, Vector.getElem_map] at h7 ⊢; exact h7
+        all_goals simp at hc
+    completeness := blake3Table.completeness }
+
+/-- A `BLAKE3` row bound to the image steps under the reduction-blind semantics: its cells are
+read, and `keccakFree` asks nothing of them. -/
+theorem blake3_free_exec {κ : ℕ} {mem : MemoryImage κ} {r : Blake3Row K}
+    (h : Blake3Bindings mem r) :
+    executeWithB keccakFree mem.read ⟨r.pc, r.fp⟩
+      (.blake3 r.oms r.ocv r.oout r.omd r.ox r.oy r.ow) = some (Registers.next ⟨r.pc, r.fp⟩) := by
+  have hin := (readCells_eq_some_iff mem.read r.fp
+    (blake3InputCellOffset r.oms r.ocv r.omd r.ox r.oy r.ow) r.inCells).mpr h.in_eq
+  have hout := (readFirstCells_eq_some_iff mem.read r.fp (fun c ↦ g ^ c.val * r.oout) 2
+    r.outCells).mpr ⟨h.out_eq, fun c hc ↦ by
+      fin_cases c <;> simp [Blake3Row.outCells] at hc ⊢⟩
+  simp only [executeWithB, keccakFree, hin, hout, Option.bind_eq_bind, Option.bind_some]
+  unfold guard
+  simp only [↓reduceIte]
+  rfl
+
+/-- The record of a `BLAKE3` row: the state step, the bytecode read of its twelve coordinates,
+and the fifteen cells as reads, in flush order. -/
+def blake3RecOf (r : Blake3Row K) : RowRec :=
+  ⟨r.pc, r.fp, ⟨g * r.pc, r.fp⟩, r.rbc,
+    #v[Opcode.blake3.busCode, r.om[0], r.om[1], r.om[2], r.om[3], r.ocv, r.oout, r.omd, r.ox,
+      r.oy, r.ow, 0, 0],
+    [(r.fp * r.om[0], r.cnt[0], r.m0), (r.fp * r.om[1], r.cnt[1], r.m1),
+      (r.fp * r.om[2], r.cnt[2], r.m2), (r.fp * r.om[3], r.cnt[3], r.m3),
+      (r.fp * r.ocv, r.cnt[4], r.cv0), (r.fp * (g * r.ocv), r.cnt[5], r.cv1),
+      (r.fp * (g ^ 0 * r.oout), r.cnt[6], r.out0), (r.fp * (g ^ 1 * r.oout), r.cnt[7], r.out1),
+      (r.fp * r.omd, r.cnt[8], r.md), (r.fp * r.ox, r.cnt[9], r.x0),
+      (r.fp * (g * r.ox), r.cnt[10], r.x1), (r.fp * r.oy, r.cnt[11], r.y0),
+      (r.fp * (g * r.oy), r.cnt[12], r.y1), (r.fp * r.ow, r.cnt[13], r.w0),
+      (r.fp * (g * r.ow), r.cnt[14], r.w1)], []⟩
+
+/-- A `BLAKE3` row has the shape and, under the guarantees, steps; without its assumption it is a
+reduction-blind step. -/
+theorem blake3_opRow (env : Environment K) : OpRow (opcodeComponent blake3Table) env := by
+  set r := (opcodeComponent blake3Table).rowInput env with hr
+  have hx : eval env (varFromOffset Blake3Row 0) = r := eval_varFromOffset_valueFromOffset ..
+  have hs : rowSends (opcodeComponent blake3Table) env = (blake3RecOf r).sends := by
+    rw [rowSends_mk, blake3_sends_gen _ _ _ _ hx]
+    simp [blake3RecOf, RowRec.sends, sendsOf, gatedSends, memMsgOf, bcMsgOf]
+  refine ⟨blake3RecOf r, hs, by simp [blake3RecOf], guarded_of_sends hs rfl,
+    fun _ ↦ by simp [blake3RecOf], ?_, ?_⟩
+  · intro ha hc hg
+    obtain ⟨hs, -⟩ := Component.weakSoundness ha hc hg
+    have hs' : Blake3Refines (imageOf env.data).2 r
+      ((opcodeComponent blake3Table).rowOutput env) := hs
+    obtain ⟨-, hexec⟩ := hs'
+    obtain ⟨_, _, -, -, -, hn⟩ := (execute_blake3_eq_some_iff _ _ _ _ _ _ _ _ _ _).mp hexec
+    rw [hn] at hexec
+    exact ⟨.blake3 r.oms r.ocv r.oout r.omd r.ox r.oy r.ow,
+      by simp [blake3RecOf, busEntry, Blake3Row.oms], hexec, fun _ ↦ rfl⟩
+  · intro hc hg
+    obtain ⟨⟨hb, -⟩, -⟩ :=
+      Component.weakSoundness (component := (opcodeComponent blake3TableFree)) trivial hc hg
+    have hb' : Blake3Bindings (imageOf env.data).2 r := hb
+    exact ⟨.blake3 r.oms r.ocv r.oout r.omd r.ox r.oy r.ow,
+      by simp [blake3RecOf, busEntry, Blake3Row.oms], blake3_free_exec hb', fun _ ↦ rfl⟩
+
 /-- The output of the `JUMP` row circuit at a row variable that evaluates to `r`: the successor
 selected by the indicator `b`, the local witness at slot `n + 1`. -/
 theorem jump_output_gen (x : Var JumpRow K) (env : Environment K) (n : ℕ) (r : JumpRow K)
@@ -644,14 +745,24 @@ theorem keccak_channelOk : ∀ a ∈ (opcodeComponent keccakTable).operations.in
     channelOk_bytecodePull, channelOk_statePull, channelOk_statePush, channelOk_memPush,
     channelOk_bytecodePush, and_self]
 
+/-- Every interaction of the `BLAKE3` table is on one of the six channels. -/
+theorem blake3_channelOk : ∀ a ∈ (opcodeComponent blake3Table).operations.interactions,
+    ChannelOk a.channel := by
+  rw [Component.interactions_eq]
+  simp only [opcodeComponent, circuit_norm, blake3Table, memRead, bytecodeRead,
+    -BitVec.reduceNeg]
+  simp only [forall_eq_or_imp, forall_eq, ChannelInteraction.toRaw_channel, channelOk_memPull,
+    channelOk_bytecodePull, channelOk_statePull, channelOk_statePush, channelOk_memPush,
+    channelOk_bytecodePush, and_self]
+
 /-! ## The opcode tables of a witness -/
 
 variable {prog : LeanIsaProgram} {κ : ℕ}
 
-/-- Each of the first six tables of a witness has rows of the opcode-table shape, and every
+/-- Each of the first seven tables of a witness has rows of the opcode-table shape, and every
 interaction it emits is on one of the six channels. -/
-theorem tableAt_opRow (w : Air.Flat.EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 8)
-    (hj : (j : ℕ) < 6) :
+theorem tableAt_opRow (w : Air.Flat.EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 9)
+    (hj : (j : ℕ) < 7) :
     (∀ env, OpRow (tableAt w j).component env) ∧
       ∀ a ∈ (tableAt w j).component.operations.interactions, ChannelOk a.channel := by
   rw [tableAt_component]
@@ -662,6 +773,7 @@ theorem tableAt_opRow (w : Air.Flat.EnsembleWitness (leanIsaEnsemble prog κ)) (
   · exact ⟨deref_opRow, deref_channelOk⟩
   · exact ⟨jump_opRow, jump_channelOk⟩
   · exact ⟨keccak_opRow, keccak_channelOk⟩
+  · exact ⟨blake3_opRow, blake3_channelOk⟩
   · exact absurd hj (by decide)
   · exact absurd hj (by decide)
 

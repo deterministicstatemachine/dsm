@@ -21,7 +21,7 @@ public import Statement.Fast.FieldWords
 
 At leanVM main `40f877dc2c858f013c5974ab71ca594b31a7aec9`. Specification Proposition 6.1
 (`doc/leanvm/body/06-bus-interactions.tex`, §6.1), stated over an abstract list of edges so that
-`Soundness.StateWalk` applies it to the rows of the six tables. It uses only the semantics'
+`Soundness.StateWalk` applies it to the rows of the seven tables. It uses only the semantics'
 `run`, nothing about the witness.
 
 **The statement** (`exists_run_of_perm`). Each edge `e` of a list `E` is a step of the machine,

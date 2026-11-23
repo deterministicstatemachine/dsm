@@ -23,7 +23,7 @@ each channel. No balance is used here. The two blocks' rows are pinned by the wi
 fixed columns and the derived prover data (`IndexColumnsAreRowIndices`, `SeedRowsAreTheImage`,
 `BytecodeRowsAreTheProgram`, theorems of `Statement`).
 
-**The rows.** `opPairs w` lists the rows of the six opcode tables, each with its table. Every
+**The rows.** `opPairs w` lists the rows of the seven opcode tables, each with its table. Every
 such row has the shape of `Soundness.Rows` (`OpRow`), so a choice of records `f` describes all
 of them at once (`exists_opRecs`): row `p` sends `(f p).sends`, reads at most nine cells, and is a
 step under its table's assumptions, constraints and pull guarantees.
@@ -36,7 +36,7 @@ and finalize pull of every entry of the program (`bcSeedSends`). The finalize co
 prover's and nothing constrains them; the balance does.
 
 **The counts** (`opRecs_counts_nonzero`). The nonzero count product (`CountsNonzero`) makes every
-read count and every bytecode count of the six tables nonzero.
+read count and every bytecode count of the seven tables nonzero.
 
 **Without the permutation** (`SatisfiedByB`). Nothing here, in the channels or in the state walk
 uses the `KECCAK` validity: their lemmas take the constraint statement without it, which
@@ -117,34 +117,34 @@ theorem mem_messagesOn {w : EnsembleWitness (leanIsaEnsemble prog κ)} {c : RawC
 
 /-! ## The tables of a witness -/
 
-/-- The witness's tables are the six opcode tables, then the two blocks. -/
+/-- The witness's tables are the seven opcode tables, then the two blocks. -/
 theorem tables_eq (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
-    w.tables = w.tables.take 6 ++ [tableAt w 6, tableAt w 7] := by
-  have hlen : w.tables.length = 8 := w.same_length.symm
-  conv_lhs => rw [← List.take_append_drop 6 w.tables]
+    w.tables = w.tables.take 7 ++ [tableAt w 7, tableAt w 8] := by
+  have hlen : w.tables.length = 9 := w.same_length.symm
+  conv_lhs => rw [← List.take_append_drop 7 w.tables]
   congr 1
   apply List.ext_getElem (by simp [hlen])
   intro i h1 h2
   simp only [List.length_drop, hlen] at h1
   interval_cases i <;> simp [tableAt]
 
-/-- A table among the first six is the table of an index below six. -/
-theorem mem_take_six {w : EnsembleWitness (leanIsaEnsemble prog κ)} {t : Air.Flat.Table K}
-    (ht : t ∈ w.tables.take 6) : ∃ j : Fin 8, (j : ℕ) < 6 ∧ tableAt w j = t := by
-  have hlen : w.tables.length = 8 := w.same_length.symm
+/-- A table among the first seven is the table of an index below seven. -/
+theorem mem_take_seven {w : EnsembleWitness (leanIsaEnsemble prog κ)} {t : Air.Flat.Table K}
+    (ht : t ∈ w.tables.take 7) : ∃ j : Fin 9, (j : ℕ) < 7 ∧ tableAt w j = t := by
+  have hlen : w.tables.length = 9 := w.same_length.symm
   obtain ⟨i, hi, rfl⟩ := List.getElem_of_mem ht
   simp only [List.length_take, hlen] at hi
   refine ⟨⟨i, by omega⟩, by simp; omega, ?_⟩
   simp [tableAt]
 
-/-- The rows of the six opcode tables, each with its table. -/
+/-- The rows of the seven opcode tables, each with its table. -/
 def opPairs (w : EnsembleWitness (leanIsaEnsemble prog κ)) : List (Air.Flat.Table K × Array K) :=
-  (w.tables.take 6).flatMap fun t ↦ t.table.map fun row ↦ (t, row)
+  (w.tables.take 7).flatMap fun t ↦ t.table.map fun row ↦ (t, row)
 
 /-- A row of `opPairs` is a row of a table among the first six. -/
 theorem mem_opPairs {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     {p : Air.Flat.Table K × Array K} (hp : p ∈ opPairs w) :
-    p.1 ∈ w.tables.take 6 ∧ p.2 ∈ p.1.table := by
+    p.1 ∈ w.tables.take 7 ∧ p.2 ∈ p.1.table := by
   obtain ⟨t, ht, hp⟩ := List.mem_flatMap.mp hp
   obtain ⟨row, hrow, rfl⟩ := List.mem_map.mp hp
   exact ⟨ht, hrow⟩
@@ -156,7 +156,7 @@ theorem environment_data {w : EnsembleWitness (leanIsaEnsemble prog κ)} {t : Ai
 
 /-! ## The records of the rows -/
 
-/-- What the rows of the six tables are: each sends its record, reads at most nine cells, emits
+/-- What the rows of the seven tables are: each sends its record, reads at most nine cells, emits
 on the six channels only, and is a step under its table's assumptions, constraints and pull
 guarantees. -/
 def OpRecs (w : EnsembleWitness (leanIsaEnsemble prog κ)) (f : Air.Flat.Table K × Array K → RowRec) :
@@ -188,7 +188,7 @@ theorem exists_opRecs (w : EnsembleWitness (leanIsaEnsemble prog κ)) : ∃ f, O
       ∀ a ∈ p.1.component.operations.interactions, ChannelOk a.channel := by
     intro p hp
     obtain ⟨ht, -⟩ := mem_opPairs hp
-    obtain ⟨j, hj, hjt⟩ := mem_take_six ht
+    obtain ⟨j, hj, hjt⟩ := mem_take_seven ht
     rw [← hjt]
     exact ⟨(tableAt_opRow w j hj).1 _, (tableAt_opRow w j hj).2⟩
   refine ⟨fun p ↦ if h : OpRow p.1.component (p.1.environment p.2) then h.choose else default,
@@ -205,9 +205,10 @@ theorem exists_opRecs (w : EnsembleWitness (leanIsaEnsemble prog κ)) : ∃ f, O
 
 /-! ## The statement without the permutation -/
 
-/-- **The constraint statement without the `KECCAK` validity**: every conjunct of `SatisfiedBy`
-but `keccak_valid`, what a proof establishes when nothing binds the `KECCAK` rows to the
-permutation (the reduction-blind instance). The bus, the channels
+/-- **The constraint statement without the `KECCAK` and `BLAKE3` validities**: every conjunct of
+`SatisfiedBy` but `keccak_valid` and `blake3_valid`, what a proof establishes when nothing binds the
+`KECCAK` rows to the permutation nor the `BLAKE3` rows to the compression (the reduction-blind
+instance). The bus, the channels
 and the state walk need no more. -/
 structure SatisfiedByB (prog : LeanIsaProgram) (input : PublicInput)
     (w : EnsembleWitness (leanIsaEnsemble prog κ)) : Prop where
@@ -230,18 +231,18 @@ structure SatisfiedByB (prog : LeanIsaProgram) (input : PublicInput)
   /-- The second word of the image is `input₂ + input₃·y`. -/
   word1_eq : (imageOf w.data).2.read (addressOfIndex 1) = some input.word1
 
-/-- The constraint statement without its `KECCAK` validity. -/
+/-- The constraint statement without its `KECCAK` and `BLAKE3` validities. -/
 theorem SatisfiedBy.toB {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     (h : SatisfiedBy prog input w) : SatisfiedByB prog input w :=
   ⟨h.public_input_eq, h.constraints, h.state_balanced, h.mem_balanced, h.bytecode_balanced,
     h.counts_nonzero, h.caps, h.word0_eq, h.word1_eq⟩
 
-/-- With the `KECCAK` validity, the constraint statement. -/
+/-- With the `KECCAK` and `BLAKE3` validities, the constraint statement. -/
 theorem SatisfiedByB.toSatisfiedBy {input : PublicInput}
     {w : EnsembleWitness (leanIsaEnsemble prog κ)} (h : SatisfiedByB prog input w)
-    (hv : KeccakRowsValid w) : SatisfiedBy prog input w :=
+    (hv : KeccakRowsValid w) (hv3 : Blake3RowsValid w) : SatisfiedBy prog input w :=
   ⟨h.public_input_eq, h.constraints, h.state_balanced, h.mem_balanced, h.bytecode_balanced,
-    h.counts_nonzero, h.caps, hv, h.word0_eq, h.word1_eq⟩
+    h.counts_nonzero, h.caps, hv, hv3, h.word0_eq, h.word1_eq⟩
 
 namespace SatisfiedByB
 
@@ -292,7 +293,7 @@ image the data names, with some finalize counts. -/
 theorem memBlock_sends_eq {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     (h : SatisfiedByB prog input w) :
     ∃ mfin : Fin (2 ^ (imageOf w.data).1) → K,
-      tableSends (tableAt w 6) = memSeedSends (imageOf w.data).2 mfin := by
+      tableSends (tableAt w 7) = memSeedSends (imageOf w.data).2 mfin := by
   obtain ⟨idx, mfin, hmem⟩ := h.seed_rows
   refine ⟨mfin, ?_⟩
   have hlen : (memBlockRows w).length = 2 ^ (imageOf w.data).1 := by rw [hmem]; simp
@@ -300,7 +301,7 @@ theorem memBlock_sends_eq {input : PublicInput} {w : EnsembleWitness (leanIsaEns
     have := h.index_columns i (by rw [hlen]; exact i.isLt)
     simp only [hmem, List.getElem_ofFn, memRowAt_toElements] at this
     exact this
-  have hc : (tableAt w 6).component = memComponent κ := tableAt_component w 6
+  have hc : (tableAt w 7).component = memComponent κ := tableAt_component w 7
   show (memBlockRows w).flatMap _ = _
   rw [hmem, List.ofFn_eq_map, List.flatMap_map]
   refine List.flatMap_congr fun i _ ↦ ?_
@@ -313,10 +314,10 @@ theorem memBlock_sends_eq {input : PublicInput} {w : EnsembleWitness (leanIsaEns
 the program, with some finalize counts. -/
 theorem bcBlock_sends_eq {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     (h : SatisfiedByB prog input w) :
-    ∃ bfin : Fin (2 ^ prog.logSize) → K, tableSends (tableAt w 7) = bcSeedSends prog bfin := by
+    ∃ bfin : Fin (2 ^ prog.logSize) → K, tableSends (tableAt w 8) = bcSeedSends prog bfin := by
   obtain ⟨bfin, hbc⟩ := h.bytecode_rows
   refine ⟨bfin, ?_⟩
-  have hc : (tableAt w 7).component = bytecodeComponent prog := tableAt_component w 7
+  have hc : (tableAt w 8).component = bytecodeComponent prog := tableAt_component w 8
   show (bytecodeBlockRows w).flatMap _ = _
   rw [hbc, List.ofFn_eq_map, List.flatMap_map]
   refine List.flatMap_congr fun i _ ↦ ?_
@@ -326,13 +327,13 @@ theorem bcBlock_sends_eq {input : PublicInput} {w : EnsembleWitness (leanIsaEnse
   simp [bcMsgOf, bytecodeRowOf]
 
 /-- **Everything a satisfying witness sends**, for the finalize counts its two blocks carry: the
-verifier's two states, the records of the rows of the six tables, the memory block's seed and
+verifier's two states, the records of the rows of the seven tables, the memory block's seed and
 finalize of the image the data names, and the bytecode block's seed and finalize of the program. -/
 theorem allSends_eq_of {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     (h : SatisfiedByB prog input w) {f : Air.Flat.Table K × Array K → RowRec} (hf : OpRecs w f)
     {mfin : Fin (2 ^ (imageOf w.data).1) → K} {bfin : Fin (2 ^ prog.logSize) → K}
-    (hmem : tableSends (tableAt w 6) = memSeedSends (imageOf w.data).2 mfin)
-    (hbc : tableSends (tableAt w 7) = bcSeedSends prog bfin) :
+    (hmem : tableSends (tableAt w 7) = memSeedSends (imageOf w.data).2 mfin)
+    (hbc : tableSends (tableAt w 8) = bcSeedSends prog bfin) :
     allSends w = verifierSends prog ++ (opPairs w).flatMap (fun p ↦ (f p).sends) ++
       memSeedSends (imageOf w.data).2 mfin ++ bcSeedSends prog bfin := by
   have _ := h
@@ -340,7 +341,7 @@ theorem allSends_eq_of {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemb
   rw [tables_eq w, List.flatMap_append, List.flatMap_cons, List.flatMap_cons,
     List.flatMap_nil, List.append_nil, ← List.append_assoc, ← List.append_assoc]
   refine congrArg₂ (· ++ ·) (congrArg₂ (· ++ ·) (congrArg₂ (· ++ ·) rfl ?_) hmem) hbc
-  -- The six tables.
+  -- The seven tables.
   unfold opPairs
   rw [List.flatMap_assoc]
   refine List.flatMap_congr fun t ht ↦ ?_
@@ -349,7 +350,7 @@ theorem allSends_eq_of {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemb
   exact (hf (t, row) (List.mem_flatMap.mpr ⟨t, ht, List.mem_map_of_mem hrow⟩)).1
 
 /-- **Everything a satisfying witness sends**: the verifier's two states, the records of the rows
-of the six tables, the memory block's seed and finalize of the image the data names, and the
+of the seven tables, the memory block's seed and finalize of the image the data names, and the
 bytecode block's seed and finalize of the program. -/
 theorem allSends_eq {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     (h : SatisfiedByB prog input w) {f : Air.Flat.Table K × Array K → RowRec} (hf : OpRecs w f) :
@@ -465,7 +466,7 @@ theorem RowRec.chanOf_sends_of_ne (x : RowRec) {n : String} (h1 : n ≠ MemPull.
     gatedSends_filter_eq_nil _ h1 h2, List.append_nil]
 
 /-- **The nonzero count product, per row**: every memory read count and the bytecode count of a
-row of the six tables is nonzero (`CountsNonzero`). -/
+row of the seven tables is nonzero (`CountsNonzero`). -/
 theorem opRecs_counts_nonzero {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     (h : SatisfiedByB prog input w) {f : Air.Flat.Table K × Array K → RowRec} (hf : OpRecs w f)
     {p : Air.Flat.Table K × Array K} (hp : p ∈ opPairs w) :
@@ -493,12 +494,12 @@ theorem opRecs_counts_nonzero {input : PublicInput} {w : EnsembleWitness (leanIs
     have := h.counts_nonzero p.1 ht i hi (Or.inr hn) (by rw [hmsg]; simp [bcMsgOf])
     simpa [hmsg, bcMsgOf] using this
 
-/-- The caps bound the rows of the six tables: at most `6 · 2^30` (`Caps.heights`). -/
+/-- The caps bound the rows of the seven tables: at most `7 · 2^30` (`Caps.heights`). -/
 theorem opPairs_length_le {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemble prog κ)}
-    (h : SatisfiedByB prog input w) : (opPairs w).length ≤ 6 * 2 ^ 30 := by
+    (h : SatisfiedByB prog input w) : (opPairs w).length ≤ 7 * 2 ^ 30 := by
   unfold opPairs
   rw [List.length_flatMap]
-  have hb : ∀ x ∈ (w.tables.take 6).map fun t ↦ (t.table.map fun row ↦ (t, row)).length,
+  have hb : ∀ x ∈ (w.tables.take 7).map fun t ↦ (t.table.map fun row ↦ (t, row)).length,
       x ≤ 2 ^ 30 := by
     intro x hx
     obtain ⟨t, ht, rfl⟩ := List.mem_map.mp hx
@@ -506,11 +507,11 @@ theorem opPairs_length_le {input : PublicInput} {w : EnsembleWitness (leanIsaEns
     exact h.caps.heights t (List.mem_of_mem_take ht)
   have hsum := List.sum_le_length_nsmul _ _ hb
   rw [List.length_map, smul_eq_mul] at hsum
-  have h6 : (w.tables.take 6).length ≤ 6 := List.length_take_le _ _
-  calc _ ≤ (w.tables.take 6).length * 2 ^ 30 := hsum
-    _ ≤ 6 * 2 ^ 30 := Nat.mul_le_mul_right _ h6
+  have h6 : (w.tables.take 7).length ≤ 7 := List.length_take_le _ _
+  calc _ ≤ (w.tables.take 7).length * 2 ^ 30 := hsum
+    _ ≤ 7 * 2 ^ 30 := Nat.mul_le_mul_right _ h6
 
-/-- The rows of the six tables read at most `26 · 6 · 2^30` cells, fewer than `2^64 - 1`: the read
+/-- The rows of the seven tables read at most `26 · 7 · 2^30` cells, fewer than `2^64 - 1`: the read
 bound of specification Lemma 6.3, derived from the caps. -/
 theorem opReads_length_lt {input : PublicInput} {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     (h : SatisfiedByB prog input w) {f : Air.Flat.Table K × Array K → RowRec} (hf : OpRecs w f) :

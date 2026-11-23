@@ -1,7 +1,7 @@
 /-
   LeanVM.Arithmetization.Completeness.Messages
 
-  What the row of each of the six tables sends on the bus: the state step, the bytecode read, and
+  What the row of each of the seven tables sends on the bus: the state step, the bytecode read, and
   the memory reads, as the explicit messages the row circuit emits.
 -/
 
@@ -327,6 +327,57 @@ theorem keccak_sends_gen (x : Var KeccakRow K) (env : Environment K) (n : ℕ)
     rbc⟩ := x
   simp only [Operations.interactionValues, circuit_norm, keccakTable, memRead, memReadIf,
     bytecodeRead,
+    AbstractInteraction.eval, Vector.toArray_map, regs_toArray, memMsg_toArray,
+    bytecodeMsg_toArray, Vector.getElem_map, -BitVec.reduceNeg]
+
+set_option maxHeartbeats 16000000 in
+/-- The sends of the `BLAKE3` row circuit (research build), in closed form: the state step, the
+bytecode read, and fifteen cells of two limbs, in flush order. -/
+theorem blake3_sends_gen (x : Var Blake3Row K) (env : Environment K) (n : ℕ)
+    (r : Blake3Row K) (hx : eval env x = r) :
+    (((blake3Table.main x).operations n).interactionValues env).map
+      (fun i ↦ (i.channel.name, i.msg)) =
+      [(StatePull.name, #[r.pc, r.fp]), (StatePush.name, #[g * r.pc, r.fp]),
+       (BytecodePull.name,
+        #[r.pc, r.rbc, Opcode.blake3.busCode, r.om[0], r.om[1], r.om[2], r.om[3], r.ocv, r.oout,
+          r.omd, r.ox, r.oy, r.ow, 0, 0]),
+       (BytecodePush.name,
+        #[r.pc, g * r.rbc, Opcode.blake3.busCode, r.om[0], r.om[1], r.om[2], r.om[3], r.ocv, r.oout,
+          r.omd, r.ox, r.oy, r.ow, 0, 0]),
+       (MemPull.name, #[r.fp * r.om[0], r.cnt[0], r.m0[0], r.m0[1]]),
+       (MemPush.name, #[r.fp * r.om[0], g * r.cnt[0], r.m0[0], r.m0[1]]),
+       (MemPull.name, #[r.fp * r.om[1], r.cnt[1], r.m1[0], r.m1[1]]),
+       (MemPush.name, #[r.fp * r.om[1], g * r.cnt[1], r.m1[0], r.m1[1]]),
+       (MemPull.name, #[r.fp * r.om[2], r.cnt[2], r.m2[0], r.m2[1]]),
+       (MemPush.name, #[r.fp * r.om[2], g * r.cnt[2], r.m2[0], r.m2[1]]),
+       (MemPull.name, #[r.fp * r.om[3], r.cnt[3], r.m3[0], r.m3[1]]),
+       (MemPush.name, #[r.fp * r.om[3], g * r.cnt[3], r.m3[0], r.m3[1]]),
+       (MemPull.name, #[r.fp * r.ocv, r.cnt[4], r.cv0[0], r.cv0[1]]),
+       (MemPush.name, #[r.fp * r.ocv, g * r.cnt[4], r.cv0[0], r.cv0[1]]),
+       (MemPull.name, #[r.fp * (g * r.ocv), r.cnt[5], r.cv1[0], r.cv1[1]]),
+       (MemPush.name, #[r.fp * (g * r.ocv), g * r.cnt[5], r.cv1[0], r.cv1[1]]),
+       (MemPull.name, #[r.fp * (g ^ 0 * r.oout), r.cnt[6], r.out0[0], r.out0[1]]),
+       (MemPush.name, #[r.fp * (g ^ 0 * r.oout), g * r.cnt[6], r.out0[0], r.out0[1]]),
+       (MemPull.name, #[r.fp * (g ^ 1 * r.oout), r.cnt[7], r.out1[0], r.out1[1]]),
+       (MemPush.name, #[r.fp * (g ^ 1 * r.oout), g * r.cnt[7], r.out1[0], r.out1[1]]),
+       (MemPull.name, #[r.fp * r.omd, r.cnt[8], r.md[0], r.md[1]]),
+       (MemPush.name, #[r.fp * r.omd, g * r.cnt[8], r.md[0], r.md[1]]),
+       (MemPull.name, #[r.fp * r.ox, r.cnt[9], r.x0[0], r.x0[1]]),
+       (MemPush.name, #[r.fp * r.ox, g * r.cnt[9], r.x0[0], r.x0[1]]),
+       (MemPull.name, #[r.fp * (g * r.ox), r.cnt[10], r.x1[0], r.x1[1]]),
+       (MemPush.name, #[r.fp * (g * r.ox), g * r.cnt[10], r.x1[0], r.x1[1]]),
+       (MemPull.name, #[r.fp * r.oy, r.cnt[11], r.y0[0], r.y0[1]]),
+       (MemPush.name, #[r.fp * r.oy, g * r.cnt[11], r.y0[0], r.y0[1]]),
+       (MemPull.name, #[r.fp * (g * r.oy), r.cnt[12], r.y1[0], r.y1[1]]),
+       (MemPush.name, #[r.fp * (g * r.oy), g * r.cnt[12], r.y1[0], r.y1[1]]),
+       (MemPull.name, #[r.fp * r.ow, r.cnt[13], r.w0[0], r.w0[1]]),
+       (MemPush.name, #[r.fp * r.ow, g * r.cnt[13], r.w0[0], r.w0[1]]),
+       (MemPull.name, #[r.fp * (g * r.ow), r.cnt[14], r.w1[0], r.w1[1]]),
+       (MemPush.name, #[r.fp * (g * r.ow), g * r.cnt[14], r.w1[0], r.w1[1]])] := by
+  subst hx
+  obtain ⟨pc, fp, om, ocv, oout, omd, ox, oy, ow, m0, m1, m2, m3, out0, out1, cv0, cv1, md, x0, x1,
+    y0, y1, w0, w1, cnt, rbc⟩ := x
+  simp only [Operations.interactionValues, circuit_norm, blake3Table, memRead, bytecodeRead,
     AbstractInteraction.eval, Vector.toArray_map, regs_toArray, memMsg_toArray,
     bytecodeMsg_toArray, Vector.getElem_map, -BitVec.reduceNeg]
 

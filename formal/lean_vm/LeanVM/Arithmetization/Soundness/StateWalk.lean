@@ -1,7 +1,7 @@
 /-
   LeanVM.Arithmetization.Soundness.StateWalk
 
-  The state channel of a satisfying witness: every row of the six tables is a step of the program
+  The state channel of a satisfying witness: every row of the seven tables is a step of the program
   over the committed image, and the balanced state pair contains a run from the initial to the
   final registers.
 -/
@@ -21,7 +21,7 @@ Proposition 6.1 (`doc/leanvm/body/06-bus-interactions.tex`, §6.1), as `exists_r
 assumes the constraint statement `SatisfiedBy` alone, nothing of the program, and serves
 `constraintSoundness`.
 
-**The rows are steps** (`opRecs_step`). For a row of the six tables, the table's `Assumptions`
+**The rows are steps** (`opRecs_step`). For a row of the seven tables, the table's `Assumptions`
 are `SatisfiedBy.keccak_valid` (`assumptions_of_keccakRowsValid`), its constraints are
 `SatisfiedBy.constraints`, and the guarantees of its pulls are the two lookup theorems
 (`mem_channel_sound`, `bytecode_guarantee`; every interaction is on one of the six channels,
@@ -70,7 +70,7 @@ theorem eval_mem_interactions {t : Air.Flat.Table K} (ht : t ∈ w.tables) {row 
   unfold Air.Flat.Table.interactions
   exact List.mem_flatMap.mpr ⟨row, hrow, List.mem_map_of_mem ha⟩
 
-/-- The pulls of a row of the six tables have their guarantees: the memory reads are the image's
+/-- The pulls of a row of the seven tables have their guarantees: the memory reads are the image's
 words (`mem_channel_sound`) and the bytecode entry decodes (`bytecode_guarantee`). -/
 theorem opRecs_guarantees (h : SatisfiedByB prog input w) {f : Air.Flat.Table K × Array K → RowRec}
     (hf : OpRecs w f) {p : Air.Flat.Table K × Array K} (hp : p ∈ opPairs w) :
@@ -97,7 +97,7 @@ theorem opRecs_guarantees (h : SatisfiedByB prog input w) {f : Air.Flat.Table K 
       (by rw [ProvableType.toElements_fromElements]; rfl)
   · exact fun _ ↦ hc _ _ _
 
-/-- **Every row of the six tables is a step of the program** over the image the data names, from
+/-- **Every row of the seven tables is a step of the program** over the image the data names, from
 its pulled state to its pushed state; its counter is a slot `g^k` of the program, and unless the
 program holds a `JUMP` there the successor is the fall-through. -/
 theorem opRecs_step (h : SatisfiedBy prog input w) {f : Air.Flat.Table K × Array K → RowRec}
@@ -108,7 +108,7 @@ theorem opRecs_step (h : SatisfiedBy prog input w) {f : Air.Flat.Table K × Arra
   obtain ⟨ht, hrow⟩ := mem_opPairs hp
   have ht' := List.mem_of_mem_take ht
   have ha := p.1.circuitAssumptions_of_assumptions
-    (assumptions_of_keccakRowsValid h.keccak_valid p.1 ht') p.2 hrow
+    (assumptions_of_keccakRowsValid h.keccak_valid h.blake3_valid p.1 ht') p.2 hrow
   have hc := h.constraints p.1 ht' p.2 hrow
   obtain ⟨ins, he, hexec, hnj⟩ := (hf p hp).2.2.2.2.2.1 ha hc (opRecs_guarantees h.toB hf hp)
   obtain ⟨k, hpc, hek⟩ := opRecs_bc_sound h.toB hf hp
@@ -119,7 +119,7 @@ theorem opRecs_step (h : SatisfiedBy prog input w) {f : Air.Flat.Table K × Arra
   rw [step_of_fetch_eq_some hfetch]
   exact hexec
 
-/-- **Every row of the six tables is a step under the semantics `S`**, from its pulled state to
+/-- **Every row of the seven tables is a step under the semantics `S`**, from its pulled state to
 its pushed state; its counter is a slot of the program, and the successor is the fall-through
 unless the program holds a `JUMP` there. -/
 def RowsStep (S : KeccakSem) (w : EnsembleWitness (leanIsaEnsemble prog κ))
