@@ -659,7 +659,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: "21"
@@ -784,7 +784,7 @@ jobs:
         run: python3 ci/bridge_rpc_names.py
 
       - name: Set up JDK 17
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: "17"
@@ -902,7 +902,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Set up JDK 17
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: "17"
@@ -1070,6 +1070,10 @@ jobs:
       - name: dsm-anchor-secure-monitor builds its four images (thumbv8m)
         working-directory: crates/dsm-anchor-secure-monitor
         run: |
+          # A board wired on the Pico's left side (SPI1, GP12-GP15) runs images
+          # built with chip_on_spi1; the checks below run on the default image.
+          cargo build --release --locked --features bench_self_enroll,chip_on_spi1
+          cargo build --release --locked --features production,chip_on_spi1
           cargo build --release --locked --features bench_self_enroll,prepare_chip
           cargo build --release --locked --features bench_self_enroll,identify_chip
           cargo build --release --locked --features bench_self_enroll

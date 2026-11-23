@@ -30,47 +30,6 @@ fn admitted_position() -> u64 {
     economic_fixtures::admitted_position().expect("the device is activated")
 }
 
-/// `method` for `amount` ERA, entered as the wallet shows it. An admission the
-/// fleet has not yet made final is held, and finished by resuming it exactly
-/// as the device resumes it before anything else; a refusal with nothing held
-/// is returned.
-async fn boundary(device: &TestDevice, method: &str, amount: &str) -> Result<(), String> {
-    let result = device
-        .invoke(
-            method,
-            &crate::generated::OfflineCashRequest {
-                token_id: "ERA".to_string(),
-                amount: amount.to_string(),
-            },
-        )
-        .await;
-    if result.success {
-        return Ok(());
-    }
-    let core = device.router().core_sdk.clone();
-    let mut error = format!("{:?}", result.error_message);
-    for resumed in 1..=4u64 {
-        let Some(pending) = core
-            .device_head()
-            .and_then(|head| head.pending_economic_admission().cloned())
-        else {
-            return Err(error);
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(250 * resumed)).await;
-        match crate::sdk::economic_admission_flow::resume_pending_admission(
-            &core,
-            economic_fixtures::NETWORK,
-            pending,
-        )
-        .await
-        {
-            Ok(_) => return Ok(()),
-            Err(e) => error = e.to_string(),
-        }
-    }
-    Err(error)
-}
-
 /// A load and an unload each land at the next economic position; the online
 /// balance and the offline account move by the same amount; a foreign
 /// verifier walks each position as that boundary; and the unload's online
@@ -87,7 +46,8 @@ async fn a_load_and_an_unload_are_admitted_and_walkable_and_an_unload_funds_once
     let start = admitted_position();
     let online = pair.a.era_balance();
 
-    boundary(&pair.a, "wallet.loadOffline", "20.00")
+    pair.a
+        .offline_boundary("wallet.loadOffline", "20.00")
         .await
         .expect("the load is admitted");
     assert_eq!(
@@ -110,7 +70,8 @@ async fn a_load_and_an_unload_are_admitted_and_walkable_and_an_unload_funds_once
         "a load funds nothing"
     );
 
-    boundary(&pair.a, "wallet.unloadOffline", "5.00")
+    pair.a
+        .offline_boundary("wallet.unloadOffline", "5.00")
         .await
         .expect("the unload is admitted");
     assert_eq!(admitted_position(), start + 2);
@@ -130,14 +91,18 @@ async fn a_load_and_an_unload_are_admitted_and_walkable_and_an_unload_funds_once
         "the unload's credit is funded by its offline debit"
     );
 
-    let refused = boundary(&pair.a, "wallet.unloadOffline", "16.00")
+    let refused = pair
+        .a
+        .offline_boundary("wallet.unloadOffline", "16.00")
         .await
         .expect_err("more than the account holds");
     assert!(
         refused.contains("more than the offline allocation holds"),
         "{refused}"
     );
-    let refused = boundary(&pair.a, "wallet.loadOffline", "100.00")
+    let refused = pair
+        .a
+        .offline_boundary("wallet.loadOffline", "100.00")
         .await
         .expect_err("more than the online balance holds");
     assert!(
@@ -192,7 +157,8 @@ async fn a_contacts_walk_records_the_offline_account_each_boundary_left() {
         (head.genesis_digest(), head.devid())
     };
 
-    boundary(&pair.a, "wallet.loadOffline", "20.00")
+    pair.a
+        .offline_boundary("wallet.loadOffline", "20.00")
         .await
         .expect("the load is admitted");
     let (loaded_root, loaded_chain) = own_account(&pair.a, &bundle);
@@ -215,7 +181,8 @@ async fn a_contacts_walk_records_the_offline_account_each_boundary_left() {
         "the funding chain the load left"
     );
 
-    boundary(&pair.a, "wallet.unloadOffline", "5.00")
+    pair.a
+        .offline_boundary("wallet.unloadOffline", "5.00")
         .await
         .expect("the unload is admitted");
     let (unloaded_root, unloaded_chain) = own_account(&pair.a, &bundle);

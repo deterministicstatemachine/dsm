@@ -432,6 +432,126 @@ async fn the_winner_takes_both_stakes_once() {
     );
 }
 
+/// `(vault id, amount, status)` of each vault listed, in the order listed.
+fn as_listed_rows(r: &generated::EscrowVaultsResponse) -> Vec<(Vec<u8>, u64, i32)> {
+    r.vaults
+        .iter()
+        .map(|v| (v.vault_id.clone(), v.amount, v.status))
+        .collect()
+}
+
+/// A lookup shows each vault at its own head, in the order it is named.
+///
+/// The vaults of a lookup are walked to their heads at once. With one vault
+/// of a cell released and the other not, and with one of a wallet's own
+/// vaults released and another not:
+/// - `escrow.locked` lists the cell's vaults in the order the cell's index
+///   names them, the released one retired and empty, the other active with
+///   its stake;
+/// - `escrow.vaults` lists the wallet's own vaults in the order its
+///   creations are kept, each as its own head stands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lookup_shows_each_vault_at_its_own_head_in_the_order_it_is_named() {
+    let p = Pair::boot(100, 100).await;
+    let r = referee(&p).await;
+    let m = open_match(&p, &r, b"match 7: A v B, 25 ERA each, referee R").await;
+    // A second stake of A's, on a match of its own: a vault A created that
+    // is not on the first match's cell.
+    let (pa, pb, pr) = (party(&p.a).await, party(&p.b).await, party(&r).await);
+    let small = whole_era(10);
+    let second = created(
+        &lock(
+            &p.a,
+            b"match 8: A alone, 10 ERA, referee R",
+            small,
+            branches(&pa, &pb, &pr, &pa),
+            None,
+        )
+        .await,
+    );
+    assert_ne!(second.verdict_cell, m.verdict_cell.to_vec());
+
+    // The referee decides the first match A's way, and A releases its own
+    // stake only: B's stake on the same cell stays locked.
+    final_on(
+        &verdict_of(
+            &adjudicate(&r, &m.a_vault, b"a-wins").await,
+            "escrow.adjudicate",
+        ),
+        &m,
+        b"a-wins",
+    );
+    realized_through(&p.a, "escrow.release", release_request(&m.a_vault)).await;
+
+    let active = generated::SofiVaultStatus::Active as i32;
+    let retired = generated::SofiVaultStatus::Retired as i32;
+    let as_it_stands = |vault_id: &[u8; 32]| {
+        if *vault_id == m.a_vault {
+            (vault_id.to_vec(), 0, retired)
+        } else if *vault_id == m.b_vault {
+            (vault_id.to_vec(), m.stake, active)
+        } else {
+            (vault_id.to_vec(), small, active)
+        }
+    };
+
+    // The cell's vaults, in the order its index names them.
+    p.b.enter();
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let named: Vec<[u8; 32]> = {
+        let ctx = VerifierContext::new(&set, Some((p.b.genesis, p.b.device_id)), None)
+            .expect("a verifier");
+        match ctx
+            .verifier()
+            .vaults_of_cell(&m.verdict_cell)
+            .expect("the cell's index read")
+        {
+            dsm::sofi::storage::Discovered::Complete(vaults) => {
+                vaults.iter().map(|v| *v.vault_id()).collect()
+            }
+            dsm::sofi::storage::Discovered::Partial(..) => panic!("the cell's index read short"),
+        }
+    };
+    let mut both_vaults = named.clone();
+    both_vaults.sort();
+    let mut expected = vec![m.a_vault, m.b_vault];
+    expected.sort();
+    assert_eq!(
+        both_vaults, expected,
+        "the cell binds the match's two vaults"
+    );
+    let listed = locked(&p.b, &m).await;
+    assert_eq!(listed.search, generated::SofiSearch::Complete as i32);
+    assert_eq!(
+        as_listed_rows(&listed),
+        named.iter().map(as_it_stands).collect::<Vec<_>>(),
+        "each vault of the cell at its own head, in the index's order"
+    );
+
+    // A's own vaults, in the order its creations are kept.
+    p.a.enter();
+    let kept: Vec<[u8; 32]> = crate::sdk::sofi_flow::standing(&p.a.router().core_sdk)
+        .expect("A's standing")
+        .local
+        .vault_creations()
+        .iter()
+        .map(|creation| creation.vault_id)
+        .collect();
+    assert_eq!(kept.len(), 2, "A created two vaults");
+    let own = vaults_of(
+        &p.a,
+        "escrow.vaults",
+        args(&generated::EscrowVaultsRequest {}),
+    )
+    .await;
+    assert_eq!(
+        as_listed_rows(&own),
+        kept.iter().map(as_it_stands).collect::<Vec<_>>(),
+        "each vault A created at its own head, in the order its creations are kept"
+    );
+}
+
 /// One commitment has one verdict (owner, 2026-10-05). A referee who signs
 /// both outcomes settles both vaults on the verdict that reached the cell
 /// first: the later one is written, and the cell still holds the first. A

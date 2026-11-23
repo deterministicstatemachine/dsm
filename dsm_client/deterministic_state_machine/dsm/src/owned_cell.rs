@@ -41,7 +41,7 @@ pub const CELL_LOCK_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
 /// A lock's public key length, `PK.seed ‖ PK.root`.
 pub const CELL_LOCK_LEN: usize = 64;
 /// The longest signature a proof carries (SPX256f is 49,856 bytes).
-const SIGNATURE_MAX_LEN: usize = 65_535;
+pub(crate) const SIGNATURE_MAX_LEN: usize = 65_535;
 
 /// Who may write a cell of a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +81,23 @@ pub enum CellOwnership {
     /// AttA derive a device that, with that genesis and `F`'s position,
     /// derives this cell, and which verifies under its own key.
     Fulfillment,
+    /// A namespace no member keeps a write in any more: the wallet backup
+    /// cells of before 2026-11-23, replaced by each device's one backup slot
+    /// (owner, 2026-11-23: "adjust the code after that so that there's no
+    /// longer that spot").
+    Retired,
+    /// An offline account's origin cell `K_off = H(DSM/offline-origin/v1 ‖ B
+    /// ‖ R)` (DSM Amendment A39): the account's, its authority the board's
+    /// signatures under `B`, and anyone holding a step delivers it (its
+    /// payer, its receiver, a later payee). Owner, 2026-11-21, asked whether
+    /// to protect origin cells as the other cells are: "sure protect them". A
+    /// write carries no proof; it is kept only when its value is a route
+    /// entry for this cell carrying a write that proves its own authority
+    /// there — a step the board signed starting from the cell's root, or the
+    /// departure of a boundary leaving it — the check every reader makes.
+    /// Nothing of an offline step between boards changes: members take part
+    /// only when a step is published for settling.
+    OfflineOrigin,
 }
 
 /// The namespaces of owned cells.
@@ -90,12 +107,16 @@ fn owned_namespaces() -> [&'static [u8]; 1] {
 
 /// Who may write a cell of `namespace`.
 pub fn ownership(namespace: &[u8]) -> CellOwnership {
-    if namespace == DIRECTORY_NAMESPACE {
+    if namespace == crate::common::domain_tags::RETIRED_WALLET_BACKUP_CELLS {
+        CellOwnership::Retired
+    } else if namespace == DIRECTORY_NAMESPACE {
         CellOwnership::Directory
     } else if namespace == crate::economic::register::economic_root_namespace() {
         CellOwnership::Register
     } else if namespace == crate::sofi::registration::fulfillment_namespace() {
         CellOwnership::Fulfillment
+    } else if namespace == crate::offline_origin::namespace() {
+        CellOwnership::OfflineOrigin
     } else if namespace == crate::app_cell::namespace() {
         CellOwnership::Application
     } else if owned_namespaces().contains(&namespace) {
@@ -223,6 +244,9 @@ pub enum CellWriteRefusal {
     /// An application cell's write is a route entry for this cell carrying
     /// no write a writer of its committed set signed for it: why.
     WriteNotAuthorized(String),
+    /// An origin cell's write is a route entry for this cell carrying no step
+    /// its board signed from the cell's root, nor a departure leaving it: why.
+    StepNotAuthorized(String),
     /// A fulfillment cell's write carries no 32-byte genesis hint: why.
     GenesisHint(String),
     /// A fulfillment cell's write is a route entry for this cell carrying no
@@ -233,6 +257,8 @@ pub enum CellWriteRefusal {
     Signature,
     /// The signature could not be checked.
     Crypto(String),
+    /// No member keeps a write in this namespace any more.
+    Retired,
 }
 
 impl core::fmt::Display for CellWriteRefusal {
@@ -256,6 +282,10 @@ impl core::fmt::Display for CellWriteRefusal {
                 f,
                 "the application cell write carries no write a writer of its set signed: {why}"
             ),
+            Self::StepNotAuthorized(why) => write!(
+                f,
+                "the origin cell write carries no step its board signed for this cell: {why}"
+            ),
             Self::GenesisHint(why) => write!(
                 f,
                 "a fulfillment cell write carries the trader's 32-byte genesis: {why}"
@@ -266,13 +296,14 @@ impl core::fmt::Display for CellWriteRefusal {
             ),
             Self::Signature => write!(f, "the proof's key did not sign this write"),
             Self::Crypto(why) => write!(f, "the signature could not be checked: {why}"),
+            Self::Retired => write!(f, "no member keeps a write in this namespace any more"),
         }
     }
 }
 
 impl std::error::Error for CellWriteRefusal {}
 
-fn strict<M: prost::Message + Default>(
+pub(crate) fn strict<M: prost::Message + Default>(
     bytes: &[u8],
     wire: &str,
     max_tag: u32,
@@ -309,13 +340,13 @@ fn directory_write_field_limit(tag: u32) -> Option<FieldLimit> {
     }
 }
 
-fn fixed32(bytes: &[u8]) -> Result<[u8; 32], CellWriteRefusal> {
+pub(crate) fn fixed32(bytes: &[u8]) -> Result<[u8; 32], CellWriteRefusal> {
     bytes
         .try_into()
         .map_err(|e: core::array::TryFromSliceError| CellWriteRefusal::Wire(e.to_string()))
 }
 
-fn signed_by(
+pub(crate) fn signed_by(
     public_key: &[u8],
     target: &[u8; 32],
     signature: &[u8],
@@ -367,6 +398,7 @@ pub fn admit_cell_write(
     proof: &[u8],
 ) -> Result<(), CellWriteRefusal> {
     match ownership(namespace) {
+        CellOwnership::Retired => Err(CellWriteRefusal::Retired),
         CellOwnership::Open => {
             if proof.is_empty() {
                 Ok(())
@@ -401,6 +433,13 @@ pub fn admit_cell_write(
             match crate::sofi::registration::fulfillment_naming_cell(&entry.value, &genesis, key) {
                 Ok(_fulfillment) => Ok(()),
                 Err(why) => Err(CellWriteRefusal::FulfillmentNotAuthorized(why.to_string())),
+            }
+        }
+        CellOwnership::OfflineOrigin => {
+            let entry = delivered_entry(namespace, key, value, proof)?;
+            match crate::offline_origin::write_occupying(&entry.value, key) {
+                Ok(_step) => Ok(()),
+                Err(why) => Err(CellWriteRefusal::StepNotAuthorized(format!("{why:?}"))),
             }
         }
         CellOwnership::Application => {

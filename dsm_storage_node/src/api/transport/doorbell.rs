@@ -316,14 +316,14 @@ fn doorbell_key(bytes: &[u8]) -> Result<[u8; 32], StatusCode> {
 
 /// A push token: printable ASCII, as every Firebase registration token is,
 /// and at most [`MAX_PUSH_TOKEN_BYTES`].
-fn push_token(token: &str) -> Result<String, StatusCode> {
-    if token.is_empty()
-        || token.len() > MAX_PUSH_TOKEN_BYTES
-        || !token.bytes().all(|b| b.is_ascii_graphic())
+fn push_token(registration: &str) -> Result<String, StatusCode> {
+    if registration.is_empty()
+        || registration.len() > MAX_PUSH_TOKEN_BYTES
+        || !registration.bytes().all(|b| b.is_ascii_graphic())
     {
         return Err(StatusCode::BAD_REQUEST);
     }
-    Ok(token.to_string())
+    Ok(registration.to_string())
 }
 
 /// The spools a doorbell names, each once, in their canonical spelling.

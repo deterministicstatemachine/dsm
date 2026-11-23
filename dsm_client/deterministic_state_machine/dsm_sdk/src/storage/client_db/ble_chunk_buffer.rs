@@ -55,6 +55,45 @@ pub fn persist_ble_chunk(params: ChunkPersistenceParams) -> Result<()> {
     Ok(())
 }
 
+/// Persist several chunks in one transaction: one sync to storage for the
+/// batch, where [`persist_ble_chunk`] syncs once per chunk (`synchronous =
+/// FULL`). Idempotent as that one is. A receiver taking a frame of hundreds
+/// of chunks waited out a sync for each before it acknowledged (rig run
+/// 2026-11-21: ~50 ms a chunk, ~8 KB/s on the link).
+pub fn persist_ble_chunks(batch: &[ChunkPersistenceParams<'_>]) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    let tx = conn.transaction()?;
+    {
+        let mut insert = tx.prepare_cached(
+            "INSERT OR IGNORE INTO ble_reassembly_chunks
+             (peer_link, frame_commitment, chunk_index, frame_type, total_chunks,
+              payload_len, chunk_data, checksum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for params in batch {
+            insert.execute(params![
+                params.peer_link,
+                &params.frame_commitment[..],
+                i64::from(params.chunk_index),
+                params.frame_type,
+                i64::from(params.total_chunks),
+                i64::from(params.payload_len),
+                params.chunk_data,
+                i64::from(params.checksum),
+            ])?;
+        }
+    }
+    tx.commit()?;
+    debug!("Persisted {} BLE chunks in one transaction", batch.len());
+    Ok(())
+}
+
 /// A stored integer column, as the type it was written from. A value out of
 /// that type's range is a corrupt row and an error, never truncated.
 fn column_int<T>(row: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<T>

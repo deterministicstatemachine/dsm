@@ -66,6 +66,7 @@ export function balanceView(b: pb.BalanceGetResponse): TokenBalanceView {
     symbol: b.symbol,
     tokenName: b.tokenName,
     baseUnits: b.available,
+    lockedBaseUnits: b.locked,
     decimals: b.decimals,
     // Rust's rendered display form. This layer never computes it.
     displayAmount: b.displayAmount,

@@ -224,11 +224,25 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
     load();
   }, []);
 
-  const run = useCallback(async (what: string, f: () => Promise<string>) => {
+  /**
+   * Do `f` and say what it answered as soon as it answers. `then` reads what
+   * is shown again afterwards: a stake that moved is said to have moved
+   * before its lists are read again, and a failed re-read is said to be the
+   * re-read's, never the step's.
+   */
+  const run = useCallback(async (what: string, f: () => Promise<string>, then?: () => Promise<void>) => {
     setBusy(what);
     setStatus({ kind: 'info', text: `${what}…` });
     try {
-      setStatus({ kind: 'success', text: await f() });
+      const said = await f();
+      setStatus({ kind: 'success', text: said });
+      if (then !== undefined) {
+        try {
+          await then();
+        } catch (e) {
+          setStatus({ kind: 'error', text: `${said}. Reading the vaults again failed: ${messageOf(e)}` });
+        }
+      }
     } catch (e) {
       setStatus({ kind: 'error', text: `${what} failed: ${messageOf(e)}` });
     } finally {
@@ -241,6 +255,14 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
     setMine(await escrow.vaults());
     if (searched !== null) setFound(await escrow.locked(searched));
   }, [searched]);
+  /** After a stake moved: the vaults shown, then the balances, whether or not the vaults were read. */
+  const moved = useCallback(async () => {
+    try {
+      await reread();
+    } finally {
+      await onMoved();
+    }
+  }, [reread, onMoved]);
 
   const setRow = (key: number, patch: Partial<OutcomeRow>) =>
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
@@ -279,10 +301,8 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
       linkedVaultId: linked.trim() === '' ? undefined : idBytes('the linked vault', linked),
     });
     setCreated(done);
-    await reread();
-    await onMoved();
     return `Locked in vault ${middleTruncate(encodeBase32Crockford(done.vaultId), 8, 6)}`;
-  });
+  }, moved);
 
   const keyOf = (v: escrow.EscrowVault) => encodeBase32Crockford(v.vaultId);
   const remember = (v: escrow.EscrowVault, got: escrow.EscrowVerdict) =>
@@ -300,15 +320,13 @@ export default function EscrowTab({ tokenOptions, onMoved }: Props): React.JSX.E
   const onDecide = (v: escrow.EscrowVault, outcome: Uint8Array) => run(`Decide ${outcomeText(outcome)}`, async () => {
     const got = await escrow.decide(v.vaultId, outcome);
     remember(v, got);
-    await reread();
     return verdictWords(got);
-  });
-  const onRelease = (v: escrow.EscrowVault) => run('Release', async () => {
-    const r = await escrow.release(v.vaultId);
-    await reread();
-    await onMoved();
-    return releaseWords(r);
-  });
+  }, reread);
+  const onRelease = (v: escrow.EscrowVault) => run(
+    'Release',
+    async () => releaseWords(await escrow.release(v.vaultId)),
+    moved,
+  );
   const onFind = () => run('Find', async () => {
     const at = idBytes('the verdict cell', cell);
     const got = await escrow.locked(at);

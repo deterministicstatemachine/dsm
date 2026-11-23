@@ -34,11 +34,29 @@ const WRITE_CHECK: &[&str] = &["verify_spool_write"];
 /// address it names and signs nothing. Nothing that makes a lock or a proof.
 const CELL_WRITE_CHECK: &[&str] = &["admit_cell_write"];
 
+/// The items of Core's wallet backup a node may name: the one check every
+/// node runs before it takes a start at a device's backup slot (DSM Amendment
+/// A40; owner, 2026-11-23: "it needs the key to do such a thing"), which
+/// checks the start's signature against the slot it names and signs nothing;
+/// the digest a part is taken by; and the bound on a backup's parts. Nothing
+/// that seals, opens or signs.
+const BACKUP_SLOT_CHECK: &[&str] = &["admit_start", "part_digest", "MAX_PARTS"];
+
+/// The doorbell's name (owner, 2026-11-23: the node signals the phone when
+/// something is ready): the hash a node keeps in place of a device's doorbell
+/// key, made with the domain-separated hasher under the doorbell's own tag. It
+/// reads nothing a payment means and signs nothing.
+const DOORBELL_NAME: &[&[&str]] = &[
+    &["crypto", "blake3", "domain_hash_bytes"],
+    &["common", "domain_tags", "TAG_DSM_B0X_DOORBELL"],
+];
+
 /// Whether the Core path `dsm::<rest>` is one a storage node may name: the
 /// framing modules; the storage set's id and members; the domain-separated
 /// hasher; a size bound of the route-chain and spool modules, which names no
-/// function either computes; the write check ([`WRITE_CHECK`]); and the
-/// cell write check ([`CELL_WRITE_CHECK`]).
+/// function either computes; the write check ([`WRITE_CHECK`]); the cell
+/// write check ([`CELL_WRITE_CHECK`]); the backup slot check
+/// ([`BACKUP_SLOT_CHECK`]); and the doorbell's name ([`DOORBELL_NAME`]).
 fn core_path_allowed(rest: &[String]) -> bool {
     let at = |i: usize| rest.get(i).map(String::as_str);
     let (module, item) = (at(0), at(1));
@@ -52,6 +70,10 @@ fn core_path_allowed(rest: &[String]) -> bool {
             && item == Some("relationship_write_grant")
             && at(2).is_some_and(|i| WRITE_CHECK.contains(&i)))
         || (module == Some("owned_cell") && item.is_some_and(|i| CELL_WRITE_CHECK.contains(&i)))
+        || (module == Some("wallet_backup") && item.is_some_and(|i| BACKUP_SLOT_CHECK.contains(&i)))
+        || DOORBELL_NAME
+            .iter()
+            .any(|path| rest.iter().map(String::as_str).eq(path.iter().copied()))
 }
 
 /// Names of application, economic and settlement concepts: what a node that

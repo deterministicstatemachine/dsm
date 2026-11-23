@@ -231,10 +231,15 @@ mod tests {
     // +4 for owned cells (owner ruling, 2026-11-19): a device's cell lock, an
     // owned cell's address, and the two write proofs (an owned cell's, a
     // directory cell's).
+    // +1 for the list of tokens a device has added (owner, 2026-11-21): what
+    // its AK signs over that list, kept in its own directory cell.
+    // +1 for each device's one backup slot (owner, 2026-11-23): the backup
+    // cell and its route seed go, the slot, its start and its part digest
+    // come.
     // +2 for the inbox doorbell (owner, 2026-11-23: the node signals the
     // phone when something is ready): a device's per-node doorbell key and
     // the hash a node names a doorbell by.
-    const EXPECTED_TAG_COUNT: usize = 464;
+    const EXPECTED_TAG_COUNT: usize = 466;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
@@ -366,7 +371,11 @@ mod tests {
     /// sources declares one, registered or not.
     #[test]
     fn no_tag_reuses_a_retired_domain() {
-        const RETIRED: &[&str] = &["DSM/sofi/route-outcome/v2"];
+        const RETIRED: &[&str] = &[
+            "DSM/sofi/route-outcome/v2",
+            "DSM/wallet-backup/v1",
+            "DSM/wallet-backup/seed/v1",
+        ];
         for tag in all_tags() {
             assert!(
                 !RETIRED

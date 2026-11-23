@@ -73,6 +73,8 @@ function freshState(): PracticeState {
         genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',
+        // Practice sends are of the practice coin and practice ERA.
+        sendableTokenIds: ['PLAY', 'ERA'],
       },
     ],
     history: [],
@@ -302,6 +304,7 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void,
         genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',
+        sendableTokenIds: ['PLAY', 'ERA'],
       });
       emit('contactAdded');
       // Accepted when the practice wallet now holds the contact, as the real

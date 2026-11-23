@@ -343,6 +343,20 @@ pub fn select_entry<'a>(
     select_proven(genesis, device_id, values, DirectoryEntry::verify).0
 }
 
+/// [`select_entry`], each candidate proven by `proves` in place of
+/// [`DirectoryEntry::verify`]: a reader that already holds the verdict of
+/// `verify` for an encoding (it proved the same bytes while reading them)
+/// answers it without proving them again. `proves` must answer as `verify`
+/// answers.
+pub fn select_entry_proven_by<'a, E>(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    values: impl IntoIterator<Item = &'a [u8]>,
+    proves: impl Fn(&DirectoryEntry) -> Result<(), E>,
+) -> Option<DirectoryEntry> {
+    select_proven(genesis, device_id, values, proves).0
+}
+
 /// [`select_entry`] with `proves` as the entry's proof of itself: what it
 /// chose, and why each candidate ranked above the choice did not prove
 /// itself, best first. The

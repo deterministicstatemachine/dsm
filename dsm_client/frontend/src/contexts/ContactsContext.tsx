@@ -48,6 +48,10 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
     contactsStore.handleBleMapped(detail);
   }, []);
   useBridgeEvent('contact.bleUpdated', contactsStore.handleBleUpdated, []);
+  // What each contact can be sent is in the list; Rust says when it changed.
+  useBridgeEvent('contact.tokens', () => {
+    contactsStore.scheduleRefreshContacts('contact tokens read');
+  }, []);
   // A contact's send-readiness moves when Rust settles, takes or releases
   // something, and Rust says so (`wallet.refresh`); a pairing moves on with
   // the radio's word. The list is read again then, and only then: nothing

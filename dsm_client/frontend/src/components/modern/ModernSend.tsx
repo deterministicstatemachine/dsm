@@ -54,16 +54,28 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
   // The token chosen, or the first on offer while none has been chosen. A
   // chosen token that is no longer on offer is no token: the screen never
   // puts another in its place.
+  // Once a recipient is chosen, only the tokens Rust says that contact can be
+  // sent: a contact credits no token it has not added, so none is offered.
+  const offered = useMemo(
+    () => (contact !== null ? tokens.filter((b) => contact.sendableTokenIds.includes(b.tokenId)) : tokens),
+    [tokens, contact],
+  );
   const token = tokenId !== null
+    ? offered.find((b) => b.tokenId === tokenId) ?? null
+    : offered.length > 0 ? offered[0] : null;
+  // The token chosen, when the wallet holds it and the recipient has not added it.
+  const notAdded = token === null && tokenId !== null
     ? tokens.find((b) => b.tokenId === tokenId) ?? null
-    : tokens.length > 0 ? tokens[0] : null;
+    : null;
   const amountOk = /^\d+(\.\d+)?$/.test(amount.trim()) && Number(amount) > 0;
   // What still stands between the form and a review, said rather than shown
   // as a grey button.
   const missing = contact === null
     ? 'Choose who to send to.'
     : token === null
-      ? 'There is no token to send yet.'
+      ? notAdded !== null
+        ? `${personName(contact)} has not added ${notAdded.symbol}. Choose a token they have added.`
+        : 'There is no token to send yet.'
       : amountOk
         ? null
         : 'Enter an amount above zero.';
@@ -186,9 +198,9 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
             </button>
           ))}
         </div>
-        {tokens.length > 1 ? (
+        {offered.length > 1 || (token === null && offered.length > 0) ? (
           <div className="s-token-pick" role="group" aria-label="Token">
-            {tokens.map((b) => (
+            {offered.map((b) => (
               <button key={b.tokenId} type="button" aria-pressed={token !== null && token.tokenId === b.tokenId} onClick={() => setTokenId(b.tokenId)}>{b.symbol}</button>
             ))}
           </div>

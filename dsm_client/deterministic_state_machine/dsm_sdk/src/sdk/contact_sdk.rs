@@ -244,6 +244,9 @@ pub fn contact_add_response(
         // The details the wallet holds for the contact are its row's; the
         // routes that read the row set them (`contacts.list`, `contacts.setProfile`).
         profile: None,
+        // Which tokens the contact can be sent is the contact list's to state
+        // (`contacts.list`), from what this device kept of the contact's lists.
+        sendable_token_ids: Vec::new(),
     }
 }
 

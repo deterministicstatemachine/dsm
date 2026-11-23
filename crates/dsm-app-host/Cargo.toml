@@ -35,5 +35,10 @@ rustls = { version = "0.23.37", features = ["ring"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
 serial_test = "3.5.0"
 tower = { version = "0.5", features = ["util"] }
+# Google's push endpoints the harness's nodes reach, served by the test as the
+# SDK suites serve them (dsm_storage_node/tests/common/google_push.rs).
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 # The test starts, kills and restarts the host as processes.
 tokio = { version = "1.52.3", features = ["process"] }

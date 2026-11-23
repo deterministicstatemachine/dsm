@@ -173,11 +173,11 @@ impl FcmSender {
     pub async fn ring(&self, push_token: &str) -> Delivery {
         let mut access = self.access.lock().await;
         let held = match access.as_ref() {
-            Some(token) => token.clone(),
+            Some(granted) => granted.clone(),
             None => match self.access_token().await {
-                Ok(token) => {
-                    *access = Some(token.clone());
-                    token
+                Ok(granted) => {
+                    *access = Some(granted.clone());
+                    granted
                 }
                 Err(e) => return Delivery::NotSent(format!("no access token: {e}")),
             },
@@ -186,7 +186,7 @@ impl FcmSender {
             Sent::Answered(delivery) => delivery,
             Sent::AccessRefused => {
                 let fresh = match self.access_token().await {
-                    Ok(token) => token,
+                    Ok(granted) => granted,
                     Err(e) => {
                         *access = None;
                         return Delivery::NotSent(format!("no access token: {e}"));
@@ -213,7 +213,7 @@ impl FcmSender {
         );
         let body = FcmSend {
             message: FcmMessage {
-                token: push_token,
+                registration: push_token,
                 data: FcmData { dsm: "inbox" },
                 android: FcmAndroid {
                     priority: "HIGH",
@@ -302,7 +302,9 @@ struct FcmSend<'a> {
 
 #[derive(serde::Serialize)]
 struct FcmMessage<'a> {
-    token: &'a str,
+    /// The app's Firebase registration, under the name Firebase gives it.
+    #[serde(rename = "token")]
+    registration: &'a str,
     data: FcmData,
     android: FcmAndroid,
 }

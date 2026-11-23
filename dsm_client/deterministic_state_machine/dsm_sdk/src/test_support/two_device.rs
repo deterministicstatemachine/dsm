@@ -318,6 +318,45 @@ impl TestDevice {
         dsm::core::bilateral_transaction_manager::compute_smt_key(&self.device_id, &peer.device_id)
     }
 
+    /// Whether a send of this device's to `peer` is committed with its
+    /// delivery left to the re-drive: its outbox row stands at
+    /// `submission_uncertain`. The Send route answers before its delivery
+    /// ends, so where a send stands is read here, not from the answer.
+    pub fn send_left_to_the_redrive(&self, peer: &TestDevice) -> bool {
+        self.enter();
+        let rel = self.rel_key_with(peer);
+        client_db::unsettled_sender_outbox()
+            .expect("the outbox")
+            .iter()
+            .any(|row| {
+                row.relationship_key == rel && row.status == client_db::OUTBOX_SUBMISSION_UNCERTAIN
+            })
+    }
+
+    /// Why a send of this device's can never complete, read from the send's
+    /// history row. The Send route answers before a send's admission is
+    /// finished, so a send whose admission then cannot land says so there.
+    pub fn failed_send_reason(&self) -> Option<String> {
+        self.enter();
+        client_db::get_transaction_history(None, Some(16), None)
+            .expect("the device's history")
+            .into_iter()
+            .find(|row| row.status == client_db::HISTORY_STATUS_FAILED)
+            .and_then(|row| row.metadata.get(client_db::HISTORY_FAILURE_KEY).cloned())
+            .map(|why| String::from_utf8(why).expect("the reason is text"))
+    }
+
+    /// Whether this device's head carries an economic admission not finished
+    /// yet: a send's, held for resume.
+    pub fn admission_held(&self) -> bool {
+        self.enter();
+        self.router()
+            .core_sdk
+            .device_head()
+            .and_then(|head| head.pending_economic_admission().cloned())
+            .is_some()
+    }
+
     /// Fund with economic ancestry: `whole_era` ERA, in faucet claims of the
     /// fixed payout (100.00 ERA each). Amounts must be multiples of the
     /// payout — a fixture asking for anything else is asking for value the
@@ -366,6 +405,47 @@ impl TestDevice {
         }
     }
 
+    /// `method` for `amount` ERA, entered as the wallet shows it. An admission the
+    /// fleet has not yet made final is held, and finished by resuming it exactly
+    /// as the device resumes it before anything else; a refusal with nothing held
+    /// is returned.
+    pub async fn offline_boundary(&self, method: &str, amount: &str) -> Result<(), String> {
+        let result = self
+            .invoke(
+                method,
+                &crate::generated::OfflineCashRequest {
+                    token_id: "ERA".to_string(),
+                    amount: amount.to_string(),
+                },
+            )
+            .await;
+        if result.success {
+            return Ok(());
+        }
+        let core = self.router().core_sdk.clone();
+        let mut error = format!("{:?}", result.error_message);
+        for resumed in 1..=4u64 {
+            let Some(pending) = core
+                .device_head()
+                .and_then(|head| head.pending_economic_admission().cloned())
+            else {
+                return Err(error);
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(250 * resumed)).await;
+            match crate::sdk::economic_admission_flow::resume_pending_admission(
+                &core,
+                economic_fixtures::NETWORK,
+                pending,
+            )
+            .await
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => error = e.to_string(),
+            }
+        }
+        Err(error)
+    }
+
     /// The device's spendable ERA as the canonical state machine holds it.
     pub fn era_balance(&self) -> u64 {
         self.enter();
@@ -399,18 +479,24 @@ impl TestDevice {
         let decimals = crate::handlers::wallet_routes::token_decimals(token_id)
             .expect("the harness sends tokens this device can name");
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
-        self.invoke(
-            "wallet.sendSmart",
-            &generated::OnlineTransferSmartRequest {
-                recipient_device_id: to.device_id.to_vec(),
-                amount: crate::handlers::wallet_routes::format_base_units_for_display(
-                    amount, decimals,
-                ),
-                token_id: token_id.to_string(),
-                memo: format!("{}->{} #{seq}", self.slot, to.slot),
-            },
-        )
-        .await
+        let answered = self
+            .invoke(
+                "wallet.sendSmart",
+                &generated::OnlineTransferSmartRequest {
+                    recipient_device_id: to.device_id.to_vec(),
+                    amount: crate::handlers::wallet_routes::format_base_units_for_display(
+                        amount, decimals,
+                    ),
+                    token_id: token_id.to_string(),
+                    memo: format!("{}->{} #{seq}", self.slot, to.slot),
+                },
+            )
+            .await;
+        // The Send route answers once the debit is committed and delivers
+        // beside it: what a test reads on the recipient's side next waits for
+        // that delivery, as a recipient's next poll would.
+        background_deliveries_settled().await;
+        answered
     }
 
     /// `storage.sync` (pull + push), the query the inbox poller makes, through
@@ -561,6 +647,20 @@ impl Pair {
             }
         }
         holders
+    }
+}
+
+/// Returns once no background delivery started by `wallet.send` is still
+/// running (`app_router_impl::BACKGROUND_DELIVERIES`): what a test that reads
+/// the recipient's side next waits on.
+pub(crate) async fn background_deliveries_settled() {
+    use crate::handlers::app_router_impl::{BACKGROUND_DELIVERIES, DELIVERIES_SETTLED};
+    loop {
+        let settled = DELIVERIES_SETTLED.notified();
+        if BACKGROUND_DELIVERIES.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return;
+        }
+        settled.await;
     }
 }
 

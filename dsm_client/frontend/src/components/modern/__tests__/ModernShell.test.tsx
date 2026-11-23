@@ -23,7 +23,7 @@ const MARK = 'MARKMARKMARKMARKMARKMARKMARKMARKMARKMARKMARKMARKMARK';
 /** A contact as contacts.list answers one: its genesis named, so verified. */
 function contact(alias: string, deviceId: string, profile?: DomainContact['profile']): DomainContact {
   const genesisHash = `G-${alias}`;
-  return { alias, deviceId, genesisHash, pairing: 'idle', relationship: 'established', genesisVerifiedOnline: genesisHash.length > 2, signingPublicKey: `K-${alias}`, profile };
+  return { alias, deviceId, genesisHash, pairing: 'idle', relationship: 'established', genesisVerifiedOnline: genesisHash.length > 2, signingPublicKey: `K-${alias}`, sendableTokenIds: ['ERA'], profile };
 }
 
 const contacts: DomainContact[] = [
@@ -122,6 +122,18 @@ describe('the Modern skin', () => {
     expect(within(recent).queryByText(/1\.00/)).not.toBeInTheDocument();
     const more = screen.getByRole('navigation', { name: 'More of DSM' });
     expect(within(more).getAllByRole('button').map((b) => b.textContent)).toEqual(['Tokens', 'Apps', 'Scan', 'Trade', 'Bitcoin', 'Storage']);
+  });
+
+  // A token the protocol defines, other than the main currency, is not a row
+  // while the wallet holds none of it (owner, 2026-11-22); a created token is.
+  it('does not list a second protocol token the wallet holds nothing of', () => {
+    const second: TokenBalanceView = { ...currency('dBTC', '0.00000000', 0n), protocolDefined: era.protocolDefined };
+    const steel = { ...gold, tokenId: 'STEEL', symbol: 'STEEL', tokenName: 'STEEL', baseUnits: 0n, displayAmount: '0' };
+    renderShell([era, second, gold, steel]);
+    const tokens = screen.getByLabelText('Your tokens');
+    expect(within(tokens).getByText('GOLD')).toBeInTheDocument();
+    expect(within(tokens).getByText('STEEL')).toBeInTheDocument();
+    expect(within(tokens).queryByText('dBTC')).not.toBeInTheDocument();
   });
 
   it('lists fungible tokens, and switches to the one-of-a-kind objects as the DGen wallet does', () => {

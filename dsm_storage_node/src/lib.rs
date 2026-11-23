@@ -240,6 +240,7 @@ impl AppState {
 /// objects need none.
 pub fn storage_contract_router(state: Arc<AppState>) -> axum::Router<()> {
     api::cells::create_router(state.clone())
+        .merge(api::backup::create_router(state.clone()))
         .merge(api::objects::bytecommit::create_router(state.clone()))
         .merge(api::objects::immutable::create_read_router(state.clone()))
         .merge(api::objects::immutable::create_write_router().layer(Extension(state)))

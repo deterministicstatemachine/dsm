@@ -77,6 +77,13 @@ static CYCLE_DONE: once_cell::sync::Lazy<Notify> = once_cell::sync::Lazy::new(No
 static POLLER_RUNNING: AtomicBool = AtomicBool::new(false);
 static POLLER_STOP: AtomicBool = AtomicBool::new(false);
 
+/// Whether the background poller is running: the device's own syncs then
+/// come round on their own, so work a sync owes but a payment never waits on
+/// can run beside them (`vault_baseline::start_owned_baselines`).
+pub(crate) fn poller_running() -> bool {
+    POLLER_RUNNING.load(Ordering::SeqCst)
+}
+
 /// Shared notify for immediate wake-up (app foreground, bilateral commit, a
 /// wait answered, the waits no longer covering the fleet).
 static POLLER_WAKE: once_cell::sync::Lazy<Arc<Notify>> =
@@ -158,12 +165,6 @@ pub(crate) fn put_back_the_stop(stopping_before: bool) {
     POLLER_STOP.store(stopping_before, Ordering::SeqCst);
 }
 
-/// Whether the background poller task is running.
-#[cfg(test)]
-pub(crate) fn poller_running() -> bool {
-    POLLER_RUNNING.load(Ordering::SeqCst)
-}
-
 /// Whether a start is deferred until the harness's hold is released.
 #[cfg(test)]
 pub(crate) fn poller_start_deferred() -> bool {
@@ -236,10 +237,21 @@ pub fn start_poller() {
 
         let mut cadence = Cadence::new();
 
+        // The wallet reads its contacts' token lists each time it opens
+        // (owner, 2026-11-21): when its poller starts, and each time the app
+        // comes back to the screen.
+        crate::sdk::contact_tokens::wallet_opened();
+        let mut shown = crate::sdk::session_manager::app_in_foreground();
+
         loop {
             if POLLER_STOP.load(Ordering::SeqCst) {
                 break;
             }
+            let showing = crate::sdk::session_manager::app_in_foreground();
+            if showing && !shown {
+                crate::sdk::contact_tokens::wallet_opened();
+            }
+            shown = showing;
 
             let (processed, pulled, more_pending) = run_inbox_sync_cycle_counted("poll").await;
             if processed > 0 {
@@ -249,6 +261,9 @@ pub fn start_poller() {
             CYCLE_DONE.notify_waiters();
             #[cfg(test)]
             POLLER_CYCLE_DONE.notify_waiters();
+            // Each contact's steps since the state kept of it are checked
+            // now, so its next payment reads only its own.
+            crate::sdk::economic_registers::start_contact_walks();
             // Settlement-urgent covers BOTH directions: the sender awaiting an
             // acceptance receipt AND the recipient still holding an undelivered
             // countersigned reply. Polling the reply side at the idle interval

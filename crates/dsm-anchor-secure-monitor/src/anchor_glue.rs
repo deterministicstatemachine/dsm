@@ -393,17 +393,37 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
-    let sck = pins.gpio18.into_function::<hal::gpio::FunctionSpi>();
-    let mosi = pins.gpio19.into_function::<hal::gpio::FunctionSpi>();
-    let miso = pins.gpio16.into_function::<hal::gpio::FunctionSpi>();
-    let cs = pins.gpio17.into_push_pull_output();
-    let spi_bus = hal::spi::Spi::<_, _, _, 8>::new(pac.SPI0, (mosi, miso, sck)).init(
-        &mut pac.RESETS,
-        clocks.peripheral_clock.freq(),
-        1_000_000u32.Hz(),
-        embedded_hal::spi::MODE_0,
-    );
-    // Asserting GP17 cannot fail (rp235x GPIO is infallible), so the device always forms.
+    // Where the TROPIC01 is wired: SPI0 on the board's right side, GP16 (MISO), GP17 (CS), GP18
+    // (SCK), GP19 (MOSI); or, in an image built with `chip_on_spi1`, SPI1 on its left side, GP12
+    // (MISO), GP13 (CS), GP14 (SCK), GP15 (MOSI). Either bus stays Secure: `grant_ns_peripherals`
+    // grants neither, and no GPIO is given to the Non-secure side.
+    #[cfg(not(feature = "chip_on_spi1"))]
+    let (spi_bus, cs) = {
+        let sck = pins.gpio18.into_function::<hal::gpio::FunctionSpi>();
+        let mosi = pins.gpio19.into_function::<hal::gpio::FunctionSpi>();
+        let miso = pins.gpio16.into_function::<hal::gpio::FunctionSpi>();
+        let spi_bus = hal::spi::Spi::<_, _, _, 8>::new(pac.SPI0, (mosi, miso, sck)).init(
+            &mut pac.RESETS,
+            clocks.peripheral_clock.freq(),
+            1_000_000u32.Hz(),
+            embedded_hal::spi::MODE_0,
+        );
+        (spi_bus, pins.gpio17.into_push_pull_output())
+    };
+    #[cfg(feature = "chip_on_spi1")]
+    let (spi_bus, cs) = {
+        let sck = pins.gpio14.into_function::<hal::gpio::FunctionSpi>();
+        let mosi = pins.gpio15.into_function::<hal::gpio::FunctionSpi>();
+        let miso = pins.gpio12.into_function::<hal::gpio::FunctionSpi>();
+        let spi_bus = hal::spi::Spi::<_, _, _, 8>::new(pac.SPI1, (mosi, miso, sck)).init(
+            &mut pac.RESETS,
+            clocks.peripheral_clock.freq(),
+            1_000_000u32.Hz(),
+            embedded_hal::spi::MODE_0,
+        );
+        (spi_bus, pins.gpio13.into_push_pull_output())
+    };
+    // Asserting the chip select cannot fail (rp235x GPIO is infallible), so the device always forms.
     let Ok(mut spi_dev) = ExclusiveDevice::new(spi_bus, cs, timer);
 
     // Cold-start SPI warm-up (mirrors the pico anchor's Phase 1): clock the TROPIC01 with a few real

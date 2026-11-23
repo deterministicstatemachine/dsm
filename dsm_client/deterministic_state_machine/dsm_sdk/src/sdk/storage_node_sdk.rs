@@ -390,6 +390,48 @@ async fn answer(request: reqwest::RequestBuilder, bound: Bound) -> Result<Option
     }
 }
 
+/// A member's answer to a write of a backup slot: its state after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotAnswer {
+    /// `200`: taken, or already held.
+    Taken(proto::BackupSlotV1),
+    /// `409`: the slot takes no write of this generation; it holds a higher one.
+    Superseded(proto::BackupSlotV1),
+}
+
+/// The most a backup slot's state holds: every integer at its largest and
+/// every part's digest.
+fn slot_state_limit() -> usize {
+    proto::BackupSlotV1 {
+        generation: u64::MAX,
+        part_digests: vec![u8::MAX; 32 * dsm::wallet_backup::MAX_PARTS],
+        highest_generation: u64::MAX,
+    }
+    .encoded_len()
+}
+
+/// Send `request` and read a backup slot's state from a `200` or a `409`.
+async fn slot_answer(request: reqwest::RequestBuilder) -> Result<SlotAnswer, String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("transport: {}", with_causes(&e)))?;
+    let status = response.status().as_u16();
+    if status != 200 && status != 409 {
+        return Err(format!("answered HTTP {status}"));
+    }
+    let body = bounded_read::read(response, Bound::Limit(slot_state_limit()))
+        .await
+        .map_err(|e| format!("reading the answer: {e}"))?;
+    let held = proto::BackupSlotV1::decode(body.as_slice())
+        .map_err(|e| format!("backup slot state: {e}"))?;
+    Ok(if status == 200 {
+        SlotAnswer::Taken(held)
+    } else {
+        SlotAnswer::Superseded(held)
+    })
+}
+
 // ── What a member's answers can hold ────────────────────────────────────────
 //
 // Each kind of answer a member gives is read within the most bytes an honest
@@ -958,6 +1000,75 @@ impl MemberClient {
                 Ok(record)
             })
             .collect()
+    }
+
+    /// Start a write of a device's backup slot (DSM Amendment A40) with the
+    /// `start` its cell lock signed.
+    pub async fn backup_start(&self, slot: &[u8; 32], start: &[u8]) -> Result<SlotAnswer, String> {
+        slot_answer(
+            self.client
+                .post(format!(
+                    "{}/api/v2/backup/{}",
+                    self.endpoint,
+                    encode_base32_crockford(slot)
+                ))
+                .body(start.to_vec()),
+        )
+        .await
+    }
+
+    /// Put part `part` of generation `generation` of a backup slot.
+    pub async fn backup_part(
+        &self,
+        slot: &[u8; 32],
+        generation: u64,
+        part: u32,
+        sealed: &[u8],
+    ) -> Result<SlotAnswer, String> {
+        slot_answer(
+            self.client
+                .post(format!(
+                    "{}/api/v2/backup/{}/{generation}/{part}",
+                    self.endpoint,
+                    encode_base32_crockford(slot)
+                ))
+                .body(sealed.to_vec()),
+        )
+        .await
+    }
+
+    /// What the member holds at a backup slot, untrusted until its parts open.
+    pub async fn backup_slot(&self, slot: &[u8; 32]) -> Result<proto::BackupSlotV1, String> {
+        match slot_answer(self.client.get(format!(
+            "{}/api/v2/backup/{}",
+            self.endpoint,
+            encode_base32_crockford(slot)
+        )))
+        .await?
+        {
+            SlotAnswer::Taken(held) => Ok(held),
+            SlotAnswer::Superseded(_) => Err("backup slot read: answered HTTP 409".into()),
+        }
+    }
+
+    /// Part `part` of the member's whole backup at `slot`, when its
+    /// generation is `generation`; `None` when it holds no such part.
+    pub async fn backup_whole_part(
+        &self,
+        slot: &[u8; 32],
+        generation: u64,
+        part: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let body = answer(
+            self.client.get(format!(
+                "{}/api/v2/backup/{}/{generation}/{part}",
+                self.endpoint,
+                encode_base32_crockford(slot)
+            )),
+            Bound::Limit(dsm::route_chain::MAX_VALUE_LEN),
+        )
+        .await?;
+        Ok(body.filter(|b| !b.is_empty()))
     }
 
     /// Read the member's cell page by page (§6), from arrival index `from`,

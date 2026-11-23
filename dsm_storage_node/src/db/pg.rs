@@ -213,10 +213,22 @@ pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
 /// first included, is its route bound to the key a write carries, so the
 /// check is derivation alone (DSM Amendment A37), and the `spool_key` table of
 /// 3 is gone. A database at 3 is refused and reprovisioned.
-pub const SCHEMA_VERSION: i32 = 4;
+///
+/// 5: each device's one backup slot (DSM Amendment A40; owner, 2026-11-23:
+/// "There only should be one backup per phone, per device"), in the tables
+/// [`BACKUP_SLOT_DDL`] adds. A database at 4 is the one version brought up in
+/// place, by adding those two tables and nothing else, so the cells it holds,
+/// the board-bound accounts' among them, stay exactly as they are (owner,
+/// 2026-11-23, of the backup table: "in each node's existing database. Yes,
+/// that's what you're doing"). Every other version is refused as before.
+pub const SCHEMA_VERSION: i32 = 5;
 
-/// The DDL of [`SCHEMA_VERSION`], run once, on an empty database, in one
-/// transaction with the version row.
+/// The one version a node brings up to [`SCHEMA_VERSION`] in place.
+const UPGRADED_IN_PLACE: i32 = 4;
+
+/// The DDL of [`SCHEMA_VERSION`] before its backup slots, run once, on an
+/// empty database, with [`BACKUP_SLOT_DDL`], in one transaction with the
+/// version row.
 const SCHEMA_DDL: &str = r#"
     CREATE TABLE schema_version (
         only_row SMALLINT PRIMARY KEY CHECK (only_row = 1),
@@ -293,6 +305,34 @@ const SCHEMA_DDL: &str = r#"
     );
 "#;
 
+/// The backup slots of [`SCHEMA_VERSION`]: run with [`SCHEMA_DDL`] on an empty
+/// database, and alone on one at [`UPGRADED_IN_PLACE`].
+const BACKUP_SLOT_DDL: &str = r#"
+    -- Each device's one backup slot (DSM Amendment A40; owner, 2026-11-23).
+    -- The whole backup's generation and its parts' digests, 32 bytes each in
+    -- order (generation 0 and none before one is whole), and the generation
+    -- and digests of the one being written, when one is. The device's cell
+    -- lock signed both lists; nothing else is kept here.
+    CREATE TABLE backup_slots (
+        slot_key           BYTEA PRIMARY KEY,
+        generation         BIGINT NOT NULL,
+        part_digests       BYTEA NOT NULL,
+        writing_generation BIGINT,
+        writing_digests    BYTEA
+    );
+
+    -- The parts of each slot's whole backup and of the one being written,
+    -- each taken only as the digest its slot names. A part of any other
+    -- generation is deleted the moment it is neither.
+    CREATE TABLE backup_parts (
+        slot_key   BYTEA NOT NULL,
+        generation BIGINT NOT NULL,
+        part       INTEGER NOT NULL,
+        value      BYTEA NOT NULL,
+        PRIMARY KEY (slot_key, generation, part)
+    );
+"#;
+
 /// A column as `information_schema.columns` reports it: name, `udt_name`,
 /// nullable.
 type ExpectedColumn = (&'static str, &'static str, Nullability);
@@ -317,6 +357,25 @@ use Nullability::{NotNull, Nullable};
 /// and every index. A database at this version holds exactly this — nothing
 /// missing, nothing extra — or the node does not start on it.
 pub const SCHEMA_LAYOUT: &[(&str, &[ExpectedColumn])] = &[
+    (
+        "backup_parts",
+        &[
+            ("slot_key", "bytea", NotNull),
+            ("generation", "int8", NotNull),
+            ("part", "int4", NotNull),
+            ("value", "bytea", NotNull),
+        ],
+    ),
+    (
+        "backup_slots",
+        &[
+            ("slot_key", "bytea", NotNull),
+            ("generation", "int8", NotNull),
+            ("part_digests", "bytea", NotNull),
+            ("writing_generation", "int8", Nullable),
+            ("writing_digests", "bytea", Nullable),
+        ],
+    ),
     (
         "bytecommit_mirror",
         &[
@@ -387,6 +446,8 @@ pub const SCHEMA_LAYOUT: &[(&str, &[ExpectedColumn])] = &[
 /// Every index of [`SCHEMA_VERSION`], the implicit ones of primary keys and
 /// unique constraints included.
 pub const SCHEMA_INDEXES: &[&str] = &[
+    "backup_parts_pkey",
+    "backup_slots_pkey",
     "bytecommit_mirror_pkey",
     "cells_by_arrival",
     "cells_by_key",
@@ -437,6 +498,7 @@ async fn init_db_serialized(client: &mut deadpool_postgres::Object) -> Result<()
     if tables.is_empty() {
         let tx = client.transaction().await?;
         tx.batch_execute(SCHEMA_DDL).await?;
+        tx.batch_execute(BACKUP_SLOT_DDL).await?;
         tx.execute(
             "INSERT INTO schema_version (only_row, version) VALUES (1, $1)",
             &[&SCHEMA_VERSION],
@@ -458,9 +520,11 @@ async fn init_db_serialized(client: &mut deadpool_postgres::Object) -> Result<()
             .map(|r| r.get(0));
         match held {
             Some(v) if v == SCHEMA_VERSION => {}
+            Some(UPGRADED_IN_PLACE) => return upgrade_in_place(client).await,
             Some(v) => bail!(
                 "the storage database is at schema version {v}; this build serves exactly \
-                 {SCHEMA_VERSION} and migrates nothing — reprovision the database"
+                 {SCHEMA_VERSION} and brings up only {UPGRADED_IN_PLACE} in place — \
+                 reprovision the database"
             ),
             None => bail!(
                 "the storage database's schema_version table holds no version row — \
@@ -471,9 +535,31 @@ async fn init_db_serialized(client: &mut deadpool_postgres::Object) -> Result<()
     verify_schema_layout(client).await
 }
 
+/// Bring a database at [`UPGRADED_IN_PLACE`] up to [`SCHEMA_VERSION`] in one
+/// transaction: add the backup slot tables, stamp the version, and commit only
+/// once the whole layout is exactly [`SCHEMA_VERSION`]'s. Nothing it already
+/// holds is touched; a layout that is not exactly the older version's plus
+/// these tables is refused, and nothing is committed.
+async fn upgrade_in_place(client: &mut deadpool_postgres::Object) -> Result<()> {
+    let tx = client.transaction().await?;
+    tx.batch_execute(BACKUP_SLOT_DDL).await?;
+    tx.execute(
+        "UPDATE schema_version SET version = $1 WHERE only_row = 1",
+        &[&SCHEMA_VERSION],
+    )
+    .await?;
+    verify_schema_layout(&tx).await?;
+    tx.commit().await?;
+    log::info!(
+        "storage database brought up from schema version {UPGRADED_IN_PLACE} to \
+         {SCHEMA_VERSION} in place: the backup slot tables added, nothing else touched"
+    );
+    Ok(())
+}
+
 /// The database's tables, columns and indexes are exactly those of
 /// [`SCHEMA_VERSION`].
-async fn verify_schema_layout(client: &deadpool_postgres::Object) -> Result<()> {
+async fn verify_schema_layout(client: &impl deadpool_postgres::GenericClient) -> Result<()> {
     let rows = client
         .query(
             "SELECT table_name::text, column_name::text, udt_name::text, is_nullable::text
@@ -541,7 +627,7 @@ async fn verify_schema_layout(client: &deadpool_postgres::Object) -> Result<()> 
 ///
 /// Cell, index, ByteCommit, mirror, immutable and spool writes go through
 /// this function.
-async fn begin_durable_write(
+pub(crate) async fn begin_durable_write(
     client: &mut deadpool_postgres::Client,
 ) -> Result<deadpool_postgres::Transaction<'_>> {
     let tx = client.build_transaction().start().await?;

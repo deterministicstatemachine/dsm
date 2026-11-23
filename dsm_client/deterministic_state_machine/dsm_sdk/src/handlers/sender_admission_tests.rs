@@ -547,6 +547,9 @@ async fn a_send_pays_the_contact_chosen_not_the_first_of_its_alias() {
             "the send to {}: {:?}",
             chosen.slot, sent.error_message
         );
+        // The Send route answers once the debit is committed: what it
+        // delivers beside the answer ends before the next device is entered.
+        crate::test_support::two_device::background_deliveries_settled().await;
     }
     c.sync().await;
     p.b.sync().await;
@@ -663,6 +666,23 @@ async fn a_non_transferable_token_refuses_its_transfer() {
     );
     let position = admitted_position();
 
+    // B has added NOTX: A's wallet sends a contact only a token it has added,
+    // so what refuses this transfer is the token's own policy.
+    p.b.enter();
+    let adopted = p
+        .b
+        .router()
+        .invoke(crate::bridge::AppInvoke {
+            method: "tokens.addByAnchor".to_string(),
+            args: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
+        })
+        .await;
+    assert!(
+        adopted.success,
+        "B adopts NOTX: {:?}",
+        adopted.error_message
+    );
+
     let sent = p.a.send_token(&p.b, "NOTX", 25).await;
     assert!(
         !sent.success,
@@ -683,20 +703,6 @@ async fn a_non_transferable_token_refuses_its_transfer() {
         "nothing left pending"
     );
 
-    p.b.enter();
-    let adopted = p
-        .b
-        .router()
-        .invoke(crate::bridge::AppInvoke {
-            method: "tokens.addByAnchor".to_string(),
-            args: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
-        })
-        .await;
-    assert!(
-        adopted.success,
-        "B adopts NOTX: {:?}",
-        adopted.error_message
-    );
     p.a.enter();
     let b_contact = client_db::get_contact_by_device_id(&p.b.device_id)
         .expect("A's contacts")
@@ -1592,7 +1598,7 @@ async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admissio
     let first = p.a.send(&p.b, 10).await;
     let said = crate::test_support::two_device::committed_send_message(&first);
     assert!(
-        said.contains("held for resume"),
+        p.a.admission_held(),
         "the first send is committed and held: {said}"
     );
     p.a.enter();
@@ -1636,7 +1642,7 @@ async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admissio
     let held_again = p.a.send(&p.b, 5).await;
     let msg = crate::test_support::two_device::committed_send_message(&held_again);
     assert!(
-        msg.contains("held for resume"),
+        p.a.admission_held(),
         "the second send is committed and held for resume, got: {msg}"
     );
     p.a.enter();
@@ -1692,8 +1698,8 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
     let held = p.a.send(&p.b, 10).await;
     let msg = crate::test_support::two_device::committed_send_message(&held);
     assert!(
-        msg.contains("held for resume") && msg.contains("nothing is delivered yet"),
-        "the committed send names the held admission, got: {msg}"
+        p.a.admission_held(),
+        "the committed send's admission is held, got: {msg}"
     );
     assert_eq!(
         p.a.era_balance(),

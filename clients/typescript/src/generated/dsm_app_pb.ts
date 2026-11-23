@@ -19664,6 +19664,67 @@ export class DeviceDirectoryEntryV1 extends Message<DeviceDirectoryEntryV1> {
 }
 
 /**
+ * The tokens a device has added (owner, 2026-11-21): kept in the device's own
+ * directory cell beside its entry, so a contact reads which tokens the device
+ * can be sent before it offers one. policy_commits are 32 bytes each, distinct
+ * and ascending; the signature is SPHINCS+ by the device's AK over the digest
+ * of this message with the signature empty.
+ *
+ * @generated from message dsm.DeviceTokenListV1
+ */
+export class DeviceTokenListV1 extends Message<DeviceTokenListV1> {
+  /**
+   * @generated from field: bytes genesis = 1;
+   */
+  genesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated bytes policy_commits = 3;
+   */
+  policyCommits: Uint8Array[] = [];
+
+  /**
+   * @generated from field: bytes signature = 4;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceTokenListV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTokenListV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "policy_commits", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 4, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTokenListV1 {
+    return new DeviceTokenListV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTokenListV1 {
+    return new DeviceTokenListV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTokenListV1 {
+    return new DeviceTokenListV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTokenListV1 | PlainMessage<DeviceTokenListV1> | undefined, b: DeviceTokenListV1 | PlainMessage<DeviceTokenListV1> | undefined): boolean {
+    return proto3.util.equals(DeviceTokenListV1, a, b);
+  }
+}
+
+/**
  * sofi.createVault (§28). The beta market family is constant product with
  * exact input and the beta release family is the owner's full close, so the
  * owner chooses the pair, the reserves and the fee. The storage set is the
@@ -23905,6 +23966,16 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
    */
   relationshipState = RelationshipState.UNSPECIFIED;
 
+  /**
+   * The tokens this wallet can send the contact (owner, 2026-11-21), by the
+   * ids balance.list names them with: the protocol's own assets, and each
+   * token of this wallet's the contact has added, as its own signed lists
+   * state. The Send screen offers the contact no other. Set on contacts.list.
+   *
+   * @generated from field: repeated string sendable_token_ids = 17;
+   */
+  sendableTokenIds: string[] = [];
+
   constructor(data?: PartialMessage<ContactAddResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -23926,6 +23997,7 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
     { no: 14, name: "pairing", kind: "enum", T: proto3.getEnumType(ContactPairingPhase) },
     { no: 15, name: "profile", kind: "message", T: ContactProfileV1 },
     { no: 16, name: "relationship_state", kind: "enum", T: proto3.getEnumType(RelationshipState) },
+    { no: 17, name: "sendable_token_ids", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactAddResponse {
@@ -30691,6 +30763,135 @@ export class DirectoryCellWriteV1 extends Message<DirectoryCellWriteV1> {
 
   static equals(a: DirectoryCellWriteV1 | PlainMessage<DirectoryCellWriteV1> | undefined, b: DirectoryCellWriteV1 | PlainMessage<DirectoryCellWriteV1> | undefined): boolean {
     return proto3.util.equals(DirectoryCellWriteV1, a, b);
+  }
+}
+
+/**
+ * The start of a write of a wallet's backup to its one slot (DSM Amendment
+ * A40; owner, 2026-11-23: "There only should be one backup per phone, per
+ * device"). The slot's address is the route bound to the device's cell lock;
+ * the lock signs the slot, the generation and the digest of every part, so a
+ * member takes a part only when its digest is the one the lock signed. A
+ * member holds one whole backup per slot and at most one being written: a
+ * start with a higher generation replaces the one being written, and the one
+ * being written replaces the whole one once every part is held.
+ *
+ * @generated from message dsm.BackupSlotStartV1
+ */
+export class BackupSlotStartV1 extends Message<BackupSlotStartV1> {
+  /**
+   * @generated from field: bytes route = 1;
+   */
+  route = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes lock_public_key = 2;
+   */
+  lockPublicKey = new Uint8Array(0);
+
+  /**
+   * u64, big-endian
+   *
+   * @generated from field: bytes generation = 3;
+   */
+  generation = new Uint8Array(0);
+
+  /**
+   * 32 bytes per part, in order
+   *
+   * @generated from field: bytes part_digests = 4;
+   */
+  partDigests = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes write_signature = 5;
+   */
+  writeSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<BackupSlotStartV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BackupSlotStartV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "route", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "lock_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "generation", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "part_digests", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "write_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BackupSlotStartV1 {
+    return new BackupSlotStartV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BackupSlotStartV1 {
+    return new BackupSlotStartV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BackupSlotStartV1 {
+    return new BackupSlotStartV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BackupSlotStartV1 | PlainMessage<BackupSlotStartV1> | undefined, b: BackupSlotStartV1 | PlainMessage<BackupSlotStartV1> | undefined): boolean {
+    return proto3.util.equals(BackupSlotStartV1, a, b);
+  }
+}
+
+/**
+ * What a member holds at a backup slot: the whole backup's generation and its
+ * parts' digests (generation 0 and no digests when it holds none), and the
+ * highest generation any start it took named.
+ *
+ * @generated from message dsm.BackupSlotV1
+ */
+export class BackupSlotV1 extends Message<BackupSlotV1> {
+  /**
+   * @generated from field: uint64 generation = 1;
+   */
+  generation = protoInt64.zero;
+
+  /**
+   * 32 bytes per part, in order
+   *
+   * @generated from field: bytes part_digests = 2;
+   */
+  partDigests = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 highest_generation = 3;
+   */
+  highestGeneration = protoInt64.zero;
+
+  constructor(data?: PartialMessage<BackupSlotV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BackupSlotV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "part_digests", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "highest_generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BackupSlotV1 {
+    return new BackupSlotV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BackupSlotV1 {
+    return new BackupSlotV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BackupSlotV1 {
+    return new BackupSlotV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BackupSlotV1 | PlainMessage<BackupSlotV1> | undefined, b: BackupSlotV1 | PlainMessage<BackupSlotV1> | undefined): boolean {
+    return proto3.util.equals(BackupSlotV1, a, b);
   }
 }
 

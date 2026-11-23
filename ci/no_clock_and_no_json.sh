@@ -54,6 +54,7 @@ common_allow_globs=(
   --glob '!**/Cargo.lock'                         # dependency lockfiles may mention banned libs
   --glob '!**/handlers/app_router_impl.rs'        # Bitcoin Core JSON-RPC boundary (external API)
   --glob '!**/handlers/mempool_api.rs'             # mempool.space REST API boundary (external JSON API)
+  --glob '!**/dsm_storage_node/src/push.rs'       # Google STS / IAM / FCM REST boundary (external JSON API): the doorbell push
   --glob '!**/chaos_testing.rs'                   # testing/benchmarks
   --glob '!**/security/wal_transaction_queue.rs'   # WAL encrypted transaction (bincode at-rest, not protocol)
 )
