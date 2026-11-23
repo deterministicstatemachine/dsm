@@ -7,9 +7,27 @@ use primitives::field::F128;
 use std::sync::OnceLock;
 use zkdsl_compiler::{compile, parse_with_replacements};
 
-/// The aggregation guest's zkDSL source.
-pub(super) const GUEST_SOURCE: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guests/lean_ethereum.py"));
+/// The aggregation guest's own zkDSL source.
+const NODE_SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../guests/lean_ethereum.py"));
+
+/// The aggregation guest's zkDSL source: the node's, with the vault step's (`guests/vault_step.py`, research build)
+/// spliced in, its constants after the node's BLAKE3 IV and its functions ahead of the node's `main`. The constants
+/// both programs define (`Y_TOWER`, the IV) are the node's.
+pub(super) fn guest_source() -> &'static str {
+    static SOURCE: OnceLock<String> = OnceLock::new();
+    SOURCE.get_or_init(|| {
+        let vs = vault_step::program::SOURCE;
+        let defs_at = vs.find("\n# ======================================================================== tables").expect("tables");
+        let main_at = vs.find("\n# ================================================================== main").expect("main");
+        let shared = ["from snark_lib", "Y_TOWER =", "B3_IV0 =", "B3_IV1 ="];
+        let consts: String =
+            vs[..defs_at].lines().filter(|l| !shared.iter().any(|s| l.starts_with(s))).map(|l| format!("{l}\n")).collect();
+        let anchor = "B3_IV1 = B3_IV1_PLACEHOLDER\n";
+        let at = NODE_SOURCE.find(anchor).expect("the node's IV") + anchor.len();
+        let main = NODE_SOURCE.find("\ndef main():").expect("the node's main");
+        format!("{}{consts}{}{}\n{}", &NODE_SOURCE[..at], &NODE_SOURCE[at..main], &vs[defs_at..main_at], &NODE_SOURCE[main..])
+    })
+}
 
 /// The aggregation bytecode, compiled to a fixed point on its own size: the one fixed program every node proves, and
 /// whose stacked bytecode every node's bytecode claims are about.
@@ -49,7 +67,7 @@ pub(super) fn compile_guest(kbc: usize) -> CompiledProgram {
         std::fs::write(&path, dump).expect("write DBG_PLACEHOLDERS");
     }
     let guest = compile(
-        &parse_with_replacements(GUEST_SOURCE, &replacements).expect("the repository aggregation guest must parse"),
+        &parse_with_replacements(guest_source(), &replacements).expect("the repository aggregation guest must parse"),
     );
     // `DBG_DISASM=path`: dump the guest's disassembly, to read alongside a
     // `DBG_PROF_DUMP` per-pc profile. Function boundaries lead the dump, so the

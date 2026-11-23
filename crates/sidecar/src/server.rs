@@ -496,6 +496,7 @@ mod tests {
             lean_xmss: vec![(xmss.0, xmss.1)],
             lean_sphincs: vec![(sphincs.0, sphincs.1)],
             da_commitment: Some([5; 32]),
+            vault: None,
         };
         let child = (only.clone(), vec![6, 7, 8]);
         let frame = encode_request(

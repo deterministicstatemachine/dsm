@@ -101,7 +101,7 @@ def value_nibbles(c0, c1, nib):
 def hinted_value(nib):
     # The next 32-byte value of the stream `value`: its two cells, then its nibbles.
     c = StackBuf(2)
-    hint_witness(c, "value")
+    hint_witness(c, "vs_value")
     p, d = value_nibbles(c[0], c[1], nib)
     return c[0], c[1], p, d
 
@@ -109,7 +109,7 @@ def hinted_value(nib):
 def digits(n: Const):
     # The next integer of the stream `digits`, n digits, each range-checked.
     d = HeapBuf(GEN ** n)
-    hint_witness(d[0:n], "digits")
+    hint_witness(d[0:n], "vs_digits")
     for k in unroll(0, n):
         assert log(d[GEN ** k]) < 16
     return d
@@ -272,9 +272,12 @@ def tree_node(bit, c0, c1, s0, s1, mcells):
     return o
 
 
-# ================================================================== main
+# ================================================================== the step
 
-def main():
+# The step's public values as the VS_CELLS cells `out` gets: v, R_prev, R_next (two cells each, the value's
+# little-endian limbs), E, K, then the new generation as one cell (its digits' patterns, `int_limb`) and a 1 marking a
+# step. With `hashed`, out[12], out[13] also get the BLAKE3 statement digest, the standalone program's public input.
+def vs_step(out, hashed: Const):
     nib = nib_table()
     mt = mul_table()
     bt = bit_table()
@@ -308,7 +311,7 @@ def main():
     attempt = digits(16)
     fee = digits(8)
     flags = StackBuf(2)
-    hint_witness(flags, "flags")  # in_is_a, relationship present
+    hint_witness(flags, "vs_flags")  # in_is_a, relationship present
     in_is_a = flags[0]
     present = flags[1]
     assert in_is_a * in_is_a == in_is_a
@@ -544,8 +547,8 @@ def main():
         rb2[GEN ** i] = bt[GEN ** (16 * ((7 - (255 - i) % 8) % 4)) * kd2[GEN ** (2 * ((255 - i) // 8) + (7 - (255 - i) % 8) // 4)]]
     path1 = HeapBuf(512)
     path2 = HeapBuf(512)
-    hint_witness(path1[0:512], "state_path")
-    hint_witness(path2[0:512], "relationship_path")
+    hint_witness(path1[0:512], "vs_state_path")
+    hint_witness(path2[0:512], "vs_relationship_path")
     # Rows of the fold: entry 1 (the state leaf) and entry 2 (the relationship leaf), before and after.
     p1 = HeapBuf(514)
     q1 = HeapBuf(514)
@@ -565,7 +568,7 @@ def main():
     q2[GEN] = l4[1]
     # The keys first differ at depth d: below it each entry folds alone, at it the two subtrees meet, above it
     # one path with shared siblings.
-    gdiv = hint_witness("divergence")
+    gdiv = hint_witness("vs_divergence")
     assert log(gdiv) < 256
     n_a = GEN ** 255 / gdiv
     for xi in mul_range(1, n_a):
@@ -649,7 +652,7 @@ def main():
     blake3(am[0:2], am[2:4], ivc, MD_64_START, at1, x=base_key, y=ab)
     attempt_key = StackBuf(2)
     blake3(zc, zc, at1, MD_1_END, attempt_key, w=ab)
-    is_zero = hint_witness("attempt_is_zero")
+    is_zero = hint_witness("vs_attempt_is_zero")
     assert is_zero * is_zero == is_zero
     a_val = int_limb(attempt, nib, 16)
     assert is_zero * a_val == 0
@@ -657,23 +660,49 @@ def main():
     k0 = attempt_key[0] + is_zero * (base_key[0] + attempt_key[0])
     k1 = attempt_key[1] + is_zero * (base_key[1] + attempt_key[1])
 
-    # ---- the statement: H(stmt || v || R_prev || R_next || u64be(g) || E || K) is the public input ----
-    rnp, rnd = value_nibbles(rn0, rn1, nib)
-    kp, kd = value_nibbles(k0, k1, nib)
-    st = HeapBuf(400)
-    for i in unroll(0, len(TAG_STATEMENT)):
-        st[GEN ** (2 * i)] = const(TAG_STATEMENT[i] % 16)
-        st[GEN ** (2 * i + 1)] = const(TAG_STATEMENT[i] // 16)
-    st[GEN ** 62] = 0
-    st[GEN ** 63] = 0
-    put_value(st, 32, vp)
-    put_value(st, 64, rpp)
-    put_value(st, 96, rnp)
-    put_u64_be(st, 128, generation2, nib)
-    put_value(st, 136, ep)
-    put_value(st, 168, kp)
-    statement = hash_msg(st, 200)
+    # ---- the public values ----
+    out[GEN ** 0] = v0
+    out[GEN ** 1] = v1
+    out[GEN ** 2] = rp0
+    out[GEN ** 3] = rp1
+    out[GEN ** 4] = rn0
+    out[GEN ** 5] = rn1
+    out[GEN ** 6] = e0
+    out[GEN ** 7] = e1
+    out[GEN ** 8] = k0
+    out[GEN ** 9] = k1
+    out[GEN ** 10] = int_limb(generation2, nib, 16)
+    out[GEN ** 11] = 1
+
+    # ---- standalone, the statement: H(stmt || v || R_prev || R_next || u64be(g) || E || K) ----
+    if const(hashed == 1):
+        rnp, rnd = value_nibbles(rn0, rn1, nib)
+        kp, kd = value_nibbles(k0, k1, nib)
+        st = HeapBuf(400)
+        for i in unroll(0, len(TAG_STATEMENT)):
+            st[GEN ** (2 * i)] = const(TAG_STATEMENT[i] % 16)
+            st[GEN ** (2 * i + 1)] = const(TAG_STATEMENT[i] // 16)
+        st[GEN ** 62] = 0
+        st[GEN ** 63] = 0
+        put_value(st, 32, vp)
+        put_value(st, 64, rpp)
+        put_value(st, 96, rnp)
+        put_u64_be(st, 128, generation2, nib)
+        put_value(st, 136, ep)
+        put_value(st, 168, kp)
+        statement = hash_msg(st, 200)
+        out[GEN ** 12] = statement[0]
+        out[GEN ** 13] = statement[1]
+    return
+
+
+# ================================================================== main
+
+def main():
+    # The standalone step: its BLAKE3 statement digest is the public input.
+    out = HeapBuf(14)
+    vs_step(out, 1)
     public = GEN ** 0
-    public[1] = statement[0]
-    public[GEN] = statement[1]
+    public[1] = out[GEN ** 12]
+    public[GEN] = out[GEN ** 13]
     return

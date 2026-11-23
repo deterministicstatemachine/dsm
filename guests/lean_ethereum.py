@@ -389,10 +389,11 @@ FLOCK_POINT_GRIND_BITS = FLOCK_POINT_GRIND_BITS_PLACEHOLDER
 FLOCK_SKIP_GRIND_BITS = FLOCK_SKIP_GRIND_BITS_PLACEHOLDER
 FLOCK_ROUND_GRIND_BITS = FLOCK_ROUND_GRIND_BITS_PLACEHOLDER
 FLOCK_ALPHA_GRIND_BITS = FLOCK_ALPHA_GRIND_BITS_PLACEHOLDER
-# The research bench's BLAKE3 chain (bench_blake3_chain): IV cells and one-block metadata.
+# Research build: a node may prove one SoFi vault step (guests/vault_step.py, spliced in after these). Its statement
+# carries VS_CELLS vault-chain cells (statement.rs `vault_cells`): v, R_first, R_last, E, K, the generation, a 1.
+VS_CELLS = 12
 B3_IV0 = B3_IV0_PLACEHOLDER
 B3_IV1 = B3_IV1_PLACEHOLDER
-B3_MD = B3_MD_PLACEHOLDER
 
 # ------------------------------------------------------ statements and deferral
 # A node defers one claim on the stacked bytecode. DEFER_SIZE is the region one
@@ -4516,7 +4517,7 @@ def verify_sig_lean_sphincs(signer, byte_bits):
 # ========================== statements and the claim lists ==========================
 
 
-def statement_digest(seed_0, seed_1, xd_0, xd_1, sd_0, sd_1, da_0, da_1, defer):
+def statement_digest(seed_0, seed_1, xd_0, xd_1, sd_0, sd_1, da_0, da_1, defer, vault):
     # A node's statement, hashed to the two words the VM publishes, over the
     # proving environment's Fiat-Shamir seed (the proof system's version and this
     # bytecode), the leanXMSS and leanSPHINCS claim-list digests, its DA digest (zeros
@@ -4536,6 +4537,8 @@ def statement_digest(seed_0, seed_1, xd_0, xd_1, sd_0, sd_1, da_0, da_1, defer):
     cells[5] = sd_1
     cells[6] = da_0
     cells[7] = da_1
+    for i in unroll(0, VS_CELLS):
+        cells[8 + i] = vault[GEN ** i]
     for i in unroll(0, DEFER_STMT_CELLS):
         cells[STMT_DEFER_OFF + i] = defer[GEN ** i]
     st = StackBuf(2)
@@ -4967,42 +4970,6 @@ def da_column_offsets(zs):
 # ================================ the aggregation node ==============================
 
 
-# ------------------------------------------------------------ research bench only
-# A stand-in for a vault step's own hashing, for measuring a per-trade node: n chained
-# one-block BLAKE3 compressions, x_(i+1) = blake3(x_i || x_i), from a hinted seed, the last
-# asserted against a hinted digest. Not part of the statement; n = 0 outside the bench.
-
-
-def b3_step(x0, x1):
-    x = StackBuf(2)
-    x[0] = x0
-    x[1] = x1
-    cv = StackBuf(2)
-    cv[0] = B3_IV0
-    cv[1] = B3_IV1
-    y = StackBuf(2)
-    blake3(x, x, cv, B3_MD, y)
-    return y[0], y[1]
-
-
-def bench_blake3_chain():
-    n_g = hint_witness("b3_n")
-    c0 = HeapBuf(n_g * GEN)
-    c1 = HeapBuf(n_g * GEN)
-    ends = StackBuf(4)
-    hint_witness(ends, "b3_ends")  # the seed's two cells, then the expected last
-    assert_gpow(n_g)
-    c0[1] = ends[0]
-    c1[1] = ends[1]
-    for xi in mul_range(1, n_g):
-        y0, y1 = b3_step(c0[xi], c1[xi])
-        c0[xi * GEN] = y0
-        c1[xi * GEN] = y1
-    assert c0[n_g] == ends[2]
-    assert c1[n_g] == ends[3]
-    return
-
-
 def main():
     # One node of an aggregation tree: n_raw_lean_xmss leanXMSS signatures, n_raw_lean_sphincs
     # leanSPHINCS signatures and n_children sub-proofs OF THIS SAME BYTECODE. A claim of
@@ -5063,6 +5030,10 @@ def main():
     child_fresh_size = n_children_g ** DEFER_SIZE
     child_carried_size = n_children_g ** DEFER_STMT_CELLS
     written_size = n_children_g * GEN
+    child_vaults_size = n_children_g ** VS_CELLS
+    child_vaults = HeapBuf(child_vaults_size)
+    own_vault = HeapBuf(VS_CELLS)
+    vs_out = HeapBuf(14)
 
     # ---- the claim lists ----
     g_squares = exponent_tables()
@@ -5156,7 +5127,9 @@ def main():
         hint_witness(carried[0:DEFER_STMT_CELLS], "child_defer")
         child_da = da_digests * xc ** 2
         hint_witness(child_da[0:2], "child_da")
-        pi_0, pi_1 = statement_digest(seed_0, seed_1, cx_0, cx_1, cs_0, cs_1, child_da[1], child_da[GEN], carried)
+        child_vault = child_vaults * xc ** VS_CELLS
+        hint_witness(child_vault[0:VS_CELLS], "child_vault")
+        pi_0, pi_1 = statement_digest(seed_0, seed_1, cx_0, cx_1, cs_0, cs_1, child_da[1], child_da[GEN], carried, child_vault)
         pi = xc * xc
         child_pi[pi] = pi_0
         child_pi[pi * GEN] = pi_1
@@ -5190,8 +5163,35 @@ def main():
     else:
         aggregate_claims(n_children_g, child_pi, child_fresh, child_carried, defer_stmt, g_squares * GEN ** WIN_TAB_AT)
 
-    bench_blake3_chain()
-    own_0, own_1 = statement_digest(seed_0, seed_1, xd_0, xd_1, sd_0, sd_1, da[1], da[GEN], defer_stmt)
+    # ---- research build: the vault step ----
+    # With a step, the node's chain is the step's, extending its first child's chain when it says so: that child's
+    # chain must be this vault's and end at this step's R_prev, and the node then publishes that chain's first root.
+    vs_on = hint_witness("vs_on")
+    assert vs_on * vs_on == vs_on
+    if vs_on == 1:
+        vs_step(vs_out, 0)
+        for i in unroll(0, VS_CELLS):
+            if const(i // 2 != 1):
+                own_vault[GEN ** i] = vs_out[GEN ** i]
+        chained = hint_witness("vs_chained")
+        assert chained * chained == chained
+        if chained == 1:
+            assert n_children_g != 1
+            prev = child_vaults  # the first child's cells
+            assert prev[GEN ** 11] == 1
+            assert prev[GEN ** 0] == vs_out[GEN ** 0]
+            assert prev[GEN ** 1] == vs_out[GEN ** 1]
+            assert prev[GEN ** 4] == vs_out[GEN ** 2]
+            assert prev[GEN ** 5] == vs_out[GEN ** 3]
+            own_vault[GEN ** 2] = prev[GEN ** 2]
+            own_vault[GEN ** 3] = prev[GEN ** 3]
+        else:
+            own_vault[GEN ** 2] = vs_out[GEN ** 2]
+            own_vault[GEN ** 3] = vs_out[GEN ** 3]
+    else:
+        for i in unroll(0, VS_CELLS):
+            own_vault[GEN ** i] = 0
+    own_0, own_1 = statement_digest(seed_0, seed_1, xd_0, xd_1, sd_0, sd_1, da[1], da[GEN], defer_stmt, own_vault)
     pub_ptr = GEN ** 0
     assert pub_ptr[1] == own_0
     assert pub_ptr[GEN] == own_1

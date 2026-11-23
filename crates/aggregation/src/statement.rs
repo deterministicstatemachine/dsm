@@ -60,7 +60,28 @@ pub(super) fn lean_sphincs_claim_cells((pk, message): &LeanSphincsClaim) -> [F12
 /// Fed to the guest as `STMT_HEADER`, which pins where its deferred cells start;
 /// the header cells themselves are written out again there, and only the
 /// end-to-end statement check holds the two spellings together.
-pub(super) const STATEMENT_HEADER: usize = 8;
+pub(super) const STATEMENT_HEADER: usize = 8 + VAULT_CELLS;
+
+/// Research build: the vault chain's cells in the statement header, after the DA digest: the vault, the first and
+/// last roots, the external commitment and the attempt key (two cells each, a value's little-endian limbs), the
+/// generation as one cell (`vault_step.py`'s `int_limb` of its digits), and 1 marking a chain; zeros for none.
+pub(super) const VAULT_CELLS: usize = 12;
+
+pub(super) fn vault_cells(vault: &Option<claims::VaultChain>) -> Vec<F128> {
+    let Some(v) = vault else {
+        return vec![F128::from(0u128); VAULT_CELLS];
+    };
+    use vault_step::program::cells;
+    let generation = (0..16).fold(F128::from(0u128), |acc, k| {
+        let digit = (v.generation >> (4 * k)) & 15;
+        acc + F128::from(u128::from(digit)) * F128::from(primitives::field::g_pow(4 * k))
+    });
+    [cells(&v.vault_id), cells(&v.r_first), cells(&v.r_last), cells(&v.external_commitment), cells(&v.attempt_key)]
+        .into_iter()
+        .flatten()
+        .chain([generation, F128::from(1u128)])
+        .collect()
+}
 
 /// A plain hash over cells: what the guest gets from `keccak_cells` over the same cells.
 fn cell_hash(cells: impl IntoIterator<Item = F128>) -> [F128; 2] {
@@ -79,11 +100,11 @@ fn cell_hash(cells: impl IntoIterator<Item = F128>) -> [F128; 2] {
 /// deferred cells, each hashed as its two lanes. Each claim list's digest binds its
 /// own length through the hash's padding, so the pair binds both lists whole.
 pub(super) fn statement_digest(claims: &AggregateClaims, defer: &DeferredClaim) -> [F128; 2] {
-    let header: [[F128; 2]; STATEMENT_HEADER / 2] = [
+    let header: [[F128; 2]; 4] = [
         fs_seed(),
         claim_list_digest(claims.lean_xmss.iter().map(lean_xmss_claim_cells)),
         claim_list_digest(claims.lean_sphincs.iter().map(lean_sphincs_claim_cells)),
         hash_to_scalars(&verifier::da::digest(claims.da_commitment)),
     ];
-    cell_hash(header.into_iter().flatten().chain(defer.cells()))
+    cell_hash(header.into_iter().flatten().chain(vault_cells(&claims.vault)).chain(defer.cells()))
 }

@@ -214,7 +214,11 @@ pub(super) fn placeholder_map(kbc: usize) -> BTreeMap<String, String> {
     bytecode_placeholders(&mut ph, &sides, kbc);
     da_placeholders(&mut ph);
     signature_placeholders(&mut ph);
-    ph.0
+    let mut map = ph.0;
+    for (k, v) in vault_step::program::placeholders() {
+        map.entry(k).or_insert(v);
+    }
+    map
 }
 
 /// The placeholders that do not depend on the bytecode: copies of the protocol's, the schemes' and this crate's
@@ -259,10 +263,9 @@ fn constants(ph: &mut Placeholders) {
         ("MATRIX_VARS", &super::deferred::MATRIX_VARS),
         ("MAT_LAM_GRIND_BITS", &super::deferred::MAT_LAM_GRIND_BITS),
         ("MAT_LAM_WORDS", &nonces(super::deferred::MAT_LAM_GRIND_BITS)),
-        // The research bench's BLAKE3 chain (`bench_blake3_chain`).
+        // The vault step's BLAKE3 IV (research build).
         ("B3_IV0", &super::node::b3_cells(&verifier::blake3::IV)[0]),
         ("B3_IV1", &super::node::b3_cells(&verifier::blake3::IV)[1]),
-        ("B3_MD", &F128::new(0, verifier::blake3::limb(64, 1 | 2 | 8))),
         // Buffer caps and memory bounds.
         ("STREAM_CAP", &STREAM_CAP),
         ("QW", &QUERY_WINDOW_BITS),

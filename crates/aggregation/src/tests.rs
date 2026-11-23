@@ -1,7 +1,7 @@
 use super::cells::{count, pack_16_bytes};
 use super::deferred::{DeferredBytecodeClaim, bytecode_sums, bytecode_value, bytecode_vars};
 use super::error::AggregateError;
-use super::guest::{GUEST_SOURCE, compile_guest, unified_guest};
+use super::guest::{compile_guest, guest_source, unified_guest};
 use super::hints::{FORGE, Forgery, Hints};
 use super::placeholders::placeholder_map;
 use super::proof::{AggregateProof, decode, encode};
@@ -92,7 +92,7 @@ fn assert_forgery_rejected(
 
 /// The guest's helpers under a `main` of their own, compiled at the bytecode size `2^kbc`.
 fn guest_snippet(main: &str, kbc: usize) -> Program {
-    let (helpers, _) = GUEST_SOURCE.split_once("\ndef main():").unwrap();
+    let (helpers, _) = guest_source().split_once("\ndef main():").unwrap();
     let source = format!("{helpers}\ndef main():\n{main}");
     Program::from(compile(
         &parse_with_replacements(&source, &placeholder_map(kbc)).unwrap(),
@@ -470,6 +470,7 @@ fn a_node_passes_on_one_childs_da_root() {
             lean_xmss: children[0].0.lean_xmss.clone(),
             lean_sphincs: vec![],
             da_commitment,
+            vault: None,
         });
         let node = aggregate(
             &children,
@@ -860,24 +861,98 @@ fn malformed_raw_signatures_are_errors() {
     }
 }
 
-/// Measurement, not a check (research build): one per-trade node, a child of 16 leanXMSS signatures verified in the
-/// VM plus `VAULT_B3` chained BLAKE3 compressions (the vault step's hashing stand-in), at rate 1/2. The whole
-/// `aggregate` call timed, median of three; one native verify; the proof's bytes; the process's peak memory.
+/// Research build: one node per vault step, each verifying the node before it in the VM. A node of steps
+/// `steps[..k]` of one vault, the first node without children.
+fn vault_nodes(steps: &[vault_step::fixture::Fixture]) -> Vec<(AggregateClaims, AggregateProof, isa::Stats)> {
+    let mut nodes: Vec<(AggregateClaims, AggregateProof, isa::Stats)> = Vec::new();
+    for f in steps {
+        let children: Vec<_> = nodes.last().map(|(c, p, _)| (c.clone(), p.clone())).into_iter().collect();
+        let step = VaultStep {
+            witness: f.witness.clone(),
+            r_prev: f.r_prev,
+        };
+        nodes.push(
+            aggregate_with_vault::<StableProver>(&children, vec![], vec![], None, OutputClaims::All, 1, Some(&step))
+                .expect("a vault node"),
+        );
+    }
+    nodes
+}
+
+/// Research build: a chain of vault-step nodes publishes the chain's first root and its last, verifies, and a node
+/// whose step does not extend its child's chain, or belongs to another vault, does not prove.
+#[test]
+fn vault_steps_chain() {
+    StableProver::init();
+    let steps = vault_step::fixture::chain(11, 3);
+    let nodes = vault_nodes(&steps);
+    for (i, (claims, proof, _)) in nodes.iter().enumerate() {
+        let chain = claims.vault.expect("a vault chain");
+        assert_eq!(chain.r_first, steps[0].r_prev, "node {i} carries the first root");
+        assert_eq!(chain.r_last, steps[i].public.r_next, "node {i} ends at its step's root");
+        assert_eq!(chain.generation, steps[i].public.generation);
+        assert!(proof.verify(claims), "node {i} verifies");
+        // Its statement binds the chain: any other chain is refused.
+        for forge in [
+            |c: &mut VaultChain| c.r_first[0] ^= 1,
+            |c: &mut VaultChain| c.r_last[31] ^= 1,
+            |c: &mut VaultChain| c.generation += 1,
+            |c: &mut VaultChain| c.vault_id[5] ^= 1,
+        ] {
+            let mut other = claims.clone();
+            forge(other.vault.as_mut().unwrap());
+            assert!(!proof.verify(&other), "node {i} verified another chain");
+        }
+        let mut none = claims.clone();
+        none.vault = None;
+        assert!(!proof.verify(&none), "node {i} verified without its chain");
+    }
+    // Step 2 straight onto the node of step 0: its R_prev is not that chain's last root.
+    let child = (nodes[0].0.clone(), nodes[0].1.clone());
+    let skip = VaultStep {
+        witness: steps[2].witness.clone(),
+        r_prev: steps[2].r_prev,
+    };
+    let err = aggregate_with_vault::<StableProver>(&[child.clone()], vec![], vec![], None, OutputClaims::All, 1, Some(&skip));
+    assert_eq!(err.err(), Some(AggregateError::ProvingFailed), "a step that skips one");
+    // Another vault's step onto this chain.
+    let other = vault_step::fixture::chain(12, 1);
+    let foreign = VaultStep {
+        witness: other[0].witness.clone(),
+        r_prev: other[0].r_prev,
+    };
+    let err = aggregate_with_vault::<StableProver>(&[child], vec![], vec![], None, OutputClaims::All, 1, Some(&foreign));
+    assert_eq!(err.err(), Some(AggregateError::ProvingFailed), "another vault's step");
+}
+
+/// Measurement, not a check (research build): the per-trade node, one vault step proven in the VM plus the node of
+/// the step before verified in the VM, at rate 1/2. The whole `aggregate_with_vault` call timed, median of three; one
+/// native verify; the proof's bytes; the process's peak memory.
 #[test]
 #[ignore = "benchmark"]
 fn vault_bench() {
     StableProver::init();
-    let signers = get_signers::<StableProver>(16);
-    let (child_claims, child_proof, _) =
-        super::aggregate::<StableProver>(&[], signers, vec![], None, OutputClaims::All, 1).expect("child");
-    assert!(child_proof.verify(&child_claims));
-    let child = (child_claims, child_proof);
+    let steps = vault_step::fixture::chain(11, 2);
+    let nodes = vault_nodes(&steps[..1]);
+    let child = (nodes[0].0.clone(), nodes[0].1.clone());
+    let step = VaultStep {
+        witness: steps[1].witness.clone(),
+        r_prev: steps[1].r_prev,
+    };
     let mut times = Vec::new();
     let mut last = None;
     for _ in 0..3 {
         let t = std::time::Instant::now();
-        let out = super::aggregate::<StableProver>(std::slice::from_ref(&child), vec![], vec![], None, OutputClaims::All, 1)
-            .expect("node");
+        let out = aggregate_with_vault::<StableProver>(
+            std::slice::from_ref(&child),
+            vec![],
+            vec![],
+            None,
+            OutputClaims::All,
+            1,
+            Some(&step),
+        )
+        .expect("node");
         times.push(t.elapsed().as_secs_f64() * 1e3);
         last = Some(out);
     }
@@ -891,8 +966,7 @@ fn vault_bench() {
         .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM:")).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")))
         .unwrap_or_default();
     println!(
-        "VAULT b3={} cycles={} blake3_rows={} keccak_rows={} prove_median_ms={:.1} verify_ms={verify_ms:.2} proof_kib={:.1} {hwm}",
-        std::env::var("VAULT_B3").unwrap_or_else(|_| "0".into()),
+        "VAULT-NODE cycles={} blake3_rows={} keccak_rows={} prove_median_ms={:.1} verify_ms={verify_ms:.2} proof_kib={:.1} {hwm}",
         stats.cycles,
         stats.table_heights[verifier::layout::OP_BLAKE3],
         stats.table_heights[verifier::layout::OP_KECCAK],

@@ -54,10 +54,10 @@ mod statement;
 #[cfg(test)]
 mod tests;
 
-pub use claims::{AggregateClaims, LeanSphincsClaim, LeanXmssClaim, OutputClaims};
+pub use claims::{AggregateClaims, LeanSphincsClaim, LeanXmssClaim, OutputClaims, VaultChain};
 pub use error::AggregateError;
 pub use guest::unified_guest;
-pub use node::aggregate;
+pub use node::{VaultStep, aggregate, aggregate_with_vault};
 pub use proof::AggregateProof;
 
 /// The maximum number of child proofs one [`aggregate`] call can take.

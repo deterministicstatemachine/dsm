@@ -13,7 +13,7 @@ use super::guest::{fs_seed, unified_guest};
 use super::hints::FORGE;
 use super::hints::{Hints, lean_sphincs_hints, lean_xmss_hints};
 use super::proof::{AggregateProof, is_sorted};
-use super::statement::{lean_sphincs_claim_cells, lean_xmss_claim_cells, list_split, statement_digest};
+use super::statement::{lean_sphincs_claim_cells, lean_xmss_claim_cells, list_split, statement_digest, vault_cells};
 use super::{AggregateClaims, MAX_LOG_INV_RATE, MAX_RECURSIONS, MIN_LOG_INV_RATE, OutputClaims};
 use fiat_shamir_prover::merkle::hash_to_scalars;
 use isa::{Prover, Stats};
@@ -42,11 +42,34 @@ use std::sync::{Mutex, PoisonError};
 /// - Call [`P::init`](Prover::init) once before the first.
 pub fn aggregate<P: Prover>(
     children: &[(AggregateClaims, AggregateProof)],
+    raw_lean_xmss: Vec<(LeanXmssPublicKey, lean_xmss::Message, LeanXmssSignature)>,
+    raw_lean_sphincs: Vec<(LeanSphincsPublicKey, lean_sphincs::Message, LeanSphincsSignature)>,
+    blobs: Option<&lean_da::BlobMatrix>,
+    output: OutputClaims,
+    log_inv_rate: usize,
+) -> Result<(AggregateClaims, AggregateProof, Stats), AggregateError> {
+    aggregate_with_vault::<P>(children, raw_lean_xmss, raw_lean_sphincs, blobs, output, log_inv_rate, None)
+}
+
+/// Research build: one SoFi vault step a node proves, from the tree root `r_prev`.
+///
+/// When the node's first child carries a vault chain, the step extends it: the guest checks the child's vault is
+/// this step's and its last root is this step's `R_prev`, and the node publishes the child's first root. Otherwise
+/// the node's chain starts at this step. A step that does not extend its child's chain fails to prove.
+pub struct VaultStep {
+    pub witness: vault_step::reference::StepWitness,
+    pub r_prev: [u8; 32],
+}
+
+/// [`aggregate`], and, with `vault`, one vault step proven in the same node (research build).
+pub fn aggregate_with_vault<P: Prover>(
+    children: &[(AggregateClaims, AggregateProof)],
     mut raw_lean_xmss: Vec<(LeanXmssPublicKey, lean_xmss::Message, LeanXmssSignature)>,
     mut raw_lean_sphincs: Vec<(LeanSphincsPublicKey, lean_sphincs::Message, LeanSphincsSignature)>,
     blobs: Option<&lean_da::BlobMatrix>,
     output: OutputClaims,
     log_inv_rate: usize,
+    vault: Option<&VaultStep>,
 ) -> Result<(AggregateClaims, AggregateProof, Stats), AggregateError> {
     // Two proofs at once would share the pool and hold both proofs' memory.
     static PROVING: Mutex<()> = Mutex::new(());
@@ -92,7 +115,7 @@ pub fn aggregate<P: Prover>(
     let raw_lean_xmss_claims = sorted_claims(&mut raw_lean_xmss);
     let raw_lean_sphincs_claims = sorted_claims(&mut raw_lean_sphincs);
     let cover = plan_coverage(&raw_lean_xmss_claims, &raw_lean_sphincs_claims, children, declare)?;
-    if cover.lean_xmss.signers.is_empty() && cover.lean_sphincs.signers.is_empty() && da_root.is_none() {
+    if cover.lean_xmss.signers.is_empty() && cover.lean_sphincs.signers.is_empty() && da_root.is_none() && vault.is_none() {
         return Err(AggregateError::InvalidInput("nothing to publish"));
     }
 
@@ -231,6 +254,7 @@ pub fn aggregate<P: Prover>(
         hints.push("flock_matrix", vec![from_scalar(summaries[i].flock.matrix)]);
         let child_da = verifier::da::digest(claims.da_commitment);
         hints.push("child_da", hash_to_scalars(&child_da).to_vec());
+        hints.push("child_vault", vault_cells(&claims.vault));
         hints.extend(verified?);
     }
     drop(_span);
@@ -279,23 +303,41 @@ pub fn aggregate<P: Prover>(
         }
     }
     hints.push("da_pick", vec![count(da_pick)]);
-    // Research bench only: `VAULT_B3` chained one-block BLAKE3 compressions, a stand-in for a vault step's hashing.
-    let n_b3: usize = std::env::var("VAULT_B3").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let seed: [u32; 8] = std::array::from_fn(|i| 0x0101_0101u32.wrapping_mul(i as u32 + 7));
-    let mut x = seed;
-    for _ in 0..n_b3 {
-        let mut block = [0u32; 16];
-        block[..8].copy_from_slice(&x);
-        block[8..].copy_from_slice(&x);
-        x = verifier::blake3::compress(&verifier::blake3::IV, &block, 0, 64, 1 | 2 | 8);
-    }
-    hints.push("b3_n", vec![count(n_b3)]);
-    hints.push("b3_ends", [b3_cells(&seed), b3_cells(&x)].concat());
+    // Research build: the vault step, extending the first child's chain when it carries one.
+    let bit = |b: bool| F128::from(u128::from(b));
+    let vault_chain = match vault {
+        None => {
+            hints.push("vs_on", vec![bit(false)]);
+            None
+        }
+        Some(VaultStep { witness, r_prev }) => {
+            hints.push("vs_on", vec![bit(true)]);
+            let public = vault_step::reference::step(witness, r_prev)
+                .map_err(|_| AggregateError::InvalidInput("the vault step is not a valid step"))?;
+            let (streams, _) = vault_step::program::hints(witness, r_prev, &public);
+            for (name, entries) in streams {
+                for entry in entries {
+                    hints.push(&name, entry);
+                }
+            }
+            let prev = children.first().and_then(|(claims, _)| claims.vault);
+            hints.push("vs_chained", vec![bit(prev.is_some())]);
+            Some(claims::VaultChain {
+                vault_id: public.vault_id,
+                r_first: prev.map_or(public.r_prev, |p| p.r_first),
+                r_last: public.r_next,
+                generation: public.generation,
+                external_commitment: public.external_commitment,
+                attempt_key: public.attempt_key,
+            })
+        }
+    };
 
     let claims = AggregateClaims {
         lean_xmss: cover.lean_xmss.signers,
         lean_sphincs: cover.lean_sphincs.signers,
         da_commitment: da_root,
+        vault: vault_chain,
     };
     #[cfg(test)]
     if let Some(forge) = FORGE.with(|forge| forge.borrow_mut().take()) {

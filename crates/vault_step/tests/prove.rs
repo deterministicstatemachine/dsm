@@ -160,14 +160,14 @@ fn invalid_steps_are_refused() {
 
     // 8: the wrong level for where the two keys part.
     let (mut witness, public) = hints(w, &f.r_prev, &f.public);
-    let d = stream(&mut witness, "divergence");
+    let d = stream(&mut witness, "vs_divergence");
     let e = (0..256).find(|&e| d[0][0] == gp(e)).unwrap();
     d[0][0] = gp(e + 1);
     refused(&p, "divergence level", &witness, public);
 
     // A digit out of range (17 for 1, the next digit one less: the same value in a wider alphabet).
     let (mut witness, public) = hints(w, &f.r_prev, &f.public);
-    let amount_in = &mut stream(&mut witness, "digits")[4];
+    let amount_in = &mut stream(&mut witness, "vs_digits")[4];
     let d0 = (0..16).find(|&e| amount_in[0] == gp(e)).unwrap();
     let d1 = (0..16).find(|&e| amount_in[1] == gp(e)).unwrap();
     if d1 > 0 {
@@ -178,13 +178,13 @@ fn invalid_steps_are_refused() {
 
     // The price's remainder, one past the divisor.
     let (mut witness, public) = hints(w, &f.r_prev, &f.public);
-    let digits = stream(&mut witness, "digits");
+    let digits = stream(&mut witness, "vs_digits");
     digits[11] = digits[11].iter().map(|_| gp(15)).collect();
     refused(&p, "remainder slack", &witness, public);
 
     // 2: a token gap that does not take token_a to token_b.
     let (mut witness, public) = hints(w, &f.r_prev, &f.public);
-    let digits = stream(&mut witness, "digits");
+    let digits = stream(&mut witness, "vs_digits");
     digits[8][5] = if digits[8][5] == gp(0) { gp(1) } else { gp(0) };
     refused(&p, "token gap", &witness, public);
 
@@ -193,12 +193,12 @@ fn invalid_steps_are_refused() {
     let mut first = f5.public.clone();
     first.attempt_key = successor_base_key(&f5.witness.vault_id, &f5.r_prev);
     let (mut witness, _) = hints(&f5.witness, &f5.r_prev, &f5.public);
-    stream(&mut witness, "attempt_is_zero")[0][0] = F128::from(1u128);
+    stream(&mut witness, "vs_attempt_is_zero")[0][0] = F128::from(1u128);
     refused(&p, "attempt 5 as attempt 0", &witness, cells(&first.digest()));
 
     // 9: attempt 0 claimed as a non-first attempt (the zero flag cleared).
     let (mut witness, _) = hints(w, &f.r_prev, &f.public);
-    stream(&mut witness, "attempt_is_zero")[0][0] = F128::from(0u128);
+    stream(&mut witness, "vs_attempt_is_zero")[0][0] = F128::from(0u128);
     let mut later = f.public.clone();
     let base = successor_base_key(&w.vault_id, &f.r_prev);
     later.attempt_key = h(TAG_SUCC_ATTEMPT, &[&base, &0u64.to_be_bytes()]);

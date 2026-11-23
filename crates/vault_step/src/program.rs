@@ -126,7 +126,7 @@ pub fn hints(w: &StepWitness, r_prev: &D32, public: &StepPublic) -> (Witness, [F
         ("token_b", &w.token_b),
     ] {
         let _ = name;
-        put("value", cells(value).to_vec());
+        put("vs_value", cells(value).to_vec());
     }
     let s = &w.state;
     for (name, v) in [
@@ -139,14 +139,14 @@ pub fn hints(w: &StepWitness, r_prev: &D32, public: &StepPublic) -> (Witness, [F
         ("attempt", w.attempt),
     ] {
         let _ = name;
-        put("digits", digits_u128(u128::from(v), 16));
+        put("vs_digits", digits_u128(u128::from(v), 16));
     }
-    put("digits", digits_u128(u128::from(w.fee_bps), 8));
+    put("vs_digits", digits_u128(u128::from(w.fee_bps), 8));
     let bit = |b: bool| F128::from(u128::from(b));
-    put("flags", vec![bit(w.hop.in_is_a), bit(w.relationship_present)]);
-    put("digits", digits_be256(&gap_be(&w.token_a, &w.token_b)));
+    put("vs_flags", vec![bit(w.hop.in_is_a), bit(w.relationship_present)]);
+    put("vs_digits", digits_be256(&gap_be(&w.token_a, &w.token_b)));
     let fee_c = BPS_DENOMINATOR - w.fee_bps;
-    put("digits", digits_u128(u128::from(fee_c), 4));
+    put("vs_digits", digits_u128(u128::from(fee_c), 4));
     let (r_in, r_out) = if w.hop.in_is_a {
         (s.reserve_a, s.reserve_b)
     } else {
@@ -156,19 +156,19 @@ pub fn hints(w: &StepWitness, r_prev: &D32, public: &StepPublic) -> (Witness, [F
     let den = u128::from(r_in) * u128::from(BPS_DENOMINATOR) + after_fee;
     let num = u128::from(r_out) * after_fee;
     let rem = num % den;
-    put("digits", digits_u128(rem, 21));
-    put("digits", digits_u128(den - rem - 1, 21));
-    put("digits", digits_u128(u128::from(r_out - w.hop.amount_out), 16));
+    put("vs_digits", digits_u128(rem, 21));
+    put("vs_digits", digits_u128(den - rem - 1, 21));
+    put("vs_digits", digits_u128(u128::from(r_out - w.hop.amount_out), 16));
     let path = |p: &[D32]| p.iter().flat_map(cells).collect::<Vec<_>>();
-    put("state_path", path(&w.state_path));
-    put("relationship_path", path(&w.relationship_path));
+    put("vs_state_path", path(&w.state_path));
+    put("vs_relationship_path", path(&w.relationship_path));
     let state_key = vault_state_key(&w.vault_id);
     let rel_key = relationship_key(&w.trader_genesis, &w.trader_device_id, &w.vault_id);
     let d = (0..HEIGHT)
         .find(|&b| get_bit(&state_key, b) != get_bit(&rel_key, b))
         .expect("distinct keys");
-    put("divergence", vec![gp(d as u64)]);
-    put("attempt_is_zero", vec![bit(w.attempt == 0)]);
+    put("vs_divergence", vec![gp(d as u64)]);
+    put("vs_attempt_is_zero", vec![bit(w.attempt == 0)]);
     let witness = streams.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
     (witness, cells(&public.digest()))
 }

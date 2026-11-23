@@ -24,6 +24,8 @@ flock = { path = "../stable_prover/flock" }
 primitives = { package = "stable_primitives", path = "../stable_prover/primitives" }
 rand = { workspace = true, optional = true }
 tracing.workspace = true
+# Research build: the SoFi vault step a node may prove.
+vault_step = { path = "../vault_step" }
 
 [features]
 # `signers_cache`: cached benchmark signers, for tests and the CLI.

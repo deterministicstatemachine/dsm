@@ -22,6 +22,22 @@ pub struct AggregateClaims {
     pub lean_sphincs: Vec<LeanSphincsClaim>,
     /// `None` for no blobs.
     pub da_commitment: Option<[u8; 32]>,
+    /// Research build: the vault chain this node's step extends, `None` for a node without a vault step. Not in the
+    /// byte form.
+    pub vault: Option<VaultChain>,
+}
+
+/// Research build: a run of consecutive steps of one SoFi vault, as a reader sees it: the vault, the tree root the
+/// run starts from and the one it ends at, the last step's new generation, its external commitment and its attempt
+/// key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VaultChain {
+    pub vault_id: [u8; 32],
+    pub r_first: [u8; 32],
+    pub r_last: [u8; 32],
+    pub generation: u64,
+    pub external_commitment: [u8; 32],
+    pub attempt_key: [u8; 32],
 }
 
 /// Which covered claims an aggregation proves.
@@ -93,6 +109,7 @@ impl AggregateClaims {
             lean_xmss,
             lean_sphincs,
             da_commitment,
+            vault: None,
         })
     }
 }
