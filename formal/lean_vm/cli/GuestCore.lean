@@ -108,6 +108,7 @@ def pAtom : Atom → String
   | .rangeCheck x y t1 t2 k => s!".rangeCheck {pV x} {pV y} {pV t1} {pV t2} {pV k}"
   | .assertInK a b => s!".assertInK {pV a} {pV b}"
   | .keccak ins outs inOdd outOdd => s!".keccak {pVs ins} {pVs outs} {inOdd} {outOdd}"
+  | .blake3 ins outs => s!".blake3 {pVs ins} {pVs outs}"
   | .frameAddr p run => s!".frameAddr {pV p} {pVs run}"
   | .hint h => s!".hint {pHint h}"
   | .touch t p => s!".touch {pV t} {pV p}"

@@ -59,6 +59,7 @@ def Atom.rename (r : V → V) : Atom → Atom
   | .rangeCheck x y t1 t2 k => .rangeCheck (r x) (r y) (r t1) (r t2) (r k)
   | .assertInK a b => .assertInK (r a) (r b)
   | .keccak ins outs inOdd outOdd => .keccak (ins.map r) (outs.map r) inOdd outOdd
+  | .blake3 ins outs => .blake3 (ins.map r) (outs.map r)
   | .frameAddr p run => .frameAddr (r p) (run.map r)
   | .hint h => .hint (h.rename r)
   | .touch t p => .touch (r t) (r p)
@@ -166,6 +167,7 @@ def Atom.vals : Atom → List V
   | .assertNe x inv p => [x, inv, p]
   | .rangeCheck x y t1 t2 k => [x, y, t1, t2, k]
   | .keccak ins outs _ _ => ins ++ outs
+  | .blake3 ins outs => ins ++ outs
   | .frameAddr p run => p :: run
   | .hint h => h.vals
   | .touch t p => [t, p]

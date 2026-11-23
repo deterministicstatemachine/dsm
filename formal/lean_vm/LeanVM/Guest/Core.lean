@@ -151,6 +151,12 @@ inductive Atom where
   (`LeanVM.Guest.keccakOuts`). An atom with `ins` not thirteen long, or `outs` not one, two or
   thirteen long, holds of no valuation. -/
   | keccak (ins outs : List V) (inOdd outOdd : Bool)
+  /-- `BLAKE3`, one instruction (research build): the thirteen values `ins` are the cells it reads,
+  in `blake3InputCellOffset`'s order (`m0, m1, m2, m3`, the chaining value's two, the metadata,
+  `X`'s, `Y`'s and `W`'s two), and the two values `outs` the output's two cells, holding the new
+  chaining value (`Blake3CellsRelation`, `Op::Blake3`). An atom with `ins` not thirteen long, or
+  `outs` not two long, holds of no valuation. -/
+  | blake3 (ins outs : List V)
   /-- `addr(run)`: `p` is the address of the frame run. -/
   | frameAddr (p : V) (run : List V)
   /-- A hint. -/
@@ -226,6 +232,8 @@ def Atom.Holds (rd : Reader) (σ : Val) : Atom → Prop
   | .keccak ins outs inOdd outOdd =>
       ins.length = 13 ∧ ∃ outCells : KeccakOutputCells, outs.length = outCells.cellCount ∧
         KeccakCellsRelation (cells13 (ins.map σ)) inOdd (cells13 (outs.map σ)) outOdd outCells
+  | .blake3 ins outs =>
+      ins.length = 13 ∧ outs.length = 2 ∧ Blake3CellsRelation (cells13 (ins.map σ)) (cells13 (outs.map σ))
   | .frameAddr p run =>
       IsInK (σ p) ∧ ∀ (k : Nat) (hk : k < run.length) (w : E),
         rd ((σ p).limb 0 * addressOfIndex k) = some w → w = σ run[k]

@@ -1637,6 +1637,9 @@ def lowerBuiltin : Nat → String → List Expr → M Bool
     | "keccak_cells" => do
         lowerKeccakCells n args
         return true
+    | "blake3" => do
+        lowerBlake3 n args
+        return true
     | "assert_in_k" => do
         let [a0, a1] := args | fail "assert_in_k(a, b) takes two scalar cells"
         let a ← expr n a0
@@ -1768,6 +1771,38 @@ def lowerKeccak : Nat → List Expr → M Unit
     let out ← keccakOut n (args.getD 2 default)
     emitKeccakMessage cells (some len) none out.state padded
     keccakFinish out
+
+/-- `blake3(a, b, cv, md, out, x=, y=, w=)` (`lower_blake3`, research build): one `BLAKE3`. `a`,
+`b`, `cv`, `out` and the optional `x`, `y`, `w` are two-cell `StackBuf` runs, the message block
+`a ‖ b`; `md` a value, the chunk counter, block length and flags. An omitted input is two zero
+cells, the padding run's window from `1` (`keccak_pad_run() + 1`). The Rust's order: the runs,
+then `md`, then the padding run. -/
+def lowerBlake3 : Nat → List Expr → M Unit
+  | 0, _ => fail "expansion fuel exhausted"
+  | n + 1, args => do
+    let kwargs ← keccakKwargs args "blake3" ["a", "b", "cv", "md", "out"] ["x", "y", "w"]
+    let run := fun (e : Expr) (what : String) => do
+      match ← tryCellRun n e with
+      | some (.stack cs) =>
+          if cs.length == 2 then pure cs
+          else fail s!"blake3's `{what}` must be a two-cell StackBuf run"
+      | _ => fail s!"blake3's `{what}` must be a two-cell StackBuf run"
+    let a ← run (args.getD 0 default) "a"
+    let b ← run (args.getD 1 default) "b"
+    let cv ← run (args.getD 2 default) "cv"
+    let out ← run (args.getD 4 default) "out"
+    let opt := fun (k : String) => do
+      match kwGet kwargs k with
+      | some e => return some (← run e k)
+      | none => return none
+    let x ← opt "x"
+    let y ← opt "y"
+    let w ← opt "w"
+    let md ← expr n (args.getD 3 default)
+    let zero ← if x.isNone || y.isNone || w.isNone then
+        pure (((← keccakPadRun).drop 1).take 2)
+      else pure []
+    emitAtom (.blake3 (a ++ b ++ cv ++ [md] ++ x.getD zero ++ y.getD zero ++ w.getD zero) out)
 
 /-- `keccak_cells(cells, out, state=, len=, final=)` (`lower_keccak_cells`): the Keccak-256 of the
 first `len` bytes the cells hold, 136 bytes a `KECCAK`, continuing the 13-cell `state` if given;

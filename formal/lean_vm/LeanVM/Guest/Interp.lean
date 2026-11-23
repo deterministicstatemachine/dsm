@@ -272,6 +272,12 @@ def execAtom (fr : Nat) : Atom → IM Unit
       let xs ← ins.mapM (needV fr)
       let out := keccakF1600 (stateOfCells (fun c => xs.getD c.val 0) inOdd)
       ((List.finRange 13).zip outs).forM fun (c, v) => setV fr v (cellsOfState out outOdd c)
+  | .blake3 ins outs => do
+      if ins.length != 13 || outs.length != 2 then
+        throw "a BLAKE3 atom not of thirteen cells read and two written"
+      let xs ← ins.mapM (needV fr)
+      let h := Blake3.compressCells (fun c => xs.getD c.val 0)
+      (outs.zipIdx).forM fun (v, k) => setV fr v (Blake3.chainCell h k)
   | .frameAddr p run => do
       let p' ← alloc run.length
       setV fr p p'
@@ -440,6 +446,7 @@ def showAtom : Atom → String
   | .keccak ins outs inOdd outOdd =>
       let layout := fun (odd : Bool) => if odd then "odd" else "even"
       s!"[{showVs outs}] {layout outOdd} = keccak_f([{showVs ins}] {layout inOdd})"
+  | .blake3 ins outs => s!"[{showVs outs}] = blake3([{showVs ins}])"
   | .frameAddr p run => s!"{showV p} = addr [{showVs run}]"
   | .touch t p => s!"{showV t} = mem[{showV p}] (touch)"
   | .hint h => match h with
