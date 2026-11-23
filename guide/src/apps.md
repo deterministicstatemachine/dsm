@@ -7,6 +7,7 @@ These apps are plugged into DSM today. Each kept its own server and its own logi
 | [Wildstate](#wildstate) | A creature-collecting game for Android | The coin and every creature are objects in the player's own wallet; the shop, the market and staked matches run through it |
 | [OpenBoxes for DSM](#openboxes-for-dsm) | The open-source warehouse and inventory system | Custody: a stock change stands only when DSM recorded it; staff sign in with their wallet; a carrier takes custody on a phone |
 | [CBFpy for DSM](#cbfpy-for-dsm) | A prototype AI with a body | Every step it takes is a DSM transition, decided by rules, and anyone can audit the chain from public keys |
+| [Sennite: Factions](#sennite-factions) | A battle royale for Android phones | A faction's base is funded by its members' own vaults; heroes, skins and building materials are held in the player's wallet; a match's prize is locked before it starts and collected by the winners |
 
 ## Wildstate
 
@@ -106,3 +107,18 @@ charter in force: version 1
 ```
 
 It enforces the rules and the facts it is given, in a simulated world. It does not understand ethics, and an act that passes is not made good by passing. Its [report](https://github.com/Irrefutable-Labs/cbfpy-dsm/blob/main/dsm/REPORT.md) says what is and is not shown; the code is in [Irrefutable-Labs/cbfpy-dsm](https://github.com/Irrefutable-Labs/cbfpy-dsm/tree/main/dsm).
+
+## Sennite: Factions
+
+[Sennite: Factions](https://github.com/Irrefutable-Labs/sennite-factions) is a battle royale for Android phones, built in Unreal Engine 5.8: heroes, weapons, building in wood, stone and steel, and faction matches in an arena made for each match. The game and its publisher's server keep their own logic. What a player owns, and what a faction has put into its base, live on DSM.
+
+<figure class="term"><a href="images/apps/sennite.webp"><img src="images/apps/sennite.webp" alt="Sennite: Factions title screen"></a><figcaption>The title screen.</figcaption></figure>
+
+How DSM carries it:
+
+- **The store is paid from the wallet.** Heroes, skins and weapons cost the game's D-bucks; a player buys D-bucks for ERA through the publisher's vault, and swaps other tokens there. Every purchase is approved in the player's wallet, and a hero or skin is chosen once the wallet proves it owns it.
+- **Materials are wallet objects.** WOOD, STONE and STEEL the publisher gives are objects in the player's wallet, and a member commits them from the wallet to a structure on the faction's base, or takes them back.
+- **A faction's base is funded by its members.** What stands on a base is funded by its members' own vaults; nothing is pooled with the publisher.
+- **A match's prize is locked before it starts.** It is one vault per member's share, on one verdict; the publisher's key decides it once, the winners collect it in their own wallets and nobody else can, and when nobody wins it returns whole to the publisher.
+
+It is a proof of concept on the beta, played with the beta's test D-bucks. Its [README](https://github.com/Irrefutable-Labs/sennite-factions#readme) and the [server's README](https://github.com/Irrefutable-Labs/sennite-factions/blob/main/Server/README.md) list what is checked and how.

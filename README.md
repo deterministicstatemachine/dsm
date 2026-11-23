@@ -44,6 +44,10 @@ These apps are already plugged into DSM: [Irrefutable Labs' repositories](https:
 <td width="290"><a href="https://github.com/Irrefutable-Labs/cbfpy-dsm/tree/main/dsm"><img src="guide/src/images/apps/cbfpy-console.webp" alt="CBFpy for DSM: the console, with every refused candidate and its reason" width="280"></a></td>
 <td><b><a href="https://github.com/Irrefutable-Labs/cbfpy-dsm/tree/main/dsm">CBFpy for DSM</a></b>: an AI with a body proposes its next step, and deterministic rules decide which proposal may become a real step on a DSM chain: it may not harm a protected animal, and anything it has not seen counts as occupied. Every step and every act is signed, and anyone can audit the chain from public keys alone. It runs in a simulated world and enforces the rules it is given; it does not understand ethics.</td>
 </tr>
+<tr>
+<td width="290"><a href="https://github.com/Irrefutable-Labs/sennite-factions"><img src="guide/src/images/apps/sennite.webp" alt="Sennite: Factions title screen" width="280"></a></td>
+<td><b><a href="https://github.com/Irrefutable-Labs/sennite-factions">Sennite: Factions</a></b>: a battle royale for Android phones, built in Unreal Engine, where a faction's base is funded by its members' own DSM vaults. Heroes, skins and weapons are bought with the game's D-bucks from the player's wallet and chosen once the wallet proves it owns them; building materials are objects in the wallet, committed to the faction's base. A match's prize is locked before it starts, one vault per member's share, and the winners collect it in their own wallets.</td>
+</tr>
 </table>
 
 ## Plug your app into DSM
