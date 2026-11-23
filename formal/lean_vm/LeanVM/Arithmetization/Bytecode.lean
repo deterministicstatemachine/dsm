@@ -80,7 +80,7 @@ def derefMode? (fpc ffp : K) : Option DerefMode :=
 def flag? (a : K) : Option Bool :=
   if a = 0 then some false else if a = 1 then some true else none
 
-/-- The opcode of a code, if it is one of the six. -/
+/-- The opcode of a code, if it is one of the seven. -/
 def opcode? (a : K) : Option Opcode :=
   if a = Opcode.xor.busCode then some .xor
   else if a = Opcode.mulNative.busCode then some .mulNative
@@ -88,6 +88,7 @@ def opcode? (a : K) : Option Opcode :=
   else if a = Opcode.deref.busCode then some .deref
   else if a = Opcode.jump.busCode then some .jump
   else if a = Opcode.keccak.busCode then some .keccak
+  else if a = Opcode.blake3.busCode then some .blake3
   else none
 
 /-- `KECCAK`'s output cells of a flag pair `(out_two, out_all)`, if it is one of the three. -/
@@ -105,7 +106,8 @@ instance (v : Vector K 13) : Decidable (Spare5 v) := by unfold Spare5; infer_ins
 
 /-- Read an entry back as an instruction: the exact inverse of `entry` (`decode_eq_some_iff`);
 `none` on an unknown opcode, on a flag pair that is no mode, on a layout flag that is neither `0`
-nor `1`, on an output flag pair that is none of the three, or on a nonzero spare slot. -/
+nor `1`, on an output flag pair that is none of the three, or on a nonzero spare slot (a
+`BLAKE3`'s are `11` and `12`). -/
 def decode (v : Vector K 13) : Option LeanIsaInstruction :=
   match opcode? v[0] with
   | some .xor => if v[4] = 0 ∧ Spare5 v then some (.xor v[1] v[2] v[3]) else none
@@ -125,6 +127,10 @@ def decode (v : Vector K 13) : Option LeanIsaInstruction :=
       | some inOdd, some outOdd, some outCells =>
           some (.keccak ![v[1], v[2], v[3], v[4]] v[5] v[6] v[7] v[8] inOdd outOdd outCells)
       | _, _, _ => none
+  | some .blake3 =>
+      if v[11] = 0 ∧ v[12] = 0 then
+        some (.blake3 ![v[1], v[2], v[3], v[4]] v[5] v[6] v[7] v[8] v[9] v[10])
+      else none
   | none => none
 
 /-! ## Proof helpers -/
@@ -217,6 +223,9 @@ theorem decode_entry (i : LeanIsaInstruction) : decode (busEntry i) = some i := 
   | keccak om otail ob8 ocap oout inOdd outOdd outCells =>
     have h := vecCons_apply om
     simp [decode, busEntry, opcode?_code, h, flag?_flagK, outCells?_flags]
+  | blake3 om ocv oout omd ox oy ow =>
+    have h := vecCons_apply om
+    simp [decode, busEntry, opcode?_code, h]
   | _ => simp [decode, busEntry, opcode?_code, derefMode?_flags, ofLimbs_limb, Spare5]
 
 /-- `decode` is the exact inverse of `entry`: a vector decodes to an instruction only when it is
@@ -252,6 +261,11 @@ theorem decode_eq_some_iff {v : Vector K 13} {i : LeanIsaInstruction} : decode v
         rw [outCells?_eq_some_iff, Prod.mk.injEq] at h11
         refine Vector.ext fun j hj ↦ ?_
         interval_cases j <;> simp [busEntry, hop, h9, h10, h11.1, h11.2]
+      case blake3 =>
+        split_ifs at h with hz
+        cases h
+        refine Vector.ext fun j hj ↦ ?_
+        interval_cases j <;> simp [busEntry, hop, hz.1, hz.2]
       all_goals
         split_ifs at h with hz
         cases h

@@ -123,6 +123,92 @@ theorem keccak_complete {C : Ctx} {M : ℕ → E} {s : St} {rd : K → Option E}
     St.withMem_eq (by rw [e1, ok_bind]; rfl), ok_bind]
   rfl
 
+
+/-- **The executor's `BLAKE3` is complete** (research build): with its thirteen input cells written,
+it reads the reference's input, writes the reference's two outputs, which the reference's relation
+fixes, and moves to the next instruction. The compression's value is generalized away at once. -/
+theorem blake3_complete {C : Ctx} {M : ℕ → E} {s : St} {rd : K → Option E} {r' : Registers K}
+    {om : Fin 4 → K} {ocv omd ox oy ow : K} {L : List ℕ} {out : ℕ}
+    (hs : Fine M s) (hrd : RefRd rd M)
+    (hL : List.Forall₂ (fun c k ↦ g ^ k = blake3InputCellOffset om ocv omd ox oy ow c)
+      (List.finRange 13) L)
+    (hsm : OpSmall (.blake3 L.toArray out))
+    (hpc : s.pc < C.ops.size) (hsz : C.ops.size ≤ 2 ^ 30) (hnext : NextOk C r')
+    (hex : executeWith rd ⟨g ^ s.pc, g ^ s.fp⟩ (.blake3 om ocv (g ^ out) omd ox oy ow) = some r')
+    (hmo : OpModed M s (.blake3 L.toArray out)) :
+    ∃ s', runOp C s (.blake3 L.toArray out) = .ok s' ∧ OpDone C M s s' r' := by
+  simp only [executeWith, Option.bind_eq_bind, Option.bind_eq_some_iff] at hex
+  obtain ⟨inp, hinp, f, hf, u, hu, hr⟩ := hex
+  simp [guard] at hu hr
+  rw [readCells_eq_some_iff] at hinp
+  obtain ⟨hf1, -⟩ := (readFirstCells_eq_some_iff _ _ _ _ _).mp hf
+  unfold Blake3CellsRelation at hu
+  generalize hH : Blake3.compressCells inp = H at hu
+  obtain ⟨hsmI, hout⟩ := hsm
+  have hsmI' : ∀ i ∈ L, i < 2 ^ 28 := fun i hi ↦ hsmI i (by simpa using hi)
+  have hmo' : ∀ i ∈ L, s.mem.written (s.fp + i) = true := fun i hi ↦ hmo i (by simpa using hi)
+  have hlL : L.length = 13 := by rw [← hL.length_eq, List.length_finRange]
+  have hin : ∀ (j : ℕ) (hj : j < 13), s.fp + L[j]'(by rw [hlL]; exact hj) < maxCells ∧
+      M (s.fp + L[j]'(by rw [hlL]; exact hj)) = inp ⟨j, hj⟩ := by
+    intro j hj
+    have h1 := forall₂_getElem hL (i := j) (by simpa using hj) (by rw [hlL]; exact hj)
+    simp only [List.getElem_finRange, Fin.cast_mk] at h1
+    have h2 := hinp ⟨j, hj⟩
+    rw [← h1] at h2
+    exact hrd.at hs.fp (hsmI' _ (List.getElem_mem _)) h2
+  have hcu : ∀ i ∈ L, s.fp + i < maxCells := fun i hi ↦ by
+    obtain ⟨j, hj, rfl⟩ := List.getElem_of_mem hi
+    exact (hin j (by rw [← hlL]; exact hj)).1
+  have hou : ∀ k, k < 2 → s.fp + (out + k) < maxCells ∧
+      M (s.fp + (out + k)) = Blake3.chainCell H (k % 13) := fun k hk ↦ by
+    have h1 := hf1 ⟨k, by omega⟩ hk
+    rw [← pow_add, ← pow_add, Nat.add_comm k out] at h1
+    obtain ⟨h2, h3⟩ := hrd _ _ (by have := hs.fp; unfold maxCells at this; omega) h1
+    refine ⟨h2, ?_⟩
+    rw [h3, Nat.mod_eq_of_lt (by omega)]
+    interval_cases k
+    · exact hu.1
+    · exact hu.2
+  have hcells : L.toArray.toList.mapM (cellAt s.fp) = .ok (L.map (s.fp + ·)) := by
+    rw [List.toList_toArray]
+    exact exMapM_eq L fun i hi ↦ cellAt_eq (hcu i hi)
+  have hinput : (L.map (s.fp + ·)).mapM s.mem.read = .ok ((L.map (s.fp + ·)).map M) := by
+    refine exMapM_eq _ fun c hc ↦ ?_
+    obtain ⟨i, hi, rfl⟩ := List.mem_map.mp hc
+    exact hs.agree.read (hmo' i hi)
+  have houts : (List.range 2).mapM (fun k ↦ cellAt s.fp (out + k)) =
+      .ok ((List.range 2).map fun k ↦ s.fp + (out + k)) :=
+    exMapM_eq _ fun k hk ↦ cellAt_eq (hou k (List.mem_range.mp hk)).1
+  have hcell : (fun c : Fin 13 ↦ ((L.map (s.fp + ·)).map M).getD c.val 0) = inp := by
+    funext c
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem (by simp [hlL]), Option.getD_some]
+    simp only [List.getElem_map]
+    exact (hin c.val c.isLt).2
+  obtain ⟨m1, e1, h1, le1⟩ := hs.agree.putOuts (fun c : Fin 13 ↦ Blake3.chainCell H c.val)
+    ((List.range 2).map fun k ↦ s.fp + (out + k)).zipIdx s.mem fun x hx ↦ by
+      have hx' := List.mem_zipIdx_iff_getElem?.mp hx
+      obtain ⟨hlt, he⟩ := List.getElem?_eq_some_iff.mp hx'
+      simp only [List.length_map, List.length_range] at hlt
+      simp only [List.getElem_map, List.getElem_range] at he
+      rw [← he]
+      exact hou x.2 hlt
+  have hall : ∀ c ∈ L.map (s.fp + ·) ++ (List.range 2).map
+      (fun k ↦ s.fp + (out + k)), c < maxCells := fun c hc ↦ by
+    rcases List.mem_append.mp hc with hc | hc
+    · obtain ⟨i, hi, rfl⟩ := List.mem_map.mp hc; exact hcu i hi
+    · obtain ⟨k, hk, rfl⟩ := List.mem_map.mp hc; exact (hou k (List.mem_range.mp hk)).1
+  have h2 := h1.foldl_ensure _ m1 hall
+  obtain ⟨le2, -⟩ := Mem.foldl_ensure (L.map (s.fp + ·) ++ (List.range 2).map
+    (fun k ↦ s.fp + (out + k))) m1 h1.wf
+  refine ⟨{ s with
+    mem := (L.map (s.fp + ·) ++ (List.range 2).map
+      (fun k ↦ s.fp + (out + k))).foldl Mem.ensure m1, pc := s.pc + 1 }, ?_,
+    next_done ⟨h2, hs.dl, hs.small, hs.fp⟩ (Mem.le_trans le1 le2) rfl rfl rfl hr.symm hnext hpc hsz⟩
+  simp only [runOp]
+  rw [hcells, ok_bind, hinput, ok_bind, houts, ok_bind, hcell, hH,
+    St.withMem_eq (by rw [e1, ok_bind]; rfl), ok_bind]
+  rfl
+
 end
 
 end LeanVM.Prover.Exec

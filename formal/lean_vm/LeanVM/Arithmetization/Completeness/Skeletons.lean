@@ -120,14 +120,15 @@ namespace LeanVM.Arithmetization
 
 open LeanVM.Parameters
 
-/-- The six opcode tables in the ensemble's order, the order of their bus codes. -/
-def tableOpcodes : List Opcode := [.xor, .mulNative, .setConstant, .deref, .jump, .keccak]
+/-- The seven opcode tables in the ensemble's order, the order of their bus codes (research build:
+`BLAKE3` the seventh). -/
+def tableOpcodes : List Opcode := [.xor, .mulNative, .setConstant, .deref, .jump, .keccak, .blake3]
 
 /-- Every opcode has a table. -/
 theorem mem_tableOpcodes (o : Opcode) : o ∈ tableOpcodes := by
   cases o <;> decide
 
 /-- The opcode of table `j`, in the ensemble's order. -/
-def tableOpcode (j : Fin 6) : Opcode := tableOpcodes.getD j .xor
+def tableOpcode (j : Fin 7) : Opcode := tableOpcodes.getD j .xor
 
 end LeanVM.Arithmetization

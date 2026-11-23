@@ -280,6 +280,8 @@ def Decodable : LeanIsaInstruction → Prop
   | .jump c d f => IsOff c ∧ IsOff d ∧ IsOff f
   | .keccak om otail ob8 ocap oout _ _ _ =>
     (∀ c, IsOff (keccakInputCellOffset om otail ob8 ocap c)) ∧ IsOff oout
+  | .blake3 om ocv oout omd ox oy ow =>
+    (∀ c, IsOff (blake3InputCellOffset om ocv omd ox oy ow c)) ∧ IsOff oout
 
 /-- Every offset of an `Op` is below `2^28`. -/
 def OpSmall : Op → Prop
@@ -289,6 +291,7 @@ def OpSmall : Op → Prop
   | .deref a b c _ => a < 2 ^ 28 ∧ b < 2 ^ 28 ∧ c < 2 ^ 28
   | .jump a b c => a < 2 ^ 28 ∧ b < 2 ^ 28 ∧ c < 2 ^ 28
   | .keccak ins out _ _ _ => (∀ i ∈ ins.toList, i < 2 ^ 28) ∧ out < 2 ^ 28
+  | .blake3 ins out => (∀ i ∈ ins.toList, i < 2 ^ 28) ∧ out < 2 ^ 28
 
 theorem offOf_lt {o : K} {k : ℕ} (h : offOf o = some k) : k < 2 ^ 28 := boundedDlog_lt h
 
@@ -324,6 +327,13 @@ theorem decode_small {ins : LeanIsaInstruction} {op : Op} (h : decode ins = some
     refine ⟨fun i hi ↦ ?_, offOf_lt hk⟩
     obtain ⟨c, -, hc⟩ := forall₂_mem_right (optMapM_ok _ _ _ hl) i (by simpa using hi)
     exact offOf_lt hc
+  | blake3 om ocv oout omd ox oy ow =>
+    simp only [decode, Option.bind_eq_bind, Option.bind_eq_some_iff, Option.pure_def,
+      Option.some.injEq] at h
+    obtain ⟨l, hl, k, hk, rfl⟩ := h
+    refine ⟨fun i hi ↦ ?_, offOf_lt hk⟩
+    obtain ⟨c, -, hc⟩ := forall₂_mem_right (optMapM_ok _ _ _ hl) i (by simpa using hi)
+    exact offOf_lt hc
   | _ =>
     simp only [decode, Option.bind_eq_bind, Option.bind_eq_some_iff, Option.pure_def,
       Option.some.injEq] at h
@@ -340,6 +350,14 @@ theorem decode_complete {ins : LeanIsaInstruction} (h : Decodable ins) :
     obtain ⟨hin, hout⟩ := h
     obtain ⟨l, hl⟩ := Option.isSome_iff_exists.mp (optMapM_isSome
       (fun c ↦ offOf (keccakInputCellOffset om otail ob8 ocap c)) (List.finRange 13)
+      fun c _ ↦ Option.isSome_iff_exists.mpr (offOf_complete (hin c)))
+    obtain ⟨k, hk⟩ := offOf_complete hout
+    exact ⟨_, by
+      simp only [decode, hl, hk, Option.bind_eq_bind, Option.bind_some, Option.pure_def]; rfl⟩
+  | blake3 om ocv oout omd ox oy ow =>
+    obtain ⟨hin, hout⟩ := h
+    obtain ⟨l, hl⟩ := Option.isSome_iff_exists.mp (optMapM_isSome
+      (fun c ↦ offOf (blake3InputCellOffset om ocv omd ox oy ow c)) (List.finRange 13)
       fun c _ ↦ Option.isSome_iff_exists.mpr (offOf_complete (hin c)))
     obtain ⟨k, hk⟩ := offOf_complete hout
     exact ⟨_, by

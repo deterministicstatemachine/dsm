@@ -2103,18 +2103,18 @@ forward (`blake3RowValues`) to evaluate `A₀ w` and `B₀ w`.
 -/
 
 /-- `PHI_BASIS` (`flock.rs`): the images of the eight bits of a byte. -/
-def phiBasis : List ℕ :=
+def flockPhiBasis : List ℕ :=
   [0x0000000000000001, 0x033CE8BEDDC8A656, 0x512620375ED2A108, 0x0C9E636090AAFC01,
     0xBA4F3CD82801769C, 0xBA26E7904ADB4A47, 0x467698598926DC01, 0x4418AE808B28BDD0]
 
-/-- `phi(value)` (`flock.rs`): the F2-linear image of the byte `value` in the PHI basis, in
+/-- `flockPhi(value)` (`flock.rs`): the F2-linear image of the byte `value` in the PHI basis, in
 limb `0`. -/
-def phi (value : ℕ) : E :=
+def flockPhi (value : ℕ) : E :=
   eOfNat ((List.range 8).foldl (fun acc bit ↦
-    if (value >>> bit) % 2 = 1 then acc ^^^ phiBasis.getD bit 0 else acc) 0)
+    if (value >>> bit) % 2 = 1 then acc ^^^ flockPhiBasis.getD bit 0 else acc) 0)
 
 /-- `MEDIUM_GENERATOR` (`flock.rs`): the old generator's first two limbs (hex digits of `π`). -/
-def mediumGenerator : E := E.ofLimbs (K.ofBits 0x243F6A8885A308D3) (K.ofBits 0x13198A2E03707344)
+def flockMediumGenerator : E := E.ofLimbs (K.ofBits 0x243F6A8885A308D3) (K.ofBits 0x13198A2E03707344)
 
 /-- `N_FIXED_CHALLENGES` (`flock.rs`): the zerocheck point's fixed coordinates. -/
 def nFixedChallenges : ℕ := 7
@@ -2129,29 +2129,29 @@ def flockSkipGrindBits : ℕ := grindingBits (2 * (kBits - 1))
 
 /-- `fixed_challenges()` (`flock.rs`): `PHI[0xF7]`, `PHI[0x53]`, `PHI[0xB5]`, then
 `v/(1 + v)` for `v` the medium generator to the powers `2^0 … 2^3`. -/
-def fixedChallenges : List E :=
+def flockFixedChallenges : List E :=
   let medium := fun (power : ℕ) ↦
-    let value := mediumGenerator ^ (2 ^ power)
+    let value := flockMediumGenerator ^ (2 ^ power)
     value * (1 + value)⁻¹
-  [phi 0xF7, phi 0x53, phi 0xB5, medium 0, medium 1, medium 2, medium 3]
+  [flockPhi 0xF7, flockPhi 0x53, flockPhi 0xB5, medium 0, medium 1, medium 2, medium 3]
 
 /-- `window_denominator(count)` (`flock.rs`): `Π_{0 < k < count} PHI[k]`, inverted, the one
 barycentric denominator of `PHI[:count]` (PHI is F2-linear, so every node has the same). -/
-def windowDenominator (count : ℕ) : E :=
-  ((List.range count).drop 1).foldl (fun acc k ↦ acc * phi k) 1 |>.inv
+def flockWindowDenominator (count : ℕ) : E :=
+  ((List.range count).drop 1).foldl (fun acc k ↦ acc * flockPhi k) 1 |>.inv
 
 /-- `lagrange_weights(count, point)` (`flock.rs`): the barycentric weights of `PHI[:count]` at
 `point`, by prefix and suffix products of `point + PHI[node]`. -/
-def lagrangeWeights (count : ℕ) (point : E) : List E :=
-  let differences := (List.range count).map fun node ↦ point + phi node
+def flockLagrangeWeights (count : ℕ) (point : E) : List E :=
+  let differences := (List.range count).map fun node ↦ point + flockPhi node
   let prefixes := differences.scanl (· * ·) 1
   let suffixes := differences.scanr (· * ·) 1
-  let denominator := windowDenominator count
+  let denominator := flockWindowDenominator count
   (List.range count).map fun i ↦ prefixes.getD i 1 * suffixes.getD (i + 1) 1 * denominator
 
 /-- `lagrange_interpolate(count, values, point)` (`flock.rs`). -/
-def lagrangeInterpolate (count : ℕ) (values : List E) (point : E) : E :=
-  dot (lagrangeWeights count point) values
+def flockLagrangeInterpolate (count : ℕ) (values : List E) (point : E) : E :=
+  dot (flockLagrangeWeights count point) values
 
 /-- What the zerocheck leaves (`ZerocheckResult`, `flock.rs`): the skip challenge, the round
 challenges, and the three claims at that point. -/
@@ -2170,13 +2170,14 @@ sumcheck of degree-two rounds in equality mode at `r`, closed by `v_a`, `v_b`, a
 claim less `v_a·v_b`. -/
 def verifyFlockZerocheck (logN : ℕ) : VerifierProgram FlockZerocheck := do
   let nSampled := logN - flockKSkip - nFixedChallenges
-  if 0 < nSampled then VerifierProgram.grindProofOfWork flockPointGrindBits
+  -- `if n_sampled > 0 { grind_check(FLOCK_POINT_GRIND_BITS) }`: a grind of zero bits is none
+  VerifierProgram.grindProofOfWork (if 0 < nSampled then flockPointGrindBits else 0)
   let sampled ← VerifierProgram.sampleChallenges nSampled
-  let r := fixedChallenges ++ sampled
+  let r := flockFixedChallenges ++ sampled
   let pCoset ← VerifierProgram.readScalars kBits
   VerifierProgram.grindProofOfWork flockSkipGrindBits
   let zSkip ← VerifierProgram.sampleChallenge
-  let vP := lagrangeInterpolate (2 * kBits) (List.replicate kBits 0 ++ pCoset) zSkip
+  let vP := flockLagrangeInterpolate (2 * kBits) (List.replicate kBits 0 ++ pCoset) zSkip
   let (chi, running) ← sumcheck vP 3 (r.map some)
   let vA ← VerifierProgram.readScalar
   let vB ← VerifierProgram.readScalar
@@ -2184,7 +2185,7 @@ def verifyFlockZerocheck (logN : ℕ) : VerifierProgram FlockZerocheck := do
 
 /-- What the reduction leaves (`FlockClaims`, `flock.rs`): the zerocheck's point and its three
 claims there, the lincheck's batching challenge, its round challenges in round order, the `64`
-slices it closes on, the terminal's matrix part (`matrixTerm`), and the claim its rounds leave. -/
+slices it closes on, the terminal's matrix part (`flockMatrixTerm`), and the claim its rounds leave. -/
 structure FlockClaims where
   zSkip : E
   chi : List E
@@ -2223,7 +2224,7 @@ def blake3Sigma : List (List ℕ) :=
 /-- `relocation_source(bit)` (`flock.rs`): the bit of `X ‖ Y ‖ W` (counted from `X`'s first) the
 circuit places at block bit `bit`: `X` at bytes `25..57`, the first `7` bytes of `Y` at `57..64`,
 the last `25` of `W` at `0..25`. -/
-def relocationSource (bit : ℕ) : Option ℕ :=
+def flockRelocationSource (bit : ℕ) : Option ℕ :=
   let p := bit / 8
   let k := bit % 8
   if p < 25 then some (512 + 8 * (p + 7) + k)
@@ -2320,7 +2321,7 @@ def blake3RowValues (w : Array E) : Array E × Array E :=
     else flockSlots w ([counterLow, counterHigh, finalFlag, lastNodeFlag].getD (word.val - 12) 0)
   let message : Array FlockWord := Array.ofFn (n := 16) fun i ↦ Array.ofFn (n := 32) fun j ↦
     w.getD (messageBase + 32 * i.val + j.val) 0 +
-      match relocationSource (32 * i.val + j.val) with
+      match flockRelocationSource (32 * i.val + j.val) with
       | some source => w.getD (xBase + source) 0
       | none => 0
   let walked := blake3Sigma.zipIdx.foldl (fun (st : FlockRows × Array FlockWord) (sigma, round) ↦
@@ -2359,31 +2360,31 @@ def blake3RowValues (w : Array E) : Array E × Array E :=
 
 /-- `w_col = eq(χ_in') ⊗ s` (`matrix_term`, `flock.rs`): entry `h·count + l` is slice `l` times
 the weight `h`, a column of it per slice. -/
-def sliceColumns (count : ℕ) (slices high : Array E) : Array E :=
+def flockSliceColumns (count : ℕ) (slices high : Array E) : Array E :=
   Array.ofFn (n := high.size * count) fun i ↦
     slices.getD (i.val % count) 0 * high.getD (i.val / count) 0
 
 /-- Each block of `count` rows met with the skip weights, a column at a time (`matrix_term`,
 `flock.rs`): block `h`'s `Σ_l skip_l · values[h·count + l]`. -/
-def skipBlocks (count : ℕ) (skip values : Array E) (blocks : ℕ) : List E :=
+def flockSkipBlocks (count : ℕ) (skip values : Array E) (blocks : ℕ) : List E :=
   (List.range blocks).map fun h ↦
     (List.range count).foldl (fun acc l ↦ acc + skip.getD l 0 * values.getD (h * count + l) 0) 0
 
 /-- `left + α·right`, the two matrices' parts batched (`matrix_term`, `flock.rs`). -/
-def batchPair (alpha left right : E) : E := left + alpha * right
+def flockBatchPair (alpha left right : E) : E := left + alpha * right
 
 /-- `matrix_term(claims)` (`flock.rs`): the lincheck terminal's matrix part,
 `Σ_{r, c} (A₀ + α B₀)[r][c] e_row(r) w_col(c)`, `e_row` the PHI Lagrange weights at the skip
 coordinate times `eq` at the zerocheck's first coordinates, `w_col` the `64` slices times `eq` at
 the lincheck's challenges (bound top-down). -/
-def matrixTerm (claims : FlockClaims) : E :=
-  let skipWeights := (lagrangeWeights kBits claims.zSkip).toArray
+def flockMatrixTerm (claims : FlockClaims) : E :=
+  let skipWeights := (flockLagrangeWeights kBits claims.zSkip).toArray
   let chiIn := claims.chi.take flockNumLincheckRounds
   let chiInPrime := claims.roundChallenges.reverse
   let high := (eqKernel chiInPrime).toArray
-  let (leftValues, rightValues) := blake3RowValues (sliceColumns kBits claims.s.toArray high)
-  batchPair claims.alpha (multilinearEval (skipBlocks kBits skipWeights leftValues high.size) chiIn)
-    (multilinearEval (skipBlocks kBits skipWeights rightValues high.size) chiIn)
+  let (leftValues, rightValues) := blake3RowValues (flockSliceColumns kBits claims.s.toArray high)
+  flockBatchPair claims.alpha (multilinearEval (flockSkipBlocks kBits skipWeights leftValues high.size) chiIn)
+    (multilinearEval (flockSkipBlocks kBits skipWeights rightValues high.size) chiIn)
 
 /-- `verify_flock_lincheck(zc, transcript)` (`flock.rs`): a grind for the batch's degree `3`, the
 batching challenge `α` over the two matrix identities, the `c` claim and the constant-position
@@ -2400,8 +2401,8 @@ def verifyFlockLincheck (zc : FlockZerocheck) : VerifierProgram FlockClaims := d
     ⟨zc.zSkip, zc.chi, zc.vA, zc.vB, zc.vC, alpha, roundChallenges, s, 0, rLc⟩
   -- A guest defers the matrix part, so a replay computes it too.
   let claims : FlockClaims :=
-    ⟨zc.zSkip, zc.chi, zc.vA, zc.vB, zc.vC, alpha, roundChallenges, s, matrixTerm unmatched, rLc⟩
-  let skipWeights := lagrangeWeights kBits claims.zSkip
+    ⟨zc.zSkip, zc.chi, zc.vA, zc.vB, zc.vC, alpha, roundChallenges, s, flockMatrixTerm unmatched, rLc⟩
+  let skipWeights := flockLagrangeWeights kBits claims.zSkip
   let chiIn := claims.chi.take flockNumLincheckRounds
   let chiInPrime := claims.roundChallenges.reverse
   let pin := claims.s.getD (blake3ConstantColumn % kBits) 0 *

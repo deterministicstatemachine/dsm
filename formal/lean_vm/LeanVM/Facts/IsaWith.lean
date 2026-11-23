@@ -30,15 +30,23 @@ check replaced, and is that one at `keccakDeployed` (`executeWithB_deployed`, `r
 `validExecutionB_deployed`). -/
 
 /-- **A semantics of `KECCAK`**: the relation of the cells read in a layout and the cells written
-in a layout, of which the instruction writes the first `outCells.cellCount`, decidable. -/
+in a layout, of which the instruction writes the first `outCells.cellCount`, decidable; and
+(research build) the relation `BLAKE3` checks of its thirteen cells read and two written,
+decidable. -/
 structure KeccakSem where
   /-- The relation. -/
   check : (Fin 13 → E) → Bool → (Fin 13 → E) → Bool → KeccakOutputCells → Prop
   /-- It is decidable. -/
   dec : ∀ input inOdd output outOdd outCells, Decidable (check input inOdd output outOdd outCells)
+  /-- Research build: the relation of a `BLAKE3`'s cells read and written. -/
+  blake3 : (Fin 13 → E) → (Fin 13 → E) → Prop
+  /-- It is decidable. -/
+  blake3Dec : ∀ input output, Decidable (blake3 input output)
 
-/-- The deployed semantics: Keccak-f[1600] (`KeccakCellsRelation`). -/
-def keccakDeployed : KeccakSem := ⟨KeccakCellsRelation, fun _ _ _ _ _ ↦ inferInstance⟩
+/-- The deployed semantics: Keccak-f[1600] (`KeccakCellsRelation`), and BLAKE3's compression
+(`Blake3CellsRelation`). -/
+def keccakDeployed : KeccakSem :=
+  ⟨KeccakCellsRelation, fun _ _ _ _ _ ↦ inferInstance, Blake3CellsRelation, fun _ _ ↦ inferInstance⟩
 
 /-- The limb of the cells written that holds no lane in the layout `odd` is zero: cell `0`'s
 low limb in the odd layout, cell `8`'s high limb in the even one, when the instruction writes
@@ -51,9 +59,11 @@ instance {output : Fin 13 → E} {odd : Bool} {outCells : KeccakOutputCells} :
   unfold FreeLimbZero; infer_instance
 
 /-- **The reduction-blind semantics**: any output with its free limb zero. A cell past the first
-`outCells.cellCount` is not written, and nothing is asked of it. -/
+`outCells.cellCount` is not written, and nothing is asked of it. Research build: nothing is asked
+of a `BLAKE3`'s output either, which only Flock's reduction binds. -/
 def keccakFree : KeccakSem :=
-  ⟨fun _ _ output outOdd outCells ↦ FreeLimbZero output outOdd outCells, fun _ _ _ _ _ ↦ inferInstance⟩
+  ⟨fun _ _ output outOdd outCells ↦ FreeLimbZero output outOdd outCells, fun _ _ _ _ _ ↦ inferInstance,
+    fun _ _ ↦ True, fun _ _ ↦ inferInstance⟩
 
 /-- `executeWith` under the semantics `S`. -/
 def executeWithB (S : KeccakSem) (read : K → Option E) (r : Registers K) : LeanIsaInstruction → Option (Registers K)
@@ -91,6 +101,11 @@ def executeWithB (S : KeccakSem) (read : K → Option E) (r : Registers K) : Lea
     let output ← readFirstCells read r.fp (fun c ↦ g ^ c.val * oout) outCells.cellCount
     @guard Option _ (S.check input inOdd output outOdd outCells)
       (S.dec input inOdd output outOdd outCells)
+    pure r.next
+  | .blake3 om ocv oout omd ox oy ow => do
+    let input ← readCells read r.fp (blake3InputCellOffset om ocv omd ox oy ow)
+    let output ← readFirstCells read r.fp (fun c ↦ g ^ c.val * oout) 2
+    @guard Option _ (S.blake3 input output) (S.blake3Dec input output)
     pure r.next
 
 /-- One step under the semantics `S`. -/

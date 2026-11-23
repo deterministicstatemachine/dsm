@@ -148,7 +148,7 @@ theorem soundnessRpmAS_le_statement {Q : ℕ} (hQ : Q ≤ 2 ^ 128) :
     have hn : verifierQueries * Sound.rootCap ≤ 2 ^ 131 := by
       have := rootCap_le
       rw [verifierQueries_eq]
-      calc 13708 * Sound.rootCap ≤ 13708 * 2 ^ 16 := Nat.mul_le_mul_left _ this
+      calc 13983 * Sound.rootCap ≤ 13983 * 2 ^ 16 := Nat.mul_le_mul_left _ this
         _ ≤ 2 ^ 131 := by norm_num
     calc (verifierQueries : ℝ≥0∞) * (Sound.rootCap * (2 ^ 256 : ℝ≥0∞)⁻¹)
         = ((verifierQueries * Sound.rootCap : ℕ) : ℝ≥0∞) * (2 : ℝ≥0∞)⁻¹ ^ 256 := by

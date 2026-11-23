@@ -36,6 +36,8 @@ theorem runOp_complete {C : Ctx} {M : ℕ → E} {s : St} {rd : K → Option E} 
   · obtain ⟨rfl, rfl, rfl⟩ := hop; exact jump_complete hs hrd hsm hpc hsz hnext hex hmo
   · obtain ⟨rfl, rfl, rfl, rfl, l, rfl, hl⟩ := hop
     exact keccak_complete hs hrd hl hsm hpc hsz hnext hex hmo
+  · obtain ⟨rfl, l, rfl, hl⟩ := hop
+    exact blake3_complete hs hrd hl hsm hpc hsz hnext hex hmo
 
 /-! ## The invariant rule -/
 

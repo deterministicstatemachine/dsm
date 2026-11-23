@@ -28,10 +28,10 @@ adversary, the verifier rejects with probability at most (`Rom.romComplete`)
 
   `completenessError fuel = Q · (1 - 2^-27 (1 - 2^-64))^fuel`,
 
-`Q = (1 + 1) + 54825 · (2^29 + 2·fuel + 2) + 13708` the queries of the prover and the verifier
-together (`completenessQueries`): the seed's hash and permutation, `leanVmCost = 54825`
+`Q = (1 + 1) + 55925 · (2^29 + 2·fuel + 2) + 13983` the queries of the prover and the verifier
+together (`completenessQueries`): the seed's hash and permutation, `leanVmCost = 55925`
 moves of the program each costing the prover at most `proverFactor costHeight fuel =
-2^29 + 2·fuel + 2` queries, and the verifier's `leanVmQueryBound = 13708`
+2^29 + 2·fuel + 2` queries, and the verifier's `leanVmQueryBound = 13983`
 (`romComplete_leanVm`). Every proof of work the honest prover meets has at most `27` bits, the
 bus's at the widest (`busGrindLE_twentySeven`), WHIR's at most `17`, and the Keccak GKR's before
 `s` also asks its challenge to lie outside `K` (`grindSample`), which a nonce's does with probability

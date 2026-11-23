@@ -592,7 +592,7 @@ def runOp (C : Ctx) (s : St) : Op → Except Fault St
     let h := Blake3.compressCells fun c ↦ input.getD c.val 0
     let outs ← (List.range 2).mapM fun k ↦ cellAt s.fp (out + k)
     let s ← s.withMem fun m ↦ do
-      let m ← outs.zipIdx.foldlM (fun m (c, k) ↦ m.put c (Blake3.chainCell h k)) m
+      let m ← outs.zipIdx.foldlM (fun m (c, k) ↦ m.put c (Blake3.chainCell h (k % 13))) m
       return (cells ++ outs).foldl Mem.ensure m
     pure { s with pc := s.pc + 1 }
 

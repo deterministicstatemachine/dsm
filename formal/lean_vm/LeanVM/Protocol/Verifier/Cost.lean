@@ -90,8 +90,9 @@ def gkrCost : ℕ → ℕ → ℕ
     if n % 2 = 1 then gkrStepCost 1 L + gkrCost (n + 1) (1 + L)
     else gkrStepCost 2 L + gkrCost n (2 + L)
 
-/-- The bound on the GKR walk: the push side's depth is at most `36`. -/
-def gkrBound : ℕ := gkrCost 36 0
+/-- The bound on the GKR walk: the push side's depth is at most `37` (research build: seven
+tables, `71` blocks with the framework's). -/
+def gkrBound : ℕ := gkrCost 37 0
 
 /-- The cost of the bus phase: the proof of work, the slot weights and `β`, the roots and the GKR
 walk, the framework's four reads, and the bytecode's share, sumcheck and value. -/
@@ -175,9 +176,21 @@ def oodCost : ℕ := 5 + 4 * Whir.maxLogStack + 1
 /-- The cost of ring switching: a proof of work and sixteen challenges. -/
 def ringCost : ℕ := 5 + 4 * (2 * ringMapWidth)
 
+/-- The cost of Flock's zerocheck over at most `44` variables (research build): a proof of work
+and at most `31` sampled coordinates, `P` on the coset, a proof of work and the skip challenge, at
+most `38` rounds of three coefficients, `v_a` and `v_b`. -/
+def flockZerocheckCost : ℕ := 5 + 4 * 31 + kBits + 5 + 4 + 38 * roundCost 3 + 2
+
+/-- The cost of Flock's lincheck: a proof of work and `α`, its rounds, the slices. -/
+def flockLincheckCost : ℕ := 5 + 4 + flockNumLincheckRounds * roundCost 3 + kBits
+
+/-- The cost of Flock's phase. -/
+def flockCost : ℕ := flockZerocheckCost + flockLincheckCost
+
 /-- **The cost of the leanVM verifier program**, phase by phase, in quarters of a query. -/
 def leanVmCost : ℕ :=
-  8 + 2 + oodCost + busCost + tableCost + 4 + keccakCost 27 + ringCost + (4 + whirBound)
+  9 + 2 + oodCost + busCost + tableCost + 4 + keccakCost 27 + flockCost + ringCost +
+    (4 + whirBound)
 
 /-! ## Sumcheck rounds -/
 
@@ -370,11 +383,11 @@ theorem busBlocks_push_logRows (hs rows : List ℕ) :
   obtain ⟨⟨t, h, n⟩, hmem, c, -, rfl⟩ := hb
   exact (List.of_mem_zip (List.of_mem_zip hmem).2).1
 
-/-- The tables flush `51` pushes. -/
-theorem busBlocks_push_length (hs rows : List ℕ) (h : hs.length = 6) (hr : rows.length = 6) :
-    (busBlocks hs rows).1.length = 51 := by
+/-- The tables flush `68` pushes (research build: `BLAKE3`'s seventeen). -/
+theorem busBlocks_push_length (hs rows : List ℕ) (h : hs.length = 7) (hr : rows.length = 7) :
+    (busBlocks hs rows).1.length = 68 := by
   match hs, rows, h, hr with
-  | [_, _, _, _, _, _], [_, _, _, _, _, _], _, _ => rfl
+  | [_, _, _, _, _, _, _], [_, _, _, _, _, _, _], _, _ => rfl
 
 /-! ## The announced sizes -/
 
@@ -385,11 +398,11 @@ structure LayoutBounds (layout : Layout) : Prop where
   /-- The bytecode has at most `2^30` tuples. -/
   logBytecode_le : layout.logBytecode ≤ 30
   /-- One height per table. -/
-  heights_length : layout.tableLogHeights.length = 6
+  heights_length : layout.tableLogHeights.length = 7
   /-- Every table has at most `2^30` rows. -/
   heights_le : ∀ h ∈ layout.tableLogHeights, h ≤ 30
   /-- The push side's blocks are the tables' push flushes, at some row count per table. -/
-  push_eq : ∃ tableRows : List ℕ, tableRows.length = 6 ∧
+  push_eq : ∃ tableRows : List ℕ, tableRows.length = 7 ∧
     layout.push = (busBlocks layout.tableLogHeights tableRows).1
 
 /-- A layout `buildLayout` returns is within its bounds. -/
@@ -407,7 +420,7 @@ theorem layoutBounds_of_buildLayout {bytecode : List K} {logMemory : ℕ} {table
     rcases hpl : placementsOf (columnKappas logMemory (logLength - busBits) hts) with ⟨pl, sl⟩
     simp only [hbb, hpl, Option.some.injEq] at h
     subst h
-    have hlen6 : tableRows.length = 6 := by simpa [tables] using hlen
+    have hlen6 : tableRows.length = 7 := by simpa [tables] using hlen
     refine ⟨hm, hb, ?_, ?_, ⟨tableRows, hlen6, by simp [hbb]⟩⟩
     · simp [hts, hlen6, tableLogFloors]
     · simp only [List.all_eq_true, decide_eq_true_eq] at hall
@@ -429,17 +442,17 @@ def SizesOK (p : Layout × ℕ) : Prop :=
 
 /-- The announced sizes: eight reads, and sizes in the window the program checks. -/
 theorem costs_readSizes {height : ℕ} (bytecode : List K) :
-    VerifierProgram.Costs height (readAnnouncedSizes bytecode) 8 SizesOK := by
+    VerifierProgram.Costs height (readAnnouncedSizes bytecode) 9 SizesOK := by
   rw [readAnnouncedSizes_eq]
   refine VerifierProgram.Costs.seq (VerifierProgram.Costs.readN _)
     (fun _ _ ↦ (costs_liftOption _ _).mono le_rfl fun x hx ↦ ?_) (by simp [tables])
   have s := sizesOf_spec hx
   exact ⟨layoutBounds_of_buildLayout s.layout, s.rate_ge, s.rate_le, s.stack_ge, s.stack_le⟩
 
-/-- The push side of a built layout has depth at most `36`. -/
+/-- The push side of a built layout has depth at most `37`. -/
 theorem pushDepth_le {layout : Layout} (h : LayoutBounds layout) :
-    (busLayout [0, layout.logMemory, layout.logBytecode] layout.push).depth ≤ 36 := by
-  refine stackOffsets_snd_le _ 30 6 ?_ ?_
+    (busLayout [0, layout.logMemory, layout.logBytecode] layout.push).depth ≤ 37 := by
+  refine stackOffsets_snd_le _ 30 7 ?_ ?_
   · intro x hx
     simp only [List.cons_append, List.nil_append, List.mem_cons, List.mem_map] at hx
     rcases hx with rfl | rfl | rfl | ⟨b, hb, rfl⟩
@@ -452,8 +465,8 @@ theorem pushDepth_le {layout : Layout} (h : LayoutBounds layout) :
   · obtain ⟨rows, hr, hp⟩ := h.push_eq
     simp [hp, busBlocks_push_length _ _ h.heights_length hr]
 
-/-- The GKR walk over at most `36` levels costs at most `gkrBound`. -/
-theorem gkrCost_le : ∀ D ≤ 36, gkrCost D 0 ≤ gkrBound := by decide
+/-- The GKR walk over at most `37` levels costs at most `gkrBound`. -/
+theorem gkrCost_le : ∀ D ≤ 37, gkrCost D 0 ≤ gkrBound := by decide
 
 
 /-- **The bus phase** on a built layout. -/
@@ -710,9 +723,67 @@ theorem costs_keccakPhase (layout : Layout) (claims : List ColumnClaim)
     (costs_verifyKeccak _ _ _ (headD_filter_short claims hc)) (fun _ _ ↦ trivial) le_rfl)
     (Nat.zero_le _)
 
+/-- A table height of a built layout is at most `30`. -/
+theorem height_getD_le {layout : Layout} (h : LayoutBounds layout) (i : ℕ) :
+    layout.tableLogHeights.getD i 0 ≤ 30 := by
+  rw [List.getD_eq_getElem?_getD]
+  cases hi : layout.tableLogHeights[i]? with
+  | none => simp
+  | some x => exact h.heights_le x (List.mem_of_getElem? hi)
+
+/-- **Flock's zerocheck**, over at most `44` variables. -/
+theorem costs_verifyFlockZerocheck (logN : ℕ) (hN : logN ≤ 44) :
+    VerifierProgram.Costs height (verifyFlockZerocheck logN) flockZerocheckCost fun _ ↦ True := by
+  have hs : logN - flockKSkip - nFixedChallenges ≤ 31 := by
+    unfold flockKSkip nFixedChallenges; omega
+  have hfix : flockFixedChallenges.length = 7 := rfl
+  unfold verifyFlockZerocheck
+  refine VerifierProgram.Costs.seq (VerifierProgram.Costs.grindP _) (fun _ _ ↦ ?_) ?_
+  refine VerifierProgram.Costs.seq ((VerifierProgram.Costs.sampleN _).mono (n := 4 * _) le_rfl
+    fun _ h ↦ h) (fun sampled hsl ↦ ?_) ?_
+  refine VerifierProgram.Costs.seq (VerifierProgram.Costs.readN _) (fun _ _ ↦ ?_)
+    ?_
+  refine VerifierProgram.Costs.seq (VerifierProgram.Costs.grindP _) (fun _ _ ↦ ?_)
+    ?_
+  refine VerifierProgram.Costs.seq VerifierProgram.Costs.sampleE (fun _ _ ↦ ?_)
+    ?_
+  refine VerifierProgram.Costs.seq ((costs_sumcheck 3 _ _).mono (m := 38 * roundCost 3) ?_
+    fun _ _ ↦ trivial) (fun r _ ↦ ?_) ?_
+  · simp only [List.length_map, List.length_append, hfix, hsl]
+    exact Nat.mul_le_mul_right _ (by omega)
+  obtain ⟨chi, running⟩ := r
+  refine VerifierProgram.Costs.seq VerifierProgram.Costs.readE (fun _ _ ↦
+    VerifierProgram.Costs.seq VerifierProgram.Costs.readE (fun _ _ ↦ trivial) ?_) ?_
+  all_goals simp only [flockZerocheckCost, kBits, roundCost] at *; omega
+
+/-- **Flock's lincheck.** -/
+theorem costs_verifyFlockLincheck (zc : FlockZerocheck) :
+    VerifierProgram.Costs height (verifyFlockLincheck zc) flockLincheckCost fun _ ↦ True := by
+  unfold verifyFlockLincheck
+  refine VerifierProgram.Costs.seq (VerifierProgram.Costs.grindP _) (fun _ _ ↦ ?_)
+    (by unfold flockLincheckCost; omega)
+  refine VerifierProgram.Costs.seq VerifierProgram.Costs.sampleE (fun _ _ ↦ ?_)
+    (by unfold flockLincheckCost; omega)
+  refine VerifierProgram.Costs.seq (costs_sumcheck 3 _ _) (fun r _ ↦ ?_)
+    (by simp only [List.length_replicate]; unfold flockLincheckCost; omega)
+  obtain ⟨rc, rLc⟩ := r
+  refine VerifierProgram.Costs.seq (VerifierProgram.Costs.readN _) (fun _ _ ↦ ?_)
+    (by simp only [List.length_replicate]; unfold flockLincheckCost; omega)
+  exact VerifierProgram.Costs.seq (VerifierProgram.Costs.require (n := 0) _) (fun _ _ ↦ trivial)
+    (Nat.zero_le _)
+
+/-- **Flock's phase**, on a built layout. -/
+theorem costs_flockPhase {layout : Layout} (hl : LayoutBounds layout) :
+    VerifierProgram.Costs height (flockPhase layout) flockCost fun _ ↦ True := by
+  unfold flockPhase verifyFlock
+  have hh := height_getD_le hl opBlake3
+  refine VerifierProgram.Costs.seq (a := flockCost) (VerifierProgram.Costs.seq
+    (costs_verifyFlockZerocheck _ (by unfold blake3R1csLogSize; omega)) (fun zc _ ↦
+      costs_verifyFlockLincheck zc) (by unfold flockCost; omega)) (fun _ _ ↦ trivial) le_rfl
+
 /-- **Ring switching**: a proof of work and sixteen challenges. -/
-theorem costs_ringSwitch (point s : List E) :
-    VerifierProgram.Costs height (ringSwitch point s) ringCost fun _ ↦ True := by
+theorem costs_ringSwitch (claims : List (List E × List E)) :
+    VerifierProgram.Costs height (ringSwitch claims) ringCost fun _ ↦ True := by
   rw [ringSwitch_eq]
   exact VerifierProgram.Costs.seq (VerifierProgram.Costs.grindP _) (fun _ _ ↦
     VerifierProgram.Costs.seq (VerifierProgram.Costs.sampleN _)
@@ -969,11 +1040,13 @@ theorem costs_verifyExecution (ev : List K → List E → E → VerifierProgram 
     · exact hcl c hc hcol
     · exact hpc c hc hcol
   · obtain ⟨claims', keccakPoint, keccakSlices⟩ := r
-    refine VerifierProgram.Costs.seq (costs_ringSwitch keccakPoint keccakSlices) (fun r _ ↦ ?_) ?_
-    · obtain ⟨ringTarget, ringWeight⟩ := r
-      exact costs_verifyStackedOpening _ _ _ whirBound fun levels h ↦
-        ⟨(ladder_cost _ _ levels h).1, (ladder_cost _ _ levels h).2.2.1,
-          (ladder_cost _ _ levels h).2.2.2⟩
+    refine VerifierProgram.Costs.seq (costs_flockPhase hl) (fun fl _ ↦ ?_) ?_
+    · obtain ⟨flockPoint, flockSlices⟩ := fl
+      refine VerifierProgram.Costs.seq (costs_ringSwitch _) (fun rs _ ↦ ?_) ?_
+      · exact costs_verifyStackedOpening _ _ _ whirBound fun levels h ↦
+          ⟨(ladder_cost _ _ levels h).1, (ladder_cost _ _ levels h).2.2.1,
+            (ladder_cost _ _ levels h).2.2.2⟩
+      · omega
     · omega
   all_goals omega
 
@@ -1031,9 +1104,9 @@ program's cost in quarters. -/
 def leanVmQueryBound : ℕ := 1 + 1 + leanVmCost / 4
 
 /-- The bound, evaluated. -/
-theorem leanVmQueryBound_eq : leanVmQueryBound = 13708 := by decide
+theorem leanVmQueryBound_eq : leanVmQueryBound = 13983 := by decide
 
-/-- **The compiled leanVM verifier makes at most `leanVmQueryBound = 13708` queries** to the random
+/-- **The compiled leanVM verifier makes at most `leanVmQueryBound = 13983` queries** to the random
 oracles on every proof, for every bytecode and public input: the hypothesis `hV` of `romSound`
 at the leanVM program and seed. -/
 theorem isTotalQueryBound_leanVm (bytecode : List K) (publicInput : Digest) (π : Proof) :

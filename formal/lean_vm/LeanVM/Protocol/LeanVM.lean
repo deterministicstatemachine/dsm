@@ -67,7 +67,7 @@ noncomputable def honestProver (prog : LeanIsaProgram) (input : PublicInput) (t 
   Complete.honestProverRom prog input t ρ fuel
 
 /-- The statement's completeness error is the random-oracle theorem's,
-`(13710 + 54825 · (2^27 + 2·fuel + 2)) · (1 - 2^-25)^fuel`. -/
+`(13985 + 55925 · (2^27 + 2·fuel + 2)) · (1 - 2^-25)^fuel`. -/
 theorem completenessError_eq (fuel : ℕ) :
     completenessError fuel = Complete.completenessError fuel :=
   Complete.completenessError_eq fuel

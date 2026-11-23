@@ -160,6 +160,10 @@ def OpOf : LeanIsaInstruction → Op → Prop
       ∃ l : List ℕ, ins = l.toArray ∧
         List.Forall₂ (fun c k ↦ g ^ k = keccakInputCellOffset om otail ob8 ocap c)
           (List.finRange 13) l
+  | .blake3 om ocv oout omd ox oy ow, .blake3 ins out =>
+    g ^ out = oout ∧ ∃ l : List ℕ, ins = l.toArray ∧
+      List.Forall₂ (fun c k ↦ g ^ k = blake3InputCellOffset om ocv omd ox oy ow c)
+        (List.finRange 13) l
   | _, _ => False
 
 theorem decode_ok {ins : LeanIsaInstruction} {op : Op} (h : decode ins = some op) :
@@ -171,6 +175,11 @@ theorem decode_ok {ins : LeanIsaInstruction} {op : Op} (h : decode ins = some op
     obtain ⟨l, hl, k, hk, rfl⟩ := h
     exact ⟨rfl, rfl, rfl, offOf_ok hk, l, rfl,
       (optMapM_ok _ _ _ hl).imp fun _ _ h ↦ offOf_ok h⟩
+  | blake3 om ocv oout omd ox oy ow =>
+    simp only [decode, Option.bind_eq_bind, Option.bind_eq_some_iff, Option.pure_def,
+      Option.some.injEq] at h
+    obtain ⟨l, hl, k, hk, rfl⟩ := h
+    exact ⟨offOf_ok hk, l, rfl, (optMapM_ok _ _ _ hl).imp fun _ _ h ↦ offOf_ok h⟩
   | _ =>
     simp only [decode, Option.bind_eq_bind, Option.bind_eq_some_iff, Option.pure_def,
       Option.some.injEq] at h

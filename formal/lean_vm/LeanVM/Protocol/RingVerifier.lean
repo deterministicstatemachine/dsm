@@ -130,12 +130,12 @@ theorem verifier_ringWeight {μ : ℕ} (r r' : Fin μ → E) (cs : List E) :
 
 /-- **The statement's ring switching** is the grind, the sixteen challenges, and `RingMap`'s
 target and coefficients at their two halves. -/
-theorem ringSwitch_eq (point s : List E) :
-    Verifier.ringSwitch point s =
+theorem ringSwitch_eq (claims : List (List E × List E)) :
+    Verifier.ringSwitch claims =
       (Compile.VerifierProgram.grindProofOfWork Whir.batchGrindingBits).bind fun _ ↦
         (Compile.VerifierProgram.sampleChallenges 16).bind fun ch ↦
-          Compile.VerifierProgram.ret (ringTarget s (ch.take 8) (ch.drop 8),
-            fun r' ↦ Verifier.ringWeight point r' (ringCoefficients (ch.take 8) (ch.drop 8))) := by
+          Compile.VerifierProgram.ret (claims.map fun c ↦ (ringTarget c.2 (ch.take 8) (ch.drop 8),
+            fun r' ↦ Verifier.ringWeight c.1 r' (ringCoefficients (ch.take 8) (ch.drop 8)))) := by
   rw [Verifier.ringSwitch, ← verifier_ringTarget, ← verifier_ringCoefficients]
   rfl
 

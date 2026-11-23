@@ -31,6 +31,7 @@ theorem runOp_spec {C : Ctx} {s s' : St} {ins : LeanIsaInstruction} {op : Op} (h
   · obtain ⟨rfl, rfl, rfl, rfl⟩ := hop; exact deref_spec hs hfp hpc e
   · obtain ⟨rfl, rfl, rfl⟩ := hop; exact jump_spec hs hfp hpc e
   · obtain ⟨rfl, rfl, rfl, rfl, l, rfl, hl⟩ := hop; exact keccak_spec hs hfp hpc hl e
+  · obtain ⟨rfl, l, rfl, hl⟩ := hop; exact blake3_spec hs hfp hpc hl e
 
 /-- What a successful step gives. -/
 structure StepSpec (ins : LeanIsaInstruction) (nops : ℕ) (s s' : St) : Prop where

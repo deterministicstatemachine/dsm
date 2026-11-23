@@ -187,15 +187,21 @@ def ringResult (point s challenges : List E) : E × (List E → E) :=
   let coefficients := ringCoefficients f g
   (ringTarget s f g, fun rPrime ↦ ringWeight point rPrime coefficients)
 
-/-- What `ringSwitch` makes of its challenges. -/
+/-- What `ringSwitch` makes of its challenges, for one claim. -/
 def ringOf (point s challenges : List E) : Option (E × (List E → E)) :=
   some (ringResult point s challenges)
 
-/-- **`ringSwitch`, normal form**: the grind, the challenges, then `ringOf`. -/
-theorem ringSwitch_eq (point s : List E) :
-    ringSwitch point s = VerifierProgram.grindProofOfWork Whir.batchGrindingBits >>= fun _ ↦
+/-- What `ringSwitch` makes of its challenges, for every claim (research build: one map for the
+claims of `q_keccak` and `q_flock`). -/
+def ringsOf (claims : List (List E × List E)) (challenges : List E) :
+    Option (List (E × (List E → E))) :=
+  some (claims.map fun c ↦ ringResult c.1 c.2 challenges)
+
+/-- **`ringSwitch`, normal form**: the grind, the challenges, then `ringsOf`. -/
+theorem ringSwitch_eq (claims : List (List E × List E)) :
+    ringSwitch claims = VerifierProgram.grindProofOfWork Whir.batchGrindingBits >>= fun _ ↦
       VerifierProgram.sampleChallenges (2 * ringMapWidth) >>= fun challenges ↦
-        liftOption (ringOf point s challenges) := by
+        liftOption (ringsOf claims challenges) := by
   unfold ringSwitch
   phase_nf
 

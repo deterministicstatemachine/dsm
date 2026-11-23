@@ -123,7 +123,7 @@ def walk : m Unit := do
     let mut word : Array α := #[]
     for j in List.range 32 do
       let slot ← W.col (640 + 32 * i + j)
-      match relocationSource (32 * i + j) with
+      match flockRelocationSource (32 * i + j) with
       | some source => word := word.push (← W.add slot (← W.col (xBase + source)))
       | none => word := word.push slot
     message := message.push word
@@ -315,7 +315,7 @@ skip coordinate's Lagrange interpolation over `PHI[0..64]`. -/
 def pCoset (r : List E) (a b z : Array UInt64) : List E :=
   let eq := eqTable r
   (List.range kBits).map fun t ↦
-    let tables := byteTables (lagrangeWeights kBits (phi (kBits + t))).toArray
+    let tables := byteTables (flockLagrangeWeights kBits (flockPhi (kBits + t))).toArray
     (List.range eq.size).foldl (fun acc x ↦
       let (ax, bx, zx) := (a.getD x 0, b.getD x 0, z.getD x 0)
       if ax = 0 ∧ zx = 0 then acc
@@ -353,16 +353,16 @@ on the coset, a grind, the skip challenge, the equality-mode rounds, `v_a` and `
 challenge and the round challenges. -/
 def zerocheck (instances : Array Instance) (logN : ℕ) : Script (E × List E) := do
   let nSampled := logN - flockKSkip - nFixedChallenges
-  if 0 < nSampled then Script.grindBits flockPointGrindBits
+  Script.grindBits (if 0 < nSampled then flockPointGrindBits else 0)
   let sampled ← Script.sampleN nSampled
-  let r := fixedChallenges ++ sampled
+  let r := flockFixedChallenges ++ sampled
   let a := wordsOf instances (·.a)
   let b := wordsOf instances (·.b)
   let z := wordsOf instances (·.z)
   Script.sendList (pCoset r a b z)
   Script.grindBits flockSkipGrindBits
   let zSkip ← Script.sampleE
-  let skip := byteTables (lagrangeWeights kBits zSkip).toArray
+  let skip := byteTables (flockLagrangeWeights kBits zSkip).toArray
   let st : ZcState := ⟨a.map (applyBytes skip), b.map (applyBytes skip), z.map (applyBytes skip),
     (List.range r.length).map fun i ↦ eqTable (r.drop (i + 1))⟩
   let (chi, st) ← sumcheckBy zcRound zcFold (r.map some) st
@@ -395,7 +395,7 @@ for `e(row) = L_{row mod 64}(z_skip)·eq(χ_in, ⌊row/64⌋)`, `Z` the witness 
 def lincheck (instances : Array Instance) (zSkip : E) (chi : List E) : Script Unit := do
   Script.grindBits (grindingBits 3)
   let alpha ← Script.sampleE
-  let skip := (lagrangeWeights kBits zSkip).toArray
+  let skip := (flockLagrangeWeights kBits zSkip).toArray
   let high := eqTable (chi.take flockNumLincheckRounds)
   let size := 2 ^ blake3R1csLogSize
   let e : Array E := Array.ofFn (n := size) fun row ↦

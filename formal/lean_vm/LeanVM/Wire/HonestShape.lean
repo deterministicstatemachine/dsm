@@ -290,9 +290,35 @@ theorem noOpen_keccakPhase (layout : Layout) (claims : List ColumnClaim) :
   obtain ⟨_, _, _⟩ := x
   exact noOpen_ret _
 
-theorem noOpen_ringSwitch (point s : List E) : NoOpen (ringSwitch point s) := by
+theorem noOpen_ringSwitch (claims : List (List E × List E)) : NoOpen (ringSwitch claims) := by
   rw [ringSwitch_eq]
   exact NoOpen.bind (noOpen_grind _) fun _ ↦ NoOpen.bind (noOpen_sampleN _) fun _ ↦ noOpen_liftOption _
+
+/-- Flock's zerocheck commits and opens nothing (research build). -/
+theorem noOpen_verifyFlockZerocheck (logN : ℕ) : NoOpen (verifyFlockZerocheck logN) := by
+  unfold verifyFlockZerocheck
+  simp only [VerifierProgram.bind_eq, VerifierProgram.pure_eq]
+  refine NoOpen.bind (noOpen_grind _) fun _ ↦ NoOpen.bind (noOpen_sampleN _) fun _ ↦ ?_
+  refine NoOpen.bind (noOpen_readN _) fun _ ↦ NoOpen.bind (noOpen_grind _) fun _ ↦ ?_
+  refine NoOpen.bind noOpen_sampleE fun _ ↦ NoOpen.bind (noOpen_sumcheck _ _ _) fun x ↦ ?_
+  obtain ⟨_, _⟩ := x
+  exact NoOpen.bind noOpen_readE fun _ ↦ NoOpen.bind noOpen_readE fun _ ↦ noOpen_ret _
+
+/-- Flock's lincheck commits and opens nothing (research build). -/
+theorem noOpen_verifyFlockLincheck (zc : FlockZerocheck) : NoOpen (verifyFlockLincheck zc) := by
+  unfold verifyFlockLincheck
+  simp only [VerifierProgram.bind_eq, VerifierProgram.pure_eq]
+  refine NoOpen.bind (noOpen_grind _) fun _ ↦ NoOpen.bind noOpen_sampleE fun _ ↦ ?_
+  refine NoOpen.bind (noOpen_sumcheck _ _ _) fun x ↦ ?_
+  obtain ⟨_, _⟩ := x
+  exact NoOpen.bind (noOpen_readN _) fun _ ↦ NoOpen.bind (noOpen_require _) fun _ ↦ noOpen_ret _
+
+/-- Flock's phase commits and opens nothing (research build). -/
+theorem noOpen_flockPhase (layout : Layout) : NoOpen (flockPhase layout) := by
+  unfold flockPhase verifyFlock
+  simp only [VerifierProgram.bind_eq, VerifierProgram.pure_eq, VerifierProgram.bind_assoc]
+  exact NoOpen.bind (noOpen_verifyFlockZerocheck _) fun zc ↦
+    NoOpen.bind (noOpen_verifyFlockLincheck zc) fun _ ↦ noOpen_ret _
 
 /-- The phases between the stack's commitment and the stacked opening. -/
 def claimsPhase (layout : Layout) (publicInput : Digest) : VerifierProgram (List StackClaim) := do
@@ -300,8 +326,11 @@ def claimsPhase (layout : Layout) (publicInput : Digest) : VerifierProgram (List
   let claims ← tablePhaseClaims layout bus
   let publicClaims ← publicInputPhase layout publicInput
   let (claims, keccakPoint, keccakSlices) ← keccakPhaseClaims layout (claims ++ publicClaims)
-  let (ringTarget, ringWeight) ← ringSwitch keccakPoint keccakSlices
-  return ringSwitchClaim layout ringTarget ringWeight :: claims.map (·.stackClaim layout)
+  let (flockPoint, flockSlices) ← flockPhase layout
+  let rings ← ringSwitch [(keccakPoint, keccakSlices), (flockPoint, flockSlices)]
+  return List.zipWith (fun region (target, weight) ↦ ringSwitchClaim layout region target weight)
+      [qkeccak, qflock] rings ++
+    claims.map (·.stackClaim layout)
 
 theorem noOpen_claimsPhase (layout : Layout) (pi : Digest) : NoOpen (claimsPhase layout pi) := by
   unfold claimsPhase
@@ -311,7 +340,9 @@ theorem noOpen_claimsPhase (layout : Layout) (pi : Digest) : NoOpen (claimsPhase
   refine NoOpen.bind (noOpen_publicInputPhase _ _) fun _ ↦ ?_
   refine NoOpen.bind (noOpen_keccakPhase _ _) fun x ↦ ?_
   obtain ⟨cl, kp, ks⟩ := x
-  exact NoOpen.bind (noOpen_ringSwitch _ _) fun _ ↦ noOpen_ret _
+  refine NoOpen.bind (noOpen_flockPhase _) fun y ↦ ?_
+  obtain ⟨_, _⟩ := y
+  exact NoOpen.bind (noOpen_ringSwitch _) fun _ ↦ noOpen_ret _
 
 theorem noOpen_readOod (stackLog : ℕ) : NoOpen (readOod stackLog) := by
   rw [readOod_eq]
@@ -330,7 +361,7 @@ theorem leanVmProgram_regroup (bytecode : List K) (publicInput : Digest) :
         VerifierProgram.ret true := by
   rw [leanVmProgram_eq]
   simp only [verifyExecutionClaims, claimsPhase, VerifierProgram.bind_eq, VerifierProgram.pure_eq,
-    VerifierProgram.bind_assoc, VerifierProgram.ret_bind, List.cons_append]
+    VerifierProgram.bind_assoc, VerifierProgram.ret_bind]
 
 /-! ## The calculus -/
 

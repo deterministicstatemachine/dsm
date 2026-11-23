@@ -133,7 +133,7 @@ theorem readSizes_ne_ret (bytecode : List K) (a : Layout × ℕ) : readAnnounced
     a := by
   intro h
   obtain ⟨x, hx, -⟩ := bind_eq_ret_iff h
-  rw [show 2 + tables.length = 7 + 1 from rfl] at hx
+  rw [show 2 + tables.length = 8 + 1 from rfl] at hx
   simp [VerifierProgram.readScalars, VerifierProgram.readScalar, VerifierProgram.bind] at hx
 
 /-- `verify_execution` does not return without an event. -/

@@ -389,6 +389,27 @@ theorem runOp_sound {C : Ctx} {s s' : St} {op : Op} (hs : s.Good) (h : s.mem.Sou
       rcases List.mem_append.mp hc' with hc' | hc'
       · exact hc c hc'
       · exact ho c hc'
+  | blake3 ins out =>
+    simp only [runOp, bind_ok] at e
+    obtain ⟨cells, hcells, input, -, outs, houts, s1, hs1, e⟩ := e
+    simp only [pure_ok] at e; subst e
+    obtain ⟨m, hm, rfl⟩ := St.withMem_ok hs1
+    rw [bind_ok] at hm
+    obtain ⟨m1, hm1, hm⟩ := hm
+    simp only [pure_ok] at hm; subst hm
+    have hc := mapM_cells_lt _ (fun _ _ h ↦ (cellAt_ok h).2) _ _ hcells
+    have ho := mapM_cells_lt _ (fun _ _ h ↦ (cellAt_ok h).2) _ _ houts
+    have h1 : m1.Sound := by
+      refine Mem.Sound.foldlM _ (fun x : ℕ × ℕ ↦ x.1 < maxCells) (fun m x m' hm hx e ↦ ?_) _ s.mem
+        m1 h (fun x hx ↦ ?_) hm1
+      · obtain ⟨c, k⟩ := x
+        exact hm.put hx e
+      · obtain ⟨c, k⟩ := x
+        exact ho c (List.mem_of_getElem? (List.mem_zipIdx_iff_getElem?.mp hx))
+    exact h1.foldl_ensure _ fun c hc' ↦ by
+      rcases List.mem_append.mp hc' with hc' | hc'
+      · exact hc c hc'
+      · exact ho c hc'
 
 /-- **A step keeps the memory sound.** -/
 theorem step_sound {C : Ctx} {s s' : St} (hs : s.Good) (h : s.mem.Sound) (e : step C s = .ok s') :

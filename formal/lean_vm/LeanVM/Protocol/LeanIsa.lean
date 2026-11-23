@@ -516,11 +516,16 @@ def publicLines (input : PublicInput) : Vector (PublicLine (shape prog s)) 2 :=
 
 /-- The verifier's padding row of a table, in `K` (`Table::padding`,
 `crates/verifier/src/layout.rs`): zero, but for the `KECCAK` output lanes, which hold
-Keccak-f[1600] of the zero state. -/
+Keccak-f[1600] of the zero state, and the `BLAKE3` value limbs, which hold Flock's padding
+instance (`blake3_padding_word`). -/
 def padRowK (t : Verifier.Table) : List K :=
   (List.range t.width).map fun i ↦
     if t.opcode = Verifier.opKeccak ∧ Verifier.keccakOut ≤ i ∧ i < Verifier.keccakOut + 25 then
       K.ofBits (Keccak.lane (keccakF1600 (Vector.replicate 25 0)) (i - Verifier.keccakOut)).toNat
+    else if t.opcode = Verifier.opBlake3 then
+      match Verifier.blake3Slot (t.columns.getD i "") with
+      | some slot => K.ofBits (Verifier.blake3PaddingWord slot)
+      | none => 0
     else 0
 
 theorem padRowK_length (t : Verifier.Table) : (padRowK t).length = t.width := by
@@ -531,7 +536,10 @@ theorem padding_eq_map_ofK (t : Verifier.Table) : t.padding = (padRowK t).map of
   simp only [Verifier.Table.padding, padRowK, List.map_map]
   refine List.map_congr_left fun i _ ↦ ?_
   simp only [Function.comp_apply]
-  split_ifs <;> rfl
+  split_ifs
+  · rfl
+  · rcases Verifier.blake3Slot (t.columns.getD i "") with _ | slot <;> simp [Verifier.eOfNat]
+  · rfl
 
 /-! ### The `KECCAK` padding row, by column -/
 
@@ -562,7 +570,8 @@ theorem padRowK_keccak_getD (i : ℕ) (hi : i < 92) :
     congr 1
     apply BitVec.eq_of_toNat_eq
     simp
-  · rw [ite_eq_right (fun h' ↦ h h'.2), dite_eq_right h]
+  · have hb : (Verifier.tables.getD 5 default).opcode ≠ Verifier.opBlake3 := by rw [ho]; decide
+    rw [ite_eq_right (fun h' ↦ h h'.2), dite_eq_right h, ite_eq_right (fun h' ↦ absurd h' hb)]
 
 /-- The public row a padding row holds: the verifier's (`padRowK`) for an opcode table, zero for
 the column groups, which have no padding row. -/

@@ -14,7 +14,7 @@ public import Common.Linear
 
 `LeanVM.Protocol.Errors` defines the errors the proofs establish; the end statements bound them
 in bits (knowledge soundness's in `LeanVM.Protocol.LeanVMSoundAS`, `soundnessRpmAS_le_statement`).
-With `V = verifierQueries = 13708`:
+With `V = verifierQueries = 13983`:
 
 * `rpmError_completenessPermCalls_le`: at a fuel of `2^35` nonces per proof of work, the
   completeness transfer's error is at most `2^-257`.
@@ -34,13 +34,13 @@ theorem inv_two_pow_eq_div (k n : ℕ) (h : k ≤ n) :
     Nat.cast_ofNat, pow_add, ENNReal.mul_inv (by simp) (by simp), mul_assoc,
     ENNReal.inv_mul_cancel (by simp) (by simp), mul_one, ENNReal.inv_pow]
 
-theorem verifierQueries_eq : verifierQueries = 13708 := rfl
+theorem verifierQueries_eq : verifierQueries = 13983 := rfl
 
 theorem rpmError_eq (q : ℕ) :
     rpmError q = ((q ^ 2 : ℕ) : ℝ≥0∞) / ((2 ^ 508 : ℕ) : ℝ≥0∞) := by
   rw [rpmError, Nat.cast_pow, Nat.cast_pow, Nat.cast_ofNat]
 
-theorem verifierPermCalls_eq : verifierPermCalls = 13708 * 2 ^ 30 := rfl
+theorem verifierPermCalls_eq : verifierPermCalls = 13983 * 2 ^ 30 := rfl
 
 /-- The completeness transfer's error at a fuel of `2^35` nonces per proof of work. -/
 theorem rpmError_completenessPermCalls_le :

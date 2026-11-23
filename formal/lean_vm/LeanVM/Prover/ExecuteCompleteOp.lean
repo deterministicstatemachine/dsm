@@ -41,6 +41,7 @@ def OpModed (M : ℕ → E) (s : St) : Op → Prop
     s.mem.written (s.fp + f) = true ∧
     (M (s.fp + c) ≠ 0 → ∃ k < maxCells, (M (s.fp + f)).limb 0 = g ^ k)
   | .keccak ins _ _ _ _ => ∀ i ∈ ins.toList, s.mem.written (s.fp + i) = true
+  | .blake3 ins _ => ∀ i ∈ ins.toList, s.mem.written (s.fp + i) = true
 
 /-- What a completed instruction gives. -/
 structure OpDone (C : Ctx) (M : ℕ → E) (s s' : St) (r' : Registers K) : Prop where
