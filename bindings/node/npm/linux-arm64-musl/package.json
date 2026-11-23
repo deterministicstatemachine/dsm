@@ -1,0 +1,44 @@
+{
+  "name": "@kevaundray/lean-pq-linux-arm64-musl",
+  "version": "0.0.0-dev",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "lean_pq_node.linux-arm64-musl.node",
+  "files": [
+    "lean_pq_node.linux-arm64-musl.node"
+  ],
+  "description": "Node.js bindings for leanXMSS and leanSPHINCS post-quantum signatures, their leanVM aggregation, and the consensus VRF tree",
+  "keywords": [
+    "xmss",
+    "sphincs",
+    "leanxmss",
+    "leansphincs",
+    "vrf",
+    "post-quantum",
+    "ethereum",
+    "napi-rs"
+  ],
+  "homepage": "https://github.com/leanEthereum/leanVM/tree/main/bindings/node#readme",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leanEthereum/leanVM.git",
+    "directory": "bindings/node"
+  },
+  "bugs": {
+    "url": "https://github.com/leanEthereum/leanVM/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "musl"
+  ]
+}

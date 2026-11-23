@@ -1,0 +1,183 @@
+/-
+  LeanVM.Guest.B1.Sig.SphincsBottomComplete
+
+  The first stages of `verify_sig_lean_sphincs` (`lean_ethereum.py`)
+  are complete for an honest signature: the message digest, the bottom key's address, FORS.
+-/
+
+module
+
+public import LeanVM.Guest.B1.Sig.SphincsStagesComplete
+import LeanVM.Guest.ValRef
+import LeanVM.Guest.Data.ValNames.«verify_sig_lean_sphincs»
+
+/-!
+# The digest and FORS, complete
+
+`G` is `lean_ethereum.py`. From the arguments (`n0` the claim, `n1` the byte table) to `n5249`,
+the body is `sDigestBlock`, `sForsAddrs` and `sForsB`
+. `sBottom_complete`: for a claim of `pk` and `m` and a signature `sig`, under the
+blocks' completeness, they complete with the padding run, `PK.seed`, `PK.root`, the digest's number
+`digestT pk m sig` (`DigestAt`), the byte table's pointers, the bottom key's `A0` and `A1`, and the
+FORS key cell (`forsKeyCell`, whose value is the statement's FORS key, `sForsKeyOf_eq`). The
+signature's FORS openings are hinted (`forsSecretCell`, `forsSibCell`).
+-/
+
+namespace LeanVM.Guest.B1.Sig
+
+open LeanVM.Parameters LeanVM.Semantics LeanVM.Guest LeanVM.Guest.Core LeanVM.Guest.Value
+open LeanVM.Protocol.Verifier (eOfNat)
+
+open LeanVM.Guest.Memory (FallPops)
+open LeanVM.Guest.Value.Keccak LeanVM.Protocol.KeccakHash
+
+@[expose] public section
+
+variable {C : CallRel} {rd : Reader}
+
+/-! ## What the digest block leaves -/
+
+theorem sFVal_below {c z : Nat} (hc : c < 24) (hz : z < 10) : ∃ k < 1372, sFVal c z = .n k :=
+  ⟨300 + 29 * c + 3 * (9 - z), by omega, rfl⟩
+
+/-- `DigestAt` reads values below `n1372` only. -/
+theorem DigestAt.congr {σ σ' : Val} {T : Nat} (h : DigestAt σ T)
+    (ha : ∀ k < 1372, σ' (.n k) = σ (.n k)) : DigestAt σ' T := by
+  obtain ⟨hT, hb, hv, hl, hm⟩ := h
+  refine ⟨hT, fun k hk => by rw [ha _ (by omega)]; exact hb k hk, fun c hc z hz => ?_,
+    fun l hl3 z hz => ?_, by rw [show sTreeMid = .n (val% «verify_sig_lean_sphincs» "tree_mid") from rfl, ha _ (by norm_num)]; exact hm⟩
+  · obtain ⟨k, hk, ek⟩ := sFVal_below hc hz
+    rw [ek, ha k hk, ← ek]; exact hv c hc z hz
+  · obtain ⟨k, hk, ek⟩ := sLVal_below (sLeafOff l + z)
+    rw [ek, ha k hk, ← ek]; exact hl l hl3 z hz
+
+/-- The pointers of the digest block's byte reads: the unused bytes'. -/
+def sDigestPtrList : List Nat := (List.range 6).map (fbPtr 1312)
+
+theorem sDigestBlock_ptrList : ∀ q ∈ loadPtrs sDigestBlock, q ∈ sDigestPtrList := by decide +kernel
+
+theorem tablePtrs_of_digestPtrs {σ : Val} {bb : E} (h : DigestPtrs σ bb) :
+    TablePtrs bb σ sDigestBlock := by
+  intro q hq
+  have hm := sDigestBlock_ptrList q hq
+  simp only [sDigestPtrList, List.mem_map, List.mem_range] at hm
+  obtain ⟨k, hk, rfl⟩ := hm
+  exact h k (by omega)
+
+/-! ## What the stages up to FORS pop -/
+
+theorem sDigestBlock_atoms : atomsOnly sDigestBlock = true := by decide +kernel
+
+theorem sDigestBlock_hints :
+    hintsOf sDigestBlock = [("sp_rand", .stack [sRand]), ("sp_unused", .stack (runV 1306 6))] := by
+  decide +kernel
+
+/-- **The digest block pops the randomizer and the unused bytes**, from any valuation. -/
+theorem sDigestBlock_pops (σ : Val) :
+    FallPops rd σ sDigestBlock [("sp_rand", [σ sRand]), ("sp_unused", (runV 1306 6).map σ)] := by
+  have h := fallPops_hintsOf (rd := rd) σ sDigestBlock_atoms
+  rw [sDigestBlock_hints] at h
+  exact h
+
+/-- The second `H_msg` call's unused bytes, as a number: its low limb's bits from `16`. -/
+def spUnusedN (pk : Sphincs.PublicKey) (m : HashSig.Message) (R : HashSig.Randomizer) : Nat :=
+  unusedOf (digestHalves (keccak256
+    (hmsgBytes (cellOf128 R) (cellOf128 pk.publicSeed) (cellOf128 pk.root) m.toNat 1))).1
+
+/-- **The entries of the stages up to FORS**: the randomizer, the unused bytes, FORS's. -/
+def bottomPops (pk : Sphincs.PublicKey) (m : HashSig.Message) (sig : Sphincs.Signature) : List Pop :=
+  [("sp_rand", [cellOf128 sig.randomizer]), ("sp_unused", (List.range 6).map fun j =>
+    ofK (addressOfIndex (spUnusedN pk m sig.randomizer / 256 ^ j % 256)))] ++
+  forsPops (cellOf128 pk.publicSeed) (adrsCell0 0 (layerTreeN (digestT pk m sig) 0))
+    (layerLeafN (digestT pk m sig) 0) (forsLeafN (digestT pk m sig)) (forsSecretCell sig) (forsSibCell sig)
+
+/-- What the stages up to FORS leave, for the claim of `pk` and `m` signed by `sig`. -/
+def BottomPost (bb : E) (pk : Sphincs.PublicKey) (m : HashSig.Message) (sig : Sphincs.Signature)
+    (σ : Val) : Prop :=
+  PadOK σ sPad ∧ σ sPP = cellOf128 pk.publicSeed ∧ σ sRoot = cellOf128 pk.root ∧
+    DigestAt σ (digestT pk m sig) ∧ TablePtrs bb σ sDigestBlock ∧
+    σ sA0B = adrsCell0 0 (layerTreeN (digestT pk m sig) 0) ∧
+    σ sKeyB = adrsCell1 0 (layerLeafN (digestT pk m sig) 0) 0 0 ∧ σ sForsPk = forsKeyCell pk m sig
+
+theorem sDigestBlock_nb : NumBelow 1372 (Stmt.valsList sDigestBlock) := numBelow_of_all (by decide +kernel)
+
+theorem sDigestBlock_ptrs : ∀ q ∈ loadPtrs sDigestBlock, q < 1372 := by decide +kernel
+
+theorem sForsAddrs_seq : SeqOK 1372 sForsAddrs 1382 := seqB_ok (by decide +kernel)
+
+/-- `BottomPost` reads values below `n5249` only. -/
+theorem BottomPost.congr {bb : E} {pk : Sphincs.PublicKey} {m : HashSig.Message}
+    {sig : Sphincs.Signature} {σ σ' : Val} (h : BottomPost bb pk m sig σ)
+    (ha : ∀ k < 5249, σ' (.n k) = σ (.n k)) : BottomPost bb pk m sig σ' := by
+  obtain ⟨hp, hpp, hr, hd, hq, ha0, hk, hf⟩ := h
+  refine ⟨hp.congr (b := 5249) (by unfold sPad; omega) fun j hj => (ha j hj).symm,
+    by rw [show sPP = .n (val% «verify_sig_lean_sphincs» "pp") from rfl, ha _ (by norm_num)]; exact hpp,
+    by rw [show sRoot = .n (val% «verify_sig_lean_sphincs» "pk_root") from rfl, ha _ (by norm_num)]; exact hr,
+    hd.congr fun k hk => ha k (by omega),
+    hq.congr (b := 5249) (fun q hq' => by have := sDigestBlock_ptrs q hq'; omega) ha,
+    by rw [show sA0B = .n (val% «verify_sig_lean_sphincs» "a0_b") from rfl, ha _ (by norm_num)]; exact ha0,
+    by rw [show sKeyB = .n (val% «verify_sig_lean_sphincs» "key_b") from rfl, ha _ (by norm_num)]; exact hk,
+    by rw [show sForsPk = .n (val% «verify_sig_lean_sphincs» "fors_pk[0]") from rfl, ha _ (by norm_num)]; exact hf⟩
+
+/-- **The digest, the bottom key's address and FORS complete** for the claim of `pk` and `m` at
+`n0`, the byte table at `n1`, a signature `sig`. -/
+theorem sBottom_complete (hB : SphincsBlocksComplete) (hm : MemOK rd 256) {bb : E}
+    (hbb : ByteBits rd bb) (pk : Sphincs.PublicKey) (m : HashSig.Message) (sig : Sphincs.Signature)
+    (σ : Val) (h1 : σ (.n (val% «verify_sig_lean_sphincs» "byte_bits")) = bb)
+    (hat : ClaimAt rd (σ (.n (val% «verify_sig_lean_sphincs» "signer"))) (cellOf128 pk.publicSeed) (cellOf128 pk.root) (msgLo m) (msgHi m)) :
+    Completes C rd (val% «verify_sig_lean_sphincs» "pp") (val% «verify_sig_lean_sphincs» "ctr[0]@1") (sDigestBlock ++ (sForsAddrs ++ sForsB.1)) σ (fun σ' => BottomPost bb pk m sig σ' ∧
+      FallPops rd σ' (sDigestBlock ++ (sForsAddrs ++ sForsB.1)) (bottomPops pk m sig) ∧ SBits σ') := by
+  set T := digestT pk m sig with hTd
+  refine Completes.append (m := (val% «verify_sig_lean_sphincs» "a0_b~0")) (by norm_num) (by norm_num) sDigestBlock_nb
+    (sDigestBlock_complete hm hbb pk m sig.randomizer hat σ rfl h1)
+    (fun σA heA hA => ?_)
+  obtain ⟨hppA, hrA, hrdA, hpA, hdA, hqA, hunA, hSA⟩ := hA
+  replace hdA : DigestAt σA T := by
+    have e : (Id.run (Sphincs.Verification.messageDigest (m := Id) LeanVM.Semantics.keccakF1600 pk
+      sig.randomizer m)).toNat = T := rfl
+    rw [e] at hdA; exact hdA
+  replace hqA := tablePtrs_of_digestPtrs hqA
+  refine Completes.seq sForsAddrs_seq (by norm_num) (fun σB heB hAt => ?_)
+  have tB : ∀ k < (val% «verify_sig_lean_sphincs» "a0_b~0"), σB (.n k) = σA (.n k) := fun k hk => heB.apply (Or.inl hk)
+  have hdB := hdA.congr tB
+  obtain ⟨ha0B, hkB⟩ := sForsAddrs_vals hdB.2.2.2.1 hdB.2.2.2.2 hAt
+  have hpB : PadOK σB sPad := hpA.congr (b := 1372) (by unfold sPad; omega) fun j hj => (tB j hj).symm
+  have hppB : σB sPP = cellOf128 pk.publicSeed := by
+    rw [show sPP = .n (val% «verify_sig_lean_sphincs» "pp") from rfl, tB 2 (by norm_num)]; exact hppA
+  have hF := hB.fors C rd σB (layerTreeN T 0) (layerLeafN T 0) (forsLeafN T) (forsSecretCell sig)
+    (forsSibCell sig) hpB ha0B hkB
+    (fun c _ => forsLeafN_lt T c)
+    (fun c hc z hz => by
+      have e : sForsBit (10 * c + z) = sMdBit (10 * c + 9 - z) := by
+        simp only [sForsBit]
+        rw [show (10 * c + z) / 10 = c by omega, show (10 * c + z) % 10 = z by omega]
+      rw [e, hdB.mdBit (by omega), testBit_forsLeafN]
+      simp [hz, bitE])
+    (fun c hc z hz => by
+      have e : sVals (10 * c + z) = sFVal c z := by
+        simp only [sVals]
+        rw [show (10 * c + z) / 10 = c by omega, show (10 * c + z) % 10 = z by omega]
+      rw [e]; exact hdB.2.2.1 c hc z hz)
+  obtain ⟨σC, heC, hfC, hhC⟩ := hF
+  have tC : ∀ k < (val% «verify_sig_lean_sphincs» "fors_at~0"), σC (.n k) = σB (.n k) := fun k hk => heC.apply (Or.inl hk)
+  have tCA : ∀ k < (val% «verify_sig_lean_sphincs» "a0_b~0"), σC (.n k) = σA (.n k) := fun k hk => by rw [tC k (by omega), tB k hk]
+  refine ⟨σC, heC, ⟨⟨hpA.congr (b := 1372) (by unfold sPad; omega) fun j hj => (tCA j hj).symm,
+    by rw [show sPP = .n (val% «verify_sig_lean_sphincs» "pp") from rfl, tCA 2 (by norm_num)]; exact hppA,
+    by rw [show sRoot = .n (val% «verify_sig_lean_sphincs» "pk_root") from rfl, tCA 3 (by norm_num)]; exact hrA,
+    hdA.congr tCA, hqA.congr sDigestBlock_ptrs tCA,
+    by rw [show sA0B = .n (val% «verify_sig_lean_sphincs» "a0_b") from rfl, tC _ (by norm_num)]; exact ha0B,
+    by rw [show sKeyB = .n (val% «verify_sig_lean_sphincs» "key_b") from rfl, tC _ (by norm_num)]; exact hkB,
+    by rw [hfC.1, hppB]; rfl⟩, ?_, hSA.congr fun k hk => tCA k (by omega)⟩, hhC⟩
+  have hd := sDigestBlock_pops (rd := rd) σA
+  have hu : (runV 1306 6).map σA = (List.range 6).map fun j =>
+      ofK (addressOfIndex (spUnusedN pk m sig.randomizer / 256 ^ j % 256)) := by
+    rw [runV, List.map_map]
+    exact List.map_congr_left fun j hj => hunA j (List.mem_range.mp hj)
+  rw [hrdA, hu] at hd
+  have hf := hfC.2
+  rw [hppB] at hf
+  exact FallPops.congr_pops ((hd.agree sDigestBlock_nb fun k hk => (tCA k hk).symm).append
+    ((fallPops_quiet σC rfl).append hf)) (by rw [List.nil_append]; rfl)
+
+end
+end LeanVM.Guest.B1.Sig

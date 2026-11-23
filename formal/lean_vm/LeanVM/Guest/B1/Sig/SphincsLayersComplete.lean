@@ -1,0 +1,195 @@
+/-
+  LeanVM.Guest.B1.Sig.SphincsLayersComplete
+
+  A layer of `verify_sig_lean_sphincs` (`sp_layer`, `lean_ethereum.py`,
+  after its counter) is complete: its encoding hashed, the key's leaf by the call of `sp_wots`, the
+  path to the root.
+-/
+
+module
+
+public import LeanVM.Guest.B1.Sig.SphincsForsComplete
+public import LeanVM.Guest.B1.Sig.SphincsSoundLayer
+
+/-!
+# A layer, complete
+
+* `encOf`: the encoding digest of `P`, `A0`, `key + WOTS_ENC`, the value signed and the counter
+  `N`'s four bytes (`sLayerEnc_sound`'s);
+* `call_complete`: a call returning one word, the call relation holding;
+* `sHtLayer_complete`: the layer, the call returning `leaf` at the encoding: its root is
+  `pFold (pNodeE …)` from `leaf`; `sHtLayer_complete_vals` also the call's encoding and leaf.
+-/
+
+namespace LeanVM.Guest.B1.Sig
+
+open LeanVM.Parameters LeanVM.Semantics LeanVM.Guest LeanVM.Guest.Core LeanVM.Guest.Value
+open LeanVM.Guest.Value.Keccak LeanVM.Protocol.KeccakHash
+open LeanVM.Protocol.Verifier (eOfNat)
+
+open LeanVM.Guest.Memory (FallPops SplicePops)
+
+@[expose] public section
+
+variable {C : CallRel} {rd : Reader}
+
+/-- A layer's encoding digest (`sLayerEnc_sound`). -/
+def encOf (pp a0 key signed : E) (N : Nat) : E :=
+  (digestHalves (keccak256 (cellsBytes [pp, a0, key + lit (7 * 2 ^ 24), signed] ++
+    leBytes N 4))).1
+
+/-- **A call returning one word completes** when the call relation holds of its arguments. -/
+theorem call_complete {f : String} {args : List V} {d : Nat} (σ : Val) (w : E)
+    (hargs : NumBelow d args) (hC : C f (args.map σ) [w]) :
+    Completes C rd d (d + 1) [.call f args [.n d]] σ (fun σ' => σ' (.n d) = w) := by
+  refine ⟨Function.update σ (.n d) w, fun v hv => Function.update_of_ne (hv d le_rfl (by omega)) _ _,
+    Function.update_self .., fun next kret hn => ⟨?_, hn⟩⟩
+  have : args.map (Function.update σ (.n d) w) = args.map σ := List.map_congr_left fun v hv => by
+    obtain ⟨j, hj, rfl⟩ := hargs v hv
+    exact Function.update_of_ne (by simp; omega) _ _
+  rw [this]
+  simpa using hC
+
+/-- **A layer completes** from base `b`, its counter `ctr` the word `N < 2^32`, the call of
+`sp_wots` at the encoding returning `leaf`: its root is `pFold` of `pNodeE` from `leaf`, the
+siblings `sib`; the call reads the encoding at `b + 9 + a0W ac` and returns `leaf` at
+`b + 10 + 2 * a0W ac`, its `A0` at `a0Cell a0 ac (b + 10 + a0W ac)`. -/
+theorem sHtLayer_complete_vals {pad : Nat} {pp a0 : V} {ac : Option E} {key signed ctr : V}
+    {bit val : Nat → V} {off e height b N : Nat} (hh : height ≤ 16) (he : e < 2 ^ height)
+    {sib : Nat → E} (σ : Val) (hpb : pad + 5 ≤ b) (hpp : NBv b pp)
+    (ha0 : ac = none → NBv b a0) (hkey : NBv b key) (hsg : NBv b signed) (hct : NBv b ctr)
+    (hbn : ∀ j < height, NBv b (bit (off + j))) (hvn : ∀ j < height, NBv b (val (off + j)))
+    (hp : PadOK σ pad) (hN : N < 2 ^ 32)
+    (hctr : σ ctr = eOfNat N)
+    (hbit : ∀ j < height, σ (bit (off + j)) = if e.testBit j then 1 else 0)
+    (hval : ∀ j < height, σ (val (off + j)) = eOfNat (e >>> j)) {leaf : E}
+    (hcall : C "sp_wots" [σ pp, a0Val σ a0 ac, σ key,
+      encOf (σ pp) (a0Val σ a0 ac) (σ key) (σ signed) N] [leaf]) :
+    Completes C rd b (sHtLayer pad pp a0 ac key signed ctr bit val off height b).2.1
+      (sHtLayer pad pp a0 ac key signed ctr bit val off height b).1 σ
+      (fun σ' => AgreeBelow b σ σ' ∧
+        σ' (sHtLayer pad pp a0 ac key signed ctr bit val off height b).2.2 =
+          pFold (pNodeE (σ pp) (a0Val σ a0 ac) e sib) height leaf ∧
+        (∀ k, SplicePops rd σ' (sHtLayer pad pp a0 ac key signed ctr bit val off height b).1 [k]
+          (k ++ climbPops "siblings" (pNodeE (σ pp) (a0Val σ a0 ac) e sib) e.testBit sib height 0 leaf)) ∧
+        σ' (.n (b + 9 + a0W ac)) = encOf (σ pp) (a0Val σ a0 ac) (σ key) (σ signed) N ∧
+        σ' (.n (b + 10 + 2 * a0W ac)) = leaf ∧ σ' (a0Cell a0 ac (b + 10 + a0W ac)) = a0Val σ a0 ac) := by
+  rw [sHtLayer_split]
+  simp only [List.append_assoc]
+  have hcells : ∀ c ∈ [KC.cell pp, .cell (a0Cell a0 ac (b + 2)), .cell (.n (b + 1)), .cell signed,
+      .cell ctr], KCb (b + 2 + a0W ac) c := by
+    simp only [List.mem_cons, List.not_mem_nil, or_false]
+    rintro c (rfl | rfl | rfl | rfl | rfl)
+    · exact hpp.mono' (by omega)
+    · exact a0Cell_nb (fun h => (ha0 h).mono' (by omega)) (fun h => by rw [a0W_some h]; omega)
+    · exact ⟨b + 1, by omega, rfl⟩
+    · exact hsg.mono' (by omega)
+    · exact hct.mono' (by omega)
+  have hkn := (kMsg_nb (pad := pad) (len := 68) (tailRun := false) (by omega) hcells).1
+  rw [(kEnc_shape ..).1, show b + 2 + a0W ac + 8 = b + 10 + a0W ac by omega] at hkn
+  have hsP : SeqOK b [cst b (lit (7 * 2 ^ 24)), addS (.n (b + 1)) key (.n b)] (b + 2) :=
+    ⟨rfl, ⟨rfl, hkey.mono' (by omega), ⟨b, by omega, rfl⟩⟩, rfl⟩
+  have hsA := a0Pre_seq ac (b + 2)
+  have hs1 := SeqOK.append hsP hsA
+  have hs2 := a0Pre_seq ac (b + 10 + a0W ac)
+  have hpre_nb : NumBelow (b + 10 + 2 * a0W ac)
+      (Stmt.valsList (layerPre pad pp a0 ac key signed ctr b)) := by
+    simp only [layerPre, valsList_append]
+    exact ((hsP.numBelow.mono (by omega)).append (hsA.numBelow.mono (by omega))).append
+      ((hkn.mono (by omega)).append (hs2.numBelow.mono (by omega)))
+  have hpath_le := sPath_le pad pp a0 ac bit val off height 0 (.n (b + 10 + 2 * a0W ac))
+    (b + 10 + 2 * a0W ac + 1)
+  -- the encoding and the call's `A0`
+  have hpre : Completes C rd b (b + 10 + 2 * a0W ac) (layerPre pad pp a0 ac key signed ctr b) σ
+      (fun σ' => AgreeBelow b σ σ' ∧
+        σ' (.n (b + 9 + a0W ac)) = encOf (σ pp) (a0Val σ a0 ac) (σ key) (σ signed) N ∧
+        σ' (a0Cell a0 ac (b + 10 + a0W ac)) = a0Val σ a0 ac) := by
+    have h := Completes.seqThen (C := C) (rd := rd) (Q := fun _ => True) hs1
+      (hi := b + 10 + 2 * a0W ac) (by omega) (fun σ1 he1 _ => by
+        have hag1 : AgreeBelow b σ σ1 := fun j hj => he1.agree j (by omega)
+        have hk := (kMsg_complete (C := C) (rd := rd) σ1 (hp.congr hpb hag1) (by omega)
+          (len := 68) (tailRun := false) hcells (fun h => by simp at h)).1
+        rw [(kEnc_shape ..).1, show b + 2 + a0W ac + 8 = b + 10 + a0W ac by omega] at hk
+        exact Completes.append (m := b + 10 + a0W ac) (by omega) (by omega) hkn hk
+          (fun σ2 _ _ => (seq_completes hs2 σ2).mono le_rfl (by omega) fun _ _ => trivial))
+    refine (h.withAtoms (by simp only [atomsOnly_append, kMsg_atoms, a0Pre_atoms]; rfl)).withExt.mono
+      le_rfl le_rfl (fun σ' ⟨⟨_, hA⟩, he'⟩ => ⟨he'.agree, ?_, ?_⟩)
+    · have t : ∀ v, NBv b v → σ' v = σ v := fun v hv => he'.agree.apply hv
+      rw [sLayerEnc_sound (hp.congr hpb he'.agree) hN (by rw [t _ hct]; exact hctr) hA, t _ hpp,
+        a0Val_agree ha0 t, t _ hkey, t _ hsg, encOf]
+    · have t : ∀ v, NBv b v → σ' v = σ v := fun v hv => he'.agree.apply hv
+      rw [a0Pre_sound (a0 := a0) hA.right.right, a0Val_agree ha0 t]
+  refine Completes.append (m := b + 10 + 2 * a0W ac) (by omega) (by omega) hpre_nb hpre
+    (fun σ1 he1 ⟨hag1, henc, ha01⟩ => ?_)
+  have t1 : ∀ v, NBv b v → σ1 v = σ v := fun v hv => hag1.apply hv
+  have hcell : NBv (b + 10 + 2 * a0W ac) (a0Cell a0 ac (b + 10 + a0W ac)) :=
+    a0Cell_nb (fun h => (ha0 h).mono' (by omega)) (fun h => by rw [a0W_some h]; omega)
+  refine Completes.append (m := b + 10 + 2 * a0W ac + 1) (by omega) (by omega)
+    (by simp only [valsList_cons, valsList_nil, Stmt.vals, List.append_nil]
+        intro v hv
+        simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false] at hv
+        rcases hv with (rfl | rfl | rfl | rfl) | rfl
+        · exact hpp.mono' (by omega)
+        · exact hcell.mono' (by omega)
+        · exact hkey.mono' (by omega)
+        · exact ⟨b + 9 + a0W ac, by omega, rfl⟩
+        · exact ⟨b + 10 + 2 * a0W ac, by omega, rfl⟩)
+    (call_complete σ1 leaf (by
+        intro v hv
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at hv
+        rcases hv with rfl | rfl | rfl | rfl
+        · exact hpp.mono' (by omega)
+        · exact hcell
+        · exact hkey.mono' (by omega)
+        · exact ⟨b + 9 + a0W ac, by omega, rfl⟩)
+      (by simp only [List.map_cons, List.map_nil, t1 _ hpp, ha01, t1 _ hkey, henc]; exact hcall))
+    (fun σ2 he2 hl2 => ?_)
+  have hag2 : AgreeBelow (b + 10 + 2 * a0W ac) σ1 σ2 := he2.agree
+  have t2 : ∀ v, NBv b v → σ2 v = σ v := fun v hv =>
+    (hag2.apply (hv.mono' (by omega))).trans (t1 v hv)
+  have hpv := sPath_complete_pops (C := C) (rd := rd) (pad := pad) (pp := pp) (a0 := a0) (ac := ac)
+    (bit := bit) (val := val) (off := off) (sib := sib) hh he (cur := .n (b + 10 + 2 * a0W ac))
+    (x := b + 10 + 2 * a0W ac + 1) σ2 (by omega)
+    (hpp.mono' (by omega)) (fun h => (ha0 h).mono' (by omega)) (fun j hj => (hbn j hj).mono' (by omega))
+    (fun j hj => (hvn j hj).mono' (by omega)) ⟨b + 10 + 2 * a0W ac, by omega, rfl⟩
+    (hp.congr hpb fun j hj => by rw [t2 (.n j) ⟨j, hj, rfl⟩])
+    (fun j hj => by rw [t2 _ (hbn j hj)]; exact hbit j hj)
+    (fun j hj => by rw [t2 _ (hvn j hj)]; exact hval j hj)
+  refine hpv.mono le_rfl le_rfl (fun σ' ⟨hag', hr', hP'⟩ => ⟨?_, ?_, fun k => ?_,
+    (hag' (b + 9 + a0W ac) (by omega)).symm.trans ((hag2 (b + 9 + a0W ac) (by omega)).symm.trans henc),
+    (hag' (b + 10 + 2 * a0W ac) (by omega)).symm.trans hl2,
+    (hag'.apply (hcell.mono' (by omega))).trans ((hag2.apply hcell).trans ha01)⟩)
+  · exact fun j hj => (t2 (.n j) ⟨j, hj, rfl⟩).symm.trans (hag' j (by omega))
+  · rw [hr', t2 _ hpp, a0Val_agree ha0 t2, hl2]
+  · rw [t2 _ hpp, a0Val_agree ha0 t2, hl2] at hP'
+    have hq : quiet (layerPre pad pp a0 ac key signed ctr b) = true := by
+      simp only [layerPre, quiet_append, kMsg_quiet, a0Pre_quiet]; rfl
+    have h := (SplicePops.of_fallPops (fallPops_quiet (rd := rd) σ' hq)).append
+      ((SplicePops.call "sp_wots" [pp, a0Cell a0 ac (b + 10 + a0W ac), key, .n (b + 9 + a0W ac)]
+        [.n (b + 10 + 2 * a0W ac)] k).append (SplicePops.of_fallPops hP'))
+    simpa only [List.nil_append, List.append_nil] using h
+
+/-- **A layer completes** (`sHtLayer_complete_vals` without the call's values). -/
+theorem sHtLayer_complete {pad : Nat} {pp a0 : V} {ac : Option E} {key signed ctr : V}
+    {bit val : Nat → V} {off e height b N : Nat} (hh : height ≤ 16) (he : e < 2 ^ height)
+    {sib : Nat → E} (σ : Val) (hpb : pad + 5 ≤ b) (hpp : NBv b pp)
+    (ha0 : ac = none → NBv b a0) (hkey : NBv b key) (hsg : NBv b signed) (hct : NBv b ctr)
+    (hbn : ∀ j < height, NBv b (bit (off + j))) (hvn : ∀ j < height, NBv b (val (off + j)))
+    (hp : PadOK σ pad) (hN : N < 2 ^ 32)
+    (hctr : σ ctr = eOfNat N)
+    (hbit : ∀ j < height, σ (bit (off + j)) = if e.testBit j then 1 else 0)
+    (hval : ∀ j < height, σ (val (off + j)) = eOfNat (e >>> j)) {leaf : E}
+    (hcall : C "sp_wots" [σ pp, a0Val σ a0 ac, σ key,
+      encOf (σ pp) (a0Val σ a0 ac) (σ key) (σ signed) N] [leaf]) :
+    Completes C rd b (sHtLayer pad pp a0 ac key signed ctr bit val off height b).2.1
+      (sHtLayer pad pp a0 ac key signed ctr bit val off height b).1 σ
+      (fun σ' => AgreeBelow b σ σ' ∧
+        σ' (sHtLayer pad pp a0 ac key signed ctr bit val off height b).2.2 =
+          pFold (pNodeE (σ pp) (a0Val σ a0 ac) e sib) height leaf ∧
+        ∀ k, SplicePops rd σ' (sHtLayer pad pp a0 ac key signed ctr bit val off height b).1 [k]
+          (k ++ climbPops "siblings" (pNodeE (σ pp) (a0Val σ a0 ac) e sib) e.testBit sib height 0 leaf)) :=
+  (sHtLayer_complete_vals hh he σ hpb hpp ha0 hkey hsg hct hbn hvn hp hN hctr hbit hval hcall).mono le_rfl
+    le_rfl fun _ h => ⟨h.1, h.2.1, h.2.2.1⟩
+
+end
+end LeanVM.Guest.B1.Sig

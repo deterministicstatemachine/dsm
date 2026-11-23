@@ -1,0 +1,174 @@
+% !TeX root = ../drafts/a-ring-switching.tex
+\section{Ring switching}\label{annex:rs}
+
+Ring switching was introduced in \cite{DP24}. We present a variant tailored to our use case: transforming a PCS for $\K$ into a PCS for $\Ftwo$ (transforming a $\K$-valued multilinear PCS, with $\nkeccak$ variables and opening claims in $\E$, into a commitment protocol to 64 $\Ftwo$-valued multilinears, each with $\nkeccak$ variables and sharing opening claims in $\E$).
+
+\subsection{Setting}\label{rs:setting}
+
+The two fields are those of \S\ref{sec:vm}: $\K=\F_2[x]/(x^{64}+x^4+x^3+x+1)$ inside $\E=\K[y]/(y^2+xy+1)$. As $\F_2$-vector spaces, $\K$ has basis $x^0,\dots,x^{63}$, and $\E$ has the $128$ products
+\[
+e_w=x^iy^j\in\E,\qquad w=64j+i,\quad 0\le i<64,\quad 0\le j<2.
+\]
+
+The witness is $64$ bit-valued multilinears $Q_0,\dots,Q_{63}:\cube{\nkeccak}\to\{0,1\}$. We commit to them packed, one $\K$ element per point:
+\[
+\qkeccak:\cube{\nkeccak}\to\K,\qquad \qkeccak(u)=\sum_{i=0}^{63}Q_i(u)\,x^i.
+\]
+The commitment scheme proves statements of one shape. Given a target $T\in\E$ and an MLE-friendly weight $W:\cube{\nkeccak}\to\E$ (Definition~\ref{def:ipcs}), an opening proves
+\[
+\sum_{u\in\cube{\nkeccak}}W(u)\,\qkeccak(u)=T.
+\]
+The weight $W$ and target $T$ are $\E$-valued, the committed values are $\K$-valued.
+
+What arrives is not of that shape. It is $64$ claimed values $s_i\in\E$, one per bit polynomial, at a point $r\in\E^{\nkeccak}$ they all share.
+\[
+s_i \qeq \mle{Q_i}(r)=\sum_{u\in\cube{\nkeccak}}\eq(r,u)\,Q_i(u),\qquad 0\le i<64.
+\]
+
+Ring switching~\cite{DP24} turns those $64$ claims into a single statement the opening can prove.
+
+\subsection{The reduction}\label{rs:reduction}
+
+Fix an $\F_2$-linear map $\Phi:\E\to\E$:
+\begin{equation}
+\begin{split}
+\sum_{u\in\cube{\nkeccak}}\Phi\bigl(\eq(r,u)\bigr)\,\qkeccak(u)
+&=\sum_{i=0}^{63}x^i\sum_{u\in\cube{\nkeccak}}Q_i(u)\,\Phi\bigl(\eq(r,u)\bigr)\\
+&=\sum_{i=0}^{63}x^i\,\Phi\Bigl(\sum_{u\in\cube{\nkeccak}}Q_i(u)\,\eq(r,u)\Bigr)
+=\sum_{i=0}^{63}x^i\,\Phi(s_i).
+\end{split}
+\label{eq:complete}
+\end{equation}
+The reduction is:
+\begin{enumerate}
+\item once the $s_i$ are fixed, the verifier draws $\Phi$ at random;
+\item it computes the target $T=\sum_{i=0}^{63}x^i\Phi(s_i)$;
+\item the commitment scheme opens $\qkeccak$ against the weight $W:\cube{\nkeccak}\to\E$, $W(u)=\Phi\bigl(\eq(r,u)\bigr)$, with target $T$; if that opening accepts, the verifier accepts the $64$ claims.
+\end{enumerate}
+Everything now turns on which $\Phi$ we can afford to draw.
+
+\subsection{Which maps are sound}\label{rs:sound-maps}
+
+\paragraph{The error, transposed.} Suppose the $s_i$ are wrong. The errors $\delta_i=s_i-\mle{Q_i}(r)\in\E$, for $0\le i<64$, are not all zero, and they are fixed before $\Phi$ is drawn. By \eqref{eq:complete} the target the verifier computes differs from the honest one by $\sum_{i=0}^{63}x^i\Phi(\delta_i)$, so the opening succeeds only if
+\[
+\sum_{i=0}^{63}x^i\,\Phi(\delta_i)=0.
+\]
+Expand each error in the $\F_2$-basis of $\E$, say $\delta_i=\sum_{w=0}^{127}\delta_{i,w}e_w$ with $\delta_{i,w}\in\F_2$, and exchange the two sums:
+\begin{equation}
+\sum_{i=0}^{63}x^i\,\Phi(\delta_i)
+=\sum_{i=0}^{63}x^i\sum_{w=0}^{127}\delta_{i,w}\,\Phi(e_w)
+=\sum_{w=0}^{127}\Phi(e_w)\,\Delta_w,
+\qquad
+\Delta_w:=\sum_{i=0}^{63}\delta_{i,w}x^i\in\K.
+\label{eq:transpose}
+\end{equation}
+The $x^i$ are an $\F_2$-basis of $\K$, so some $\Delta_w\neq0$. The cheating prover succeeds if $\sum_{w=0}^{127}\Phi(e_w)\,\Delta_w=0$. We must thus draw $\Phi$ to make this event unlikely.
+
+\paragraph{Frobenius sums.} Squaring is additive in characteristic $2$, so
+\[
+\Phi(a)=\sum_{k=0}^{127}c_k\,a^{2^k},\qquad a\in\E,\quad c_k\in\E,
+\]
+is $\F_2$-linear for any choice of coefficients. Call $\supp=\{k:c_k\neq0\}\subseteq\{0,\dots,127\}$ the \emph{support} of $\Phi$. Substituting into the check above,
+\begin{equation}
+\sum_{w=0}^{127}\Phi(e_w)\,\Delta_w=\sum_{w=0}^{127}\sum_{k\in\supp}c_k\,e_w^{2^k}\,\Delta_w=\sum_{k\in\supp}c_k\,\pair_k,
+\qquad
+\pair_k:=\sum_{w=0}^{127}e_w^{2^k}\,\Delta_w\in\E.
+\label{eq:pairing}
+\end{equation}
+The $\pair_k$ depend only on the error, the $c_k$ only on the randomness.
+
+\paragraph{Sixty-four terms.} We take $\supp=\{0,\dots,63\}$ and show that a nonzero $\Delta$ leaves some $\pair_k\neq0$, $k<64$. Suppose $\pair_k=0$ for all $k<64$; two steps force $\Delta=0$.
+
+First, split $\pair_k$ over $\K$. Write $w=64j+i$, so that $e_w^{2^k}=x^{i2^k}\,\bigl(y^{2^k}\bigr)^{j}$ and
+\[
+\pair_k=\pair_{0,k}+y^{2^k}\,\pair_{1,k},
+\qquad
+\pair_{j,k}:=\sum_{i=0}^{63}\Delta_{64j+i}\,x^{i2^k}\in\K,\qquad 0\le j<2.
+\]
+Squaring is a bijection of $\K$ onto itself, so $y^{2^k}\in\K$ would force $y\in\K$, hence $\E=\K[y]=\K$. By Lemma~\ref{lem:kbasis} applied to $y^{2^k}$, the set $\bigl\{1,y^{2^k}\bigr\}$ is a $\K$-basis of $\E$, and $\pair_k=0$ forces $\pair_{0,k}=\pair_{1,k}=0$.
+
+Second, read the $64$ equations $\pair_{j,k}=0$, at fixed $j$, as a single polynomial. Put
+\[
+D_j(v)=\sum_{i=0}^{63}\Delta_{64j+i}\,v^i\in\K[v],
+\qquad\text{so that}\qquad
+\pair_{j,k}=D_j\bigl(x^{2^k}\bigr).
+\]
+Then $D_j$ has degree at most $63$ and vanishes at the $64$ points $x,x^2,x^4,\dots,x^{2^{63}}$. Those are distinct, because $x$ has degree $64$ over $\F_2$ and so has $64$ distinct conjugates. A nonzero polynomial of degree at most $63$ cannot have $64$ roots, so $D_j=0$ and every $\Delta_{64j+i}$ vanishes. A nonzero error therefore leaves some $\pair_k\neq0$.
+
+\subsection{The map we draw}\label{rs:map}
+
+We derive the $64$ coefficients from sixteen challenges. Once the $s_i$ are fixed, the verifier draws $f_0,\dots,f_7,g_0,\dots,g_7\leftarrow\E$, in this order and in one message with the opening's batching challenge, and sets
+\begin{equation}
+\Psi(a)=\sum_{b<8}g_b\,a^{2^b},
+\qquad
+\Phi(a)=\sum_{p<8}f_p\,\Psi(a)^{2^{8p}}.
+\label{eq:phi}
+\end{equation}
+Squaring is additive, so
+\begin{equation}
+\Phi(a)=\sum_{k=0}^{63}c_k\,a^{2^k},
+\qquad
+c_{8p+b}=f_p\,g_b^{\,2^{8p}}\qquad(p,b<8).
+\label{eq:ck}
+\end{equation}
+
+\paragraph{Soundness.} Fix a nonzero error. Some $\pair_{8p+b}\neq0$ (\S\ref{rs:sound-maps}), and
+\[
+\sum_{k=0}^{63}c_k\,\pair_k=\sum_{p<8}f_p\,M_p,
+\qquad
+M_p:=\sum_{b<8}g_b^{\,2^{8p}}\,\pair_{8p+b}.
+\]
+The Frobenius permutes $\E$, so the $g_b^{2^{8p}}$ are uniform and independent, and $M_p=0$ with probability $1/|\E|$. Otherwise the sum vanishes with probability $1/|\E|$ over the $f$. So the check passes with probability at most $2/|\E|$.
+
+Two stages of eight take sixteen challenges instead of sixty-four, and the target shares the outer Frobenius powers across the $64$ slices (\S\ref{rs:cost}).
+
+\subsection{Evaluating the weight}\label{rs:weight}
+
+An opening reduces $\sum_{u\in\cube{\nkeccak}}W(u)\,\qkeccak(u)=T$ to a claim about $\qkeccak$ at a random point $r'\in\E^{\nkeccak}$, and the verifier must evaluate the multilinear extension of $W$ at $r'$, written $\mle{W}(r')$, by itself. One fact turns that into a short formula.
+
+\emph{Fact (Frobenius passes through $\eq$ on the boolean hypercube).} Squaring respects sums and products and fixes bits, so for $u\in\cube{\nkeccak}$, by Definition~\ref{def:eq},
+\[
+\eq(r,u)^{2^k}=\prod_{n=1}^{\nkeccak}(1+r_n+u_n)^{2^k}=\prod_{n=1}^{\nkeccak}\bigl(1+r_n^{2^k}+u_n\bigr)=\eq\bigl(r^{2^k},u\bigr),
+\qquad r^{2^k}:=\bigl(r_1^{2^k},\dots,r_{\nkeccak}^{2^k}\bigr).
+\]
+
+Expand $W$ at $r'$ with \eqref{eq:ck} and this fact:
+\[
+\begin{aligned}
+\mle{W}(r')&=\sum_{u\in\cube{\nkeccak}}W(u)\,\eq(r',u)
+=\sum_{u\in\cube{\nkeccak}}\Phi\bigl(\eq(r,u)\bigr)\,\eq(r',u)\\
+&=\sum_{k=0}^{63}c_k\sum_{u\in\cube{\nkeccak}}\eq\bigl(r^{2^k},u\bigr)\,\eq(r',u).
+\end{aligned}
+\]
+The inner sum is $\eq(r^{2^k},r')$, since $\eq(u,\cdot\,)$ is its own multilinear extension for every $u$. By Definition~\ref{def:eq} again,
+\[
+\boxed{\ \
+\mle{W}(r') \;=\; \sum_{k=0}^{63}\, c_k \prod_{n=1}^{\nkeccak}
+\bigl( 1 + r_n^{2^k} + r'_n \bigr).
+\ \ }
+\]
+
+\subsection{Cost}\label{rs:cost}
+
+The target need not apply $\Phi$ to each slice. Put $z_p=x^{2^{-8p}}$, a constant of $\K$, equal to $x^{2^{64-8p}}$ since the Frobenius of $\K$ has order $64$. Then $x^i\,\Psi(a)^{2^{8p}}=\bigl(z_p^i\,\Psi(a)\bigr)^{2^{8p}}$, and
+\[
+T=\sum_{i=0}^{63}x^i\,\Phi(s_i)=\sum_{p<8}f_p\Bigl(\sum_{i=0}^{63}z_p^i\,\Psi(s_i)\Bigr)^{2^{8p}}.
+\]
+One application of $\Psi$ takes $7$ squarings and $8$ multiplications. The verifier applies it to each slice, takes the eight inner sums by Horner in $z_p$, raises the $p$-th to $2^{8p}$, $224$ squarings in all, and multiplies by $f_p$. The coefficients of \eqref{eq:ck} take $56$ squarings per $g_b$ and one multiplication per $c_k$.
+
+\begin{center}
+\begin{tabular}{lrr}
+& squarings & multiplications\\[2pt]
+\hline
+one application of $\Psi$ & $7$ & $8$\\
+the target $T$, $64$ applications and $8$ sums & $672$ & $520$\\
+the coefficients $c_k$, once & $448$ & $64$\\
+the weight $\mle{W}(r')$ & $63\nkeccak$ & $64\nkeccak$\\
+\end{tabular}
+\end{center}
+
+Everything above is in $\E$. The $504$ Horner steps in the target are left out: each multiplies by a constant $z_p$ of $\K$, which is cheaper.
+
+\subsection{Credits}\label{rs:credits}
+
+The construction above rests on generalizing ring switching~\cite{DP24} beyond the binary-tower setting, an idea of Lev Soukhanov, \textit{[[alloc]init]}. The idea of drawing $\Phi$ as a composition of cheap stages is from~\cite{Flock26}.

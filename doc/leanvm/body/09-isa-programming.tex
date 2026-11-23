@@ -1,0 +1,63 @@
+% !TeX root = ../drafts/09-isa-programming.tex
+\section{ISA programming}\label{sec:isa-programming}
+
+How the zkDSL compiler (\path{crates/zkdsl_compiler}; surface language in \path{crates/zkdsl_compiler/zkDSL.md}) programs the six-instruction ISA. Two themes run through every pattern: \emph{write-once memory is an assertion mechanism} (a second write of a cell is an equality check, an unwritten cell is prover-chosen), and \emph{indices live in the exponent} (a logical index $i$ is the element $\gen^{i}$, so incrementing, offsetting, and address formation are single field multiplications).
+
+\subsection{Hints}\label{sec:prog-hints}
+
+The prover's nondeterminism enters through write-once cells that are still unset when execution needs them. Some are explicit advice (a fresh allocation pointer $\gen^{\mathrm{base}}$, a witness stream, a computed-advice builtin); others are back-solved by an instruction whose remaining operands are known. In every case the resulting word is unconstrained except by the instructions and memory equalities that consume it, so a program must check all security-relevant advice.
+
+\subsection{Division and inequality}\label{sec:prog-div-ne}
+
+The zkDSL's single-slash division $q=a/b$ uses write-once back-solving: it emits \texttt{MUL\_NATIVE} with $q$ as the one unset input and $a$ as the already-written output. Witness generation fills $q=a\,b^{-1}$, while the ordinary multiplication table proves $q b=a$. It costs one VM instruction. Division by zero is undefined. Double slash \texttt{//} remains compile-time integer floor division for sizes and indices; it is not a field operation.
+
+The assertion \texttt{assert a != b} computes $x=a+b$ with \texttt{XOR}, takes a hinted $w=x^{-1}$, forms $p=x\,w$ with \texttt{MUL\_NATIVE}, and writes $1$ to $p$ with \texttt{SET\_CONSTANT}. Memory being write-once, the two writes to $p$ agree only if $p=1$, and $x=0$ forces $p=0$ whatever the hint.
+
+\subsection{Functions}\label{sec:prog-functions}
+
+A frame is fp-relative with layout $[\mathit{retpc},\mathit{retfp},\mathrm{args},\mathrm{rets},\mathrm{locals}]$. A call: the callee frame pointer is hinted into a fresh cell $\mathit{nfp}$; the arguments and the caller's $\fp$ are stored through $\mathit{nfp}$ with \texttt{DEREF}s (modes \texttt{cell} and \texttt{fp}); a \texttt{DEREF} in mode \texttt{pc} stores the return address $\gen^{2}\cdot\pc$ (the instruction after the transfer); one \texttt{JUMP} enters the callee. Return is a single \texttt{JUMP} to $\loc{1}$ with frame pointer $\loc{\gen}$. Cost: $n_{\mathrm{args}}+n_{\mathrm{rets}}+4$ instructions per call.
+
+The callee frame pointer being hinted, the following convention is crucial: \textit{a function's internal logic should only depend on its inputs, not on where its frame happens to land}, so that the value of $\mathit{nfp}$ does not impact its execution.
+
+The ISA makes it possible to use values of $\fp$ outside the range $\{\gen^{0},\dots,\gen^{2^{\kmem}-1}\}$. As long as every memory access of the form $\loc{o}$ (for some offset $o$) is in range, i.e.\ $\fp\cdot o=\gen^{i}$ with $i<2^{\kmem}$, the execution is valid. Yet, reasoning about such out-of-range values of $\fp$ is tricky. The initial $\fp$ is in range, since the state boundary condition fixes $\fp_{0}=\gen^{0}$ (\S\ref{sec:state}), but nothing guarantees it for the ones a \texttt{JUMP} sets. We thus suggest the following programming convention: whenever a \texttt{JUMP} updates $\fp$, the program should guarantee that the new value is in range. The calling convention above does it for free:
+
+\begin{itemize}
+\item On a call, $\fp\gets\loc{o_f}$, where $\loc{o_f}=\mathit{nfp}$ is hinted, hence arbitrary. But the callee frame was initialized with the \texttt{DEREF} $\mem[\mathit{nfp}]\gets\gen^{2}\cdot\pc$, whose memory access at address $\mathit{nfp}$ forces $\mathit{nfp}=\gen^{i}$ with $i<2^{\kmem}$ (Corollary~\ref{cor:addrrange}).
+\item On a return, $\fp\gets\loc{\gen}$ reads back what the caller wrote there, i.e.\ its own $\fp$, in range by induction.
+\end{itemize}
+
+\subsection{Loops}\label{sec:prog-loops}
+
+A counted loop keeps its counter in the exponent: it starts at $\gen^{\mathrm{lo}}$, advances by one multiplication $i\gets\gen\cdot i$, and exits on reaching $\gen^{\mathrm{hi}}$. The body is lowered as a tail-recursive helper function whose exit test \emph{is} the recursive call's \texttt{JUMP} condition (the \texttt{XOR} $i+\gen^{\mathrm{hi}}$ is nonzero exactly while the loop must continue), so an iteration costs one call plus two instructions, with no is-zero gadget. Loop state is threaded through captured arguments or a heap buffer.
+
+\subsection{Conditionals}\label{sec:prog-conditionals}
+
+\texttt{if}/\texttt{else} on a field equality is one \texttt{XOR} plus one conditional \texttt{JUMP}: the taken jump goes to whichever block the test should \emph{not} fall into ($=$ falls into \emph{then}, $\neq$ into \emph{else}), so no negation is ever computed. Intra-function jump targets are bytecode addresses $\gen^{\mathrm{entry}+i}$, backpatched at layout.
+
+A taken \texttt{JUMP} reloads $\fp$ from a cell, and the ISA has no $\fp$-read; a branching function therefore materializes its own $\fp$ once: a \texttt{DEREF} in mode \texttt{fp} writes $\fp$ into a fresh one-cell heap buffer, a \texttt{DEREF} in mode \texttt{cell} copies it back into the frame (2 instructions, amortized; in \texttt{main}, $\fp=\gen^{0}=1$ is already a constant). Bindings made inside a branch are local to it; branches communicate through write-once cells: only one branch executes, so both may write the \emph{same} cell.
+
+\subsection{Checking that a value is in the subfield \texorpdfstring{$\K$}{K}}\label{sec:prog-subfield-checks}
+
+To check that $\loc{o_1}$ and $\loc{o_2}$ are both in $\K$, it suffices to emit \texttt{JUMP} $[o_0,o_1,o_2]$ with $\loc{o_0}=0$. Indeed, the jump falls through, while \texttt{JUMP} unconditionally requires all three values it reads to be in $\K$.
+
+\subsection{Range checks}\label{sec:prog-range-checks}
+
+The range check \emph{in the exponent} proves $x\in\{\gen^{0},\dots,\gen^{k-1}\}$, i.e.\ $\log_{\gen}x<k$, in 3 cycles:
+\begin{enumerate}
+\item \texttt{DEREF} through $x$: the dereferenced address $x\cdot\gen^{0}$ rides the memory interaction, which balances only for the $2^{\kmem}$ addresses $\gen^{0},\dots,\gen^{2^{\kmem}-1}$ (\S\ref{sec:memchan}): the bus itself proves $x=\gen^{e}$ with $e<2^{\kmem}$;
+\item \texttt{MUL} $x\cdot y$ into a write-once cell holding the constant $\gen^{k-1}$: the runner back-solves the complement $y=\gen^{k-1-e}$ (\S\ref{sec:prog-hints}), and the double write asserts $x\cdot y=\gen^{k-1}$;
+\item \texttt{DEREF} through $y$: proves $y=\gen^{f}$, $f<2^{\kmem}$.
+\end{enumerate}
+Then $e+f\equiv k-1\pmod{2^{64}-1}$ with $e,f<2^{\kmem}\le2^{30}$, so $e+f<2^{31}<2^{64}-1$ and the congruence is an equality over the integers; a ``negative'' $k-1-e$ would wrap to $\approx2^{64}\gg2^{\kmem}$, so $e\le k-1$, for every memory size the prover may announce. Each \texttt{DEREF} targets a fresh cell used nowhere else. The constant $\gen^{k-1}$ costs one \texttt{SET} per distinct bound per frame.
+
+\subsection{Hashing with Keccak}\label{sec:prog-hashing}
+
+The machine's hash is Keccak-256~\cite{keccak}, Ethereum's: the $256$-bit hash of FIPS~202~\cite{fips202} with padding first byte $\mathtt{0x01}$ instead of $\mathtt{0x06}$. The message is padded with $\mathtt{01}\,\mathtt{00}^{*}\,\mathtt{80}$ (or $\mathtt{81}$) to a multiple of $136$ bytes, and each block is XORed into lanes $0,\dots,16$ before a permutation.
+
+A block is $8.5$ cells: block $k$ of a message in consecutive cells is the nine cells from $\lfloor17k/2\rfloor$, starting at the high limb of the first when $k$ is odd. These cells line up with the state cells of the layout of $k$'s parity (\S\ref{sec:vm}), the extra half cell falling on the free limb. So block $k$ costs at most nine \texttt{XOR}s into the previous output, written in that layout, and one \texttt{KECCAK} reading it in that layout. The first block is the state itself, with a zero capacity, and the last writes the even layout, whose cells $0,1$ are the digest. A padding byte is a constant cell, or one \texttt{XOR} into a message cell. Constant cells are set once per frame, the zero capacity and the common tail sharing the run $[\mathtt{0x01},0,0,0,0]$; they are never left unwritten, since an unwritten cell holds whatever the prover chooses.
+
+A list of $n$ claims, $64$ bytes each, has runtime length. Seventeen claims are four whole block pairs, so one loop absorbs $136$ claims per iteration, a second seventeen, carrying the state through a heap chain, and a \texttt{match} on the $r<17$ remaining claims places the padding. The split $n=136b+17q+r$ is prover advice, pinned by the range checks $r<17$ and $q<8$, a \texttt{DEREF} through $\gen^{b}$, so $b$ is below the memory's size and at most $2^{30}$, and $\gen^{136b+17q+r}=\gen^{n}$.
+
+\subsection{Match statements}\label{sec:prog-match}
+
+A \texttt{match} on $x=\gen^{j}$, $j<n$, runs block $j$ through a jump table: $n$ cells, cell $j$ holding block $j$'s address. Tables live in \texttt{main}'s frame, which is always at address $\gen^{0}$, so cell $j$ of a table at offset $t$ is at $x\cdot\gen^{t}$. A \texttt{DEREF} reads that cell and a \texttt{JUMP} goes there: 3 cycles, for any $n$. The program fills all tables before \texttt{main} starts, one \texttt{SET} per cell. The dispatch does not check $j<n$. Untrusted values (like hints) of $x$ must be range-checked first (\S\ref{sec:prog-range-checks}).
