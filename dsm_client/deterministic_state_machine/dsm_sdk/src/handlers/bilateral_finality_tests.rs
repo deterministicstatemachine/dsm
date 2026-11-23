@@ -1054,7 +1054,7 @@ async fn two_online_sends_that_cross_both_settle_and_the_relationship_moves_on()
         let sent = from.send(to, amount).await;
         let said = crate::test_support::two_device::committed_send_message(&sent);
         assert!(
-            said.contains("delivery outcome is unknown"),
+            from.send_left_to_the_redrive(to),
             "{}: debited, its delivery left to the re-drive: {said}",
             from.slot
         );
@@ -1128,7 +1128,7 @@ async fn crossed(p: &Pair, a_amount: u64, b_amount: u64) {
         let sent = from.send(to, amount).await;
         let said = crate::test_support::two_device::committed_send_message(&sent);
         assert!(
-            said.contains("delivery outcome is unknown"),
+            from.send_left_to_the_redrive(to),
             "{}: debited, its delivery left to the re-drive: {said}",
             from.slot
         );
@@ -1585,12 +1585,14 @@ async fn a_second_transfer_from_the_same_parent_never_applies_beside_a_crossing(
     p.nodes.fail_spools(&members).await;
     let forked = copy.send(&p.b, 4).await;
     p.nodes.restore_spools(&members).await;
+    // The Send screen is answered once the debit is committed; the admission
+    // run beside it finds the position held and marks the send's row.
+    let stopped = copy.failed_send_reason();
     assert!(
-        forked
-            .error_message
+        stopped
             .as_deref()
             .is_some_and(|e| e.contains("held by another root claim")),
-        "the copy's admission finds A's position held: {:?}",
+        "the copy's admission finds A's position held: {stopped:?} (answered {:?})",
         forked.error_message
     );
     let fork = frozen_send(&copy, &p.b, &rel);
@@ -1682,12 +1684,14 @@ async fn a_lone_transfer_half_from_a_copy_holds_nothing() {
     p.nodes.fail_spools(&members).await;
     let forked = copy.send(&p.b, 4).await;
     p.nodes.restore_spools(&members).await;
+    // The Send screen is answered once the debit is committed; the admission
+    // run beside it finds the position held and marks the send's row.
+    let stopped = copy.failed_send_reason();
     assert!(
-        forked
-            .error_message
+        stopped
             .as_deref()
             .is_some_and(|e| e.contains("held by another root claim")),
-        "the copy's admission finds A's position held: {:?}",
+        "the copy's admission finds A's position held: {stopped:?} (answered {:?})",
         forked.error_message
     );
     let fork = frozen_send(&copy, &p.b, &rel);

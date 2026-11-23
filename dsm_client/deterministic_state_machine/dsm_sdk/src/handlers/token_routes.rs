@@ -1121,6 +1121,12 @@ impl AppRouterImpl {
 
         dsm::core::token::register_policy_commit_ticker(anchor, &parsed.ticker);
 
+        // The token is one more this device can be sent: its list says so at
+        // once, however the token came to be added (the Tokens screen, an
+        // application's coin at connect), so a contact need not wait on this
+        // device's next sync to offer it.
+        self.state_tokens_added().await;
+
         // Tell the wallet its token set changed, from HERE — the
         // registry write is what made it true, so the notification
         // belongs beside it. The screen then reloads from the

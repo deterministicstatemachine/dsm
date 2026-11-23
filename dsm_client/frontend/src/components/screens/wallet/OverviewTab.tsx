@@ -7,6 +7,7 @@ import type { BalanceHoldingView, TokenBalanceView } from '../../../dsm/types';
 import { TokenMark } from '../../TokenMark';
 import BluetoothIcon from '../../icons/BluetoothIcon';
 import type { DomainTransaction } from '../../../domain/types';
+import { homeListed } from '../../../domain/holdings';
 import type { PendingOfflineState } from './hooks/usePendingOffline';
 import { dsmClient } from '../../../services/dsmClient';
 import type { ReceivedUnload } from '../../../dsm/offlineCash';
@@ -53,7 +54,7 @@ function OverviewTabInner({ balances, balancesLoading, pendingOffline, onReceive
   // Currencies, or the state objects (supply-one tokens: creatures, items) the wallet holds.
   const [shown, setShown] = useState<BalanceHoldingView>('currency');
   const showingObjects = shown === 'object';
-  const listed = useMemo(() => balances.filter((b) => (b.holding ?? 'currency') === shown), [balances, shown]);
+  const listed = useMemo(() => homeListed(balances).filter((b) => (b.holding ?? 'currency') === shown), [balances, shown]);
 
   const visibleBalances = useMemo(() => {
     if (showAllBalances) return listed;

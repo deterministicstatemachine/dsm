@@ -51,6 +51,8 @@ pub mod chain_tip_store;
 pub mod connect; // DSM Connect: a Web2 application connected to a wallet (DSM Amendment A11)
 pub mod core_sdk;
 pub mod identity_publication; // publication-quorum lifecycle for device identities
+#[cfg(test)]
+mod idle_wallet_tests; // what an open wallet with nothing to do asks of the nodes
 pub mod inbox_poller;
 pub mod inbox_waiter; // long-poll on the storage nodes beside the poller
 pub mod kyber_identity; // ML-KEM identity binding carried in offline messages
@@ -107,6 +109,7 @@ pub mod receipts;
 // Application-specific SDK implementations
 pub mod contact_profile; // a person's details as the wallet shows them (DSM Amendment A17)
 pub mod contact_sdk;
+pub mod contact_tokens;
 pub mod email_receipts; // a courtesy email receipt after a send (DSM Amendment A17)
 pub mod money_waiting; // the count on the app icon of money received and not yet looked at
 

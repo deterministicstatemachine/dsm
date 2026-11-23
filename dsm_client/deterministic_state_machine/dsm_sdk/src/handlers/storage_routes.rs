@@ -1129,6 +1129,14 @@ async fn deliver_pending_acceptance_replies(
 /// the next poll; ordering by `created_at` keeps cross-transfer causality.
 const OUTBOX_RESUBMIT_ROWS_PER_POLL: usize = 8;
 
+/// Whose path a sync runs on: any caller's, or a payment's own
+/// ([`AppRouterImpl::run_payment_path_sync_request`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncPath {
+    Ordinary,
+    Payment,
+}
+
 impl AppRouterImpl {
     /// liveness — replay every unsettled frozen send through the shared
     /// delivery primitive. Returns how many logical sends reached full quorum
@@ -1845,6 +1853,16 @@ impl AppRouterImpl {
                     }
                 };
                 log::info!("[storage.sync] ADR 0003 completion: {name} {acceptance:?}");
+                // The credit is applied and accepted durably: the page shows it
+                // now, not after this device's own admission and release that
+                // follow, which held the receiver's screen ~3.7 s on the rig
+                // phones (2026-11-21). The sync's end refreshes it again.
+                match acceptance {
+                    crate::handlers::recipient_accept::Acceptance::AcceptedFresh => {
+                        crate::host::post_event("dsm-wallet-refresh", &[]);
+                    }
+                    crate::handlers::recipient_accept::Acceptance::AcceptedDuplicate => {}
+                }
                 // CONVERGE from durable state — tip sync, CAS both heads,
                 // enqueue the B reply. Idempotent when already complete. On
                 // failure the pair stays accepted and
@@ -1962,9 +1980,30 @@ impl AppRouterImpl {
         (consumed, release, failures)
     }
 
+    /// A sync on a payment's path (`wallet.send`'s preflight and its wait for
+    /// the recipient's certificate): the same pull, processing and push as any
+    /// sync, but the owner's baseline duty (SoFi Amendment S24) is left to the
+    /// next sync off the path. That duty walks every vault this device created
+    /// from its genesis, and a baseline costs a fresh reader speed, never an
+    /// admission, so a payment never waits on it.
+    pub(crate) async fn run_payment_path_sync_request(
+        &self,
+        req: generated::StorageSyncRequest,
+    ) -> Result<generated::StorageSyncResponse, String> {
+        self.run_sync_request_on(req, SyncPath::Payment).await
+    }
+
     pub(crate) async fn run_storage_sync_request(
         &self,
         req: generated::StorageSyncRequest,
+    ) -> Result<generated::StorageSyncResponse, String> {
+        self.run_sync_request_on(req, SyncPath::Ordinary).await
+    }
+
+    async fn run_sync_request_on(
+        &self,
+        req: generated::StorageSyncRequest,
+        path: SyncPath,
     ) -> Result<generated::StorageSyncResponse, String> {
         let pack = generated::ArgPack {
             codec: generated::Codec::Proto as i32,
@@ -1972,7 +2011,9 @@ impl AppRouterImpl {
             ..Default::default()
         };
 
-        let result = self.storage_sync_route(&pack.encode_to_vec()).await;
+        let result = self
+            .storage_sync_route_on(&pack.encode_to_vec(), path)
+            .await;
 
         if !result.success {
             return Err(result
@@ -2023,11 +2064,15 @@ impl AppRouterImpl {
 
     /// `storage.sync`, its `StorageSyncRequest` in a PROTO `ArgPack`.
     async fn storage_sync_route(&self, args: &[u8]) -> AppResult {
+        self.storage_sync_route_on(args, SyncPath::Ordinary).await
+    }
+
+    async fn storage_sync_route_on(&self, args: &[u8], path: SyncPath) -> AppResult {
         let request = match decode_storage_sync_request(args) {
             Ok(request) => request,
             Err(e) => return err(e),
         };
-        let response = match self.storage_sync(request).await {
+        let response = match self.storage_sync(request, path).await {
             Ok(report) => generated::StorageSyncResponse {
                 success: true,
                 pulled: report.pulled,
@@ -2427,13 +2472,15 @@ impl AppRouterImpl {
     async fn storage_sync(
         &self,
         request: StorageSyncRequestV,
+        path: SyncPath,
     ) -> Result<StorageSyncReport, StorageSyncFailure> {
-        crate::sdk::connect::operations::taking_in(self.pull_process_push(request)).await
+        crate::sdk::connect::operations::taking_in(self.pull_process_push(request, path)).await
     }
 
     async fn pull_process_push(
         &self,
         request: StorageSyncRequestV,
+        path: SyncPath,
     ) -> Result<StorageSyncReport, StorageSyncFailure> {
         let mut report = StorageSyncReport {
             pulled: 0,
@@ -2454,7 +2501,7 @@ impl AppRouterImpl {
                 .await?;
         }
         if request.push_pending {
-            self.push_owed(&mut report, &storage_endpoints, &device_id_b32)
+            self.push_owed(&mut report, &storage_endpoints, &device_id_b32, path)
                 .await;
         }
         if let Some(why) = report.inbox_incomplete.take() {
@@ -3013,6 +3060,7 @@ impl AppRouterImpl {
         report: &mut StorageSyncReport,
         storage_endpoints: &[String],
         device_id_b32: &str,
+        path: SyncPath,
     ) {
         match self
             .resubmit_unsettled_sender_outbox(device_id_b32, storage_endpoints)
@@ -3041,32 +3089,66 @@ impl AppRouterImpl {
             self.deliver_owed_write_authorizations(storage_endpoints, None)
                 .await,
         );
-        match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
-            Ok(n) => report.pushed += n,
-            Err(e) => report
-                .errors
-                .push(format!("artifact republish sweep failed: {e}")),
-        }
-        if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
-            report.errors.push(e);
-        }
         // The owner's duty (SoFi Amendment S24): a baseline at the head of
         // every vault this device created. One not published is reported and
-        // the sync goes on: it costs a fresh reader speed, never an admission.
-        match crate::sdk::economic_admission_flow::committed_network_id()
-            .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
-        {
-            Ok(set) => {
-                let (published, left) =
-                    crate::sdk::vault_baseline::publish_owned_baselines(&self.core_sdk, &set).await;
-                report.pushed += published;
-                report
+        // the sync goes on: it costs a fresh reader speed, never an admission,
+        // so a sync on a payment's path leaves it to the next sync. The same
+        // goes for the two backlog sweeps: the frozen artifacts still owed the
+        // set and the route writes still short of their route's end (a wallet
+        // backup's, for one) are this device's standing debts, none of them
+        // the payment's. A payment publishes its own evidence and writes its
+        // own claim itself. On the rig phones (2026-11-21) continuing a
+        // backup's route write held a send's pre-send sync 1.1 s.
+        if path == SyncPath::Payment {
+            log::info!("[storage.sync] backlog sweeps and owner baselines left to the next sync: this one is on a payment's path");
+        } else {
+            match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
+                Ok(n) => report.pushed += n,
+                Err(e) => report
                     .errors
-                    .extend(left.into_iter().map(|why| format!("owner baseline: {why}")));
+                    .push(format!("artifact republish sweep failed: {e}")),
             }
-            Err(e) => report
-                .errors
-                .push(format!("owner baselines: no committed set: {e}")),
+            if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
+                report.errors.push(e);
+            }
+            // The tokens this device has added, stated for its contacts: a
+            // list is written only when it has added one its last list does
+            // not state, so a sync that finds nothing new reads its own
+            // database and nothing else.
+            match crate::sdk::economic_admission_flow::committed_network_id()
+                .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+            {
+                Ok(set) => {
+                    if let Err(e) =
+                        crate::sdk::contact_tokens::publish_own_token_list(&self.core_sdk, &set)
+                            .await
+                    {
+                        report.errors.push(format!("own token list: {e}"));
+                    }
+                }
+                Err(e) => report
+                    .errors
+                    .push(format!("own token list: no committed set: {e}")),
+            }
+            match crate::sdk::economic_admission_flow::committed_network_id()
+                .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+            {
+                Ok(set) if crate::sdk::inbox_poller::poller_running() => {
+                    crate::sdk::vault_baseline::start_owned_baselines(self.core_sdk.clone(), set);
+                }
+                Ok(set) => {
+                    let (published, left) =
+                        crate::sdk::vault_baseline::publish_owned_baselines(&self.core_sdk, &set)
+                            .await;
+                    report.pushed += published;
+                    report
+                        .errors
+                        .extend(left.into_iter().map(|why| format!("owner baseline: {why}")));
+                }
+                Err(e) => report
+                    .errors
+                    .push(format!("owner baselines: no committed set: {e}")),
+            }
         }
         // A pending admission no running handler holds: its handler returned
         // with it held for resume, or a restart restored it (owner ruling,

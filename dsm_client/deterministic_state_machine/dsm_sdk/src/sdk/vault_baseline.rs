@@ -429,6 +429,40 @@ pub(crate) async fn publish_owned_baselines(
     (published, left)
 }
 
+/// One owner baseline pass at a time. A pass walks every vault this device
+/// created from its genesis, which takes seconds per vault on a phone.
+static OWNER_PASS: once_cell::sync::Lazy<std::sync::Arc<tokio::sync::Mutex<()>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+
+/// Start the owner's baseline pass (SoFi Amendment S24) beside the sync that
+/// owes it, unless one is running: the sync goes on at once, and a payment
+/// that arrives meanwhile is pulled by the next sync instead of waiting out
+/// every vault's walk (rig run 2026-11-21: a receiver waited ~15 s on it).
+/// Only while the background poller runs (`inbox_poller::poller_running`),
+/// whose syncs come round again; with none, the sync runs the pass itself.
+pub(crate) fn start_owned_baselines(
+    core: std::sync::Arc<crate::sdk::core_sdk::CoreSDK>,
+    set: StorageSet,
+) {
+    match OWNER_PASS.clone().try_lock_owned() {
+        Ok(held) => {
+            tokio::spawn(async move {
+                let (published, left) = publish_owned_baselines(&core, &set).await;
+                for why in &left {
+                    log::warn!("[vault baseline] owner baseline: {why}");
+                }
+                log::info!("[vault baseline] owner pass done: {published} published");
+                drop(held);
+            });
+        }
+        Err(running) => {
+            log::info!(
+                "[vault baseline] an owner pass is running ({running}); this sync starts none"
+            );
+        }
+    }
+}
+
 /// How many objects of a history are put at once.
 const HISTORY_PUTS_AT_ONCE: usize = 16;
 

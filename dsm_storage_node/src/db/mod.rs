@@ -2,8 +2,13 @@
 
 //! Storage node DB layer: PostgreSQL through `deadpool_postgres::Pool`.
 
+mod backup_slots;
 mod committed;
 mod pg;
+
+pub use backup_slots::{
+    backup_part, backup_slot, backup_start, backup_whole_part, PartTaken, SlotState, StartTaken,
+};
 
 pub use committed::{
     CommittedCells, TreeBuild, TreeBuildsFull, KEPT_CYCLES, KEPT_LEAVES, TREE_BUILDS_QUEUED,

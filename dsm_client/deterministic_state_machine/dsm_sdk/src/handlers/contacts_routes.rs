@@ -63,6 +63,7 @@ impl AppRouterImpl {
                 self.begin_establishment(device_id)
                     .await
                     .map_err(|e| format!("contacts.add: {e}"))?;
+                crate::sdk::inbox_poller::wake();
                 return Ok(contact_add_response(&existing));
             }
             log::warn!(
@@ -100,6 +101,11 @@ impl AppRouterImpl {
             .await
             .map_err(|e| format!("contacts.add: {e}"))?;
         walk_new_contact(resolved.entry.body.genesis, device_id).await;
+        // A new contact is a new route to read: a sync now reads it, and the
+        // inbox waiter, which waits on the routes a sync leaves, holds a wait
+        // on it from there. Nothing else times either while the waits cover
+        // the fleet.
+        crate::sdk::inbox_poller::wake();
 
         #[cfg(feature = "bluetooth")]
         {
@@ -152,6 +158,11 @@ impl AppRouterImpl {
                         Ok(profile) => profile,
                         Err(e) => return err(format!("contacts.list: {e}")),
                     };
+                    item.sendable_token_ids =
+                        match crate::sdk::contact_tokens::sendable_token_ids(&contact.device_id) {
+                            Ok(ids) => ids,
+                            Err(e) => return err(format!("contacts.list: {e}")),
+                        };
                     let session = crate::bluetooth::get_pairing_orchestrator()
                         .get_session_status(&contact.device_id)
                         .await;
@@ -490,6 +501,7 @@ mod tests {
             send_status: None,
             pairing: generated::ContactPairingPhase::Paired as i32,
             relationship_state: generated::RelationshipState::Unspecified as i32,
+            sendable_token_ids: vec!["ERA".into()],
             profile: Some(generated::ContactProfileV1 {
                 display_name: "Carol Diaz".into(),
                 email: "carol@example.com".into(),

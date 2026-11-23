@@ -67,6 +67,8 @@ export type DomainContact = {
   sendCheckState?: DomainRelationshipSendCheckState;
   sendBlockReason?: DomainRelationshipSendBlockReason;
   sendBlockMessage?: string;
+  /** The tokens this wallet can send the contact, by token id, as Rust states them. */
+  sendableTokenIds: string[];
 };
 
 /** The history types Rust writes (`TransactionInfo.tx_type`). */

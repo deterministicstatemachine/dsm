@@ -261,6 +261,14 @@ export function initializeEventBridge(): void {
         return;
       }
 
+      // The connected applications or the requests waiting for the player
+      // changed; the page reads them again. No payload.
+      if (topic === 'connect.changed') {
+        bridgeEvents.emit('connect.changed', undefined);
+        emit(topic, bytes);
+        return;
+      }
+
       // Inbox sync result pushed from Rust inbox_poller (Invariant #7 compliant).
       // Payload is StorageSyncResponse protobuf bytes.
       if (topic === 'inbox.updated') {
@@ -277,6 +285,15 @@ export function initializeEventBridge(): void {
         if (resp.processed > 0) {
           bridgeEvents.emit('wallet.refresh', { source: 'inbox.sync' });
         }
+        emit(topic, bytes);
+        return;
+      }
+
+      // Rust read a contact's token lists and keeps a token it did not keep
+      // before; the page reads its contacts again (contacts.list carries what
+      // each can be sent). No payload.
+      if (topic === 'contact.tokens') {
+        bridgeEvents.emit('contact.tokens', undefined);
         emit(topic, bytes);
         return;
       }

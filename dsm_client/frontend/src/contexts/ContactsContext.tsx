@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import React, { createContext, useContext, useEffect, useMemo } from 'react';
 import { useBridgeEvent } from '@/hooks/useBridgeEvents';
+import { useWalletRefreshListener } from '@/hooks/useWalletRefreshListener';
 import { hasIdentity } from '../utils/identity';
 import { contactsStore, useContactsStore } from '../stores/contactsStore';
 import type { AddContactResult, ContactCard } from '../dsm/types';
@@ -47,6 +48,18 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
     contactsStore.handleBleMapped(detail);
   }, []);
   useBridgeEvent('contact.bleUpdated', contactsStore.handleBleUpdated, []);
+  // What each contact can be sent is in the list; Rust says when it changed.
+  useBridgeEvent('contact.tokens', () => {
+    contactsStore.scheduleRefreshContacts('contact tokens read');
+  }, []);
+  // A contact's send-readiness moves when Rust settles, takes or releases
+  // something, and Rust says so (`wallet.refresh`); a pairing moves on with
+  // the radio's word. The list is read again then, and only then: nothing
+  // reads it on a timer.
+  useWalletRefreshListener(() => contactsStore.refreshContacts(), []);
+  useBridgeEvent('ble.pairingStatus', () => {
+    contactsStore.scheduleRefreshContacts('ble.pairingStatus');
+  }, []);
   // The list Rust holds once there is an identity. Whether the radio
   // advertises is native policy (it follows the identity), not the screen's.
   useBridgeEvent('identity.ready', () => {

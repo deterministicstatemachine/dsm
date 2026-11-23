@@ -11,7 +11,8 @@
 //! Amendment A41); a reader still keeps only the entry that proves itself.
 
 use dsm::core::identity::directory::{
-    directory_cell_key, select_entry, DirectoryEntry, DirectoryEntryBody, DIRECTORY_NAMESPACE,
+    directory_cell_key, select_entry_proven_by, DirectoryEntry, DirectoryEntryBody,
+    DIRECTORY_NAMESPACE,
 };
 use dsm::core::identity::genesis_v2::derive_atta;
 use dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested;
@@ -114,6 +115,41 @@ pub async fn publish_entry(
     Ok(())
 }
 
+/// The digests of directory entries this process has seen prove themselves.
+/// [`DirectoryEntry::verify`] reads nothing but the entry's own bytes (its
+/// keys, its SPHINCS+ signature, its P0-P6 evidence), so an entry whose
+/// encoding hashes to a digest held here proves itself again without the
+/// work. Every send reads its recipient's entry and proved it anew, twice
+/// (once as the members' values were read, once more choosing among them).
+/// Only verdicts that hold are kept: a junk value is proven at most once per
+/// read, as before (SA-142).
+static PROVEN_ENTRIES: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::BTreeSet<[u8; 32]>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::BTreeSet::new()));
+
+/// The most digests [`PROVEN_ENTRIES`] holds; past it, it starts again.
+const PROVEN_ENTRIES_HELD: usize = 1024;
+
+/// Whether `digest` is of an entry this process has seen prove itself.
+fn proven_before(digest: &[u8; 32]) -> bool {
+    match PROVEN_ENTRIES.lock() {
+        Ok(held) => held.contains(digest),
+        Err(poisoned) => poisoned.into_inner().contains(digest),
+    }
+}
+
+/// Keep `digest` as the digest of an entry that proved itself.
+fn keep_proven(digest: [u8; 32]) {
+    let mut held = match PROVEN_ENTRIES.lock() {
+        Ok(held) => held,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if held.len() >= PROVEN_ENTRIES_HELD {
+        held.clear();
+    }
+    held.insert(digest);
+}
+
 /// A directory entry that proves itself, and the members whose cell holds its
 /// exact bytes.
 #[derive(Debug, Clone)]
@@ -151,7 +187,14 @@ pub async fn read_entry(
             .cloned();
         let verdict = match held {
             Some(verdict) => verdict,
-            None => entry.verify().map_err(|why| why.to_string()),
+            None if proven_before(&digest) => Ok(()),
+            None => {
+                let verdict = entry.verify().map_err(|why| why.to_string());
+                if let Ok(()) = verdict {
+                    keep_proven(digest);
+                }
+                verdict
+            }
         };
         verdicts
             .lock()
@@ -192,7 +235,7 @@ pub async fn read_entry(
         .flatten()
         .map(Vec::as_slice)
         .collect();
-    let Some(entry) = select_entry(genesis, device_id, values) else {
+    let Some(entry) = select_entry_proven_by(genesis, device_id, values, proves) else {
         return Ok(None);
     };
     let bytes = entry.encode();
@@ -239,6 +282,33 @@ mod tests {
             .expect("read")
             .expect("the genesis session kept its entry");
         DirectoryEntry::decode(&bytes).expect("an entry")
+    }
+
+    /// An entry read and proven once is remembered by its digest: a send reads
+    /// its recipient's entry every time, and the same bytes are not proven
+    /// again (two SPHINCS+ verifications and the P0-P6 evidence, every send,
+    /// before 2026-11-21). The entry is still read from the members each time.
+    /// MUTATION CONTROL: not keeping the verdict (`keep_proven` not called)
+    /// turns this red at "the verdict is kept".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn an_entry_proven_once_is_remembered_by_its_digest() {
+        let p = Pair::boot(0, 0).await;
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        let own = kept_entry(&p.b);
+        let digest = dsm::storage_cell::entry_digest(&own.encode());
+        p.a.enter();
+        let read = read_entry(&set, &p.b.genesis, &p.b.device_id)
+            .await
+            .expect("read")
+            .expect("B's entry proves itself");
+        assert_eq!(read.entry.encode(), own.encode(), "A reads B's entry");
+        assert!(proven_before(&digest), "the verdict is kept");
+        let again = read_entry(&set, &p.b.genesis, &p.b.device_id)
+            .await
+            .expect("read again")
+            .expect("B's entry, again");
+        assert_eq!(again.entry.encode(), own.encode(), "the same entry again");
     }
 
     /// MR-STOR-0035, storage spec §8.3, DSM §11 and Amendment A18: a device's

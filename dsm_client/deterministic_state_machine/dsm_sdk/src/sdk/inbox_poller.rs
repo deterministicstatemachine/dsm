@@ -7,6 +7,14 @@
 //!
 //! Replaces the frontend `setTimeout` polling loop that violated Invariant #7
 //! by making the frontend the authority over inbox discovery timing.
+//!
+//! While the inbox waiter's waits cover the fleet
+//! ([`crate::sdk::inbox_waiter::covers_fleet`]) the poller keeps no timer of
+//! its own: a sync runs when a wait answers, when the app comes on screen, or
+//! when this device sends; an open wallet with nothing to do asks the nodes
+//! only to hold its waits. The poller times its syncs only for what no
+//! arrival drives (settlement this device owes) and while the waits do not
+//! cover the fleet (a member down, a fleet that does not hold waits).
 
 use prost::Message;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,7 +23,9 @@ use tokio::sync::Notify;
 
 use dsm::types::proto as generated;
 
-/// Default poll interval (ticks between sync attempts).
+/// Poll interval while the waits do not cover the fleet and nothing else
+/// hurries the poller; and the retry of settlement work still owed once
+/// [`SETTLEMENT_PATIENCE_CYCLES`] have passed.
 const DEFAULT_POLL_INTERVAL_MS: u64 = 60_000;
 
 /// Eager poll interval used temporarily after items are found,
@@ -57,10 +67,6 @@ const SETTLEMENT_PATIENCE_CYCLES: u32 = 30;
 /// fetchable, a delivery that failed.
 const COVERED_SETTLEMENT_POLL_INTERVAL_MS: u64 = 5_000;
 
-/// Poll interval while the app is on screen, nothing is settling, and the
-/// waits cover the fleet: a safety net only, an arrival wakes a sync at once.
-const COVERED_FOREGROUND_POLL_INTERVAL_MS: u64 = 30_000;
-
 /// Poller cycles completed in this process, and the signal each one gives.
 static CYCLES_COMPLETED: AtomicU64 = AtomicU64::new(0);
 /// Poller cycles in this process whose sync processed something.
@@ -71,7 +77,15 @@ static CYCLE_DONE: once_cell::sync::Lazy<Notify> = once_cell::sync::Lazy::new(No
 static POLLER_RUNNING: AtomicBool = AtomicBool::new(false);
 static POLLER_STOP: AtomicBool = AtomicBool::new(false);
 
-/// Shared notify for immediate wake-up (app foreground, bilateral commit).
+/// Whether the background poller is running: the device's own syncs then
+/// come round on their own, so work a sync owes but a payment never waits on
+/// can run beside them (`vault_baseline::start_owned_baselines`).
+pub(crate) fn poller_running() -> bool {
+    POLLER_RUNNING.load(Ordering::SeqCst)
+}
+
+/// Shared notify for immediate wake-up (app foreground, bilateral commit, a
+/// wait answered, the waits no longer covering the fleet).
 static POLLER_WAKE: once_cell::sync::Lazy<Arc<Notify>> =
     once_cell::sync::Lazy::new(|| Arc::new(Notify::new()));
 
@@ -151,12 +165,6 @@ pub(crate) fn put_back_the_stop(stopping_before: bool) {
     POLLER_STOP.store(stopping_before, Ordering::SeqCst);
 }
 
-/// Whether the background poller task is running.
-#[cfg(test)]
-pub(crate) fn poller_running() -> bool {
-    POLLER_RUNNING.load(Ordering::SeqCst)
-}
-
 /// Whether a start is deferred until the harness's hold is released.
 #[cfg(test)]
 pub(crate) fn poller_start_deferred() -> bool {
@@ -229,10 +237,21 @@ pub fn start_poller() {
 
         let mut cadence = Cadence::new();
 
+        // The wallet reads its contacts' token lists each time it opens
+        // (owner, 2026-11-21): when its poller starts, and each time the app
+        // comes back to the screen.
+        crate::sdk::contact_tokens::wallet_opened();
+        let mut shown = crate::sdk::session_manager::app_in_foreground();
+
         loop {
             if POLLER_STOP.load(Ordering::SeqCst) {
                 break;
             }
+            let showing = crate::sdk::session_manager::app_in_foreground();
+            if showing && !shown {
+                crate::sdk::contact_tokens::wallet_opened();
+            }
+            shown = showing;
 
             let (processed, pulled, more_pending) = run_inbox_sync_cycle_counted("poll").await;
             if processed > 0 {
@@ -242,6 +261,9 @@ pub fn start_poller() {
             CYCLE_DONE.notify_waiters();
             #[cfg(test)]
             POLLER_CYCLE_DONE.notify_waiters();
+            // Each contact's steps since the state kept of it are checked
+            // now, so its next payment reads only its own.
+            crate::sdk::economic_registers::start_contact_walks();
             // Settlement-urgent covers BOTH directions: the sender awaiting an
             // acceptance receipt AND the recipient still holding an undelivered
             // countersigned reply. Polling the reply side at the idle interval
@@ -271,14 +293,21 @@ pub fn start_poller() {
             } else {
                 Waits::DoNotCover
             };
-            let interval_ms = poll_interval_ms(activity, waits);
 
-            // Wait for either the poll interval or a wake-up signal.
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {},
-                _ = wake.notified() => {
-                    log::info!("[inbox_poller] Woken up early (foreground/bilateral)");
+            // Wait for the poll interval, if there is one, or a wake-up. A
+            // wake the waiter gives as the waits stop covering the fleet is
+            // kept by the notify if it comes before this wait begins.
+            match poll_interval_ms(activity, waits, cadence.owed()) {
+                Some(interval_ms) => tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {},
+                    _ = wake.notified() => {
+                        log::info!("[inbox_poller] Woken up early");
+                    },
                 },
+                None => {
+                    wake.notified().await;
+                    log::info!("[inbox_poller] Woken up");
+                }
             }
         }
 
@@ -316,6 +345,20 @@ pub(crate) struct Cadence {
     /// Cycles in a row in which settlement work was outstanding and the
     /// cycle took nothing.
     settling_unanswered: u32,
+    /// Whether settlement work was still outstanding after the last cycle,
+    /// past [`SETTLEMENT_PATIENCE_CYCLES`].
+    owed: Owed,
+}
+
+/// Settlement work this device still owes once the settlement cadence has
+/// given up hurrying it ([`SETTLEMENT_PATIENCE_CYCLES`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Owed {
+    /// None, or the settlement cadence still drives it.
+    Nothing,
+    /// Some: a release, a certificate or a delivery that no arrival may
+    /// drive. It is retried at [`DEFAULT_POLL_INTERVAL_MS`] at the longest.
+    PastPatience,
 }
 
 impl Cadence {
@@ -323,7 +366,13 @@ impl Cadence {
         Self {
             eager_remaining: 0,
             settling_unanswered: 0,
+            owed: Owed::Nothing,
         }
+    }
+
+    /// Settlement work still owed past the settlement cadence's patience.
+    pub(crate) fn owed(&self) -> Owed {
+        self.owed
     }
 
     /// What the device is doing after `cycle`, with settlement work
@@ -357,6 +406,11 @@ impl Cadence {
                  with nothing taken; polling at the ordinary cadence until something arrives"
             );
         }
+        self.owed = if settling && self.settling_unanswered > SETTLEMENT_PATIENCE_CYCLES {
+            Owed::PastPatience
+        } else {
+            Owed::Nothing
+        };
         if settling && self.settling_unanswered <= SETTLEMENT_PATIENCE_CYCLES {
             Activity::Settling
         } else if on_screen {
@@ -377,20 +431,40 @@ pub(crate) enum Waits {
     DoNotCover,
 }
 
-/// The time to the next poll: the settlement cadence while a transfer is
-/// settling, the on-screen cadence while the app is shown, the eager one
-/// after an exchange, else the idle minute. While the waits cover the fleet
-/// an arrival wakes a sync at once, so the settlement and on-screen cadences
-/// slow to a safety net.
-pub(crate) fn poll_interval_ms(activity: Activity, waits: Waits) -> u64 {
-    match (activity, waits) {
-        (Activity::Settling, Waits::CoverFleet) => COVERED_SETTLEMENT_POLL_INTERVAL_MS,
-        (Activity::Settling, Waits::DoNotCover) => PENDING_GATE_POLL_INTERVAL_MS,
-        (Activity::OnScreen, Waits::CoverFleet) => COVERED_FOREGROUND_POLL_INTERVAL_MS,
-        (Activity::OnScreen, Waits::DoNotCover) => FOREGROUND_POLL_INTERVAL_MS,
-        (Activity::Eager, _) => EAGER_POLL_INTERVAL_MS,
-        (Activity::Idle, _) => DEFAULT_POLL_INTERVAL_MS,
+/// The time to the next poll, or `None` when only a wake starts the next
+/// sync.
+///
+/// While the waits cover the fleet every arrival wakes a sync at once: a
+/// transfer, a reply, a certificate, and a backlog a capped read left (its
+/// wait's mark is behind it, so the member answers at once). The poller then
+/// times only what no arrival drives: settlement in flight, at the covered
+/// settlement cadence, and settlement still owed past its patience, at the
+/// idle minute. Without the waits it polls: the settlement cadence while a
+/// transfer is settling, the on-screen cadence while the app is shown, the
+/// eager one after an exchange, else the idle minute.
+pub(crate) fn poll_interval_ms(activity: Activity, waits: Waits, owed: Owed) -> Option<u64> {
+    let timed = match (activity, waits) {
+        (Activity::Settling, Waits::CoverFleet) => Some(COVERED_SETTLEMENT_POLL_INTERVAL_MS),
+        (Activity::Settling, Waits::DoNotCover) => Some(PENDING_GATE_POLL_INTERVAL_MS),
+        (Activity::OnScreen, Waits::DoNotCover) => Some(FOREGROUND_POLL_INTERVAL_MS),
+        (Activity::Eager, Waits::DoNotCover) => Some(EAGER_POLL_INTERVAL_MS),
+        (Activity::Idle, Waits::DoNotCover) => Some(DEFAULT_POLL_INTERVAL_MS),
+        (Activity::OnScreen | Activity::Eager | Activity::Idle, Waits::CoverFleet) => None,
+    };
+    match owed {
+        Owed::Nothing => timed,
+        Owed::PastPatience => Some(timed.map_or(DEFAULT_POLL_INTERVAL_MS, |ms| {
+            ms.min(DEFAULT_POLL_INTERVAL_MS)
+        })),
     }
+}
+
+/// Wake the poller for a sync now, without starting one that is not running.
+/// The waiter gives it when its waits stop covering the fleet: an arrival
+/// that landed meanwhile is read, and the poller goes back to timing its
+/// syncs.
+pub(crate) fn wake() {
+    POLLER_WAKE.notify_one();
 }
 
 /// Poller cycles completed in this process.
@@ -1008,22 +1082,38 @@ mod tests {
 
     // ── push_inbox_event_to_webview is no-op on non-android ──
 
-    /// While a transfer settles the poller checks every 2 s, and every 5 s
-    /// while the app is on screen; with the waits covering the fleet an
-    /// arrival syncs at once, so those slow to 5 s and 30 s. An eager burst
-    /// and the idle minute are the same either way.
+    /// With the waits covering the fleet an arrival syncs at once: the
+    /// poller keeps no timer on screen, after an exchange or idle, and times
+    /// only settlement in flight (5 s) and settlement owed past its patience
+    /// (the minute). Without the waits it polls: 2 s settling, 5 s on screen,
+    /// 8 s after an exchange, the minute idle.
+    /// MUTATION CONTROL: any timer on an idle covered wallet turns this red,
+    /// and so does dropping the owed retry.
     #[test]
-    fn the_waits_covering_the_fleet_slow_the_settling_and_on_screen_polls() {
+    fn the_waits_covering_the_fleet_leave_the_poller_no_timer_but_settlement() {
         use Activity::{Eager, Idle, OnScreen, Settling};
+        use Owed::{Nothing, PastPatience};
         use Waits::{CoverFleet, DoNotCover};
-        assert_eq!(poll_interval_ms(Settling, DoNotCover), 2_000);
-        assert_eq!(poll_interval_ms(Settling, CoverFleet), 5_000);
-        assert_eq!(poll_interval_ms(OnScreen, DoNotCover), 5_000);
-        assert_eq!(poll_interval_ms(OnScreen, CoverFleet), 30_000);
-        assert_eq!(poll_interval_ms(Eager, DoNotCover), 8_000);
-        assert_eq!(poll_interval_ms(Eager, CoverFleet), 8_000);
-        assert_eq!(poll_interval_ms(Idle, DoNotCover), 60_000);
-        assert_eq!(poll_interval_ms(Idle, CoverFleet), 60_000);
+        assert_eq!(poll_interval_ms(Settling, DoNotCover, Nothing), Some(2_000));
+        assert_eq!(poll_interval_ms(Settling, CoverFleet, Nothing), Some(5_000));
+        assert_eq!(poll_interval_ms(OnScreen, DoNotCover, Nothing), Some(5_000));
+        assert_eq!(poll_interval_ms(OnScreen, CoverFleet, Nothing), None);
+        assert_eq!(poll_interval_ms(Eager, DoNotCover, Nothing), Some(8_000));
+        assert_eq!(poll_interval_ms(Eager, CoverFleet, Nothing), None);
+        assert_eq!(poll_interval_ms(Idle, DoNotCover, Nothing), Some(60_000));
+        assert_eq!(poll_interval_ms(Idle, CoverFleet, Nothing), None);
+        assert_eq!(
+            poll_interval_ms(OnScreen, CoverFleet, PastPatience),
+            Some(60_000)
+        );
+        assert_eq!(
+            poll_interval_ms(Idle, CoverFleet, PastPatience),
+            Some(60_000)
+        );
+        assert_eq!(
+            poll_interval_ms(OnScreen, DoNotCover, PastPatience),
+            Some(5_000)
+        );
     }
 
     /// SA-138: A sends B 10 and then withholds its finality certificate for
@@ -1084,6 +1174,11 @@ mod tests {
             last.1,
             Activity::Settling,
             "the withheld certificate still holds the settlement cadence: {cycles:?}"
+        );
+        assert_eq!(
+            cadence.owed(),
+            Owed::PastPatience,
+            "the certificate B still awaits is retried at the minute, waits or none"
         );
 
         let finalized = p.a.sync().await;

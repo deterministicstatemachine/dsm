@@ -135,6 +135,25 @@ async fn put_and_confirm(
     Ok(stored.as_deref() == Some(payload))
 }
 
+/// Whether `Stored` holds for exactly `payload` at `addr`, read from the
+/// members first: an object its author already published is `Stored` there,
+/// and is read once and not put again. One short of `Stored` is put at every
+/// member and read again ([`crate::sdk::storage_io::read_back_or_repair`]).
+async fn read_or_put(
+    set: &StorageSet,
+    namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+    addr: &[u8; 32],
+    payload: &[u8],
+) -> Result<bool, String> {
+    if dsm::storage_object::immutable_addr(namespace, payload) != *addr {
+        return Err("the payload is not the object at its address".into());
+    }
+    let stored = crate::sdk::storage_io::read_back_or_repair(set, namespace, payload)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(stored.as_deref() == Some(payload))
+}
+
 /// What putting one row came to.
 enum Published {
     /// The row's set is not resolvable through the local catalog.
@@ -241,10 +260,10 @@ pub(crate) fn spawn_frozen_artifact_republish(origin: &'static str) {
     });
 }
 
-/// Put an already-VERIFIED foreign evidence closure to `set` until each
-/// object is `Stored` there: for each exact `(namespace, inner addr, exact
-/// bytes)` the recording fetch boundary captured, put the bytes to every
-/// member and read them back. Objects already recorded `Stored` are skipped;
+/// Have an already-VERIFIED foreign evidence closure `Stored` on `set`: for
+/// each exact `(namespace, inner addr, exact bytes)` the recording fetch
+/// boundary captured, read the bytes back from the members, and put them to
+/// every member and read again when they are short of `Stored`. Objects already recorded `Stored` are skipped;
 /// each object established `Stored` is recorded. The foreign bytes are not
 /// frozen locally — the frozen backlog is this device's own admission
 /// evidence.
@@ -259,6 +278,11 @@ pub(crate) async fn ensure_closure_stored(
         Vec<u8>,
     )],
 ) -> Result<(), String> {
+    // Each object is one of its own, put and read back by itself: the ones not
+    // yet known `Stored` go at once (three a transfer, ~0.35 s each on the rig
+    // phones one after another, 2026-11-21), and each is recorded, and the
+    // first not `Stored` named, in the closure's order.
+    let mut owed = Vec::new();
     for (namespace, inner, bytes) in closure {
         let ns = core::str::from_utf8(namespace.source_bytes())
             .map_err(|e| format!("immutable namespace: {e}"))?;
@@ -267,11 +291,19 @@ pub(crate) async fn ensure_closure_stored(
         {
             continue;
         }
-        let addr = dsm::storage_object::immutable_addr_from_inner(*namespace, inner);
-        if !put_and_confirm(set, *namespace, &addr, bytes).await? {
+        owed.push((ns, namespace, inner, bytes));
+    }
+    let confirmed =
+        futures::future::join_all(owed.iter().map(|(_, namespace, inner, bytes)| async move {
+            let addr = dsm::storage_object::immutable_addr_from_inner(**namespace, inner);
+            read_or_put(set, **namespace, &addr, bytes).await
+        }))
+        .await;
+    for ((ns, _, inner, _), confirmed) in owed.iter().zip(confirmed) {
+        if !confirmed? {
             return Err(format!(
                 "evidence closure object {ns}::{} is not Stored yet — retry later",
-                crate::util::text_id::encode_base32_crockford(inner)
+                crate::util::text_id::encode_base32_crockford(*inner)
             ));
         }
         crate::storage::client_db::economic_lineage::record_addr_stored(ns, inner)

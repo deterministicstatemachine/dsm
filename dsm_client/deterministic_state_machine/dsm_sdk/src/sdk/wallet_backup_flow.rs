@@ -12,6 +12,9 @@
 //! another transaction comes through, it should interrupt it and cancel it").
 //! A backup is taken once the wallet has been still for [`QUIET`]; a step that
 //! comes while one is being written cancels it, and the quiet starts over.
+//! The loop learns the wallet moved from the database itself: a change to a
+//! row of the tables the activity mark reads ([`MARK_READS`]) wakes it, and a
+//! wallet that does not move wakes nothing.
 //!
 //! What: the tables in [`BACKUP_TABLES`], read in one transaction so the copy
 //! is the wallet as it stood at one moment. Never the sealed seed, the records
@@ -20,22 +23,21 @@
 use std::time::Duration;
 
 use dsm::types::error::DsmError;
-use dsm::wallet_backup::{BackupCell, BackupKeys, BackupRead, Place};
+use dsm::wallet_backup::BackupKeys;
 use rusqlite::types::Value;
 
-use crate::sdk::route_seats::{write_recorded, AtLeader};
-use crate::sdk::storage_set::{as_ccb_members, StorageSet};
+use crate::sdk::route_seats::AtLeader;
+use crate::sdk::storage_node_sdk::SetClient;
+use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
 
 /// How long the wallet must be still before a backup is taken.
 pub const QUIET: Duration = Duration::from_secs(20);
 
-/// How often the backup loop looks whether the wallet moved.
-const TICK: Duration = Duration::from_secs(2);
-
-/// [`QUIET`] in the loop's looks: the loop counts them, and reads no clock.
-const QUIET_TICKS: u64 = QUIET.as_secs() / TICK.as_secs();
+/// The longest the loop waits before it tries a backup that could not be
+/// written again, the wallet still: the wait starts at [`QUIET`] and doubles.
+const RETRY_AT_MOST: Duration = Duration::from_secs(600);
 
 /// How often a backup being written looks whether the wallet moved.
 const WATCH: Duration = Duration::from_millis(250);
@@ -297,6 +299,54 @@ impl<'a> Reader<'a> {
 
 // ── taking and installing ───────────────────────────────────────────────────
 
+/// A journal row a backup carries: one still in flight (prepared, applied,
+/// or awaiting the sender's finality), or one at or after its contact's
+/// latest accepted step. Earlier steps are history the relationship has moved
+/// past: nothing a restored wallet does with that contact reads them.
+const KEPT_JOURNAL: &str = "(j.status IN ('prepared', 'applied') \
+     OR (j.status != 'rejected' AND j.peer_finalized = 0) \
+     OR j.rowid >= COALESCE((SELECT MAX(l.rowid) FROM acceptance_fold_journal l \
+                              WHERE l.relationship_key = j.relationship_key \
+                                AND l.status != 'rejected'), 0))";
+
+/// A send a backup carries: one not complete, or its contact's latest.
+const KEPT_SEND: &str = "(o.status != 'complete' \
+     OR o.rowid >= (SELECT MAX(l.rowid) FROM sender_outbox l \
+                     WHERE l.relationship_key = o.relationship_key))";
+
+/// The rows of `table` a backup carries, in the order the wallet wrote them.
+/// Four tables keep a record of every payment ever sent or taken; a backup
+/// carries only the steps in flight and each contact's latest step (DSM
+/// Amendment A40: "the steps in flight", "each relationship's chain tip"),
+/// so its size follows the wallet's contacts, not every payment it ever made.
+/// Every other table is carried whole, the offline account's among them.
+fn kept_rows(table: &str) -> String {
+    match table {
+        "acceptance_fold_journal" => format!(
+            "SELECT j.* FROM acceptance_fold_journal j WHERE {KEPT_JOURNAL} ORDER BY j.rowid"
+        ),
+        "recipient_outbound_reply" => format!(
+            "SELECT r.* FROM recipient_outbound_reply r \
+              WHERE r.submitted = 0 OR r.held = 1 \
+                 OR EXISTS (SELECT 1 FROM acceptance_fold_journal j \
+                             WHERE j.commitment = r.commitment AND {KEPT_JOURNAL}) \
+              ORDER BY r.rowid"
+        ),
+        "sender_outbox" => {
+            format!("SELECT o.* FROM sender_outbox o WHERE {KEPT_SEND} ORDER BY o.rowid")
+        }
+        "sender_outbox_artifacts" => format!(
+            "SELECT a.* FROM sender_outbox_artifacts a \
+              WHERE EXISTS (SELECT 1 FROM sender_outbox o \
+                             WHERE o.relationship_key = a.relationship_key \
+                               AND o.canonical_parent = a.canonical_parent \
+                               AND o.proposal_nonce = a.proposal_nonce AND {KEPT_SEND}) \
+              ORDER BY a.rowid"
+        ),
+        other => format!("SELECT * FROM {other}"),
+    }
+}
+
 /// Why no backup was taken now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotNow {
@@ -343,9 +393,7 @@ pub fn snapshot() -> Result<Result<Body, NotNow>, DsmError> {
     };
     let mut tables = Vec::with_capacity(BACKUP_TABLES.len());
     for name in BACKUP_TABLES {
-        let mut stmt = tx
-            .prepare(&format!("SELECT * FROM {name}"))
-            .map_err(|e| storage(name, e))?;
+        let mut stmt = tx.prepare(&kept_rows(name)).map_err(|e| storage(name, e))?;
         let columns: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
         let width = columns.len();
         let rows = stmt
@@ -451,9 +499,10 @@ pub fn head_of(
     Ok(head)
 }
 
-// ── the cells ───────────────────────────────────────────────────────────────
+// ── the slot ────────────────────────────────────────────────────────────────
 
-/// The last backup this wallet wrote or restored; 0 when none.
+/// The last generation this wallet used for a backup or restored, or the
+/// highest a member named; 0 when none.
 pub fn latest_written() -> Result<u64, DsmError> {
     match crate::storage::client_db::get_setting(LATEST).map_err(|e| storage("setting", e))? {
         Some(n) => n.parse().map_err(|e| storage("setting", e)),
@@ -461,172 +510,312 @@ pub fn latest_written() -> Result<u64, DsmError> {
     }
 }
 
-/// Record `n` as the last backup this wallet wrote or restored.
+/// Record `n` as the last generation this wallet used or restored, or the
+/// highest a member named: the next backup is written as a higher one.
 pub fn record_latest(n: u64) -> Result<(), DsmError> {
     crate::storage::client_db::set_setting(LATEST, &n.to_string())
         .map_err(|e| storage("setting", e))
 }
 
-/// The most one part of a backup carries: a sealed part is one cell value at
-/// its largest.
+/// The most one part of a backup carries.
 pub const PART: usize = dsm::wallet_backup::MAX_PART;
 
-/// Write `body` as backup `n` in one attempt of its own, in parts of at most
-/// [`PART`], each leader first: the later parts under the attempt, then part 0,
-/// which names the attempt and the count of parts, at the backup's own cell. An
-/// attempt cut short leaves only cells no later attempt uses. Answers the
-/// leader's answer for part 0, or for the later part it stopped at.
+/// The cell lock of the device `own` names, `(genesis, device id)`: the key
+/// its slot is bound to and the one that starts every write of it. It comes
+/// from the wallet seed, so a wallet restored from its words has it again.
+pub(crate) fn slot_lock(own: (D32, D32)) -> Result<dsm::crypto::sphincs::SphincsKeyPair, DsmError> {
+    let seed = crate::fetch_wallet_seed()
+        .map_err(|e| DsmError::invalid_operation(format!("wallet backup: wallet locked: {e}")))?;
+    let s_master = crate::init::smaster_of(seed.as_slice(), &own.0, &own.1);
+    dsm::owned_cell::derive_cell_lock_keypair(&s_master, &own.1)
+}
+
+/// This device's `(genesis, device id)`.
+fn own_device() -> Result<(D32, D32), DsmError> {
+    let id32 = |v: Option<Vec<u8>>, what: &str| -> Result<D32, DsmError> {
+        let bytes = v.ok_or_else(|| storage(what, "none yet"))?;
+        D32::try_from(bytes.as_slice()).map_err(|e| storage(what, e))
+    };
+    Ok((
+        id32(
+            crate::sdk::app_state::AppState::get_genesis_hash(),
+            "genesis",
+        )?,
+        id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device id",
+        )?,
+    ))
+}
+
+/// How a write of a backup came out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Written {
+    /// At least the set's quorum of members hold it as their whole backup.
+    Whole,
+    /// A member holds a start of `highest`, not lower than this one: the next
+    /// backup is written after it.
+    Superseded { highest: u64 },
+    /// Fewer than the quorum hold it whole: `whole` of `members`, and what
+    /// the others answered.
+    Short {
+        whole: usize,
+        members: usize,
+        why: Vec<String>,
+    },
+}
+
+/// How one member took a write.
+enum AtMember {
+    Whole,
+    Superseded(u64),
+}
+
+/// Write `sealed`, generation `generation` of `slot`, at `member`: the start,
+/// then every part in order.
+async fn write_at(
+    member: &crate::sdk::storage_node_sdk::MemberClient,
+    slot: &D32,
+    generation: u64,
+    start: &[u8],
+    sealed: &[Vec<u8>],
+) -> Result<AtMember, String> {
+    use crate::sdk::storage_node_sdk::SlotAnswer;
+    let mut held = match member.backup_start(slot, start).await? {
+        SlotAnswer::Taken(held) => held,
+        SlotAnswer::Superseded(held) => return Ok(AtMember::Superseded(held.highest_generation)),
+    };
+    if held.generation != generation {
+        for (part, bytes) in sealed.iter().enumerate() {
+            let part = u32::try_from(part).map_err(|e| format!("part {part}: {e}"))?;
+            held = match member.backup_part(slot, generation, part, bytes).await? {
+                SlotAnswer::Taken(held) => held,
+                SlotAnswer::Superseded(held) => {
+                    return Ok(AtMember::Superseded(held.highest_generation))
+                }
+            };
+        }
+    }
+    if held.generation == generation {
+        Ok(AtMember::Whole)
+    } else {
+        Err(format!(
+            "every part sent, and the member holds generation {} whole",
+            held.generation
+        ))
+    }
+}
+
+/// Write `body` as generation `generation` of this wallet's slot on the
+/// device whose cell lock is `lock`, at every member of `set` at once: the
+/// start the lock signs, then the parts, each no larger than [`PART`].
 pub async fn write(
     set: &StorageSet,
     keys: &BackupKeys,
-    n: u64,
+    lock: &dsm::crypto::sphincs::SphincsKeyPair,
+    generation: u64,
     body: &Body,
 ) -> Result<Written, DsmError> {
     let bytes = body.encode()?;
     let chunks: Vec<&[u8]> = bytes.chunks(PART).collect();
-    let parts = u32::try_from(chunks.len()).map_err(|e| storage("parts", e))?;
-    let attempt = dsm::wallet_backup::new_attempt();
-    let members = as_ccb_members(set)?;
-    for (index, chunk) in chunks.iter().enumerate().rev() {
-        let part = u32::try_from(index).map_err(|e| storage("part", e))?;
-        let place = Place::of(part, attempt);
-        let cell = BackupCell::new(keys, n, place, &members, &set.id())
-            .map_err(|e| storage("cell", format!("{e:?}")))?;
-        let sealed = keys.seal(n, part, parts, &attempt, chunk)?;
-        let report = write_recorded(set, cell.routed(), &cell.keeps(), &sealed).await?;
-        match (place, report.leader()) {
-            (_, AtLeader::Link) => {}
-            (Place::First, AtLeader::Taken) => return Ok(Written::NumberTaken),
-            (Place::Later { .. }, AtLeader::Taken) | (_, AtLeader::Unanswered) => {
-                return Ok(Written::Stopped { part })
-            }
+    if chunks.len() > dsm::wallet_backup::MAX_PARTS {
+        return Err(storage(
+            "size",
+            format!(
+                "{} bytes is more than {} parts",
+                bytes.len(),
+                dsm::wallet_backup::MAX_PARTS
+            ),
+        ));
+    }
+    let count = u32::try_from(chunks.len()).map_err(|e| storage("parts", e))?;
+    let slot = keys.slot(&lock.public_key);
+    let sealed = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let i = u32::try_from(i).map_err(|e| storage("part", e))?;
+            keys.seal(&slot, generation, i, count, chunk)
+        })
+        .collect::<Result<Vec<_>, DsmError>>()?;
+    let digests: Vec<D32> = sealed
+        .iter()
+        .map(|p| dsm::wallet_backup::part_digest(p))
+        .collect();
+    let (slot, start) = keys.start(lock, generation, &digests)?;
+    let client = SetClient::new(set)?;
+    let answers = futures::future::join_all(
+        client
+            .members()
+            .iter()
+            .map(|m| write_at(m, &slot, generation, &start, &sealed)),
+    )
+    .await;
+    let mut whole = 0usize;
+    let mut highest = None;
+    let mut why = Vec::new();
+    for (member, answer) in client.members().iter().zip(answers) {
+        match answer {
+            Ok(AtMember::Whole) => whole += 1,
+            Ok(AtMember::Superseded(h)) => highest = highest.max(Some(h)),
+            Err(e) => why.push(format!("{}: {e}", member.member_id())),
         }
     }
-    Ok(Written::Whole)
-}
-
-/// How a write of a backup came out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Written {
-    /// Every part holds its cell, part 0 last: the backup is written.
-    Whole,
-    /// Part 0's cell already holds a whole backup of this wallet's: the number
-    /// is used, and the next backup goes after it.
-    NumberTaken,
-    /// The write stopped at `part` without part 0: nothing of it is relied on,
-    /// and the number stays free for the next attempt.
-    Stopped { part: u32 },
-}
-
-/// What the cell of the part of backup `n` at `place` holds, read from the
-/// set's seats. Reads that do not decide it yet are a storage error, never an
-/// open cell.
-pub fn read(
-    set: &StorageSet,
-    own: (D32, D32),
-    keys: &BackupKeys,
-    n: u64,
-    place: Place,
-) -> Result<BackupRead, DsmError> {
-    let ctx = crate::sdk::sofi_reads::VerifierContext::new(set, Some(own), None)?;
-    ctx.verifier()
-        .read_backup_cell(keys, n, place)
-        .map_err(crate::sdk::sofi_reads::verifier_error)?
-        .map_err(|missing| {
-            storage(
-                &format!("backup {n} part {}", place.index()),
-                format!("not decided yet: {missing:?}"),
-            )
-        })
-}
-
-/// The part of backup `n` at `place` once final, `None` when its cell is
-/// open. A cell held by a write not final yet is an error to try again on.
-fn settled_part(
-    set: &StorageSet,
-    own: (D32, D32),
-    keys: &BackupKeys,
-    n: u64,
-    place: Place,
-) -> Result<Option<dsm::wallet_backup::Opened>, DsmError> {
-    let at = read(set, own, keys, n, place)?;
-    if at.open() {
-        return Ok(None);
-    }
-    at.settled().cloned().map(Some).ok_or_else(|| {
-        storage(
-            &format!("backup {n} part {}", place.index()),
-            "held, not final yet; try again shortly",
-        )
+    let quorum = usize::try_from(set.quorum()).map_err(|e| storage("quorum", e))?;
+    Ok(match highest {
+        _ if whole >= quorum => Written::Whole,
+        Some(highest) => Written::Superseded { highest },
+        None => Written::Short {
+            whole,
+            members: client.members().len(),
+            why,
+        },
     })
 }
 
-/// The latest backup the cells hold, by its number: backup `n`'s part 0 holds
-/// its cell only once its later parts do, and `n` is written only once
-/// `n − 1`'s part 0 holds its cell, so the part 0 cells fill in order with no
-/// gap, and the latest is found by doubling, then halving, on part 0. Its later
-/// parts are read under the attempt part 0 names, and each must be final.
-pub fn latest(
+/// The latest backup the members of `set` hold whole in the slot of the
+/// device `own` names, `(genesis, device id)`, with its generation: the
+/// highest whole one whose every part a member serves as the digest that
+/// member names and that opens under this wallet's key as that part. `None`
+/// only when every member answered that it holds none; a read that does not
+/// decide it is an error to try again on.
+pub async fn latest(
     set: &StorageSet,
     own: (D32, D32),
     keys: &BackupKeys,
 ) -> Result<Option<(u64, Body)>, DsmError> {
-    let head = |n: u64| settled_part(set, own, keys, n, Place::First);
-    let Some(first) = head(1)? else {
+    let lock = slot_lock(own)?;
+    let slot = keys.slot(&lock.public_key);
+    let client = SetClient::new(set)?;
+    let states =
+        futures::future::join_all(client.members().iter().map(|m| m.backup_slot(&slot))).await;
+    let mut unanswered = 0usize;
+    let mut why = Vec::new();
+    let mut held: Vec<(u64, Vec<D32>, usize)> = Vec::new();
+    for (at, state) in states.into_iter().enumerate() {
+        let member = client.members().get(at).map(|m| m.member_id().to_string());
+        let named = dsm::wallet_backup::digests_of;
+        match state.map(|state| (state.generation, named(&state.part_digests))) {
+            Ok((0, _)) => {}
+            Ok((generation, Ok(digests))) => held.push((generation, digests, at)),
+            Ok((generation, Err(e))) => {
+                why.push(format!("{member:?}: generation {generation}: {e}"))
+            }
+            Err(e) => {
+                unanswered += 1;
+                why.push(format!("{member:?}: {e}"));
+            }
+        }
+    }
+    held.sort_by_key(|h| std::cmp::Reverse(h.0));
+    for (generation, digests, _) in &held {
+        let servers: Vec<usize> = held
+            .iter()
+            .filter(|(g, d, _)| g == generation && d == digests)
+            .map(|(_, _, at)| *at)
+            .collect();
+        match read_whole(&client, &slot, keys, *generation, digests, &servers).await {
+            Ok(body) => return Ok(Some((*generation, body))),
+            Err(e) => why.push(format!("generation {generation}: {e}")),
+        }
+    }
+    if held.is_empty() && unanswered == 0 {
         return Ok(None);
-    };
-    let (mut lo, mut lo_head) = (1u64, first);
-    let mut hi = 2u64;
-    while let Some(found) = head(hi)? {
-        (lo, lo_head) = (hi, found);
-        hi = hi
-            .checked_mul(2)
-            .ok_or_else(|| storage("latest", "backup numbers exhausted"))?;
     }
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        match head(mid)? {
-            Some(found) => (lo, lo_head) = (mid, found),
-            None => hi = mid,
+    Err(storage(
+        "slot",
+        format!(
+            "no whole backup read back from the members that answered ({unanswered} did not); \
+             not decided yet: {}",
+            why.join("; ")
+        ),
+    ))
+}
+
+/// Generation `generation` of `slot`, read part by part from the members at
+/// `servers`, each part taken only as its digest and as that part when it
+/// opens.
+async fn read_whole(
+    client: &SetClient,
+    slot: &D32,
+    keys: &BackupKeys,
+    generation: u64,
+    digests: &[D32],
+    servers: &[usize],
+) -> Result<Body, DsmError> {
+    let count = u32::try_from(digests.len()).map_err(|e| storage("parts", e))?;
+    let mut bytes = Vec::new();
+    for (part, digest) in digests.iter().enumerate() {
+        let part = u32::try_from(part).map_err(|e| storage("part", e))?;
+        let mut found = None;
+        let mut why = Vec::new();
+        for member in servers.iter().filter_map(|at| client.members().get(*at)) {
+            let served = member.backup_whole_part(slot, generation, part).await;
+            let opened = match served {
+                Ok(Some(sealed)) if dsm::wallet_backup::part_digest(&sealed) == *digest => keys
+                    .open(slot, generation, part, &sealed)
+                    .map_err(|refusal| format!("{refusal:?}")),
+                Ok(Some(_other)) => Err("not the digest it names".to_string()),
+                Ok(None) => Err("holds no such part".to_string()),
+                Err(e) => Err(e),
+            };
+            match opened {
+                Ok(opened) if opened.parts == count => {
+                    found = Some(opened.chunk);
+                    break;
+                }
+                Ok(opened) => why.push(format!(
+                    "{}: names {} parts, not {count}",
+                    member.member_id(),
+                    opened.parts
+                )),
+                Err(e) => why.push(format!("{}: {e}", member.member_id())),
+            }
         }
+        let chunk = found.ok_or_else(|| storage(&format!("part {part}"), why.join("; ")))?;
+        bytes.extend_from_slice(&chunk);
     }
-    let mut bytes = lo_head.chunk;
-    for part in 1..lo_head.parts {
-        let place = Place::of(part, lo_head.attempt);
-        let found = settled_part(set, own, keys, lo, place)?.ok_or_else(|| {
-            storage(
-                &format!("backup {lo} part {part}"),
-                "missing though part 0 is written",
-            )
-        })?;
-        if found.parts != lo_head.parts {
-            return Err(storage(
-                &format!("backup {lo} part {part}"),
-                "names another count of parts",
-            ));
-        }
-        bytes.extend_from_slice(&found.chunk);
-    }
-    Ok(Some((lo, Body::decode(&bytes)?)))
+    Body::decode(&bytes)
 }
 
 // ── backing up once the wallet is still ────────────────────────────────────
 
+/// The tables the activity mark reads, and the column of each it reads.
+pub const MARK_READS: [(&str, &str); 6] = [
+    ("bcr_device_heads", "head_bytes"),
+    ("economic_admitted_v2", "economic_root"),
+    ("economic_pending_admissions", "pre_economic_root"),
+    ("sender_outbox", "submission_id"),
+    ("acceptance_fold_journal", "relationship_key"),
+    ("own_offline_hop", "hop"),
+];
+
+/// Signalled when a row of a table the activity mark reads changes. A
+/// notify keeps one wake given while nobody waits, so a move made while the
+/// loop is busy is seen when it next waits.
+static MOVED: once_cell::sync::Lazy<tokio::sync::Notify> =
+    once_cell::sync::Lazy::new(tokio::sync::Notify::new);
+
+/// The device database changed a row of `table`: the backup loop is woken
+/// when the table is one the activity mark reads. Called by the database's
+/// update hook, inside the write; it only signals.
+pub fn row_changed(table: &str) {
+    if MARK_READS.iter().any(|(read, _)| *read == table) {
+        MOVED.notify_one();
+    }
+}
+
 /// What moving looks like from outside: the device head, the admitted register
 /// position and the in-flight steps. A step changes it the moment it lands.
 pub fn activity_mark() -> Result<D32, DsmError> {
+    #[cfg(test)]
+    MARKS_READ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let binding = crate::storage::client_db::get_connection().map_err(|e| storage("db", e))?;
     let conn = binding.lock().map_err(|e| storage("db lock", e))?;
     let mut h = dsm::crypto::blake3::Hasher::new_derive_key("DSM/wallet-backup/activity/v1\0");
-    for sql in [
-        "SELECT head_bytes FROM bcr_device_heads",
-        "SELECT economic_root FROM economic_admitted_v2",
-        "SELECT pre_economic_root FROM economic_pending_admissions",
-        "SELECT submission_id FROM sender_outbox",
-        "SELECT relationship_key FROM acceptance_fold_journal",
-        "SELECT hop FROM own_offline_hop",
-    ] {
-        let mut stmt = conn.prepare(sql).map_err(|e| storage("mark", e))?;
+    for (table, column) in MARK_READS {
+        let sql = format!("SELECT {column} FROM {table}");
+        let mut stmt = conn.prepare(&sql).map_err(|e| storage("mark", e))?;
         let values = stmt
             .query_map([], |r| r.get::<_, Value>(0))
             .map_err(|e| storage("mark", e))?;
@@ -640,7 +829,8 @@ pub fn activity_mark() -> Result<D32, DsmError> {
 /// What one backup attempt came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attempt {
-    /// Backup `n` holds its cell.
+    /// Generation `n` is the whole backup at the set's quorum of members,
+    /// written over the one before.
     Written(u64),
     /// Nothing written now, and why.
     NotNow(NotNow),
@@ -654,6 +844,7 @@ pub enum Attempt {
 /// change of it while the write is under way cancels the write.
 pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmError> {
     let keys = keys()?;
+    let lock = slot_lock(own_device()?)?;
     let body = match snapshot()? {
         Ok(body) => body,
         Err(not_now) => return Ok(Attempt::NotNow(not_now)),
@@ -661,9 +852,12 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
     if activity_mark()? != mark {
         return Ok(Attempt::Cancelled);
     }
-    let n = latest_written()?
+    let generation = latest_written()?
         .checked_add(1)
-        .ok_or_else(|| storage("number", "backup numbers exhausted"))?;
+        .ok_or_else(|| storage("generation", "backup generations exhausted"))?;
+    // The generation is used from here: an attempt the wallet's next step
+    // cuts short is written over by the next, which goes higher.
+    record_latest(generation)?;
     let moved = async {
         loop {
             tokio::time::sleep(WATCH).await;
@@ -678,21 +872,24 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
         }
     };
     tokio::select! {
-        written = write(set, &keys, n, &body) => match written? {
-            Written::Whole => {
-                record_latest(n)?;
-                Ok(Attempt::Written(n))
+        written = write(set, &keys, &lock, generation, &body) => match written? {
+            Written::Whole => Ok(Attempt::Written(generation)),
+            // A member took a start at least this high: one this wallet wrote
+            // from another device, or before it was restored. The next backup
+            // goes after it.
+            Written::Superseded { highest } => {
+                record_latest(highest)?;
+                Err(storage(
+                    &format!("generation {generation}"),
+                    format!("a member holds {highest}; the next backup goes after it"),
+                ))
             }
-            // A whole backup of this wallet's holds the number already: one
-            // an earlier attempt finished. The next backup goes after it.
-            Written::NumberTaken => {
-                record_latest(n)?;
-                Err(storage(&format!("backup {n}"), "the number is used; the next goes after it"))
-            }
-            // Nothing of this attempt is relied on, and the number stays free.
-            Written::Stopped { part } => Err(storage(
-                &format!("backup {n} part {part}"),
-                "the write stopped before part 0; the next attempt takes the number",
+            Written::Short { whole, members, why } => Err(storage(
+                &format!("generation {generation}"),
+                format!(
+                    "whole at {whole} of {members} members ({}); the next attempt writes it over",
+                    why.join("; ")
+                ),
             )),
         },
         () = moved => Ok(Attempt::Cancelled),
@@ -700,6 +897,35 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
 }
 
 static LOOP: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> = std::sync::Mutex::new(None);
+
+/// How many times this process has read the wallet's activity mark: each read
+/// scans the mark's tables whole.
+#[cfg(test)]
+static MARKS_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn marks_read() -> u64 {
+    MARKS_READ.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The next wake a move gives the backup loop, for a test that waits on one.
+#[cfg(test)]
+pub(crate) fn moved() -> tokio::sync::futures::Notified<'static> {
+    MOVED.notified()
+}
+
+/// End the backup loop a test started, so no later test finds it reading the
+/// database it has entered.
+#[cfg(test)]
+pub(crate) fn stop_for_test() {
+    let mut running = match LOOP.lock() {
+        Ok(running) => running,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(task) = running.take() {
+        task.abort();
+    }
+}
 
 /// Start the wallet's backup loop, once: it backs the wallet up each time it
 /// has been still for [`QUIET`] since it last moved.
@@ -718,57 +944,112 @@ pub fn start() {
     *running = Some(crate::runtime::get_runtime().spawn(run()));
 }
 
-async fn run() {
-    let mut seen: Option<D32> = None;
-    let mut still_ticks: u64 = 0;
-    let mut backed_up: Option<D32> = None;
+/// What one look at the still wallet came to.
+enum Look {
+    /// The wallet is backed up as it stands, or a backup was cancelled by a
+    /// move: the loop waits for the next move.
+    Done,
+    /// No backup could be written now: tried again after a wait, or sooner
+    /// if the wallet moves.
+    TryAgain,
+}
+
+/// Wait until the wallet has been still for `quiet`: every move restarts it.
+async fn still_for(quiet: Duration) {
     loop {
-        tokio::time::sleep(TICK).await;
-        let mark = match activity_mark() {
-            Ok(mark) => mark,
-            Err(e) => {
-                log::debug!("[wallet backup] {e}");
-                continue;
-            }
-        };
-        if seen != Some(mark) {
-            seen = Some(mark);
-            still_ticks = 0;
-            continue;
+        tokio::select! {
+            () = MOVED.notified() => {}
+            () = tokio::time::sleep(quiet) => return,
         }
-        still_ticks = still_ticks.saturating_add(1);
-        if backed_up == Some(mark) || still_ticks < QUIET_TICKS {
-            continue;
+    }
+}
+
+/// Forget this phone's records of writing the backup cells of before the
+/// slot: no member takes a write there any more, so nothing of them is left
+/// to continue.
+fn forget_old_backup_writes() -> Result<(), DsmError> {
+    let forgotten = crate::storage::client_db::route_writes::forget_writes_in(
+        dsm::common::domain_tags::RETIRED_WALLET_BACKUP_CELLS,
+    )
+    .map_err(|e| storage("forgetting the old backup cells' writes", e))?;
+    if forgotten > 0 {
+        log::info!("[wallet backup] forgot {forgotten} writes of the old backup cells");
+    }
+    Ok(())
+}
+
+async fn run() {
+    if let Err(e) = forget_old_backup_writes() {
+        log::warn!("{e}");
+    }
+    let mut backed_up: Option<D32> = None;
+    let mut retry = QUIET;
+    // A process starts as a move does: its first look comes once the wallet
+    // has been still for QUIET.
+    loop {
+        still_for(QUIET).await;
+        match look(&mut backed_up).await {
+            Look::Done => {
+                retry = QUIET;
+                MOVED.notified().await;
+            }
+            Look::TryAgain => {
+                tokio::select! {
+                    () = MOVED.notified() => {}
+                    () = tokio::time::sleep(retry) => {}
+                }
+                retry = retry.saturating_mul(2).min(RETRY_AT_MOST);
+            }
         }
-        let set = match crate::sdk::economic_admission_flow::committed_network_id()
-            .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
-        {
-            Ok(set) => set,
-            Err(e) => {
-                log::debug!("[wallet backup] no set yet: {e}");
-                continue;
-            }
-        };
-        match publish_own_steps(&set).await {
-            Ok(0) => {}
-            Ok(n) => log::info!("[wallet backup] {n} own offline steps put at their cells"),
-            Err(e) => {
-                still_ticks = 0;
-                log::warn!("[wallet backup] own offline steps not put yet: {e}");
-                continue;
-            }
+    }
+}
+
+/// Back the still wallet up, unless it is backed up as it stands.
+async fn look(backed_up: &mut Option<D32>) -> Look {
+    let mark = match activity_mark() {
+        Ok(mark) => mark,
+        Err(e) => {
+            log::debug!("[wallet backup] {e}");
+            return Look::TryAgain;
         }
-        match back_up_now(&set, mark).await {
-            Ok(Attempt::Written(n)) => {
-                backed_up = Some(mark);
-                log::info!("[wallet backup] backup {n} written");
-            }
-            Ok(Attempt::NotNow(why)) => log::debug!("[wallet backup] not now: {why:?}"),
-            Ok(Attempt::Cancelled) => log::info!("[wallet backup] cancelled: the wallet moved"),
-            Err(e) => {
-                still_ticks = 0;
-                log::warn!("[wallet backup] {e}");
-            }
+    };
+    if *backed_up == Some(mark) {
+        return Look::Done;
+    }
+    let set = match crate::sdk::economic_admission_flow::committed_network_id()
+        .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+    {
+        Ok(set) => set,
+        Err(e) => {
+            log::debug!("[wallet backup] no set yet: {e}");
+            return Look::TryAgain;
+        }
+    };
+    match publish_own_steps(&set).await {
+        Ok(0) => {}
+        Ok(n) => log::info!("[wallet backup] {n} own offline steps put at their cells"),
+        Err(e) => {
+            log::warn!("[wallet backup] own offline steps not put yet: {e}");
+            return Look::TryAgain;
+        }
+    }
+    match back_up_now(&set, mark).await {
+        Ok(Attempt::Written(n)) => {
+            *backed_up = Some(mark);
+            log::info!("[wallet backup] generation {n} written over the last");
+            Look::Done
+        }
+        Ok(Attempt::NotNow(why)) => {
+            log::debug!("[wallet backup] not now: {why:?}");
+            Look::TryAgain
+        }
+        Ok(Attempt::Cancelled) => {
+            log::info!("[wallet backup] cancelled: the wallet moved");
+            Look::Done
+        }
+        Err(e) => {
+            log::warn!("[wallet backup] {e}");
+            Look::TryAgain
         }
     }
 }

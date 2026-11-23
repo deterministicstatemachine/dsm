@@ -53,6 +53,8 @@ The first run is the wallet's setup. You read the beta terms and tick each one, 
 
 For a wallet that already exists on the network, **Restore my wallet from its 24 words** brings back the same identity, at its last online balance. Otherwise **Create my wallet**, and the wallet makes its identity on your phone: a recovery phrase of 24 words, which you write down and check. The phrase is not shown here. After the check, the wallet puts itself on the network: it publishes its directory entry to the storage nodes, and then it is ready.
 
+From then on, each time the wallet has been still for a short while, it writes one sealed backup of what it needs to carry on with its contacts to the storage nodes, in place of the last one. Only the phone's own key writes it, and only the 24 words open it. On a new phone, tap **Restore my wallet from its 24 words** (RESTORE WALLET in the DGen look): the words bring back the same wallet, its last online balance from the network, and its contacts from that backup.
+
 <div class="shots">
 <figure><img src="images/ios-almost-ready.webp" width="210" alt="Almost ready: putting your wallet on the DSM network"><figcaption>Putting the wallet on the network.</figcaption></figure>
 <figure><img src="images/ios-device-ready.webp" width="210" alt="Device ready: your device key is enrolled and your identity is published"><figcaption>Device ready.</figcaption></figure>

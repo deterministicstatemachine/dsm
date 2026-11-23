@@ -104,14 +104,6 @@ const ContactsTabScreen: React.FC<Props> = () => {
     } catch {}
   }, [activeTab, load, refreshTransactions]);
 
-  // Periodic refresh to catch backend updates (e.g., BLE pairing completion)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      void load('periodic');
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [load]);
-
   // Listen for BLE mapping events - refresh the list. An added contact reaches
   // this screen through the contacts store, which the add itself refreshes.
   useEffect(() => {

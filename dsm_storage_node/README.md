@@ -10,7 +10,13 @@ A storage node keeps bytes and hands them back. It:
 - **never establishes validity** — Core's construction predicates do, on the
   device, from the bytes;
 - **refuses no value** at a key and deduplicates nothing; which value counts is
-  the reader's question (storage spec §6, §9);
+  the reader's question (storage spec §6, §9). It refuses only a write a cell's
+  owner did not sign, and any write to the retired backup cells
+  (`DSM/wallet-backup/v1`);
+- **writes over one thing only**: each device's backup slot, which holds one
+  whole wallet backup and at most one being written, takes writes only as the
+  device's cell lock signed them, and deletes a backup once the next one is
+  whole (storage spec §6 rule 7, §19 rule 5). Everything else is kept for good;
 - **never opens** a spool envelope (storage spec §8);
 - **holds no protocol key and signs no protocol object**; its TLS key
   authenticates its endpoint only, and its ByteCommits are unsigned evidence a
@@ -22,6 +28,7 @@ Client (Android / Web)
   ▼
 Storage Node (Rust / Axum)
   ├── Keyed cells and indexes           (storage contract, Part II §12)
+  ├── Backup slots, one per device      (§6 rule 7)
   ├── Immutable content-addressed store (storage contract)
   ├── ByteCommits and the set-mate mirror (§14)
   └── b0x inbox spool                   (§8)
@@ -103,6 +110,8 @@ Every route is protobuf or raw bytes; `/api/v2/health` answers plain `ok`.
 | `/api/v2/cell/{key}` | POST, GET | Keep a value at an open cell (a cell one party owns is written through `/cells`, which carries its owner's proof); what is held at a key, in arrival order, a page at a time (`?from=<arrival index>`; each page names the next) |
 | `/api/v2/cells` | POST | Keep values at several keys in one transaction, each entry with its owner's proof where the cell is owned; an entry that fails the owner check is refused (403) |
 | `/api/v2/index/{locator}` | POST, GET | Append a content address; read the index in append order |
+| `/api/v2/backup/{slot}` | POST, GET | Start a write of a device's backup slot (`BackupSlotStartV1`, signed by its cell lock; `409` when the generation is not higher than one taken); the slot's state (`BackupSlotV1`) |
+| `/api/v2/backup/{slot}/{generation}/{part}` | POST, GET | One sealed part, taken only as the digest the start names; a part of the whole backup (empty body when not held) |
 | `/api/v2/immutable/put` | POST | Write-once object; the node computes the address |
 | `/api/v2/immutable/{addr}` | GET | Read an object by content address |
 | `/api/v2/bytecommit/close` | POST | Close a ByteCommit cycle |
@@ -124,6 +133,7 @@ src/
 ├── set_client.rs      # the client a node reaches one set-mate with, pinned to that set-mate's own CA
 ├── liveness.rs        # transport liveness bounds on connections and request bodies
 ├── api/
+│   ├── backup.rs      # each device's one backup slot
 │   ├── cells.rs       # keyed cells and indexes
 │   ├── objects/       # immutable store, ByteCommits and mirror
 │   └── transport/     # b0x spool
@@ -147,9 +157,11 @@ unless its URL says
 configs `make nodes-up` writes to `.dsm-dev/net/`.
 
 The database carries an explicit schema version: an empty database is created
-at the version this build serves, a database at that version must hold exactly
-its layout, and anything else is refused. Nothing is migrated in place; an old
-database is reprovisioned.
+at the version this build serves (5), a database at that version must hold
+exactly its layout, and anything else is refused. One version is brought up in
+place: a database at 4 gains the two backup slot tables and nothing else, so
+every cell it holds stays as it was (owner, 2026-11-23). Any other old database
+is reprovisioned.
 
 ## Build
 

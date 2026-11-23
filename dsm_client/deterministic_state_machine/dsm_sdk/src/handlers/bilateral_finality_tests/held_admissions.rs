@@ -210,6 +210,9 @@ async fn a_sync_racing_a_send_admits_and_delivers_each_send_once() {
             args: packed(crate::sdk::inbox_poller::poll_sync_request().encode_to_vec()),
         });
         let (sent, synced) = tokio::join!(send, sync);
+        // The Send route answers once the debit is committed: what it
+        // finishes beside the answer ends before the device is entered again.
+        crate::test_support::two_device::background_deliveries_settled().await;
         assert!(synced.success, "round {round}: {:?}", synced.error_message);
         p.a.enter();
         let armed = super::gate_present(&p.b);
