@@ -20,6 +20,8 @@ export type BridgeEventMap = {
   'inbox.updated': { newItems: number; source: string };
   // Rust's count of received transfers not yet looked at may have changed.
   'money.waiting': void;
+  // The connected applications or the requests waiting for the player changed.
+  'connect.changed': void;
   'visibility.change': { state: DocumentVisibilityState };
   'ble.permission.error': { message: string };
   'ble.deviceFound': { address: string; name: string; rssi: number };

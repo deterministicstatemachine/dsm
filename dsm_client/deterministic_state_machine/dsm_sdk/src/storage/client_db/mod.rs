@@ -219,6 +219,13 @@ pub fn init_database() -> Result<()> {
         upgrade::upgrade_in_place(&mut conn)?;
         create_schema(&conn)?;
         sofi_vault_head::drop_superseded_baselines(&conn)?;
+        // A changed row tells the backup loop the wallet moved: it reads no
+        // table on a timer (`wallet_backup_flow::row_changed`).
+        conn.update_hook(Some(
+            |_action: rusqlite::hooks::Action, _database: &str, table: &str, _row: i64| {
+                crate::sdk::wallet_backup_flow::row_changed(table);
+            },
+        ))?;
         {
             let mut guard = DB_CONNECTION
                 .write()

@@ -50,6 +50,8 @@ pub mod chain_tip_store;
 pub mod connect; // DSM Connect: a Web2 application connected to a wallet (DSM Amendment A11)
 pub mod core_sdk;
 pub mod identity_publication; // publication-quorum lifecycle for device identities
+#[cfg(test)]
+mod idle_wallet_tests; // what an open wallet with nothing to do asks of the nodes
 pub mod inbox_poller;
 pub mod inbox_waiter; // long-poll on the storage nodes beside the poller
 pub mod kyber_identity; // ML-KEM identity binding for online contact establishment (§11.1)
