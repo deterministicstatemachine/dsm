@@ -579,34 +579,29 @@ pub(crate) async fn walk_contact(genesis: [u8; 32], device_id: [u8; 32]) -> Resu
     Ok(())
 }
 
-/// How long after one background pass over the contacts ends the next may
-/// start. A contact with nothing new costs one read of its next cell.
+/// How long a background pass over the contacts holds off the next one once
+/// it has walked them. A contact with nothing new costs one read of its next
+/// cell.
 const CONTACT_PASS_SPACING: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// One background pass over the contacts at a time, and when the last one
-/// ended.
-static CONTACT_PASS: once_cell::sync::Lazy<
-    std::sync::Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
-> = once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)));
+/// One background pass over the contacts at a time, its spacing included.
+static CONTACT_PASS: once_cell::sync::Lazy<std::sync::Arc<tokio::sync::Mutex<()>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
 
 /// Start a pass that walks every contact from the state kept of it toward its
-/// head ([`walk_contacts`]), unless one is running or one ended within
-/// [`CONTACT_PASS_SPACING`]. The background poller starts it after each of
-/// its cycles, so that a contact's payment finds the contact's steps since
+/// head ([`walk_contacts`]), unless one is running or still spacing itself
+/// out ([`CONTACT_PASS_SPACING`]). The background poller starts it after each
+/// of its cycles, so that a contact's payment finds the contact's steps since
 /// the last one already checked and reads only its own (rig run 2026-11-22:
 /// a payment after idle waited 63–95 s on its payer's steps since).
 pub(crate) fn start_contact_walks() {
-    let Ok(mut held) = CONTACT_PASS.clone().try_lock_owned() else {
+    let Ok(held) = CONTACT_PASS.clone().try_lock_owned() else {
         return;
     };
-    if let Some(ended) = *held {
-        if ended.elapsed() < CONTACT_PASS_SPACING {
-            return;
-        }
-    }
     tokio::spawn(async move {
         walk_contacts().await;
-        *held = Some(std::time::Instant::now());
+        tokio::time::sleep(CONTACT_PASS_SPACING).await;
+        drop(held);
     });
 }
 
@@ -623,7 +618,6 @@ pub(crate) async fn walk_contacts() {
             return;
         }
     };
-    let started = std::time::Instant::now();
     log::info!(
         "[kept state] a pass over {} contacts starts",
         contacts.len()
@@ -649,10 +643,7 @@ pub(crate) async fn walk_contacts() {
         }
         walked += 1;
     }
-    log::info!(
-        "[kept state] the pass walked {walked} contacts in {} ms",
-        started.elapsed().as_millis()
-    );
+    log::info!("[kept state] the pass walked {walked} contacts");
 }
 
 /// This wallet's own lineage as the register on `network_id` holds it,
