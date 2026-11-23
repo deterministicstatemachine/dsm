@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Bitcoin primitives for the DSM-Bitcoin bridge (deposits/withdrawals via HTLC vaults).
+//! Bitcoin primitives for dBTC taps (Explainer §64: DSM taps Bitcoin; it does not bridge it).
 //!
-//! Provides SPV proof verification, HTLC script construction, and
-//! Bitcoin-specific types needed for bidirectional dBTC bridge operations.
+//! Provides SPV proof verification, the dual-hashlock script, header-chain checks and the
+//! Bitcoin types a vault's deposit and withdrawal use.
 //! No wall clocks — all verification is deterministic and state-based.
 
 pub mod header_chain;

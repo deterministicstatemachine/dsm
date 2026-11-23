@@ -57,7 +57,7 @@ export function unloadOfflineCash(tokenId: string, amount: string): Promise<Offl
 export interface ReceivedUnload {
   /** The payments that moved into the online balance. */
   moved: number;
-  /** The payments still waiting for their payers to be back online. */
+  /** The payments whose payer's steps are not final at their cells yet. */
   waiting: number;
   /** Rust's own sentence about the move. */
   message: string;
@@ -65,7 +65,8 @@ export interface ReceivedUnload {
 
 /**
  * Move every payment received offline that is ready into the online balance (owner, 2026-11-07:
- * "One tap, all ready"). A payment is ready once its payer has been back online; the rest stay in
+ * "One tap, all ready"). A payment is ready once the storage nodes hold it final at the payer's
+ * origin cells; the rest stay in
  * the offline balance, waiting. Nothing moves until this is asked for.
  */
 export async function unloadReceived(): Promise<ReceivedUnload> {

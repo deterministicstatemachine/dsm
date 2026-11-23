@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Offline origin cells on storage nodes (DSM Amendment A39 draft, prototype):
+//! Offline origin cells on storage nodes (DSM Amendment A39):
 //! writing a step an offline account's board signed, by anyone holding it, and
 //! reading the cells to settle a payment without its payer or to find where an
 //! account stands.

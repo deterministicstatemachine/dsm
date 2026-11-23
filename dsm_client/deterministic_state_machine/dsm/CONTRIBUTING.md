@@ -57,7 +57,7 @@ When reporting bugs or requesting features, please include:
 
 ## Development Environment Setup
 
-1. Install Rust (stable):
+1. Install Rust with rustup; the version is the one the repository's `rust-toolchain.toml` pins:
    ```
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
@@ -68,15 +68,10 @@ When reporting bugs or requesting features, please include:
    cargo install cargo-audit cargo-deny
    ```
 
-3. Configure git hooks (optional):
-   ```
-   git config core.hooksPath .github/hooks
-   ```
-
 ## Testing
 
-- Run tests: `cargo test --all-features`
-- Run linting: `cargo clippy --all-targets --all-features -- -D warnings`
+- Run tests: `cargo test` (never `--all-features`: it turns on `bitcoin-testnet-bypass`, which no production build may enable)
+- Run linting: `cargo clippy --all-targets -- -D warnings`
 - Format code: `cargo fmt --all`
 - Check for security issues: `cargo audit`
 
@@ -84,7 +79,7 @@ When reporting bugs or requesting features, please include:
 
 Cryptographic code is held to higher standards:
 
-1. **Post-Quantum Only**: All cryptographic primitives must be post-quantum resistant. DSM uses SPHINCS+ (signatures), ML-KEM-768 (key encapsulation), and BLAKE3 (hashing). Do not introduce classical-only primitives.
+1. **Post-Quantum**: DSM's own signatures and key encapsulation are post-quantum: SPHINCS+ (signatures), ML-KEM-768 (key encapsulation), and BLAKE3 (hashing). The one classical primitive is the verification of the anchor chip's Ed25519 witness (`crypto::classical_verify`). Do not introduce another.
 
 2. **Domain Separation**: All BLAKE3 hashing must use domain-separated prefixes: `BLAKE3("DSM/<domain>\0" || data)`.
 
@@ -96,4 +91,4 @@ Cryptographic code is held to higher standards:
 
 ## License
 
-By contributing to this project, you agree that your contributions will be licensed under the project's license.
+By contributing to this project, you agree that your contributions will be dual-licensed under MIT and Apache-2.0, as the repository is.

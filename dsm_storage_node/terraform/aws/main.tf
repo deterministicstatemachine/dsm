@@ -1,9 +1,11 @@
 # DSM Storage Nodes — Multi-Region Terraform Configuration
 #
 # Provisions 6 independent EC2 instances across 3 AWS regions for geographic
-# distribution (2 nodes per region). Storage nodes are not a consensus system —
-# consensus, no leaders, no shared state. Each node independently stores bytes,
-# mirrors ByteCommit chains, and enforces byte accounting.
+# distribution (2 nodes per region). Storage nodes run no consensus and no
+# vote. Each stores bytes, mirrors its set-mates' ByteCommit chains and copies
+# objects to them; which seat leads a cell is computed by writers and
+# verifiers, never by a node. A storage set is five members, written into each
+# node's config by deploy/assemble_storage_set.sh.
 #
 # Regions: us-east-1 (N. Virginia), eu-west-1 (Ireland), ap-southeast-1 (Singapore)
 #

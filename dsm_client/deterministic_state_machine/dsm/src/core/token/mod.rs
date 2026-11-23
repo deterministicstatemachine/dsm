@@ -6,10 +6,6 @@ pub mod era_policy;
 pub mod policy;
 pub mod token_state_manager;
 
-// Optional modules (enable via Cargo features)
-
-// JNI bridge moved to dsm_sdk - see dsm_sdk/src/jni/unified_protobuf_bridge.rs
-
 // Export main token manager types and helpers (only items that exist)
 pub use policy::TokenPolicySystem;
 

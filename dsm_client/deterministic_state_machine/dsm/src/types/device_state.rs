@@ -2084,8 +2084,7 @@ impl DeviceState {
 
     /// The operation id the boundary of `kind` would take from this head, and
     /// the counter and frontier its account stands at: what the board's
-    /// transition for it is built from before it is taken (DSM Amendment A39
-    /// draft, option B).
+    /// transition for it is built from before it is taken (DSM Amendment A39).
     pub fn offline_boundary_start(
         &self,
         bundle: &[u8; 32],
@@ -2225,7 +2224,7 @@ impl RealizedHead {
     /// online balance is credited by it. The credit is an admitted economic transition, funded by the
     /// payer's spend its origin cells hold (`economic::offline_boundary::OfflineSettlementBody`). The
     /// account's board signs the unload at its next counter, advancing to `next_frontier` (DSM
-    /// Amendment A39 draft, option B). Answers the head it leaves, with the account's step as the
+    /// Amendment A39). Answers the head it leaves, with the account's step as the
     /// witness the account's next boundary carries in its ancestry, and the device roots and
     /// offline-state proofs the board's release carries.
     pub fn settle_offline_receipt(
@@ -2295,7 +2294,7 @@ impl RealizedHead {
 }
 
 /// The unload of a payment received offline, taken: the head it leaves, the account's step as
-/// its witness, and what the board's release of it carries (DSM Amendment A39 draft, option B).
+/// its witness, and what the board's release of it carries (DSM Amendment A39).
 #[derive(Clone)]
 pub struct OfflineSettleOutcome {
     pub new_device_state: RealizedHead,
@@ -2313,8 +2312,8 @@ pub enum OfflineBoundaryKind {
     /// From the offline account back to the online balance.
     Unload,
     /// The unload of a payment received offline: its amount leaves what the receiver's offline
-    /// account holds received for its online balance, funded by the payer's spend the payer's
-    /// online history exposed (owner, 2026-11-07).
+    /// account holds received for its online balance, funded by the payer's spend that is final at
+    /// the payer's origin cell (DSM Amendment A39).
     Settle,
 }
 

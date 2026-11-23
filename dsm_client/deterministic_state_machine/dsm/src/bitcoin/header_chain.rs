@@ -7,14 +7,15 @@
 //! This prevents fabricated-header attacks where an attacker creates a
 //! block header with valid PoW at an easy difficulty target.
 //!
-//! Checkpoints are hardcoded per network and updated with app releases.
-//! For signet/testnet, checkpoint enforcement is skipped.
+//! Checkpoints are hardcoded per network and updated with app releases. Every
+//! network requires a checkpoint-rooted chain. A build with the
+//! `bitcoin-testnet-bypass` feature, for development rigs only, skips
+//! checkpoint enforcement on signet/testnet.
 //!
-//! Formal correspondence:
-//! - on mainnet, successful verification here feeds the `checkpointed`
-//!   predicate used by the dBTC trust-reduction artifacts;
-//! - on signet/testnet, bypassed checks mean runtime behavior is intentionally
-//!   weaker than the formal mainnet predicate.
+//! Formal correspondence: successful verification here feeds the
+//! `checkpointed` predicate used by the dBTC trust-reduction artifacts; a
+//! build with the bypass feature does not meet that predicate on
+//! signet/testnet.
 
 use crate::types::error::DsmError;
 use super::spv::{block_hash, extract_nbits, nbits_to_target, verify_block_header_work};
@@ -106,7 +107,7 @@ pub fn meets_difficulty_floor(header: &[u8; 80], floor_nbits: u32) -> bool {
 /// - `Err` on malformed input
 ///
 /// # Verification steps
-/// 1. Testnet/Signet: always returns `Ok(true)` (no checkpoint enforcement)
+/// 1. Testnet/Signet under the `bitcoin-testnet-bypass` feature only: accepted with no checkpoint enforcement
 /// 2. Build the full chain: `[header_chain..., block_header]`
 /// 3. The first header's `prev_hash` must match a known checkpoint's `block_hash`
 /// 4. Each subsequent header's `prev_hash == block_hash(previous_header)`

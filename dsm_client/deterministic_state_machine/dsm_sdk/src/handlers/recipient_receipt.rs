@@ -7,7 +7,7 @@
 //! `CanonicalApplyRecord` exists; never sign in recovery.
 //!
 //! Live sequence (accept path holds the tokio guard across all of it):
-//!   CoreSDK::apply_incoming_transfer_full_state(   // ONE staged full-state tx:
+//!   CoreSDK::apply_incoming_transfer_staged(       // ONE staged full-state tx:
 //!       build = generate_b_artifacts_from_inbound  //   pre-write, sees the exact
 //!               (…, outcome.relationship_pair()),  //   AdvanceOutcome, signs sig_b
 //!       write = journal_row(..) inserted in-tx     //   with nonce + apply record

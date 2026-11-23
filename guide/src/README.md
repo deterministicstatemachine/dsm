@@ -55,7 +55,7 @@ Apps already plugged into DSM, a game, a warehouse system and a prototype AI wit
 ## What DSM is, for an app builder
 
 - Each party keeps its own state. Your app has an account, each player has a wallet.
-- There is no global ledger to wait on, no validators and no fee market. Storage nodes keep an index of where everyone's state is, and decide nothing.
+- There is no global ledger to wait on, no validators and no fee market. Storage nodes keep everyone's state where anyone can read it. A node keeps a write at a cell one party owns only when that owner's key signed it, and decides nothing about what is valid.
 - You plug in. You don't deploy storage nodes or run any part of the DSM network: your app runs its own DSM account beside your existing server.
 
 ## Your app is an account
@@ -93,20 +93,20 @@ A grant is the player's consent, written down: which kinds of requests your app 
 |---|---|---|
 | Passwords, password resets, an authenticator app, SMS codes, security keys | `ask.login`: the player approves "Sign in to *your app*" on their device, and the wallet's identity signs it. Your account verifies the signature and gives you the fact `signed`. | No password or code to store, leak, reuse or intercept. The player reads the words on their own device and signs them there, and the signature names this connection and this request, so it signs the player in to your app and nowhere else. It does not stop a player approving a look-alike app's own requests: the wallet shows which app is asking, and the player decides. Post-quantum signatures. No hardware key to buy, ship or replace. |
 | A payment processor for in-app purchases | `ask.send`: the wallet sends your account ERA, or a coin you issued. Fact: `received`. | A transfer your account accepted is final; there is no chargeback. Small amounts cost what a storage write costs, not a percentage plus a fixed fee. Inside the grant's caps the player is not asked again. |
-| An inventory database as the source of truth for who owns what | `issue` an object, `give` it, and later `ask.owns`: the wallet proves what it owns, and your account verifies the proof. Fact: `owns`. | Items are the player's: they can send them to each other in the wallet, and your app still sees who holds what. Your database keeps game state; ownership lives with the player. |
+| An inventory database as the source of truth for who owns what | `issue` an object, `give` it, and later `ask.owns`: the wallet proves what it owns, and your account verifies the proof. Fact: `owns`. | Items are the player's: they can send them to each other in the wallet, to anyone they and the other person have both added as a contact, and your app still sees who holds what. Your database keeps game state; ownership lives with the player. |
 | An escrow service, or trusting yourself with both players' stakes | A match: both players stake from their own wallets, your app decides, the winner collects. | Your app never holds the stakes. Each wallet locks its own, under terms it built itself; your key only decides. |
 | A marketplace backend with its own order book and settlement | A vault of your own that sells your coin for ERA (or any pair) at a fee you set, and `ask.trade`. | Prices come from the vault's reserves, trades settle on the players' own devices, and your account earns the fee. |
-| Account recovery flows, "forgot password" | None. The identity is the player's wallet, which they back up themselves. | Your app has nothing to recover. |
+| Account recovery flows, "forgot password" | None. A player restores their wallet from its 24 words and is the same DSM identity, back at its last online balance; they connect to your app again with a new code, and a sign-in proves it is them. | Your app has nothing to recover. |
 
 What DSM does not replace: your app's own logic and state (DSM holds identities, objects and facts, not your game), and government identity. If you need KYC, keep your own record of it keyed by the player's DSM identity, which a sign-in proves. DSM itself holds no personal data, so KYC attaches to the identity, not to a password.
 
 ## Who pays for what
 
-Storage on DSM is paid for by the account that writes: a one-time entry payment, then credits consumed by each write. Nobody is billed per month or per user, and reading is free. That leaves you three ways to set things up:
+Storage on DSM is designed to be paid for by the account that writes: a one-time entry payment, then credits charged by the storage each write uses. Nobody is billed per month or per user, and reading is free. In the beta no node charges for a write yet. That leaves you three ways to set things up:
 
 1. **Players pay their own way.** Each player's wallet is their own account, on the public set. In the beta, the faucet funds every new wallet. Your app pays only for its own account's writes. This is what this guide sets up: your app's account on the beta network, funded by the same faucet.
 2. **Your app pays for its players.** `give` a player ERA when they connect; their wallet spends it on its own writes. What you give is theirs, and works anywhere on DSM, so this is a gift, not a subscription.
-3. **Your app runs the storage, and players pay nothing.** Run your own storage set and point your players' wallets at it. A node may enforce the entry payment and credits, or not; on your own set, that is your call. You pay the hosting. Accounts on your set are still their owners', and a wallet on your set reaches only your set. [A storage set of your own](own-storage-set.md) shows it on one machine.
+3. **Your app runs the storage, and players pay nothing.** Run your own storage set and point your players' wallets at it. You pay the hosting. Accounts on your set are still their owners', and a wallet on your set reaches only your set. [A storage set of your own](own-storage-set.md) shows it on one machine.
 
 What this replaces, in cost: a hardware key per user and its replacements, SMS codes per message, a processor's percentage on every payment, an escrow or marketplace provider. What you pay instead is your account's storage writes, in ERA, and hosting if you choose the third setup.
 

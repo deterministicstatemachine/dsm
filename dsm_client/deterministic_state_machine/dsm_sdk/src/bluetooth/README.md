@@ -1,30 +1,49 @@
-# Canonical Android BLE Bridge (Offline Bilateral Path)
-
-## Status: ACTIVE - Single, enforced path
-
-This directory contains the ONLY permitted Bluetooth Low Energy (BLE) integration for DSM. All previous multi-module / exploratory stacks (discovery, connection managers, messaging layers, bluetooth_impl, retry schedulers) have been permanently removed and are CI‑guarded against resurrection.
+# BLE: offline steps between contacts
 
 ## Scope
 
-Minimal responsibility: move serialized Envelope v3 byte frames between two Android devices so the bilateral transaction state machine can progress offline. No JSON framing, no generalized message bus, no multi-hop routing, and no wall-clock influence on protocol semantics. Operational BLE timers are allowed only for transport behavior such as retries, ACK timeouts, reconnect backoff, pacing, and idle expiry.
+Moves bilateral frames between two contacts' devices so an offline step can progress. Every byte
+on a link is a fragment of the link handshake or a sealed record of the link's session (DSM
+Amendment A27): a post-quantum handshake over the ML-KEM keys each contact pinned from the other's
+directory entry, then fixed-length XChaCha20-Poly1305 records. The host (Android over JNI, iOS over
+the C ABI) moves bytes and interprets none. No JSON framing, no generalized message bus, no
+multi-hop routing, and no wall-clock influence on protocol semantics. Operational BLE timers are
+allowed only for transport behavior such as retries, ACK timeouts, reconnect backoff, pacing, and
+idle expiry.
 
 ## Components
 
 ```
-Kotlin GATT service
-    │  (JNI protobuf bytes)
+host GATT (Kotlin BleCoordinator / Swift)
+    │  radio bytes
     ▼
-android_ble_bridge.rs        // JNI ingress/egress, converts to Vec<u8>
+radio_link.rs                 // one link per peer address, for any host
     │
     ▼
-ble_frame_coordinator.rs     // Chunking / reassembly of Envelope v3 frames
+link_session.rs               // the A27 handshake and sealed records
     │
     ▼
-bilateral_ble_handler.rs     // Prepares + commits bilateral transactions (returns envelope bytes + commitment hash)
+radio_ingress.rs              // opened records into frames
     │
     ▼
-core bilateral manager       // Forward-only state updates
+ble_frame_coordinator.rs      // chunking / reassembly of Envelope v3 frames
+    │
+    ▼
+bilateral_transport_adapter.rs
+    │
+    ▼
+bilateral_ble_handler.rs      // the offline step (below)
+
+beside them: pairing_orchestrator.rs (scan and advertising), owed_frame_driver.rs (re-sends owed frames)
 ```
+
+## The offline step
+
+The payer proposes; the receiver accepts; the payer's board signs the release and the payer
+confirms with it; the receiver's board checks the payment (the payer's stamp included, DSM
+Amendment A38) and commits the receive; the receiver's acknowledgement commits the payer's side.
+Every step of an offline account is its board's, and each is final at its origin cell on the
+storage nodes (DSM Amendment A39).
 
 ## Deterministic Invariants
 
@@ -45,17 +64,12 @@ checks that a transport timer stays out of protocol semantics:
 `ci/no_clock_and_no_json.sh` allowlists the BLE transport files, so that
 invariant is held by review. There is no `ci_gates.sh`.
 
-## Interaction Pattern
-
-Android (Kotlin) pushes a prepared transaction by invoking JNI → bytes enter `android_ble_bridge.rs` → coordinator frames them → handler validates / commits when counterpart responds → resulting committed state is exposed back up through existing SDK flows.
-
 ## Non-Goals (Deliberate Exclusions)
 
-- General device discovery / scanning orchestration
 - Protocol-semantic schedulers or background loops that advance DSM state by elapsed time
 - Multi-hop / mesh routing
 - Arbitrary message bus or chat semantics
-- Cross-platform desktop BLE (Android only for now)
+- Desktop BLE
 
 ## Adding New Offline Features
 

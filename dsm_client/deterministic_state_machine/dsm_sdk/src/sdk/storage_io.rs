@@ -4,8 +4,10 @@
 //! §5, §7), and the storage facts Core derives from them.
 //!
 //! Every function takes the set the caller resolved from committed state,
-//! never "the configured nodes". Writes go to every member; what a member
-//! answered is never counted toward anything here. Reads return what the
+//! never "the configured nodes". An object is put for the set: one member
+//! takes it and copies it to its set-mates, and this device puts it itself
+//! wherever a member does not answer that it holds it (storage spec §5 rule 7).
+//! What a member answered is never counted toward anything here. Reads return what the
 //! members hold, and Core decides what it establishes: `Stored(o)` from
 //! three members returning the exact bytes (§5 rule 6), an index's candidate
 //! order from every member's appends (§7). Raced cells are written and read
@@ -19,7 +21,7 @@ use crate::sdk::final_reads::PassedOver;
 use crate::sdk::storage_node_sdk::{IndexRead, SetClient};
 use crate::sdk::storage_set::StorageSet;
 
-/// Put an immutable object at every member of `set` (§5). Returns its
+/// Put an immutable object for `set` (§5 rule 7). Returns its
 /// address and how many members took it; whether it is `Stored` is read back
 /// ([`read_stored_bytes`]), never inferred from this count.
 pub(crate) async fn put_immutable(

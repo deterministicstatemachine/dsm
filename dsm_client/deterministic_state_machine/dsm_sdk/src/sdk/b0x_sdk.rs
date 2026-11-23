@@ -4,8 +4,11 @@
 //!
 //! Deterministic, protobuf-only client for the b0x spool: Envelope v3
 //! submission to, and retrieval from, the storage-node `/api/v2/b0x/*`
-//! endpoints. A node's spool is append-only and checks no writer or reader
-//! (DSM Amendment A3): there is no registration, token or acknowledgement,
+//! endpoints. A node's spool is append-only. A node stores a write only when
+//! its inbox address is the route bound to the key the write carries, the
+//! grant verifies under that key and the write's signature under the granted
+//! key (DSM Amendments A34, A37); it checks no reader, and there is no
+//! registration, token or acknowledgement,
 //! and what this device consumed is its own state (`client_db::b0x_consumed`).
 //!
 //! Every payload is sealed end to end (DSM Amendment A7): a node holds an
@@ -454,7 +457,7 @@ pub struct B0xSDK {
     /// names there: it accepts only that member's certificate.
     member_clients: HashMap<String, reqwest::Client>,
     circuit_breaker: CircuitBreaker,
-    /// Write quorum K for multi-node ops (submit/ack). Default 3.
+    /// Write fan-out K for submits. Default 3.
     quorum_k: usize,
     /// ADR 0003 B-side countersign deltas decoded during the most recent
     /// retrieve. Buffered rather than returned so the retrieve signature (5 call
@@ -574,7 +577,7 @@ pub(crate) fn step_recipient(op: &Operation) -> Result<Vec<u8>, DsmError> {
 }
 
 /// One finality certificate as it came off the wire: the node message id it
-/// is ACKed under, the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`),
+/// is held under in the spool, the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`),
 /// and the content key of the copy it came in, by which one that never will be
 /// taken is passed over.
 #[derive(Debug, Clone, PartialEq, Eq)]

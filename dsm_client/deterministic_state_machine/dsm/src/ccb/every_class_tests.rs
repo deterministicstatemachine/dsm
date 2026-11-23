@@ -1360,7 +1360,7 @@ fn every_class() -> Vec<Shown> {
         }),
     ));
 
-    // ── an offline boundary's departure (DSM Amendment A39 draft) ───────
+    // ── an offline boundary's departure (DSM Amendment A39) ───────
     let departure = crate::offline_origin::OriginDeparture {
         genesis: b(0xD5),
         owner_key: key(),
@@ -1379,7 +1379,7 @@ fn every_class() -> Vec<Shown> {
         }),
     ));
 
-    // ── offline origin cells (DSM Amendment A39 draft) ──────────────────
+    // ── offline origin cells (DSM Amendment A39) ──────────────────
     let origin = crate::offline_origin::OriginWrite {
         owner_key: key(),
         device_id: b(0xD1),

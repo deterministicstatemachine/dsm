@@ -12,8 +12,8 @@
 //!
 //! The exported [`to_canonical_bytes`] / [`from_canonical_bytes`] functions
 //! return / consume the **unframed protobuf transport bytes** of an
-//! [`Envelope`]. They are NOT the canonical signing-preimage bytes used for
-//! hashing — those live in the `compute_*_signing_bytes_v3` family below.
+//! [`Envelope`]. They are NOT signing preimages: a transfer's signature covers
+//! `Operation::to_bytes` of the unsigned operation.
 //! The historical name is retained because 100+ external call sites use it;
 //! treat it as a transport-encoding identifier, not a signing-preimage one.
 //! For receipts the analogous distinction is made cleanly by

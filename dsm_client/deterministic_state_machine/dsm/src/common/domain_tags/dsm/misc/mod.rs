@@ -54,7 +54,7 @@ pub(super) fn app_cell_tags() -> &'static [TaggedHashDomain<'static>] {
     app_cell::APP_CELL_TAGS
 }
 
-/// The offline origin-cell tags (DSM Amendment A39 draft), collected the same way.
+/// The offline origin-cell tags (DSM Amendment A39), collected the same way.
 #[cfg(test)]
 pub(super) fn offline_origin_tags() -> &'static [TaggedHashDomain<'static>] {
     offline_origin::OFFLINE_ORIGIN_TAGS

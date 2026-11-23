@@ -1,13 +1,13 @@
 # Set up your machine
 
-Plugging an app in needs Node.js 20 or later, Python 3 if you use the Python client, and `curl`. No Rust, no protobuf compiler, and no copy of the DSM repo: DSM's tools come prebuilt from a release, for Linux (x86-64 and ARM64) and macOS (Apple silicon and Intel). On Windows, use WSL2 with Ubuntu and follow the Ubuntu lines. PostgreSQL is not on the list either: you need it only if you later run storage nodes of your own.
+Plugging an app in needs Node.js 20 or later, Python 3.10 or later if you use the Python client, and `curl`. No Rust, no protobuf compiler, and no copy of the DSM repo: DSM's tools come prebuilt from a release, for Linux (x86-64 and ARM64) and macOS (Apple silicon and Intel). On Windows, use WSL2 with Ubuntu and follow the Ubuntu lines. PostgreSQL is not on the list either: you need it only if you later run storage nodes of your own.
 
 ## 1. Install the prerequisites
 
-**macOS**, with [Homebrew](https://brew.sh). macOS already has Python 3 with `venv`, and `curl`.
+**macOS**, with [Homebrew](https://brew.sh). macOS already has `curl`; its own Python 3 is older than the 3.10 the Python client needs, so Python comes from Homebrew too.
 
 ```bash
-brew install node
+brew install node python
 ```
 
 **Ubuntu or Debian.** Ubuntu's own `nodejs` package is older than the Node.js 20 the tools need, so Node comes from NodeSource:

@@ -5,8 +5,9 @@
 // device's own board and is held in its offline balance, apart from the
 // allocation it pays from (owner, 2026-11-07). Rust keeps them, names the payer
 // and renders each amount; this only reads them. They are in no online balance
-// until the user unloads them (`unloadReceived`), and each moves only once its
-// payer's return online has exposed its signed spend chain.
+// until the user unloads them (`unloadReceived`), and each moves once the
+// payer's origin cells hold it final; this device writes the payer's steps
+// there itself, so the payer is not needed (DSM Amendment A39).
 
 import * as pb from '../proto/dsm_app_pb';
 import { routerQueryBin } from './WebViewBridge';

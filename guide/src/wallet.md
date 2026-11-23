@@ -48,10 +48,10 @@ The first run is the wallet's setup. You read the beta terms and tick each one, 
 <div class="shots">
 <figure><img src="images/ios-terms.webp" width="210" alt="Before you start: the beta terms, each with a tick box"><figcaption>The beta terms. You continue once every point is ticked.</figcaption></figure>
 <figure><img src="images/ios-look.webp" width="210" alt="Choose your look: Modern or DGen, dark mode, simple mode"><figcaption>Choose your look: Modern or DGen.</figcaption></figure>
-<figure><img src="images/ios-create.webp" width="210" alt="Welcome to DSM, with the Create my wallet button"><figcaption>Create my wallet.</figcaption></figure>
+<figure><img src="images/ios-create.webp" width="210" alt="Welcome to DSM, with the Create my wallet button"><figcaption>Create my wallet, or restore one from its 24 words.</figcaption></figure>
 </div>
 
-Then the wallet makes its identity on your phone: a recovery phrase of 24 words, which you write down and check. The phrase is not shown here. After the check, the wallet puts itself on the network: it publishes its directory entry to the storage nodes, and then it is ready.
+For a wallet that already exists on the network, **Restore my wallet from its 24 words** brings back the same identity, at its last online balance. Otherwise **Create my wallet**, and the wallet makes its identity on your phone: a recovery phrase of 24 words, which you write down and check. The phrase is not shown here. After the check, the wallet puts itself on the network: it publishes its directory entry to the storage nodes, and then it is ready.
 
 <div class="shots">
 <figure><img src="images/ios-almost-ready.webp" width="210" alt="Almost ready: putting your wallet on the DSM network"><figcaption>Putting the wallet on the network.</figcaption></figure>

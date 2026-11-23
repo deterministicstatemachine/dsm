@@ -13,10 +13,12 @@ provider "google" {
   region  = "us-central1"
 }
 
-# The beta fleet is FIVE nodes in one region. Quorum is 3 of 5 and every settle
-# waits on it, so the members sit next to each other rather than across
-# continents: an intercontinental hop would be on the critical path of every
-# quorum-bound operation the rig performs.
+# This configuration is FIVE nodes in one region (the former beta fleet; the
+# beta fleet runs from terraform/ovh). A write is final once its route chain
+# has the leader's link and two more, and every settle waits on that, so the
+# members sit next to each other rather than across continents: an
+# intercontinental hop would be on the critical path of every write the rig
+# makes.
 module "us_central1" {
   source = "./modules/region"
 

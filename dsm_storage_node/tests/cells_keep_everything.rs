@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The keyed-cell and index contract, executed against the real routers.
 //!
-//! A member keeps every value it is given for a key, in arrival order, and
-//! never refuses, replaces or compares. Absence is asserted by shape: `200`
+//! A member keeps every value it takes for a key, in arrival order, and
+//! never replaces or compares; the cells driven here are open, so the owner
+//! check of storage spec §6 rule 6 passes every write. Absence is asserted by
+//! shape: `200`
 //! with an empty list. An index is append-only and pages from the last `seq`.
 //! Nothing here decodes a value; the payloads are arbitrary bytes on purpose.
 

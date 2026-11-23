@@ -36,19 +36,23 @@
 //!
 //! ## Module Organization
 //!
-//! - [`core`] — State machine, bridge traits, bilateral management, identity, token subsystem
-//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, ChaCha20-Poly1305 (salted-BLAKE3 commitments via `dsm_domain_hasher`)
-//! - [`types`] — All protocol types: [`types::state_types::State`], [`types::error::DsmError`], identifiers, tokens
-//! - [`vault`] — Deterministic Limbo Vaults (DLV), asset management, fulfillment
+//! - [`core`] — the device head and its transition path, the app-router bridge, relationships (lifecycle and write grants), identity, tokens
+//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, XChaCha20-Poly1305 and AES-256-GCM, HKDF over BLAKE3, Ed25519 verification of the anchor chip
+//! - [`types`] — protocol types: the device head [`types::device_state::DeviceState`], operations, receipts, errors, tokens, offline accounts
+//! - [`economic`] — the online economic root `R_econ`, the root register, admission, provenance, the peer step verifier, offline boundaries
+//! - [`sofi`] — SoFi v8: wire objects, predicates and resolution
+//! - [`shared_lineage`] — shared lineages: discovery without authority
+//! - [`vault`], [`dlv`] — Deterministic Limbo Vaults for the Bitcoin tap; vault arithmetic and the owner baseline
 //! - [`merkle`] — Sparse Merkle Tree (per-device SMT) and Device Trees
 //! - [`emissions`] — DJTE (Deterministic Join-Triggered Emissions), JAP, winner selection
 //! - [`bitcoin`] — dBTC tap primitives (HTLC, deep-anchor)
-//! - [`bilateral`] — Bilateral transaction types and protocol definitions
-//! - [`commitments`] — Deterministic, smart, and external commitments
+//! - [`bilateral`] — offline steps between contacts, certificate restart
+//! - [`commitments`] — the bilateral precommit and the Bitcoin tap's external commit id
 //! - [`envelope`] — Envelope v3 protobuf wire format (0x03 framing)
-//! - [`recovery`] — Recovery tombstones, succession and rollup proofs
-//! - [`serialization`] — Protobuf serialization utilities
-//! - [`verification`] — Chain verification and integrity checking
+//! - [`recovery`] — recovery cells: tombstones, succession and rollup proofs
+//! - [`owned_cell`], [`app_cell`], [`offline_origin`], [`wallet_backup`], [`route_chain`], [`storage_cell`], [`spool`] — storage cells: who may write them, and what a reader recognizes there
+//! - [`connect`] — DSM Connect's signed objects
+//! - [`verification`] — stitched-receipt verification
 //!
 //! ## Hard Invariants
 //!
@@ -64,12 +68,12 @@
 //!
 //! - `#![forbid(unsafe_code)]` — no unsafe Rust anywhere in this crate
 //! - All secrets use `Zeroize` + `ZeroizeOnDrop` for memory safety
-//! - Feature-gated optional modules (bluetooth)
+//! - One optional feature, `bitcoin-testnet-bypass`, for development rigs only
 
 pub mod app_cell; // application cells (DSM Amendment A35)
 pub mod authored_object; // authored objects (storage spec §5, §7)
 pub mod bilateral;
-pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
+pub mod ccb; // canonical commit bytes
 pub mod commitments;
 pub mod common;
 // offline steps final at their origin cells (DSM Amendment A39)
@@ -81,7 +85,7 @@ pub mod connect;
 // keyed-cell arrival records and running hashes (storage spec §14)
 pub mod route_chain;
 pub mod storage_cell;
-pub mod storage_object; // Area 4 immutable content addressing — addr(N, P)
+pub mod storage_object; // immutable content addressing — addr(N, P) (storage spec §5)
                         // pub mod config; // Network detection moved to SDK - no HTTP in core
 pub mod core;
 pub mod crypto;
@@ -101,7 +105,7 @@ pub mod pbi;
 pub mod prelude;
 pub mod recovery;
 pub mod shared_lineage; // shared lineages: discovery without authority (DSM A15, SoFi S23)
-pub mod sofi; // SoFi v8 wire registry and pure derivations (dark)
+pub mod sofi; // SoFi v8: wire registry, derivations, predicates and resolution
 pub mod spool; // the b0x spool's limits (storage spec §8)
 pub mod storage;
 pub mod types;
@@ -113,9 +117,9 @@ use crate::types::error::DsmError;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Returns the version of the SDK
+/// Returns the version of this crate
 ///
-/// Retrieves the current version of the DSM SDK from cargo package metadata.
+/// Retrieves the current version of the DSM core crate from cargo package metadata.
 ///
 /// # Returns
 ///

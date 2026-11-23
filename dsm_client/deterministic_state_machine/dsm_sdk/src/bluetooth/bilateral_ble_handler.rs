@@ -2,10 +2,11 @@
 
 //! BLE Bilateral Transaction Handler
 //!
-//! Implements the complete offline bilateral transaction protocol over Bluetooth Low Energy:
-//! 1. Prepare phase: Create pre-commitments
-//! 2. Accept phase: Counterparty accepts/rejects the commitment
-//! 3. Commit phase: Both parties finalize with dual signatures
+//! Implements the offline step between two contacts over Bluetooth Low Energy: the payer
+//! proposes; the receiver accepts; the payer's board signs the release and the payer confirms
+//! with it; the receiver's board checks the payment and commits the receive; the receiver's
+//! acknowledgement commits the payer's side (Prepared → Accepted → Releasing → ConfirmPending →
+//! Receiving → Committed).
 //!
 //! All messages use protobuf envelopes for deterministic serialization.
 
@@ -4853,7 +4854,7 @@ impl BilateralBleHandler {
         // The payer's steps this payment was carried with, from the account the payer's boundary
         // left that this device recorded, through the payment's own step: each a write at the
         // payer's origin cell of the root it starts from. This device writes them and settles from
-        // the cells; the payer is never needed (DSM Amendment A39 draft).
+        // the cells; the payer is never needed (DSM Amendment A39).
         let offline_origin = {
             let recorded = bearer_origin.recorded.as_ref().ok_or_else(|| {
                 DsmError::invalid_operation(

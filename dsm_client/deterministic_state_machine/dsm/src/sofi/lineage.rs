@@ -21,7 +21,9 @@
 //! | Realized | `P.realize_root` |
 //! | Void | the predecessor's root — the lineage continues where it was |
 //! | Invalid | none, ever: the lineage is terminal at `p` |
-//! | Pending | none yet |
+//!
+//! A position whose facts are not complete is not resolved, and installs
+//! nothing.
 //!
 //! Void installing the previous root IS "SofiVoid has zero mutations": the
 //! position exists, it is terminal, and it moved nothing.

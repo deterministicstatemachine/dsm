@@ -3,18 +3,18 @@
 
   Discharges the mathematical core of the key-scoped fork-exclusion result in
   Ramsay, "Deterministic State Machines as Guarded Linear Constraint Systems"
-  (June 2026), Appendix A — turning that appendix's skeleton (which leaves the
+  (June 2026, revised July 2026), Appendix A — turning that appendix's skeleton (which leaves the
   load-bearing claim as `axiom structural_linearity_unique_at_key`) into fully
   PROVED theorems, with zero `sorry` / `admit`.
 
   Paper map:
     - Theorem 2  (Uniqueness of Realized Successor per Consumed Parent)
                  -> realized_unique_at_key
-    - Theorem 4  (Guarded Tripwire: no key-scoped realized fork)
+    - Theorem 5  (Guarded Tripwire: no key-scoped realized fork)
                  -> guarded_tripwire_at_key / guarded_tripwire_exists
     - Theorem 1  (Hardened Single Consumption) / Lemma 1
                  -> hardened_single_consumption / conflict_excludes_corealization
-    - Theorem 6  (No Resource-Local Realized Cycles)
+    - Theorem 7  (No Resource-Local Realized Cycles)
                  -> no_resource_local_cycle (+ consumed_monotone, no_reconsume_same_key)
     - Corollary 1 (Candidate multiplicity does not imply realized forking)
                  -> candidate_multiplicity_without_realized_fork
@@ -59,8 +59,8 @@ deriving DecidableEq, Repr
 
 /-- A precommitted candidate branch in a guard family Γ_s (paper Def 11, 14, 16).
     `key` is the resource consumption key it consumes; `succ` is the canonically
-    recomputed successor root (StructuralOK, Def 38); `guard` records whether a
-    canonical witness verifies the branch's guard (GuardOK / Fulfilled, Def 18). -/
+    recomputed successor root (StructuralOK, Def 39); `guard` records whether a
+    canonical witness verifies the branch's guard (GuardOK / Fulfilled, Def 19). -/
 structure Branch where
   bid   : Nat
   key   : ResKey
@@ -69,7 +69,7 @@ structure Branch where
 deriving DecidableEq, Repr
 
 /-- The linear part of a DSM state that determines realization uniqueness:
-    the current root and the consumed-parent set Σ (paper Def 30), modeled as
+    the current root and the consumed-parent set Σ (paper Def 31), modeled as
     the list of resource consumption keys already consumed in the realized
     history. The committed guard family Γ_s is carried alongside as a separate
     `List Branch` (it is committed by ρ_s, Def 16/ G6). -/
@@ -78,7 +78,7 @@ structure State where
   consumed : List ResKey
 deriving DecidableEq, Repr
 
-/-- Canonical successor recomputation (StructuralOK, Def 38; App D
+/-- Canonical successor recomputation (StructuralOK, Def 39; App D
     recompute_successor). The realized successor is a PURE FUNCTION of the
     parent state and the realized branch: its root is the branch's committed
     successor digest and its consumed set is Σ extended by the consumed key. -/
@@ -86,20 +86,20 @@ def applyBranch (s : State) (b : Branch) : State :=
   { root := b.succ, consumed := b.key :: s.consumed }
 
 -- ============================================================
--- Realization predicate (paper Def 41/42, layered Step / Step_K)
+-- Realization predicate (paper Def 42/43, layered Step / Step_K)
 -- ============================================================
 
 /-- `Realizes fam s b t` : branch `b` of the committed guard family `fam`
     realizes the transition s → t. Conjuncts:
-      b ∈ fam            CandidateOK   (committed candidate, Def 36)
-      b.guard = true     GuardOK       (Def 37, Fulfilled branch Def 18)
-      b.key ∉ s.consumed LinearityOK   (key absent before, Def 31/32)
-      t = applyBranch s b StructuralOK (canonical recompute, Def 38). -/
+      b ∈ fam            CandidateOK   (committed candidate, Def 37)
+      b.guard = true     GuardOK       (Def 38, Fulfilled branch Def 19)
+      b.key ∉ s.consumed LinearityOK   (key absent before, Def 32/33)
+      t = applyBranch s b StructuralOK (canonical recompute, Def 39). -/
 def Realizes (fam : List Branch) (s : State) (b : Branch) (t : State) : Prop :=
   b ∈ fam ∧ b.guard = true ∧ b.key ∉ s.consumed ∧ t = applyBranch s b
 
 /-- `StepAtKey fam s t k` : there is a realized step s → t consuming key `k`
-    (paper Def 42, Step_K). -/
+    (paper Def 43, Step_K). -/
 def StepAtKey (fam : List Branch) (s t : State) (k : ResKey) : Prop :=
   ∃ b, Realizes fam s b t ∧ b.key = k
 
@@ -141,22 +141,22 @@ theorem realized_unique_at_key (fam : List Branch) (s t₁ t₂ : State) (k : Re
         _ = t₂ := (hb₂.1.2.2.2).symm
 
 -- ============================================================
--- Theorem 4: Guarded Tripwire (no key-scoped realized fork)
+-- Theorem 5: Guarded Tripwire (no key-scoped realized fork)
 -- ============================================================
 
 /-- A key-scoped realized fork: two DISTINCT realized successors from the same
-    parent consuming the same resource key (paper Def 52). -/
+    parent consuming the same resource key (paper Def 54). -/
 def KeyScopedRealizedFork (fam : List Branch) (s t₁ t₂ : State) (k : ResKey) : Prop :=
   StepAtKey fam s t₁ k ∧ StepAtKey fam s t₂ k ∧ t₁ ≠ t₂
 
-/-- Paper Theorem 4 (local form): under a well-formed guard family, no
+/-- Paper Theorem 5 (local form): under a well-formed guard family, no
     key-scoped realized fork exists from `s` at key `k`. -/
 theorem guarded_tripwire_at_key (fam : List Branch) (s t₁ t₂ : State) (k : ResKey)
     (wf : WellFormedFamily s fam) : ¬ KeyScopedRealizedFork fam s t₁ t₂ k := by
   intro h
   exact h.2.2 (realized_unique_at_key fam s t₁ t₂ k wf h.1 h.2.1)
 
-/-- Paper Theorem 4 (global form): if every guard family is well-formed, then
+/-- Paper Theorem 5 (global form): if every guard family is well-formed, then
     no key-scoped realized fork exists anywhere. -/
 theorem guarded_tripwire_exists
     (wf : ∀ (s : State) (fam : List Branch), WellFormedFamily s fam) :
@@ -172,14 +172,14 @@ theorem guarded_tripwire_exists
             exact h.2.2 (realized_unique_at_key fam s t₁ t₂ k (wf s fam) h.1 h.2.1)
 
 -- ============================================================
--- Lemma 1 / Theorem 1: conflict + linearity exclude co-realization
+-- Lemma 2 / Theorem 1: conflict + linearity exclude co-realization
 -- ============================================================
 
 /-- Two distinct branches conflict (paper Def 17, #_s) when they consume the
     same resource key. -/
 def Conflict (b₁ b₂ : Branch) : Prop := b₁ ≠ b₂ ∧ b₁.key = b₂.key
 
-/-- Paper Lemma 1: for a well-formed guard family, two conflicting fulfilled
+/-- Paper Lemma 2: for a well-formed guard family, two conflicting fulfilled
     branches cannot realize to distinct successors — they co-realize to the
     SAME successor, so there is no fork. -/
 theorem conflict_excludes_corealization (s : State) (fam : List Branch)
@@ -201,11 +201,11 @@ theorem hardened_single_consumption (fam : List Branch) (s t₁ t₂ : State) (k
   realized_unique_at_key fam s t₁ t₂ k wf h₁ h₂
 
 -- ============================================================
--- Theorem 6: No Resource-Local Realized Cycles (forward progress)
+-- Theorem 7: No Resource-Local Realized Cycles (forward progress)
 -- ============================================================
 
 /-- The consumed-parent set Σ only grows: a key consumed before a step stays
-    consumed after it (paper Lemma 2 / Def 31 monotone update). -/
+    consumed after it (paper Lemma 3 / Def 32 monotone update). -/
 theorem consumed_monotone (s : State) (b : Branch) (k : ResKey)
     (h : k ∈ s.consumed) : k ∈ (applyBranch s b).consumed := by
   simp [applyBranch]
@@ -217,7 +217,7 @@ theorem key_consumed_after_step (s : State) (b : Branch) :
   simp [applyBranch]
 
 /-- Linearity blocks re-consumption: no realized step from `t` can consume a
-    key already present in t.consumed (paper Def 31 clause 1). -/
+    key already present in t.consumed (paper Def 32 clause 1). -/
 theorem no_reconsume_same_key (fam' : List Branch) (t t' : State) (b' : Branch)
     (k : ResKey) (hk : b'.key = k) (hconsumed : k ∈ t.consumed)
     (hstep : Realizes fam' t b' t') : False := by
@@ -225,7 +225,7 @@ theorem no_reconsume_same_key (fam' : List Branch) (t t' : State) (b' : Branch)
   rw [hk] at hnotin
   exact hnotin hconsumed
 
-/-- Paper Theorem 6: no resource-local realized cycle. A realized chain cannot
+/-- Paper Theorem 7: no resource-local realized cycle. A realized chain cannot
     consume the same resource key twice — once consumed, the key is in Σ and
     linearity forbids consuming it again. -/
 theorem no_resource_local_cycle (fam fam' : List Branch) (s t t' : State)
@@ -367,7 +367,7 @@ theorem candidate_digest_binds (s t : State)
     (h : canonicalEncode s = canonicalEncode t) : s = t :=
   canonical_encode_injective s t h
 
-/-- CandidateOK digest binding (paper Def 36 clause 2): equal committed
+/-- CandidateOK digest binding (paper Def 37 clause 2): equal committed
     digests name the same state, or exhibit a collision of the digest
     function on two distinct canonical encodings. -/
 theorem candidate_digest_binds_or_collides (digest : List Nat → Nat) (s t : State)
@@ -383,15 +383,15 @@ theorem candidate_digest_binds_or_collides (digest : List Nat → Nat) (s t : St
 -- ============================================================
 -- Discharged, zero `sorry` / `admit`:
 --   realized_unique_at_key            (Thm 2)   — PROVED, not axiomatized
---   guarded_tripwire_at_key           (Thm 4 local)
---   guarded_tripwire_exists           (Thm 4 global)
---   conflict_excludes_corealization   (Lemma 1)
+--   guarded_tripwire_at_key           (Thm 5 local)
+--   guarded_tripwire_exists           (Thm 5 global)
+--   conflict_excludes_corealization   (Lemma 2)
 --   hardened_single_consumption       (Thm 1)
---   no_resource_local_cycle           (Thm 6)   (+ consumed_monotone, no_reconsume_same_key)
+--   no_resource_local_cycle           (Thm 7)   (+ consumed_monotone, no_reconsume_same_key)
 --   candidate_multiplicity_without_realized_fork  (Cor 1)
 --   disjoint_progress_two_steps       (Prop 12 / DisjointProgressAllowed)
 --   step_inhabited                    (non-vacuity)
 --   malformed_family_admits_fork      (teeth: well-formedness is load-bearing)
 --   canonical_encode_injective        (Assumption 3, PROVED)
---   candidate_digest_binds_or_collides (Def 36 clause 2: equal state or collision)
+--   candidate_digest_binds_or_collides (Def 37 clause 2: equal state or collision)
 -- Axioms used: none beyond Lean core (see specs/requirements/LEAN_AXIOM_LEDGER.tsv).

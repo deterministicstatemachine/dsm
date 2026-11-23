@@ -244,8 +244,8 @@ pub const TAG_DSM_RELATIONSHIP_WRITE_KEY_POSSESSION: TaggedHashDomain<'static> =
 /// Amendment A34).
 pub const TAG_DSM_RELATIONSHIP_WRITE_GRANT_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-write-grant-id/v1");
-/// What a recipient's AK signs to grant a sender's write key its inbox for
-/// one relationship instance (DSM Amendment A34).
+/// What a relationship's write lock signs to grant a sender's write key the
+/// recipient's inbox for one relationship instance (DSM Amendment A34).
 pub const TAG_DSM_RELATIONSHIP_WRITE_GRANT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-write-grant/v1");
 /// The restart statement both AKs of a relationship sign to continue one

@@ -346,8 +346,8 @@ impl<'a> LiveSofiReads<'a> {
         }
     }
 
-    /// Another trader's step at `position`, validated from its own parent (DSM
-    /// Amendment A14); a conditional position is resolved by Core over SoFi's
+    /// Another trader's step at `position`, validated from the state kept of
+    /// that trader (DSM Amendment A36); a conditional position is resolved by Core over SoFi's
     /// public objects for that position alone (SoFi Amendment S15).
     fn peer_step(
         &self,
@@ -704,8 +704,8 @@ impl SofiReads for LiveSofiReads<'_> {
         position: u64,
     ) -> Result<AcceptedClaim, PeerLineageFailure> {
         if self.own != Some((*genesis, *device_id)) {
-            // Another trader's position: the claim frontier-relative
-            // verification of its lineage accepted there (SoFi Amendment
+            // Another trader's position: the claim accepted there, its step
+            // validated from its own parent (SoFi Amendment
             // S15, MR-SOFI-0347) — a SoFi position's by its resolution, since
             // a setup made right after one names that claim — or the walk's
             // failure in the class it gave it. This operation's contexts keep

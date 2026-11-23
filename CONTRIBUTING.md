@@ -18,10 +18,10 @@ Thank you for taking part in the beta. This document covers how to report issues
 1. Open an issue at **Issues → New Issue**
 2. Use the **Bug Report** template if available, otherwise include:
    - Device model and Android version
-   - DSM Protocol app version (visible in Settings → About)
+   - DSM Wallet app version (the **Version** row in Settings)
    - Steps to reproduce
    - What you expected vs. what happened
-   - Attach the diagnostics file: in-app **Settings → Export Diagnostics**
+   - Attach the diagnostics report: in Settings tap **Version** seven times, then **Report issue / feedback → Share report**
    - Attach `adb logcat` output if you have it: `adb logcat -d > logcat.txt`
 
 ### Reporting Security Issues

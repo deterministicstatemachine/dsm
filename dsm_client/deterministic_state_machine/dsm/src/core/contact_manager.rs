@@ -8,7 +8,7 @@
 //! - No time of any kind.
 //! - No JSON/GSON at any boundary. No hex/base64 in data structures or logs; bytes-only.
 //! - Mandatory online genesis verification is enforced by the SDK layer; core only exposes bytes APIs.
-//! - Chain tip tracking is bytes-based with deterministic SMT proofs.
+//! - A contact's chain tip is stored as bytes.
 
 use std::collections::HashMap;
 

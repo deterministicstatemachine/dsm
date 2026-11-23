@@ -17,6 +17,7 @@
 //!                                     //   DSM      : exact C_dsm+ / sigma_dsm accepted
 //!                                     //   boundary : exact OfflineBoundaryAttestationV1 accepted
 //!    -> ECON_EVIDENCE_PUBLISHED
+//!    -> ECON_VALIDATED                // the full verifier accepted this exact transition
 //!    -> ECON_REGISTERED
 //!    -> ECON_ADMITTED                 // LOCAL terminal state
 //! ```
@@ -187,7 +188,7 @@ pub enum EconomicAdmissionState {
     /// The substrate acceptance is durable. From here recovery MUST finish
     /// this exact admission and may not start a different one.
     LocalAcceptedPendingEcon,
-    /// The evidence DAG is durably present on a quorum.
+    /// The evidence DAG is stored: three members of the set return its exact bytes.
     EvidencePublished,
     /// The full verifier accepted this exact transition, its credits' live
     /// reads included, before anything was registered (SA-94). From here the

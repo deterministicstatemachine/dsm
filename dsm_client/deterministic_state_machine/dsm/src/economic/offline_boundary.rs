@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Offline boundaries — CCB classes `0x002A` (load) and `0x002B` (unload).
+//! Offline boundaries — CCB classes `0x002A` (load), `0x002B` (unload) and
+//! `0x002C` (settlement).
 //!
 //! A load moves value from the online balance into the device's offline
 //! account; an unload moves it back. Each is an economic transition admitted
@@ -23,27 +24,28 @@
 //! is derived from that identity, so one offline debit funds one online
 //! credit, once.
 //!
-//! Schema 2: a boundary also carries the account's ancestry since the boundary
-//! before it. It names the anchor the account belongs to — the keys and birth
-//! its bundle `B` commits, so a verifier recomputes `B` with the owner's online
-//! key and device id — and where the account stood when the last boundary left
-//! it (or, at the account's first boundary, the frontier it opened at, empty),
-//! and every spend the anchor released since, in order. The spends are verified
-//! hop by hop from that account to the one the boundary starts from
-//! ([`crate::types::offline_chain::verify_spend_chain`]): value only leaves an
-//! account between its boundaries, and the boundary exposes each payment
-//! online. A walker that recorded the previous boundary holds the account it
-//! left, and takes this boundary only from there.
+//! A boundary's body (schema 5) also carries the account's ancestry since the
+//! boundary before it. It names the anchor the account belongs to — the keys
+//! and birth its bundle `B` commits, so a verifier recomputes `B` with the
+//! owner's online key and device id — and where the account stood when the
+//! last boundary left it (or, at the account's first boundary, the frontier it
+//! opened at, empty), and every typed step since (`OfflineAccountHop`), in
+//! order: spends, the board's receive commits into what it holds received, and
+//! the unloads of received payments out of it, verified hop by hop
+//! ([`crate::types::offline_chain::verify_account_hops`]). A walker that
+//! recorded the previous boundary holds the account it left, and takes this
+//! boundary only from there.
 //!
-//! Schema 3 (owner, 2026-11-07: an offline payment needs a board on both sides,
-//! and the money received lands in the receiver's own offline balance): the
-//! ancestry's steps are typed (`OfflineAccountHop`). Besides spends, an account
-//! moves between its boundaries by its own board's receive commits, into what it
-//! holds received, and by the unload of a received payment, out of it
-//! ([`crate::types::offline_chain::verify_account_hops`]). A receive brings no
-//! money a contact takes on its word: the money leaves only by its unload, which
-//! is checked against the payer's own history. An account's first boundary may
-//! come after receives, and still after no spend.
+//! The body also carries the board's release: the boundary signed at the
+//! board's next counter, as every step of the account is (DSM Amendment A39).
+//! A boundary counts only when each board-signed step it carries and its own
+//! departure are final at their origin cells.
+//!
+//! A settlement (`0x002C`, schema 3) admits value received offline: it names
+//! the payer's boundary whose account the receiver recorded and the root the
+//! payment starts from, and is proved from the payer's origin cells, each
+//! final; the payer is never needed. An account's first boundary may come
+//! after receives, and still after no spend.
 
 use crate::ccb::decode::{Cursor, DecodeError};
 use crate::ccb::{
@@ -107,8 +109,9 @@ pub enum BoundarySince {
 }
 
 /// What a boundary exposes of its account: its anchor, where it stood since
-/// its last boundary, and the spends since (each an `OfflineSpendHop`'s
-/// canonical bytes), in order.
+/// its last boundary, and the account's steps since (each an
+/// `OfflineAccountHop`'s canonical bytes: a spend, a receive commit or the
+/// unload of a received payment), in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryAncestry {
     pub anchor: BoundaryAnchor,
@@ -139,7 +142,7 @@ pub struct OfflineBoundaryBody {
     pub next_frontier: [u8; 32],
     /// The board's release of the boundary (a `dsm.anchor.OfflineRelease`, its
     /// offline-state proofs attached): the load or unload signed at the board's
-    /// next counter, as a spend is (DSM Amendment A39 draft, option B).
+    /// next counter, as a spend is (DSM Amendment A39).
     pub release: Vec<u8>,
     /// The account paths of the leaves the boundary writes, in key order.
     pub account_paths: Vec<EncodedPath>,
@@ -576,7 +579,7 @@ impl OfflineBoundaryBody {
 
     /// Verify the body at `body_bytes` as the departure of a boundary of the
     /// device `(genesis, device_id)` from the root it starts from (DSM Amendment
-    /// A39 draft): the boundary with no steps carried, as its origin cell holds
+    /// A39): the boundary with no steps carried, as its origin cell holds
     /// it. `B` recomputes from the anchor it names and the owner's online key
     /// `owner_key`; the account step folds; the board signed it. The steps
     /// since the last boundary are each at their own cell.
@@ -676,8 +679,7 @@ fn verify_boundary_step(
     let post_device_root =
         fold_path::<DeviceSmtHashes>(&key, Some(&post_account_root), &device_path);
     // The board signed this very boundary, at its next counter, from where the
-    // account stood, after every step since the last boundary (DSM Amendment A39
-    // draft, option B).
+    // account stood, after every step since the last boundary (DSM Amendment A39).
     {
         let departure = verify_boundary_release(
             body,
@@ -713,7 +715,7 @@ impl CcbObject for SettlementBody {
     const SCHEMA: u16 = 3;
 }
 
-/// The body of an offline settlement (SA-91; DSM Amendment A39 draft): a
+/// The body of an offline settlement (SA-91; DSM Amendment A39): a
 /// receiver's admission of value it received offline. It names the payer's
 /// spend by the root-advance message `M` the payer's anchor signed for it, the
 /// economic position of the payer's boundary whose account the receiver
@@ -1309,7 +1311,7 @@ mod tests {
         refused(other, "does not recompute for its owner");
     }
 
-    /// DSM Amendment A39 draft, option B: a load or an unload is its board's signed advance. A
+    /// DSM Amendment A39: a load or an unload is its board's signed advance. A
     /// body carrying another boundary's release, another board's, or one whose frontier is not
     /// the one the account advanced to is refused: no boundary moves an account its board did not
     /// sign.
@@ -1386,7 +1388,7 @@ mod tests {
         );
     }
 
-    /// DSM Amendment A39 draft, option B: a payer cannot unload what it already paid offline,
+    /// DSM Amendment A39: a payer cannot unload what it already paid offline,
     /// whether or not the payment's receiver has published it. A wallet rolled back to before
     /// its payment asks its board for an unload of the whole allocation from there: the board,
     /// which signed the payment from that root and left it, refuses, so no such unload exists to
@@ -1617,7 +1619,7 @@ mod tests {
 
     /// A payment of `amount` to `receiver` held, final, at the payer's origin
     /// cell: the settlement body naming it, the account the payer's load left,
-    /// and the read of the cell (DSM Amendment A39 draft).
+    /// and the read of the cell (DSM Amendment A39).
     fn held_at_cells(
         receiver: [u8; 32],
         amount: u64,
@@ -1671,7 +1673,7 @@ mod tests {
     /// The fixture payer's bearer transfers name this genesis.
     const PAYEE_GENESIS: [u8; 32] = [0x6E; 32];
 
-    /// SA-91, DSM Amendment A39 draft. A settlement names exactly the payment
+    /// SA-91, DSM Amendment A39. A settlement names exactly the payment
     /// the payer's origin cells hold, final, from the account the payer's
     /// boundary left, to the device that settles it; its identity is that
     /// device's one settlement of that spend. The payer is never needed.

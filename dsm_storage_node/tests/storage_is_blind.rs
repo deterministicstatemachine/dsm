@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The storage node holds bytes and decides nothing (storage spec §1, §12):
+//! The storage node holds bytes and decides nothing (storage spec §1, §5–§7):
 //! it holds no signing key and signs nothing (MR-DSM-0051); it decides no
 //! ownership, validates no burn, holds no mint or Bitcoin key and chooses no
 //! successor (MR-STOR-0011); and it knows nothing of SoFi (MR-SOFI-0286).
@@ -8,7 +8,9 @@
 //! calls, string literals and unparsed macro bodies — and held to three
 //! rules. The node names only the Core modules that frame and address bytes:
 //! cell and object addressing, its own ByteCommit tree, the storage set's id,
-//! the domain-separated hasher, the wire types and the size bounds. It calls
+//! the domain-separated hasher, the wire types and the size bounds, and the
+//! two write checks every node runs (`verify_spool_write`,
+//! `admit_cell_write`), which verify a proof and sign nothing. It calls
 //! nothing that signs. It names no application, economic or settlement
 //! concept. The scanner is checked against injected sources of each kind
 //! first, so a gate that finds nothing is a gate that would have found it.

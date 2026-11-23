@@ -1,6 +1,6 @@
 # A storage set of your own
 
-Everything in this guide runs on the beta network, which is already there. If you would rather depend on no hosted node, run the network's storage set yourself, on your machine: the network's five pinned members, `dsm-node-1` to `dsm-node-5`, as five local nodes. Each is the production storage node program, on its own PostgreSQL database, serving TLS from a certificate authority of the set's own. Nothing then reaches outside your machine.
+Everything in this guide runs on the beta network, which is already there. If you would rather depend on no hosted node, run the network's storage set yourself, on your machine: the network's five pinned members, `dsm-node-1` to `dsm-node-5`, as five local nodes. Each is the production storage node program, on its own PostgreSQL database, serving TLS from a certificate authority of its own. Nothing then reaches outside your machine.
 
 ## 1. PostgreSQL
 
@@ -55,7 +55,7 @@ make nodes-up
 
 `nodes-status` checks every node's health over verified TLS. `nodes-down` stops the nodes, and `nodes-up` prepares the set the first time and starts every node, on ports 8080 to 8084. `make nodes-reset` stops them, drops their databases, and forgets the set and the accounts made on it.
 
-Everything the set needs lives under `.dsm-dev/net/` in the repo, including the client config wallets use, `dsm_env_config.toml`, which trusts the set's `dev-ca.pem`.
+Everything the set needs lives under `.dsm-dev/net/` in the repo, including the client config wallets use, `dsm_env_config.toml`, which carries each node's own CA (also kept as `dsm-node-N-ca.pem`).
 
 ## 4. The phones
 
@@ -65,7 +65,7 @@ Point the wallet on your phones at your set: every adb device (through `adb reve
 make phones-local
 ```
 
-A wallet that already made its identity on another set keeps it there, so clear the app's data first. On Android, `adb shell pm clear com.dsm.wallet`, then grant its Bluetooth permissions again; on iOS, delete the app and run `make ios-simulator-run`. The same holds after `make nodes-reset`: it makes a new set with a new certificate authority, so clear the wallets and run `make phones-local` again, or they refuse every node (`invalid peer certificate`).
+A wallet that already made its identity on another set keeps it there, so clear the app's data first. On Android, `adb shell pm clear com.dsm.wallet`, then grant its Bluetooth permissions again; on iOS, delete the app and run `make ios-simulator-run`. The same holds after `make nodes-reset`: it makes a new set with new certificate authorities, so clear the wallets and run `make phones-local` again, or they refuse every node (`invalid peer certificate`).
 
 ## Back to the beta network
 

@@ -65,12 +65,12 @@ dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	51	sign	sign	eb
 dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	57	verify	verify	eb8d98a71c250712058f88e66fe24ccfda57027b
 dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	74	sphincs_sign	sign(.spx256f)	eb8d98a71c250712058f88e66fe24ccfda57027b
 dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	80	sphincs_verify	verify(.spx256f)	eb8d98a71c250712058f88e66fe24ccfda57027b
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	80	generate_from_entropy	entropy normalization; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	85	generate_from_entropy_with_params	H(DSM/sphincs-seed,entropy) then generateKeypair; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	115	sign	raw-byte forwarding; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	135	verify	raw-byte forwarding; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	186	sign_message_with_params	raw-byte forwarding; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	210	verify_message_with_params	raw-byte forwarding; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	79	generate_from_entropy	entropy normalization; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	84	generate_from_entropy_with_params	H(DSM/sphincs-seed,entropy) then generateKeypair; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	114	sign	raw-byte forwarding; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	134	verify	raw-byte forwarding; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	185	sign_message_with_params	raw-byte forwarding; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	209	verify_message_with_params	raw-byte forwarding; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	42	derive_ephemeral_seed	ekSeedInput (tested encoding)	0c72673052df00fa8cc5cfcf328e198b89500860
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	121	derive_ek_cert_hash	ekCertInput / cert_preimage_binding	0c72673052df00fa8cc5cfcf328e198b89500860
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	130	sign_ek_cert	sign(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
@@ -85,10 +85,10 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	193	setup_signing_
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	211	precommit_signing_digest	domainInput + opaque CCB; unproved CCB refinement	d714e40fbc4b95c3ffd2c5bdcdca81fff31db667
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	226	fulfillment_signing_digest	domainInput + opaque CCB; unproved CCB refinement	d714e40fbc4b95c3ffd2c5bdcdca81fff31db667
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	259	resolution_claim_signing_digest	WrapperInjective.lean: resolution_claim_signing_injective (claim CCB, alg, key, AttA)	d714e40fbc4b95c3ffd2c5bdcdca81fff31db667
-dsm_client/deterministic_state_machine/dsm/src/economic/claim.rs	243	signing_digest	root claim canonical signing digest; unproved	ccbdd539736fde2955f218de0a258681bb076929
-dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	169	sign_economic_root_claim	claim auth + key binding; unproved	a145855f3959dc7a8eae6b8f45b4b9e3ab7e09ff
+dsm_client/deterministic_state_machine/dsm/src/economic/claim.rs	243	signing_digest	root claim canonical signing digest; unproved	318373d7c7031fa445585008ff0b347ae4d6fe27
+dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	171	sign_economic_root_claim	claim auth + key binding; unproved	4cab8e47a4b46c451505e6c1c1948c88e7f9e20f
 dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	102	substrate_signing_digest	substrate-bound digest; unproved	62dfe289f52a48a607313f2bd5138174cb832778
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2283	signing_bytes	operation-specific canonical signing bytes; unproved	5417b920de721d94e5edfb4cbe545d0c1fe1cb20
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2289	signing_bytes	operation-specific canonical signing bytes; unproved	fb0786e193b403b521a5c4484920f310f3c140c9
 dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	448	relationship_finalized_signing_target	finalized relationship digest; unproved	3bca22b63a1f10601978e4d9cba3d1727c5ffb49
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	811	process_envelope_v3	JNI → ingress; unproved	13342e162aa82712da11037ed9dd37d7ca8d5de0
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	207	dispatch_envelope_via_ingress	ingress dispatch; unproved	13342e162aa82712da11037ed9dd37d7ca8d5de0

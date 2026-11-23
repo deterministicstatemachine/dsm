@@ -19,9 +19,9 @@ python3 ~/.local/share/dsm/examples/account_status.py
 
 From the repo root, `pip install -e clients/python` instead, and the examples are in `clients/python/examples`: `account_status.py` (your account at a glance) and `first_payment.py` (a connect code, a wallet, 0.05 ERA received). After a change to `proto/dsm_app.proto`, `make client-types` regenerates the types; CI fails when they differ (`ci/client_types_check.sh`).
 
-- `AppAccount`: `offer`, `connections`, `request`, `result`, `wait`; `issue`, `give`; `open_vault`, `vaults`, `close_vault`; `decide`; `owned`, `owns`, `identity`, `fund`; and `ingress.activity`.
+- `AppAccount`: `offer`, `connections`, `request`, `result`, `wait`; `issue`, `give`; `open_vault`, `vaults`, `close_vault`; `decide`, `return_contribution`; `owned`, `owns`, `identity`, `fund`; and `ingress.activity`.
 - `WalletAccount`: `preview`, `approve`, `connections`, `sync`, `pending`, `respond`, `log`, `disconnect`.
-- `grant.*` builds what an offer asks for; `ask.*` builds requests (`send`, `owns`, `accept`, `contacts`, `login`, `sign`, `price`, `trade`, `match.*`, `duel.*`).
+- `grant.*` builds what an offer asks for; `ask.*` builds requests (`send`, `owns`, `accept`, `contacts`, `login`, `sign`, `price`, `trade`, `match.*`, `duel.*`, `state.write`, `contribution.*`).
 - Objects are named by symbol (`"ERA"`, `"SWORD"`) or id; amounts in the object's own units (`"0.10"`). Results are plain dataclasses: `outcome`, `fact`, `owns`, `signed`, with the wire's message as `raw`. `pb` is every generated message.
 - `local_app()` and `local_wallet("wallet" | "wallet2")` find the accounts `dsm-app up` and `dsm-dev-wallet up` (or, from the repo, `make app-dev` and `make dev-wallet`) run. Elsewhere, `AppAccount(Ingress.from_secret_file(url, secret_file))`.
 

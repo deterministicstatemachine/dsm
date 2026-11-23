@@ -3,7 +3,7 @@
 //! Which b0x messages this device has consumed — the device's own state.
 //!
 //! A storage node's spool is append-only: it never marks, hides, expires or
-//! removes a message (storage spec §4; owner, 2026-09-23). What a device has
+//! removes a message (storage spec §8; owner, 2026-09-23). What a device has
 //! already consumed is kept here, on the device, where no one else can change
 //! it:
 //!
@@ -16,8 +16,9 @@
 //!   position belongs to one node. It only moves forward.
 //! - `b0x_passed_over`: copies this device classified as never anything it
 //!   can take, keyed by the copy's content (`envelope_merge_key`: message id
-//!   and content digest), never by message id alone. Anyone can spool a copy
-//!   under an honest message's id, and the node keeps both (storage spec §8);
+//!   and content digest), never by message id alone. The inbox's writer can
+//!   spool a second, different copy under a message's id, and the node keeps
+//!   both (storage spec §8);
 //!   a pass-over by id would hide the honest copy for good. A copy passed over
 //!   is never charged to a sync's budget again (owner ruling, 2026-10-01,
 //!   pre-audit item 11).

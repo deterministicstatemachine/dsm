@@ -178,9 +178,10 @@ impl AppRouterImpl {
     }
 
     /// `wallet.unloadReceived` (owner, 2026-11-07: "One tap, all ready"): every payment this device
-    /// received offline whose payer has been back online moves out of its offline account's
-    /// received amount into its online balance, each as its own checked step — its settlement, which
-    /// a contact takes only once the payer's own online history shows the spend. The rest stay in
+    /// received offline that its payer's origin cells hold final moves out of its offline account's
+    /// received amount into its online balance, each as its own checked step (its settlement). This
+    /// device writes the payer's carried steps to those cells itself, so the payer is never needed
+    /// (DSM Amendment A39). The rest stay in
     /// the offline balance, waiting. Nothing moves without being asked: the sync settles nothing.
     pub(crate) async fn handle_unload_received_invoke(&self, _i: AppInvoke) -> AppResult {
         let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
@@ -215,13 +216,13 @@ impl AppRouterImpl {
         let mut message = match (moved, waiting) {
             (0, 0) => "No money received offline is waiting.".to_string(),
             (0, w) => format!(
-                "{w} payment(s) received offline are still waiting: each moves online once its \
-                 payer has been back online"
+                "{w} payment(s) received offline are still waiting: each moves online once the \
+                 storage nodes hold its payer's steps final"
             ),
             (m, 0) => format!("{m} payment(s) received offline moved online"),
             (m, w) => format!(
-                "{m} payment(s) received offline moved online; {w} still waiting for their payers \
-                 to be back online"
+                "{m} payment(s) received offline moved online; {w} still waiting for the storage \
+                 nodes to hold their payers' steps final"
             ),
         };
         if !failures.is_empty() {

@@ -22,14 +22,15 @@
 pub mod app_cell_flow;
 /// Objects an account publishes under a topic of its own, signed by its AK.
 pub mod authored_objects;
-/// Escrow vaults (SoFi §19.9): stakes released by a canonical verdict.
+/// Computed escrow vaults (SoFi §19.10): an outcome a pinned program decides.
 pub mod computed_flow;
 pub mod economic_admission_flow;
 pub mod economic_registers;
+/// Escrow vaults (SoFi §19.9): stakes released by a canonical verdict.
 pub mod escrow_flow;
 pub mod faucet_claim_flow;
 pub mod native_reserve;
-pub mod origin_cell_flow; // offline origin cells (DSM Amendment A39 draft)
+pub mod origin_cell_flow; // offline origin cells (DSM Amendment A39)
 pub mod outcome_programs;
 pub mod runtime_config;
 pub mod sdk_context;
@@ -52,25 +53,25 @@ pub mod core_sdk;
 pub mod identity_publication; // publication-quorum lifecycle for device identities
 pub mod inbox_poller;
 pub mod inbox_waiter; // long-poll on the storage nodes beside the poller
-pub mod kyber_identity; // ML-KEM identity binding for online contact establishment (§11.1)
+pub mod kyber_identity; // ML-KEM identity binding carried in offline messages
 pub mod lineage_discovery;
 pub mod realized_records;
 pub mod session_manager; // Native-first session state projection
 pub mod signing_authority;
 pub mod sofi_advance;
-/// SoFi v8 producers: setup, vault creation, trade, route and close.
 pub mod sofi_exercise;
 pub mod sofi_publish;
 pub mod sofi_reads;
 pub mod sofi_register;
 pub mod sofi_relay;
+/// SoFi v8 producers: setup, vault creation, trade, route and close.
 pub mod sofi_sdk;
 pub mod tls_transport_sdk;
 pub mod token_sdk;
 pub mod token_state;
 pub mod vault_baseline;
 pub mod vault_history;
-// Storage-node client wrapper
+// Storage-node clients
 pub mod device_directory;
 pub(crate) mod final_reads;
 pub mod route_seats;
@@ -80,7 +81,7 @@ pub mod storage_io;
 pub mod storage_node_sdk;
 pub mod storage_set; // canonical storage-set identity + catalog (the anchor chooses the set; config resolves it)
 
-// Smart contract and commitment functionality
+// The Bitcoin tap (dBTC; not functional in this release) and identity presentation
 pub mod bitcoin_key_store;
 pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;

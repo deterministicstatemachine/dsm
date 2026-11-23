@@ -133,13 +133,14 @@ function OverviewTabInner({ balances, balancesLoading, pendingOffline, onReceive
       {/* Received offline: committed by this phone's own board into its
           offline balance, shown apart from the balances, which do not include
           it. It moves into the balance when the user unloads it, each payment
-          once its payer has been back online. */}
+          once the storage nodes hold its payer's steps final; the payer is not
+          needed (DSM Amendment A39). */}
       {(pendingOffline.receipts.length > 0 || pendingOffline.error) && (
         <section className="sb-card" aria-label="Received offline" data-testid="pending-offline">
           <div className="sb-card__title">
             <span className="sb-hero__label">Received offline</span>
           </div>
-          <div className="sb-hero__sub">In this phone's offline balance. Move it to your balance once the payer is back online.</div>
+          <div className="sb-hero__sub">In this phone's offline balance. Move it to your balance when you are online; the payer does not need to be.</div>
           {pendingOffline.receipts.map((r, i) => (
             <div className="sb-kv" style={{ padding: '6px 0' }} key={i} data-testid="pending-offline-receipt">
               <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>

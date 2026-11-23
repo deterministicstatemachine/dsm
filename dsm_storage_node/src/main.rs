@@ -43,8 +43,7 @@ struct ServerConfig {
     max_open_connections_per_peer: usize,
     tls_cert_path: String,
     tls_key_path: String,
-    /// The storage set's CA certificate: the one anchor this node pins its
-    /// peers to.
+    /// `[http] body_limit_bytes`: the largest request body taken.
     body_limit_bytes: usize,
     /// `[http] request_timeout_secs`: how long one request may take, waiting
     /// for a slot included.
@@ -63,13 +62,13 @@ struct ServerConfig {
     storage_set_mates: Vec<(String, String, Option<String>)>,
 }
 
-/// A setting the node cannot start without: absent is an error, never a
-/// value made up in its place.
 /// One `[[storage_set.members]]` entry as the config states it: the member's
 /// id, its register incarnation, and the endpoint and CA PEM every other
 /// member must name.
 type SetMemberEntry = (String, [u8; 32], Option<String>, Option<String>);
 
+/// A setting the node cannot start without: absent is an error, never a
+/// value made up in its place.
 fn required(settings: &Config, key: &str) -> Result<String> {
     settings
         .get_string(key)

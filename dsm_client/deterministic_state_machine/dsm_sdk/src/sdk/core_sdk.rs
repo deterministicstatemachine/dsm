@@ -1058,8 +1058,8 @@ impl CoreSDK {
         }
         // The unload of the payment received (owner, 2026-11-07): out of what this device's own
         // offline account holds received, into its online balance.
-        // Its board signed the unload over the device roots it previewed (DSM Amendment A39 draft,
-        // option B): the head must still stand where it did.
+        // Its board signed the unload over the device roots it previewed (DSM Amendment A39):
+        // the head must still stand where it did.
         let settled = head.settle_offline_receipt(
             &receipt.receiver_bundle,
             &receipt.asset,
@@ -2585,7 +2585,7 @@ pub struct OfflineMove {
     pub amount: u64,
 }
 
-/// What a board signed for a step that is no payment (DSM Amendment A39 draft, option B): the
+/// What a board signed for a step that is no payment (DSM Amendment A39): the
 /// frontier it advanced to, and the device roots before and after it signed over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoardSigned {
@@ -3143,8 +3143,8 @@ impl CoreSDK {
         })
     }
 
-    /// The board's signature of a load or an unload of its account (DSM Amendment A39 draft,
-    /// option B): the boundary's transition `t`, built from its operation id, prepared over the
+    /// The board's signature of a load or an unload of its account (DSM Amendment A39):
+    /// the boundary's transition `t`, built from its operation id, prepared over the
     /// device roots before and after it, committed and emitted, with the offline-state proofs
     /// attached. A board that already committed exactly this transition (a crash after its counter
     /// moved and before the boundary was durable) emits that release again; a board holding any

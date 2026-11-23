@@ -1,5 +1,5 @@
 # Standalone reference crate for Appendix D of Ramsay, "Deterministic State
-# Machines as Guarded Linear Constraint Systems" (June 2026).
+# Machines as Guarded Linear Constraint Systems" (June 2026, revised July 2026).
 #
 # This is an independent, self-contained REFERENCE implementation of the paper's
 # verify_candidate / apply_candidate enforcement skeleton. It is deliberately

@@ -482,9 +482,12 @@ pub enum Operation {
         /// Human-readable description.
         message: String,
     },
-    /// Create a bilateral relationship with a counterparty (simplified form).
+    /// A relationship's ESTABLISH step (DSM Amendment A33) when `message` is the
+    /// marker `establish` (or recovery's re-establishment marker): the moneyless
+    /// first step, made by the lower device id and countersigned by the other.
+    /// Any other `CreateRelationship` writes nothing and is refused.
     CreateRelationship {
-        /// Human-readable description.
+        /// The lifecycle marker.
         message: String,
         /// Binary identifier of the counterparty device.
         counterparty_id: Vec<u8>,
@@ -495,7 +498,10 @@ pub enum Operation {
         /// Bilateral or unilateral execution mode.
         mode: TransactionMode,
     },
-    /// Remove an existing bilateral relationship.
+    /// A relationship's TERMINATE step (DSM Amendment A33) when `message` is the
+    /// marker `terminate`: the moneyless step that ends the relationship, made
+    /// from the maker's tip and countersigned by the other device as its
+    /// acknowledgement. Any other `RemoveRelationship` is refused.
     RemoveRelationship {
         /// 32-byte device ID of the relationship initiator.
         from_id: [u8; 32],
@@ -507,7 +513,7 @@ pub enum Operation {
         proof: Vec<u8>,
         /// Bilateral or unilateral execution mode.
         mode: TransactionMode,
-        /// Human-readable description.
+        /// The lifecycle marker.
         message: String,
     },
     /// Recovery operation to restore a compromised hash chain from a capsule/tombstone.
@@ -686,7 +692,6 @@ pub enum Operation {
         /// Execution mode (typically Unilateral).
         mode: TransactionMode,
     },
-    /// Invalidate a vault, returning any locked tokens to the creator.
     /// SoFi v8: the relationship setup claim (F1). Non-economic — it inserts
     /// exactly one relationship leaf at `h⁰` and moves no value — but signed,
     /// because the setup binds `(G, DevID, p, v)` to this identity's key.
@@ -797,6 +802,7 @@ pub enum Operation {
         /// `SofiVaultCreate`: a creation has no object digest of its own.
         signature: Vec<u8>,
     },
+    /// Invalidate a vault. Moves no value.
     DlvInvalidate {
         /// 32-byte vault identifier.
         vault_id: Vec<u8>,

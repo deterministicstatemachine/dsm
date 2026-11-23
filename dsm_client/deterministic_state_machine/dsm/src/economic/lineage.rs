@@ -163,11 +163,12 @@ impl ValidatedEconomicRoot {
         }
     }
 
-    /// The root a peer's step is validated from (DSM Amendment A14): the root
-    /// that step's own witness was built on, taken as its parent only because
-    /// the claim is final at the cell routed from it, and `advance_validated`
-    /// then refuses a witness built on any other root. Never a root a peer
-    /// merely states.
+    /// A root the peer step verifier validates a step from: the root of a
+    /// state the receiver proved and kept (DSM Amendment A36), the activation
+    /// root, or, on a read without kept state, the root a claim's own witness
+    /// was built on, taken only because the claim is final at the cell routed
+    /// from it; `advance_validated` then refuses a witness built on any other
+    /// root. Never a root a peer merely states.
     /// **Only the peer step verifier may call this**, from one place
     /// (`peer_lineage::authenticated_root`).
     pub(crate) fn from_verifier_memo(economic_position: u64, economic_root: [u8; 32]) -> Self {

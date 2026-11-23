@@ -9,10 +9,9 @@
 //!
 //! Per §4.3 (counterless model): functions that took a `state_number`
 //! parameter (`calculate_next_entropy`, `calculate_state_hash`) have been
-//! deleted. Entropy evolution per §11 eq.14 uses
-//! `H("DSM/state-entropy" || prev_entropy || op || prev_hash)` — see
-//! `crate::core::state_machine::utils::calculate_next_entropy` for the
-//! correct counterless implementation.
+//! deleted. A transition's entropy is
+//! `H("DSM/state-entropy" || prev_entropy || op || prev_hash)`, derived in
+//! `types::device_state::DeviceState::derive_transition_entropy`.
 
 pub use blake3::Hash as HashOutput;
 use crate::common::domain_tags::TAG_HASH_DATA;

@@ -13,12 +13,14 @@
 //! ## What a member checks, and what it must not
 //!
 //! Storage only. A member never runs P0–P6, never validates a transition,
-//! never judges economics, and never checks who carries the bytes (Part II
-//! §9): it keeps every value it is given at the cell, in arrival order.
+//! never judges economics, and never checks who carries the bytes. It keeps a
+//! write at the cell only when the write is a route entry for that cell
+//! carrying a claim whose key and AttA derive the trader's device and whose
+//! signature verifies under that key (DSM Amendment A41), in arrival order.
 //!
-//! What protects a trader's cell is recognition, not a member. The cell's
-//! coordinate is identity-scoped but derivable by anyone holding a trader's
-//! public `(G, DevID, position)`; bytes anyone sends there are kept, but only
+//! Recognition protects a trader's cell as well. The cell's coordinate is
+//! identity-scoped but derivable by anyone holding a trader's public
+//! `(G, DevID, position)`; only
 //! an object that proves its own authority for the cell names it, and Core's
 //! leader-first read counts nothing else (DSM Amendment A10). A single-root
 //! claim carries the trader device's `AttA`: its signature verifies under the
@@ -190,7 +192,7 @@ pub fn sign_economic_root_claim(
 /// unknown fields, duplicates and non-canonical encodings all fail that
 /// comparison. At a write-once cell, a byte-different encoding of "the same"
 /// claim is a different value, so tolerating one would mean a member could
-/// accept a claim that never wins a quorum.
+/// accept a claim that can never be final at the cell.
 pub fn decode_and_verify_economic_root_claim(
     envelope_bytes: &[u8],
 ) -> Result<VerifiedEconomicRootClaim, ClaimEnvelopeError> {

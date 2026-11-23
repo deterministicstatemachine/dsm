@@ -57,7 +57,7 @@ dsm-app id
 P1TTQ65K20YCW6FCHVJ8A8V0VQ55NN3DZK6KCBFMCC3M98KN3X2G
 ```
 
-`owned` prints what it holds: a hundred ERA from the faucet, and nothing of dBTC yet.
+`owned` prints what it holds: a hundred ERA from the faucet, and a dBTC line at zero (dBTC is not functional in this release).
 
 ```bash
 dsm-app owned
@@ -70,7 +70,7 @@ dBTC           0.00000000   currency 0EJ2PSRS2YQR8BR77P3WZ92SV12VJT7XP6NWP0SH5P8
 
 Each line is an object: its symbol, the amount in its own units, its kind, and its id.
 
-`activity` is the account's own record of every call made through the ingress:
+`activity` is the account's own record of every invoke made through the ingress:
 
 ```bash
 dsm-app activity
@@ -89,7 +89,7 @@ Four routes make the ingress:
 
 | Route | What it does |
 |---|---|
-| `POST /ingress` | Makes a call, and records it in the account's activity. |
+| `POST /ingress` | Makes a call, and records an invoke in the account's activity (a query is not recorded). |
 | `POST /ingress/quiet` | Makes a call that is not recorded: what your app reads with. |
 | `GET /activity/{after}` | Reads what was recorded after that point. |
 | `GET /activity/{after}/wait` | The same, held until something is recorded after that point: what your app waits on. |

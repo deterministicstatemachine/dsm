@@ -1264,7 +1264,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     }
 
     /// The offline origin cell of `account_root` of `bundle` (DSM Amendment
-    /// A39 draft): its route chains evaluated from every seat's reads into a
+    /// A39): its route chains evaluated from every seat's reads into a
     /// read bound to the key. A step final at the cell is relied on only
     /// through its completion proof, checked against fresh reads (Amendment
     /// S10, [`Self::rely_on_final`]). Reads that do not decide the cell yet are

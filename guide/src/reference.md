@@ -13,8 +13,10 @@ What an offer asks the player to let your app do without asking again:
 | `trade(a, b, caps)` | trade between two objects through your vaults, within caps | `ask.price`, `ask.trade`; a wallet receives only an object it added, so `ask.accept` your coin first |
 | `match(caps)` | take stakes in matches your app referees, within caps | `ask.match.stake`, `decide`, `ask.match.collect` |
 | `duel(programs, caps)` | take stakes in matches a pinned program decides | `ask.duel.*` |
+| `state()` | have the wallet sign and store a write at a cell your app names, as one of that cell's writers; spends nothing | `ask.state.write` |
+| `contribute(caps)` | have the wallet commit an amount to what your app names, the wallet's to take back at any time, within caps | `ask.contribution.commit`, `returnContribution`, `ask.contribution.takeBack` |
 
-`ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that move nothing run without asking, up to the offer's `freeRequests` (64 unless the offer says otherwise); past that, each waits for the player. A payment inside the grant's caps keeps running past that count until one fails; from then on, every request waits for the player.
+`ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that move nothing run without asking, up to the offer's `freeRequests` (64 unless the offer says otherwise); past that, each waits for the player. An offer may also name objects to `adopt`: the wallet takes them up when it connects, so it can hold them. A payment inside the grant's caps keeps running past that count until one fails; from then on, every request waits for the player.
 
 The wallet answers a connection's requests in order: a request that waits for the player holds up every later one on that connection. On the beta network a request settles in a few seconds to about half a minute; `wait` (in the clients) holds one read on the host's record until it has: the host records the wallet's answer, then establishes the fact itself and records that, and each entry ends the read.
 
@@ -22,6 +24,7 @@ The wallet answers a connection's requests in order: a request that waits for th
 
 | Outcome, the wallet's word | |
 |---|---|
+| `unanswered` | the wallet has not answered yet |
 | `carried_out` | the wallet did it |
 | `awaiting_approval` | it waits for the player |
 | `declined` | the player said no |
@@ -34,6 +37,10 @@ The wallet answers a connection's requests in order: a request that waits for th
 | `signed` | a signature over the asked words checked |
 | `staked` | the wallet's stake is held under the match's terms |
 | `collected` | the match's verdict paid the wallet |
+| `contributed` | the wallet's contribution is held under the contribution's terms |
+| `taken_back` | a contribution went back to the wallet |
+| `written` | the wallet's write is the final occupant of the cell your app named |
+| `duel_staked`, `duel_started`, `duel_withdrawn`, `duel_settled` | where a match a pinned program decides stands |
 | `none` | nothing to establish: a price, a trade's notification, contacts |
 
 ## The app's command line
@@ -69,7 +76,7 @@ The wallet answers a connection's requests in order: a request that waits for th
 
 ## The terminal wallets
 
-`dsm-dev-wallet <command>` drives a player's wallet in the terminal: `up`, `down`, `status`, `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`. With `DSM_WALLET_NAME=wallet2` in front, it drives a second one, for matches. `dsm-dev-wallet help` lists them. From the repo, `make wallet ARGS="..."` and `make wallet2 ARGS="..."` run the same.
+`dsm-dev-wallet <command>` drives a player's wallet in the terminal: `up`, `down`, `status`, `id`, `fund`, `owned`, `connect`, `connections`, `sync`, `pending`, `approve`, `decline`, `log`, `disconnect`. With `DSM_WALLET_NAME=wallet2` in front, it drives a second one, for matches. `dsm-dev-wallet help` lists them. From the repo, `make wallet ARGS="..."` and `make wallet2 ARGS="..."` run the same.
 
 ## What the install puts on your machine
 
@@ -111,6 +118,7 @@ The routes your app's account uses:
 | Route | Kind | Request | Answer | Client |
 |---|---|---|---|---|
 | `connect.app.offer` | invoke | `ConnectAppOfferRequestV1` | `ConnectAppOfferV1` | `offer` |
+| `connect.app.offerOf` | query | `ConnectOfferRefV1` | `ConnectAppOfferV1` | `offerOf` |
 | `connect.app.sessions` | query | none | `ConnectSessionsV1` | `connections` |
 | `connect.app.request` | invoke | `ConnectAppRequestIntentV1` | `ConnectRequestRefV1` | `request` |
 | `connect.app.status` | invoke | `ConnectRequestRefV1` | `ConnectAppStatusV1` | `result`, `wait` |
@@ -119,16 +127,16 @@ The routes your app's account uses:
 | `token.create` | invoke | `TokenCreateRequest` | `TokenCreateResponse` | `issue` |
 | `wallet.sendSmart` | invoke | `OnlineTransferSmartRequest` | `OnlineTransferResponse` | `give` |
 | `sofi.createVault`, `sofi.vaults`, `sofi.close` | invoke | `SofiCreateVaultRequest`, none, `SofiCloseRequest` | `SofiVaultCreatedResponse`, `SofiVaultsResponse` | `openVault`, `vaults`, `closeVault` |
-| `escrow.adjudicate` | invoke | `EscrowOutcomeRequest` | `EscrowVerdictResponse` | `decide` |
+| `escrow.adjudicate` | invoke | `EscrowOutcomeRequest` | `EscrowVerdictResponse` | `decide`, `returnContribution` |
 | `faucet.claim` | invoke | `FaucetClaimRequest` | `FaucetClaimResponse` | `fund` |
 
-And a wallet's: `connect.preview` (query), `connect.approve`, `connect.sync`, `connect.list` (query), `connect.connectedBy` (query), `connect.pending` (query), `connect.respond`, `connect.log` (query), `connect.disconnect`.
+And a wallet's: `connect.preview` (query), `connect.approve`, `connect.sync`, `connect.list` (query), `connect.connectedBy` (query), `connect.pending` (query), `connect.respond`, `connect.log` (query), `connect.disconnect`, and for matches a pinned program decides `connect.duelWithdraw`, `connect.duelSettle`, `connect.duelCollect`.
 
 `GET /activity/{after}` returns `AppHostActivityV1`: your account's identity, and a record of each call and each wallet's visit to the relay. `GET /activity/{after}/wait` returns the same once the record has an entry after `after`, or empty after twenty seconds. Every plain result keeps the wire's message as `raw`, and `pb` exports every generated message, for anything the plain fields leave out.
 
 ## Offline
 
-Your app's own calls are all online. Offline transfers are the wallet's feature, between two wallets: a bearer transfer carries any object whose policy lets it move, from one wallet's offline account to another's. Today that needs a hardware board on both sides, it is available on Android (the iOS app has no board link yet, and refuses), and a trade offline is two one-way transfers.
+Your app's own calls are all online. Offline transfers are the wallet's feature, between two wallets: a bearer transfer carries any object whose policy lets it move, from one wallet's offline account to another's. Today that needs a hardware board on both sides, each set up and stamped by DSM's owner (a board without the owner's stamp is refused), it is available on Android (the iOS app has no board link yet, and refuses), and a trade offline is two one-way transfers.
 
 ## More
 

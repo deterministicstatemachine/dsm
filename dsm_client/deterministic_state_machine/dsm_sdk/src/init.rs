@@ -22,14 +22,14 @@ use crate::handlers::{
     AppRouterImpl, BiImpl,
 };
 
-/// Deterministically derive the device's identity signing keypair (SPHINCS+), Genesis v2.
+/// Deterministically derive the device's identity signing keypair (SPHINCS+).
 ///
 /// CANONICAL derivation — the AK keypair rooted in the BIP39 `wallet_seed` (NOT a device
-/// secret): `device_seed = KDF(wallet_seed, "DSM/device-seed/v2" || G || 0)`,
-/// `AK_seed = KDF(device_seed, "DSM/device-ak/v2" || authority_policy_hash)`,
+/// secret), key schedule KS1: `device_seed = Expand(PRK_w, "DSM/device-seed/v3" ‖ G ‖ slot)`,
+/// `AK_seed = Expand(Extract("DSM/kdf/device-root/v1", device_seed), "DSM/device-ak/v3" ‖ aph)`,
 /// `AK = SPHINCS+.KeyGen(AK_seed)`. Delegates to the SINGLE canonical
 /// `dsm::core::identity::genesis_v2::derive_device_ak_keypair`, so the re-derived keypair is
-/// byte-identical to the one `create_genesis_v2` registered. Both wallet-init and
+/// byte-identical to the one wallet creation (`create_genesis_v3_self_attested`) registered. Both wallet-init and
 /// recovery-authority anchoring MUST call it; a divergent copy would silently break every
 /// EK-cert chain + recovery anchor, so the derivation is never duplicated inline. `device_slot`
 /// is the primary device (0) and the default genesis authority policy is used — matching genesis.
@@ -69,7 +69,7 @@ fn app_state_u32_bytes(
 /// `s0 = derive_s0(wallet_seed, G, 0, aph)`; `Smaster = derive_smaster(s0, G, DevID, aph)`,
 /// where `G` is the persisted genesis digest (`AppState` genesis_hash, == `GenesisV2.g`) and
 /// `DevID` is the persisted device id (`AppState` device_id, == `GenesisV2.devid`) — both
-/// registered by `create_genesis_v2`. Because `G` and `DevID` are persisted, the only secret
+/// registered by wallet creation (`create_genesis_v3_self_attested`). Because `G` and `DevID` are persisted, the only secret
 /// input needed is the session-cached `wallet_seed`; `network_id`/`wallet_index`/`atta`/
 /// `genesis_nonce` are NOT required to reproduce `Smaster`.
 ///

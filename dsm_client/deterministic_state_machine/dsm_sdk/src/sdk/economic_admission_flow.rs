@@ -850,8 +850,8 @@ pub(crate) async fn admitted_offline_boundary(
             )));
         }
     }
-    // The board signs the boundary at its next counter, as it signs a payment (DSM Amendment A39
-    // draft, option B), from where the account stands, over the device roots the boundary moves:
+    // The board signs the boundary at its next counter, as it signs a payment (DSM Amendment A39),
+    // from where the account stands, over the device roots the boundary moves:
     // previewed from the head here, taken again under its lock, and refused there if the head
     // moved. A board that left the account's root after a payment signs no unload of it.
     let (boundary_id, counter, frontier) =
@@ -1030,8 +1030,8 @@ pub(crate) async fn admitted_offline_boundary(
     Ok((outcome, admitted))
 }
 
-/// Write the origin cells a boundary `body_bytes` of this device holds (DSM Amendment A39 draft,
-/// option B): each board-signed step the boundary carries, at the cell of the root it starts from,
+/// Write the origin cells a boundary `body_bytes` of this device holds (DSM Amendment A39):
+/// each board-signed step the boundary carries, at the cell of the root it starts from,
 /// and the boundary's departure, at the cell of the root it leaves.
 async fn write_boundary_cells(
     set: &crate::sdk::storage_set::StorageSet,
@@ -1156,7 +1156,7 @@ pub(crate) async fn admitted_offline_settlement(
     let verified = OfflineSettlementBody::verify(&body, &genesis, &devid, &origin.root, &reads)?;
     let mut built: Option<(EconomicTransitionWitness, EconomicAdmissionManifest)> = None;
     // The account's board signs the unload of the received payment at its next counter, as it
-    // signs every step of the account (DSM Amendment A39 draft, option B): previewed here, taken
+    // signs every step of the account (DSM Amendment A39): previewed here, taken
     // again under the head lock, and refused there if the head moved. A board that committed
     // exactly this unload before a crash emits it again.
     let settle_id = dsm::economic::offline_boundary::settlement_id(
@@ -1336,7 +1336,7 @@ pub(crate) async fn admitted_offline_settlement(
 }
 
 /// Settle every payment this device received offline that its payer's origin
-/// cells now hold final (SA-91; DSM Amendment A39 draft): this device writes
+/// cells now hold final (SA-91; DSM Amendment A39): this device writes
 /// the payer's steps each payment was carried with to the payer's cells, reads
 /// them from the account the payer's boundary left, and settles each payment
 /// they hold by its own admitted transition. The payer is never needed. A
@@ -1679,7 +1679,7 @@ async fn finish_locked(
                     }
                     // A settlement is held to the payment the payer's origin cells hold,
                     // read again from the account the payer's boundary left that this
-                    // device recorded with the payment (DSM Amendment A39 draft).
+                    // device recorded with the payment (DSM Amendment A39).
                     dsm::economic::offline_boundary::OfflineBodyKind::Settlement => {
                         let named =
                             dsm::economic::offline_boundary::OfflineSettlementBody::decode(&body)
@@ -2288,9 +2288,10 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         expected_network_id: network_id.clone(),
     };
     let recorder = crate::sdk::economic_registers::RecordingResolver::new(&live);
-    // DSM Amendment A14: the sender's step is validated from its own parent,
-    // and each of its credits' sources by the source's own step, so the
-    // recorder observes exactly the closure this acceptance depends on.
+    // DSM Amendment A36: the sender's step is validated from the state this
+    // device kept of the sender, every step since, and each credit's source
+    // the same way from the state kept of the source, so the recorder
+    // observes exactly the closure this acceptance depends on.
     let peer = {
         let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
             .map_err(|e| incomplete(format!("SoFi reads: {e}")))?;

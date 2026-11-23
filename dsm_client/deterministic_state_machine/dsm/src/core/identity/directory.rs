@@ -4,11 +4,13 @@
 //! 2026-09-23).
 //!
 //! A device writes its own entry — its genesis, its device id, its authority
-//! key AK, its birth attestation AttA, its Kyber key, a counter and its P0–P6
-//! authority evidence at a transition it names — signed with AK, to a keyed
-//! cell every member of the set holds. A node stores every entry it is given
-//! and checks nothing: it has no authority over whose entry is whose. A sender
-//! reads the cell and keeps the entry that proves itself:
+//! key AK, its birth attestation AttA, its Kyber key, its first-inbox lock
+//! (DSM Amendment A37), its cell lock (DSM Amendment A41), a counter and its
+//! P0–P6 authority evidence at a transition it names — signed with AK, to its
+//! directory cell, whose address is the directory key of the genesis and the
+//! device id. A member keeps a write there only when the AK and AttA the write
+//! carries hash to that device id and the AK signed the write (DSM Amendment
+//! A41). A sender reads the cell and keeps the entry that proves itself:
 //!
 //! 1. `DevID = H("DSM/devid" ‖ AK ‖ AttA)` equals the device id the entry names,
 //!    so the AK is the one the device id commits;
@@ -19,7 +21,9 @@
 //!    recomputes from its parameters and commits the GRK, the delegation and
 //!    transition chain authenticates under it, and the device is a leaf of
 //!    the tree at that transition;
-//! 4. among entries that pass, the highest counter wins, so a device can
+//! 4. the first-inbox lock and the cell lock are each a 64-byte key, neither
+//!    is the AK, and they are not the same key;
+//! 5. among entries that pass, the highest counter wins, so a device can
 //!    update its own entry.
 //!
 //! Knowing a device id is not enough to write a valid entry for it: that takes

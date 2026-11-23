@@ -1,34 +1,40 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The foreign step verifier, one hop (DSM Amendment A14).
+//! The foreign step verifier (DSM Amendments A36 and A14).
 //!
-//! A receiver accepts a peer's step from the step's own parent, and reads
-//! nothing behind that parent (owner paper, "Deterministic State Machines as
-//! Guarded Linear Constraint Systems", Definition 57 and §29). For the step at
-//! `position` it:
+//! A receiver keeps, for each peer it checks, the state it proved at each
+//! position: the root the peer's step installed and the claim accepted there
+//! ([`KeptPeerState`]; the owner paper, "Deterministic State Machines as
+//! Guarded Linear Constraint Systems", Definition 57). [`validate_peer_step`]
+//! starts from the highest state kept below the step asked about, or the
+//! activation root when none is kept, and validates every step after it up
+//! to that step. Each step:
 //!
-//! 1. reads `K_root(position)`, a hash of `(G, DevID, position)`, at every
-//!    member of the register. This is discovery: nothing found there is
-//!    authority;
-//! 2. takes each claim of the peer found there and the parent it names: for
-//!    a single-root claim, the root its own witness was built on (the
-//!    activation root at position 1);
-//! 3. requires the claim to be the one final at the cell routed from that
-//!    parent (Tripwire). Exactly one claim may survive: none is
-//!    `Incomplete`, and two are a fork, `Invalid`, never one chosen;
-//! 4. authenticates the claim (manifest by content address, the AK its
-//!    authority evidence proves, the committed network's register set) and
-//!    validates the transition from that parent with the SAME
-//!    `advance_validated` any device runs, which refuses a witness built on
-//!    any other root.
+//! 1. is the claim final at the cell routed from the root proved before it
+//!    (Tripwire). Exactly one claim may hold it: none is `Incomplete`, and
+//!    two are a fork, `Invalid`, never one chosen;
+//! 2. is authenticated (manifest by content address, the AK its authority
+//!    evidence proves, the committed network's register set);
+//! 3. is validated from that root with the SAME `advance_validated` any
+//!    device runs, which refuses a witness built on any other root (the step
+//!    as Amendment A14 states it).
 //!
-//! The cost is a constant number of lookup stages, whatever the position.
+//! The states proved are returned in `Checked::kept_states`.
+//! [`walk_peer_to_head`] runs the same walk toward a peer's head when a contact
+//! is added, and [`replay_own_lineage`] runs it from the activation root.
+//!
+//! [`peer_root_at`], [`peer_claim_at`] and [`scan_offline_boundaries`] read one
+//! named position without kept state: they read `K_root(position)` at every
+//! member (discovery: nothing found there is authority), take each claim found
+//! to the cell routed from the parent it names (for a single-root claim, the
+//! root its own witness was built on), and validate that step from that
+//! parent.
 //!
 //! ## Sources
 //!
-//! A credit's source is the source's own step, validated the same way, one
-//! hop. It is an online transfer, a debit that names no source of its own,
-//! so nothing behind it is asked for.
+//! A credit's source is checked the same way, from the state kept of the
+//! source. It is an online transfer, a debit that names no source of its own;
+//! a step that is, through its credits' sources, its own source is refused.
 //!
 //! ## Conditional positions
 //!
@@ -46,7 +52,7 @@
 //! previous boundary left where this receiver recorded that one, and nothing
 //! behind the step is read to find it. A settlement is held to the payment the
 //! payer's origin cells hold, final, from the account the payer's boundary at
-//! the position it names left (DSM Amendment A39 draft): the payer's later
+//! the position it names left (DSM Amendment A39): the payer's later
 //! steps are never needed.
 //!
 //! A receiver finds the boundaries a payer published with
@@ -385,11 +391,11 @@ pub trait ConditionalPositionResolver {
     ) -> Result<crate::sofi::lineage::ResolvedAdvance, PeerLineageFailure>;
 }
 
-/// What checking one step of a peer cost, in lookup stages. Every count is
-/// bounded by a constant whatever the peer's position (DSM Amendment A14):
-/// one probe and one routed read for each claim found at a position, one
-/// position back for a conditional claim's parent, and one step for each
-/// credit's source.
+/// What one check of a peer cost, in lookup stages: one routed read for each
+/// step walked from the kept state (DSM Amendment A36); one probe and one
+/// routed read for each claim found at a position read without kept state;
+/// one position back for each conditional claim's parent resolved; and one
+/// step for each credit's source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepCost {
     /// Unrouted reads of a register key at every member.
@@ -1545,8 +1551,8 @@ impl Verifier<'_> {
         .map_err(|e| invalid(format!("an offline settlement: {e}")))
     }
 
-    /// That a boundary holds its origin cells (DSM Amendment A39 draft, option
-    /// B): every step its board signed since the last boundary, final at the
+    /// That a boundary holds its origin cells (DSM Amendment A39):
+    /// every step its board signed since the last boundary, final at the
     /// cell of the root it starts from, and the boundary's own departure, final
     /// at the cell of the root it leaves. A boundary whose root another step
     /// holds took back what that step moved, and is refused.
@@ -2464,9 +2470,10 @@ impl Verifier<'_> {
         }
     }
 
-    /// A credit's source: the source's own step at `position`, validated one
-    /// hop. It is an online transfer, a debit that names no source of its
-    /// own, so nothing behind it is read.
+    /// A credit's source: the source's own step at `position`, validated as
+    /// the payer's is, from the state kept of the source when this check keeps
+    /// states and from its own parent otherwise. It is an online transfer, a
+    /// debit that names no source of its own.
     fn source_step(
         &self,
         genesis: &[u8; 32],
@@ -2483,10 +2490,11 @@ impl Verifier<'_> {
     }
 }
 
-/// The root at `position` a step is validated from: the root a claim's own
-/// witness at `position + 1` was built on, taken as the parent only because
-/// that claim is final at the cell routed from it and its step is then
-/// validated from it (DSM Amendment A14). Never a root a peer merely states.
+/// The root at `position` a step is validated from: the root of a state this
+/// receiver proved and kept, the activation root, or, on a read without kept
+/// state, the root a claim's own witness at `position + 1` was built on, taken
+/// only because that claim is final at the cell routed from it and its step
+/// is then validated from it. Never a root a peer merely states.
 fn authenticated_root(position: u64, root: [u8; 32]) -> ValidatedEconomicRoot {
     ValidatedEconomicRoot::from_verifier_memo(position, root)
 }

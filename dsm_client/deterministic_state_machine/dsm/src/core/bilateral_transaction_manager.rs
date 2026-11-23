@@ -3,9 +3,9 @@
 //! Bilateral Transaction Manager - Production Implementation (STRICT, bytes-only, no wall-clock)
 //!
 //! Invariants:
-//! - No wall-clock APIs anywhere. Use a deterministic, process-local monotonic counter.
+//! - No wall-clock APIs anywhere. Relationship tips, precommitments and signing targets are
+//!   bytes derived from the relationship tip and the operation.
 //! - No JSON/GSON at any boundary. No hex/base64 in data structures; bytes-only.
-//! - SMT proofs are derived deterministically from state + domain separators + counters.
 //! - No placeholders: real key retrieval from verified contacts; fail hard if missing.
 
 use std::collections::HashMap;
@@ -436,7 +436,7 @@ impl BilateralTransactionManager {
     }
 
     /// Return the local signing public key for inclusion in BLE prepare requests.
-    /// This allows offline receivers to verify signatures without prior key exchange.
+    /// The receiver takes it only when it is the key it pinned for this contact.
     pub fn local_signing_public_key(&self) -> Vec<u8> {
         self.signature_keypair.public_key().to_vec()
     }
@@ -895,9 +895,6 @@ fn bytes32(slice: &[u8]) -> [u8; 32] {
     a.copy_from_slice(&slice[0..32]);
     a
 }
-
-// NOTE: This stays as a String because PreCommitment currently requires it.
-// It carries no wall-clock/epoch semantics and remains transport-agnostic.
 
 #[cfg(test)]
 mod tests {

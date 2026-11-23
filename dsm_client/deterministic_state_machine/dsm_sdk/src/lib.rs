@@ -3,14 +3,16 @@
 //! # DSM SDK — Platform Integration Layer
 //!
 //! The `dsm_sdk` crate bridges the pure, deterministic [`dsm`] core library to
-//! platform-specific runtimes (Android/JNI, desktop test harnesses).
+//! platform-specific runtimes (Android over JNI, iOS over the C ABI of the
+//! `ffi` feature, and test harnesses).
 //!
 //! ## Architecture: One Agnostic Ingress
 //!
 //! The crate is organised into three tiers:
 //!
 //! 1. **ABI shim** - platform-specific marshalling only, no semantic logic:
-//!    - Android: `jni/unified_protobuf_bridge.rs` - `extern "system"` JNI exports
+//!    - Android: `jni/` - the `extern "system"` JNI exports Kotlin's `UnifiedNativeApi` declares
+//!    - iOS: `ffi/` - the C ABI Swift calls
 //!
 //! 2. **Shared ingress** (`ingress`) - the single semantic boundary:
 //!    - The shim translates ABI inputs into [`generated::IngressRequest`] and
@@ -43,27 +45,27 @@
 //! |--------|---------|
 //! | [`ingress`] | Shared platform-agnostic ingress dispatch |
 //! | [`sdk`] | High-level SDK facades (wallet, token, bilateral, DLV, Bitcoin tap) |
-//! | `jni` | Android JNI ABI shim (87+ `extern "system"` functions, cfg-gated) |
+//! | `jni` | Android JNI ABI shim (cfg-gated) |
+//! | `ffi` | iOS C ABI shim (the `ffi` feature) |
 //! | [`handlers`] | `AppRouter` implementation and the BLE runtime |
 //! | [`bluetooth`] | BLE bilateral sessions, frame chunking, pairing orchestration |
 //! | [`bridge`] | Trait-object dispatch layer connecting handlers to core |
 //! | [`envelope`] | Envelope v3 construction, framing (`0x03` prefix), guard rails |
-//! | [`security`] | clone-detection validation at the SDK boundary |
+//! | [`security`] | the modal lock: one step in flight per relationship, online or offline |
 //! | [`storage`] | SQLite-backed client database for contacts, chain tips, bilateral state |
 //! | [`network`] | Multi-node storage endpoint registry and env-config loader |
-//! | [`recovery`] | Capsule, tombstone, and rollup recovery flows |
 //! | [`vault`] | DLV (Deterministic Limbo Vault) SDK operations |
 //!
 //! ## Readiness Lifecycle
 //!
 //! The SDK uses a two-phase readiness model gated by atomic flags:
 //!
-//! 1. **Core ready** (`SDK_READY` in `unified_protobuf_bridge`) — set after
-//!    `sdkBootstrap` completes PBI (Platform Boundary Interface) initialization
-//!    with device_id and genesis_hash (GenesisV2: mnemonic-rooted).
-//! 2. **Bilateral ready** (`BILATERAL_READY`) — set after
-//!    [`initialize_bilateral_sdk`] verifies that the SDK context and bilateral
-//!    handler are installed, and device performance calibration succeeds.
+//! 1. **Core ready** (`sdk::session_manager::SDK_READY`) — set once the SDK's
+//!    identity context (device id and genesis, mnemonic-rooted Genesis v3) is
+//!    initialized.
+//! 2. **Bilateral ready** (`BILATERAL_READY`) — set once
+//!    [`initialize_bilateral_sdk`] finds the SDK context initialized and the
+//!    BLE stack live.
 //!
 //! All post-bootstrap JNI calls are gated on `SDK_READY`. Bilateral BLE
 //! operations additionally require `BILATERAL_READY`.
@@ -77,8 +79,9 @@
 //! ## Feature Flags
 //!
 //! - `jni` — Enables Android JNI entry points (`extern "system"` functions).
+//! - `ffi` — Enables the C ABI Swift calls on iOS.
 //! - `bluetooth` — Enables BLE bilateral transport and pairing orchestration.
-//! - `storage` — Enables storage-node sync SDK and genesis publisher.
+//! - `test-utils`, `demos` — test fixtures and demos; never in a shipped build.
 
 // DSM SDK Library – strict, fail-closed posture.
 #![deny(warnings)]

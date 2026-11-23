@@ -9,19 +9,25 @@ A storage node keeps bytes and hands them back. It:
 
 - **never establishes validity** — Core's construction predicates do, on the
   device, from the bytes;
-- **refuses no value** at a key and deduplicates nothing; which value counts is
-  the reader's question (storage spec §6, §9);
+- **keeps every value it takes** at a key, in arrival order, and replaces,
+  compares and deduplicates nothing; which value counts is the reader's
+  question (storage spec §6, §9);
+- **refuses a write on one check only**, the same on every node: a cell one
+  party owns, and every inbox, takes a write only when the key its address is
+  bound to signed it (storage spec §6 rule 6, §8). The node holds no list of
+  owners and makes no judgment;
 - **never opens** a spool envelope (storage spec §8);
-- **signs nothing** a client relies on for authority; its ByteCommits are
-  evidence a verifier checks (storage spec §14).
+- **holds no protocol key and signs no protocol object**; its TLS key
+  authenticates its endpoint only, and its ByteCommits are unsigned evidence a
+  verifier checks (storage spec §1, §14).
 
 ```
 Client (Android / Web)
   │  HTTPS + protobuf
   ▼
 Storage Node (Rust / Axum)
-  ├── Keyed cells and indexes           (storage contract, Part II §12)
-  ├── Immutable content-addressed store (storage contract)
+  ├── Keyed cells and indexes           (§6, §7)
+  ├── Immutable content-addressed store (§5)
   ├── ByteCommits and the set-mate mirror (§14)
   └── b0x inbox spool                   (§8)
        │
@@ -29,9 +35,11 @@ Storage Node (Rust / Axum)
   PostgreSQL (per-node persistence)
 ```
 
-There is no consensus, no leader election and no gossip between nodes. A node
-reaches a set-mate only to mirror its ByteCommits, at the endpoint its own
-configuration names, over a client pinned to that set-mate's own CA.
+There is no consensus, no leader election and no vote between nodes. A node
+reaches a set-mate for two things, both state synchronisation: to mirror its
+ByteCommits (§14), and to copy it an object the node took (§5 rule 7). Both go
+to the endpoint its own configuration names, over a client pinned to that
+set-mate's own CA.
 
 The environment config the app ships (`dsm_env_config.toml`) names the fleet
 it connects to, and the CA each member is known by.
@@ -97,8 +105,8 @@ Every route is protobuf or raw bytes; `/api/v2/health` answers plain `ok`.
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
 | `/api/v2/health` | GET | Liveness |
-| `/api/v2/cell/{key}` | POST, GET | Keep a value at a key; what is held there, in arrival order, a page at a time (`?from=<arrival index>`; each page names the next) |
-| `/api/v2/cells` | POST | Keep values at several keys |
+| `/api/v2/cell/{key}` | POST, GET | Keep a value at an open cell (a cell one party owns is written through `/cells`, which carries its owner's proof); what is held at a key, in arrival order, a page at a time (`?from=<arrival index>`; each page names the next) |
+| `/api/v2/cells` | POST | Keep values at several keys in one transaction, each entry with its owner's proof where the cell is owned; an entry that fails the owner check is refused (403) |
 | `/api/v2/index/{locator}` | POST, GET | Append a content address; read the index in append order |
 | `/api/v2/immutable/put` | POST | Write-once object; the node computes the address |
 | `/api/v2/immutable/{addr}` | GET | Read an object by content address |
@@ -108,8 +116,9 @@ Every route is protobuf or raw bytes; `/api/v2/health` answers plain `ok`.
 | `/api/v2/bytecommit/proof/{key}` | GET | Proof that a ByteCommit commits a cell's entries |
 | `/api/v2/bytecommit/mirror/sync` | POST | Mirror every set-mate's new ByteCommits |
 | `/api/v2/bytecommit/mirror/{member}/{cycle}` | GET | Every ByteCommit mirrored for a member at a cycle |
-| `/api/v2/b0x/submit` | POST | Append bytes to a spool |
+| `/api/v2/b0x/submit` | POST | Append a write to an inbox spool; stored only when the key the inbox address is bound to granted and signed it (403 otherwise) |
 | `/api/v2/b0x/retrieve/{from_seq}` | GET | A spool's entries from a position |
+| `/api/v2/b0x/wait` | POST | Long-poll: held until one of the named spools has an entry at or after the position given for it, or the node's bound passes with none |
 
 ## Source Layout
 
@@ -117,7 +126,8 @@ Every route is protobuf or raw bytes; `/api/v2/health` answers plain `ok`.
 src/
 ├── main.rs            # config, TLS listener, startup checks
 ├── lib.rs             # AppState, NodeStorageSet, the served app (build_app)
-├── set_client.rs      # the client pinned to the storage set's CA
+├── set_client.rs      # the client a node reaches one set-mate with, pinned to that set-mate's own CA
+├── liveness.rs        # transport liveness bounds on connections and request bodies
 ├── api/
 │   ├── cells.rs       # keyed cells and indexes
 │   ├── objects/       # immutable store, ByteCommits and mirror
@@ -131,9 +141,13 @@ A node starts from its TOML config (`--config`, required). It refuses to start
 without `node.id`, `network.listen_addr`, `network.port`, `database.url`, and
 `tls.cert_path` / `tls.key_path`, or in a set without each set-mate's `endpoint`
 and `ca_cert` (the CA that member's operator holds, which mirror sync pins that
-set-mate to). `network.max_connections` and
-`http.body_limit_bytes` default when absent and are refused when of the wrong
-type. The database connection requires TLS unless its URL says
+set-mate to). Seven keys default when absent and are refused when of the wrong
+type: `network.max_connections` (256), `network.max_open_connections` (4096),
+`network.max_open_connections_per_peer` (128), `http.body_limit_bytes`
+(1,048,576), `http.request_timeout_secs` (60), `http.header_read_timeout_secs`
+(10) and `database.max_connections` (the pool's size; it must be more than the
+connections waits on spools may hold). The database connection requires TLS
+unless its URL says
 `sslmode=disable`. It serves TLS only. See `config/production.toml`, and the
 configs `make nodes-up` writes to `.dsm-dev/net/`.
 
@@ -152,16 +166,15 @@ cargo build --release
 
 ## Cryptographic Stack
 
-Storage nodes use the same post-quantum primitives as the rest of DSM:
+| Primitive | Algorithm | Usage |
+| --- | --- | --- |
+| Hashing | BLAKE3-256 | Domain-separated: addresses, running hashes, ByteCommits |
+| Signatures | SPHINCS+ (BLAKE3), verification only | The two write checks every node runs: a cell's owner proof (§6 rule 6) and an inbox write's grant and signature (§8) |
+| Transport | TLS (rustls) | The node's endpoint, and its client to each set-mate |
 
-| Primitive    | Algorithm         | Usage                                      |
-| ------------ | ----------------- | ------------------------------------------ |
-| Hashing      | BLAKE3-256        | Domain-separated, all hashing              |
-| Key Exchange | ML-KEM-768        | Post-quantum key encapsulation (TLS)       |
-| Signatures   | SPHINCS+          | Post-quantum signatures (client-side only) |
-| Encryption   | ChaCha20-Poly1305 | At-rest encryption                         |
-
-Storage nodes themselves never sign anything. The crypto stack is used for TLS transport and verifying client-provided proofs.
+A storage node holds no protocol key, signs nothing and encrypts nothing. Spool
+payloads reach it already sealed by the sending device (ML-KEM-768 and
+XChaCha20-Poly1305, storage spec §8), and the node never opens them.
 
 ## Troubleshooting
 
@@ -190,9 +203,14 @@ make nodes-reset
 make nodes-up
 ```
 
-## AWS Cloud Deployment
+## Cloud Deployment
 
-Deploy 6 independent storage nodes across 3 AWS regions (us-east-1, eu-west-1, ap-southeast-1) from a single machine.
+A storage set is five members (storage spec §10). The beta fleet is five nodes
+on OVHcloud; [its bring-up](#the-beta-fleet-on-ovhcloud) is below. The AWS
+configuration provisions six instances across three regions (us-east-1,
+eu-west-1, ap-southeast-1) from a single machine. On either cloud the nodes
+come up in no set: phase 2, `assemble_storage_set.sh`, writes the five-member
+set into each node's config.
 
 ### Cloud Prerequisites
 
@@ -236,6 +254,19 @@ bash deploy/provision_aws.sh --ssh-key ~/.ssh/dsm-deploy --ssh-cidr <your IP>/32
 Terraform shows its plan and asks before it applies anything: each node's
 database lives on its instance.
 
+This single command:
+
+1. Provisions 6 EC2 instances across 3 AWS regions via Terraform
+2. Waits for all instances to be SSH-ready (~2-3 minutes)
+3. Generates per-node TLS certificates and configs
+4. Builds the Docker image (cross-compiled for x86_64 if on Apple Silicon)
+5. Uploads and starts services on all 6 nodes
+6. Runs a health check
+
+Total time: ~30-45 minutes (bulk is the Rust release build).
+
+### The beta fleet on OVHcloud
+
 The beta fleet runs on OVHcloud Public Cloud (OpenStack, region BHS5). It is
 provisioned the same way, from the project's OpenStack RC file (the OVHcloud
 panel offers it per OpenStack user) and a password file it reads instead of
@@ -254,18 +285,7 @@ bash deploy/assemble_storage_set.sh --ssh-key ~/.ssh/dsm-deploy --ca-file deploy
 the set id every member logged; pin them in `dsm::economic::register`,
 `dsm_sdk::sdk::storage_set` and the bundled client env config.
 
-This single command:
-
-1. Provisions 6 EC2 instances across 3 AWS regions via Terraform
-2. Waits for all instances to be SSH-ready (~2-3 minutes)
-3. Generates per-node TLS certificates and configs
-4. Builds the Docker image (cross-compiled for x86_64 if on Apple Silicon)
-5. Uploads and starts services on all 6 nodes
-6. Runs a health check
-
-Total time: ~30-45 minutes (bulk is the Rust release build).
-
-### Cloud Architecture
+### Cloud Architecture (AWS)
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -290,7 +310,7 @@ Each node runs:
   └─────────────────────────────┘
 ```
 
-### Cost
+### Cost (AWS)
 
 | Resource        | Spec                | Monthly Cost   |
 | --------------- | ------------------- | -------------- |
@@ -325,7 +345,7 @@ bash deploy/teardown_aws.sh --ssh-key ~/.ssh/dsm-deploy
 
 ### Changing Regions
 
-The 3 regions and node counts are configured in `terraform/main.tf`:
+The 3 regions and node counts are configured in `terraform/aws/main.tf`:
 
 ```hcl
 module "us_east_1"      { ... node_count = 2; global_node_offset = 0; }

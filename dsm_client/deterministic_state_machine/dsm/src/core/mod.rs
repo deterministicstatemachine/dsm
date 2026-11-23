@@ -5,22 +5,21 @@
 //! This module is the heart of the DSM protocol, providing the foundational components
 //! for post-quantum, clockless, bilateral state management. It contains:
 //!
-//! - **State machine engine** ([`state_machine`]): Forward-only hash chain evolution,
-//!   deterministic entropy derivation, pre-commitment verification, and batch processing.
-//! - **Bridge traits** ([`bridge`]): Envelope routing and handler installation for
-//!   dispatching protobuf-encoded operations to the appropriate subsystem (bilateral,
-//!   recovery, bootstrap, or application queries).
-//! - **Bilateral management** ([`bilateral_transaction_manager`]):
-//!   Isolated bilateral state pairs with cross-chain continuity verification, forward-linked
-//!   commitments, and chain-tip tracking as described in whitepaper Section 3.4.
+//! - **State machine** ([`state_machine`]): the device head and the one transition path
+//!   onto it, `DeviceState::advance`.
+//! - **Bridge** ([`bridge`]): Envelope v3 routing of queries, invokes and faucet claims to
+//!   the installed `AppRouter`.
+//! - **Bilateral management** ([`bilateral_transaction_manager`]): relationship tips,
+//!   precommitments, signing and the Tripwire prechecks of the steps between two contacts.
+//! - **Relationship lifecycle** ([`relationship_lifecycle`]): the ESTABLISH and TERMINATE
+//!   steps (DSM Amendment A33); **write grants** ([`relationship_write_grant`]): the inbox
+//!   write locks and grants (DSM Amendments A34, A37).
 //! - **Identity** ([`identity`]): mnemonic-rooted genesis (Genesis v2/v3), the
 //!   device directory entry, and the P0–P6 device-authority resolver.
 //! - **Token subsystem** ([`token`]): Token type definitions, conservation invariant
 //!   enforcement (`B_{n+1} = B_n + Delta, B >= 0`), and policy validation via CPTA anchors.
 //! - **Contact management** ([`contact_manager`]): Counterparty identity storage and
 //!   lookup by device ID.
-//! - **Verification** ([`verification`]): Proof primitives for SMT inclusion proofs and
-//!   device tree verification.
 //! - **Chain tip store** ([`chain_tip_store`]): Per-relationship chain tip tracking for
 //!   bilateral state synchronization.
 //! - **Error types** ([`error`]): Structured error hierarchy for all core operations.
@@ -33,16 +32,6 @@ pub mod error;
 pub mod identity;
 pub mod relationship_lifecycle;
 pub mod relationship_write_grant;
-// security module deleted: bilateral_control (BilateralControlResistance +
-// DecentralizedStorage trait + heuristic pattern detectors) was a §29 attack-
-// probability suspicious-pattern detector built around &[State] walks. Under
-// §2.2 SMT-Replace + §4.3 counterless acceptance the heuristics (sequence-
-// number proximity, state-count rate, etc.) no longer map to the canonical
-// model. Security guarantees now come from:
-//   - §6.1 Tripwire: no double-consume of a chain tip
-//   - §12 anti-cloning: fused hardware anchor (σ^chip + σ^host) + single-writer invariant
-//   - bilateral pair signing on every advance (§11)
-//   - §8 balance-witness equality check inside DeviceState::advance
 pub mod state_machine;
 pub mod token;
 pub mod utility;

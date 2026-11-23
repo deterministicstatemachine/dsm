@@ -2,8 +2,8 @@
 
 //! Receipt Rollup Accumulator Implementation
 //!
-//! Implements the receipt rollup accumulator as described in the whitepaper:
-//! Roll_t+1 = H("RM" || Roll_t || rid_t || H(Rec_t) || ID(8)_Bi || ht'_i)
+//! Implements the receipt rollup accumulator:
+//! Roll_{t+1} = H(DSM/recovery-roll ‖ Roll_t ‖ rid_t ‖ H(Rec_t) ‖ ID(8)_Bi ‖ ht'_i)
 //!
 //! This provides cryptographic binding of the ordered sequence of accepted receipts.
 

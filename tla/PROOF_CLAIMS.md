@@ -20,12 +20,14 @@ The TLAPS milestone is implemented as machine-checked TLAPS proofs over:
 
 - `DSM_Abstract.tla`,
 - `DSM_ProtocolCore.tla`,
-- `DSM.tla`.
+- `DSM_InitProof.tla` (the concrete `Init` of `DSM.tla` refines
+  `DSM_ProtocolCore!Init`; TLAPS cannot parse `DSM.tla` itself, and its step
+  refinement is checked by TLC).
 
 The guarded kernel (paper Appendix A/B) is machine checked as:
 
 - `lean4/DSMGuardedTripwire.lean`: the universal theorems
-  (`realized_unique_at_key`, `guarded_tripwire_at_key`/`_exists`,
+  (`realized_unique_at_key`, `guarded_tripwire_at_key`, `guarded_tripwire_exists`,
   `hardened_single_consumption`, `no_resource_local_cycle`, and companions).
   The module depends on NO axioms beyond Lean's core logic
   (specs/requirements/LEAN_AXIOM_LEDGER.tsv). Paper Assumption 3 is proved for
@@ -86,8 +88,12 @@ and would not change any claim above.
 
 ## Not Proved In This Milestone
 
-- No cryptographic proof for SPHINCS+, ML-KEM, BLAKE3, or any quantum-resistance claim.
-- No machine-checked proof for the Rust implementation or model-to-code refinement.
+- No property of BLAKE3, ChaCha20 or ML-KEM is proved, and no quantum bound. The
+  SPHINCS+ construction has its own Lean tree (`lean4/Sphincs/`;
+  `specs/requirements/SPHINCS_PROOF_OVERVIEW.md`).
+- Rust-to-model refinement is proved for four extracted SPHINCS+ address and digit
+  functions only (`lean4/Sphincs/RustExtraction/`); everything else is supported
+  by tests, conformance vectors and mutation controls.
 - No proof of Bitcoin PoW / Nakamoto consensus security from first principles.
 - No full bilateral or DLV liveness proof in `DSM_BilateralLiveness.tla`.
 - No TLAPS mechanization of the guarded kernel itself: the general theorems are
@@ -120,20 +126,17 @@ lean4/DSMEconomicSmtSeparation.lean   the ALGEBRAIC obligations:
                                       (tag, message), per-key byte-layer input
                                       injectivity, pairwise domain
                                       non-aliasing, ABSENT_LEAF separation,
-                                      map/tree/root non-interference, and
-                                      quorum intersection over qualifying
-                                      quorums
+                                      and map/tree/root non-interference
 
-tla/DSM_EconRegisterObservation.tla   the CONCURRENT half: write-once cells,
-                                      two-axis attribution, non-atomic read
-                                      rounds, register rebuild, and the
-                                      four-valued observation
+tla/DSM_RouteChain.tla,               the CONCURRENT half: a keyed cell's
+tla/DSM_SofiSuccessorCells.tla,       first recognized write at its leader,
+tla/DSM_NativeReserveRelease.tla      final once its route chain has three
+                                      links (storage spec §9)
 ```
 
-Neither restates the other, and the split is deliberate: `2q > n` is a universal
-statement over all `n` that TLC cannot express, while "a cell observed Claimed
-is never later observed empty across every interleaving" is a statement about
-rounds that Lean is the wrong tool for.
+The split is deliberate: the algebraic facts are universal statements Lean
+proves, while cell finality across every interleaving is a statement TLC
+checks.
 
 **Boundary, stated as plainly as the ones above.** Formal coverage establishes
 the stated properties of the normative economic-SMT and economic-register
@@ -142,8 +145,8 @@ the shipping Rust implements those models. Implementation correspondence is
 supported separately by conformance vectors, source-level invariants, tests, and
 deliberate falsification controls.
 
-**And the Lean module is not "axiom-free" without qualification.** The quorum
-results are. The hash and non-aliasing results rest on a symbolic abstraction
+**And the Lean module is not "axiom-free" without qualification.** The hash and
+non-aliasing results rest on a symbolic abstraction
 declared in that module's header, with the adequacy bridge resting on a *local*
 collision hypothesis and — for the zero-sentinel obligation only — a *local*
 preimage hypothesis. Neither is a global claim about BLAKE3: a universal
@@ -170,10 +173,10 @@ every reachable state rather than as a temporal property. The quorum algebra is
 not restated in TLA+; the member-level behaviour is not restated in the operation
 model.
 
-**Boundary.** These are properties of the models of plan revision 10.3. The v8
-Rust is not written yet (Phase E), so no correspondence to shipping code is
-claimed; Phase E owes conformance vectors and mutation-tested gates against
-these invariants.
+**Boundary.** These are properties of the models. Correspondence to
+`dsm/src/sofi` is supported by the tests and mutation controls in
+`specs/requirements/VERIFICATION_MATRIX.md`, not by a machine-checked
+refinement.
 
 
 ## A step's receipt proves its whole write set

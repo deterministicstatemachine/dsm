@@ -62,8 +62,8 @@ impl RecoveryCell {
     }
 
     /// Whether `bytes` are an object of the kind this cell holds, naming the
-    /// cell's coordinates where the object carries them. Anyone can write a
-    /// cell, so a reader keeps nothing else (storage spec §9, route chains,
+    /// cell's coordinates where the object carries them. The owner's lock may
+    /// sign any bytes, so a reader keeps nothing else (storage spec §9, route chains,
     /// rule 3: bytes that are no recognized object naming the key never
     /// count). Whether the object verifies is the reader's to check.
     pub fn holds(&self, bytes: &[u8]) -> bool {

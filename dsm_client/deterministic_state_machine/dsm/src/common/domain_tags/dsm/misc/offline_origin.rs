@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! DSM namespace tags: offline origin cells (proposed, DSM Amendment A39 draft).
+//! DSM namespace tags: offline origin cells (DSM Amendment A39).
 //!
 //! One cell per offline account root holds the first recognized step its owner's
 //! board signed from that root. The derivations live in `crate::offline_origin`;
@@ -16,9 +16,10 @@ pub const TAG_DSM_OFFLINE_ORIGIN_CELL: TaggedHashDomain<'static> =
 pub const TAG_DSM_OFFLINE_ORIGIN_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/offline-origin/seed/v1");
 
-/// `r = H(tag ‖ boundary_id)` — the challenge an offline account's board signs
-/// a load or an unload under (option B): drawn from the boundary itself, so the
-/// same boundary always yields the same transition.
+/// `r = H(tag ‖ payload)` — the challenge an offline account's board signs a
+/// load, an unload or the unload of a received payment under, the payload being
+/// the step's own name (a boundary's operation id, a settlement's id), so the
+/// same step always yields the same transition (DSM Amendment A39).
 pub const TAG_DSM_OFFLINE_BOUNDARY_CHALLENGE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/offline-origin/boundary-challenge/v1");
 

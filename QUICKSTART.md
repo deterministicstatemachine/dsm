@@ -118,7 +118,7 @@ make test-frontend
 make test
 ```
 
-`make test-rust` includes SDK integration coverage beyond pure unit tests, and some of that coverage expects the configured storage network to be reachable. `make test-frontend` runs the full Jest/UI suite; use `make typecheck` for the fastest baseline validation.
+`make test-rust` includes SDK integration coverage beyond pure unit tests; its node-backed tests start their own storage nodes on a PostgreSQL database named by `DSM_TEST_DATABASE_URL`, and refuse to run without one. `make test-frontend` runs the full Jest/UI suite; use `make typecheck` for the fastest baseline validation.
 
 ## Android
 
@@ -169,13 +169,13 @@ For a real iPhone or iPad, `make ios-device IOS_TEAM=<your Apple team id>` build
 
 ## Bitcoin / dBTC
 
-Bitcoin testing is signet-backed. There is no local Bitcoin node workflow in this repository.
+dBTC is being replaced and does not function in this release; see the README's dBTC section. Its code is kept in the tree, unused. There is no local Bitcoin node workflow in this repository.
 
 Code: `dsm_client/deterministic_state_machine/dsm/src/bitcoin/`, `dsm/src/vault/`, and `dsm_sdk/src/handlers/bitcoin_invoke_routes.rs`.
 
 ## Optional: Local Storage Nodes
 
-Your own storage set on this machine: the network's pinned members (`dsm-node-1` to `dsm-node-5`) as five local nodes, each the production storage node binary on its own PostgreSQL database, serving TLS from a CA of the set's own.
+Your own storage set on this machine: the network's pinned members (`dsm-node-1` to `dsm-node-5`) as five local nodes, each the production storage node binary on its own PostgreSQL database, serving TLS from a CA of its own.
 
 The set keeps each node's data on a PostgreSQL server on this machine, reached as your own login.
 
@@ -211,7 +211,7 @@ Stop them, drop their databases, and forget the set and the accounts made on it:
 make nodes-reset
 ```
 
-PostgreSQL must run with `fsync=on` and `full_page_writes=on` (the defaults). The set is reached as `DSM_DEV_PG_URL`; by default, your login's role on the server at localhost, over Debian/Ubuntu's socket where there is one (`postgresql://<login>@/postgres?host=/var/run/postgresql&sslmode=disable`), else TCP port 5432 (`postgresql://<login>@localhost:5432/postgres?sslmode=disable`). Everything the set needs lives under `.dsm-dev/net/`, including the client config wallets use (`dsm_env_config.toml`, trusting `dev-ca.pem`).
+PostgreSQL must run with `fsync=on` and `full_page_writes=on` (the defaults). The set is reached as `DSM_DEV_PG_URL`; by default, your login's role on the server at localhost, over Debian/Ubuntu's socket where there is one (`postgresql://<login>@/postgres?host=/var/run/postgresql&sslmode=disable`), else TCP port 5432 (`postgresql://<login>@localhost:5432/postgres?sslmode=disable`). Everything the set needs lives under `.dsm-dev/net/`, including the client config wallets use (`dsm_env_config.toml`, which carries each node's CA, also kept as `dsm-node-N-ca.pem`).
 
 Point the wallets on your phones at it (debug builds only): every adb device, through `adb reverse`, and every booted iOS Simulator.
 
@@ -219,7 +219,7 @@ Point the wallets on your phones at it (debug builds only): every adb device, th
 make phones-local
 ```
 
-A wallet that already made its identity on another storage set keeps it there: clear the app's data first (Android: `adb shell pm clear com.dsm.wallet`, then grant its Bluetooth permissions again; iOS: delete the app and run `make ios-simulator-run`). The same holds after `make nodes-reset`: it makes a new set with a new CA, so clear the wallets and run `make phones-local` again, or they refuse every node (`invalid peer certificate`).
+A wallet that already made its identity on another storage set keeps it there: clear the app's data first (Android: `adb shell pm clear com.dsm.wallet`, then grant its Bluetooth permissions again; iOS: delete the app and run `make ios-simulator-run`). The same holds after `make nodes-reset`: it makes a new set with new CAs, so clear the wallets and run `make phones-local` again, or they refuse every node (`invalid peer certificate`).
 
 ## Plug an App Into DSM
 
