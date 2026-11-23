@@ -487,11 +487,26 @@ def childSlotPushes (offsets : List ℕ) : List (String × Entry) :=
 
 /-- The batching's hints: the proof of work's nonce, if it grinds, and the sumcheck's rounds
 (`bc_sumcheck_msgs`, as `aggregate_deferred_claims` writes them: `Batch.lambdaGrindNonceCells`,
-`Batch.sumcheckRoundCells`), and the bytecode's value at its end (`bc_star_hint`). -/
+`Batch.sumcheckRoundCells`), and the bytecode's value at its end (`bc_star_hint`); then, research
+build, the matrix batch's nonce and rounds (`mat_sumcheck_msgs`, `matrix_batch`) and `A0`'s and
+`B0`'s values at its end (`mat_stars_hint`). -/
 def batchPushes (h : BatchingHints) : List (String × Entry) :=
   [("bc_sumcheck_msgs", Guest.Batch.lambdaGrindNonceCells h ++
       h.sumcheckMessages.flatMap Guest.Batch.sumcheckRoundCells),
-    ("bc_star_hint", [h.finalBytecodeValue])]
+    ("bc_star_hint", [h.finalBytecodeValue]),
+    ("mat_sumcheck_msgs", Guest.Batch.matrixGrindNonceCells h ++
+      h.matrixMessages.flatMap Guest.Batch.sumcheckRoundCells),
+    ("mat_stars_hint", [h.finalMatrixValues.1, h.finalMatrixValues.2])]
+
+/-- Research build: the vault step's pushes, after the DA digest's pick: whether the node proves a
+step (`vs_on`), then the step's hints (`Vault.stepPushes`) and whether it extends its first child's
+chain (`vs_chained`) (`aggregate_with_vault`, `node.rs`). -/
+def vaultPushes (w : NodeWitness) : List (String × Entry) :=
+  match w.vault with
+  | none => [("vs_on", [Vault.bitCell false])]
+  | some step =>
+    ("vs_on", [Vault.bitCell true]) :: Vault.stepPushes step ++
+      [("vs_chained", [Vault.bitCell (w.children.head?.bind (·.statement.vault)).isSome])]
 
 /-- The DA digest the node publishes, as the slot of `da_digests` it picks (`da_pick`): its own
 (`n`, the children's count) when it checks a matrix or publishes zeros, else the first child whose
@@ -503,9 +518,10 @@ def daPick (s : NodeStatement) (w : NodeWitness) : ℕ :=
 /-- **Every push of an honest run**, in the order `aggregate` makes them: the node's
 sizes (`meta`) and seed (`fs_seed`), the claim lists (`claims`) and the
 duplicates (`dup_claims`), each raw signature's slot (`raw_index`, `sp_raw_index`) and hints, each
-child's sizes (`child_meta`), slots, carried claim (`child_defer`), DA digest (`child_da`) and
-hints, the batching's hints or a leaf's deferred value (`leaf_defer`), the blob matrix's hints and
-the DA digest's pick. -/
+child's sizes (`child_meta`), slots, carried claims (`child_defer`), Flock matrix part
+(`flock_matrix`), DA digest (`child_da`), vault chain (`child_vault`) and hints, the batching's
+hints or a leaf's deferred values (`leaf_defer`), the blob matrix's hints, the DA digest's pick,
+and the vault step's pushes (research build). -/
 def honestPushes (bytecode : List K) (seed : Digest) (s : NodeStatement) (w : NodeWitness) :
     List (String × Entry) :=
   let rawX := w.xmssSignatures
@@ -528,11 +544,16 @@ def honestPushes (bytecode : List K) (seed : Digest) (s : NodeStatement) (w : No
   ((w.children.zip xr.childSlots).zip sr.childSlots).flatMap (fun ((c, xs), ss) ↦
     ("child_meta", [count c.statement.claims.xmss.length, count c.statement.claims.sphincs.length]) ::
       childSlotPushes xs ++ childSlotPushes ss ++
-      [("child_defer", c.statement.deferredClaim.cells), ("child_da", digestCells c.statement.claims.daDigest)] ++
+      [("child_defer", c.statement.deferredClaim.cells ++ c.statement.matrixClaim.cells),
+        ("flock_matrix", [c.flockMatrix]), ("child_da", digestCells c.statement.claims.daDigest),
+        ("child_vault", Vault.vaultCells c.statement.vault)] ++
       childHints bytecode seed c) ++
-  (if w.children = [] then [("leaf_defer", [s.deferredClaim.bytecodeValue])] else batchPushes w.batchingHints) ++
+  (if w.children = [] then
+      [("leaf_defer", [s.deferredClaim.bytecodeValue, s.matrixClaim.a, s.matrixClaim.b])]
+    else batchPushes w.batchingHints) ++
   (w.daMatrix.map (fun c ↦ daHints c.1 c.2)).getD [] ++
-  [("da_pick", [count (daPick s w)])]
+  [("da_pick", [count (daPick s w)])] ++
+  vaultPushes w
 
 end LeanVM.Guest.Prover
 

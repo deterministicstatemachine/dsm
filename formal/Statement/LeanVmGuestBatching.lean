@@ -36,6 +36,23 @@ exported as: the point, then the value (`DeferredBytecodeClaim::cells`,
 def DeferredBytecodeClaim.cells (claim : DeferredBytecodeClaim) : List E :=
   claim.bytecodePoint ++ [claim.bytecodeValue]
 
+/-- Research build: the claim a statement defers on Flock's BLAKE3 matrices `A0`, `B0`: their
+multilinear extensions' values at a point, rows' variables then columns' (`DeferredMatrixClaim`,
+`crates/aggregation/src/deferred.rs`). What makes it true (the BLAKE3 circuit's matrices) is not
+stated here. -/
+structure DeferredMatrixClaim where
+  /-- The point, `2 · BLAKE3_R1CS_LOG_SIZE` coordinates. -/
+  point : List E
+  /-- `A0`'s value there. -/
+  a : E
+  /-- `B0`'s value there. -/
+  b : E
+
+/-- The cells a deferred matrix claim is hashed and absorbed as: the point, then the two values
+(`DeferredMatrixClaim::cells`). -/
+def DeferredMatrixClaim.cells (claim : DeferredMatrixClaim) : List E :=
+  claim.point ++ [claim.a, claim.b]
+
 /-! ## The batching program
 
 The batching of the children's deferred claims (`aggregate_claims`, `lean_ethereum.py`;
@@ -73,6 +90,13 @@ structure BatchingHints where
   sumcheckMessages : List (E × E)
   /-- The bytecode's value at the sumcheck's final point. -/
   finalBytecodeValue : E
+  /-- Research build: the nonce of the proof of work before the matrix batch's challenge
+  (`matrix_batch`, `crates/aggregation/src/deferred.rs`), sent only if it is of nonzero bits. -/
+  matrixGrindNonce : E
+  /-- Research build: each round's message `(g(1), g(∞))` of the matrix batch's sumcheck, rows first. -/
+  matrixMessages : List (E × E)
+  /-- Research build: `A0`'s and `B0`'s values at the matrix sumcheck's final point (`mat_stars_hint`). -/
+  finalMatrixValues : E × E
 
 /-- The batching transcript's label (`RECURSION_AGG_LABEL`,
 `crates/aggregation/src/deferred.rs`). -/
@@ -101,6 +125,15 @@ def batchLambdaGrindBits : ℕ := grindingBits (2 * maxRecursions - 1)
 zero bits (`aggregate_deferred_claims`'s `messages`; `BC_LAM_WORDS`, `lean_ethereum.py`). -/
 def lambdaGrindNonceCells (hints : BatchingHints) : List E :=
   if batchLambdaGrindBits = 0 then [] else [hints.lambdaGrindNonce]
+
+/-- Research build: the bits of the proof of work before the matrix batch's challenge, whose powers
+weigh at most `3 · maxRecursions` claims (`MAT_LAM_GRIND_BITS`, `crates/aggregation/src/deferred.rs`). -/
+def matrixLambdaGrindBits : ℕ := grindingBits (3 * maxRecursions - 1)
+
+/-- Research build: the matrix batch's nonce in its messages, unless its proof of work is of zero
+bits (`matrix_batch`'s `messages`). -/
+def matrixGrindNonceCells (hints : BatchingHints) : List E :=
+  if matrixLambdaGrindBits = 0 then [] else [hints.matrixGrindNonce]
 
 /-- A round's cells in the batching's messages: `(g(1), g(∞))`. A round, of degree two, grinds
 `grindingBits 2` bits (`absorb_round`), zero at `securityBits = 125`, so it sends no nonce and

@@ -7,6 +7,7 @@ public import Statement.LeanDa
 public import Statement.Data.Bytecode
 public import Statement.Fast.Schemes
 public import Statement.CostMachine
+public import Statement.VaultStep
 
 /-!
 # The leanISA guest program: what a node proves
@@ -92,12 +93,16 @@ structure NodeClaims where
   sphincs : List LeanSphincsClaim
   /-- The DA digest. -/
   daDigest : Digest
-/-- A node's statement: its claims and its deferred claim. -/
+/-- A node's statement: its claims and its deferred claims. -/
 structure NodeStatement where
   /-- Its signature and DA claims. -/
   claims : NodeClaims
   /-- The claim on the bytecode it defers to its parent. -/
   deferredClaim : DeferredBytecodeClaim
+  /-- Research build: the claim on Flock's BLAKE3 matrices it defers to its parent. -/
+  matrixClaim : DeferredMatrixClaim
+  /-- Research build: the vault chain its step extends, if it proves one (`AggregateClaims::vault`). -/
+  vault : Option Vault.VaultChain
 
 /-! ## The statement's digest
 
@@ -141,13 +146,15 @@ def daClaimDigest (claim : DaClaim) : Digest :=
 def zeroDigest : Digest := Vector.replicate 4 0
 
 /-- The bytes `statementDigest seed statement` hashes: the seed, the leanXMSS and leanSPHINCS
-claims' digests, the DA digest, then the deferred claim's cells, each as its two lanes. Each list's
-digest binds its length through Keccak's padding. -/
+claims' digests, the DA digest, the vault chain's cells (research build), then the deferred
+claims' cells, the bytecode's then the matrices', each cell as its two lanes. Each list's digest
+binds its length through Keccak's padding. -/
 def statementPreimage (seed : Digest) (statement : NodeStatement) : List UInt8 :=
   digestBytes seed ++ digestBytes (claimListDigest xmssPublicKeyBytes statement.claims.xmss) ++
     digestBytes (claimListDigest Sphincs.PublicKey.toBytes statement.claims.sphincs) ++
     digestBytes statement.claims.daDigest ++
-    statement.deferredClaim.cells.flatMap E.toBytes
+    (Vault.vaultCells statement.vault).flatMap E.toBytes ++
+    (statement.deferredClaim.cells ++ statement.matrixClaim.cells).flatMap E.toBytes
 
 /-- **The statement's digest under `seed`**, a node's public input (`statement_digest`,
 `crates/aggregation/src/statement.rs`, `lean_ethereum.py`). The cells carry no lengths: the
@@ -181,6 +188,9 @@ structure Child where
   statement : NodeStatement
   /-- The claim on the bytecode its proof makes. -/
   freshClaim : BytecodeClaim
+  /-- Research build: its proof's Flock lincheck's matrix part, which the node takes as advice and
+  defers (`flock_matrix`; `FreshFlockClaim::matrix`, `crates/aggregation/src/deferred.rs`). -/
+  flockMatrix : E
   /-- Its proof. -/
   proof : Proof
 
@@ -198,6 +208,8 @@ structure NodeWitness where
   daMatrix : Option (DaClaim × Da.MatrixWitness)
   /-- The prover's part of the batching of the children's deferred claims. -/
   batchingHints : BatchingHints
+  /-- Research build: the vault step the node proves, if any (`aggregate_with_vault`'s `vault`). -/
+  vault : Option Vault.StepWitness
 
 /-- The deferred claim has the shape of the bytecode `bytecode`: a point of `log₂` of its length
 (`bytecode_vars`, `crates/aggregation/src/deferred.rs`; `BYTECODE_VARS`, `lean_ethereum.py`). -/
