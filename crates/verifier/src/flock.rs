@@ -412,3 +412,42 @@ pub fn verify_flock(log_n: usize, transcript: &mut Transcript) -> Result<FlockCl
     let zc = verify_flock_zerocheck(log_n, transcript)?;
     verify_flock_lincheck(zc, transcript)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The premise of Flock's fixed-coordinate zerocheck lemma, on the verifier's own constants: the `2^7` equality
+    /// weights `eq(a, b)` of the seven fixed coordinates are F2-linearly independent in `E`. Every value the
+    /// zerocheck sums over those coordinates is a bit, so a nonzero error there can never cancel: exact, whatever
+    /// the field's size, as long as `2^7` weights fit independently in its 128 dimensions over F2.
+    #[test]
+    fn fixed_weights_are_f2_independent() {
+        let a = fixed_challenges();
+        let mut rows: Vec<[u64; 2]> = (0..1usize << N_FIXED_CHALLENGES)
+            .map(|b| {
+                let w = a
+                    .iter()
+                    .enumerate()
+                    .fold(ONE, |acc, (i, &ai)| acc * if (b >> i) & 1 == 1 { ai } else { ONE + ai });
+                [w.c0, w.c1]
+            })
+            .collect();
+        let mut rank = 0;
+        for col in (0..128).rev() {
+            let (limb, mask) = (col / 64, 1u64 << (col % 64));
+            if let Some(p) = (rank..rows.len()).find(|&i| rows[i][limb] & mask != 0) {
+                rows.swap(rank, p);
+                let pivot = rows[rank];
+                for (i, row) in rows.iter_mut().enumerate() {
+                    if i != rank && row[limb] & mask != 0 {
+                        row[0] ^= pivot[0];
+                        row[1] ^= pivot[1];
+                    }
+                }
+                rank += 1;
+            }
+        }
+        assert_eq!(rank, 1 << N_FIXED_CHALLENGES);
+    }
+}

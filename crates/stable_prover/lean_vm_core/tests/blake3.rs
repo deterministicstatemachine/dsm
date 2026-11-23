@@ -322,3 +322,14 @@ fn bench_chain() {
         proof.to_bytes().len() as f64 / 1024.0
     );
 }
+
+/// The verifier fixes the zerocheck's seven constant coordinates itself; the prover's are the same seven, so the
+/// verifier's independence test (`verifier::flock`'s) is about the point every proof is checked at.
+#[test]
+fn fixed_zerocheck_coordinates_agree() {
+    use flock::zerocheck::univariate_skip_optimized::{medium_challenges, small_challenges};
+    let prover: Vec<(u64, u64)> =
+        small_challenges().iter().chain(medium_challenges().iter()).map(|c| (c.c0, c.c1)).collect();
+    let verifier: Vec<(u64, u64)> = verifier::flock::fixed_challenges().iter().map(|c| (c.c0, c.c1)).collect();
+    assert_eq!(prover, verifier);
+}
