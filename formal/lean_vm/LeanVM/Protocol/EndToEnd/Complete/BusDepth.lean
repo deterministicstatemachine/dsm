@@ -36,12 +36,12 @@ open LeanVM.Protocol.LeanIsa LeanVM.Protocol.EndToEnd LeanVM.Protocol.EndToEnd.F
 @[expose] public section
 
 /-- The committed columns of table `j` of the instance. -/
-def committedCount (j : Fin 9) : ℕ :=
+def committedCount (j : Fin 11) : ℕ :=
   ((List.finRange (width j)).filter fun i ↦ !decide (IsVirtual ⟨j, i⟩)).length
 
 /-- **The stack's blocks total**: `Σ_j (committed columns of j)·2^(height j)`. -/
 theorem blocks_total_eq_sum (prog : LeanIsaProgram) (s : Sizes) :
-    (blocks prog s).total = ∑ j : Fin 9, committedCount j * 2 ^ height prog s j := by
+    (blocks prog s).total = ∑ j : Fin 11, committedCount j * 2 ^ height prog s j := by
   rw [Blocks.total_eq_sum]
   have h1 : ∑ b : Fin (blocks prog s).n, 2 ^ (blocks prog s).size b =
       ((LeanIsa.stackOrder prog s).map fun c ↦ 2 ^ kappa prog s c).sum := by
@@ -59,33 +59,35 @@ theorem blocks_total_eq_sum (prog : LeanIsaProgram) (s : Sizes) :
 
 /-- **Each table pushes at most as many tuples per row as it commits columns.** -/
 theorem pushes_le_committed :
-    ∀ t : Fin 6, (refSide t .push).length ≤ committedCount ⟨t.val + 3, by omega⟩ := by
+    ∀ t : Fin 7, (refSide t .push).length ≤ committedCount ⟨t.val + 4, by omega⟩ := by
   decide +kernel
 
 /-- The framework's committed columns: three of the memory, one of the bytecode, one
 `QKECCAK`. -/
 theorem committedCount_framework :
-    committedCount 0 = 3 ∧ committedCount 1 = 1 ∧ committedCount 2 = 1 := by
+    committedCount 0 = 3 ∧ committedCount 1 = 1 ∧ committedCount 2 = 1 ∧ committedCount 3 = 1 := by
   decide +kernel
 
 /-- **The push side's leaves are at most the stack's committed cells.** -/
 theorem pushTotal_le_blocks (prog : LeanIsaProgram) (s : Sizes) :
     blockTotal (sideSizes (fwLogs prog s) (pushBlocks s)) ≤ (blocks prog s).total := by
-  have hsplit : ∑ j : Fin 9, committedCount j * 2 ^ height prog s j =
-      3 * 2 ^ s.logMem + (2 ^ prog.logSize + (2 ^ (s.τ 5 + 6) +
-        ∑ t : Fin 6, committedCount ⟨t.val + 3, by omega⟩ * 2 ^ s.τ t)) := by
-    rw [Fin.sum_univ_succ (n := 8), Fin.sum_univ_succ (n := 7), Fin.sum_univ_succ (n := 6)]
-    obtain ⟨c0, c1, c2⟩ := committedCount_framework
+  have hsplit : ∑ j : Fin 11, committedCount j * 2 ^ height prog s j =
+      3 * 2 ^ s.logMem + (2 ^ prog.logSize + (2 ^ (s.τ 5 + 6) + (2 ^ (s.τ 6 + 8) +
+        ∑ t : Fin 7, committedCount ⟨t.val + 4, by omega⟩ * 2 ^ s.τ t))) := by
+    rw [Fin.sum_univ_succ (n := 10), Fin.sum_univ_succ (n := 9), Fin.sum_univ_succ (n := 8),
+      Fin.sum_univ_succ (n := 7)]
+    obtain ⟨c0, c1, c2, c3⟩ := committedCount_framework
     simp only [Fin.succ_zero_eq_one, Fin.succ_one_eq_two, c0, c1, c2, one_mul]
+    rw [show (Fin.succ (2 : Fin 10) : Fin 11) = 3 from rfl, c3, one_mul]
     rfl
   rw [blockTotal_sideSizes, blocks_total_eq_sum, pushBlocks, sum_flatten_ofFn, hsplit]
   simp only [fwLogs, List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, pow_zero,
     List.map_map, Function.comp_def, List.map_const', List.sum_replicate, smul_eq_mul]
-  have ht : ∑ t : Fin 6, (refSide t .push).length * 2 ^ s.τ t ≤
-      ∑ t : Fin 6, committedCount ⟨t.val + 3, by omega⟩ * 2 ^ s.τ t :=
+  have ht : ∑ t : Fin 7, (refSide t .push).length * 2 ^ s.τ t ≤
+      ∑ t : Fin 7, committedCount ⟨t.val + 4, by omega⟩ * 2 ^ s.τ t :=
     Finset.sum_le_sum fun t _ ↦ Nat.mul_le_mul (pushes_le_committed t) le_rfl
   have hm : 1 ≤ 2 ^ s.logMem := Nat.one_le_two_pow
-  linarith [ht, hm, Nat.zero_le (2 ^ (s.τ 5 + 6))]
+  linarith [ht, hm, Nat.zero_le (2 ^ (s.τ 5 + 6)), Nat.zero_le (2 ^ (s.τ 6 + 8))]
 
 /-- **The push tree is no deeper than the stack.** -/
 theorem busDepth_le_leanIsaμ (prog : LeanIsaProgram) (s : Sizes) :

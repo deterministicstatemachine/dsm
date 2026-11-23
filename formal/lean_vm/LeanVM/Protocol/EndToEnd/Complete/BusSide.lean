@@ -246,10 +246,10 @@ def padSum (sideWeights : List E) (sideBeta : E) (point : List E) (l : List (E �
 
 /-- The invariant the fold keeps: the forms' shape, the other sides, the side's values. -/
 theorem accFold_spec (side : ℕ) (hside : side < 3) (w : List E) (β : E) :
-    ∀ (l : List (E × BusBlock)) (forms : List (List Form)), forms.length = 6 →
-      (∀ t < 6, (forms.getD t []).length = 3) → (∀ x ∈ l, x.2.owner < 6) →
-      (accFold side w β l forms).length = 6 ∧
-      (∀ t < 6, ((accFold side w β l forms).getD t []).length = 3) ∧
+    ∀ (l : List (E × BusBlock)) (forms : List (List Form)), forms.length = 7 →
+      (∀ t < 7, (forms.getD t []).length = 3) → (∀ x ∈ l, x.2.owner < 7) →
+      (accFold side w β l forms).length = 7 ∧
+      (∀ t < 7, ((accFold side w β l forms).getD t []).length = 3) ∧
       (∀ t side', side' ≠ side →
         ((accFold side w β l forms).getD t []).getD side' {} = (forms.getD t []).getD side' {}) ∧
       (∀ (t : ℕ) (col : ℕ → E),
@@ -258,16 +258,16 @@ theorem accFold_spec (side : ℕ) (hside : side < 3) (w : List E) (β : E) :
             ((l.filter fun x ↦ x.2.owner = t).map fun x ↦ x.1 * blockVal β w x.2 col).sum)
   | [], forms, h6, h3, _ => ⟨h6, h3, fun _ _ _ ↦ rfl, fun _ _ ↦ by simp [accFold]⟩
   | (sel, b) :: l, forms, h6, h3, hl => by
-    have hb : b.owner < 6 := hl (sel, b) (by simp)
+    have hb : b.owner < 7 := hl (sel, b) (by simp)
     set forms' := forms.modify b.owner fun row ↦ row.modify side fun f ↦
       f.addScaled (blockForm b w β) sel
     have hstep : accFold side w β ((sel, b) :: l) forms = accFold side w β l forms' := rfl
-    have h6' : forms'.length = 6 := by simp [forms', h6]
+    have h6' : forms'.length = 7 := by simp [forms', h6]
     have hrow : ∀ t, (forms'.getD t []) = if b.owner = t ∧ t < forms.length then
         (forms.getD t []).modify side (fun f ↦ f.addScaled (blockForm b w β) sel)
         else forms.getD t [] := fun t ↦
       getD_modify _ _ _ _ _
-    have h3' : ∀ t < 6, (forms'.getD t []).length = 3 := by
+    have h3' : ∀ t < 7, (forms'.getD t []).length = 3 := by
       intro t ht
       rw [hrow]; split_ifs <;> simp only [List.length_modify, h3 t ht]
     obtain ⟨r1, r2, r3, r4⟩ := accFold_spec side hside w β l forms' h6' h3'

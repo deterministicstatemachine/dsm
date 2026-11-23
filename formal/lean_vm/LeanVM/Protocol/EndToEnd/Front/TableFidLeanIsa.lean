@@ -109,16 +109,16 @@ theorem target_leanIsa (w : BusWit) (hp : w.point.length = (leanIsaWith prog s f
 
 /-! ## The verifier's final value, table by table -/
 
-/-- A list of six entries, listed. -/
-theorem list_six {α : Type} (l : List α) (d : α) (h : l.length = 6) :
-    l = [l.getD 0 d, l.getD 1 d, l.getD 2 d, l.getD 3 d, l.getD 4 d, l.getD 5 d] := by
+/-- A list of seven entries, listed. -/
+theorem list_six {α : Type} (l : List α) (d : α) (h : l.length = 7) :
+    l = [l.getD 0 d, l.getD 1 d, l.getD 2 d, l.getD 3 d, l.getD 4 d, l.getD 5 d, l.getD 6 d] := by
   match l, h with
-  | [a, b, c, e, f, g], _ => rfl
+  | [a, b, c, e, f, g, i], _ => rfl
 
-/-- The verifier's shape of the bus phase's forms: six tables, three sides each. -/
+/-- The verifier's shape of the bus phase's forms: seven tables, three sides each. -/
 theorem result_forms_shape (w : BusWit) :
-    (w.result (verifierLayout prog s)).forms.length = 6 ∧
-      ∀ t < 6, ((w.result (verifierLayout prog s)).forms.getD t []).length = 3 := by
+    (w.result (verifierLayout prog s)).forms.length = 7 ∧
+      ∀ t < 7, ((w.result (verifierLayout prog s)).forms.getD t []).length = 3 := by
   rw [result_forms]
   obtain ⟨a1, a2, -, -⟩ := Complete.accFold_spec 0 (by norm_num) (w.alphas) w.beta
     _ _ Complete.forms0_length Complete.forms0_row
@@ -130,7 +130,7 @@ theorem result_forms_shape (w : BusWit) :
   exact ⟨c1, c2⟩
 
 /-- The constraints' part of table `t` in the verifier's final value: only `JUMP` has any. -/
-def refCons (ξ : E) (t : Fin 6) (ev : List E) : E :=
+def refCons (ξ : E) (t : Fin 7) (ev : List E) : E :=
   if t = 4 then dot [1, ξ] (jumpConstraints ev) else 0
 
 /-- The forms' part of table `t` in the verifier's final value. -/
@@ -150,25 +150,25 @@ theorem dot_fpsOf (ξ : E) (fs : List Form) (hfs : fs.length = 3) (col : ℕ →
   interval_cases k <;> rfl
 
 /-- Table `t`'s row of the final loop. -/
-def refRow (bus : BusResult) (pt : List E) (t : Fin 6) : Table × ℕ × List Form × E :=
+def refRow (bus : BusResult) (pt : List E) (t : Fin 7) : Table × ℕ × List Form × E :=
   (tables.getD t default, s.τ t, bus.forms.getD t [],
     (tableWeights (tableLogs s) bus.point pt).getD t 0)
 
 /-- The rows of the final loop, listed. -/
-theorem rowsOf_eq (bus : BusResult) (hf : bus.forms.length = 6) (pt : List E) :
+theorem rowsOf_eq (bus : BusResult) (hf : bus.forms.length = 7) (pt : List E) :
     rowsOf (verifierLayout prog s) bus pt =
       [refRow s bus pt 0, refRow s bus pt 1, refRow s bus pt 2, refRow s bus pt 3, refRow s bus pt 4,
-        refRow s bus pt 5] := by
-  have hw : (tableWeights (tableLogs s) bus.point pt).length = 6 := by
+        refRow s bus pt 5, refRow s bus pt 6] := by
+  have hw : (tableWeights (tableLogs s) bus.point pt).length = 7 := by
     rw [Complete.length_tableWeights]; rfl
-  have ht : tables.length = 6 := rfl
-  have hl : (tableLogs s).length = 6 := by simp [tableLogs]
+  have ht : tables.length = 7 := rfl
+  have hl : (tableLogs s).length = 7 := by simp [tableLogs]
   unfold rowsOf refRow
   rw [show (verifierLayout prog s).tableLogHeights = tableLogs s from rfl]
   generalize tableWeights (tableLogs s) bus.point pt = W at hw ⊢
   apply List.ext_getElem (by simp [ht, hw, hf, hl])
   intro i h1 h2
-  have hi : i < 6 := by simpa using h2
+  have hi : i < 7 := by simpa using h2
   simp only [List.getElem_zip]
   interval_cases i <;> simp [List.getD_eq_getElem?_getD, hw, hf, ht, tableLogs]
 
@@ -177,34 +177,35 @@ theorem refTableTerms_eq (w : BusWit) (ξ : E) (pt : List E) (evs : List (List E
     (hs : ReadShape (rowsOf (verifierLayout prog s) (w.result (verifierLayout prog s)) pt) evs) :
     (refTableTerms (cpsOf ξ) (fpsOf ξ) pt
         (rowsOf (verifierLayout prog s) (w.result (verifierLayout prog s)) pt) evs 0 0 []).1 =
-      ∑ t : Fin 6, (tableWeights (tableLogs s) w.point pt).getD t 0 *
+      ∑ t : Fin 7, (tableWeights (tableLogs s) w.point pt).getD t 0 *
         (refCons ξ t (evs.getD t []) +
           refForms ξ ((w.result (verifierLayout prog s)).forms.getD t []) (evs.getD t [])) := by
   obtain ⟨hf6, hf3⟩ := result_forms_shape prog s w
   set bus := w.result (verifierLayout prog s) with hbus
   have hrows := rowsOf_eq prog s bus hf6 pt
-  have hev : evs.length = 6 := by
+  have hev : evs.length = 7 := by
     have := hs.length_eq
     rw [hrows] at this
     simpa using this.symm
   rw [hrows] at hs ⊢
   rw [list_six evs [] hev] at hs ⊢
-  have e0 : ∀ ev, (tables.getD ((0 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e1 : ∀ ev, (tables.getD ((1 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e2 : ∀ ev, (tables.getD ((2 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e3 : ∀ ev, (tables.getD ((3 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e5 : ∀ ev, (tables.getD ((5 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e4 : (tables.getD ((4 : Fin 6) : ℕ) default).constraints = jumpConstraints := rfl
-  have n0 : (tables.getD ((0 : Fin 6) : ℕ) default).nConstraints = 0 := rfl
-  have n1 : (tables.getD ((1 : Fin 6) : ℕ) default).nConstraints = 0 := rfl
-  have n2 : (tables.getD ((2 : Fin 6) : ℕ) default).nConstraints = 0 := rfl
-  have n3 : (tables.getD ((3 : Fin 6) : ℕ) default).nConstraints = 0 := rfl
-  have n4 : (tables.getD ((4 : Fin 6) : ℕ) default).nConstraints = 2 := rfl
+  have e0 : ∀ ev, (tables.getD ((0 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e1 : ∀ ev, (tables.getD ((1 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e2 : ∀ ev, (tables.getD ((2 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e3 : ∀ ev, (tables.getD ((3 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e5 : ∀ ev, (tables.getD ((5 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e6 : ∀ ev, (tables.getD ((6 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e4 : (tables.getD ((4 : Fin 7) : ℕ) default).constraints = jumpConstraints := rfl
+  have n0 : (tables.getD ((0 : Fin 7) : ℕ) default).nConstraints = 0 := rfl
+  have n1 : (tables.getD ((1 : Fin 7) : ℕ) default).nConstraints = 0 := rfl
+  have n2 : (tables.getD ((2 : Fin 7) : ℕ) default).nConstraints = 0 := rfl
+  have n3 : (tables.getD ((3 : Fin 7) : ℕ) default).nConstraints = 0 := rfl
+  have n4 : (tables.getD ((4 : Fin 7) : ℕ) default).nConstraints = 2 := rfl
   have hpt : bus.point = w.point := rfl
-  simp only [refTableTerms, refRow, e0, e1, e2, e3, e4, e5, n0, n1, n2, n3, n4, hpt,
-    Whir.Complete.dot_nil_right, add_zero, zero_add, List.drop_zero, Fin.sum_univ_six, refCons,
+  simp only [refTableTerms, refRow, e0, e1, e2, e3, e4, e5, e6, n0, n1, n2, n3, n4, hpt,
+    Whir.Complete.dot_nil_right, add_zero, zero_add, List.drop_zero, Fin.sum_univ_seven, refCons,
     refForms]
-  have hd : ∀ (t : Fin 6) (col : ℕ → E),
+  have hd : ∀ (t : Fin 7) (col : ℕ → E),
       dot (fpsOf ξ) ((bus.forms.getD t []).map (·.evaluate col)) =
       ∑ k ∈ range 3, ξ ^ (2 + k) * ((bus.forms.getD t []).getD k {}).evaluate col :=
     fun t col ↦ dot_fpsOf _ _ (hf3 t t.isLt) col
@@ -221,7 +222,7 @@ theorem eq_factor (a b : E) : (1 - a) * (1 - b) + a * b = 1 + b + a := by
 /-- **The weights**: the protocol's weight of opcode table `t` at the reversed challenges is the
 verifier's. -/
 theorem prodWeight_eq (w : BusWit) (ch : List E)
-    (hch : ch.length = (leanIsaWith prog s fl).τmax) (t : Fin 6) :
+    (hch : ch.length = (leanIsaWith prog s fl).τmax) (t : Fin 7) :
     prodWeight (tableWeights (leanIsaWith prog s fl)
         (busStmt (leanIsaWith prog s fl) (leanIsaWith_conditions prog s fl) input w).2.point
         (stEquiv prog s fl t)) (vecOf _ ch).reverse =
@@ -269,42 +270,42 @@ theorem flatten_getD : ∀ (l : List (List E)) (t i : ℕ), t < l.length → i <
 
 /-- A prefix sum over the instance's tables, kept on the sumcheck tables, as a sum over the
 opcode tables before. -/
-theorem prefix_onSumcheck (f : Fin (leanIsaWith prog s fl).ntab → ℕ) (t : Fin 6) :
+theorem prefix_onSumcheck (f : Fin (leanIsaWith prog s fl).ntab → ℕ) (t : Fin 7) :
     ∑ j : Fin (stEquiv prog s fl t).1.val,
         onSumcheck (leanIsaWith prog s fl) f (Fin.castLE (stEquiv prog s fl t).1.isLt.le j) =
-      ∑ u ∈ range t, if h : u < 6 then f (opI prog s fl ⟨u, h⟩) else 0 := by
-  let G : ℕ → ℕ := fun k ↦ if h : k < 9 then onSumcheck (leanIsaWith prog s fl) f ⟨k, h⟩ else 0
+      ∑ u ∈ range t, if h : u < 7 then f (opI prog s fl ⟨u, h⟩) else 0 := by
+  let G : ℕ → ℕ := fun k ↦ if h : k < 11 then onSumcheck (leanIsaWith prog s fl) f ⟨k, h⟩ else 0
   have hL : ∑ j : Fin (stEquiv prog s fl t).1.val,
       onSumcheck (leanIsaWith prog s fl) f (Fin.castLE (stEquiv prog s fl t).1.isLt.le j) =
-        ∑ k ∈ range (3 + t), G k := by
-    rw [show 3 + t.val = (stEquiv prog s fl t).1.val by simp [opIdx]; omega,
+        ∑ k ∈ range (4 + t), G k := by
+    rw [show 4 + t.val = (stEquiv prog s fl t).1.val by simp [opIdx]; omega,
       ← Fin.sum_univ_eq_sum_range]
     refine Finset.sum_congr rfl fun j _ ↦ ?_
-    have hj : j.val < 9 := lt_trans j.isLt (stEquiv prog s fl t).1.isLt
+    have hj : j.val < 11 := lt_trans j.isLt (stEquiv prog s fl t).1.isLt
     simp only [G, hj, dite_true]
     rfl
   rw [hL, Finset.sum_range_add]
-  have h0 : ∑ k ∈ range 3, G k = 0 := Finset.sum_eq_zero fun k hk ↦ by
+  have h0 : ∑ k ∈ range 4, G k = 0 := Finset.sum_eq_zero fun k hk ↦ by
     have hk' := Finset.mem_range.mp hk
-    simp only [G, show k < 9 by omega, dite_true, onSumcheck]
+    simp only [G, show k < 11 by omega, dite_true, onSumcheck]
     exact ite_eq_right_iff.mpr fun hs ↦
       absurd (three_le_of_sumcheckTable prog s _ hs) (by simp; omega)
   rw [h0, zero_add]
   refine Finset.sum_congr rfl fun u hu ↦ ?_
-  have hu' : u < 6 := lt_of_lt_of_le (Finset.mem_range.mp hu) (by omega)
-  have he : (⟨3 + u, by show 3 + u < 9; omega⟩ : Fin (leanIsaWith prog s fl).ntab) =
+  have hu' : u < 7 := lt_of_lt_of_le (Finset.mem_range.mp hu) (by omega)
+  have he : (⟨4 + u, by show 4 + u < 11; omega⟩ : Fin (leanIsaWith prog s fl).ntab) =
       opI prog s fl ⟨u, hu'⟩ :=
     Fin.ext (by simp [opI, opIdx]; omega)
   have hst : (leanIsaWith prog s fl).SumcheckTable (opI prog s fl ⟨u, hu'⟩) :=
     sumcheckTable_opIdx prog s ⟨u, hu'⟩
-  simp only [G, show 3 + u < 9 by omega, dite_true, hu', onSumcheck]
+  simp only [G, show 4 + u < 11 by omega, dite_true, hu', onSumcheck]
   rw [he]
   simp only [hst, ↓reduceIte]
 
 /-- **The values read are the protocol's**: column `i` of opcode table `t` among the values of all
 the columns is entry `i` of table `t`'s read. -/
-theorem tableValues_eq (evs : List (List E)) (hlen : evs.length = 6)
-    (hw : ∀ t : Fin 6, (evs.getD t []).length = width (opIdx t)) (t : Fin 6)
+theorem tableValues_eq (evs : List (List E)) (hlen : evs.length = 7)
+    (hw : ∀ t : Fin 7, (evs.getD t []).length = width (opIdx t)) (t : Fin 7)
     (i : Fin ((leanIsaWith prog s fl).width (stEquiv prog s fl t).1)) :
     tableValues (leanIsaWith prog s fl) (vecOf _ evs.flatten) (stEquiv prog s fl t) i =
       (evs.getD t []).getD i 0 := by
@@ -312,10 +313,10 @@ theorem tableValues_eq (evs : List (List E)) (hlen : evs.length = 6)
   simp only [vecOf, Fin.getElem_fin, Vector.getElem_ofFn]
   rw [show (((columnPos (leanIsaWith prog s fl)) ⟨stEquiv prog s fl t, i⟩ : Fin _) : ℕ) = _
     from position_val _ _ _, prefix_onSumcheck]
-  have hsum : ∑ u ∈ range t, (if h : u < 6 then
+  have hsum : ∑ u ∈ range t, (if h : u < 7 then
       (leanIsaWith prog s fl).width (opI prog s fl ⟨u, h⟩) else 0) =
       ∑ u ∈ range t, (evs.getD u []).length := Finset.sum_congr rfl fun u hu ↦ by
-    have hu' : u < 6 := lt_of_lt_of_le (Finset.mem_range.mp hu) (by omega)
+    have hu' : u < 7 := lt_of_lt_of_le (Finset.mem_range.mp hu) (by omega)
     simp only [hu', ↓reduceDIte]
     exact (hw ⟨u, hu'⟩).symm
   rw [hsum]
@@ -333,14 +334,14 @@ theorem sum_fin_length {α : Type} (l : List α) (c : ℕ) (ξ : E) (g : α → 
   rfl
 
 /-- The constraints of opcode table `t`, batched by `ξ` at their positions, are the verifier's. -/
-theorem consPart_eq (ξ : E) (t : Fin 6)
+theorem consPart_eq (ξ : E) (t : Fin 7)
     (e : Fin ((leanIsaWith prog s fl).width (stEquiv prog s fl t).1) → E) (ev : List E)
     (hev : ∀ i, ev.getD i 0 = rowE e i) :
     ∑ i : Fin ((leanIsaWith prog s fl).constraints (stEquiv prog s fl t).1).length,
         ξ ^ (constraintPos (leanIsaWith prog s fl) ⟨stEquiv prog s fl t, i⟩ : ℕ) *
           evalRow ((leanIsaWith prog s fl).constraints (stEquiv prog s fl t).1)[i] e =
       refCons ξ t ev := by
-  let c₀ := ∑ u ∈ range t, if h : u < 6 then
+  let c₀ := ∑ u ∈ range t, if h : u < 7 then
     ((leanIsaWith prog s fl).constraints (opI prog s fl ⟨u, h⟩)).length else 0
   have hpos : ∀ i, (constraintPos (leanIsaWith prog s fl) ⟨stEquiv prog s fl t, i⟩ : ℕ) =
       c₀ + i := fun i ↦ by
@@ -356,7 +357,7 @@ theorem consPart_eq (ξ : E) (t : Fin 6)
       simp only [c₀]
       refine Finset.sum_eq_zero fun u hu ↦ ?_
       have hu' : u < 4 := Finset.mem_range.mp hu
-      simp only [show u < 6 by omega, ↓reduceDIte]
+      simp only [show u < 7 by omega, ↓reduceDIte]
       have := constraints_opIdx_length ⟨u, by omega⟩
       rw [ite_eq_right_of_eq_false _ _
         (eq_false fun h ↦ by have := congrArg Fin.val h; simp at this; omega)]
@@ -374,7 +375,7 @@ theorem consPart_eq (ξ : E) (t : Fin 6)
 /-- **What a table owes is the verifier's**: at values `e` of opcode table `t`'s columns, read as
 `ev`, the protocol's constraints and forms batched by `ξ` are the verifier's. -/
 theorem rowValue_eq (w : BusWit) (hp : w.point.length = (leanIsaWith prog s fl).μBus)
-    (ha : w.alphas.length = 16) (ξ : E) (t : Fin 6)
+    (ha : w.alphas.length = 16) (ξ : E) (t : Fin 7)
     (e : Fin ((leanIsaWith prog s fl).width (stEquiv prog s fl t).1) → E) (ev : List E)
     (hev : ∀ i, ev.getD i 0 = rowE e i) :
     rowValue (leanIsaWith prog s fl)
@@ -396,10 +397,10 @@ theorem rowValue_eq (w : BusWit) (hp : w.point.length = (leanIsaWith prog s fl).
 
 /-! ## The formula -/
 
-/-- What a read of the right shape is: six lists, one per table, of the table's width. -/
+/-- What a read of the right shape is: seven lists, one per table, of the table's width. -/
 theorem readShape_facts (w : BusWit) (pt : List E) (evs : List (List E))
     (hs : ReadShape (rowsOf (verifierLayout prog s) (w.result (verifierLayout prog s)) pt) evs) :
-    evs.length = 6 ∧ ∀ t : Fin 6, (evs.getD t []).length = width (opIdx t) := by
+    evs.length = 7 ∧ ∀ t : Fin 7, (evs.getD t []).length = width (opIdx t) := by
   rw [rowsOf_eq prog s _ (result_forms_shape prog s w).1] at hs
   have hl := hs.length_eq
   simp only [List.length_cons, List.length_nil] at hl
@@ -584,11 +585,11 @@ theorem tableFid_leanIsa (hI : Bus.Conditions (leanIsaWith prog s fl)) (w : BusW
     · exact List.mem_append_right _ (finalClaims_mem prog s ξ w ch evs hch hs c hc)
   rows pt := by
     apply List.ne_nil_of_length_pos
-    have hh : (verifierLayout prog s).tableLogHeights.length = 6 := by
+    have hh : (verifierLayout prog s).tableLogHeights.length = 7 := by
       rw [show (verifierLayout prog s).tableLogHeights = tableLogs s from rfl]
       simp [tableLogs]
     simp only [rowsOf, List.length_zip, Complete.length_tableWeights, (result_forms_shape prog s w).1,
-      hh, show tables.length = 6 from rfl]
+      hh, show tables.length = 7 from rfl]
     norm_num
 
 /-! ## The bus phase's depth -/

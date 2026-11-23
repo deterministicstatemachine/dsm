@@ -40,7 +40,7 @@ open LeanVM.Protocol.EndToEnd.Front LeanVM.Protocol.EndToEnd.Complete
 /-! ## The push side's leaves -/
 
 /-- Each opcode table pushes as often in the verifier's tables as in the instance. -/
-theorem length_pySide_push (t : Fin 6) :
+theorem length_pySide_push (t : Fin 7) :
     (refSide t .push).length =
       ((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = Side.push)).length := by
   have h := congrArg List.length (refFlush_eval t .push fun _ ↦ 0)
@@ -50,7 +50,7 @@ theorem length_pySide_push (t : Fin 6) :
 table's push flushes. -/
 theorem pushLeaves_leanIsa (prog : LeanIsaProgram) (s : Sizes) :
     (leanIsaInstance prog s).pushLeaves = (1 + 2 ^ s.logMem + 2 ^ prog.logSize) +
-      ∑ t : Fin 6, ((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = Side.push)).length *
+      ∑ t : Fin 7, ((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = Side.push)).length *
         2 ^ s.τ t := by
   rw [M3Instance.pushLeaves, ← List.ofFn_eq_map, List.sum_ofFn]
   congr 1
@@ -59,13 +59,14 @@ theorem pushLeaves_leanIsa (prog : LeanIsaProgram) (s : Sizes) :
       reduceCtorEq, ite_true, ite_false, List.map_cons, List.map_nil, List.sum_cons, List.sum_nil,
       pow_zero]
     omega
-  · show ∑ j : Fin 9, ((LeanIsa.flushes j).filter fun f ↦ decide (f.1 = Side.push)).length *
+  · show ∑ j : Fin 11, ((LeanIsa.flushes j).filter fun f ↦ decide (f.1 = Side.push)).length *
         2 ^ height prog s j = _
-    rw [Fin.sum_univ_succ, Fin.sum_univ_succ, Fin.sum_univ_succ]
-    have h0 : LeanIsa.flushes (0 : Fin 9) = [] := rfl
-    have h1 : LeanIsa.flushes (Fin.succ 0 : Fin 9) = [] := rfl
-    have h2 : LeanIsa.flushes ((Fin.succ 0).succ : Fin 9) = [] := rfl
-    simp only [h0, h1, h2, List.filter_nil, List.length_nil, zero_mul, zero_add]
+    rw [Fin.sum_univ_succ, Fin.sum_univ_succ, Fin.sum_univ_succ, Fin.sum_univ_succ]
+    have h0 : LeanIsa.flushes (0 : Fin 11) = [] := rfl
+    have h1 : LeanIsa.flushes (Fin.succ 0 : Fin 11) = [] := rfl
+    have h2 : LeanIsa.flushes ((Fin.succ 0).succ : Fin 11) = [] := rfl
+    have h3 : LeanIsa.flushes (((Fin.succ 0).succ).succ : Fin 11) = [] := rfl
+    simp only [h0, h1, h2, h3, List.filter_nil, List.length_nil, zero_mul, zero_add]
     rfl
 
 /-- The push side's stacked total at the verifier's layout is the instance's push leaves. -/
@@ -86,8 +87,8 @@ theorem busLayout_depth_leanIsa (prog : LeanIsaProgram) (s : Sizes) :
   rw [busLayout_depth_verifier, busDepth, log2Ceil_eq_clog, blockTotal_push_eq_pushLeaves]
   rfl
 
-/-- The instance's constraint counts: `JUMP` (table `7`) has two, the others none. -/
-theorem length_constraints : ∀ j : Fin 9,
+/-- The instance's constraint counts: `JUMP` (table `8`) has two, the others none. -/
+theorem length_constraints : ∀ j : Fin 11,
     (LeanIsa.constraints j).length = if j = opIdx 4 then 2 else 0 := by
   decide +kernel
 
@@ -98,7 +99,7 @@ theorem B_leanIsa (prog : LeanIsaProgram) (s : Sizes) :
   have hsub : I.B = ∑ j ∈ Finset.univ.filter I.SumcheckTable, (I.constraints j).length :=
     (Finset.sum_subtype _ (by simp) (fun j ↦ (I.constraints j).length)).symm
   have hfil : ∑ j ∈ Finset.univ.filter I.SumcheckTable, (I.constraints j).length =
-      ∑ j : Fin 9, (LeanIsa.constraints j).length :=
+      ∑ j : Fin 11, (LeanIsa.constraints j).length :=
     Finset.sum_filter_of_ne fun _ _ hj ↦
       Or.inl (List.ne_nil_of_length_pos (Nat.pos_of_ne_zero hj))
   rw [show (leanIsaInstance prog s).B = I.B from rfl, hsub, hfil,

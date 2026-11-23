@@ -80,7 +80,7 @@ theorem busGrindLE_twentySeven {prog : LeanIsaProgram} {logMemory : ℕ} {rows :
     {layout : Verifier.Layout} (h : buildLayout (bytecodeWords prog) logMemory rows = some layout)
     (hmax : layout.stackLog ≤ Whir.maxLogStack) : Sound.BusGrindLE 27 layout := by
   intro _
-  have hc : rows.length = 6 ∧ 1 ≤ logMemory := by
+  have hc : rows.length = 7 ∧ 1 ≤ logMemory := by
     unfold buildLayout at h
     split at h
     · cases h

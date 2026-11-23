@@ -99,11 +99,11 @@ theorem μBus_le_of_admissible {prog : LeanIsaProgram} {s : Sizes} (hs : s.Admis
   have hτ : ∀ t, s.τ t ≤ 30 := fun t ↦
     max_le (Nat.clog_le_of_le_pow (hs.2.2.1 t))
       (by fin_cases t <;> decide +kernel)
-  have hc : ∀ t : Fin 6,
+  have hc : ∀ t : Fin 7,
       ((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = Side.push)).length ≤ 64 := by
     decide +kernel
-  have hsum : ∑ t : Fin 6, ((LeanIsa.flushes (opIdx t)).filter fun f ↦
-      decide (f.1 = Side.push)).length * 2 ^ s.τ t ≤ ∑ _t : Fin 6, 64 * 2 ^ 30 :=
+  have hsum : ∑ t : Fin 7, ((LeanIsa.flushes (opIdx t)).filter fun f ↦
+      decide (f.1 = Side.push)).length * 2 ^ s.τ t ≤ ∑ _t : Fin 7, 64 * 2 ^ 30 :=
     Finset.sum_le_sum fun t _ ↦
       Nat.mul_le_mul (hc t) (Nat.pow_le_pow_right (by norm_num) (hτ t))
   have hm : 2 ^ s.logMem ≤ 2 ^ 30 := Nat.pow_le_pow_right (by norm_num) hs.2.1
@@ -158,9 +158,9 @@ noncomputable def keccakPart (hS1 : S.ncard ≤ 1) {T : ℝ≥0∞} (hT : T ≤ 
 
 open Classical in
 /-- **The public input at the table sumcheck's point `pt`, then the Keccak reduction**, after at
-most `157` claims of the table phase. -/
+most `215` claims of the table phase. -/
 noncomputable def pubPart (hS1 : S.ncard ≤ 1) {T : ℝ≥0∞} (hT : T ≤ εmsg)
-    (cl : List Verifier.ColumnClaim) (hcl : cl.length ≤ 157)
+    (cl : List Verifier.ColumnClaim) (hcl : cl.length ≤ 215)
     (pt : Vector E (leanIsaInstance prog s).τmax) :
     Spec ((Verifier.publicInputPhase (verifierLayout prog s) (publicInputDigest input)).bind
         fun pc ↦ keccakPhaseClaims (verifierLayout prog s) (cl ++ pc))
@@ -241,14 +241,14 @@ noncomputable def frontSpecAt (hs : s.Admissible prog) (hS : S.Finite) (hS1 : S.
         (candsS prog s S) (candsS_finite hS) (candsS_ncard hS hS1) he.1 he.2.1 he.2.2.1
         he.2.2.2.1 he.2.2.2.2.1 he.2.2.2.2.2.1 he.2.2.2.2.2.2.1 he.2.2.2.2.2.2.2.1
         he.2.2.2.2.2.2.2.2)
-      (fun cl ↦ cl.length ≤ 157) (retOK_busTable _ _)).mono
+      (fun cl ↦ cl.length ≤ 215) (retOK_busTable _ _)).mono
       (Pre' := fun h ↦ (∃ W, firstWord h = some W) ∧
         ∀ q ∈ S, ¬ M3Holds (leanIsaInstance prog s) input (toI prog s q))
       (fun _ hp ↦ by
         obtain ⟨⟨W, hW⟩, hd⟩ := hp
         exact ⟨W, hW, by rintro _ ⟨q, hq, rfl⟩ hin; exact hd q hq hin⟩)
       (fun _ _ h ↦ h) le_rfl (grindLead_le_of_discount he.2.1) le_rfl).bind' fun cl ↦
-    if hcl : cl.length ≤ 157 then
+    if hcl : cl.length ≤ 215 then
       (Spec.exPre fun pt ↦ pubPart input hS1 hT cl hcl pt).mono
         (fun h hp ↦ tablePost_pubPre prog s (candsS prog s S) input (CS prog s S)
           (fun _ q hq _ _ ↦ ⟨q, hq, rfl⟩) cl h hp.1) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl

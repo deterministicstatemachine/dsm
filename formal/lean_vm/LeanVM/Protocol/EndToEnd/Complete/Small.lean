@@ -128,19 +128,19 @@ theorem exists_admissible_witness {prog : LeanIsaProgram} {input : PublicInput} 
   obtain ⟨hpos, rfl⟩ := eq_of_ofWitness hs
   -- The sizes: the trace's memory, and each table's row count that of the run.
   have hmem : (witnessSizes w hpos).logMem = t.logMemorySize := hrep.κ_eq
-  have hr : ∀ j : Fin 6, (witnessSizes w hpos).rows j = t.opcodeCount (tableOpcode j) := fun j ↦
+  have hr : ∀ j : Fin 7, (witnessSizes w hpos).rows j = t.opcodeCount (tableOpcode j) := fun j ↦
     (hlen j).trans (hcount _).symm
   have htotal : (LeanIsa.blocks prog (witnessSizes w hpos)).total = t.committedSize := by
     have e : tableOpcode 0 = .xor ∧ tableOpcode 1 = .mulNative ∧ tableOpcode 2 = .setConstant ∧
         tableOpcode 3 = .deref ∧ tableOpcode 4 = .jump ∧ tableOpcode 5 = .keccak := by decide
     rw [blocks_total_eq, hmem, pow_add 2 _ 6]
     simp only [Sizes.τ, hr, e, Execution.committedSize]
-    have f0 : tableLogFloors.getD ((0 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f1 : tableLogFloors.getD ((1 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f2 : tableLogFloors.getD ((2 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f3 : tableLogFloors.getD ((3 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f4 : tableLogFloors.getD ((4 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f5 : tableLogFloors.getD ((5 : Fin 6) : ℕ) 0 = 9 := rfl
+    have f0 : tableLogFloors.getD ((0 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f1 : tableLogFloors.getD ((1 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f2 : tableLogFloors.getD ((2 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f3 : tableLogFloors.getD ((3 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f4 : tableLogFloors.getD ((4 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f5 : tableLogFloors.getD ((5 : Fin 7) : ℕ) 0 = 9 := rfl
     simp only [f0, f1, f2, f3, f4, f5, Nat.max_zero]
     ring
   refine ⟨?_, ?_, fun j ↦ (hr j).trans_le (by rw [hcount]; exact hrows _), ?_⟩

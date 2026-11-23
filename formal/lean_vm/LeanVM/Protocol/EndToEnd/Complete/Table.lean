@@ -113,18 +113,18 @@ section Honest
 variable (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ prog s))
 
 /-- Column `i` of opcode table `t` read off the stack, lifted to `E`: `2^τ_t` entries. -/
-def tableColList (t : Fin 6) (i : Fin (width (opIdx t))) : List E :=
+def tableColList (t : Fin 7) (i : Fin (width (opIdx t))) : List E :=
   ((inst prog s).column q ⟨opIdx t, i⟩).values.toList.map ofK
 
 /-- A column has `2^τ_t` entries. -/
-theorem length_tableColList (t : Fin 6) (i : Fin (width (opIdx t))) :
+theorem length_tableColList (t : Fin 7) (i : Fin (width (opIdx t))) :
     (tableColList prog s q t i).length = 2 ^ s.τ t := by
   simp only [tableColList, List.length_map, Vector.length_toList]
   rfl
 
 /-- The honest evaluations of table `t` at a point: every column's extension at the point's first
 `τ_t` coordinates. -/
-def evalsAt (t : Fin 6) (r : List E) : List E :=
+def evalsAt (t : Fin 7) (r : List E) : List E :=
   (List.finRange (width (opIdx t))).map fun i ↦
     multilinearEval (tableColList prog s q t i) (r.take (s.τ t))
 
@@ -133,7 +133,7 @@ def nRounds : ℕ := (tableLogs s).foldl max 0
 
 /-- What the verifier's loop reads for table `t` at the point `r`: the table, its height, its
 bus forms and its weight, and the honest evaluations. -/
-def tableRow (bus : BusResult) (r : List E) (t : Fin 6) :
+def tableRow (bus : BusResult) (r : List E) (t : Fin 7) :
     (Table × ℕ × List Form × E) × List E :=
   ((tables.getD t default, s.τ t, bus.forms.getD t [],
     (tableWeights (tableLogs s) bus.point r).getD t 0), evalsAt prog s q t r)
@@ -141,11 +141,12 @@ def tableRow (bus : BusResult) (r : List E) (t : Fin 6) :
 /-- The six tables' rows, in table order. -/
 def pairsAt (bus : BusResult) (r : List E) : List ((Table × ℕ × List Form × E) × List E) :=
   [tableRow prog s q bus r 0, tableRow prog s q bus r 1, tableRow prog s q bus r 2,
-    tableRow prog s q bus r 3, tableRow prog s q bus r 4, tableRow prog s q bus r 5]
+    tableRow prog s q bus r 3, tableRow prog s q bus r 4, tableRow prog s q bus r 5,
+    tableRow prog s q bus r 6]
 
-/-- The tables' claims are one per column, `153` of them. -/
+/-- The tables' claims are one per column, `211` of them. -/
 theorem length_termsPure_pairsAt (bus : BusResult) (cp fp r : List E) :
-    (termsPure cp fp r (pairsAt prog s q bus r) 0 0 []).2.length = 153 := by
+    (termsPure cp fp r (pairsAt prog s q bus r) 0 0 []).2.length = 211 := by
   rw [termsPure_snd]
   simp only [pairsAt, tableRow, evalsAt, List.flatMap_cons, List.flatMap_nil, List.length_append,
     List.length_map, List.length_zipIdx, List.length_finRange, List.nil_append, List.append_nil]
@@ -157,31 +158,32 @@ def summand (cp fp : List E) (bus : BusResult) (r : List E) : E :=
   (termsPure cp fp r (pairsAt prog s q bus r) 0 0 []).1
 
 /-- The forms of table `t` evaluated at the evaluations `ev`, batched by the form powers. -/
-def formPart (fp : List E) (bus : BusResult) (t : Fin 6) (ev : List E) : E :=
+def formPart (fp : List E) (bus : BusResult) (t : Fin 7) (ev : List E) : E :=
   dot fp ((bus.forms.getD t []).map (·.evaluate (ev.getD · 0)))
 
 /-- The constraints of table `t` at the evaluations `ev`, batched: only `JUMP` has any. -/
-def consPart (cp : List E) (t : Fin 6) (ev : List E) : E :=
+def consPart (cp : List E) (t : Fin 7) (ev : List E) : E :=
   if t = 4 then dot (cp.take 2) (jumpConstraints ev) else 0
 
 /-- The honest summand, table by table: weight times constraints and forms. -/
 theorem summand_eq (cp fp : List E) (bus : BusResult) (r : List E) :
-    summand prog s q cp fp bus r = ∑ t : Fin 6,
+    summand prog s q cp fp bus r = ∑ t : Fin 7,
       (tableWeights (tableLogs s) bus.point r).getD t 0 *
         (consPart cp t (evalsAt prog s q t r) + formPart fp bus t (evalsAt prog s q t r)) := by
-  have e0 : ∀ ev, (tables.getD ((0 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e1 : ∀ ev, (tables.getD ((1 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e2 : ∀ ev, (tables.getD ((2 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e3 : ∀ ev, (tables.getD ((3 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e5 : ∀ ev, (tables.getD ((5 : Fin 6) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
-  have e4 : (tables.getD ((4 : Fin 6) : ℕ) default).constraints = jumpConstraints := rfl
-  have n0 : (tables.getD ((0 : Fin 6) : ℕ) default).nConstraints = 0 := rfl
-  have n1 : (tables.getD ((1 : Fin 6) : ℕ) default).nConstraints = 0 := rfl
-  have n2 : (tables.getD ((2 : Fin 6) : ℕ) default).nConstraints = 0 := rfl
-  have n3 : (tables.getD ((3 : Fin 6) : ℕ) default).nConstraints = 0 := rfl
-  have n4 : (tables.getD ((4 : Fin 6) : ℕ) default).nConstraints = 2 := rfl
-  simp only [summand, pairsAt, tableRow, termsPure, Fin.sum_univ_six, consPart, formPart, e0, e1,
-    e2, e3, e4, e5, n0, n1, n2, n3, n4, dot_nil_right, add_zero, zero_add, List.drop_zero]
+  have e0 : ∀ ev, (tables.getD ((0 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e1 : ∀ ev, (tables.getD ((1 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e2 : ∀ ev, (tables.getD ((2 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e3 : ∀ ev, (tables.getD ((3 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e5 : ∀ ev, (tables.getD ((5 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e6 : ∀ ev, (tables.getD ((6 : Fin 7) : ℕ) default).constraints ev = [] := fun _ ↦ rfl
+  have e4 : (tables.getD ((4 : Fin 7) : ℕ) default).constraints = jumpConstraints := rfl
+  have n0 : (tables.getD ((0 : Fin 7) : ℕ) default).nConstraints = 0 := rfl
+  have n1 : (tables.getD ((1 : Fin 7) : ℕ) default).nConstraints = 0 := rfl
+  have n2 : (tables.getD ((2 : Fin 7) : ℕ) default).nConstraints = 0 := rfl
+  have n3 : (tables.getD ((3 : Fin 7) : ℕ) default).nConstraints = 0 := rfl
+  have n4 : (tables.getD ((4 : Fin 7) : ℕ) default).nConstraints = 2 := rfl
+  simp only [summand, pairsAt, tableRow, termsPure, Fin.sum_univ_seven, consPart, formPart, e0, e1,
+    e2, e3, e4, e5, e6, n0, n1, n2, n3, n4, dot_nil_right, add_zero, zero_add, List.drop_zero]
   simp only [Fin.isValue, Fin.reduceEq, ↓reduceIte, zero_add]
 
 end Honest
@@ -225,18 +227,18 @@ section Degree
 variable (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ prog s))
 
 /-- The announced heights, read back. -/
-theorem getD_tableLogs (t : Fin 6) : (tableLogs s).getD t 0 = s.τ t := by
+theorem getD_tableLogs (t : Fin 7) : (tableLogs s).getD t 0 = s.τ t := by
   rw [List.getD_eq_getElem _ _ (by simp [tableLogs])]
   simp only [tableLogs, List.getElem_ofFn]
 
 /-- Every table's height is at most the number of rounds. -/
-theorem τ_le_nRounds (t : Fin 6) : s.τ t ≤ nRounds s := by
+theorem τ_le_nRounds (t : Fin 7) : s.τ t ≤ nRounds s := by
   refine (le_foldl_max (tableLogs s) 0).2 _ ?_
   simp only [tableLogs, List.mem_ofFn]
   exact ⟨t, rfl⟩
 
 /-- An honest evaluation has degree one in each coordinate. -/
-theorem coordPoly_evalsAt (t : Fin 6) (i : ℕ) :
+theorem coordPoly_evalsAt (t : Fin 7) (i : ℕ) :
     CoordPoly 1 (nRounds s) fun r ↦ (evalsAt prog s q t r).getD i 0 := by
   by_cases hi : i < width (opIdx t)
   · refine (coordPoly_multilinearEval_take (τ_le_nRounds s t) (tableColList prog s q t ⟨i, hi⟩)
@@ -248,7 +250,7 @@ theorem coordPoly_evalsAt (t : Fin 6) (i : ℕ) :
 /-- **The honest summand has degree at most three in each coordinate.** -/
 theorem coordPoly_summand {bus : BusResult} (hb : BusGood prog s q bus) (cp fp : List E) :
     CoordPoly 3 (nRounds s) (summand prog s q cp fp bus) := by
-  refine (CoordPoly.sum (n := nRounds s) Finset.univ (F := fun (t : Fin 6) r ↦
+  refine (CoordPoly.sum (n := nRounds s) Finset.univ (F := fun (t : Fin 7) r ↦
     (∏ v ∈ range (nRounds s), weightFactor bus.point (s.τ t) v (r.getD v 0)) *
       (consPart cp t (evalsAt prog s q t r) + formPart fp bus t (evalsAt prog s q t r)))
     fun t _ ↦ (coordPoly_weight bus.point (s.τ t) (nRounds s)).mul (d' := 2) ?_).congr
@@ -331,15 +333,15 @@ section Sum
 variable (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ prog s))
 
 /-- Cell `i` of row `y` of opcode table `t`, read off the stack. -/
-def rowCell (t : Fin 6) (y : Fin (2 ^ s.τ t)) (i : Fin (width (opIdx t))) : K :=
+def rowCell (t : Fin 7) (y : Fin (2 ^ s.τ t)) (i : Fin (width (opIdx t))) : K :=
   ((inst prog s).column q ⟨opIdx t, i⟩).values.get y
 
 /-- The rows of table `t`, read as the evaluations the verifier would see at a cube point. -/
-def rowEvals (t : Fin 6) (y : Fin (2 ^ s.τ t)) : List E :=
+def rowEvals (t : Fin 7) (y : Fin (2 ^ s.τ t)) : List E :=
   (List.finRange (width (opIdx t))).map fun i ↦ ofK (rowCell prog s q t y i)
 
 /-- At a cube point, the honest evaluations are the row's cells. -/
-theorem evalsAt_boolPoint (t : Fin 6) (y : Fin (2 ^ s.τ t)) :
+theorem evalsAt_boolPoint (t : Fin 7) (y : Fin (2 ^ s.τ t)) :
     evalsAt prog s q t (boolPoint (s.τ t) y) = rowEvals prog s q t y := by
   unfold evalsAt rowEvals
   rw [List.take_of_length_le (le_of_eq (Whir.Complete.length_boolPoint (s.τ t) y))]
@@ -350,7 +352,7 @@ theorem evalsAt_boolPoint (t : Fin 6) (y : Fin (2 ^ s.τ t)) :
   rfl
 
 /-- The row's cells, read by index, are `rowVal`. -/
-theorem getD_rowEvals (t : Fin 6) (y : Fin (2 ^ s.τ t)) (i : ℕ) :
+theorem getD_rowEvals (t : Fin 7) (y : Fin (2 ^ s.τ t)) (i : ℕ) :
     (rowEvals prog s q t y).getD i 0 = rowVal prog s q t y i := by
   have hlen : (rowEvals prog s q t y).length = width (opIdx t) := by
     unfold rowEvals; rw [List.length_map, List.length_finRange]
@@ -371,7 +373,7 @@ theorem sum_summand {bus : BusResult} (hb : BusGood prog s q bus) (cp fp : List 
     (hcons : ∀ y : Fin (2 ^ s.τ 4), consPart cp 4 (rowEvals prog s q 4 y) = 0) :
     ∑ x ∈ range (2 ^ nRounds s), summand prog s q cp fp bus (boolPoint (nRounds s) x) =
       dot fp bus.totals := by
-  have hform : ∀ (t : Fin 6) (y : Fin (2 ^ s.τ t)),
+  have hform : ∀ (t : Fin 7) (y : Fin (2 ^ s.τ t)),
       formPart fp bus t (rowEvals prog s q t y) = ∑ i ∈ range 3, fp.getD i 0 *
         ((bus.forms.getD t []).getD i {}).evaluate (rowVal prog s q t y) := by
     intro t y
@@ -387,7 +389,7 @@ theorem sum_summand {bus : BusResult} (hb : BusGood prog s q bus) (cp fp : List 
     congr 2
     funext j
     exact getD_rowEvals prog s q t y j
-  have htab : ∀ t : Fin 6, ∑ x ∈ range (2 ^ nRounds s),
+  have htab : ∀ t : Fin 7, ∑ x ∈ range (2 ^ nRounds s),
       (tableWeights (tableLogs s) bus.point (boolPoint (nRounds s) x)).getD t 0 *
         (consPart cp t (evalsAt prog s q t (boolPoint (nRounds s) x)) +
           formPart fp bus t (evalsAt prog s q t (boolPoint (nRounds s) x))) =
@@ -415,7 +417,7 @@ theorem sum_summand {bus : BusResult} (hb : BusGood prog s q bus) (cp fp : List 
   rw [sum_comm]
   simp only [htab]
   rw [dot_eq_sum _ _ (by rw [hfp, hb.totals_length]), hfp]
-  have hR : ∀ i ∈ range 3, fp.getD i 0 * bus.totals.getD i 0 = ∑ t : Fin 6,
+  have hR : ∀ i ∈ range 3, fp.getD i 0 * bus.totals.getD i 0 = ∑ t : Fin 7,
       ∑ y : Fin (2 ^ s.τ t), eqEval (bus.point.take (s.τ t)) (boolPoint (s.τ t) y) *
         (fp.getD i 0 * ((bus.forms.getD t []).getD i {}).evaluate (rowVal prog s q t y)) := by
     intro i hi
@@ -465,7 +467,7 @@ noncomputable def hTable (bus : BusResult) : Script (List Verifier.ColumnClaim) 
           (termsPure (cpOf xi) (fpOf xi) r.1.reverse (pairsAt prog s q bus r.1.reverse) 0 0 []).2)
 
 /-- The honest evaluation of a column is its true value. -/
-theorem colEval_opIdx (t : Fin 6) (i : Fin (width (opIdx t))) (z : Vector E (s.τ t)) :
+theorem colEval_opIdx (t : Fin 7) (i : Fin (width (opIdx t))) (z : Vector E (s.τ t)) :
     colEval prog s q ⟨opIdx t, i⟩ z = multilinearEval (tableColList prog s q t i) z.toList := by
   unfold colEval CompPoly.CMlPolynomialEval.eval₂Mle
   refine (Front.multilinearEval_eq_evalMle (CompPoly.CMlPolynomialEval.map (algebraMap K E)
@@ -474,10 +476,10 @@ theorem colEval_opIdx (t : Fin 6) (i : Fin (width (opIdx t))) (z : Vector E (s.�
   simp [CompPoly.CMlPolynomialEval.map, tableColList, Vector.toList_map]
 
 /-- Each verifier table's opcode is its index. -/
-theorem opcode_tables_getD : ∀ t : Fin 6, (tables.getD t default).opcode = t := by decide
+theorem opcode_tables_getD : ∀ t : Fin 7, (tables.getD t default).opcode = t := by decide
 
 /-- Every claim of table `t`'s row is a true claim. -/
-theorem trueClaim_tableRow (bus : BusResult) (pt : List E) (t : Fin 6)
+theorem trueClaim_tableRow (bus : BusResult) (pt : List E) (t : Fin 7)
     (hpt : s.τ t ≤ pt.length) :
     ∀ p ∈ (tableRow prog s q bus pt t).2.zipIdx, TrueClaim prog s q
       ⟨globalColumnBases.getD (tableRow prog s q bus pt t).1.1.opcode 0 + p.2,
@@ -497,18 +499,18 @@ theorem trueClaim_tableRow (bus : BusResult) (pt : List E) (t : Fin 6)
   rfl
 
 /-- The verifier's rows of the loop are the honest rows. -/
-theorem rows_eq (bus : BusResult) (hf : bus.forms.length = 6) (pt : List E) :
+theorem rows_eq (bus : BusResult) (hf : bus.forms.length = 7) (pt : List E) :
     tables.zip ((tableLogs s).zip (bus.forms.zip (tableWeights (tableLogs s) bus.point pt))) =
       (pairsAt prog s q bus pt).map (·.1) := by
-  have hw : (tableWeights (tableLogs s) bus.point pt).length = 6 := by
+  have hw : (tableWeights (tableLogs s) bus.point pt).length = 7 := by
     rw [length_tableWeights]; simp [tableLogs]
-  have ht : tables.length = 6 := rfl
-  have hl : (tableLogs s).length = 6 := by simp [tableLogs]
+  have ht : tables.length = 7 := rfl
+  have hl : (tableLogs s).length = 7 := by simp [tableLogs]
   unfold pairsAt tableRow
   generalize tableWeights (tableLogs s) bus.point pt = W at hw ⊢
   apply List.ext_getElem (by simp [ht, hw, hf, hl])
   intro i h1 h2
-  have hi : i < 6 := by simpa using h2
+  have hi : i < 7 := by simpa using h2
   simp only [List.getElem_zip, List.getElem_map]
   interval_cases i <;>
     simp [List.getD_eq_getElem?_getD, hw, hf, ht, tableLogs]
@@ -534,26 +536,27 @@ theorem trueClaims_termsPure (bus : BusResult) (cp fp pt : List E) (hpt : nRound
   obtain ⟨p, hp, hcl⟩ := List.mem_flatMap.mp hcl
   obtain ⟨⟨value, column⟩, hmem, rfl⟩ := List.mem_map.mp hcl
   simp only [pairsAt, List.mem_cons, List.not_mem_nil, or_false] at hp
-  have hτ : ∀ t : Fin 6, s.τ t ≤ pt.length := fun t ↦ (τ_le_nRounds s t).trans hpt
-  rcases hp with rfl | rfl | rfl | rfl | rfl | rfl
+  have hτ : ∀ t : Fin 7, s.τ t ≤ pt.length := fun t ↦ (τ_le_nRounds s t).trans hpt
+  rcases hp with rfl | rfl | rfl | rfl | rfl | rfl | rfl
   · exact trueClaim_tableRow prog s q bus _ 0 (hτ 0) _ hmem
   · exact trueClaim_tableRow prog s q bus _ 1 (hτ 1) _ hmem
   · exact trueClaim_tableRow prog s q bus _ 2 (hτ 2) _ hmem
   · exact trueClaim_tableRow prog s q bus _ 3 (hτ 3) _ hmem
   · exact trueClaim_tableRow prog s q bus _ 4 (hτ 4) _ hmem
   · exact trueClaim_tableRow prog s q bus _ 5 (hτ 5) _ hmem
+  · exact trueClaim_tableRow prog s q bus _ 6 (hτ 6) _ hmem
 
 /-- Every honest row carries as many evaluations as its table has columns. -/
 theorem width_pairsAt (bus : BusResult) (pt : List E) :
     ∀ p ∈ pairsAt prog s q bus pt, p.2.length = p.1.1.width := by
   intro p hp
   simp only [pairsAt, List.mem_cons, List.not_mem_nil, or_false] at hp
-  have hw : ∀ t : Fin 6, (tableRow prog s q bus pt t).2.length =
+  have hw : ∀ t : Fin 7, (tableRow prog s q bus pt t).2.length =
       (tableRow prog s q bus pt t).1.1.width := fun t ↦ by
     simp only [tableRow, evalsAt, List.length_map, List.length_finRange]
     exact width_opIdx t
-  rcases hp with rfl | rfl | rfl | rfl | rfl | rfl
-  exacts [hw 0, hw 1, hw 2, hw 3, hw 4, hw 5]
+  rcases hp with rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  exacts [hw 0, hw 1, hw 2, hw 3, hw 4, hw 5, hw 6]
 
 /-- **After the rounds**: sending the rows' evaluations passes the terminal check when their
 loop's value is the final claim, and returns the claims. -/
@@ -634,16 +637,16 @@ theorem consPart_rowEvals {input : PublicInput} (hq : M3Holds (inst prog s) inpu
   simp only [consPart, ↓reduceIte]
   apply dot_eq_zero_of_forall
   rw [show jumpConstraints (rowEvals prog s q 4 y) =
-    (tables.getD ((4 : Fin 6) : ℕ) default).constraints
+    (tables.getD ((4 : Fin 7) : ℕ) default).constraints
       ((List.finRange (width (opIdx 4))).map fun i ↦ ofK (rowCell prog s q 4 y i)) from rfl, h]
   exact hz
 
 /-! ## The output lanes' claims -/
 
-/-- **The honest claims on the output lanes**: lane `l`'s claim on its global column `106 + l`,
+/-- **The honest claims on the output lanes**: lane `l`'s claim on its global column `107 + l`,
 at the point `z` of the `KECCAK` table's coordinates, with the derived column's true value. -/
 def honestLanes (z : Vector E (s.τ 5)) : List Verifier.ColumnClaim :=
-  (List.finRange 25).map fun l ↦ ⟨106 + l.val, z.toList, colEval prog s q (outCol l) z⟩
+  (List.finRange 25).map fun l ↦ ⟨107 + l.val, z.toList, colEval prog s q (outCol l) z⟩
 
 /-- Output lane `l`'s column of the `KECCAK` table, `40 + l`. -/
 def outIdx (l : Fin 25) : Fin (width (opIdx 5)) := ⟨40 + l, by rw [width_keccak]; omega⟩
@@ -662,16 +665,17 @@ theorem zipIdx_map_finRange {α : Type} (n : ℕ) (f : Fin n → α) :
   intro i h1 h2
   simp [List.getElem_zipIdx]
 
-/-- The tables before `KECCAK` claim only columns below its output lanes. -/
-theorem base_lt (t : Fin 6) (ht : t.val < 5) (c : ℕ) (hc : c < width (opIdx t)) :
-    globalColumnBases.getD t 0 + c < 106 := by
+/-- The tables but `KECCAK` claim no column among its output lanes: those before it are below
+them, `BLAKE3` above them. -/
+theorem base_lt (t : Fin 7) (ht : t.val ≠ 5) (c : ℕ) (hc : c < width (opIdx t)) :
+    globalColumnBases.getD t 0 + c < 107 ∨ 132 ≤ globalColumnBases.getD t 0 + c := by
   revert t c; decide +kernel
 
-/-- The `KECCAK` table's columns start at the global column `66`. -/
-theorem base_keccak : globalColumnBases.getD 5 0 = 66 := by decide
+/-- The `KECCAK` table's columns start at the global column `67`. -/
+theorem base_keccak : globalColumnBases.getD 5 0 = 67 := by decide
 
 /-- The claims of a table before `KECCAK` hold no output lane. -/
-theorem filter_tableRow_lt (bus : BusResult) (pt : List E) (t : Fin 6) (ht : t.val < 5) :
+theorem filter_tableRow_lt (bus : BusResult) (pt : List E) (t : Fin 7) (ht : t.val ≠ 5) :
     ((tableRow prog s q bus pt t).2.zipIdx.map fun (value, column) ↦
         (⟨globalColumnBases.getD (tableRow prog s q bus pt t).1.1.opcode 0 + column,
           pt.take (tableRow prog s q bus pt t).1.2.1, value⟩ : Verifier.ColumnClaim)).filter
@@ -698,14 +702,15 @@ theorem lanes_termsPure (bus : BusResult) (cp fp pt : List E) (hpt : s.τ 5 ≤ 
   simp only [pairsAt, List.flatMap_cons, List.flatMap_nil, List.append_nil, List.filter_append]
   rw [filter_tableRow_lt prog s q bus pt 0 (by decide), filter_tableRow_lt prog s q bus pt 1
     (by decide), filter_tableRow_lt prog s q bus pt 2 (by decide), filter_tableRow_lt prog s q bus
-    pt 3 (by decide), filter_tableRow_lt prog s q bus pt 4 (by decide)]
-  simp only [List.nil_append]
+    pt 3 (by decide), filter_tableRow_lt prog s q bus pt 4 (by decide),
+    filter_tableRow_lt prog s q bus pt 6 (by decide)]
+  simp only [List.nil_append, List.append_nil]
   simp only [tableRow, evalsAt, opcode_tables_getD 5, zipIdx_map_finRange, List.map_map,
     List.filter_map]
   have hf := finRange_filter_out
   rw [show ((fun c : Verifier.ColumnClaim ↦ decide (c.column ∈ keccakOutputColumns)) ∘
       ((fun (x : E × ℕ) ↦ match x with
-        | (value, column) => (⟨globalColumnBases.getD (5 : Fin 6) 0 + column,
+        | (value, column) => (⟨globalColumnBases.getD (5 : Fin 7) 0 + column,
           pt.take (s.τ 5), value⟩ : Verifier.ColumnClaim)) ∘
         fun i : Fin (width (opIdx 5)) ↦ (multilinearEval (tableColList prog s q 5 i)
           (pt.take (s.τ 5)), i.val))) =
@@ -717,7 +722,7 @@ theorem lanes_termsPure (bus : BusResult) (cp fp pt : List E) (hpt : s.τ 5 ≤ 
       (⟨(pt.take (s.τ 5)).toArray, by simp; omega⟩ : Vector E (s.τ 5)) =
       multilinearEval (tableColList prog s q 5 (outIdx l)) (pt.take (s.τ 5)) :=
     colEval_opIdx prog s q 5 (outIdx l) _
-  rw [hv, show globalColumnBases.getD ((5 : Fin 6) : ℕ) 0 = 66 from base_keccak]
+  rw [hv, show globalColumnBases.getD ((5 : Fin 7) : ℕ) 0 = 67 from base_keccak]
   simp only [outIdx, Vector.toList_mk]
   congr 1
   omega
@@ -730,7 +735,7 @@ bus result, every check of `tablePhase` passes and every claim it returns is tru
 theorem follows_tablePhase {input : PublicInput} (hq : M3Holds (inst prog s) input q)
     (bus : BusResult) (hb : BusGood prog s q bus) (cs : Commits) :
     Follows (fun cs' a b ↦ cs' = cs ∧ a = b ∧ TrueClaims prog s q b ∧
-        ∃ tc, b = bus.claims ++ tc ∧ tc.length = 153 ∧ ∃ z : Vector E (s.τ 5),
+        ∃ tc, b = bus.claims ++ tc ∧ tc.length = 211 ∧ ∃ z : Vector E (s.τ 5),
           tc.filter (fun c ↦ c.column ∈ keccakOutputColumns) = honestLanes prog s q z)
       (hTable prog s q bus) (tablePhaseClaims (verifierLayout prog s) bus) cs := by
   unfold tablePhaseClaims tableSumcheckClaims hTable
@@ -767,7 +772,7 @@ theorem follows_tablePhase {input : PublicInput} (hq : M3Holds (inst prog s) inp
         (termsPure (cpOf xi) (fpOf xi) r.1.reverse (pairsAt prog s q bus r.1.reverse) 0 0 []).2) ∧
         ∃ tc, bus.claims ++
           (termsPure (cpOf xi) (fpOf xi) r.1.reverse (pairsAt prog s q bus r.1.reverse) 0 0 []).2 =
-            bus.claims ++ tc ∧ tc.length = 153 ∧ ∃ z : Vector E (s.τ 5),
+            bus.claims ++ tc ∧ tc.length = 211 ∧ ∃ z : Vector E (s.τ 5),
               tc.filter (fun c ↦ c.column ∈ keccakOutputColumns) = honestLanes prog s q z :=
       ⟨trueClaims_append hb.claims
         (trueClaims_termsPure prog s q bus (cpOf xi) (fpOf xi) r.1.reverse

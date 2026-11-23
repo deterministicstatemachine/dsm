@@ -286,6 +286,19 @@ theorem fslot_lt {n : ℕ} (x : Fin (2 ^ n)) (slot : ℕ) (hslot : slot < 256) :
     x.val + 2 ^ n * slot < 2 ^ (n + 8) :=
   (cubeIndex (k := n) (m := 8) x ⟨slot, hslot⟩).isLt
 
+/-- Word `x` of slot `slot < 256` of the Flock region is cell `x + slot · 2 ^ τ` of `QFLOCK`. -/
+theorem flockWord_eq_column (slot : ℕ) (hslot : slot < 256) (x : Fin (2 ^ s.τ 6)) :
+    (flockRegion prog s).word
+        ((leanIsaInstance prog s).flockColumn (flockRegion prog s) q) slot x =
+      ((leanIsaInstance prog s).column q flockCol).values.get
+        ⟨x.val + 2 ^ s.τ 6 * slot, fslot_lt x slot hslot⟩ := by
+  have hlt : x.val + 2 ^ s.τ 6 * slot < 2 ^ (s.τ 6 + 8) := fslot_lt x slot hslot
+  show ((leanIsaInstance prog s).column q flockCol).values.toArray.getD
+    (x.val + 2 ^ s.τ 6 * slot) 0 = _
+  rw [Array.getD_eq_getD_getElem?,
+    Array.getElem?_eq_getElem (by rw [Vector.size_toArray]; exact hlt), Option.getD_some]
+  rfl
+
 /-- Word `x` of slot `slot < 256` of the Flock region is the stack's cell `x + slot · 2 ^ τ`
 past `QFLOCK`'s offset. -/
 theorem word_flockColumn (slot : ℕ) (hslot : slot < 256) (x : Fin (2 ^ s.τ 6)) :

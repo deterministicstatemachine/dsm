@@ -189,6 +189,29 @@ theorem instOutputs_instanceOfRow (hF : FlockWalk) (r : ℕ → K)
     · exact h.2.trans hv.2.symm
   · simp only [instOutputs, rowOutputs, hk, ↓reduceIte]
 
+/-! ## The honest instances -/
+
+/-- Instance `x` of a table's instances: its row's, or the padding instance past its rows. -/
+theorem instancesOf_getD (rows : Array (Array K)) (h x : ℕ) (hx : x < 2 ^ h) :
+    (instancesOf rows h).getD x default =
+      if x < rows.size then instanceOfRow (fun i ↦ (rows.getD x #[]).getD i 0)
+      else paddingInstance := by
+  simp [instancesOf, Array.getD, hx]
+
+/-- **Every honest instance compresses**, when the walk computes the compression: a row's and the
+padding instance are both instances `instanceOf` builds. -/
+theorem walkComputes_instancesOf (hc : WalkComputes) (rows : Array (Array K)) (h x : ℕ)
+    (hx : x < 2 ^ h) :
+    Blake3CellsRelation (instInputs ((instancesOf rows h).getD x default))
+      (instOutputs ((instancesOf rows h).getD x default)) := by
+  rw [instancesOf_getD rows h x hx]
+  split_ifs
+  · exact hc _ _ _ _ _ _
+  · exact hc _ _ _ _ _ _
+
+/-- The predicate's word slots are words of an instance. -/
+theorem flockInSlots_lt : ∀ k, flockInSlots k + 1 < 256 := by decide
+
 end
 
 end LeanVM.Protocol.Flock

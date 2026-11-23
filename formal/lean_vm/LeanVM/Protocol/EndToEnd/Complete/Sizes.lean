@@ -78,14 +78,14 @@ theorem follows_readSizes (prog : LeanIsaProgram) {s : Sizes} (hs : s.Admissible
     exact kToNat_eOfNat (by have := hρ.2; omega)
   have htab : (((announce s ρ).drop 1).take tables.length).map (fun value ↦ kToNat (value.limb 0))
       = tableRows s := by
-    have ht : tables.length = 6 := rfl
+    have ht : tables.length = 7 := rfl
     simp only [announce, ht, List.cons_append, List.map_cons, List.drop_succ_cons, List.drop_zero,
       List.map_append, List.map_nil, tableRows, List.ofFn_succ, List.ofFn_zero]
     simp only [List.nil_append, List.take_succ_cons, List.take_zero,
       List.map_cons, List.map_nil, List.cons.injEq, and_true]
     have hτ : ∀ j, kToNat ((eOfNat (s.rows j)).limb 0) = s.rows j := fun j ↦
       kToNat_eOfNat (lt_of_le_of_lt (h3 j) (by decide))
-    exact ⟨hτ 0, hτ 1, hτ 2, hτ 3, hτ 4, hτ 5⟩
+    exact ⟨hτ 0, hτ 1, hτ 2, hτ 3, hτ 4, hτ 5, hτ 6⟩
   have hok : LayoutOk s := ⟨h1, h2, h3⟩
   have hb := buildLayout_eq prog s
   simp only [hok, ↓reduceIte] at hb

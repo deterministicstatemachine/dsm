@@ -101,7 +101,7 @@ def candsL (ρ : ℕ) (A : ℕ → ℕ → ℕ) (h : List Ev) : Set (Column (ver
     toI prog s q ∈ EndToEnd.Candidates (leanIsaμ prog s) ρ (A (leanIsaμ prog s) ρ) W}
 
 /-- Every opcode table has a push block, at its row count. -/
-theorem exists_pushBlock (s : Sizes) (t : Fin 6) :
+theorem exists_pushBlock (s : Sizes) (t : Fin 7) :
     ∃ b ∈ Complete.pushBlocks s, b.owner = t.val ∧ b.rows = s.rows t := by
   obtain ⟨c, cs, hc⟩ := List.exists_cons_of_ne_nil (Complete.refSide_push_ne_nil t)
   refine ⟨⟨s.τ t, s.rows t, c, t⟩, ?_, rfl, rfl⟩
@@ -110,7 +110,7 @@ theorem exists_pushBlock (s : Sizes) (t : Fin 6) :
 
 /-- A push block of an opcode table has the table's row count. -/
 theorem rows_of_mem_pushBlocks (s : Sizes) {b : BusBlock} (hb : b ∈ Complete.pushBlocks s)
-    (t : Fin 6) (ht : b.owner = t.val) : b.rows = s.rows t := by
+    (t : Fin 7) (ht : b.owner = t.val) : b.rows = s.rows t := by
   obtain ⟨t', he⟩ := Complete.pushBlocks_owned s b hb
   have : t' = t := Fin.ext (by rw [← ht, he])
   subst this

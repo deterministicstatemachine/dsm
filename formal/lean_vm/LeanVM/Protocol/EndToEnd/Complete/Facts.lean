@@ -38,7 +38,7 @@ open LeanVM.Protocol.EndToEnd.Front LeanVM.Protocol.Whir.Complete
 
 /-- Row `x` of opcode table `t` read off the stack, as a function of the local column index (the
 verifier's `evaluations.getD · 0`): cell `i` lifted to `E`, `0` past the width. -/
-def rowVal (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ prog s)) (t : Fin 6)
+def rowVal (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ prog s)) (t : Fin 7)
     (x : Fin (2 ^ s.τ t)) : ℕ → E :=
   fun i ↦ if h : i < width (opIdx t) then ofK ((inst prog s).row q (opIdx t) x ⟨i, h⟩) else 0
 
@@ -52,7 +52,7 @@ def FormsDeg2 (forms : List (List Form)) : Prop :=
 against the equality weight of the point's first `τ_t` coordinates. -/
 def trueTotal (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ prog s)) (point : List E)
     (forms : List (List Form)) (side : ℕ) : E :=
-  ∑ t : Fin 6, ∑ x : Fin (2 ^ s.τ t),
+  ∑ t : Fin 7, ∑ x : Fin (2 ^ s.τ t),
     eqEval (point.take (s.τ t)) (boolPoint (s.τ t) x) *
       ((forms.getD t []).getD side {}).evaluate (rowVal prog s q t x)
 
@@ -66,11 +66,11 @@ structure BusGood (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ pro
   /-- Four framework claims: the memory's two limbs and the two finalize counts. -/
   claims_length : b.claims.length = 4
   /-- The point covers every table's coordinates. -/
-  point_length : ∀ t : Fin 6, s.τ t ≤ b.point.length
+  point_length : ∀ t : Fin 7, s.τ t ≤ b.point.length
   /-- One row of forms per table. -/
-  forms_length : b.forms.length = 6
+  forms_length : b.forms.length = 7
   /-- Three forms per table, one per side. -/
-  forms_row_length : ∀ t, t < 6 → (b.forms.getD t []).length = 3
+  forms_row_length : ∀ t, t < 7 → (b.forms.getD t []).length = 3
   /-- Every form has degree at most two. -/
   forms_deg : FormsDeg2 b.forms
   /-- Three totals. -/

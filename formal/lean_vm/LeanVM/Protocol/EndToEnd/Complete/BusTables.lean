@@ -43,12 +43,12 @@ open Finset
 /-! ## The blocks -/
 
 /-- Each table's opcode is its index. -/
-theorem opcode_tables : ∀ t : Fin 6, (tables.getD t default).opcode = t := by decide
+theorem opcode_tables : ∀ t : Fin 7, (tables.getD t default).opcode = t := by decide
 
 /-- The rows `busBlocks` walks: the tables with their heights and row counts. -/
 theorem zip_tables_tableLogs (s : Sizes) :
     List.zip tables (List.zip (tableLogs s) (tableRows s)) =
-      List.ofFn fun t : Fin 6 ↦ (tables.getD t default, s.τ t, s.rows t) := by
+      List.ofFn fun t : Fin 7 ↦ (tables.getD t default, s.τ t, s.rows t) := by
   apply List.ext_getElem
   · simp [tableLogs, tableRows, tables]
   · intro i h1 h2
@@ -58,11 +58,11 @@ theorem zip_tables_tableLogs (s : Sizes) :
 /-- A side's table blocks, table by table. -/
 theorem busBlocks_eq (s : Sizes) :
     busBlocks (tableLogs s) (tableRows s) =
-      ((List.ofFn fun t : Fin 6 ↦
+      ((List.ofFn fun t : Fin 7 ↦
           (refSide t .push).map fun c ↦ (⟨s.τ t, s.rows t, c, t⟩ : BusBlock)).flatten,
-        (List.ofFn fun t : Fin 6 ↦
+        (List.ofFn fun t : Fin 7 ↦
           (refSide t .pull).map fun c ↦ (⟨s.τ t, s.rows t, c, t⟩ : BusBlock)).flatten,
-        (List.ofFn fun t : Fin 6 ↦ (tables.getD t default).countColumns.map fun l ↦
+        (List.ofFn fun t : Fin 7 ↦ (tables.getD t default).countColumns.map fun l ↦
           (⟨s.τ t, s.rows t, [Form.col l], t⟩ : BusBlock)).flatten) := by
   simp only [busBlocks, zip_tables_tableLogs, List.flatMap, List.map_ofFn]
   refine Prod.ext ?_ (Prod.ext ?_ ?_) <;> simp only <;> congr 1
@@ -205,13 +205,13 @@ variable (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ prog s))
 
 /-- Row `x` of table `t`, for natural-number indices: `rowVal`, `0` outside the tables. -/
 def rowAt (t x : ℕ) : ℕ → E :=
-  if h : t < 6 then
+  if h : t < 7 then
     if hx : x < 2 ^ s.τ ⟨t, h⟩ then rowVal prog s q ⟨t, h⟩ ⟨x, hx⟩ else fun _ ↦ 0
   else fun _ ↦ 0
 
-theorem rowAt_eq (t : Fin 6) (x : Fin (2 ^ s.τ t)) :
+theorem rowAt_eq (t : Fin 7) (x : Fin (2 ^ s.τ t)) :
     rowAt prog s q t x = rowVal prog s q t x := by
-  simp [rowAt, t.isLt, x.isLt]
+  simp [rowAt, x.isLt]
 
 /-- A table block's honest leaves: `β` plus the block's fingerprint at every executed row of its
 owner, `1` at a padding row. -/
@@ -235,8 +235,8 @@ theorem length_tableTab (β : E) (w : List E) (b : BusBlock) :
     (tableTab prog s q β w b).length = 2 ^ b.logRows := by simp [tableTab]
 
 /-- A product over a flattened list of lists of the tables. -/
-theorem prod_flatten_ofFn {α : Type} (f : Fin 6 → List α) (T : α → E) :
-    (((List.ofFn f).flatten).map T).prod = ∏ t : Fin 6, ((f t).map T).prod := by
+theorem prod_flatten_ofFn {α : Type} (f : Fin 7 → List α) (T : α → E) :
+    (((List.ofFn f).flatten).map T).prod = ∏ t : Fin 7, ((f t).map T).prod := by
   rw [List.map_flatten, List.prod_flatten, List.map_ofFn, List.map_ofFn, List.prod_ofFn]
   rfl
 
@@ -280,7 +280,7 @@ theorem prod_range_eq_list (n : ℕ) (H : ℕ → E) :
   rw [← List.toFinset_range, List.prod_toFinset _ (List.nodup_range)]
 
 /-- A table block's product: the fingerprints of its tuple at every executed row of its table. -/
-theorem prod_tableTab (β : E) (w : List E) (hw : w.length = 16) (t : Fin 6) (c : List Form)
+theorem prod_tableTab (β : E) (w : List E) (hw : w.length = 16) (t : Fin 7) (c : List Form)
     (hc : c.length ≤ 16) :
     (tableTab prog s q β w ⟨s.τ t, s.rows t, c, t⟩).prod =
       ∏ x : Fin (s.rows t), (β + dot w ((List.range 16).map fun k ↦
@@ -316,23 +316,24 @@ where
 executed row. -/
 theorem prod_flushTuples (β : E) (w : List E) (side : Side) :
     (((inst prog s).flushTuples q side).map (fpV β w)).prod =
-      ∏ t : Fin 6, ∏ x : Fin (s.rows t),
+      ∏ t : Fin 7, ∏ x : Fin (s.rows t),
         (((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = side)).map fun f ↦
           β + dot w (f.2.toList.map fun P ↦
             ofK (P.eval ((inst prog s).row q (opIdx t) (Fin.castLE (s.rows_le t) x))))).prod := by
   rw [M3Instance.flushTuples, List.map_flatMap, prod_flatMap_E, ← Fin.prod_univ_def]
-  set G : Fin 9 → E := fun j ↦
+  set G : Fin 11 → E := fun j ↦
     ((((inst prog s).flushes j).filter fun f ↦ decide (f.1 = side)).flatMap
     fun f ↦ ((inst prog s).executed j).map fun x ↦
       f.2.map fun P ↦ P.eval ((inst prog s).row q j x)).map (fpV β w) |>.prod with hG
-  show ∏ j : Fin 9, G j = _
-  rw [Fin.prod_univ_succ, Fin.prod_univ_succ, Fin.prod_univ_succ]
+  show ∏ j : Fin 11, G j = _
+  rw [Fin.prod_univ_succ, Fin.prod_univ_succ, Fin.prod_univ_succ, Fin.prod_univ_succ]
   have e0 : G 0 = 1 := rfl
   have e1 : G (Fin.succ 0) = 1 := rfl
   have e2 : G (Fin.succ (Fin.succ 0)) = 1 := rfl
-  rw [e0, e1, e2, one_mul, one_mul, one_mul]
+  have e3 : G (Fin.succ (Fin.succ (Fin.succ 0))) = 1 := rfl
+  rw [e0, e1, e2, e3, one_mul, one_mul, one_mul, one_mul]
   refine Finset.prod_congr rfl fun t _ ↦ ?_
-  have ht : t.succ.succ.succ = opIdx t := Fin.ext (by simp [opIdx])
+  have ht : t.succ.succ.succ.succ = opIdx t := Fin.ext (by simp [opIdx])
   rw [ht]
   have he : (inst prog s).executed (opIdx t) =
       (List.finRange (s.rows t)).map (Fin.castLE (s.rows_le t)) := M3Instance.executed_eq _ _
@@ -345,7 +346,7 @@ theorem prod_flushTuples (β : E) (w : List E) (side : Side) :
 
 /-- **A side's table leaves multiply to the instance's flush tuples' fingerprints.** -/
 theorem prod_tables (β : E) (w : List E) (hw : w.length = 16) (side : Side) :
-    (((List.ofFn fun t : Fin 6 ↦
+    (((List.ofFn fun t : Fin 7 ↦
         (refSide t side).map fun c ↦ (⟨s.τ t, s.rows t, c, t⟩ : BusBlock)).flatten).map
         fun b ↦ (tableTab prog s q β w b).prod).prod =
       (((inst prog s).flushTuples q side).map (fpV β w)).prod := by
@@ -367,7 +368,7 @@ theorem prod_tables (β : E) (w : List E) (hw : w.length = 16) (side : Side) :
 
 /-- **No count leaf is zero**: a count block's leaves are its count column's executed cells and
 ones. -/
-theorem zero_not_mem_countTab (hcnt : (inst prog s).CountsNonzero q) (t : Fin 6) (l : ℕ)
+theorem zero_not_mem_countTab (hcnt : (inst prog s).CountsNonzero q) (t : Fin 7) (l : ℕ)
     (hl : l ∈ (tables.getD t default).countColumns) :
     (0 : E) ∉ tableTab prog s q 0 [1] ⟨s.τ t, s.rows t, [Form.col l], t⟩ := by
   rw [refCountColumns t] at hl
@@ -385,7 +386,7 @@ theorem zero_not_mem_countTab (hcnt : (inst prog s).CountsNonzero q) (t : Fin 6)
 /-- The count side's leaves multiply to a nonzero root. -/
 theorem prod_countTabs_ne_zero (hcnt : (inst prog s).CountsNonzero q) (sizes : List ℕ)
     (blocks : List BusBlock) (hsz : sizes.length = blocks.length)
-    (hb : ∀ b ∈ blocks, ∃ t : Fin 6, ∃ l ∈ (tables.getD t default).countColumns,
+    (hb : ∀ b ∈ blocks, ∃ t : Fin 7, ∃ l ∈ (tables.getD t default).countColumns,
       b = ⟨s.τ t, s.rows t, [Form.col l], t⟩) (D : ℕ) :
     (stackLeaves sizes (fun b ↦ tableTab prog s q 0 [1] (blocks.getD b default)) D).prod ≠ 0 := by
   rw [prod_stackLeaves]

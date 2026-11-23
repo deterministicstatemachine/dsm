@@ -80,7 +80,7 @@ structure Phases.Honest (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsa
   lanes the honest ones. -/
   table : ∀ bus, BusGood prog s q bus → ∀ cs,
     Follows (fun cs' a b ↦ cs' = cs ∧ a = b ∧ TrueClaims prog s q b ∧
-        ∃ tc, b = bus.claims ++ tc ∧ tc.length = 153 ∧ ∃ z : Vector E (s.τ 5),
+        ∃ tc, b = bus.claims ++ tc ∧ tc.length = 211 ∧ ∃ z : Vector E (s.τ 5),
           tc.filter (fun c ↦ c.column ∈ keccakOutputColumns) = honestLanes prog s q z)
       (P.table bus) (tablePhaseClaims (verifierLayout prog s) bus) cs
   /-- The Keccak phase, from true claims whose output lanes are the honest ones, ends in true

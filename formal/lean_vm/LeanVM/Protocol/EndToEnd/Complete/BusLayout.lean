@@ -79,17 +79,17 @@ theorem verifyBusBalance_eq (layout : Verifier.Layout) :
 
 /-- The push side's table blocks. -/
 def pushBlocks (s : Sizes) : List BusBlock :=
-  (List.ofFn fun t : Fin 6 ↦
+  (List.ofFn fun t : Fin 7 ↦
     (refSide t .push).map fun c ↦ (⟨s.τ t, s.rows t, c, t⟩ : BusBlock)).flatten
 
 /-- The pull side's table blocks. -/
 def pullBlocks (s : Sizes) : List BusBlock :=
-  (List.ofFn fun t : Fin 6 ↦
+  (List.ofFn fun t : Fin 7 ↦
     (refSide t .pull).map fun c ↦ (⟨s.τ t, s.rows t, c, t⟩ : BusBlock)).flatten
 
 /-- The count side's blocks. -/
 def countBlocks (s : Sizes) : List BusBlock :=
-  (List.ofFn fun t : Fin 6 ↦ (tables.getD t default).countColumns.map fun l ↦
+  (List.ofFn fun t : Fin 7 ↦ (tables.getD t default).countColumns.map fun l ↦
     (⟨s.τ t, s.rows t, [Form.col l], t⟩ : BusBlock)).flatten
 
 theorem layout_push (prog : LeanIsaProgram) (s : Sizes) : (verifierLayout prog s).push = pushBlocks
@@ -130,21 +130,21 @@ theorem blockTotal_sideSizes (fw : List ℕ) (blocks : List BusBlock) :
   rw [blockTotal_eq, sideSizes, List.map_append, List.sum_append, List.map_map]
   rfl
 
-theorem sum_flatten_ofFn {α : Type} (f : Fin 6 → List α) (g : α → ℕ) :
-    (((List.ofFn f).flatten).map g).sum = ∑ t : Fin 6, ((f t).map g).sum := by
+theorem sum_flatten_ofFn {α : Type} (f : Fin 7 → List α) (g : α → ℕ) :
+    (((List.ofFn f).flatten).map g).sum = ∑ t : Fin 7, ((f t).map g).sum := by
   rw [List.map_flatten, List.sum_flatten, List.map_ofFn, List.map_ofFn, List.sum_ofFn]
   rfl
 
 /-- Each table has at least one count column per push, at most. -/
 theorem length_countColumns_le :
-    ∀ t : Fin 6, (tables.getD t default).countColumns.length ≤ (refSide t .push).length := by
+    ∀ t : Fin 7, (tables.getD t default).countColumns.length ≤ (refSide t .push).length := by
   intro t
   rw [refCountColumns t, List.length_map]
   revert t
   decide +kernel
 
 /-- Each table pushes. -/
-theorem refSide_push_ne_nil : ∀ t : Fin 6, refSide t .push ≠ [] := by
+theorem refSide_push_ne_nil : ∀ t : Fin 7, refSide t .push ≠ [] := by
   decide +kernel
 
 theorem total_pull (prog : LeanIsaProgram) (s : Sizes) :
@@ -188,7 +188,7 @@ theorem logSize_le_busDepth (prog : LeanIsaProgram) (s : Sizes) : prog.logSize �
   simp only [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, pow_zero]
   exact le_add_right (le_add_left (le_add_left (le_add_right le_rfl)))
 
-theorem tau_le_busDepth (prog : LeanIsaProgram) (s : Sizes) (t : Fin 6) : s.τ t ≤ busDepth prog
+theorem tau_le_busDepth (prog : LeanIsaProgram) (s : Sizes) (t : Fin 7) : s.τ t ≤ busDepth prog
     s := by
   refine le_busDepth prog s ?_
   rw [blockTotal_sideSizes, pushBlocks, sum_flatten_ofFn]
@@ -197,17 +197,17 @@ theorem tau_le_busDepth (prog : LeanIsaProgram) (s : Sizes) (t : Fin 6) : s.τ t
       (((refSide t .push).map fun c ↦ (⟨s.τ t, s.rows t, c, t⟩ : BusBlock)).map
         fun b ↦ 2 ^ b.logRows).sum := by
     rw [hc]; simp
-  exact this.trans (le_add_left (Finset.single_le_sum (f := fun t' : Fin 6 ↦
+  exact this.trans (le_add_left (Finset.single_le_sum (f := fun t' : Fin 7 ↦
     (((refSide t' .push).map fun c ↦ (⟨s.τ t', s.rows t', c, t'⟩ : BusBlock)).map
       fun b ↦ 2 ^ b.logRows).sum) (fun _ _ ↦ Nat.zero_le _) (Finset.mem_univ t)))
 
 variable (s : Sizes)
 
 /-- The blocks of every side are owned by a table at its height. -/
-theorem blocks_owned {α : Type} (f : Fin 6 → List α) (g : Fin 6 → α → List Form) :
-    ∀ b ∈ (List.ofFn fun t : Fin 6 ↦
+theorem blocks_owned {α : Type} (f : Fin 7 → List α) (g : Fin 7 → α → List Form) :
+    ∀ b ∈ (List.ofFn fun t : Fin 7 ↦
         (f t).map fun a ↦ (⟨s.τ t, s.rows t, g t a, t⟩ : BusBlock)).flatten,
-      ∃ t : Fin 6, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩ := by
+      ∃ t : Fin 7, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩ := by
   intro b hb
   obtain ⟨l, hl, hbl⟩ := List.mem_flatten.mp hb
   obtain ⟨t, rfl⟩ := List.mem_ofFn.mp hl
@@ -231,10 +231,10 @@ theorem forms0_entry (t side : ℕ) :
   · rw [hrow r (List.mem_of_getElem? h), Option.getD_some]
     rcases side with _ | _ | _ | side <;> rfl
 
-theorem forms0_length : (tables.map fun _ ↦ ([{}, {}, {}] : List Form)).length = 6 := rfl
+theorem forms0_length : (tables.map fun _ ↦ ([{}, {}, {}] : List Form)).length = 7 := rfl
 
 theorem forms0_row :
-    ∀ t < 6, ((tables.map fun _ ↦ ([{}, {}, {}] : List Form)).getD t []).length = 3 := by
+    ∀ t < 7, ((tables.map fun _ ↦ ([{}, {}, {}] : List Form)).getD t []).length = 3 := by
   intro t ht
   rw [List.getD_eq_getElem _ _ (by simpa [tables] using ht)]
   simp
@@ -246,29 +246,29 @@ theorem forms0_deg : FormsDeg2 (tables.map fun _ ↦ ([{}, {}, {}] : List Form))
 
 /-- Every block of a list owned by a table is owned below six. -/
 theorem owner_lt_six {l : List BusBlock}
-    (h : ∀ b ∈ l, ∃ t : Fin 6, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩)
-    (sels : List E) : ∀ x ∈ List.zip sels l, x.2.owner < 6 := by
+    (h : ∀ b ∈ l, ∃ t : Fin 7, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩)
+    (sels : List E) : ∀ x ∈ List.zip sels l, x.2.owner < 7 := by
   intro x hx
   obtain ⟨t, ht⟩ := h x.2 (List.of_mem_zip hx).2
   rw [ht]; exact t.isLt
 
 /-- The zipped blocks of a side are owned by tables at their heights. -/
 theorem zip_owned {l : List BusBlock}
-    (h : ∀ b ∈ l, ∃ t : Fin 6, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩)
+    (h : ∀ b ∈ l, ∃ t : Fin 7, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩)
     (sels : List E) :
-    ∀ y ∈ List.zip sels l, ∃ t : Fin 6, y.2 = ⟨s.τ t, s.rows t, y.2.coordinates, t⟩ :=
+    ∀ y ∈ List.zip sels l, ∃ t : Fin 7, y.2 = ⟨s.τ t, s.rows t, y.2.coordinates, t⟩ :=
   fun y hy ↦ h y.2 (List.of_mem_zip hy).2
 
 theorem pushBlocks_owned :
-    ∀ b ∈ pushBlocks s, ∃ t : Fin 6, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩ :=
+    ∀ b ∈ pushBlocks s, ∃ t : Fin 7, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩ :=
   blocks_owned s _ fun _ c ↦ c
 
 theorem pullBlocks_owned :
-    ∀ b ∈ pullBlocks s, ∃ t : Fin 6, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩ :=
+    ∀ b ∈ pullBlocks s, ∃ t : Fin 7, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩ :=
   blocks_owned s _ fun _ c ↦ c
 
 theorem countBlocks_owned :
-    ∀ b ∈ countBlocks s, ∃ t : Fin 6, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩ :=
+    ∀ b ∈ countBlocks s, ∃ t : Fin 7, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩ :=
   blocks_owned s _ fun _ l ↦ [Form.col l]
 
 variable {s}

@@ -111,11 +111,12 @@ def qkAt {μ : ℕ} (off : ℕ) (q : Column μ) (n : ℕ) : K := q.values.toArra
 theorem qkOf_eq_qkAt (layout : Verifier.Layout) (q : Column layout.stackLog) :
     qkOf layout q = qkAt (layout.placement qkeccak).index q := rfl
 
-/-- **What ring switching needs of the layout**: `q_keccak` is placed on `h + 6` variables, at an
-offset aligned to its size, inside the stack. -/
-structure RingLayoutHyp (layout : Verifier.Layout) (h off : ℕ) : Prop where
-  /-- `q_keccak`'s placement: `h + 6` variables at `off`. -/
-  placement : layout.placement qkeccak = { variableCount := h + 6, index := off }
+/-- **What ring switching needs of the layout** for a region: its column (`q_keccak`, or
+`q_flock` in the research build) is placed on `h + 6` variables, at an offset aligned to its size,
+inside the stack. -/
+structure RingLayoutHyp (layout : Verifier.Layout) (region h off : ℕ) : Prop where
+  /-- The region's placement: `h + 6` variables at `off`. -/
+  placement : layout.placement region = { variableCount := h + 6, index := off }
   /-- The offset is aligned to the block's size. -/
   aligned : 2 ^ (h + 6) ∣ off
   /-- The block lies inside the stack. -/
@@ -194,11 +195,11 @@ theorem sum_placed {v off μ : ℕ} (hal : 2 ^ v ∣ off) (hfit : off + 2 ^ v �
 /-- **The ring claim paired with a stack** (any stack size `μ` the block fits in): with
 `q_keccak` placed on `h + 6` variables at an aligned `off`, the pairing of the program's ring
 claim at the drawn map `Φ = frobPhi 8 f g` is `Σ_i x^i Φ(ẑ_i(point))`. -/
-theorem pair_ringClaim {layout : Verifier.Layout} {h off μ : ℕ}
-    (hpl : layout.placement qkeccak = { variableCount := h + 6, index := off })
+theorem pair_ringClaim {layout : Verifier.Layout} {region h off μ : ℕ}
+    (hpl : layout.placement region = { variableCount := h + 6, index := off })
     (hal : 2 ^ (h + 6) ∣ off) (hfit : off + 2 ^ (h + 6) ≤ 2 ^ μ) (q : Column μ) {pt : List E}
     (hpt : pt.length = h + 6) (f g : Fin 8 → E) (target : E) :
-    ∑ x : Fin (2 ^ μ), (ringSwitchClaim layout target
+    ∑ x : Fin (2 ^ μ), (ringSwitchClaim layout region target
         fun rPrime ↦ ringWeight pt rPrime (Ring.ringCoefficients (List.ofFn f) (List.ofFn g))).1
           (boolPoint μ x) * ofK (q.values.getD x 0) =
       ∑ i : Fin 64, ringW i * frobPhi 8 f g (sliceExt h (qkAt off q) pt i) := by
@@ -223,35 +224,47 @@ theorem pair_ringClaim {layout : Verifier.Layout} {h off μ : ℕ}
 
 /-- **The ring claim holds exactly at the target's honest value**: the program's claim at the
 drawn map holds of a stack iff the target is `Σ_i x^i Φ(ẑ_i(point))`. -/
-theorem ringClaim_holds_iff {layout : Verifier.Layout} {h off μ : ℕ}
-    (hpl : layout.placement qkeccak = { variableCount := h + 6, index := off })
+theorem ringClaim_holds_iff {layout : Verifier.Layout} {region h off μ : ℕ}
+    (hpl : layout.placement region = { variableCount := h + 6, index := off })
     (hal : 2 ^ (h + 6) ∣ off) (hfit : off + 2 ^ (h + 6) ≤ 2 ^ μ) (q : Column μ) {pt : List E}
     (hpt : pt.length = h + 6) (f g : Fin 8 → E) (target : E) :
-    StackClaim.Holds μ (ringSwitchClaim layout target
+    StackClaim.Holds μ (ringSwitchClaim layout region target
         fun rPrime ↦ ringWeight pt rPrime (Ring.ringCoefficients (List.ofFn f) (List.ofFn g))) q ↔
       target = ∑ i : Fin 64, ringW i * frobPhi 8 f g (sliceExt h (qkAt off q) pt i) := by
   unfold StackClaim.Holds
   rw [pair_ringClaim hpl hal hfit q hpt f g, eq_comm]
   rfl
 
-/-- **The stack's ring claim holds only at bad challenge lists** (`RingClaimBad`), against the
-true slices `ẑ_i(point)` of the block. -/
-theorem ringClaimBad_stack {layout : Verifier.Layout} {h off : ℕ}
-    (hl : RingLayoutHyp layout h off) {pt : List E} (hpt : pt.length = h + 6) (sv : Fin 64 → E) :
-    RingClaimBad (fun q : Column layout.stackLog ↦ fun i ↦ sliceExt h (qkAt off q) pt i) sv
-      (fun r q ↦ StackClaim.Holds layout.stackLog (ringSwitchClaim layout r.1 r.2) q) pt := by
-  intro q ch hch hq
+/-- The program's ring claims, one per region, read on a stack: every one holds. -/
+def RingClaims {n : ℕ} (layout : Verifier.Layout) (regions : Fin n → ℕ)
+    (r : List (E × (List E → E))) (q : Column layout.stackLog) : Prop :=
+  ∀ i : Fin n, StackClaim.Holds layout.stackLog
+    (ringSwitchClaim layout (regions i) (r.getD i default).1 (r.getD i default).2) q
+
+/-- **The stack's ring claims hold only at challenge lists bad for every region**
+(`RingClaimBad`), against each region's true slices `ẑ_i(point)`. -/
+theorem ringClaimBad_stack {layout : Verifier.Layout} {n : ℕ} {regions hs offs : Fin n → ℕ}
+    (hl : ∀ i, RingLayoutHyp layout (regions i) (hs i) (offs i)) {pt : Fin n → List E}
+    (hpt : ∀ i, (pt i).length = hs i + 6) (sv : Fin n → Fin 64 → E) :
+    RingClaimBad pt
+      (fun i (q : Column layout.stackLog) j ↦ sliceExt (hs i) (qkAt (offs i) q) (pt i) j) sv
+      (RingClaims layout regions) := by
+  intro q ch hch hq i
   rw [ringBad_iff hch]
-  have hq' := hq
+  have hq' := hq i
+  have hr : (ringResults pt sv ch).getD i default = ringResult (pt i) (sv i) ch := by
+    simp [ringResults, List.getD_eq_getElem?_getD]
+  rw [hr] at hq'
   simp only [ringResult, take_eq_ofFn_fOf hch, drop_eq_ofFn_gOf hch] at hq'
-  exact (ringClaim_holds_iff hl.placement hl.aligned hl.fits q hpt _ _ _).1 hq'
+  exact (ringClaim_holds_iff (hl i).placement (hl i).aligned (hl i).fits q (hpt i) _ _ _).1 hq'
 
 /-! ## The verifier's layout -/
 
 /-- **The verifier's layout places `q_keccak` as ring switching needs**: on `τ_KECCAK + 6`
 variables at its block's offset, aligned and inside the stack. -/
 theorem ringLayoutHyp_verifierLayout (prog : LeanIsaProgram) (s : Sizes) :
-    RingLayoutHyp (verifierLayout prog s) (s.τ 5) ((blocks prog s).offset (keccakBlock prog s)) where
+    RingLayoutHyp (verifierLayout prog s) qkeccak (s.τ 5)
+      ((blocks prog s).offset (keccakBlock prog s)) where
   placement := placement_qkeccak prog s
   aligned := by
     have h := (blocks prog s).pow_size_dvd_offset (keccakBlock prog s)
@@ -261,6 +274,30 @@ theorem ringLayoutHyp_verifierLayout (prog : LeanIsaProgram) (s : Sizes) :
     have h2 := blocks_fits prog s
     rw [size_keccakBlock] at h1
     rw [stackLog_verifierLayout]
+    omega
+
+/-- The verifier's layout places `q_flock` on its block (research build). -/
+theorem placement_qflock (prog : LeanIsaProgram) (s : Sizes) :
+    (verifierLayout prog s).placement qflock =
+      { variableCount := s.τ 6 + 2 + 6, index := (blocks prog s).offset (flockBlock prog s) } := by
+  rw [← refCol_flockCol, placement_committed prog s flockCol not_isVirtual_flockCol]
+  rfl
+
+/-- **The verifier's layout places `q_flock` as ring switching needs** (research build): on
+`τ_BLAKE3 + 8` variables, `h + 6` for `h = τ_BLAKE3 + 2`, at its block's offset, aligned and
+inside the stack. -/
+theorem ringLayoutHyp_flock (prog : LeanIsaProgram) (s : Sizes) :
+    RingLayoutHyp (verifierLayout prog s) qflock (s.τ 6 + 2)
+      ((blocks prog s).offset (flockBlock prog s)) where
+  placement := placement_qflock prog s
+  aligned := by
+    have h := (blocks prog s).pow_size_dvd_offset (flockBlock prog s)
+    rwa [size_flockBlock] at h
+  fits := by
+    have h1 := (blocks prog s).offset_add_pow_le_total (flockBlock prog s)
+    have h2 := blocks_fits prog s
+    rw [size_flockBlock] at h1
+    rw [stackLog_verifierLayout, show s.τ 6 + 2 + 6 = s.τ 6 + 8 by omega]
     omega
 
 end

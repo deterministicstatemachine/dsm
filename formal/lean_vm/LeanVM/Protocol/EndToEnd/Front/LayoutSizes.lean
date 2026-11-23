@@ -108,16 +108,16 @@ theorem IsPure.after_cons {α : Type} {p : VerifierProgram α} (hp : IsPure p) (
 @[simp] theorem fail_bind' {α β : Type} (f : α → VerifierProgram β) :
     (VerifierProgram.fail : VerifierProgram α).bind f = .fail := rfl
 
-/-- **What `readAnnouncedSizes` returns**: after eight reads whose upper limb is zero, the rate in
-`[1, 4]` from the last, the layout `buildLayout` gives from the first seven, and a stacked size in
+/-- **What `readAnnouncedSizes` returns**: after nine reads whose upper limb is zero, the rate in
+`[1, 4]` from the last, the layout `buildLayout` gives from the first eight, and a stacked size in
 the window. -/
 theorem readSizes_ret {bytecode : List K} {l : List Ev} {a : Verifier.Layout × ℕ}
     (h : (readAnnouncedSizes bytecode).after l = some (.ret a)) :
-    ∃ xs : List E, l = xs.map Ev.read ∧ xs.length = 8 ∧
+    ∃ xs : List E, l = xs.map Ev.read ∧ xs.length = 9 ∧
       (xs.all fun value ↦ value.limb 1 = 0) ∧
       1 ≤ a.2 ∧ a.2 ≤ 4 ∧ a.2 = kToNat ((xs.getLastD 0).limb 0) ∧
       buildLayout bytecode (kToNat ((xs.headD 0).limb 0))
-        (((xs.drop 1).take 6).map fun value ↦ kToNat (value.limb 0)) = some a.1 ∧
+        (((xs.drop 1).take 7).map fun value ↦ kToNat (value.limb 0)) = some a.1 ∧
       Whir.minLogStack ≤ a.1.stackLog ∧ a.1.stackLog ≤ Whir.maxLogStack := by
   rw [readAnnouncedSizes_eq] at h
   simp only [VerifierProgram.bind_eq] at h
@@ -157,16 +157,16 @@ theorem readSizes_ret_sizes (prog : LeanIsaProgram) {l : List Ev} {a : Verifier.
       l = (announce s a.2).map Ev.read := by
   obtain ⟨xs, rfl, hlen, hall, hρ1, hρ2, hρ, hb, hμ1, hμ2⟩ := readSizes_ret h
   match xs, hlen with
-  | [x0, x1, x2, x3, x4, x5, x6, x7], _ =>
+  | [x0, x1, x2, x3, x4, x5, x6, x7, x8], _ =>
     have hlm := logMem_of_buildLayout hb
     let s : Sizes := ⟨kToNat (x0.limb 0), by simp at hlm; omega,
       ![kToNat (x1.limb 0), kToNat (x2.limb 0), kToNat (x3.limb 0), kToNat (x4.limb 0),
-        kToNat (x5.limb 0), kToNat (x6.limb 0)]⟩
-    have htl : tableRows s = ((([x0, x1, x2, x3, x4, x5, x6, x7].drop 1).take 6).map
+        kToNat (x5.limb 0), kToNat (x6.limb 0), kToNat (x7.limb 0)]⟩
+    have htl : tableRows s = ((([x0, x1, x2, x3, x4, x5, x6, x7, x8].drop 1).take 7).map
         fun value ↦ kToNat (value.limb 0)) := by
       simp [tableRows, s, List.ofFn_succ]
     have hb' := buildLayout_eq prog s
-    rw [show s.logMem = kToNat (([x0, x1, x2, x3, x4, x5, x6, x7].headD 0).limb 0) from rfl, htl,
+    rw [show s.logMem = kToNat (([x0, x1, x2, x3, x4, x5, x6, x7, x8].headD 0).limb 0) from rfl, htl,
       hb] at hb'
     split_ifs at hb' with hok
     · simp only [Option.some.injEq] at hb'
@@ -179,11 +179,11 @@ theorem readSizes_ret_sizes (prog : LeanIsaProgram) {l : List Ev} {a : Verifier.
         List.nil_append, List.ofFn_succ, List.ofFn_zero]
       rw [hρ]
       simp only [List.getLastD_cons, List.getLastD_nil]
-      obtain ⟨a0, a1, a2, a3, a4, a5, a6, a7⟩ := hall
+      obtain ⟨a0, a1, a2, a3, a4, a5, a6, a7, a8⟩ := hall
       simp only [List.cons.injEq, Ev.read.injEq, and_true]
       exact ⟨eq_eOfNat_of_limbs a0, eq_eOfNat_of_limbs a1, eq_eOfNat_of_limbs a2,
         eq_eOfNat_of_limbs a3, eq_eOfNat_of_limbs a4, eq_eOfNat_of_limbs a5,
-        eq_eOfNat_of_limbs a6, eq_eOfNat_of_limbs a7⟩
+        eq_eOfNat_of_limbs a6, eq_eOfNat_of_limbs a7, eq_eOfNat_of_limbs a8⟩
 
 end
 end LeanVM.Protocol.EndToEnd.Front

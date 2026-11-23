@@ -25,7 +25,7 @@ The instances bound the column claims the front phases of `verifyExecutionClaims
 
 * `retOK_verifyBusBalance`: the bus phase returns four framework claims (the two memory limbs'
   columns and the two final counters);
-* `retOK_busTable`: the bus phase followed by the table sumcheck returns at most `4 + 153 = 157`
+* `retOK_busTable`: the bus phase followed by the table sumcheck returns at most `4 + 211 = 215`
   claims, every one of the six tables contributing one claim per column (`tables_width_sum`);
 * `retOK_publicInputPhase`: the public-input phase returns two claims, one per memory limb.
 -/
@@ -145,13 +145,13 @@ theorem sum_map_zip_fst_le {α β : Type} (f : α → ℕ) :
     simp only [List.zip_cons_cons, List.map_cons, List.sum_cons]
     exact Nat.add_le_add_left (sum_map_zip_fst_le f l₁ l₂) _
 
-/-- The six tables have `153` columns in all (`KECCAK`'s `92` the widest). -/
-theorem tables_width_sum : (tables.map Table.width).sum = 153 := by decide +kernel
+/-- The seven tables have `211` columns in all (`KECCAK`'s `92` the widest). -/
+theorem tables_width_sum : (tables.map Table.width).sum = 211 := by decide +kernel
 
-/-- The table sumcheck returns at most `153` claims, one per column of the six tables. -/
+/-- The table sumcheck returns at most `211` claims, one per column of the seven tables. -/
 theorem retOK_tableSumcheck (heights : List ℕ) (busForms : List (List Form))
     (constraintPowers formPowers equalityPoint : List E) (target : E) :
-    RetOK (fun claims : List ColumnClaim ↦ claims.length ≤ 153)
+    RetOK (fun claims : List ColumnClaim ↦ claims.length ≤ 211)
       (tableSumcheckClaims heights busForms constraintPowers formPowers equalityPoint target) := by
   unfold tableSumcheckClaims
   refine RetOK.bind_true fun r ↦ ?_
@@ -165,9 +165,9 @@ theorem retOK_tableSumcheck (heights : List ℕ) (busForms : List (List Form))
   simp only [List.length_nil, Nat.zero_add] at hr
   omega
 
-/-- The table phase returns the bus's claims and at most `153` more. -/
+/-- The table phase returns the bus's claims and at most `211` more. -/
 theorem retOK_tablePhase (layout : Layout) (bus : BusResult) :
-    RetOK (fun claims : List ColumnClaim ↦ claims.length ≤ bus.claims.length + 153)
+    RetOK (fun claims : List ColumnClaim ↦ claims.length ≤ bus.claims.length + 211)
       (tablePhaseClaims layout bus) := by
   unfold tablePhaseClaims
   refine RetOK.bind_true fun _ ↦ RetOK.bind_true fun _ ↦
@@ -175,9 +175,9 @@ theorem retOK_tablePhase (layout : Layout) (bus : BusResult) :
   simp only [List.length_append]
   omega
 
-/-- The bus phase and the table sumcheck return at most `4 + 153 = 157` claims. -/
+/-- The bus phase and the table sumcheck return at most `4 + 211 = 215` claims. -/
 theorem retOK_busTable (ev : List K → List E → E → VerifierProgram Unit) (layout : Layout) :
-    RetOK (fun claims : List ColumnClaim ↦ claims.length ≤ 157)
+    RetOK (fun claims : List ColumnClaim ↦ claims.length ≤ 215)
       ((verifyBusBalance ev layout).bind (tablePhaseClaims layout)) :=
   (retOK_verifyBusBalance ev layout).bind fun bus hb ↦
     (retOK_tablePhase layout bus).mono fun _ h ↦ by omega

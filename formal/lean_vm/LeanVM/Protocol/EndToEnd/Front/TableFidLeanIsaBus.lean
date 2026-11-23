@@ -71,43 +71,44 @@ open Finset
 /-! ## The sumcheck tables of the instance -/
 
 /-- Every opcode table flushes. -/
-theorem flushes_opIdx_length_pos : ∀ t : Fin 6, 0 < (LeanIsa.flushes (opIdx t)).length := by
+theorem flushes_opIdx_length_pos : ∀ t : Fin 7, 0 < (LeanIsa.flushes (opIdx t)).length := by
   decide +kernel
 
 /-- `JUMP` has two constraints, the other opcode tables none. -/
 theorem constraints_opIdx_length :
-    ∀ t : Fin 6, (LeanIsa.constraints (opIdx t)).length = if t = 4 then 2 else 0 := by
+    ∀ t : Fin 7, (LeanIsa.constraints (opIdx t)).length = if t = 4 then 2 else 0 := by
   decide +kernel
 
 variable (prog : LeanIsaProgram) (s : Sizes) {fl : Option (KeccakRegion (shape prog s))}
 
 /-- The opcode tables are sumcheck tables. -/
-theorem sumcheckTable_opIdx (t : Fin 6) : (leanIsaWith prog s fl).SumcheckTable (opIdx t) :=
+theorem sumcheckTable_opIdx (t : Fin 7) : (leanIsaWith prog s fl).SumcheckTable (opIdx t) :=
   Or.inr (Or.inl (List.ne_nil_of_length_pos (flushes_opIdx_length_pos t)))
 
 /-- The sumcheck tables are the opcode tables: the column groups have nothing to check. -/
-theorem three_le_of_sumcheckTable (j : Fin 9) (h : (leanIsaWith prog s fl).SumcheckTable j) :
-    3 ≤ j.val := by
+theorem three_le_of_sumcheckTable (j : Fin 11) (h : (leanIsaWith prog s fl).SumcheckTable j) :
+    4 ≤ j.val := by
   match j, h with
   | ⟨0, _⟩, h => rcases h with h | h | h <;> exact absurd rfl h
   | ⟨1, _⟩, h => rcases h with h | h | h <;> exact absurd rfl h
   | ⟨2, _⟩, h => rcases h with h | h | h <;> exact absurd rfl h
-  | ⟨j + 3, _⟩, _ => show 3 ≤ j + 3; omega
+  | ⟨3, _⟩, h => rcases h with h | h | h <;> exact absurd rfl h
+  | ⟨j + 4, _⟩, _ => show 4 ≤ j + 4; omega
 
 variable (fl) in
-/-- The six opcode tables are the instance's sumcheck tables, in order. -/
-def stEquiv : Fin 6 ≃ (leanIsaWith prog s fl).SumcheckTables where
+/-- The seven opcode tables are the instance's sumcheck tables, in order. -/
+def stEquiv : Fin 7 ≃ (leanIsaWith prog s fl).SumcheckTables where
   toFun t := ⟨opIdx t, sumcheckTable_opIdx prog s t⟩
-  invFun j := ⟨j.1.val - 3, by have h9 : j.1.val < 9 := j.1.isLt; omega⟩
+  invFun j := ⟨j.1.val - 4, by have h9 : j.1.val < 11 := j.1.isLt; omega⟩
   left_inv t := Fin.ext (by simp [opIdx])
   right_inv j := by
     have h3 := three_le_of_sumcheckTable prog s j.1 j.2
     refine Subtype.ext (Fin.ext ?_)
-    show j.1.val - 3 + 3 = j.1.val
+    show j.1.val - 4 + 4 = j.1.val
     omega
 
 /-- The opcode table behind a sumcheck table. -/
-@[simp] theorem stEquiv_apply_val (t : Fin 6) : (stEquiv prog s fl t).1 = opIdx t := rfl
+@[simp] theorem stEquiv_apply_val (t : Fin 7) : (stEquiv prog s fl t).1 = opIdx t := rfl
 
 /-- A fold of `max` is below a bound above the start and every entry. -/
 theorem foldl_max_le {b : ℕ} : ∀ (l : List ℕ) (init : ℕ), init ≤ b → (∀ x ∈ l, x ≤ b) →
@@ -144,7 +145,7 @@ theorem sumcheckB_leanIsa : (leanIsaWith prog s fl).B = 2 := by
   unfold M3Instance.B
   rw [← (stEquiv prog s fl).sum_comp]
   simp only [stEquiv_apply_val]
-  change ∑ t : Fin 6, (LeanIsa.constraints (opIdx t)).length = 2
+  change ∑ t : Fin 7, (LeanIsa.constraints (opIdx t)).length = 2
   simp [constraints_opIdx_length]
 
 /-- **The boundary columns**: the memory columns, then `BYTECODE_FINAL_COUNTERS`. -/
@@ -272,13 +273,14 @@ theorem sum_zipIdx {α : Type} (g : ℕ → α → E) (d : α) :
     exact congrArg₂ (· + ·) (Finset.sum_congr rfl fun k _ ↦ by rw [add_assoc, add_comm 1 k])
       rfl
 
-/-- `List.finRange 9`, the column groups first. -/
-theorem finRange_nine' : List.finRange 9 = [0, 1, 2] ++ (List.finRange 6).map opIdx := by
+/-- `List.finRange 11`, the column groups first. -/
+theorem finRange_nine' : List.finRange 11 = [0, 1, 2, 3] ++ (List.finRange 7).map opIdx := by
   decide
 
 /-- A `flatMap` over the instance's tables, the column groups first. -/
-theorem flatMap_finRange_nine {X : Type} (g : Fin 9 → List X) :
-    (List.finRange 9).flatMap g = g 0 ++ g 1 ++ g 2 ++ (List.finRange 6).flatMap (g ∘ opIdx) := by
+theorem flatMap_finRange_nine {X : Type} (g : Fin 11 → List X) :
+    (List.finRange 11).flatMap g =
+      g 0 ++ g 1 ++ g 2 ++ g 3 ++ (List.finRange 7).flatMap (g ∘ opIdx) := by
   rw [finRange_nine', List.flatMap_append, List.flatMap_map]
   simp only [List.flatMap_cons, List.flatMap_nil, List.append_nil, List.append_assoc]
   rfl
@@ -291,26 +293,26 @@ variable (prog : LeanIsaProgram) (s : Sizes) {fl : Option (KeccakRegion (shape p
 
 variable (fl) in
 /-- Opcode table `t` among the instance's tables. -/
-def opI (t : Fin 6) : Fin (leanIsaWith prog s fl).ntab := opIdx t
+def opI (t : Fin 7) : Fin (leanIsaWith prog s fl).ntab := opIdx t
 
 variable (fl) in
 /-- Opcode table `t`'s flushes of a side, as the protocol's blocks. -/
-def flushSrcs (side : Side) (t : Fin 6) : List (Bus.Source (leanIsaWith prog s fl)) :=
+def flushSrcs (side : Side) (t : Fin 7) : List (Bus.Source (leanIsaWith prog s fl)) :=
   ((List.finRange ((leanIsaWith prog s fl).flushes (opI prog s fl t)).length).filter fun f ↦
     decide (((leanIsaWith prog s fl).flushes (opI prog s fl t))[f].1 = side)).map
       (Bus.Source.flush (opI prog s fl t))
 
 variable (fl) in
 /-- Opcode table `t`'s count columns, as the protocol's blocks. -/
-def countSrcs (t : Fin 6) : List (Bus.Source (leanIsaWith prog s fl)) :=
+def countSrcs (t : Fin 7) : List (Bus.Source (leanIsaWith prog s fl)) :=
   ((leanIsaWith prog s fl).counts (opI prog s fl t)).map (Bus.Source.count (opI prog s fl t))
 
 /-- The verifier's blocks of opcode table `t` on a side. -/
-def refBlocks (side : Side) (t : Fin 6) : List BusBlock :=
+def refBlocks (side : Side) (t : Fin 7) : List BusBlock :=
   (Complete.refSide t side).map fun c ↦ ⟨s.τ t, s.rows t, c, t⟩
 
 /-- The verifier's count blocks of opcode table `t`. -/
-def refCountBlocks (t : Fin 6) : List BusBlock :=
+def refCountBlocks (t : Fin 7) : List BusBlock :=
   (tables.getD t default).countColumns.map fun l ↦ ⟨s.τ t, s.rows t, [Form.col l], t⟩
 
 /-- **A side's blocks** at the instance: its boundary blocks, then the opcode tables' flushes of the
@@ -318,7 +320,7 @@ side, table by table. -/
 theorem sideSources_leanIsa (side : Side) :
     Bus.sideSources (leanIsaWith prog s fl) side =
       ((boundary prog s).filter fun b ↦ decide (b.side = side)).map Bus.Source.boundary ++
-        (List.finRange 6).flatMap (flushSrcs prog s fl side) := by
+        (List.finRange 7).flatMap (flushSrcs prog s fl side) := by
   unfold Bus.sideSources
   refine congrArg (_ ++ ·) ((flatMap_finRange_nine _).trans ?_)
   have hnil : ∀ j, (leanIsaWith prog s fl).flushes j = [] →
@@ -330,34 +332,34 @@ theorem sideSources_leanIsa (side : Side) :
     intro f _
     have h0 : ((leanIsaWith prog s fl).flushes j).length = 0 := by rw [hj]; rfl
     exact absurd f.isLt (by omega)
-  rw [hnil (0 : Fin 9) rfl, hnil (1 : Fin 9) rfl, hnil (2 : Fin 9) rfl, List.nil_append,
-    List.nil_append, List.nil_append]
+  rw [hnil (0 : Fin 11) rfl, hnil (1 : Fin 11) rfl, hnil (2 : Fin 11) rfl, hnil (3 : Fin 11) rfl,
+    List.nil_append, List.nil_append, List.nil_append, List.nil_append]
   rfl
 
 /-- **The count side's blocks** at the instance: the opcode tables' count columns. -/
 theorem countSources_leanIsa :
     Bus.countSources (leanIsaWith prog s fl) =
-      (List.finRange 6).flatMap (countSrcs prog s fl) := by
+      (List.finRange 7).flatMap (countSrcs prog s fl) := by
   unfold Bus.countSources
   exact flatMap_finRange_nine _
 
 /-- The verifier's push blocks, table by table. -/
-theorem pushBlocks_eq : Complete.pushBlocks s = (List.finRange 6).flatMap (refBlocks s .push) := by
+theorem pushBlocks_eq : Complete.pushBlocks s = (List.finRange 7).flatMap (refBlocks s .push) := by
   rw [Complete.pushBlocks, List.ofFn_eq_map, List.flatMap_def]
   rfl
 
 /-- The verifier's pull blocks, table by table. -/
-theorem pullBlocks_eq : Complete.pullBlocks s = (List.finRange 6).flatMap (refBlocks s .pull) := by
+theorem pullBlocks_eq : Complete.pullBlocks s = (List.finRange 7).flatMap (refBlocks s .pull) := by
   rw [Complete.pullBlocks, List.ofFn_eq_map, List.flatMap_def]
   rfl
 
 /-- The verifier's count blocks, table by table. -/
-theorem countBlocks_eq : Complete.countBlocks s = (List.finRange 6).flatMap (refCountBlocks s) := by
+theorem countBlocks_eq : Complete.countBlocks s = (List.finRange 7).flatMap (refCountBlocks s) := by
   rw [Complete.countBlocks, List.ofFn_eq_map, List.flatMap_def]
   rfl
 
 /-- Opcode table `t` has as many protocol flush blocks on a side as the verifier. -/
-theorem length_flushSrcs (side : Side) (t : Fin 6) :
+theorem length_flushSrcs (side : Side) (t : Fin 7) :
     (flushSrcs prog s fl side t).length = (refBlocks s side t).length := by
   have h := congrArg List.length (refFlush_evalE t side (fun _ ↦ 0))
   simp only [List.length_map] at h
@@ -369,7 +371,7 @@ theorem length_flushSrcs (side : Side) (t : Fin 6) :
     List.length_map]
 
 /-- The protocol's flush blocks of opcode table `t` have its height, as the verifier's. -/
-theorem flushSrcs_map_κ (side : Side) (t : Fin 6) :
+theorem flushSrcs_map_κ (side : Side) (t : Fin 7) :
     (flushSrcs prog s fl side t).map Bus.Source.κ = (refBlocks s side t).map (·.logRows) := by
   have hl := length_flushSrcs prog s (fl := fl) side t
   rw [show (flushSrcs prog s fl side t).map Bus.Source.κ =
@@ -384,7 +386,7 @@ theorem flushSrcs_map_κ (side : Side) (t : Fin 6) :
     List.map_const', List.map_const', hl]
 
 /-- The protocol's count blocks of opcode table `t` have its height, as the verifier's. -/
-theorem countSrcs_map_κ (t : Fin 6) :
+theorem countSrcs_map_κ (t : Fin 7) :
     (countSrcs prog s fl t).map Bus.Source.κ = (refCountBlocks s t).map (·.logRows) := by
   have h1 : (countSrcs prog s fl t).map Bus.Source.κ =
       List.replicate ((leanIsaWith prog s fl).counts (opI prog s fl t)).length (s.τ t) := by
@@ -445,13 +447,13 @@ variable (prog : LeanIsaProgram) (s : Sizes) {fl : Option (KeccakRegion (shape p
 variable (fl) in
 /-- The weight-one form a block of the instance puts on opcode table `t₀`, at values `e` of the
 table's columns. -/
-def arkG (t₀ : Fin 6) (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E)
+def arkG (t₀ : Fin 7) (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E)
     (src : Bus.Source (leanIsaWith prog s fl)) : E :=
   formAt (src.form (by norm_num) 1 α β (opI prog s fl t₀)) e
 
 /-- The verifier's block on opcode table `t₀`: its fingerprint if `t₀` owns it, nothing
 otherwise. -/
-def refG (t₀ : Fin 6) (w : List E) (col : ℕ → E) (b : BusBlock) : E :=
+def refG (t₀ : Fin 7) (w : List E) (col : ℕ → E) (b : BusBlock) : E :=
   if b.owner = t₀.val then Complete.blockVal β w b col else 0
 
 /-- Distinct opcode tables are distinct tables of the instance. -/
@@ -461,7 +463,7 @@ theorem opI_injective : Function.Injective (opI prog s fl) := fun a b h ↦ by
   exact Fin.ext (by omega)
 
 /-- A flush of another table puts nothing on `t₀`. -/
-theorem arkG_flush_ne {t t₀ : Fin 6} (ht : t ≠ t₀)
+theorem arkG_flush_ne {t t₀ : Fin 7} (ht : t ≠ t₀)
     (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E)
     (f : Fin ((leanIsaWith prog s fl).flushes (opI prog s fl t)).length) :
     arkG prog s fl α β t₀ e (.flush (opI prog s fl t) f) = 0 := by
@@ -469,7 +471,7 @@ theorem arkG_flush_ne {t t₀ : Fin 6} (ht : t ≠ t₀)
   simp [arkG, Bus.Source.form, hne, formAt]
 
 /-- A flush of `t₀` puts its fingerprint at weight one: `β − Σ_i eq(α, i) · P_i(e)`. -/
-theorem arkG_flush_self (t₀ : Fin 6)
+theorem arkG_flush_self (t₀ : Fin 7)
     (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E)
     (f : Fin ((leanIsaWith prog s fl).flushes (opI prog s fl t₀)).length) :
     arkG prog s fl α β t₀ e (.flush (opI prog s fl t₀) f) =
@@ -484,7 +486,7 @@ theorem arkG_flush_self (t₀ : Fin 6)
   ring
 
 /-- The protocol's fingerprint of a flush at values in `E`, in the verifier's weighted sum. -/
-theorem flushValue_eq_wsum {alphas : List E} (ha : alphas.length = 16) (t₀ : Fin 6)
+theorem flushValue_eq_wsum {alphas : List E} (ha : alphas.length = 16) (t₀ : Fin 7)
     (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E)
     (fu : Side × Vector (CMvPolynomial ((leanIsaWith prog s fl).width (opI prog s fl t₀)) K)
       16) :
@@ -561,7 +563,7 @@ theorem map_eq_zeros {X : Type} (l : List X) (g : X → E) (h : ∀ x ∈ l, g x
 
 /-- **Opcode table `t`'s flushes of a side put on table `t₀` what the verifier's blocks put**, at
 values `e` of `t₀`'s columns in `E`. -/
-theorem flushSrcs_map_arkG {alphas : List E} (ha : alphas.length = 16) (side : Side) (t t₀ : Fin 6)
+theorem flushSrcs_map_arkG {alphas : List E} (ha : alphas.length = 16) (side : Side) (t t₀ : Fin 7)
     (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E) :
     (flushSrcs prog s fl side t).map (arkG prog s fl (toAlpha alphas) β t₀ e) =
       (refBlocks s side t).map (refG β t₀ alphas (rowE e)) := by
@@ -600,7 +602,7 @@ theorem flushSrcs_map_arkG {alphas : List E} (ha : alphas.length = 16) (side : S
       exact arkG_flush_ne prog s _ β ht e f
 
 /-- **Opcode table `t`'s count columns put on table `t₀` what the verifier's count blocks put.** -/
-theorem countSrcs_map_arkG (α : Fin 16 → E) (t t₀ : Fin 6)
+theorem countSrcs_map_arkG (α : Fin 16 → E) (t t₀ : Fin 7)
     (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E) :
     (countSrcs prog s fl t).map (arkG prog s fl α β t₀ e) =
       (refCountBlocks s t).map (refG 0 t₀ [1] (rowE e)) := by
@@ -643,13 +645,13 @@ theorem sources_one :
 
 /-- The heights of a side's blocks are the verifier's, framework first. -/
 theorem sideSources_map_κ (side : Side) (blocks : List BusBlock)
-    (hb : blocks = (List.finRange 6).flatMap (refBlocks s side)) :
+    (hb : blocks = (List.finRange 7).flatMap (refBlocks s side)) :
     (Bus.sideSources (leanIsaWith prog s fl) side).map Bus.Source.κ =
       Complete.sideSizes (((boundary prog s).filter fun b ↦ decide (b.side = side)).map (·.κ))
         blocks := by
   rw [sideSources_leanIsa, List.map_append, List.map_map, Complete.sideSizes, hb,
     List.map_flatMap, List.map_flatMap]
-  exact congrArg (_ ++ ·) (congrArg (fun g ↦ (List.finRange 6).flatMap g)
+  exact congrArg (_ ++ ·) (congrArg (fun g ↦ (List.finRange 7).flatMap g)
     (funext fun t ↦ flushSrcs_map_κ prog s side t))
 
 /-- The heights of the count side's blocks are the verifier's count blocks'. -/
@@ -658,30 +660,30 @@ theorem countSources_map_κ :
       Complete.sideSizes [] (Complete.countBlocks s) := by
   rw [countSources_leanIsa, Complete.sideSizes, countBlocks_eq, List.map_flatMap,
     List.map_flatMap, List.nil_append]
-  exact congrArg (fun g ↦ (List.finRange 6).flatMap g) (funext fun t ↦ countSrcs_map_κ prog s t)
+  exact congrArg (fun g ↦ (List.finRange 7).flatMap g) (funext fun t ↦ countSrcs_map_κ prog s t)
 
 /-- The forms a side's blocks put on table `t₀`: nothing from the framework, then the verifier's. -/
 theorem sideSources_map_arkG {alphas : List E} (ha : alphas.length = 16) (side : Side)
-    (blocks : List BusBlock) (hb : blocks = (List.finRange 6).flatMap (refBlocks s side))
-    (t₀ : Fin 6) (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E) :
+    (blocks : List BusBlock) (hb : blocks = (List.finRange 7).flatMap (refBlocks s side))
+    (t₀ : Fin 7) (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E) :
     (Bus.sideSources (leanIsaWith prog s fl) side).map
         (arkG prog s fl (toAlpha alphas) β t₀ e) =
       List.replicate ((boundary prog s).filter fun b ↦ decide (b.side = side)).length 0 ++
         blocks.map (refG β t₀ alphas (rowE e)) := by
   rw [sideSources_leanIsa, List.map_append, List.map_map, hb, List.map_flatMap, List.map_flatMap]
-  refine congrArg₂ (· ++ ·) ?_ (congrArg (fun g ↦ (List.finRange 6).flatMap g)
+  refine congrArg₂ (· ++ ·) ?_ (congrArg (fun g ↦ (List.finRange 7).flatMap g)
     (funext fun t ↦ flushSrcs_map_arkG prog s β ha side t t₀ e))
   rw [map_eq_zeros _ _ fun b _ ↦ by simp [arkG, Bus.Source.form, formAt]]
 
 /-- The forms the count side's blocks put on table `t₀` are the verifier's. -/
-theorem countSources_map_arkG (α : Fin 16 → E) (t₀ : Fin 6)
+theorem countSources_map_arkG (α : Fin 16 → E) (t₀ : Fin 7)
     (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E) :
     (Bus.countSources (leanIsaWith prog s fl)).map (arkG prog s fl α β t₀ e) =
       List.replicate ([] : List ℕ).length 0 ++
         (Complete.countBlocks s).map (refG 0 t₀ [1] (rowE e)) := by
   rw [countSources_leanIsa, countBlocks_eq, List.map_flatMap, List.map_flatMap, List.length_nil,
     List.replicate_zero, List.nil_append]
-  exact congrArg (fun g ↦ (List.finRange 6).flatMap g)
+  exact congrArg (fun g ↦ (List.finRange 7).flatMap g)
     (funext fun t ↦ countSrcs_map_arkG prog s β α t t₀ e)
 
 end SideLists
@@ -720,7 +722,7 @@ def foldSum (w : List E) (β : E) (l : List (E × BusBlock)) (t : ℕ) (col : �
 
 /-- **The verifier's forms, side by side**: table `t`'s form on each side is what that side's fold
 adds. -/
-theorem result_form_eval (w : BusWit) (t : Fin 6) (col : ℕ → E) :
+theorem result_form_eval (w : BusWit) (t : Fin 7) (col : ℕ → E) :
     (((w.result (verifierLayout prog s)).forms.getD t []).getD 0 {}).evaluate col =
         foldSum w.alphas w.beta (List.zip (Complete.sideSels (Complete.fwLogs prog s)
           (Complete.pushBlocks s) w.point 3 (Complete.pushBlocks s).length)
@@ -753,7 +755,7 @@ theorem result_form_eval (w : BusWit) (t : Fin 6) (col : ℕ → E) :
 
 /-- `foldSum` as a sum over the blocks' indices. -/
 theorem foldSum_eq (w : List E) (β : E) (fw : List ℕ) (m : ℕ) (blocks : List BusBlock)
-    (p : List E) (t : Fin 6) (col : ℕ → E) :
+    (p : List E) (t : Fin 7) (col : ℕ → E) :
     foldSum w β (List.zip (Complete.sideSels fw blocks p m blocks.length) blocks) t col =
       ∑ i ∈ range blocks.length,
         Complete.blockSel (Complete.sideSizes fw blocks) p.length (m + i) p *
@@ -782,7 +784,7 @@ def srcDefault : Bus.Source (leanIsaWith prog s fl) :=
 read, the form of side `k` on opcode table `t₀`, evaluated at any values `e` of the table's
 columns in `E`, is the verifier's form `forms[t₀][k]` evaluated at `e`. -/
 theorem formAt_busOut_forms (w : BusWit) (hp : w.point.length = (leanIsaWith prog s fl).μBus)
-    (ha : w.alphas.length = 16) (k : Fin 3) (t₀ : Fin 6)
+    (ha : w.alphas.length = 16) (k : Fin 3) (t₀ : Fin 7)
     (e : Fin ((leanIsaWith prog s fl).width (opI prog s fl t₀)) → E) :
     formAt ((Bus.busOut (leanIsaWith_conditions prog s fl)
         (w.layer (leanIsaWith prog s fl) input)
@@ -1149,7 +1151,7 @@ def refPad (w : List E) (β : E) (p : List E) (b : BusBlock) : E :=
 
 variable (fl) in
 /-- Opcode table `t`'s padding row, lifted to `E`. -/
-def padE (t : Fin 6) : Fin ((leanIsaWith prog s fl).width (opI prog s fl t)) → E :=
+def padE (t : Fin 7) : Fin ((leanIsaWith prog s fl).width (opI prog s fl t)) → E :=
   fun i ↦ ofK ((leanIsaWith prog s fl).padRow (opI prog s fl t) i)
 
 /-- Lifting a list's entry is reading the lifted list. -/
@@ -1161,18 +1163,18 @@ private theorem ofK_getD : ∀ (l : List K) (i : ℕ), ofK (l.getD i 0) = (l.map
   | _ :: l, i + 1 => ofK_getD l i
 
 /-- The padding row, as the verifier reads columns, is the verifier's `Table.padding`. -/
-theorem rowE_padE (t : Fin 6) :
+theorem rowE_padE (t : Fin 7) :
     rowE (padE prog s fl t) = fun i ↦ (tables.getD t default).padding.getD i 0 := by
   funext i
   have hw : (padRowK (tables.getD t default)).length = width (opIdx t) := by
     rw [width_opIdx, padRowK_length]
-  have h3 : (opIdx t).val - 3 = t.val := by simp [opIdx]
+  have h3 : (opIdx t).val - 4 = t.val := by simp [opIdx]
   have hrow : ∀ j : Fin (width (opIdx t)),
       (leanIsaWith prog s fl).padRow (opI prog s fl t) j =
         (padRowK (tables.getD t default)).getD j 0 := by
     intro j
-    show (if 3 ≤ (opIdx t).val then
-      (padRowK (tables.getD ((opIdx t).val - 3) default)).getD j 0 else 0) = _
+    show (if 4 ≤ (opIdx t).val then
+      (padRowK (tables.getD ((opIdx t).val - 4) default)).getD j 0 else 0) = _
     rw [ite_eq_left (by simp [opIdx]), h3]
   rw [padding_eq_map_ofK]
   unfold rowE
@@ -1183,21 +1185,21 @@ theorem rowE_padE (t : Fin 6) :
       (by rw [List.length_map, hw]; exact Nat.le_of_not_lt h)]
 
 /-- A table's rows fit in the bus point. -/
-theorem tau_le_point (t : Fin 6) {p : List E} (hp : p.length = (leanIsaWith prog s fl).μBus) :
+theorem tau_le_point (t : Fin 7) {p : List E} (hp : p.length = (leanIsaWith prog s fl).μBus) :
     s.τ t ≤ p.length :=
   hp ▸ ((leanIsaWith prog s fl).τ_le_τmax (stEquiv prog s fl t)).trans
     (leanIsaWith_conditions prog s fl).τmax_le
 
 /-- The padding weight of a table's rows at the low coordinates of the bus point is the
 verifier's `padding_weight`. -/
-theorem padWeight_vecOf (t : Fin 6) {p : List E} (hp : p.length = (leanIsaWith prog s fl).μBus) :
+theorem padWeight_vecOf (t : Fin 7) {p : List E} (hp : p.length = (leanIsaWith prog s fl).μBus) :
     Bus.padWeight (s.rows t) (vecOf (s.τ t) p) = paddingWeight (p.take (s.τ t)) (s.rows t) :=
   padWeight_ofFn_take p _ (tau_le_point prog s t hp) (s.rows_le t)
 
 /-- A flush block's public value is its padding term: one less its form at the padding row,
 times the padding weight. -/
 theorem arkB_flush (α : Fin 16 → E) (β : E)
-    (vals : Vector E (leanIsaWith prog s fl).busClaims) (p : List E) (t : Fin 6)
+    (vals : Vector E (leanIsaWith prog s fl).busClaims) (p : List E) (t : Fin 7)
     (f : Fin ((leanIsaWith prog s fl).flushes (opI prog s fl t)).length) :
     arkBWith prog s fl α β vals p (.flush (opI prog s fl t) f) =
       (1 - arkG prog s fl α β t (padE prog s fl t) (.flush (opI prog s fl t) f)) *
@@ -1220,11 +1222,11 @@ theorem arkB_flush (α : Fin 16 → E) (β : E)
 theorem flushSrcs_map_arkB {alphas : List E} (ha : alphas.length = 16) (side : Side) (β : E)
     (vals : Vector E (leanIsaWith prog s fl).busClaims) (p : List E)
     (hp : p.length = (leanIsaWith prog s fl).μBus) :
-    ((List.finRange 6).flatMap (flushSrcs prog s fl side)).map
+    ((List.finRange 7).flatMap (flushSrcs prog s fl side)).map
         (arkBWith prog s fl (toAlpha alphas) β vals p) =
-      ((List.finRange 6).flatMap (refBlocks s side)).map (refPad alphas β p) := by
+      ((List.finRange 7).flatMap (refBlocks s side)).map (refPad alphas β p) := by
   rw [List.map_flatMap, List.map_flatMap]
-  refine congrArg (fun g ↦ (List.finRange 6).flatMap g) (funext fun t ↦ ?_)
+  refine congrArg (fun g ↦ (List.finRange 7).flatMap g) (funext fun t ↦ ?_)
   have h1 : (flushSrcs prog s fl side t).map (arkBWith prog s fl (toAlpha alphas) β vals p) =
       ((flushSrcs prog s fl side t).map
         (arkG prog s fl (toAlpha alphas) β t (padE prog s fl t))).map
@@ -1248,7 +1250,7 @@ theorem countSources_map_arkB (α : Fin 16 → E) (β : E)
     (Bus.countSources (leanIsaWith prog s fl)).map (arkBWith prog s fl α β vals p) =
       [] ++ (Complete.countBlocks s).map (refPad [1] 0 p) := by
   rw [countSources_leanIsa, countBlocks_eq, List.nil_append, List.map_flatMap, List.map_flatMap]
-  refine congrArg (fun g ↦ (List.finRange 6).flatMap g) (funext fun t ↦ ?_)
+  refine congrArg (fun g ↦ (List.finRange 7).flatMap g) (funext fun t ↦ ?_)
   rw [refCountBlocks, Complete.refCountColumns, List.map_map, List.map_map, countSrcs, List.map_map]
   refine List.map_congr_left fun c _ ↦ ?_
   show (1 - ofK ((leanIsaWith prog s fl).padRow (opI prog s fl t) c)) *

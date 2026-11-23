@@ -232,7 +232,7 @@ private theorem one_add_one_E : (1 : E) + 1 = 0 := by
   exact CharTwo.two_eq_zero
 
 /-- The verifier's tables have the instance's widths. -/
-theorem columns_length : ∀ t : Fin 6, (tables.getD t default).columns.length = width (opIdx t) := by
+theorem columns_length : ∀ t : Fin 7, (tables.getD t default).columns.length = width (opIdx t) := by
   decide +kernel
 
 /-- The verifier's padding weight is the padding rows' share of the equality weight. -/
@@ -252,7 +252,7 @@ theorem paddingWeight_eq_sum (z : List E) (n : ℕ) (hn : n ≤ 2 ^ z.length) :
   rw [h1, h2, multilinearEval_range _ _ _ rfl]
 
 /-- A padding row of an honest stack reads, column by column, as the verifier's padding row. -/
-theorem rowVal_padding (hP : (inst prog s).PaddingHonest q) (t : Fin 6) (x : Fin (2 ^ s.τ t))
+theorem rowVal_padding (hP : (inst prog s).PaddingHonest q) (t : Fin 7) (x : Fin (2 ^ s.τ t))
     (hx : s.rows t ≤ x.val) :
     rowVal prog s q t x = fun i ↦ (tables.getD t default).padding.getD i 0 := by
   funext i
@@ -260,7 +260,7 @@ theorem rowVal_padding (hP : (inst prog s).PaddingHonest q) (t : Fin 6) (x : Fin
   split_ifs with hi
   · rw [hP (opIdx t) x hx]
     show ofK (padRow (opIdx t) ⟨i, hi⟩) = _
-    simp only [padRow, opIdx, show 3 ≤ t.val + 3 by omega, ↓reduceIte, Nat.add_sub_cancel,
+    simp only [padRow, opIdx, show 4 ≤ t.val + 4 by omega, ↓reduceIte, Nat.add_sub_cancel,
       List.getD_eq_getElem?_getD, List.getElem?_map]
     have h0 : ofK (0 : K) = 0 := map_zero (algebraMap K E)
     cases h : (padRowK (tables[(t : ℕ)]?.getD default))[i]? <;> simp [h0]
@@ -273,7 +273,7 @@ theorem rowVal_padding (hP : (inst prog s).PaddingHonest q) (t : Fin 6) (x : Fin
 padding term the verifier adds, `pad_n · (φ(p) + 1)`: in characteristic two, the honest leaves `1`
 of the padding rows and that term add up to the padding rows' fingerprints. -/
 theorem sum_block_true (hP : (inst prog s).PaddingHonest q) (β : E) (w : List E) (p : List E)
-    (sel : E) (t : Fin 6) (coords : List Form) (hp : s.τ t ≤ p.length) :
+    (sel : E) (t : Fin 7) (coords : List Form) (hp : s.τ t ≤ p.length) :
     ∑ x : Fin (2 ^ s.τ t), eqEval (p.take (s.τ t)) (boolPoint (s.τ t) x) *
         (sel * blockVal β w ⟨s.τ t, s.rows t, coords, t⟩ (rowVal prog s q t x)) =
       sel * multilinearEval (tableTab prog s q β w ⟨s.τ t, s.rows t, coords, t⟩)
@@ -308,8 +308,8 @@ honest stack. -/
 theorem sum_owner_tables (hP : (inst prog s).PaddingHonest q) (β : E) (w : List E) (p : List E)
     (hp : ∀ t, s.τ t ≤ p.length) :
     ∀ l : List (E × BusBlock),
-      (∀ y ∈ l, ∃ t : Fin 6, y.2 = ⟨s.τ t, s.rows t, y.2.coordinates, t⟩) →
-      ∑ t : Fin 6, ∑ x : Fin (2 ^ s.τ t), eqEval (p.take (s.τ t)) (boolPoint (s.τ t) x) *
+      (∀ y ∈ l, ∃ t : Fin 7, y.2 = ⟨s.τ t, s.rows t, y.2.coordinates, t⟩) →
+      ∑ t : Fin 7, ∑ x : Fin (2 ^ s.τ t), eqEval (p.take (s.τ t)) (boolPoint (s.τ t) x) *
         ((l.filter fun y ↦ decide (y.2.owner = (t : ℕ))).map
           fun y ↦ y.1 * blockVal β w y.2 (rowVal prog s q t x)).sum =
       (l.map fun y ↦ y.1 * multilinearEval (tableTab prog s q β w y.2) (p.take y.2.logRows)).sum +
@@ -322,7 +322,7 @@ theorem sum_owner_tables (hP : (inst prog s).PaddingHonest q) (β : E) (w : List
       ← sum_owner_tables hP β w p hp l fun y hy ↦ hl y (by simp [hy])]
     simp only [sum_map_filter_cons, mul_add, sum_add_distrib]
     refine congrArg (· + _) ?_
-    have hcond : ∀ t : Fin 6, (b.owner = ↑t) ↔ (ty = t) := fun t ↦ by
+    have hcond : ∀ t : Fin 7, (b.owner = ↑t) ↔ (ty = t) := fun t ↦ by
       rw [hb]; simp [Fin.val_inj]
     simp only [hcond, mul_ite, mul_zero, Finset.sum_ite_irrel, Finset.sum_const_zero]
     rw [Finset.sum_ite_eq]
@@ -477,11 +477,11 @@ theorem trueTotal_congr (p : List E) {F G : List (List Form)} (side : ℕ)
 start empty and the stack is honest. -/
 theorem fold_trueTotal (hP : (inst prog s).PaddingHonest q) (side : ℕ) (hside : side < 3)
     (w : List E) (β : E) (blocks : List BusBlock)
-    (hown : ∀ b ∈ blocks, ∃ t : Fin 6, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩) (fw : List ℕ)
+    (hown : ∀ b ∈ blocks, ∃ t : Fin 7, b = ⟨s.τ t, s.rows t, b.coordinates, t⟩) (fw : List ℕ)
     (tabs : ℕ → List E)
     (htabs : ∀ i, tabs (fw.length + i) = tableTab prog s q β w (blocks.getD i default))
     (p : List E) (hp : p.length = busDepth prog s) (forms : List (List Form))
-    (h6 : forms.length = 6) (h3 : ∀ t < 6, (forms.getD t []).length = 3)
+    (h6 : forms.length = 7) (h3 : ∀ t < 7, (forms.getD t []).length = 3)
     (hzero : ∀ t, (forms.getD t []).getD side {} = {}) :
     trueTotal prog s q p
         (accFold side w β (List.zip (sideSels fw blocks p fw.length blocks.length) blocks) forms)
@@ -531,7 +531,7 @@ theorem trueClaims_honestBus (alphas : List E) (β : E) (p bp : List E)
 
 /-- The table blocks' coordinates have degree at most two. -/
 theorem blocks_deg2 (side : Side) (sels : List E) :
-    ∀ x ∈ List.zip sels ((List.ofFn fun t : Fin 6 ↦
+    ∀ x ∈ List.zip sels ((List.ofFn fun t : Fin 7 ↦
       (refSide t side).map fun c ↦ (⟨s.τ t, s.rows t, c, t⟩ : BusBlock)).flatten),
       ∀ c ∈ x.2.coordinates, Deg2 c := by
   intro x hx c hc
