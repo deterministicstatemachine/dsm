@@ -102,7 +102,8 @@ fn hint_lean(h: &RHint) -> Option<String> {
 }
 
 /// A hint module closes after the function that takes it past this many bytes of hints.
-const HINT_MODULE_BYTES: usize = 700_000;
+// Research build: `350_000` (upstream `700_000`), so that each module elaborates within 7 GB.
+const HINT_MODULE_BYTES: usize = 350_000;
 
 /// The header of a hint module, as `Statement/Data/Bytecode*.lean`'s.
 fn hints_header(module: &str, about: &str, imports: &str) -> String {

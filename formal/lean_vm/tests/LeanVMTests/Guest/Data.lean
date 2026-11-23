@@ -20,7 +20,8 @@ namespace LeanVMTests.Guest.Data
 
 open LeanVM.Guest LeanVM.Guest.Data
 
-/-- The opcode index of an instruction: `XOR`, `MUL`, `SET`, `DEREF`, `JUMP`, `KECCAK`. -/
+/-- The opcode index of an instruction: `XOR`, `MUL`, `SET`, `DEREF`, `JUMP`, `KECCAK`, `BLAKE3`
+(research build). -/
 def opIdx : OffsetInstruction → Nat
   | .xor .. => 0
   | .mul .. => 1
@@ -28,12 +29,13 @@ def opIdx : OffsetInstruction → Nat
   | .deref .. => 3
   | .jump .. => 4
   | .keccak .. => 5
+  | .blake3 .. => 6
 
 /-- The instructions of each opcode in the padded bytecode. -/
 def opcodeCounts : List Nat :=
   let code := functions.flatMap (·.chunks.flatten)
   let pad := 2 ^ logSize - codeLen
-  (List.range 6).map fun i ↦ (code.filter (opIdx · == i)).length + if i == 2 then pad else 0
+  (List.range 7).map fun i ↦ (code.filter (opIdx · == i)).length + if i == 2 then pad else 0
 
 #guard logSize = Manifest.logSize
 #guard codeLen = Manifest.codeLen
@@ -49,7 +51,7 @@ def opcodeCounts : List Nat :=
 #guard guest.constArrays.length = Manifest.constArrayCount
 #guard guest.funcs.any (·.name == "main")
 
-/- The compiler's seventeen test programs. -/
-#guard Programs.all.length = 17
+/- The compiler's eighteen test programs (research build: `blake3_xyw` among them). -/
+#guard Programs.all.length = 18
 
 end LeanVMTests.Guest.Data

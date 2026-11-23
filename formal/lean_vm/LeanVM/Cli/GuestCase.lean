@@ -78,6 +78,11 @@ def deferR : R DeferredBytecodeClaim := do
   expect "defer"
   return ⟨← many eR, ← eR⟩
 
+/-- Research build: the deferred matrix claim, its point and `A0`'s and `B0`'s values. -/
+def matrixR : R DeferredMatrixClaim := do
+  expect "matrix"
+  return ⟨← many eR, ← eR, ← eR⟩
+
 def statementR : R NodeStatement := do
   expect "xmss"
   let xmss ← many do let ((r, p), m) ← claimR; return ((⟨r, p⟩ : HashSig.PublicKey), m)
@@ -85,17 +90,23 @@ def statementR : R NodeStatement := do
   let sphincs ← many do let ((p, r), m) ← claimR; return ((⟨p, r⟩ : Sphincs.PublicKey), m)
   expect "da"
   let da ← digestR
-  return ⟨⟨xmss, sphincs, da⟩, ← deferR⟩
+  let defer ← deferR
+  let matrix ← matrixR
+  -- Research build: these nodes prove no vault step.
+  expect "vault"; expect "none"
+  return ⟨⟨xmss, sphincs, da⟩, defer, matrix, none⟩
 
 def childR : R Child := do
   expect "child"
   let statement ← statementR
   expect "fresh"
   let fresh : BytecodeClaim := ⟨← many eR, ← eR⟩
+  expect "flock_matrix"
+  let flockMatrix ← eR
   expect "proof"
   let stream ← many eR
   let openings ← many do many do return (⟨← nat, ← many kR, ← many digestR⟩ : Opening)
-  return ⟨statement, fresh, ⟨stream, openings⟩⟩
+  return ⟨statement, fresh, flockMatrix, ⟨stream, openings⟩⟩
 
 def fn128 {n : Nat} (xs : List (BitVec 128)) : Fin n → BitVec 128 := fun i => xs.getD i 0
 
@@ -151,7 +162,7 @@ structure Case where
   streams : Streams
 
 def caseR : R Case := do
-  expect "leanvm-guest-diff"; expect "5"
+  expect "leanvm-guest-diff"; expect "6"
   expect "case"; let name ← tok
   expect "seed"; let seed ← digestR
   expect "log_memory"; let logMemory ← nat
@@ -165,20 +176,28 @@ def caseR : R Case := do
   let pairs := fun (xs : List E) => (List.range (xs.length / 2)).map fun i => (xs[2 * i]!, xs[2 * i + 1]!)
   let bc ← many eR
   let stars ← many eR
+  let mat ← many eR
+  let matStars ← many eR
   -- The lambda grind's nonce, if it grinds, leads `bc_sumcheck_msgs`, then the rounds' pairs (a
-  -- round grinds no nonce, `Batch.sumcheckRoundCells`); a leaf batches nothing.
-  let hints : BatchingHints :=
-    if Batch.batchLambdaGrindBits = 0 then ⟨0, pairs bc, stars.getD 0 0⟩ else
-    match bc with
-    | nonce :: rounds => ⟨nonce, pairs rounds, stars.getD 0 0⟩
-    | [] => ⟨0, [], stars.getD 0 0⟩
+  -- round grinds no nonce, `Batch.sumcheckRoundCells`); a leaf batches nothing. Likewise the
+  -- matrix batch's (research build).
+  let split := fun (bits : Nat) (xs : List E) =>
+    if bits = 0 then (0, pairs xs) else
+    match xs with
+    | nonce :: rounds => (nonce, pairs rounds)
+    | [] => (0, [])
+  let (bcNonce, bcRounds) := split Batch.batchLambdaGrindBits bc
+  let (matNonce, matRounds) := split Batch.matrixLambdaGrindBits mat
+  let hints : BatchingHints := ⟨bcNonce, bcRounds, stars.getD 0 0, matNonce, matRounds,
+    (matStars.getD 0 0, matStars.getD 1 0)⟩
   expect "streams"
   let streams ← many do
     expect "stream"
     let n ← tok
     return (n, ← many (many eR))
   expect "end"
-  return ⟨name, seed, logMemory, publicInput, statement, ⟨children, xmss, sphincs, da, hints⟩, streams⟩
+  return ⟨name, seed, logMemory, publicInput, statement,
+    ⟨children, xmss, sphincs, da, hints, none⟩, streams⟩
 
 def readCase (path : System.FilePath) : IO Case := do
   let text ← IO.FS.readFile path

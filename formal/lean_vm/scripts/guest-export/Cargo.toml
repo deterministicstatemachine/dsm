@@ -19,7 +19,8 @@ build = "build.rs"
 # The overlay's sources (`build.rs` copies `aggregation` into `OUT_DIR`) use these, which
 # cargo-machete, reading this crate's own sources, cannot see.
 [package.metadata.cargo-machete]
-ignored = ["claims", "fiat_shamir_prover", "isa", "keccak256", "parallel", "pcs", "primitives", "tracing"]
+ignored = ["claims", "fiat_shamir_prover", "flock", "isa", "keccak256", "parallel", "pcs", "primitives", "tracing",
+  "vault_step"]
 
 [workspace]
 
@@ -45,6 +46,9 @@ lean_vm_core = { package = "stable_lean_vm_core", path = "../../../../crates/sta
 parallel = { package = "stable_parallel", path = "../../../../crates/stable_prover/parallel" }
 pcs = { package = "stable_pcs", path = "../../../../crates/stable_prover/pcs" }
 primitives = { package = "stable_primitives", path = "../../../../crates/stable_prover/primitives" }
+# Research build: aggregation's Flock (the BLAKE3 instruction's prover) and the SoFi vault step.
+flock = { path = "../../../../crates/stable_prover/flock" }
+vault_step = { path = "../../../../crates/vault_step" }
 rand = "0.9"
 tracing = "0.1.26"
 

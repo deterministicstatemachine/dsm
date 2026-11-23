@@ -203,7 +203,9 @@ accepts**:
    execution of the guest program on a statement's digest under the deployed seed, wherever `verifierRefusingZero` with the deployed Keccak accepts it, forms
    with the statement (its deferred claim shaped) and some claim `fresh` on the bytecode whose
    value is true (`BytecodeClaim.Holds`) a child the guest program accepts (`AcceptableChild`).
-Proved by `LeanVM.Guest.Budget.guest_child_complete`. -/
+Proved by `LeanVM.Guest.Budget.guest_child_complete` (upstream; not rebuilt for the research build).
+Research build: a child also carries its proof's Flock matrix part (`Child.flockMatrix`), here only
+some value: the statement does not yet say it is the proof's lincheck matrix term. -/
 def GuestChildComplete : Prop :=
   HonestProofRarelyRefused ∧
   ∀ (statement : NodeStatement) (execution : Execution guestProgram) (ρ : ℕ),
@@ -213,9 +215,9 @@ def GuestChildComplete : Prop :=
         (2 ^ 35) =
       some proof →
     verifierRefusingZero (m := Id) keccakF1600 guestProgram input proof = true →
-    ∃ fresh, fresh.Holds (bytecodeWords guestProgram) ∧
+    ∃ fresh flockMatrix, fresh.Holds (bytecodeWords guestProgram) ∧
       AcceptableChild (bytecodeWords guestProgram) (deployedSeed guestProgram)
-        ⟨statement, fresh, proof⟩
+        ⟨statement, fresh, flockMatrix, proof⟩
 
 end Completeness
 

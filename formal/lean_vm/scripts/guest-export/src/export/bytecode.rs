@@ -4,7 +4,8 @@
 //! name, entry pc, length and code, in chunks of `CHUNK` instructions (`LeanVM.Guest.chunkSize`),
 //! one definition per chunk; operands are frame offsets and `SET` immediates limbs, so that Lean
 //! never evaluates a power of `g`. The format is the BLAKE2s-era `guest_bytecode_lean`'s, with
-//! `.keccak m0 m1 m2 m3 tail b8 cap out inOdd outOdd outCells` in place of `.blake2s`.
+//! `.keccak m0 m1 m2 m3 tail b8 cap out inOdd outOdd outCells` in place of `.blake2s`, and (research build)
+//! `.blake3 m0 m1 m2 m3 cv out md x y w`.
 
 use super::*;
 use isa::{DerefMode, Op, OutCells};
@@ -20,8 +21,9 @@ pub const HIDDEN: &str = "The bodies are not exposed, for build locality; their 
 /// Instructions per chunk definition: `LeanVM.Guest.chunkSize`.
 pub const CHUNK: usize = 2048;
 
-/// A chunk module closes after the chunk that takes it past this many instructions.
-const MODULE: usize = 16384;
+/// A chunk module closes after the chunk that takes it past this many instructions. Research build: `8192`
+/// (upstream `16384`), so that each module elaborates within 7 GB; the values are unchanged.
+const MODULE: usize = 8192;
 
 pub fn lean_op(op: &Op) -> String {
     match *op {
@@ -54,6 +56,15 @@ pub fn lean_op(op: &Op) -> String {
             };
             format!(".keccak {m0} {m1} {m2} {m3} {tail} {b8} {cap} {out} {in_odd} {out_odd} .{out_cells}")
         }
+        Op::Blake3 {
+            m: [m0, m1, m2, m3],
+            cv,
+            out,
+            md,
+            x,
+            y,
+            w,
+        } => format!(".blake3 {m0} {m1} {m2} {m3} {cv} {out} {md} {x} {y} {w}"),
     }
 }
 

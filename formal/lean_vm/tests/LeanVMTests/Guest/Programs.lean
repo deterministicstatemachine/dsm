@@ -18,6 +18,45 @@ structure TestProgram where
   publicInput : List (Nat × Nat)
   streams : List (String × List (List (Nat × Nat)))
 
+/-- `blake3_xyw.py`. -/
+def prog_blake3_xyw : TestProgram where
+  name := "blake3_xyw"
+  program := ⟨[
+    { name := "main", params := [], returnShapes := [],
+      inline := false,
+      body := [
+        .mk 10 (.let_ "a" (.stackBuf 2)),
+        .mk 11 (.let_ "b" (.stackBuf 2)),
+        .mk 12 (.let_ "iv" (.stackBuf 2)),
+        .mk 13 (.let_ "h1" (.stackBuf 2)),
+        .mk 14 (.let_ "h2" (.stackBuf 2)),
+        .mk 15 (.let_ "h3" (.stackBuf 2)),
+        .mk 16 (.let_ "x" (.stackBuf 2)),
+        .mk 17 (.let_ "y" (.stackBuf 2)),
+        .mk 18 (.let_ "w" (.stackBuf 2)),
+        .mk 19 (.store (.var "a") (.lit 0) (.lit 20011376718272490338853433276725592320)),
+        .mk 20 (.store (.var "a") (.lit 1) (.lit 41362427191743139026751447860679676176)),
+        .mk 21 (.store (.var "b") (.lit 0) (.lit 62713477665213787714649462444633760032)),
+        .mk 22 (.store (.var "b") (.lit 1) (.lit 84064528138684436402547477028587843888)),
+        .mk 23 (.store (.var "iv") (.lit 0) (.lit 219737784560624922979293950613486429799)),
+        .mk 24 (.store (.var "iv") (.lit 1) (.lit 122126981997165389778004304960695456383)),
+        .mk 25 (.store (.var "x") (.lit 0) (.lit 141414077682499347914967658848576276481)),
+        .mk 26 (.store (.var "x") (.lit 1) (.lit 290871430996793888730253760936254863473)),
+        .mk 27 (.store (.var "y") (.lit 0) (.lit 224128465864773140356368643778472906243)),
+        .mk 28 (.store (.var "y") (.lit 1) (.lit 117373213497419896916950911031540563635)),
+        .mk 29 (.store (.var "w") (.lit 0) (.lit 266820100610501952120062762154918351365)),
+        .mk 30 (.store (.var "w") (.lit 1) (.lit 202766949190090006056368718407367910101)),
+        .mk 31 (.call "blake3" [(.var "a"), (.var "b"), (.var "iv"), (.lit 871509788837499334246394757120), (.var "h1")]),
+        .mk 32 (.call "blake3" [(.var "h1"), (.var "b"), (.var "iv"), (.lit 79228163694855958310955253765), (.var "h2"), (.call "__kw_x" [(.var "x")]), (.call "__kw_y" [(.var "y")]), (.call "__kw_w" [(.var "w")])]),
+        .mk 33 (.call "blake3" [(.var "h2"), (.var "h1"), (.var "h2"), (.lit 792281625751385931467366334467), (.var "h3")]),
+        .mk 34 (.let_ "p" (.gpow 0)),
+        .mk 35 (.store (.var "p") (.lit 1) (.index (.var "h3") (.lit 0))),
+        .mk 36 (.store (.var "p") .gen (.index (.var "h3") (.lit 1))),
+        .mk 37 (.ret [])] }],
+    []⟩
+  publicInput := [(2453439992833862290, 15018567440265832434), (15101716034360930414, 11224329683225262239)]
+  streams := []
+
 /-- `conditionals.py`. -/
 def prog_conditionals : TestProgram where
   name := "conditionals"
@@ -478,6 +517,6 @@ def prog_wots_walk : TestProgram where
   streams := []
 
 /-- Every test program. -/
-def all : List TestProgram := [prog_conditionals, prog_const_params, prog_fibonacci, prog_hash_heap_chain, prog_hash_slices, prog_heapbuf_dyn, prog_hint, prog_identities, prog_inline, prog_loop_scopes, prog_match, prog_match_arms, prog_nested, prog_runtime_loop, prog_scoping, prog_unroll, prog_wots_walk]
+def all : List TestProgram := [prog_blake3_xyw, prog_conditionals, prog_const_params, prog_fibonacci, prog_hash_heap_chain, prog_hash_slices, prog_heapbuf_dyn, prog_hint, prog_identities, prog_inline, prog_loop_scopes, prog_match, prog_match_arms, prog_nested, prog_runtime_loop, prog_scoping, prog_unroll, prog_wots_walk]
 
 end LeanVMTests.Guest.Programs

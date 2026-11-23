@@ -35,8 +35,11 @@ pub fn placeholders() -> BTreeMap<String, String> {
     placeholder_map(guest().prog.len().trailing_zeros() as usize)
 }
 
-/// The guest's source text, as the crate's `guest.rs` includes it.
-pub const GUEST_SOURCE: &str = include_str!(concat!(env!("OUT_DIR"), "/aggregation/guests/lean_ethereum.py"));
+/// The guest's source text, as the crate's `guest.rs` compiles it: research build, the node's with the vault step's
+/// spliced in (`guest_source`).
+pub fn guest_source_text() -> &'static str {
+    guest_source()
+}
 
 /// Every file this crate writes.
 pub fn all_files() -> Vec<File> {

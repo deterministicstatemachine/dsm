@@ -1,8 +1,10 @@
 //! Real aggregations for the Lean differential check of the guest (`lean_vm/cli/GuestDiff.lean`): per case,
 //! the node's statement, its seed and witness (`LeanVM.Node.NodeWitness`: every child's statement, fresh claim and
 //! raw proof, the raw signatures with their claims, the batching's hints), the streams `aggregate` installed, the public input and the
-//! run's memory size, as whitespace-separated tokens. Ported from the BLAKE2s-era `guest_diff`: Flock's claims are
-//! gone (a deferred and a fresh claim are a point and a value), and the installed streams are read through
+//! run's memory size, as whitespace-separated tokens. Ported from the BLAKE2s-era `guest_diff`; in the research build a
+//! statement's deferred claims are the bytecode's (a point and a value) and Flock's matrices' (a point and two values),
+//! a statement carries its vault chain (`none` here: these nodes prove no vault step), a child its Flock lincheck's
+//! matrix part, and the batching the matrix batch's hints too. The installed streams are read through
 //! `aggregation/hints.rs`'s test-only `FORGE` hook, which hands this module the node's `Hints` before they are installed.
 //! `LEANVM_GUEST_DIFF=<dir> cargo test --release --manifest-path scripts/guest-export/Cargo.toml --lib guest_diff -- --ignored`
 //! writes `<dir>/<case>.txt`.
@@ -73,14 +75,20 @@ impl Out {
         }
     }
 
-    fn deferred(&mut self, c: &DeferredBytecodeClaim) {
+    fn deferred(&mut self, c: &DeferredClaim) {
         self.tag("defer");
-        self.es(&c.bytecode_point);
-        self.e(c.bytecode_value);
+        self.es(&c.bytecode.bytecode_point);
+        self.e(c.bytecode.bytecode_value);
+        self.tag("matrix");
+        self.es(&c.matrix.point);
+        self.e(c.matrix.a);
+        self.e(c.matrix.b);
     }
 
-    /// `NodeStatement`: the claims, the DA digest (`verifier::da::digest`), and the deferred claim.
-    fn statement(&mut self, claims: &AggregateClaims, defer: &DeferredBytecodeClaim) {
+    /// `NodeStatement`: the claims, the DA digest (`verifier::da::digest`), the deferred claims, and the vault chain
+    /// (none: these nodes prove no vault step).
+    fn statement(&mut self, claims: &AggregateClaims, defer: &DeferredClaim) {
+        assert!(claims.vault.is_none(), "a guest_diff node proves no vault step");
         self.tag("xmss");
         self.n(claims.lean_xmss.len());
         for (pk, m) in &claims.lean_xmss {
@@ -96,6 +104,8 @@ impl Out {
         self.tag("da");
         self.bytes(&verifier::da::digest(claims.da_commitment));
         self.deferred(defer);
+        self.tag("vault");
+        self.0.push_str("none ");
     }
 
     /// The leaf index, then each layer, bottom first, its randomizer, chain values and path: read off the
@@ -173,14 +183,14 @@ fn export(
     let streams = INSTALLED.with(|i| i.take());
     let stream = |name: &str| streams.iter().find(|(n, _)| n == name).map(|(_, e)| e.as_slice());
 
-    let mut out = Out(format!("leanvm-guest-diff 5\ncase {name}"));
+    let mut out = Out(format!("leanvm-guest-diff 6\ncase {name}"));
     out.tag("seed");
     let seed = fs_seed();
     out.bytes(&cell_bytes(seed));
     out.tag("log_memory");
     out.n(node.proof.stream[0].c0 as usize);
     out.tag("public_input");
-    let defer = DeferredBytecodeClaim::recompute(node.bytecode_point.clone());
+    let defer = DeferredClaim::recompute(node.bytecode_point.clone(), node.matrix_point.clone());
     out.es(&statement_digest(&claims, &defer));
     out.tag("statement");
     out.statement(&claims, &defer);
@@ -190,7 +200,7 @@ fn export(
     let bytecode = unified_guest().bytecode();
     for (child_claims, child) in &children {
         out.tag("child");
-        let defer = DeferredBytecodeClaim::recompute(child.bytecode_point.clone());
+        let defer = DeferredClaim::recompute(child.bytecode_point.clone(), child.matrix_point.clone());
         out.statement(child_claims, &defer);
         let pi = statement_digest(child_claims, &defer);
         let scalar = child.proof.clone();
@@ -203,6 +213,9 @@ fn export(
         let point: Vec<F128> = summary.bytecode_point.iter().copied().map(from_scalar).collect();
         out.es(&point);
         out.e(fresh_value);
+        // Its Flock lincheck's matrix part, which the node takes as advice (`flock_matrix`).
+        out.tag("flock_matrix");
+        out.e(FreshFlockClaim::of(&summary.flock).matrix);
         out.tag("proof");
         out.es(&child.proof.stream.iter().copied().map(from_scalar).collect::<Vec<_>>());
         // Every phase's paths (`Proof::merkle_openings`), each its leaf index, leaf and siblings.
@@ -264,6 +277,8 @@ fn export(
     let rounds = |name: &str| stream(name).map_or(vec![], |e| e[0].clone());
     out.es(&rounds("bc_sumcheck_msgs"));
     out.es(&stream("bc_star_hint").map_or(vec![F128::ZERO], |e| e[0].clone()));
+    out.es(&rounds("mat_sumcheck_msgs"));
+    out.es(&stream("mat_stars_hint").map_or(vec![F128::ZERO, F128::ZERO], |e| e[0].clone()));
 
     out.tag("streams");
     out.n(streams.len());

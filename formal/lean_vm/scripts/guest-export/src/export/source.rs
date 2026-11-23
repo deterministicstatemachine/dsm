@@ -305,7 +305,7 @@ fn render_programs() -> String {
 /// `Consts.lean`, `Source.lean` and `Programs.lean`.
 pub fn files() -> Vec<File> {
     let kbc = guest().prog.len().trailing_zeros() as usize;
-    let (ast, consts) = parse_with_constants(GUEST_SOURCE, &placeholder_map(kbc))
+    let (ast, consts) = parse_with_constants(guest_source_text(), &placeholder_map(kbc))
         .expect("the repository aggregation guest must parse");
     // The AST is the one the deployed bytecode was compiled from.
     let recompiled = compile(&ast);

@@ -104,7 +104,8 @@ oracle calls),
    bytecode (`fresh.Holds`) a child the guest program accepts (`AcceptableChild`).
 Reading part 1 for the deployed Keccak, so that part 2 applies to the honest proof, is the heuristic
 that the deployed Keccak-f[1600] behaves as a random permutation, applied to this prover.
-Proved by `LeanVM.Guest.Budget.guest_child_complete`. -/
+Proved by `LeanVM.Guest.Budget.guest_child_complete` (upstream; not rebuilt for the research build;
+the child's Flock matrix part is only some value here, as in `GuestChildComplete`). -/
 def GuestChildCompleteWithHash : Prop :=
   (∀ (prog : LeanIsaProgram) (input : PublicInput) (t : Execution prog) (ρ : ℕ),
     ValidExecution prog input t → t.committedSize ≤ 2 ^ 30 → 1 ≤ ρ ∧ ρ ≤ 4 →
@@ -122,8 +123,9 @@ def GuestChildCompleteWithHash : Prop :=
       honestProofWithDeployedKeccakWithHash LeanVM.proverWithHash guestProgram input t ρ (2 ^ 35) =
         some proof →
     verifierRefusingZeroWithHash (m := Id) keccak256 keccakF1600 guestProgram input proof = true →
-    ∃ fresh, fresh.Holds (bytecodeWords guestProgram) ∧
-      AcceptableChild (bytecodeWords guestProgram) (deployedSeed guestProgram) ⟨s, fresh, proof⟩
+    ∃ fresh flockMatrix, fresh.Holds (bytecodeWords guestProgram) ∧
+      AcceptableChild (bytecodeWords guestProgram) (deployedSeed guestProgram)
+        ⟨s, fresh, flockMatrix, proof⟩
 
 end Budget
 
