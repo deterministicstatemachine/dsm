@@ -258,6 +258,7 @@ const BUILTINS: &[&str] = &[
     "assert_in_k",
     "assert_gpow",
     "keccak",
+    "blake3",
     "keccak_cells",
     "const",
     "hint_decompose_bits",

@@ -14,6 +14,7 @@
 //!
 //! [`tables`] declares the six instruction tables, [`cpu`] the whole program's layout, execution and witness.
 
+pub mod blake3flock;
 pub mod constraints;
 pub mod cpu;
 mod eq;

@@ -92,6 +92,14 @@ pub(crate) enum LOp {
         out_odd: bool,
         out_cells: OutCells,
     },
+    /// `BLAKE3`: one compression of the four message cells `m`, the chaining value run `cv` (2 cells) and the metadata
+    /// cell `md`, into the run `c` (2 cells).
+    Blake3 {
+        m: [Off; 4],
+        cv: Off,
+        md: Off,
+        c: Off,
+    },
 }
 
 /// A prover hint attached to an instruction. Most are already the runtime's own

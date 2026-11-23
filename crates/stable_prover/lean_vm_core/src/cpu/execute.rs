@@ -497,8 +497,8 @@ pub fn execute(
         .then(|| vec![0u64; program.prog.len()]);
 
     let mut bytecode_count: Vec<u32> = vec![0; program.prog.len()];
-    let (mut xor, mut mul, mut set, mut deref, mut jump, mut keccak) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut xor, mut mul, mut set, mut deref, mut jump, mut keccak, mut blake3) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut pc, mut fp) = (0u32, 0u32);
     let mut steps = 0usize;
     loop {
@@ -685,6 +685,37 @@ pub fn execute(
                 });
                 pc += 1;
             }
+            Op::Blake3 { m: msg, cv, out, md } => {
+                use crate::blake3flock::{CELLS, OUT_CELLS, compression, output};
+                let offsets = [msg[0], msg[1], msg[2], msg[3], cv, out, md];
+                let mut cells = [0; 9];
+                for (cell, &(operand, step)) in cells.iter_mut().zip(&CELLS) {
+                    *cell = at(at(fp, offsets[operand])?, step)?;
+                }
+                // Flock proves the output; the run computes it for the later reads.
+                let mut values = [F128::ZERO; 9];
+                for (c, value) in values.iter_mut().enumerate() {
+                    if !OUT_CELLS.contains(&c) {
+                        *value = m.read(cells[c]);
+                    }
+                }
+                let new_cv = output(&compression(&values));
+                for (&c, v) in OUT_CELLS.iter().zip(new_cv) {
+                    m.put(cells[c], v).map_err(fail)?;
+                }
+                // In flush order, so a cell two operands alias pairs each read with its own count.
+                let mut r = [0; 9];
+                for (count, &cell) in r.iter_mut().zip(&cells) {
+                    *count = m.bump_access_count(cell);
+                }
+                blake3.push(Brow {
+                    pc,
+                    fp,
+                    r,
+                    bytecode_read,
+                });
+                pc += 1;
+            }
         }
         steps += 1;
     }
@@ -700,6 +731,7 @@ pub fn execute(
         deref,
         jump,
         keccak,
+        blake3,
         bytecode_count,
         counts,
     };

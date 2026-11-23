@@ -22,7 +22,7 @@ pub use execute::{ExecError, Execution, Fault, Memory, execute};
 use isa::Program;
 pub use isa::{DerefMode, Op, OutCells, Stats};
 pub use layout::*;
-pub(crate) use trace::{Drow, Jrow, Krow, Srow, Trace, Xrow};
+pub(crate) use trace::{Brow, Drow, Jrow, Krow, Srow, Trace, Xrow};
 
 /// Announce the prover's sizes (`log_mem`, every table's row count, the PCS rate) on the stream, from which the
 /// verifier rebuilds the layout ([`layout::table_logs`]). The statement, the program and the public input, is not
@@ -208,7 +208,11 @@ pub fn prove(
     });
     let (ring, outputs) = openings.into_pcs_claims(offset);
     slots.extend(outputs);
-    crate::stage!("PCS open", || pcs::open(&mut ps, committed, w.q, &slots, &ring));
+    // BLAKE3 validity, by Flock's reduction over q_flock: its 64 slices' claim joins the one opening, ring-switched
+    // with the same map as q_keccak's.
+    let flock_offset = w.layout.placements[QFLOCK].offset;
+    let flock_ring = crate::stage!("Flock reduction", || w.flock_reduction.prove(&mut ps, flock_offset));
+    crate::stage!("PCS open", || pcs::open(&mut ps, committed, w.q, &slots, &[ring, flock_ring]));
     Ok((ps.into_proof(), stats))
 }
 
@@ -280,8 +284,9 @@ pub fn verify(
 /// `col(r) = v` on one, at the instance point `r`, is the claim on its slot's `2^|r|` words of
 /// `q_keccak`, which folds into the one opening like every other point claim.
 fn slot_claim(l: &Layout, col: usize, point: Vec<F128>) -> pcs::StackClaim {
-    let offset = match keccak_value(col) {
-        Some(KeccakLane::Slot(slot)) => l.placements[QKECCAK].offset + (slot << point.len()),
+    let offset = match (keccak_value(col), verifier::layout::qflock_slot(col)) {
+        (Some(KeccakLane::Slot(slot)), _) => l.placements[QKECCAK].offset + (slot << point.len()),
+        (_, Some(slot)) => l.placements[QFLOCK].offset + (slot << point.len()),
         _ => l.placements[col].offset,
     };
     pcs::StackClaim {

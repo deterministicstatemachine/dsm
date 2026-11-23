@@ -52,6 +52,15 @@ pub(crate) struct Krow {
     pub(crate) bytecode_read: u32,
 }
 
+/// `BLAKE3` row: the access counts of its nine cells in flush order ([`crate::blake3flock::CELLS`]). The values are
+/// read back from the final memory image.
+pub(crate) struct Brow {
+    pub(crate) pc: u32,
+    pub(crate) fp: u32,
+    pub(crate) r: [u32; 9],
+    pub(crate) bytecode_read: u32,
+}
+
 pub(crate) struct Trace {
     pub(crate) xor: Vec<Xrow>,
     pub(crate) mul: Vec<Xrow>,
@@ -59,6 +68,7 @@ pub(crate) struct Trace {
     pub(crate) deref: Vec<Drow>,
     pub(crate) jump: Vec<Jrow>,
     pub(crate) keccak: Vec<Krow>,
+    pub(crate) blake3: Vec<Brow>,
     pub(crate) bytecode_count: Vec<u32>, // per-pc execution count; the column holds g^{A[pc]}
     /// One past the highest access count, of a cell or a pc: the `g`-powers a fill looks up.
     pub(crate) counts: usize,
@@ -74,6 +84,7 @@ impl Trace {
             self.deref.len(),
             self.jump.len(),
             self.keccak.len(),
+            self.blake3.len(),
         ]
     }
 }

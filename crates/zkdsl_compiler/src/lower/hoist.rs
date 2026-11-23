@@ -236,6 +236,6 @@ fn touched(op: &LOp) -> Vec<Off> {
         LOp::Deref { o1, .. } => vec![o1],
         LOp::Jump { .. } => Vec::new(),
         LOp::Slot { x, .. } => vec![x],
-        LOp::Keccak { .. } => Vec::new(),
+        LOp::Keccak { .. } | LOp::Blake3 { .. } => Vec::new(),
     }
 }

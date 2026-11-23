@@ -75,6 +75,28 @@ impl FnLower<'_> {
         self.keccak_finish(out);
     }
 
+    /// `blake3(a, b, cv, md, out)`: one BLAKE3 compression, one `BLAKE3` instruction. `a`, `b`, `cv` and `out` are
+    /// two-cell `StackBuf` runs (a cell's two limbs are four little-endian 32-bit words), the message block `a ‖ b`;
+    /// `md` is a cell, the chunk counter in its low limb and `block_len | flags << 32` in its high one. A statement:
+    /// it writes the new chaining value into `out`, and a pre-written `out` asserts it (write-once).
+    fn lower_blake3(&mut self, args: &[Expr]) {
+        if args.len() != 5 || args.iter().any(|a| matches!(a, Expr::Call(name, _) if name.starts_with("__kw_"))) {
+            self.fail("blake3 takes five positional arguments: (a, b, cv, md, out)")
+        }
+        let mut run = |e: &Expr, what: &str| match self.try_cell_run(e) {
+            Ok(CellRun::Stack { base, len: 2 }) => base,
+            _ => self.fail(format!("blake3's `{what}` must be a two-cell StackBuf run")),
+        };
+        let (a, b, cv, out) = (run(&args[0], "a"), run(&args[1], "b"), run(&args[2], "cv"), run(&args[4], "out"));
+        let md = self.expr(&args[3]);
+        self.emit(LOp::Blake3 {
+            m: [a, a + 1, b, b + 1],
+            cv,
+            md,
+            c: out,
+        });
+    }
+
     /// `pad_tail=1`: set the cells of the `tail` slice from `len` on to the padding (its first
     /// byte, then zeros), so the message is read in place instead of copied into a padded run.
     /// The slice must be a `StackBuf`'s, `len` must end one of its cells, and `a` and `b` must
@@ -514,6 +536,7 @@ impl FnLower<'_> {
                 }));
             }
             "keccak" => self.lower_keccak(args),
+            "blake3" => self.lower_blake3(args),
             "keccak_cells" => self.lower_keccak_cells(args),
             "assert_in_k" => {
                 if args.len() != 2 {

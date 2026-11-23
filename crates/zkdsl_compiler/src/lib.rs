@@ -283,6 +283,10 @@ pub fn disassemble(prog: &[Op]) -> String {
                     layout(*in_odd)
                 )
             }
+            Op::Blake3 { m, cv, out, md } => format!(
+                "BLAKE3 fp[{out}..+2] = blake3_compress(cv=fp[{cv}..+2], m=fp[{}],fp[{}],fp[{}],fp[{}], md=fp[{md}])",
+                m[0], m[1], m[2], m[3]
+            ),
         };
         writeln!(out, "{:>6}  {line}", pretty_integer(pc)).unwrap();
     }
@@ -349,6 +353,12 @@ fn resolve(op: &LOp, entry: &HashMap<String, u32>, sentinel: u32, pc0: u32, fram
             in_odd: *in_odd,
             out_odd: *out_odd,
             out_cells: *out_cells,
+        },
+        LOp::Blake3 { m, cv, md, c } => Op::Blake3 {
+            m: *m,
+            cv: *cv,
+            out: *c,
+            md: *md,
         },
     }
 }

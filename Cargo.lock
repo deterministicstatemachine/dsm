@@ -665,6 +665,7 @@ name = "stable_lean_vm_core"
 version = "0.1.0"
 dependencies = [
  "fiat_shamir_prover",
+ "flock",
  "isa",
  "stable_keccak_gkr",
  "stable_parallel",

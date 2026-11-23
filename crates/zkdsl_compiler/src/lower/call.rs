@@ -503,7 +503,7 @@ impl FnLower<'_> {
     /// copied into a fresh consecutive run in the caller; an inlined call binds
     /// as [`Self::try_inline`] decides.
     pub(super) fn call(&mut self, callee: &str, args: &[Expr], n_ret: usize) -> Vec<Binding> {
-        if callee == "keccak" || callee == "keccak_cells" {
+        if callee == "keccak" || callee == "keccak_cells" || callee == "blake3" {
             self.fail(format!(
                 "{callee} is a statement: it writes the state or the digest into its `out` run"
             ))
@@ -540,7 +540,7 @@ impl FnLower<'_> {
     /// Evaluate `callee(args)` into `dsts`, inlining the callee when it is
     /// `@inline` ([`Self::try_inline`]), else a real call.
     pub(super) fn call_into(&mut self, callee: &str, args: &[Expr], dsts: &[Off]) {
-        if callee == "keccak" || callee == "keccak_cells" {
+        if callee == "keccak" || callee == "keccak_cells" || callee == "blake3" {
             self.fail(format!("{callee} is a statement, not a value-returning call"))
         };
         self.check_returns(callee, dsts.len());

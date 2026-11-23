@@ -15,7 +15,7 @@
 //! identities to the table sumcheck as a degree-2 form (`Table::constraint`).
 
 use crate::constraints::Form;
-use crate::cpu::{Drow, Jrow, Krow, Memory, Op, Srow, Trace};
+use crate::cpu::{Brow, Drow, Jrow, Krow, Memory, Op, Srow, Trace};
 use crate::leaf::Coord::{self, Col, Const, GCol, Prod};
 use primitives::field::{F64, F128, mul_by_g};
 use std::ops::Range;
@@ -57,6 +57,7 @@ pub(crate) const OP_SET: F64 = g_pow(verifier::layout::OP_SET);
 pub(crate) const OP_DEREF: F64 = g_pow(verifier::layout::OP_DEREF);
 pub(crate) const OP_JUMP: F64 = g_pow(verifier::layout::OP_JUMP);
 pub(crate) const OP_KECCAK: F64 = g_pow(verifier::layout::OP_KECCAK);
+pub(crate) const OP_BLAKE3: F64 = g_pow(verifier::layout::OP_BLAKE3);
 
 // ---- flush builder -----------------------------------------------------------
 
@@ -309,6 +310,7 @@ pub(crate) fn tables() -> [&'static dyn Table; N_TABLES] {
         &DerefTable,
         &JumpTable,
         &KeccakTable,
+        &Blake3Table,
     ]
 }
 
@@ -904,6 +906,81 @@ impl Table for KeccakTable {
     }
 }
 
+// ---- BLAKE3 ---------------------------------------------------------------------
+
+/// `BLAKE3`: one BLAKE3 compression. The four message cells are addressed independently at `fp·o_i`, the chaining
+/// value and the output are consecutive pairs at `fp·o_v` and `fp·o_out`, and the metadata cell is at `fp·o_md`. The
+/// eighteen value limbs are listed for the flushes, but `cpu` treats them as virtual: each is a slot of `q_flock`
+/// (`verifier::layout::qflock_slot`), whose claims route there, and Flock's reduction proves the compression. The
+/// table has no identity of its own.
+struct Blake3Table;
+
+pub(crate) mod blake3t {
+    pub const PC: usize = 0;
+    pub const FP: usize = 1;
+    pub const O0: usize = 2; // the seven offset operands, in bytecode slot order: m0..m3, cv, out, md
+    pub const V: usize = O0 + 7; // the value limbs, (lo, hi) per cell: m0..m3, out0, out1, cv0, cv1, md
+    pub const R0: usize = V + 18; // one read count per cell, in flush order
+    pub const RBC: usize = R0 + 9;
+    pub const N: usize = RBC + 1;
+}
+
+/// The value-limb pair of the cell at flush position `c` ([`crate::blake3flock::CELLS`]), in
+/// `verifier::layout::BLAKE3_COLUMNS` order (message, output, chaining value, metadata).
+const fn blake3_value(c: usize) -> usize {
+    blake3t::V
+        + 2 * match c {
+            0..4 => c,
+            4 | 5 => c + 2, // cv0, cv1 after the two output cells
+            6 | 7 => c - 2, // out0, out1
+            _ => 8,
+        }
+}
+
+impl Table for Blake3Table {
+    fn n_committed_columns(&self) -> usize {
+        blake3t::N
+    }
+    fn count_columns(&self) -> Range<usize> {
+        blake3t::R0..blake3t::RBC + 1
+    }
+    /// Zeros, but for the value limbs: they are `q_flock`'s words, so a padding row holds Flock's padding instance.
+    fn padding(&self) -> Vec<F64> {
+        use verifier::layout::{BLAKE3_COLUMNS, BLAKE3_SLOTS, blake3_padding_words};
+        let words = blake3_padding_words();
+        (0..blake3t::N)
+            .map(|local| {
+                let slot = BLAKE3_SLOTS.iter().position(|&s| s == Some(BLAKE3_COLUMNS[local]));
+                F64(slot.map_or(0, |s| words[s]))
+            })
+            .collect()
+    }
+    fn flushes(&self, f: &mut FlushBuilder) {
+        use blake3t::*;
+        f.state_step(PC, FP);
+        let operands: Vec<Coord> = (O0..O0 + 7).map(Col).collect();
+        f.bytecode(PC, RBC, OP_BLAKE3, &operands);
+        for (c, &(operand, step)) in crate::blake3flock::CELLS.iter().enumerate() {
+            let v = blake3_value(c);
+            f.memory(Prod(FP, O0 + operand, step), R0 + c, v, v + 1);
+        }
+    }
+    /// Every column but the value limbs, which are `q_flock`'s and have no window here.
+    fn fill(&self, ctx: &FillCtx, out: &mut [&mut [F64]]) {
+        use blake3t::*;
+        let rows = &ctx.trace.blake3;
+        let offsets = |r: &Brow| match ctx.prog[r.pc as usize] {
+            Op::Blake3 { m, cv, out, md } => [m[0], m[1], m[2], m[3], cv, out, md],
+            op => unreachable!("a BLAKE3 row's pc {} holds {op:?}", r.pc),
+        };
+        ctx.col(out, rows, PC, |r| ctx.g_at(r.pc));
+        ctx.col(out, rows, FP, |r| ctx.g_at(r.fp));
+        ctx.cols(out, rows, O0, |r| offsets(r).map(|o| ctx.g_at(o)));
+        ctx.cols(out, rows, R0, |r| r.r.map(|k| ctx.g_at(k)));
+        ctx.col(out, rows, RBC, |r| ctx.g_at(r.bytecode_read));
+    }
+}
+
 /// The fewest committed columns of a table's row, `SET`'s: a run of `n` steps commits at least `n` times it, which
 /// bounds the steps of a provable run (the interpreter's step limit).
 pub(crate) const MIN_COMMITTED_COLUMNS: usize = set::N;
@@ -917,6 +994,7 @@ const _: () = {
     assert!(set::N == TABLE_WIDTHS[OP_SET] && deref::N == TABLE_WIDTHS[OP_DEREF] && jump::N == TABLE_WIDTHS[OP_JUMP]);
     assert!(keccakt::N == TABLE_WIDTHS[verifier::layout::OP_KECCAK]);
     assert!(keccakt::V_IN == KECCAK_IN && keccakt::V_OUT == KECCAK_OUT && keccakt::R0 == KECCAK_CNT);
+    assert!(blake3t::N == TABLE_WIDTHS[verifier::layout::OP_BLAKE3]);
 };
 
 #[cfg(test)]

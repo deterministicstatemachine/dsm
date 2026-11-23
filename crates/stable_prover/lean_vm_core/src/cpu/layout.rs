@@ -8,6 +8,9 @@ use verifier::layout::{GLOBAL_COLUMN_BASES, TABLE_WIDTHS};
 /// The Keccak reduction's committed states `q_keccak`, `2^(SLOT_LOG + τ)` words for `2^τ` steps: the one copy of the
 /// `KECCAK` input lanes, whose columns are virtual ([`keccak_value`]).
 pub use verifier::layout::QKECCAK;
+/// Flock's witness of every `BLAKE3` instance, slot-major ([`crate::blake3flock`]): the one copy of the `BLAKE3` value
+/// limbs, whose columns are virtual (`verifier::layout::qflock_slot`).
+pub use verifier::layout::QFLOCK;
 
 /// Every column, the shared ones then each table's, at [`GLOBAL_COLUMN_BASES`].
 pub(crate) const N_COLUMNS: usize = GLOBAL_COLUMN_BASES[tables::N_TABLES - 1] + TABLE_WIDTHS[tables::N_TABLES - 1];
@@ -92,6 +95,8 @@ pub(crate) struct Witness {
     pub(crate) layout: Layout,
     /// What the Keccak reduction needs beside `q`, which holds the states it rebuilds its witness from.
     pub(crate) keccak_reduction: crate::keccak::Reduction,
+    /// Flock's witness, beside its slot-major copy `q_flock` in `q`.
+    pub(crate) flock_reduction: crate::blake3flock::Reduction,
 }
 
 impl Witness {
@@ -101,13 +106,16 @@ impl Witness {
     pub(crate) fn columns(&self) -> Vec<&[F64]> {
         let q_keccak = self.layout.placements[QKECCAK].offset;
         let steps = 1 << self.layout.taus[verifier::layout::OP_KECCAK];
+        let q_flock = self.layout.placements[QFLOCK].offset;
+        let instances = 1 << self.layout.taus[verifier::layout::OP_BLAKE3];
         let mut cols: Vec<&[F64]> = self
             .layout
             .placements
             .iter()
             .enumerate()
-            .map(|(i, p)| match keccak_value(i) {
-                Some(KeccakLane::Slot(slot)) => &self.q[q_keccak + slot * steps..][..steps],
+            .map(|(i, p)| match (keccak_value(i), verifier::layout::qflock_slot(i)) {
+                (Some(KeccakLane::Slot(slot)), _) => &self.q[q_keccak + slot * steps..][..steps],
+                (_, Some(slot)) => &self.q[q_flock + slot * instances..][..instances],
                 _ if p.is_virtual() => &[][..],
                 _ => &self.q[p.offset..][..1 << p.n_vars],
             })
@@ -132,6 +140,8 @@ pub fn col_kappa_sources(log_bytecode: usize) -> Vec<Option<(usize, usize)>> {
     k[BYTECODE_FINAL_COUNTERS] = Some((0, log_bytecode));
     // `q_keccak` is `2^(SLOT_LOG + n_steps_log)` words, and the KECCAK table is `2^n_steps_log` rows.
     k[QKECCAK] = Some((2 + verifier::layout::OP_KECCAK, crate::keccak::SLOT_LOG));
+    // `q_flock` is `2^(8 + tau)` words for `2^tau` instances, the BLAKE3 table's height.
+    k[QFLOCK] = Some((2 + verifier::layout::OP_BLAKE3, verifier::layout::QFLOCK_SLOT_BITS));
     for t in 0..tables::N_TABLES {
         let base = GLOBAL_COLUMN_BASES[t];
         k[base..base + TABLE_WIDTHS[t]].fill(Some((2 + t, 0)));
@@ -139,7 +149,7 @@ pub fn col_kappa_sources(log_bytecode: usize) -> Vec<Option<(usize, usize)>> {
     // The columns `q_keccak` carries are virtual: it holds the input lanes and the KECCAK columns riding its spare
     // slots, whose claims route to those slots (`slot_claim`), and the output lanes are the reduction's to prove.
     for (col, k) in k.iter_mut().enumerate() {
-        if keccak_value(col).is_some() {
+        if keccak_value(col).is_some() || verifier::layout::qflock_slot(col).is_some() {
             *k = None;
         }
     }
@@ -305,7 +315,8 @@ pub(crate) fn build(program: &Program, exec: &Execution, l: Layout) -> Witness {
         }
         // The shared columns, from one pass over the image: each cell's two limbs and final count `g^{A[i]}`, then each
         // pc's final count.
-        const _: () = assert!(NUM_GLOBAL_COLUMNS == 5, "a new shared column needs a fill here");
+        // q_keccak and q_flock are filled from their reductions' witnesses, below.
+        const _: () = assert!(NUM_GLOBAL_COLUMNS == 6, "a new shared column needs a fill here");
         const CHUNK: usize = 1 << 12;
         let [lo, hi, count] = windows
             .get_disjoint_mut([MEMORY_0, MEMORY_1, MEMORY_FINAL_COUNTERS])
@@ -340,11 +351,27 @@ pub(crate) fn build(program: &Program, exec: &Execution, l: Layout) -> Witness {
         });
         crate::keccak::place(&inputs, windows[QKECCAK])
     });
+    // Flock's witness of the BLAKE3 instances, instance `j` the `j`-th BLAKE3 row, its cells read back from the
+    // final memory image, which is write-once.
+    let flock_reduction = crate::stage!("Build q_flock", || {
+        use crate::blake3flock::{CELLS, compression};
+        let blocks = parallel::map_collect(tr.blake3.len(), |i| {
+            let row = &tr.blake3[i];
+            let offsets = match program.prog[row.pc as usize] {
+                Op::Blake3 { m, cv, out, md } => [m[0], m[1], m[2], m[3], cv, out, md],
+                op => unreachable!("a BLAKE3 row's pc {} holds {op:?}", row.pc),
+            };
+            let cells = CELLS.map(|(operand, step)| exec.mem.word((row.fp + offsets[operand] + step) as usize));
+            compression(&cells)
+        });
+        crate::blake3flock::place(&blocks, windows[QFLOCK])
+    });
     drop(windows);
     Witness {
         q,
         virt,
         layout: l,
         keccak_reduction,
+        flock_reduction,
     }
 }

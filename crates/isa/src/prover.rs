@@ -55,5 +55,5 @@ pub struct Stats {
 
 impl Stats {
     /// Table names in `table_heights` order.
-    pub const TABLES: [&'static str; N_TABLES] = ["XOR", "MUL", "SET", "DEREF", "JUMP", "KECCAK"];
+    pub const TABLES: [&'static str; N_TABLES] = ["XOR", "MUL", "SET", "DEREF", "JUMP", "KECCAK", "BLAKE3"];
 }

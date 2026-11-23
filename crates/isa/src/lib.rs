@@ -116,6 +116,11 @@ pub enum Op {
         out_odd: bool,
         out_cells: OutCells,
     },
+    /// `BLAKE3`: one BLAKE3 compression. Its message block is the four independently addressed cells `m` (two 64-bit
+    /// limbs each, little-endian words), its chaining value the two consecutive cells from `cv`, its metadata the cell
+    /// `md` (the chunk counter in the low limb; the block length, then the flags, as the high limb's two 32-bit words),
+    /// and it writes the new chaining value to the two consecutive cells from `out`. The provers prove it by Flock.
+    Blake3 { m: [u32; 4], cv: u32, out: u32, md: u32 },
 }
 
 /// How many of a `KECCAK`'s thirteen output cells it writes, from `out` on: the first, the first two (a
