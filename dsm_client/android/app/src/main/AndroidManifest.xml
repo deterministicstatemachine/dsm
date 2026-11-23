@@ -147,6 +147,16 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice|dataSync" />
 
+        <!-- The storage nodes' doorbell (Firebase Cloud Messaging): an empty push that
+             wakes the wallet to read its inbox. -->
+        <service
+            android:name="com.dsm.wallet.service.InboxPushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- The H2 bench self-test (PicoSelfTestActivity) is declared in src/debug/AndroidManifest.xml
              only: it is exported, and a launch with its confirmation extras runs irreversible chip
              operations, so a release build must not declare it (pre-audit item 16). -->

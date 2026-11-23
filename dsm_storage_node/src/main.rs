@@ -61,6 +61,9 @@ struct ServerConfig {
     /// `endpoint` and `ca_cert` on `[[storage_set.members]]` — where each
     /// set-mate is reached for ByteCommit mirroring, and the CA it is known by.
     storage_set_mates: Vec<(String, String, Option<String>)>,
+    /// `[push.fcm]`: how this node pushes devices' phones when their spools
+    /// take an entry. Absent = it pushes no one and serves no doorbell.
+    push: Option<dsm_storage_node::push::FcmConfig>,
 }
 
 /// A setting the node cannot start without: absent is an error, never a
@@ -87,6 +90,55 @@ fn optional_positive(settings: &Config, key: &str, default: usize) -> Result<usi
         Err(config::ConfigError::NotFound(_)) => Ok(default),
         Err(e) => Err(e).with_context(|| format!("`{key}` is not an integer")),
     }
+}
+
+/// A file the config names, read whole.
+fn read_named_file(settings: &Config, key: &str) -> Result<Vec<u8>> {
+    let path = required(settings, key)?;
+    std::fs::read(&path).with_context(|| format!("`{key}` names {path:?}, which is not readable"))
+}
+
+/// `[push.fcm]`, when the config has it: every field but the endpoints and
+/// `ca_cert_path` is required, and a file it names must be readable.
+///
+///     [push.fcm]
+///     project_id = "<Firebase project id>"
+///     workload_identity_provider = "//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>"
+///     service_account = "<name>@<project>.iam.gserviceaccount.com"
+///     client_cert_path = "/certs/push-client.crt"   # this node's certificate (then intermediates)
+///     client_key_path = "/certs/push-client.key"    # its private key: TLS's alone
+fn load_push_config(settings: &Config) -> Result<Option<dsm_storage_node::push::FcmConfig>> {
+    use dsm_storage_node::push::{FcmConfig, GOOGLE_FCM, GOOGLE_IAM, GOOGLE_STS};
+    match settings.get_table("push.fcm") {
+        Ok(_) => {}
+        Err(config::ConfigError::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e).context("`[push.fcm]` is not a table"),
+    }
+    let endpoint = |key: &str, default: &str| -> Result<String> {
+        match settings.get_string(key) {
+            Ok(v) => Ok(v),
+            Err(config::ConfigError::NotFound(_)) => Ok(default.to_string()),
+            Err(e) => Err(e).with_context(|| format!("`{key}` is not a string")),
+        }
+    };
+    let ca_cert_pem = match settings.get_string("push.fcm.ca_cert_path") {
+        Ok(path) => Some(std::fs::read(&path).with_context(|| {
+            format!("`push.fcm.ca_cert_path` names {path:?}, which is not readable")
+        })?),
+        Err(config::ConfigError::NotFound(_)) => None,
+        Err(e) => return Err(e).context("`push.fcm.ca_cert_path` is not a string"),
+    };
+    Ok(Some(FcmConfig {
+        project_id: required(settings, "push.fcm.project_id")?,
+        workload_identity_provider: required(settings, "push.fcm.workload_identity_provider")?,
+        service_account: required(settings, "push.fcm.service_account")?,
+        client_cert_pem: read_named_file(settings, "push.fcm.client_cert_path")?,
+        client_key_pem: read_named_file(settings, "push.fcm.client_key_path")?,
+        sts_endpoint: endpoint("push.fcm.sts_endpoint", GOOGLE_STS)?,
+        iam_endpoint: endpoint("push.fcm.iam_endpoint", GOOGLE_IAM)?,
+        fcm_endpoint: endpoint("push.fcm.fcm_endpoint", GOOGLE_FCM)?,
+        ca_cert_pem,
+    }))
 }
 
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
@@ -198,6 +250,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .context("the node's config names no `network.port`")?;
     let bind_addr: SocketAddr = format!("{listen_ip}:{port}").parse()?;
     let node_id = required(&settings, "node.id")?;
+    let push = load_push_config(&settings)?;
 
     Ok(ServerConfig {
         bind_addr,
@@ -214,6 +267,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         database_max_connections,
         storage_set_members,
         storage_set_mates,
+        push,
     })
 }
 
@@ -319,6 +373,22 @@ async fn async_main() -> Result<()> {
             "no [storage_set] configured: this node serves the storage contract and mirrors no \
              set-mate; name its members, with the incarnation above for this node, to join a set"
         );
+    }
+
+    match server_config.push.clone() {
+        Some(push) => {
+            let sender = dsm_storage_node::push::FcmSender::new(push)
+                .context("`[push.fcm]` does not describe a working push sender")?;
+            log::info!(
+                "push configured: devices' doorbells are rung through Firebase Cloud Messaging"
+            );
+            state = state.with_doorbells(
+                dsm_storage_node::api::transport::doorbell::Doorbells::start(sender),
+            );
+        }
+        None => log::info!(
+            "no [push.fcm] configured: this node rings no doorbell, and devices keep their waits"
+        ),
     }
 
     let app_state = Arc::new(state.clone());

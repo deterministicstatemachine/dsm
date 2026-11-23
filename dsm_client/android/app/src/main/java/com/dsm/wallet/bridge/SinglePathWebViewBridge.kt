@@ -61,11 +61,12 @@ class SinglePathWebViewBridge(private val context: Context) {
 
     companion object {
         private const val TAG = "SinglePathWebViewBridge"
-        private const val PREFS_NAME = "dsm_prefs"
+        // Read as well by the wallet a push starts with no screen (HeadlessWallet).
+        internal const val PREFS_NAME = "dsm_prefs"
         // Canonical identity keys (app-wide).
         // Values are stored as Base32 Crockford strings (standard boundary encoding).
-        private const val KEY_DEVICE_ID = "device_id_bytes"
-        private const val KEY_GENESIS_HASH = "genesis_hash_bytes"
+        internal const val KEY_DEVICE_ID = "device_id_bytes"
+        internal const val KEY_GENESIS_HASH = "genesis_hash_bytes"
         private const val KEY_GENESIS_ENVELOPE = "genesis_envelope_bytes"
 
 

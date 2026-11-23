@@ -551,6 +551,13 @@ pub enum Backgrounded {
     /// time, and only a wallet that is still running fetches and answers them.
     /// The host keeps the process alive, so the connect listener keeps going.
     Serving,
+    /// This device has contacts, and its doorbells stand on enough members
+    /// that every delivery rings its phone
+    /// ([`crate::sdk::inbox_doorbell::covers_fleet`]): the nodes push it when
+    /// something lands, so it holds no connection open. The poller keeps
+    /// running with no timer and its waiter holds no wait; the host may let
+    /// its foreground service go, and a push wakes the app.
+    Ringing,
     /// Nothing owed and nobody to hear from: the poller was stopped.
     Stopped,
 }
@@ -568,20 +575,32 @@ pub fn stop_poller_for_lifecycle() -> anyhow::Result<Backgrounded> {
         );
         return Ok(Backgrounded::Settling);
     }
-    let contacts = crate::storage::client_db::count_contacts()?;
-    if contacts > 0 {
-        log::info!(
-            "[inbox_poller] lifecycle stop DECLINED — {contacts} contact(s) can send to this \
-             device; listening in the background"
-        );
-        return Ok(Backgrounded::Listening);
-    }
     if crate::sdk::connect::wallet::any_connected().map_err(|e| anyhow::anyhow!(e))? {
         log::info!(
             "[inbox_poller] lifecycle stop DECLINED — an application is connected; \
              its requests keep being answered in the background"
         );
         return Ok(Backgrounded::Serving);
+    }
+    let contacts = crate::storage::client_db::count_contacts()?;
+    if contacts > 0 {
+        // Off screen now: the waiter plans again, putting the doorbells up at
+        // every member, and holds no wait while they cover the fleet.
+        crate::sdk::inbox_doorbell::ask_refresh();
+        crate::sdk::inbox_waiter::replan();
+        if crate::sdk::inbox_doorbell::covers_fleet() {
+            log::info!(
+                "[inbox_poller] lifecycle stop DECLINED — {contacts} contact(s) can send to \
+                 this device, and the nodes ring its phone when they do: no connection held \
+                 in the background"
+            );
+            return Ok(Backgrounded::Ringing);
+        }
+        log::info!(
+            "[inbox_poller] lifecycle stop DECLINED — {contacts} contact(s) can send to this \
+             device, and no push covers the fleet: listening in the background"
+        );
+        return Ok(Backgrounded::Listening);
     }
     stop_poller();
     Ok(Backgrounded::Stopped)

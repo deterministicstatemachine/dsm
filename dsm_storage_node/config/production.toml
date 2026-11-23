@@ -86,6 +86,16 @@ max_open_connections_per_peer = 128   # of those, held by one peer (an IPv4 addr
 cert_path = "/certs/node.crt"
 key_path  = "/certs/node.key"
 
+# Push (dsm_storage_node/deploy/operator/PUSH_DOORBELL.md): the node rings devices' phones through Firebase Cloud
+# Messaging when their spools take an entry. Absent = no doorbell; devices keep their waits.
+# Every value is the operator's; the certificate and its key are this node's alone.
+# [push.fcm]
+# project_id = "<Firebase project id>"
+# workload_identity_provider = "//iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>"
+# service_account = "<name>@<project id>.iam.gserviceaccount.com"
+# client_cert_path = "/certs/push-client.crt"
+# client_key_path = "/certs/push-client.key"
+
 [database]
 url = "__DATABASE_URL__"
 

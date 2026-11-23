@@ -380,6 +380,15 @@ pub struct Spooled {
 }
 
 impl Node {
+    /// The doorbell `key` names on this node, if it stands: its push token
+    /// and the spools it watches.
+    pub fn doorbell(&self, key: &[u8; 32]) -> Option<(String, Vec<String>)> {
+        match &self.state.doorbells {
+            Some(doorbells) => doorbells.registered(key),
+            None => panic!("every node of a set pushes"),
+        }
+    }
+
     /// The pool the node draws its database connections from.
     pub fn pool(&self) -> &db::DBPool {
         &self.state.db_pool
@@ -484,9 +493,14 @@ impl Drop for Node {
     }
 }
 
-/// The network's pinned register members, one node each.
+/// The network's pinned register members, one node each, each pushing
+/// devices' phones through [`NodeSet::google`] as the fleet pushes them
+/// through Firebase.
 pub struct NodeSet {
     pub nodes: Vec<Node>,
+    /// Google's push endpoints every node's doorbells ring through: what
+    /// Firebase took is read here.
+    pub google: super::google_push::GooglePush,
     ca: TestCa,
 }
 
@@ -584,7 +598,8 @@ impl NodeSet {
             .collect();
 
         // Phase 2: each node, with the set checked against its own register,
-        // serving the binary's app.
+        // serving the binary's app and pushing through Google's endpoints.
+        let google = super::google_push::GooglePush::start().await;
         let mut nodes = Vec::with_capacity(prepared.len());
         for p in prepared {
             let endpoint = endpoint_of(&p.address);
@@ -596,8 +611,13 @@ impl NodeSet {
                 Ok(set) => set,
                 Err(e) => panic!("set-mates: {e}"),
             };
+            let sender = match dsm_storage_node::push::FcmSender::new(google.config()) {
+                Ok(sender) => sender,
+                Err(e) => panic!("the node's push sender: {e}"),
+            };
+            let doorbells = dsm_storage_node::api::transport::doorbell::Doorbells::start(sender);
             let state = match AppState::new(p.member_id.clone(), p.pool) {
-                Ok(state) => Arc::new(state.with_storage_set(set)),
+                Ok(state) => Arc::new(state.with_storage_set(set).with_doorbells(doorbells)),
                 Err(e) => panic!("app state: {e}"),
             };
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -622,7 +642,7 @@ impl NodeSet {
                 rival,
             });
         }
-        Self { nodes, ca }
+        Self { nodes, google, ca }
     }
 
     /// The TLS a member serves, from this node set's CA: a certificate naming

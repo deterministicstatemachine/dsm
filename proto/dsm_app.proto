@@ -2835,6 +2835,24 @@ message B0xWaitResponse {
   repeated string ready = 1; // the listed spools holding an entry at or after their position
 }
 
+// A device's doorbell on a node: while the app is off screen, an entry that
+// lands on any of these spools makes the node send one empty push (Firebase
+// Cloud Messaging) to `push_token`. The push carries nothing; the device
+// wakes and reads its spools as it always does. Only the holder of `key`
+// replaces or removes this doorbell: a doorbell is named by the hash of its
+// key, and a device derives a key of its own for each node. Nothing about a
+// doorbell enters what any device or node verifies.
+message B0xDoorbell {
+  bytes key = 1 [(dsm_fixed_len)=32];
+  string push_token = 2;          // the FCM registration token of the device's app
+  repeated string addresses = 3;  // spool keys, Base32 Crockford of 32 bytes
+}
+
+// Take down the doorbell `key` names.
+message B0xDoorbellRemove {
+  bytes key = 1 [(dsm_fixed_len)=32];
+}
+
 // =============================== ENVELOPE ============================
 // The sender of an addressed envelope. A local answer (this device's Core or
 // SDK answering its own caller) makes no sender claim and carries no Headers.

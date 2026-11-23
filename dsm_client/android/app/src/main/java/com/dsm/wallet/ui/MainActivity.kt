@@ -55,6 +55,7 @@ import com.dsm.wallet.bridge.Unified
 import com.dsm.wallet.bridge.ble.BleCoordinator
 import com.dsm.wallet.permissions.BluetoothPermissionHelper
 import com.dsm.wallet.service.BleBackgroundService
+import com.dsm.wallet.service.InboxPush
 import com.dsm.wallet.session.NativeFirstCutoverReset
 import dsm.types.proto.NativeHostEvent
 import dsm.types.proto.NativeHostEventKind
@@ -981,7 +982,11 @@ class MainActivity : AppCompatActivity() {
             } catch (t: Throwable) {
                 Log.w(tag, "onStart: startForegroundService failed", t)
             }
-            BatteryExemption.askOnce(this)
+            // Only a phone the storage nodes cannot ring keeps its own connection
+            // open while it sleeps, and needs the exemption for it.
+            if (InboxPush.unavailableBecause(this) != null) {
+                BatteryExemption.askOnce(this)
+            }
         }
         val intent = Intent(this, BleBackgroundService::class.java)
         try {
@@ -1447,6 +1452,12 @@ class MainActivity : AppCompatActivity() {
                     } catch (t: Throwable) {
                         Log.e(tag, "initDsmAndSignalReady: Bilateral SDK init error", t)
                     }
+                }
+
+                // The storage nodes' doorbell: Rust is handed this phone's push token, or
+                // told there is no push here and keeps its waits and foreground service.
+                if (bootstrapped) {
+                    InboxPush.start(applicationContext)
                 }
 
                 // Fetch identity bytes via JNI → Rust (Invariant #7: no prefs side channel)

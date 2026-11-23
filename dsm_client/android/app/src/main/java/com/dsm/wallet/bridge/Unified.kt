@@ -134,6 +134,18 @@ object Unified {
     @Keep @JvmStatic fun ensureAppRouterInstalled(): Boolean =
         UnifiedNativeApi.ensureAppRouterInstalled()
 
+    /** This phone's Firebase Cloud Messaging token: the storage nodes ring it. */
+    @Keep @JvmStatic fun setPushToken(token: String) = UnifiedNativeApi.setPushToken(token)
+
+    /** No push on this phone: Rust keeps the waits and the foreground service. */
+    @Keep @JvmStatic fun pushUnavailable(why: String) = UnifiedNativeApi.pushUnavailable(why)
+
+    /**
+     * A storage node rang this phone. 1 once Rust's sync is under way, 0 when the
+     * wallet is not started in this process yet (Android started it for the push).
+     */
+    @Keep @JvmStatic fun onPushWake(): Int = UnifiedNativeApi.onPushWake()
+
     /**
      * Get a compact AppRouter status code (native):
      * 0 = NOT_READY_NO_GENESIS
@@ -341,9 +353,10 @@ object Unified {
     @Keep @JvmStatic fun getDeviceIdBin(): ByteArray = UnifiedNativeApi.getDeviceIdBin()
 
     /**
-     * App-backgrounded transition. Rust owns the whole decision (stop the poller or
-     * keep polling because settlement is in flight) and returns ONE directive:
-     * true = keep the foreground service alive. Kotlin relays it, nothing more.
+     * App-backgrounded transition. Rust owns the whole decision (stop the poller,
+     * keep polling because settlement is in flight, or let the storage nodes ring
+     * the phone) and returns ONE directive: whether the foreground service must
+     * stay alive. Kotlin relays it, nothing more.
      */
     @Keep @JvmStatic fun onAppBackgrounded(): Boolean =
         try { UnifiedNativeApi.onAppBackgrounded() } catch (_: Throwable) { false }

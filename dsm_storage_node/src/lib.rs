@@ -10,6 +10,7 @@ use std::sync::Arc;
 pub mod api;
 pub mod db;
 pub mod liveness;
+pub mod push;
 pub mod set_client;
 
 #[derive(Clone)]
@@ -39,6 +40,9 @@ pub struct AppState {
     pub committed: Arc<db::CommittedCells>,
     /// Devices' waits on their spools (long-poll), woken by each submit.
     pub spool_waits: api::transport::b0x::SpoolWaits,
+    /// Devices' doorbells, rung by each submit: `None` when the node is not
+    /// configured to push (`[push.fcm]`), and serves no doorbell route.
+    pub doorbells: Option<Arc<api::transport::doorbell::Doorbells>>,
 }
 
 /// One set-mate, as this node's own configuration names it: where it is
@@ -208,12 +212,20 @@ impl AppState {
             mirror_syncs: Arc::new(api::objects::bytecommit::MirrorSyncs::default()),
             committed: Arc::new(db::CommittedCells::default()),
             spool_waits: api::transport::b0x::SpoolWaits::default(),
+            doorbells: None,
         })
     }
 
     /// Attach this node's canonical storage set (see [`NodeStorageSet`]).
     pub fn with_storage_set(mut self, set: NodeStorageSet) -> Self {
         self.storage_set = Some(Arc::new(set));
+        self
+    }
+
+    /// Push devices' phones when their spools take an entry (see
+    /// [`api::transport::doorbell`]).
+    pub fn with_doorbells(mut self, doorbells: Arc<api::transport::doorbell::Doorbells>) -> Self {
+        self.doorbells = Some(doorbells);
         self
     }
 }
@@ -561,6 +573,14 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
         trace::TraceLayer,
     };
 
+    // A node configured to push serves devices' doorbells; one that is not
+    // answers their routes `404`, and its devices keep their waits.
+    let doorbells = match &state.doorbells {
+        Some(doorbells) => {
+            crate::api::transport::doorbell::router(state.clone(), doorbells.clone())
+        }
+        None => Router::new(),
+    };
     Router::new()
         .route(
             "/api/v2/health",
@@ -575,6 +595,7 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
         // The b0x spool (storage spec §8): no writer or reader authorization,
         // envelopes never opened.
         .merge(crate::api::transport::b0x::router(state.clone()))
+        .merge(doorbells)
         .layer(RequestBodyLimitLayer::new(limits.body_limit_bytes))
         // One limit for the whole node. A router applies a layer to each
         // route on its own, so a per-service limit would be one limit per

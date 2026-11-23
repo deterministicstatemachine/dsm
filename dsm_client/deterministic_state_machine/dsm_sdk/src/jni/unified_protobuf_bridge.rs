@@ -615,22 +615,28 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
 /// Returns TRUE when the host MUST keep its foreground service alive: killing
 /// the service kills the poller with it, stranding money in flight until the
 /// user happens to reopen the app, and leaving what a contact sends unread
-/// until then. The caller performs no protocol reasoning of its own — it
-/// relays this directive and nothing else.
+/// until then. FALSE when nothing is owed and nobody can send, or when the
+/// nodes ring this phone (Firebase Cloud Messaging) when someone does: a push
+/// starts the app again if Android has stopped it. The caller performs no
+/// protocol reasoning of its own — it relays this directive and nothing else.
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_onAppBackgrounded(
     _env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
 ) -> jni::sys::jboolean {
-    // Only a readable "nothing owed, nobody to hear from" lets the host go:
-    // the poller was stopped. Outstanding work, a contact, an unreadable
-    // store, or a panic keep it alive.
+    // Only a readable "nothing owed, nobody to hear from" (the poller was
+    // stopped), or "the nodes ring this phone", lets the host go. Outstanding
+    // work, a contact no push covers, an unreadable store, or a panic keep it
+    // alive.
     let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::logging::init_android_device_logging();
         crate::sdk::inbox_poller::stop_poller_for_lifecycle()
     }));
     match stopped {
-        Ok(Ok(crate::sdk::inbox_poller::Backgrounded::Stopped)) => 0,
+        Ok(Ok(
+            crate::sdk::inbox_poller::Backgrounded::Stopped
+            | crate::sdk::inbox_poller::Backgrounded::Ringing,
+        )) => 0,
         Ok(Ok(
             crate::sdk::inbox_poller::Backgrounded::Settling
             | crate::sdk::inbox_poller::Backgrounded::Listening
@@ -645,6 +651,90 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_onAppBackgrou
             1
         }
     }
+}
+
+/// The app's Firebase Cloud Messaging token, at start and whenever Firebase
+/// issues a new one: the waiter puts this device's doorbells up with it, so
+/// the storage nodes push the phone when something lands for it.
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_setPushToken(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    token: jni::sys::jstring,
+) {
+    crate::jni::bridge_utils::jni_catch_unwind_void(
+        "setPushToken",
+        std::panic::AssertUnwindSafe(|| {
+            crate::logging::init_android_device_logging();
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return,
+            };
+            let token = unsafe { jstr_from(token) };
+            let read: Result<String, _> = env.get_string(&token).map(String::from);
+            match read {
+                Ok(token) => crate::sdk::inbox_doorbell::set_push_token(token),
+                Err(e) => log::error!("setPushToken: the token is not a string: {e}"),
+            }
+        }),
+    );
+}
+
+/// This phone has no push (no Google Play services, or Firebase could not
+/// issue a token): the app keeps listening off screen as it did before,
+/// with its waits and its foreground service.
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_pushUnavailable(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    why: jni::sys::jstring,
+) {
+    crate::jni::bridge_utils::jni_catch_unwind_void(
+        "pushUnavailable",
+        std::panic::AssertUnwindSafe(|| {
+            crate::logging::init_android_device_logging();
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return,
+            };
+            let why = unsafe { jstr_from(why) };
+            let read: Result<String, _> = env.get_string(&why).map(String::from);
+            match read {
+                Ok(why) => crate::sdk::inbox_doorbell::push_unavailable(&why),
+                Err(e) => {
+                    log::error!("pushUnavailable: the reason is not a string: {e}");
+                    crate::sdk::inbox_doorbell::push_unavailable("reason unreadable");
+                }
+            }
+        }),
+    );
+}
+
+/// A storage node pushed this phone: something landed for it. Answers 1 once
+/// the sync a wait's answer runs is under way, 0 when this process has not
+/// started the wallet yet (Android started it for the push): the host starts
+/// it and asks again.
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_onPushWake(
+    _env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+) -> jni::sys::jint {
+    crate::jni::bridge_utils::jni_catch_unwind_jint(
+        "onPushWake",
+        0,
+        std::panic::AssertUnwindSafe(|| {
+            crate::logging::init_android_device_logging();
+            let started = crate::sdk::app_state::AppState::readable()
+                && crate::sdk::app_state::AppState::get_device_id().is_some()
+                && crate::bridge::full_app_router_installed();
+            if !started {
+                log::info!("onPushWake: the wallet is not started in this process yet");
+                return 0;
+            }
+            crate::sdk::inbox_doorbell::on_push_wake();
+            1
+        }),
+    )
 }
 
 /// Returns the local device id as raw bytes (32 bytes) when available.

@@ -23,3 +23,6 @@ proguard/
 .navigation/
 *.jks
 *.keystore
+
+# The owner's Firebase project (app/google-services.json): his, never committed.
+app/google-services.json

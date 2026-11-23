@@ -232,6 +232,16 @@ pub const TAG_DSM_SPOOL_WRITE: TaggedHashDomain<'static> =
 /// The commitment of a written envelope's bytes (DSM Amendment A34).
 pub const TAG_DSM_SPOOL_WRITE_ENVELOPE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/spool-write-envelope/v1");
+/// The seed of the key a device rings its doorbell on one storage node with,
+/// keyed by its master seed, one per node: only that device replaces or
+/// removes its doorbell there, and no node holds a key another node takes.
+/// A doorbell only wakes a device; nothing it holds is verified by anyone.
+pub const TAG_DSM_B0X_DOORBELL_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-doorbell-key/v1");
+/// What a node names a doorbell by: the hash of its key, so the key itself
+/// is never kept.
+pub const TAG_DSM_B0X_DOORBELL: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-doorbell/v1");
 /// What a sender's AK signs to bind its relationship write key to one
 /// relationship instance and one recipient (DSM Amendment A34).
 pub const TAG_DSM_RELATIONSHIP_WRITE_KEY_BINDING: TaggedHashDomain<'static> =
