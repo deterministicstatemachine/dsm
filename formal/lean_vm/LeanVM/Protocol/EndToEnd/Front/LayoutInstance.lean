@@ -30,16 +30,18 @@ vector:
   (`bytecodeColumn`, `FixedColumns.lean`) as a list: `2 ^ (logSize + 4)` words, instruction bits
   low, slot bits high, sixteen slots per instruction, the entry at slots 3 to 13.
 * `refCol c`: the verifier's global column number of the instance's column `c`, its position in the
-  instance's global order (`columns`): the memory columns `0 to 2`, `BYTECODE_FINAL_COUNTERS` `3`, `QKECCAK` `4`, then
-  the six opcode tables' columns in order. `refCol_*` give the named columns.
+  instance's global order (`columns`): the memory columns `0 to 2`, `BYTECODE_FINAL_COUNTERS` `3`, `QKECCAK` `4`,
+  `QFLOCK` `5` (research build), then the seven opcode tables' columns in order. `refCol_*` give the
+  named columns.
 * `buildLayout_eq`: the layout is built from the announced rows (`tableRows`) exactly when the
   sizes are in the windows `buildLayout` checks (`LayoutOk`), and is then `verifierLayout prog s`,
   whose log-heights are `tableLogs s` (`logHeights_tableRows`, with `KECCAK`'s floor).
 * `stackLog_verifierLayout`: its stacked size is the instance's `μ`.
 * `placement_committed`, `placement_slot`: every committed column at its block's offset, every
   `KECCAK` input lane and column riding a spare slot at its slot of `QKECCAK` (`qSlot`, the
-  verifier's `qkeccak_slot`); an output lane has no placement (`placements_outLane`), as the
-  instance commits none.
+  verifier's `qkeccak_slot`), every `BLAKE3` value limb at its word of `QFLOCK` (`fSlot`, the
+  verifier's `qflock_slot`, `placement_limb`); an output lane has no placement
+  (`placements_outLane`), as the instance commits none.
 * `stackPoint_eq_extend`: a point placed by the verifier's layout is the instance layout's lift
   of that point; hence `onStack_holds_iff`: a verifier column claim on a column that is not an
   output lane holds of a stack exactly when the instance's column claim holds.
@@ -129,16 +131,16 @@ theorem logHeights_tableRows (s : Sizes) :
 order. -/
 def refCol (c : Col) : ℕ := columns.idxOf c
 
-/-- The instance has `158` columns, as the verifier. -/
-theorem length_columns : columns.length = 158 := by decide +kernel
+/-- The instance has `217` columns, as the verifier. -/
+theorem length_columns : columns.length = 217 := by decide +kernel
 
 /-- Every column is in the global order. -/
 theorem mem_columns (c : Col) : c ∈ columns := by
   simp only [columns, List.mem_flatMap, List.mem_finRange, List.mem_map, true_and]
   exact ⟨c.1, c.2, rfl⟩
 
-/-- A global column number is below `158`. -/
-theorem refCol_lt (c : Col) : refCol c < 158 :=
+/-- A global column number is below `217`. -/
+theorem refCol_lt (c : Col) : refCol c < 217 :=
   length_columns ▸ List.idxOf_lt_length_of_mem (mem_columns c)
 
 /-- The column at a global number. -/
@@ -157,13 +159,16 @@ theorem refCol_bfcntCol : refCol bfcntCol = bytecodeFinalCounters := by decide +
 /-- The instance's `keccakCol` is the reference's `QKECCAK`. -/
 theorem refCol_keccakCol : refCol keccakCol = qkeccak := by decide +kernel
 
+/-- The instance's `flockCol` is the reference's `QFLOCK` (research build). -/
+theorem refCol_flockCol : refCol flockCol = qflock := by decide +kernel
+
 /-- Column `i` of opcode table `j` is the verifier's `GLOBAL_COLUMN_BASES[j] + i`. -/
-theorem refCol_opIdx (j : Fin 6) (i : Fin (width (opIdx j))) :
+theorem refCol_opIdx (j : Fin 7) (i : Fin (width (opIdx j))) :
     refCol ⟨opIdx j, i⟩ = globalColumnBases.getD j 0 + i := by
   revert j i; decide +kernel
 
 /-- A table's width in the verifier is the instance's. -/
-theorem width_opIdx (j : Fin 6) : width (opIdx j) = (tables.getD j default).width := by
+theorem width_opIdx (j : Fin 7) : width (opIdx j) = (tables.getD j default).width := by
   revert j; decide +kernel
 
 /-! ## The layout -/
@@ -223,14 +228,14 @@ theorem buildLayout_eq (prog : LeanIsaProgram) (s : Sizes) :
 /-! ## The column sizes and the blocks -/
 
 /-- The instance's widths, table by table. -/
-theorem width_vals : width 0 = 3 ∧ width 1 = 1 ∧ width 2 = 1 ∧ width 3 = 13 ∧ width 4 = 13 ∧
-    width 5 = 7 ∧ width 6 = 14 ∧ width 7 = 14 ∧ width 8 = 92 := by
+theorem width_vals : width 0 = 3 ∧ width 1 = 1 ∧ width 2 = 1 ∧ width 3 = 1 ∧ width 4 = 13 ∧
+    width 5 = 13 ∧ width 6 = 7 ∧ width 7 = 14 ∧ width 8 = 14 ∧ width 9 = 92 ∧ width 10 = 58 := by
   decide +kernel
 
 /-- A function of the table, along the global order. -/
-theorem columns_map_fst (h : Fin 9 → ℕ) :
+theorem columns_map_fst (h : Fin 11 → ℕ) :
     columns.map (fun c ↦ h c.1) =
-      (List.finRange 9).flatMap fun j ↦ List.replicate (width j) (h j) := by
+      (List.finRange 11).flatMap fun j ↦ List.replicate (width j) (h j) := by
   simp only [columns, List.map_flatMap, List.map_map]
   congr 1
   funext j
@@ -240,16 +245,19 @@ theorem columns_map_fst (h : Fin 9 → ℕ) :
 theorem refKappas_eq (prog : LeanIsaProgram) (s : Sizes) :
     refKappas prog s = columns.map (kappa prog s) := by
   rw [columns_map_fst (height prog s)]
-  obtain ⟨h0, h1, h2, h3, h4, h5, h6, h7, h8⟩ := width_vals
-  rw [show List.finRange 9 = [0, 1, 2, 3, 4, 5, 6, 7, 8] by decide]
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10⟩ := width_vals
+  rw [show List.finRange 11 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] by decide]
   simp only [List.flatMap_cons, List.flatMap_nil, List.append_nil, h0, h1, h2, h3, h4, h5, h6,
-    h7, h8]
+    h7, h8, h9, h10]
   simp only [refKappas, columnKappas, tables, List.flatMap_cons, List.flatMap_nil,
     List.append_nil]
   have hq : (tableLogs s).getD opKeccak 0 + qkeccakSlotBits = height prog s 2 := by
     rw [show qkeccakSlotBits = 6 by decide]
     rfl
-  rw [hq]
+  have hf : (tableLogs s).getD opBlake3 0 + qflockSlotBits = height prog s 3 := by
+    rw [show qflockSlotBits = 8 by decide]
+    rfl
+  rw [hq, hf]
   rfl
 
 /-- The verifier's log-size of a column is the instance's. -/
@@ -260,39 +268,49 @@ theorem getD_pyKappas (prog : LeanIsaProgram) (s : Sizes) (c : Col) :
     exact refCol_lt c
   rw [refKappas_eq, List.getD_eq_getElem _ _ h, List.getElem_map, getElem_columns_pyCol]
 
-/-- The verifier has `158` columns. -/
-theorem length_pyKappas (prog : LeanIsaProgram) (s : Sizes) : (refKappas prog s).length = 158 := by
+/-- The verifier has `217` columns. -/
+theorem length_pyKappas (prog : LeanIsaProgram) (s : Sizes) : (refKappas prog s).length = 217 := by
   rw [refKappas_eq, List.length_map, length_columns]
 
-/-- The `q_keccak` slot of a global column below `158`: lane `l`'s for input lane `l` (global
-columns `81 … 105`), `50 + k` for the `KECCAK` table's column `k < 14` (global `66 … 79`), none
+/-- The `q_keccak` slot of a global column below `217`: lane `l`'s for input lane `l` (global
+columns `82 … 106`), `50 + k` for the `KECCAK` table's column `k < 14` (global `67 … 80`), none
 otherwise. Checked in the kernel. -/
-theorem keccakSlot_lt : ∀ c : Fin 158,
-    keccakSlot c = if 81 ≤ c.val ∧ c.val < 106 then some (c.val - 81)
-      else if 66 ≤ c.val ∧ c.val < 80 then some (c.val - 16) else none := by
+theorem keccakSlot_lt : ∀ c : Fin 217,
+    keccakSlot c = if 82 ≤ c.val ∧ c.val < 107 then some (c.val - 82)
+      else if 67 ≤ c.val ∧ c.val < 81 then some (c.val - 17) else none := by
   decide +kernel
 
-/-- The output lanes are global columns `106 … 130`. -/
-theorem keccakOutputColumns_eq : keccakOutputColumns = (List.range 25).map (106 + ·) := by
+/-- The `q_flock` word of a global column below `217` (research build): the `BLAKE3` value limbs
+are global columns `171 … 200`, at their `BLAKE3_SLOTS` words; none otherwise. Checked in the
+kernel. -/
+theorem flockSlot_lt : ∀ c : Fin 217,
+    flockSlot c = if h : 171 ≤ c.val ∧ c.val < 201 then
+      some (limbSlot ⟨c.val - 171, by omega⟩).val else none := by
   decide +kernel
 
-/-- The instance's input lanes are global columns `81 … 105`, its output lanes `106 … 130`, its
-spare columns `66 … 79`. -/
-theorem refCol_lanes : ∀ c : Col, (IsLane c ∧ ¬ IsOut c ↔ 81 ≤ refCol c ∧ refCol c < 106) ∧
-    (IsOut c ↔ 106 ≤ refCol c ∧ refCol c < 131) ∧
-    (IsSpare c ↔ 66 ≤ refCol c ∧ refCol c < 80) ∧
-    (IsVirtual c → refCol c = 66 + c.2.val) := by
+/-- The output lanes are global columns `107 … 131`. -/
+theorem keccakOutputColumns_eq : keccakOutputColumns = (List.range 25).map (107 + ·) := by
   decide +kernel
 
-/-- The `q_keccak` slot of a global column: its `qSlot` for a virtual column but an output lane
-(an input lane or a spare column), none otherwise. -/
+/-- The instance's input lanes are global columns `82 … 106`, its output lanes `107 … 131`, its
+spare columns `67 … 80`, the `BLAKE3` value limbs `171 … 200`. -/
+theorem refCol_lanes : ∀ c : Col, (IsLane c ∧ ¬ IsOut c ↔ 82 ≤ refCol c ∧ refCol c < 107) ∧
+    (IsOut c ↔ 107 ≤ refCol c ∧ refCol c < 132) ∧
+    (IsSpare c ↔ 67 ≤ refCol c ∧ refCol c < 81) ∧
+    (IsKVirtual c → refCol c = 67 + c.2.val) ∧
+    (IsLimb c ↔ 171 ≤ refCol c ∧ refCol c < 201) ∧
+    (IsLimb c → refCol c = 159 + c.2.val) := by
+  decide +kernel
+
+/-- The `q_keccak` slot of a global column: its `qSlot` for a column riding `QKECCAK` but an output
+lane (an input lane or a spare column), none otherwise. -/
 theorem keccakSlot_pyCol (c : Col) :
-    keccakSlot (refCol c) = if IsVirtual c ∧ ¬ IsOut c then some (qSlot c).val else none := by
+    keccakSlot (refCol c) = if IsKVirtual c ∧ ¬ IsOut c then some (qSlot c).val else none := by
   have h1 := keccakSlot_lt ⟨refCol c, refCol_lt c⟩
-  obtain ⟨hin, hout, hsp, hval⟩ := refCol_lanes c
+  obtain ⟨hin, hout, hsp, hval, -, -⟩ := refCol_lanes c
   simp only at h1
   rw [h1]
-  by_cases h : IsVirtual c ∧ ¬ IsOut c
+  by_cases h : IsKVirtual c ∧ ¬ IsOut c
   · rw [ite_eq_left h]
     have hv := hval h.1
     have hq : (qSlot c).val = if c.2.val < 14 then 50 + c.2.val else
@@ -308,8 +326,26 @@ theorem keccakSlot_pyCol (c : Col) :
       rw [ite_eq_right (by omega), ite_eq_left h']
       congr 1
       split_ifs <;> omega
-  · rw [ite_eq_right h, ite_eq_right (fun h' ↦ h ⟨(hin.mpr h').1.isVirtual, (hin.mpr h').2⟩),
-      ite_eq_right (fun h' ↦ h ⟨(hsp.mpr h').isVirtual, (hsp.mpr h').not_isOut⟩)]
+  · rw [ite_eq_right h, ite_eq_right (fun h' ↦ h ⟨(hin.mpr h').1.isKVirtual, (hin.mpr h').2⟩),
+      ite_eq_right (fun h' ↦ h ⟨(hsp.mpr h').isKVirtual, (hsp.mpr h').not_isOut⟩)]
+
+/-- The `q_flock` word of a global column: its `fSlot` for a `BLAKE3` value limb, none
+otherwise. -/
+theorem flockSlot_pyCol (c : Col) :
+    flockSlot (refCol c) = if IsLimb c then some (fSlot c).val else none := by
+  have h1 := flockSlot_lt ⟨refCol c, refCol_lt c⟩
+  obtain ⟨-, -, -, -, hl, hv⟩ := refCol_lanes c
+  simp only at h1
+  rw [h1]
+  by_cases h : IsLimb c
+  · have hr := hl.mp h
+    have h2 := hv h
+    have h3 := h.2
+    rw [dite_eq_left hr, ite_eq_left h]
+    unfold fSlot
+    rw [dite_eq_left ⟨h3.1, h3.2⟩]
+    exact congrArg (fun i ↦ some (limbSlot i).val) (Fin.ext (by simp only; omega))
+  · rw [ite_eq_right h, dite_eq_right (fun h' ↦ h (hl.mpr h'))]
 
 /-- A global column is an output lane exactly when its instance column is. -/
 theorem mem_keccakOutputColumns_pyCol (c : Col) :
@@ -318,12 +354,13 @@ theorem mem_keccakOutputColumns_pyCol (c : Col) :
   simp only [List.mem_map, List.mem_range]
   constructor
   · rintro ⟨l, hl, he⟩; omega
-  · intro h; exact ⟨refCol c - 106, by omega, by omega⟩
+  · intro h; exact ⟨refCol c - 107, by omega, by omega⟩
 
 /-- The verifier's committed columns (`blocks` in `build_layout`) are the instance's, in global
 order. -/
 theorem blockCols_eq :
-    (List.range 158).filter (fun c ↦ (keccakSlot c).isNone ∧ c ∉ keccakOutputColumns) =
+    (List.range 217).filter (fun c ↦
+        (keccakSlot c).isNone ∧ (flockSlot c).isNone ∧ c ∉ keccakOutputColumns) =
       committedColumns.map refCol := by
   decide +kernel
 
@@ -443,22 +480,25 @@ theorem stackOffsets_snd (prog : LeanIsaProgram) (s : Sizes) :
 `layout.rs`). -/
 def refOffset (prog : LeanIsaProgram) (s : Sizes) (column : ℕ) : ℕ :=
   let blockCols := (List.range (refKappas prog s).length).filter fun c ↦
-    (keccakSlot c).isNone ∧ c ∉ keccakOutputColumns
+    (keccakSlot c).isNone ∧ (flockSlot c).isNone ∧ c ∉ keccakOutputColumns
   (stackOffsets (blockCols.map ((refKappas prog s).getD · 0))).1.getD (blockCols.idxOf column) 0
 
 /-- `placements_of`, unfolded: each column's placement from its log-size and the offsets. -/
 theorem placementsOf_pyKappas (prog : LeanIsaProgram) (s : Sizes) :
     placementsOf (refKappas prog s) =
       ((refKappas prog s).zipIdx.map fun (kappa, column) ↦
-        match keccakSlot column with
-        | some slot =>
+        match keccakSlot column, flockSlot column with
+        | some slot, _ =>
           some ({ variableCount := kappa, index := refOffset prog s qkeccak + slot * 2 ^ kappa } :
             Placement)
-        | none =>
+        | none, some slot =>
+          some ({ variableCount := kappa, index := refOffset prog s qflock + slot * 2 ^ kappa } :
+            Placement)
+        | none, none =>
           if column ∈ keccakOutputColumns then none
           else some { variableCount := kappa, index := refOffset prog s column },
       max Whir.minLogStack (stackOffsets (((List.range (refKappas prog s).length).filter
-        fun c ↦ (keccakSlot c).isNone ∧ c ∉ keccakOutputColumns).map
+        fun c ↦ (keccakSlot c).isNone ∧ (flockSlot c).isNone ∧ c ∉ keccakOutputColumns).map
           ((refKappas prog s).getD · 0))).2) := rfl
 
 /-- The verifier's offset of a committed column is its block's. -/
@@ -480,10 +520,12 @@ theorem stackLog_verifierLayout (prog : LeanIsaProgram) (s : Sizes) :
 /-- The verifier's placement of a global column. -/
 theorem placements_getD (prog : LeanIsaProgram) (s : Sizes) (c : Col) :
     (verifierLayout prog s).placements.getD (refCol c) none =
-      match keccakSlot (refCol c) with
-      | some slot =>
+      match keccakSlot (refCol c), flockSlot (refCol c) with
+      | some slot, _ =>
         some { variableCount := kappa prog s c, index := refOffset prog s qkeccak + slot * 2 ^ kappa prog s c }
-      | none =>
+      | none, some slot =>
+        some { variableCount := kappa prog s c, index := refOffset prog s qflock + slot * 2 ^ kappa prog s c }
+      | none, none =>
         if refCol c ∈ keccakOutputColumns then none
         else some { variableCount := kappa prog s c, index := refOffset prog s (refCol c) } := by
   show (placementsOf (refKappas prog s)).1.getD (refCol c) none = _
@@ -500,31 +542,48 @@ theorem placement_committed (prog : LeanIsaProgram) (s : Sizes) (c : Col) (h : �
     (verifierLayout prog s).placement (refCol c) =
       { variableCount := kappa prog s c, index := (blocks prog s).offset (blockOf c h) } := by
   have hno : ¬ IsOut c := fun ho ↦ h ho.isVirtual
-  have hns : ¬ (IsVirtual c ∧ ¬ IsOut c) := fun h' ↦ h h'.1
+  have hns : ¬ (IsKVirtual c ∧ ¬ IsOut c) := fun h' ↦ h (.inl h'.1)
+  have hnl : ¬ IsLimb c := fun h' ↦ h (.inr h')
   unfold Verifier.Layout.placement
-  rw [placements_getD, keccakSlot_pyCol, ite_eq_right hns]
+  rw [placements_getD, keccakSlot_pyCol, ite_eq_right hns, flockSlot_pyCol, ite_eq_right hnl]
   simp only [(mem_keccakOutputColumns_pyCol c).not.mpr hno, ↓reduceIte, Option.getD_some]
   rw [refOffset_pyCol prog s c h]
 
 /-- **An output lane has no placement**: the instance commits none. -/
 theorem placements_outLane (prog : LeanIsaProgram) (s : Sizes) (c : Col) (h : IsOut c) :
     (verifierLayout prog s).placements.getD (refCol c) none = none := by
-  have hns : ¬ (IsVirtual c ∧ ¬ IsOut c) := fun h' ↦ h'.2 h
-  rw [placements_getD, keccakSlot_pyCol, ite_eq_right hns]
+  have hns : ¬ (IsKVirtual c ∧ ¬ IsOut c) := fun h' ↦ h'.2 h
+  have hnl : ¬ IsLimb c := fun h' ↦ IsLimb.not_isOut h' h
+  rw [placements_getD, keccakSlot_pyCol, ite_eq_right hns, flockSlot_pyCol, ite_eq_right hnl]
   simp only [(mem_keccakOutputColumns_pyCol c).mpr h, ↓reduceIte]
 
 /-- **The placement of a column with a slot**: an input lane or a column riding a spare slot
 has `τ_KECCAK` variables at its slot `k = qSlot c` of `QKECCAK`, the cells
 `offset + k · 2 ^ τ_KECCAK + x`. -/
-theorem placement_slot (prog : LeanIsaProgram) (s : Sizes) (c : Col) (h : IsVirtual c ∧ ¬ IsOut c) :
+theorem placement_slot (prog : LeanIsaProgram) (s : Sizes) (c : Col)
+    (h : IsKVirtual c ∧ ¬ IsOut c) :
     (verifierLayout prog s).placement (refCol c) =
       { variableCount := s.τ 5,
         index := (blocks prog s).offset (keccakBlock prog s) + (qSlot c).val * 2 ^ s.τ 5 } := by
-  have hk : kappa prog s c = s.τ 5 := kappa_of_isVirtual prog s h.1
+  have hk : kappa prog s c = s.τ 5 := kappa_of_isKVirtual prog s h.1
   unfold Verifier.Layout.placement
   rw [placements_getD, keccakSlot_pyCol, ite_eq_left h]
   simp only [Option.getD_some]
   rw [← refCol_keccakCol, refOffset_pyCol prog s keccakCol not_isVirtual_keccakCol, hk]
+  rfl
+
+/-- **The placement of a `BLAKE3` value limb** (research build): `τ_BLAKE3` variables at its word
+`k = fSlot c` of `QFLOCK`, the cells `offset + k · 2 ^ τ_BLAKE3 + x`. -/
+theorem placement_limb (prog : LeanIsaProgram) (s : Sizes) (c : Col) (h : IsLimb c) :
+    (verifierLayout prog s).placement (refCol c) =
+      { variableCount := s.τ 6,
+        index := (blocks prog s).offset (flockBlock prog s) + (fSlot c).val * 2 ^ s.τ 6 } := by
+  have hk : kappa prog s c = s.τ 6 := kappa_of_isLimb prog s h
+  have hns : ¬ (IsKVirtual c ∧ ¬ IsOut c) := fun h' ↦ h.not_isKVirtual h'.1
+  unfold Verifier.Layout.placement
+  rw [placements_getD, keccakSlot_pyCol, ite_eq_right hns, flockSlot_pyCol, ite_eq_left h]
+  simp only [Option.getD_some]
+  rw [← refCol_flockCol, refOffset_pyCol prog s flockCol not_isVirtual_flockCol, hk]
   rfl
 
 /-! ## Placed points are lifted points -/
@@ -556,33 +615,63 @@ theorem extend_committed (prog : LeanIsaProgram) (s : Sizes) (c : Col)
         ((blocks prog s).offset (blockOf c h) / 2 ^ kappa prog s c) := by
   have e : (LeanIsa.layout prog s).extend c z =
       (((blocks prog s).layout (blocks_fits prog s)).piecewise
-        ((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
+        (((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
           (fun l : Fin 64 ↦ (⟨l, by omega⟩ : Fin (2 ^ 6)))
-          (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s)).extend (route prog s c)
+          (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s).piecewise
+        ((blocks prog s).sliceLayout (blocks_fits prog s) (flockBlock prog s) 8
+          (fun l : Fin 256 ↦ (⟨l, by omega⟩ : Fin (2 ^ 8)))
+          (κ := fun _ ↦ s.τ 6) fun _ ↦ size_flockBlock prog s))).extend (route prog s c)
         (Vector.cast (route_kappa prog s c).symm z) := rfl
-  have hr : route prog s c = .inl (blockOf c h) := by simp [route, h]
+  have hk : ¬ IsKVirtual c := fun h' ↦ h (.inl h')
+  have hl : ¬ IsLimb c := fun h' ↦ h (.inr h')
+  have hr : route prog s c = .inl (blockOf c h) := by simp [route, hk, hl]
   rw [e, piecewise_extend_inl _ _ _ _ hr]
   simp only [Blocks.layout, Blocks.extendPoint, Vector.toList_cast, Vector.toList_append,
     toList_boolVec, Blocks.selector_val, size_blockOf]
 
-/-- The instance lifts a point of a virtual column to the point, its slot's bits, and the bits of
-`QKECCAK`'s selector. -/
+/-- The instance lifts a point of a column riding `QKECCAK` to the point, its slot's bits, and the
+bits of `QKECCAK`'s selector. -/
 theorem extend_virtual (prog : LeanIsaProgram) (s : Sizes) (c : Col)
-    (h : IsVirtual c) (z : Vector E (kappa prog s c)) :
+    (h : IsKVirtual c) (z : Vector E (kappa prog s c)) :
     ((LeanIsa.layout prog s).extend c z).toList =
       z.toList ++ boolPoint 6 (qSlot c).val ++
         boolPoint (leanIsaμ prog s - (s.τ 5 + 6))
           ((blocks prog s).offset (keccakBlock prog s) / 2 ^ (s.τ 5 + 6)) := by
   have e : (LeanIsa.layout prog s).extend c z =
       (((blocks prog s).layout (blocks_fits prog s)).piecewise
-        ((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
+        (((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
           (fun l : Fin 64 ↦ (⟨l, by omega⟩ : Fin (2 ^ 6)))
-          (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s)).extend (route prog s c)
+          (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s).piecewise
+        ((blocks prog s).sliceLayout (blocks_fits prog s) (flockBlock prog s) 8
+          (fun l : Fin 256 ↦ (⟨l, by omega⟩ : Fin (2 ^ 8)))
+          (κ := fun _ ↦ s.τ 6) fun _ ↦ size_flockBlock prog s))).extend (route prog s c)
         (Vector.cast (route_kappa prog s c).symm z) := rfl
-  have hr : route prog s c = .inr (qSlot c) := by simp [route, h]
-  rw [e, piecewise_extend_inr _ _ _ _ hr]
+  have hr : route prog s c = .inr (.inl (qSlot c)) := by simp [route, h]
+  rw [e, piecewise_extend_inr _ _ _ _ hr, piecewise_extend_inl _ _ _ _ rfl]
   simp only [Blocks.sliceLayout, Blocks.extendPoint, Vector.toList_cast, Vector.toList_append,
     toList_boolVec, Blocks.selector_val, size_keccakBlock, List.append_assoc]
+
+/-- The instance lifts a point of a `BLAKE3` value limb to the point, its word's bits, and the bits
+of `QFLOCK`'s selector (research build). -/
+theorem extend_limb (prog : LeanIsaProgram) (s : Sizes) (c : Col)
+    (h : IsLimb c) (z : Vector E (kappa prog s c)) :
+    ((LeanIsa.layout prog s).extend c z).toList =
+      z.toList ++ boolPoint 8 (fSlot c).val ++
+        boolPoint (leanIsaμ prog s - (s.τ 6 + 8))
+          ((blocks prog s).offset (flockBlock prog s) / 2 ^ (s.τ 6 + 8)) := by
+  have e : (LeanIsa.layout prog s).extend c z =
+      (((blocks prog s).layout (blocks_fits prog s)).piecewise
+        (((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
+          (fun l : Fin 64 ↦ (⟨l, by omega⟩ : Fin (2 ^ 6)))
+          (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s).piecewise
+        ((blocks prog s).sliceLayout (blocks_fits prog s) (flockBlock prog s) 8
+          (fun l : Fin 256 ↦ (⟨l, by omega⟩ : Fin (2 ^ 8)))
+          (κ := fun _ ↦ s.τ 6) fun _ ↦ size_flockBlock prog s))).extend (route prog s c)
+        (Vector.cast (route_kappa prog s c).symm z) := rfl
+  have hr : route prog s c = .inr (.inr (fSlot c)) := by simp [route, h, h.not_isKVirtual]
+  rw [e, piecewise_extend_inr _ _ _ _ hr, piecewise_extend_inr _ _ _ _ rfl]
+  simp only [Blocks.sliceLayout, Blocks.extendPoint, Vector.toList_cast, Vector.toList_append,
+    toList_boolVec, Blocks.selector_val, size_flockBlock, List.append_assoc]
 
 /-- **A placed point is the instance's lifted point**: for a column that is not an output lane,
 the verifier's layout places a point of column `refCol c` where the instance's layout lifts it. -/
@@ -593,14 +682,22 @@ theorem stackPoint_eq_extend (prog : LeanIsaProgram) (s : Sizes) (c : Col) (hc :
       ((leanIsaInstance prog s).layout.extend c z).toList := by
   rw [stackLog_verifierLayout]
   show _ = ((LeanIsa.layout prog s).extend c z).toList
-  by_cases h : IsVirtual c
+  by_cases h : IsKVirtual c
   · have hsz := Blocks.size_le _ (blocks_fits prog s) (keccakBlock prog s)
     have hdvd := Blocks.pow_size_dvd_offset _ (keccakBlock prog s)
     rw [size_keccakBlock] at hsz hdvd
     rw [placement_slot prog s c ⟨h, hc⟩, extend_virtual prog s c h,
       stackPoint_slice _ _ _ _ _ (by unfold leanIsaμ at hsz ⊢; omega) hdvd
         (by have := (qSlot c).isLt; omega)]
-  · rw [placement_committed prog s c h, extend_committed prog s c h, stackPoint_aligned]
+  by_cases hl : IsLimb c
+  · have hsz := Blocks.size_le _ (blocks_fits prog s) (flockBlock prog s)
+    have hdvd := Blocks.pow_size_dvd_offset _ (flockBlock prog s)
+    rw [size_flockBlock] at hsz hdvd
+    rw [placement_limb prog s c hl, extend_limb prog s c hl,
+      stackPoint_slice _ _ _ _ _ (by unfold leanIsaμ at hsz ⊢; omega) hdvd
+        (by have := (fSlot c).isLt; omega)]
+  · have hv : ¬ IsVirtual c := by rintro (h' | h') <;> contradiction
+    rw [placement_committed prog s c hv, extend_committed prog s c hv, stackPoint_aligned]
 
 /-- **A verifier column claim means the instance's column claim**: for a column that is not an
 output lane, the claim on global column `refCol c` at `z` with value `v`, placed on the stack by

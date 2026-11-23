@@ -178,7 +178,7 @@ theorem flushPolys_slot_eval₂ {n : ℕ} (e : Fin n → E) (i : AbstractInterac
 /-! ## The flushes at values in `E` -/
 
 /-- The verifier's flushes of a side at values in `E` are the lifted canonical forms' values. -/
-theorem refSide_evalE (t : Fin 6) (side : Side) (r : ℕ → E) :
+theorem refSide_evalE (t : Fin 7) (side : Side) (r : ℕ → E) :
     ((refSide t side).map fun coords ↦
         (List.range 16).map fun k ↦ (coords.getD k {}).evaluate r) =
       (refNF t side).map (·.map fun l ↦ termsEval r (liftTerms l)) := by
@@ -192,7 +192,7 @@ theorem refSide_evalE (t : Fin 6) (side : Side) (r : ℕ → E) :
   rw [Function.comp_apply, hd, evaluate_toForm_E]
 
 /-- The instance's flushes of a side at values in `E` are the lifted canonical forms' values. -/
-theorem instSide_evalE (t : Fin 6) (side : Side) (e : Fin (width (opIdx t)) → E) :
+theorem instSide_evalE (t : Fin 7) (side : Side) (e : Fin (width (opIdx t)) → E) :
     (((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = side)).map
         fun f ↦ f.2.toList.map fun P ↦ P.eval₂ (algebraMap K E) e) =
       (clNF t side).map (·.map fun l ↦ termsEval (rowE e) (liftTerms l)) := by
@@ -210,7 +210,7 @@ theorem instSide_evalE (t : Fin 6) (side : Side) (e : Fin (width (opIdx t)) → 
 table `t`'s columns in `E`, the verifier table's flushes of a side, each coordinate evaluated on `e`
 and padded to sixteen slots, are the instance's flushes of that side evaluated on `e` by
 `eval₂ (algebraMap K E)`, in order. -/
-theorem refFlush_evalE (t : Fin 6) (side : Side) (e : Fin (width (opIdx t)) → E) :
+theorem refFlush_evalE (t : Fin 7) (side : Side) (e : Fin (width (opIdx t)) → E) :
     ((refSide t side).map fun coords ↦
         (List.range 16).map fun k ↦ (coords.getD k {}).evaluate (rowE e)) =
       (((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = side)).map
@@ -220,7 +220,7 @@ theorem refFlush_evalE (t : Fin 6) (side : Side) (e : Fin (width (opIdx t)) → 
 /-! ## The constraints at values in `E` -/
 
 /-- The instance's constraints of opcode table `t` are Clean's assertions as polynomials. -/
-theorem constraints_opIdx (t : Fin 6) :
+theorem constraints_opIdx (t : Fin 7) :
     LeanIsa.constraints (opIdx t) =
       (opcodeComponent t).rowOperations.constraints.map (·.toCMvPolynomial (width (opIdx t))) := by
   simp only [LeanIsa.constraints, opIdx, opcodeTable, Air.Flat.Component.toM3]

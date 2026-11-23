@@ -14,8 +14,8 @@ public import LeanVM.Protocol.Verifier
 /-!
 # The verifier tables are the instance's
 
-Fidelity of the six instruction tables of `crates/verifier/src/layout.rs` (`Flushes`, `flushes_arith`, `flushes_set`, `flushes_deref`, `flushes_jump`,
-`jump_constraints`, `keccak_cell_lanes`, `layout_limb`, `flushes_keccak`, `tables`), transcribed as
+Fidelity of the seven instruction tables of `crates/verifier/src/layout.rs` (`Flushes`, `flushes_arith`, `flushes_set`, `flushes_deref`, `flushes_jump`,
+`jump_constraints`, `keccak_cell_lanes`, `layout_limb`, `flushes_keccak`, `flushes_blake3`, `tables`), transcribed as
 `LeanVM.Protocol.Verifier.tables`, against the leanISA instance's opcode tables (`LeanIsa.flushes`,
 `LeanIsa.counts`, `LeanIsa.constraints` at `opIdx t`), which are Clean's components through
 `Component.toM3`.
@@ -462,27 +462,46 @@ def flushesKeccakC : FlushesC :=
       else f.memoryIf (if cell = 1 then c "out_two" else c "out_all")
         (FormC.prod fp (c "o_out") cell) count values) f) f
 
+/-- `flushes_blake3()`, symbolically (research build). -/
+def flushesBlake3C : FlushesC :=
+  let c := columnIndexByName blake3Columns
+  let fp := c "fp"
+  let f : FlushesC := {}
+  let f := f.stateStep (c "pc") fp
+  let f := f.bytecode (c "pc") (c "cnt_bc") opBlake3
+    (["o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md", "o_x", "o_y", "o_w"].map
+      fun name ↦ FormC.col (c name))
+  let cells : List (String × String × ℕ) :=
+    [("m0", "o_0", 0), ("m1", "o_1", 0), ("m2", "o_2", 0), ("m3", "o_3", 0), ("cv0", "o_v", 0),
+      ("cv1", "o_v", 1), ("out0", "o_out", 0), ("out1", "o_out", 1), ("md", "o_md", 0),
+      ("x0", "o_x", 0), ("x1", "o_x", 1), ("y0", "o_y", 0), ("y1", "o_y", 1), ("w0", "o_w", 0),
+      ("w1", "o_w", 1)]
+  cells.foldl (fun f (cell, operand, exponent) ↦
+    f.memoryCols (FormC.prod fp (c operand) exponent) (c ("cnt_" ++ cell))
+      [c (cell ++ "_lo"), c (cell ++ "_hi")]) f
+
 /-- The tables' flushes, symbolically, in opcode order. -/
-def flushesC : Fin 6 → FlushesC
+def flushesC : Fin 7 → FlushesC
   | 0 => flushesArithC opXor false
   | 1 => flushesArithC opMul true
   | 2 => flushesSetC
   | 3 => flushesDerefC
   | 4 => flushesJumpC
   | 5 => flushesKeccakC
+  | 6 => flushesBlake3C
 
 /-- The verifier table's flushes of a side. -/
-def refSide (t : Fin 6) : Side → List (List Form)
+def refSide (t : Fin 7) : Side → List (List Form)
   | .push => (tables.getD t default).flushes.push
   | .pull => (tables.getD t default).flushes.pull
 
 /-- The symbolic flushes of a side. -/
-def refSideC (t : Fin 6) : Side → List (List FormC)
+def refSideC (t : Fin 7) : Side → List (List FormC)
   | .push => (flushesC t).push
   | .pull => (flushesC t).pull
 
 /-- **The transcription is the symbolic restatement**, read through `Coef.ev`: by unfolding. -/
-theorem refSide_eq : ∀ (t : Fin 6) (side : Side),
+theorem refSide_eq : ∀ (t : Fin 7) (side : Side),
     refSide t side = (refSideC t side).map (·.map FormC.toForm)
   | 0, .push => rfl
   | 0, .pull => rfl
@@ -496,9 +515,11 @@ theorem refSide_eq : ∀ (t : Fin 6) (side : Side),
   | 4, .pull => rfl
   | 5, .push => rfl
   | 5, .pull => rfl
+  | 6, .push => rfl
+  | 6, .pull => rfl
 
 /-- The canonical forms of the verifier's flushes of a side over `K`, sixteen slots each. -/
-def refNF (t : Fin 6) (side : Side) : List (List (Terms K)) :=
+def refNF (t : Fin 7) (side : Side) : List (List (Terms K)) :=
   (refSideC t side).map fun coords ↦ (List.range 16).map fun k ↦ canon (coords.getD k {}).termsK
 
 /-- `Form.evaluate` is the value of the form's terms. -/
@@ -525,7 +546,7 @@ theorem evaluate_toForm {n : ℕ} (f : FormC) (row : Fin n → K) :
 
 /-- The verifier's flushes of a side, evaluated on a row, are the lifts of their canonical forms'
 values. -/
-theorem refSide_eval (t : Fin 6) (side : Side) {n : ℕ} (row : Fin n → K) :
+theorem refSide_eval (t : Fin 7) (side : Side) {n : ℕ} (row : Fin n → K) :
     ((refSide t side).map fun coords ↦
         (List.range 16).map fun k ↦ (coords.getD k {}).evaluate (rowFn row)) =
       (refNF t side).map (·.map fun l ↦ ofK (termsEval (rowK row) l)) := by
@@ -571,7 +592,7 @@ def coordTerms (i : AbstractInteraction K) (k : ℕ) : Terms K :=
   else exprTerms ((i.msg.toArray[k - 1]?).getD (.const 0))
 
 /-- The canonical forms of the instance's flushes of a side, sixteen slots each. -/
-def clNF (t : Fin 6) (side : Side) : List (List (Terms K)) :=
+def clNF (t : Fin 7) (side : Side) : List (List (Terms K)) :=
   (((opcodeComponent t).rowOperations.interactions.filter
     fun i ↦ decide (sideOf (channelDir i.channel) = side)).map
       fun i ↦ (List.range 16).map fun k ↦ canon (coordTerms i k))
@@ -589,7 +610,7 @@ theorem flushPolys_slot_eval {n : ℕ} (row : Fin n → K) (i : AbstractInteract
 
 /-- The instance's flushes of opcode table `t`: the interactions of its Clean component, each on
 its channel's side, as the sixteen flush polynomials. -/
-theorem flushes_opIdx (t : Fin 6) :
+theorem flushes_opIdx (t : Fin 7) :
     LeanIsa.flushes (opIdx t) = (opcodeComponent t).rowOperations.interactions.map
       fun i ↦ (sideOf (channelDir i.channel), flushPolys channelSep (width (opIdx t)) i) := by
   simp only [LeanIsa.flushes, opIdx, opcodeTable, Air.Flat.Component.toM3, List.map_map]
@@ -597,7 +618,7 @@ theorem flushes_opIdx (t : Fin 6) :
 
 /-- The instance's flushes of a side, evaluated on a row, are the lifts of the canonical forms'
 values. -/
-theorem instSide_eval (t : Fin 6) (side : Side) (row : Fin (width (opIdx t)) → K) :
+theorem instSide_eval (t : Fin 7) (side : Side) (row : Fin (width (opIdx t)) → K) :
     (((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = side)).map
         fun f ↦ f.2.toList.map fun P ↦ ofK (P.eval row)) =
       (clNF t side).map (·.map fun l ↦ ofK (termsEval (rowK row) l)) := by
@@ -620,7 +641,7 @@ private theorem refNF_eq_clNF_keccak :
 
 /-- The verifier's canonical flushes are Clean's, table by table and side by side (kernel
 evaluation over `K`). -/
-theorem refNF_eq_clNF : ∀ (t : Fin 6) (side : Side), refNF t side = clNF t side
+theorem refNF_eq_clNF : ∀ (t : Fin 7) (side : Side), refNF t side = clNF t side
   | 0, .push => by decide +kernel
   | 0, .pull => by decide +kernel
   | 1, .push => by decide +kernel
@@ -633,11 +654,13 @@ theorem refNF_eq_clNF : ∀ (t : Fin 6) (side : Side), refNF t side = clNF t sid
   | 4, .pull => by decide +kernel
   | 5, .push => refNF_eq_clNF_keccak.1
   | 5, .pull => refNF_eq_clNF_keccak.2
+  | 6, .push => by decide +kernel
+  | 6, .pull => by decide +kernel
 
 /-- **The verifier's flushes are the instance's.** On every row of opcode table `t`, the verifier
 table's flushes of a side, each coordinate evaluated on the row and padded to sixteen slots, are
 the instance's flushes of that side evaluated on the row, in order. -/
-theorem refFlush_eval (t : Fin 6) (side : Side) (row : Fin (width (opIdx t)) → K) :
+theorem refFlush_eval (t : Fin 7) (side : Side) (row : Fin (width (opIdx t)) → K) :
     ((refSide t side).map fun coords ↦
         (List.range 16).map fun k ↦ (coords.getD k {}).evaluate (rowFn row)) =
       (((LeanIsa.flushes (opIdx t)).filter fun f ↦ decide (f.1 = side)).map
@@ -646,7 +669,7 @@ theorem refFlush_eval (t : Fin 6) (side : Side) (row : Fin (width (opIdx t)) →
 
 /-- Every verifier flush has at most sixteen coordinates, each a form of terms of at most two
 column indices below the table's width. -/
-theorem refForm_terms : ∀ t : Fin 6,
+theorem refForm_terms : ∀ t : Fin 7,
     (∀ coords ∈ refSide t .push, coords.length ≤ 16 ∧ ∀ f ∈ coords, ∀ term ∈ f.terms,
       term.1.length ≤ 2 ∧ ∀ i ∈ term.1, i < width (opIdx t)) ∧
     (∀ coords ∈ refSide t .pull, coords.length ≤ 16 ∧ ∀ f ∈ coords, ∀ term ∈ f.terms,
@@ -656,7 +679,7 @@ theorem refForm_terms : ∀ t : Fin 6,
 /-! ## The count columns and the constraints -/
 
 /-- **The verifier's count columns are the instance's**, in order. -/
-theorem refCountColumns : ∀ t : Fin 6,
+theorem refCountColumns : ∀ t : Fin 7,
     (tables.getD t default).countColumns = (LeanIsa.counts (opIdx t)).map (·.val)
   | 0 => by
     rw [show (LeanIsa.counts (opIdx 0)).map (·.val) = [9, 10, 11, 12] by decide +kernel]
@@ -677,13 +700,17 @@ theorem refCountColumns : ∀ t : Fin 6,
     rw [show (LeanIsa.counts (opIdx 5)).map (·.val) = (List.range 27).map (65 + ·) by
       decide +kernel]
     simp [Table.countColumns, tables, keccakColumns, laneNames, decimalNumeral, List.range_succ]
+  | 6 => by
+    rw [show (LeanIsa.counts (opIdx 6)).map (·.val) = (List.range 16).map (42 + ·) by
+      decide +kernel]
+    simp [Table.countColumns, tables, blake3Columns, List.range_succ]
 
 /-- Only `JUMP` has constraints, two. -/
-theorem refNConstraints : tables.map Table.nConstraints = [0, 0, 0, 0, 2, 0] := by
+theorem refNConstraints : tables.map Table.nConstraints = [0, 0, 0, 0, 2, 0, 0] := by
   decide +kernel
 
 /-- The opcode tables other than `JUMP` assert nothing. -/
-theorem constraints_opIdx_ne_jump : ∀ t : Fin 6, t ≠ 4 →
+theorem constraints_opIdx_ne_jump : ∀ t : Fin 7, t ≠ 4 →
     (opcodeComponent t).rowOperations.constraints = [] := by
   decide +kernel
 
@@ -695,7 +722,7 @@ theorem jump_constraints_canon :
 
 /-- The instance's constraints, evaluated on a row and lifted to `E`, are the lifts of the
 canonical forms' values. -/
-theorem instConstraints_eval (t : Fin 6) (row : Fin (width (opIdx t)) → K) :
+theorem instConstraints_eval (t : Fin 7) (row : Fin (width (opIdx t)) → K) :
     (LeanIsa.constraints (opIdx t)).map (fun P ↦ ofK (P.eval row)) =
       ((opcodeComponent t).rowOperations.constraints.map (canon ∘ exprTerms)).map
         fun l ↦ ofK (termsEval (rowK row) l) := by
@@ -717,7 +744,7 @@ theorem getD_finRange_map {n : ℕ} (f : Fin n → E) (i : ℕ) (h : i < n) :
 /-- **The verifier's constraints are the instance's**: on every row, the verifier table's
 constraints of the row's values are the instance's constraint polynomials on the row, in
 order. -/
-theorem refConstraints_eval (t : Fin 6) (row : Fin (width (opIdx t)) → K) :
+theorem refConstraints_eval (t : Fin 7) (row : Fin (width (opIdx t)) → K) :
     (tables.getD t default).constraints ((List.finRange (width (opIdx t))).map fun i ↦ ofK (row i))
       = (LeanIsa.constraints (opIdx t)).map fun P ↦ ofK (P.eval row) := by
   rw [instConstraints_eval]

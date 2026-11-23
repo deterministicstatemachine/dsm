@@ -193,6 +193,51 @@ def KeccakRegion.Holds {S : Shape} (r : KeccakRegion S) (c : Column (r.logSteps 
 instance {S : Shape} (r : KeccakRegion S) (c : Column (r.logSteps + 6)) : Decidable (r.Holds c) :=
   inferInstanceAs (Decidable (∀ y, r.state c 25 y = keccakSegment 0 (r.state c 0 y)))
 
+/-- Where Flock's committed column sits (research build): a column of height `2 ^ (h + 8)`, `2^8`
+word slots of `2^h` instances, word `w` of instance `x` at cell `x + 2^h · w` (`QFLOCK`,
+`crates/verifier/src/layout.rs`). The `BLAKE3` table's value limbs are words of it
+(`BLAKE3_SLOTS`): the chaining value at `0 … 4`, the output at `4 … 8`, the message at `10 … 18`,
+the metadata at `18, 19`, `X`, `Y`, `W` at `181 … 193`. -/
+structure FlockRegion (S : Shape) where
+  /-- The column. -/
+  col : S.ColumnId
+  /-- The log-count of instances. -/
+  logSteps : ℕ
+  /-- The column holds `2^8` slots of `2 ^ logSteps` words. -/
+  height : S.τ col.1 = logSteps + 8
+
+/-- Word `x` of slot `slot` of the region's column: cell `x + 2^logSteps · slot`. -/
+def FlockRegion.word {S : Shape} (r : FlockRegion S) (c : Column (r.logSteps + 8)) (slot : ℕ)
+    (x : Fin (2 ^ r.logSteps)) : K :=
+  c.values.toArray.getD (x.val + 2 ^ r.logSteps * slot) 0
+
+/-- The cell of instance `x` whose limbs are the words at slots `lo, lo + 1`. -/
+def FlockRegion.cell {S : Shape} (r : FlockRegion S) (c : Column (r.logSteps + 8)) (lo : ℕ)
+    (x : Fin (2 ^ r.logSteps)) : E :=
+  E.ofLimbs (r.word c lo x) (r.word c (lo + 1) x)
+
+/-- The low slot of each of the thirteen cells a `BLAKE3` reads, in `blake3InputCellOffset`'s
+order: the four message cells, the chaining value's two, the metadata, `X`'s, `Y`'s, `W`'s two. -/
+def flockInSlots : Fin 13 → ℕ := ![10, 12, 14, 16, 0, 2, 18, 181, 183, 185, 187, 189, 191]
+
+/-- The thirteen cells instance `x` reads. -/
+def FlockRegion.inputs {S : Shape} (r : FlockRegion S) (c : Column (r.logSteps + 8))
+    (x : Fin (2 ^ r.logSteps)) : Fin 13 → E :=
+  fun k ↦ r.cell c (flockInSlots k) x
+
+/-- The two cells instance `x` writes, zero past them. -/
+def FlockRegion.outputs {S : Shape} (r : FlockRegion S) (c : Column (r.logSteps + 8))
+    (x : Fin (2 ^ r.logSteps)) : Fin 13 → E :=
+  fun k ↦ if k.val < 2 then r.cell c (4 + 2 * k.val) x else 0
+
+/-- What Flock's reduction is to establish of the region: every instance's output cells are the
+compression of its input cells (`Blake3CellsRelation`). -/
+def FlockRegion.Holds {S : Shape} (r : FlockRegion S) (c : Column (r.logSteps + 8)) : Prop :=
+  ∀ x, Blake3CellsRelation (r.inputs c x) (r.outputs c x)
+
+instance {S : Shape} (r : FlockRegion S) (c : Column (r.logSteps + 8)) : Decidable (r.Holds c) :=
+  inferInstanceAs (Decidable (∀ x, Blake3CellsRelation (r.inputs c x) (r.outputs c x)))
+
 /-! ## The instance -/
 
 /-- Everything the verifier reads about an arithmetization. -/
@@ -235,6 +280,8 @@ structure M3Instance extends Shape where
   publicLines : Stmt → Vector (PublicLine toShape) nLines
   /-- The region the Keccak reduction owns, if the arithmetization has one. -/
   keccak : Option (KeccakRegion toShape)
+  /-- The region Flock's reduction owns, if the arithmetization has one (research build). -/
+  flock : Option (FlockRegion toShape) := none
 
 namespace M3Instance
 
@@ -303,6 +350,10 @@ def tuples (q : Column I.μ) (s : Side) : List (Vector K 16) :=
 
 /-- The Keccak region, read off the stack at its height. -/
 def keccakColumn (r : KeccakRegion I.toShape) (q : Column I.μ) : Column (r.logSteps + 6) :=
+  ⟨Vector.cast (congrArg (2 ^ ·) r.height) (I.column q r.col).values⟩
+
+/-- The Flock region, read off the stack at its height. -/
+def flockColumn (r : FlockRegion I.toShape) (q : Column I.μ) : Column (r.logSteps + 8) :=
   ⟨Vector.cast (congrArg (2 ^ ·) r.height) (I.column q r.col).values⟩
 
 /-! ## What the schedule reads off the instance -/
@@ -402,10 +453,23 @@ def PublicLinesHold (input : I.Stmt) (q : Column I.μ) : Prop :=
 establishes of the committed column (for leanISA, every step's state after twelve rounds is the
 first segment of its input state's permutation; that the `KECCAK` rows permute is then the
 derived output lanes'). -/
-def aux (q : Column I.μ) : Prop := ∀ r ∈ I.keccak, r.Holds (I.keccakColumn r q)
+def keccakAux (q : Column I.μ) : Prop := ∀ r ∈ I.keccak, r.Holds (I.keccakColumn r q)
+
+instance instDecidableKeccakAux (q : Column I.μ) : Decidable (I.keccakAux q) :=
+  inferInstanceAs (Decidable (∀ r ∈ I.keccak, r.Holds (I.keccakColumn r q)))
+
+/-- The Flock predicate holds of the Flock region, if there is one (research build): every
+instance compresses. -/
+def flockAux (q : Column I.μ) : Prop := ∀ r ∈ I.flock, r.Holds (I.flockColumn r q)
+
+instance instDecidableFlockAux (q : Column I.μ) : Decidable (I.flockAux q) :=
+  inferInstanceAs (Decidable (∀ r ∈ I.flock, r.Holds (I.flockColumn r q)))
+
+/-- The reductions' predicates: Keccak's and Flock's. -/
+def aux (q : Column I.μ) : Prop := I.keccakAux q ∧ I.flockAux q
 
 instance instDecidableAux (q : Column I.μ) : Decidable (I.aux q) :=
-  inferInstanceAs (Decidable (∀ r ∈ I.keccak, r.Holds (I.keccakColumn r q)))
+  inferInstanceAs (Decidable (_ ∧ _))
 
 deriving instance Decidable for ConstraintsVanish, Balanced, CountsNonzero, PublicLinesHold,
   PaddingHonest

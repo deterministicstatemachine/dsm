@@ -353,17 +353,17 @@ theorem verifier_messages (prog : LeanIsaProgram) (κ : ℕ) (env : Environment 
 /-! ## The opcode tables -/
 
 /-- Opcode table `j` of a witness. -/
-abbrev opTable (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 6) : Air.Flat.Table K :=
+abbrev opTable (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 7) : Air.Flat.Table K :=
   tableAt w ⟨j, by omega⟩
 
 /-- Opcode table `j` of a witness runs the ensemble's opcode component `j`. -/
-theorem opTable_component (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 6) :
+theorem opTable_component (w : EnsembleWitness (leanIsaEnsemble prog κ)) (j : Fin 7) :
     (opTable w j).component = opcodeComponent j := by
   rw [opTable, tableAt_component]
   fin_cases j <;> rfl
 
 /-- Every message coordinate of an opcode table reads within its width. -/
-theorem opcode_withinWidth : ∀ j : Fin 6, ∀ ai ∈ (opcodeComponent j).rowOperations.interactions,
+theorem opcode_withinWidth : ∀ j : Fin 7, ∀ ai ∈ (opcodeComponent j).rowOperations.interactions,
     ∀ e ∈ ai.msg.toList, e.WithinWidth (opcodeComponent j).width := by
   decide +kernel
 
@@ -406,7 +406,7 @@ private theorem tuplesOn_truncate (c : Component K)
 
 /-- On a row of its width, an opcode table flushes, on one side, its flushes of that side
 evaluated on the row. -/
-private theorem tuplesOn_opcode_row (j : Fin 6) (r : Fin (opcodeComponent j).width → K)
+private theorem tuplesOn_opcode_row (j : Fin 7) (r : Fin (opcodeComponent j).width → K)
     (data : ProverData K) (side : Side) :
     tuplesOn ((opcodeComponent j).operations.interactionValues
         (Environment.fromArray (Array.ofFn r) data)) side =
@@ -449,9 +449,9 @@ variable (s : Sizes) (q : Column (leanIsaμ prog s))
 widths, the stack's rows; the memory and bytecode blocks are the stack's. -/
 structure Agrees (w : EnsembleWitness (leanIsaEnsemble prog κ)) : Prop where
   /-- Opcode table `j` has the announced `rows_j` rows, its executed ones. -/
-  length : ∀ j : Fin 6, (opTable w j).table.length = s.rows j
+  length : ∀ j : Fin 7, (opTable w j).table.length = s.rows j
   /-- Its cells within its width are the stack's executed row. -/
-  cells : ∀ (j : Fin 6) (x : Fin (s.rows j)) (i : Fin (opcodeComponent j).width),
+  cells : ∀ (j : Fin 7) (x : Fin (s.rows j)) (i : Fin (opcodeComponent j).width),
     cellOf (opTable w j) x i =
       (leanIsaInstance prog s).row q (opIdx j) (Fin.castLE (s.rows_le j) x) i
   /-- The memory block's rows are the stack's. -/
@@ -464,7 +464,7 @@ variable {s q}
 /-- Opcode table `j` flushes, on one side, its flushes of that side on every executed row of the
 stack. -/
 theorem tuplesOn_opTable {w : EnsembleWitness (leanIsaEnsemble prog κ)} (h : Agrees s q w)
-    (j : Fin 6) (side : Side) :
+    (j : Fin 7) (side : Side) :
     tuplesOn (opTable w j).interactions side =
       (List.finRange (s.rows j)).flatMap fun x ↦
         ((opcodeTable j).flushes.filter fun f ↦ decide (sideOf f.1 = side)).map fun f ↦
@@ -601,16 +601,16 @@ variable {s q}
 /-- The memory block flushes its seed and finalize tuples, on the stack's memory columns. -/
 theorem tuplesOn_memBlock {w : EnsembleWitness (leanIsaEnsemble prog κ)} (h : Agrees s q w)
     (side : Side) :
-    tuplesOn (tableAt w 6).interactions side =
+    tuplesOn (tableAt w 7).interactions side =
       (List.finRange (2 ^ s.logMem)).map fun x : Fin (2 ^ s.logMem) ↦
         tupleOf (addressOfIndex 1) ((if side = .push then #[addressOfIndex x, 1]
           else #[addressOfIndex x, cell prog s q (memCol 2) x]) ++ (memLimbs s q x).toArray) := by
   rw [Air.Flat.Table.interactions, tuplesOn_flatMap,
-    show (tableAt w 6).table = memBlockRowsOf prog s q from h.memRows, memBlockRowsOf,
+    show (tableAt w 7).table = memBlockRowsOf prog s q from h.memRows, memBlockRowsOf,
     List.ofFn_eq_map, List.flatMap_map, tableAt_component]
   rw [← List.flatMap_pure_eq_map]
   refine List.flatMap_congr fun x _ ↦ ?_
-  refine (tuplesOn_pair (memTable_messages κ _ _ _ _ (tableAt w 6).data)
+  refine (tuplesOn_pair (memTable_messages κ _ _ _ _ (tableAt w 7).data)
     (nameView_six _).2.2.1 (nameView_six _).2.2.2.1 side).trans ?_
   cases side <;> rfl
 
@@ -618,17 +618,17 @@ theorem tuplesOn_memBlock {w : EnsembleWitness (leanIsaEnsemble prog κ)} (h : A
 counts. -/
 theorem tuplesOn_bytecodeBlock {w : EnsembleWitness (leanIsaEnsemble prog κ)} (h : Agrees s q w)
     (side : Side) :
-    tuplesOn (tableAt w 7).interactions side =
+    tuplesOn (tableAt w 8).interactions side =
       (List.finRange (2 ^ prog.logSize)).map fun i : Fin (2 ^ prog.logSize) ↦
         tupleOf (addressOfIndex 2) ((if side = .push then #[addressOfIndex i, 1]
           else #[addressOfIndex i, cell prog s q bfcntCol i]) ++ (entryList i).toArray) := by
   rw [Air.Flat.Table.interactions, tuplesOn_flatMap,
-    show (tableAt w 7).table = bytecodeBlockRowsOf prog s q from h.bytecodeRows,
+    show (tableAt w 8).table = bytecodeBlockRowsOf prog s q from h.bytecodeRows,
     bytecodeBlockRowsOf, List.ofFn_eq_map, List.flatMap_map, tableAt_component]
   rw [← List.flatMap_pure_eq_map]
   refine List.flatMap_congr fun i _ ↦ ?_
   refine (tuplesOn_pair (bytecodeTable_messages prog _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-    (tableAt w 7).data)
+    (tableAt w 8).data)
     (nameView_six _).2.2.2.2.1 (nameView_six _).2.2.2.2.2 side).trans ?_
   cases side <;> simp [entryList, List.finRange_succ]
 
@@ -639,13 +639,13 @@ theorem tuplesOn_verifier (w : EnsembleWitness (leanIsaEnsemble prog κ)) (side 
       [tupleOf (addressOfIndex 0) (if side = .push then #[1, 1] else #[prog.pcFinal, 1])] :=
   tuplesOn_pair (verifier_messages prog κ _) (nameView_six _).1 (nameView_six _).2.1 side
 
-/-- The instance's tables: the three column groups, then the six opcode tables. -/
-private theorem finRange_nine : List.finRange 9 = [0, 1, 2] ++ (List.finRange 6).map opIdx := by
+/-- The instance's tables: the four column groups, then the seven opcode tables. -/
+private theorem finRange_eleven : List.finRange 11 = [0, 1, 2, 3] ++ (List.finRange 7).map opIdx := by
   decide
 
 /-- The witness's tables, in order. -/
 theorem tables_eq (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
-    w.tables = (List.finRange 8).map (tableAt w) := by
+    w.tables = (List.finRange 9).map (tableAt w) := by
   apply List.ext_getElem
   · rw [List.length_map, List.length_finRange, ← w.same_length]
     rfl
@@ -662,7 +662,7 @@ private theorem filter_map_flatMap {α β γ : Type} (l : List α) (f : α → �
 /-- The instance's flush tuples, table by table. -/
 private theorem flushTuples_eq (side : Side) :
     (leanIsaInstance prog s).flushTuples q side =
-      (List.finRange 9).flatMap fun j ↦ ((flushes j).filter fun f ↦ decide (f.1 = side)).flatMap
+      (List.finRange 11).flatMap fun j ↦ ((flushes j).filter fun f ↦ decide (f.1 = side)).flatMap
         fun f ↦ ((leanIsaInstance prog s).executed j).map fun x ↦
           f.2.map fun P ↦ P.eval ((leanIsaInstance prog s).row q j x) := rfl
 
@@ -670,7 +670,7 @@ private theorem flushTuples_eq (side : Side) :
 there. -/
 private theorem flushTuples_opIdx_perm {w : EnsembleWitness (leanIsaEnsemble prog κ)}
     (h : Agrees s q w)
-    (j : Fin 6) (side : Side) :
+    (j : Fin 7) (side : Side) :
     (((flushes (opIdx j)).filter fun f ↦ decide (f.1 = side)).flatMap
         fun f ↦ ((leanIsaInstance prog s).executed (opIdx j)).map fun x ↦
           f.2.map fun P ↦ P.eval ((leanIsaInstance prog s).row q (opIdx j) x)).Perm
@@ -691,8 +691,8 @@ theorem tuples_perm {w : EnsembleWitness (leanIsaEnsemble prog κ)} (h : Agrees 
     (side : Side) : ((leanIsaInstance prog s).tuples q side).Perm (sideTuples w side) := by
   have hb : (leanIsaInstance prog s).boundaryTuples q side =
       tuplesOn ((leanIsaEnsemble prog κ).verifierOperations.interactionValues
-          (.fromInput w.publicInput w.data)) side ++ tuplesOn (tableAt w 6).interactions side ++
-        tuplesOn (tableAt w 7).interactions side := by
+          (.fromInput w.publicInput w.data)) side ++ tuplesOn (tableAt w 7).interactions side ++
+        tuplesOn (tableAt w 8).interactions side := by
     rw [tuplesOn_verifier, tuplesOn_memBlock h, tuplesOn_bytecodeBlock h]
     cases side
     · rw [boundaryTuples_push]
@@ -700,9 +700,9 @@ theorem tuples_perm {w : EnsembleWitness (leanIsaEnsemble prog κ)} (h : Agrees 
     · rw [boundaryTuples_pull]
       simp
   have hf : ((leanIsaInstance prog s).flushTuples q side).Perm
-      ((List.finRange 6).flatMap fun j ↦ tuplesOn (opTable w j).interactions side) := by
-    rw [flushTuples_eq, finRange_nine, List.flatMap_append, List.flatMap_map]
-    have h0 : ([0, 1, 2] : List (Fin 9)).flatMap (fun j ↦
+      ((List.finRange 7).flatMap fun j ↦ tuplesOn (opTable w j).interactions side) := by
+    rw [flushTuples_eq, finRange_eleven, List.flatMap_append, List.flatMap_map]
+    have h0 : ([0, 1, 2, 3] : List (Fin 11)).flatMap (fun j ↦
         ((flushes j).filter fun f ↦ decide (f.1 = side)).flatMap fun f ↦
           ((leanIsaInstance prog s).executed j).map fun x ↦
             f.2.map fun P ↦ P.eval ((leanIsaInstance prog s).row q j x)) = [] := rfl
@@ -710,8 +710,8 @@ theorem tuples_perm {w : EnsembleWitness (leanIsaEnsemble prog κ)} (h : Agrees 
     exact List.Perm.flatMap_left _ fun j _ ↦ flushTuples_opIdx_perm h j side
   rw [M3Instance.tuples, hb, sideTuples, EnsembleWitness.interactions, tuplesOn_append,
     tables_eq, List.flatMap_map,
-    show List.finRange 8 = (List.finRange 6).map (fun j : Fin 6 ↦ (⟨j, by omega⟩ : Fin 8)) ++
-      [6, 7] by decide, List.flatMap_append, List.flatMap_map, tuplesOn_append, tuplesOn_flatMap,
+    show List.finRange 9 = (List.finRange 7).map (fun j : Fin 7 ↦ (⟨j, by omega⟩ : Fin 9)) ++
+      [7, 8] by decide, List.flatMap_append, List.flatMap_map, tuplesOn_append, tuplesOn_flatMap,
     tuplesOn_flatMap]
   refine (hf.append_right _).trans ?_
   rw [List.perm_iff_count]

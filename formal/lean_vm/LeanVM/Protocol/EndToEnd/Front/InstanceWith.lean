@@ -16,7 +16,8 @@ public import LeanVM.Protocol.LeanIsa
 `leanIsaWith prog s kr` is `leanIsaInstance prog s` with the Keccak region `kr`: the deployed
 instance at `kr = some (keccakRegion prog s)` (`leanIsaWith_some`, by `rfl`), and the
 reduction-blind instance at `kr = none`, whose relation has no Keccak predicate
-(`M3Instance.aux` holds of every stack, `aux_none`).
+(`M3Instance.aux` holds of every stack, `aux_none`). The research build's Flock region goes with
+it: `QFLOCK`'s region at a `some`, none at `none`.
 
 The region is read only by the Keccak predicate: the bus, the table sumcheck's claims and the
 public input read the same fields at every `kr`. The statements about them that the front phases
@@ -53,6 +54,8 @@ abbrev leanIsaWith (prog : LeanIsaProgram) (s : Sizes)
   nLines := 2
   publicLines := publicLines prog s
   keccak := fl
+  -- Research build: the Flock region goes with the Keccak one, both the reductions' or neither.
+  flock := fl.map fun _ ↦ flockRegion prog s
 
 variable (prog : LeanIsaProgram) (s : Sizes)
 

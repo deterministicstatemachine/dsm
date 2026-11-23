@@ -35,7 +35,8 @@ the follower of a return right after a proof of work must start with a challenge
 The instances follow `leanVmVerifierProgram` (`Statement/LeanVmVerifier.lean`)
 phase by phase. Every grind is followed by a challenge: the sumcheck rounds' grinds by the round's
 challenge, the bus's by the slot weights, a GKR step's by its combiner and its `y`, the table
-phase's by `ξ`, the Keccak reduction's by its segment, `s` and `β`, ring switching's by its map,
+phase's by `ξ`, the Keccak reduction's by its segment, `s` and `β`, Flock's by its sampled point, `z_skip` and
+`α` (research build), ring switching's by its map,
 WHIR's fold grinds by `(α, β)`, its query grinds by the first query sample (every
 deployed level queries, `ladder_queries_pos`; a non-final level's `λ` follows its positions), a
 later level's OOD grind by its point (a non-final level leaves it a variable,
@@ -551,8 +552,61 @@ theorem moves_keccakPhase_le (hB : grindCap ≤ B) (layout : Layout)
     Moves (· ≤ B) False (fun _ ↦ True) (fun _ ↦ False) (keccakPhase layout evaluations) :=
   moves_verifyKeccak_le hB _ _ _
 
-theorem moves_ringSwitch_le (hB : grindCap ≤ B) (point s : List E) :
-    Moves (· ≤ B) False (fun _ ↦ True) (fun _ ↦ False) (ringSwitch point s) := by
+/-- **Flock's zerocheck** (research build): its point's grind (none when no coordinate is
+sampled) followed by the sampled coordinates, the coset values, the skip grind followed by
+`z_skip`, the rounds, the two claims. -/
+theorem moves_verifyFlockZerocheck_le (hB : grindCap ≤ B) (logN : ℕ) :
+    Moves (· ≤ B) False (fun _ ↦ True) (fun _ ↦ False) (verifyFlockZerocheck logN) := by
+  have hrest : ∀ sampled : List E,
+      Moves (· ≤ B) False (fun _ ↦ True) (fun _ ↦ False) (do
+        let pCoset ← VerifierProgram.readScalars kBits
+        VerifierProgram.grindProofOfWork flockSkipGrindBits
+        let zSkip ← VerifierProgram.sampleChallenge
+        let vP := flockLagrangeInterpolate (2 * kBits) (List.replicate kBits 0 ++ pCoset) zSkip
+        let (chi, running) ← sumcheck vP 3 ((flockFixedChallenges ++ sampled).map some)
+        let vA ← VerifierProgram.readScalar
+        let vB ← VerifierProgram.readScalar
+        return (⟨zSkip, chi, vA, vB, running + vA * vB⟩ : FlockZerocheck)) := fun sampled ↦
+    Moves.seq' (Moves.readN _) fun _ _ ↦
+      Moves.seq (Moves.grindP fun _ ↦ grindingBits_le_of (le_two_pow_of_le hB (by decide)))
+        (fun _ _ ↦ Moves.seq' Moves.sampleE fun _ _ ↦
+          Moves.seq' (moves_sumcheck_le (le_two_pow_of_le hB (by norm_num)) _ _) fun r _ ↦ by
+            obtain ⟨chi, running⟩ := r
+            exact Moves.seq' Moves.readE fun _ _ ↦ Moves.seq' Moves.readE fun _ _ ↦
+              Moves.pure trivial)
+        fun _ _ _ ↦ Moves.startsSample_sampleChallenge _
+  unfold verifyFlockZerocheck
+  dsimp only
+  split_ifs with hn
+  · exact Moves.seq (Moves.grindP fun _ ↦ grindingBits_le_of (le_two_pow_of_le hB (by decide)))
+      (fun _ _ ↦ Moves.seq' (Moves.sampleN _) fun sampled _ ↦ hrest sampled)
+      fun _ _ _ ↦ Moves.startsSample_sampleChallenges (by omega) _
+  · have h0 : Moves (· ≤ B) False (fun _ ↦ True) (fun _ ↦ False) (grindProofOfWork 0) := by
+      unfold grindProofOfWork; rw [ite_eq_left rfl]; exact Moves.ret trivial
+    exact Moves.seq' h0 fun _ _ ↦
+      Moves.seq' (Moves.sampleN _) fun sampled _ ↦ hrest sampled
+
+/-- **Flock's lincheck** (research build): its grind followed by `α`, the rounds, the slices,
+the terminal check. -/
+theorem moves_verifyFlockLincheck_le (hB : grindCap ≤ B) (zc : FlockZerocheck) :
+    Moves (· ≤ B) False (fun _ ↦ True) (fun _ ↦ False) (verifyFlockLincheck zc) := by
+  unfold verifyFlockLincheck
+  refine Moves.seq (Moves.grindP fun _ ↦ grindingBits_le_of (le_two_pow_of_le hB (by decide)))
+    (fun _ _ ↦ Moves.seq' Moves.sampleE fun _ _ ↦ ?_) fun _ _ _ ↦
+      Moves.startsSample_sampleChallenge _
+  refine Moves.seq' (moves_sumcheck_le (le_two_pow_of_le hB (by norm_num)) _ _) fun r _ ↦ ?_
+  obtain ⟨roundChallenges, rLc⟩ := r
+  exact Moves.seq' (Moves.readN _) fun _ _ ↦ Moves.seq' (Moves.require _) fun _ _ ↦
+    Moves.pure trivial
+
+/-- **Flock's phase** (research build): the zerocheck, the lincheck. -/
+theorem moves_flockPhase_le (hB : grindCap ≤ B) (layout : Layout) :
+    Moves (· ≤ B) False (fun _ ↦ True) (fun _ ↦ False) (flockPhase layout) :=
+  Moves.seq' (Moves.seq' (moves_verifyFlockZerocheck_le hB _) fun _ _ ↦
+    moves_verifyFlockLincheck_le hB _) fun _ _ ↦ Moves.pure trivial
+
+theorem moves_ringSwitch_le (hB : grindCap ≤ B) (claims : List (List E × List E)) :
+    Moves (· ≤ B) False (fun _ ↦ True) (fun _ ↦ False) (ringSwitch claims) := by
   rw [ringSwitch_eq]
   exact Moves.seq (Moves.grindP fun _ ↦ le_of_le_grindCap hB (by decide))
     (fun _ _ ↦ Moves.seq' (Moves.sampleN _) fun _ _ ↦ Moves.liftAny _)
@@ -769,8 +823,9 @@ theorem moves_verifyExecution_le (hB : grindCap ≤ B)
           Moves.seq' (Moves.liftTrue (moves_publicInputPhase_le layout publicInput)) fun _ _ ↦
             Moves.seq' (Moves.liftTrue (moves_keccakPhase_le hB _ _)) fun r _ ↦ ?_
   obtain ⟨outputs, keccakPoint, keccakSlices⟩ := r
-  refine Moves.seq' (Moves.liftTrue (moves_ringSwitch_le hB keccakPoint keccakSlices)) fun r _ ↦ ?_
-  obtain ⟨ringTarget, ringWeight⟩ := r
+  refine Moves.seq' (Moves.liftTrue (moves_flockPhase_le hB layout)) fun r _ ↦ ?_
+  obtain ⟨flockPoint, flockSlices⟩ := r
+  refine Moves.seq' (Moves.liftTrue (moves_ringSwitch_le hB _)) fun _ _ ↦ ?_
   exact moves_verifyStackedOpening_le hB _ _ _
 
 theorem moves_computedBytecodeValue_le {g : ℕ → Prop} (w : List K) (p : List E) (v : E) :
@@ -829,10 +884,15 @@ theorem moves_keccakPhase (layout : Layout) (evaluations : List (List E × List 
     Moves G64 False (fun _ ↦ True) (fun _ ↦ False) (keccakPhase layout evaluations) :=
   moves_keccakPhase_le (by decide) layout evaluations
 
+/-- **Flock's phase** (research build). -/
+theorem moves_flockPhase (layout : Layout) :
+    Moves G64 False (fun _ ↦ True) (fun _ ↦ False) (flockPhase layout) :=
+  moves_flockPhase_le (by decide) layout
+
 /-- **Ring switching**: its grind followed by the map's sixteen challenges. -/
-theorem moves_ringSwitch (point s : List E) :
-    Moves G64 False (fun _ ↦ True) (fun _ ↦ False) (ringSwitch point s) :=
-  moves_ringSwitch_le (by decide) point s
+theorem moves_ringSwitch (claims : List (List E × List E)) :
+    Moves G64 False (fun _ ↦ True) (fun _ ↦ False) (ringSwitch claims) :=
+  moves_ringSwitch_le (by decide) claims
 
 /-- The phases that commit nothing, as moves of the whole program. -/
 theorem Moves.lift {p : VerifierProgram α} {Q : α → Prop}

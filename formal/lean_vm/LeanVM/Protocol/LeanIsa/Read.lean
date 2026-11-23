@@ -63,18 +63,22 @@ private theorem column_get (c : Col) (h : ¬ IsOut c) (x : Fin (2 ^ kappa prog s
 
 /-- The pieces of the layout, before the renaming. -/
 private abbrev pieces :
-    Layout (leanIsaμ prog s) (Fin (blocks prog s).n ⊕ Fin 64)
-      (Sum.elim (blocks prog s).size fun _ ↦ s.τ 5) :=
+    Layout (leanIsaμ prog s) (Fin (blocks prog s).n ⊕ (Fin 64 ⊕ Fin 256))
+      (Sum.elim (blocks prog s).size (Sum.elim (fun _ ↦ s.τ 5) (fun _ ↦ s.τ 6))) :=
   ((blocks prog s).layout (blocks_fits prog s)).piecewise
-    ((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
+    (((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
       (fun l : Fin 64 ↦ (⟨l, by omega⟩ : Fin (2 ^ 6)))
-      (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s)
+      (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s).piecewise
+    ((blocks prog s).sliceLayout (blocks_fits prog s) (flockBlock prog s) 8
+      (fun l : Fin 256 ↦ (⟨l, by omega⟩ : Fin (2 ^ 8)))
+      (κ := fun _ ↦ s.τ 6) fun _ ↦ size_flockBlock prog s))
 
 /-- Through a route to a block, a cell is the stack's cell at the block's offset. -/
 private theorem get_inl (c : Col) (x : Fin (2 ^ kappa prog s c))
     (b : Fin (blocks prog s).n) (hb : (blocks prog s).size b = kappa prog s c) :
-    ∀ (r : Fin (blocks prog s).n ⊕ Fin 64)
-      (e : Sum.elim (blocks prog s).size (fun _ ↦ s.τ 5) r = kappa prog s c), r = .inl b →
+    ∀ (r : Fin (blocks prog s).n ⊕ (Fin 64 ⊕ Fin 256))
+      (e : Sum.elim (blocks prog s).size (Sum.elim (fun _ ↦ s.τ 5) (fun _ ↦ s.τ 6)) r =
+        kappa prog s c), r = .inl b →
       q.values.get (boolIndex ((pieces prog s).extend r (Vector.cast e.symm (boolVec x)))) =
         q.values[x.val + (blocks prog s).offset b]'(by
           have := (blocks prog s).offset_add_pow_le_total b
@@ -89,8 +93,9 @@ private theorem get_inl (c : Col) (x : Fin (2 ^ kappa prog s c))
 /-- Through a route to a slot, a cell is the stack's cell at the slot of `QKECCAK`. -/
 private theorem get_inr (c : Col) (x : Fin (2 ^ kappa prog s c))
     (k : Fin 64) (hk : s.τ 5 = kappa prog s c) :
-    ∀ (r : Fin (blocks prog s).n ⊕ Fin 64)
-      (e : Sum.elim (blocks prog s).size (fun _ ↦ s.τ 5) r = kappa prog s c), r = .inr k →
+    ∀ (r : Fin (blocks prog s).n ⊕ (Fin 64 ⊕ Fin 256))
+      (e : Sum.elim (blocks prog s).size (Sum.elim (fun _ ↦ s.τ 5) (fun _ ↦ s.τ 6)) r =
+        kappa prog s c), r = .inr (.inl k) →
       q.values.get (boolIndex ((pieces prog s).extend r (Vector.cast e.symm (boolVec x)))) =
         q.values[x.val + 2 ^ s.τ 5 * k.val + (blocks prog s).offset (keccakBlock prog s)]'(by
           have := (blocks prog s).offset_add_pow_le_total (keccakBlock prog s)
@@ -107,6 +112,28 @@ private theorem get_inr (c : Col) (x : Fin (2 ^ kappa prog s c))
     (fun l : Fin 64 ↦ (⟨l, by omega⟩ : Fin (2 ^ 6)))
     (κ := fun _ ↦ s.τ 5) (fun _ ↦ size_keccakBlock prog s) q k (Fin.cast (by rw [hk]) x)
 
+/-- Through a route to a word, a cell is the stack's cell at the word of `QFLOCK`. -/
+private theorem get_flock (c : Col) (x : Fin (2 ^ kappa prog s c))
+    (k : Fin 256) (hk : s.τ 6 = kappa prog s c) :
+    ∀ (r : Fin (blocks prog s).n ⊕ (Fin 64 ⊕ Fin 256))
+      (e : Sum.elim (blocks prog s).size (Sum.elim (fun _ ↦ s.τ 5) (fun _ ↦ s.τ 6)) r =
+        kappa prog s c), r = .inr (.inr k) →
+      q.values.get (boolIndex ((pieces prog s).extend r (Vector.cast e.symm (boolVec x)))) =
+        q.values[x.val + 2 ^ s.τ 6 * k.val + (blocks prog s).offset (flockBlock prog s)]'(by
+          have := (blocks prog s).offset_add_pow_le_total (flockBlock prog s)
+          have := blocks_fits prog s
+          have h1 := (cubeIndex (k := s.τ 6) (m := 8) (Fin.cast (congrArg (2 ^ ·) hk.symm) x)
+            ⟨k, by omega⟩).isLt
+          have h2 : 2 ^ (s.τ 6 + 8) = 2 ^ (blocks prog s).size (flockBlock prog s) := by
+            rw [size_flockBlock]
+          simp only [cubeIndex, Fin.val_cast] at h1
+          omega) := by
+  rintro r e rfl
+  simp only [pieces, Layout.piecewise, boolVec_cast]
+  exact (blocks prog s).get_sliceLayout (blocks_fits prog s) (flockBlock prog s) 8
+    (fun l : Fin 256 ↦ (⟨l, by omega⟩ : Fin (2 ^ 8)))
+    (κ := fun _ ↦ s.τ 6) (fun _ ↦ size_flockBlock prog s) q k (Fin.cast (by rw [hk]) x)
+
 /-- Cell `x` of a committed column is the stack's cell `x` past its block's offset. -/
 theorem column_committed (c : Col) (h : ¬ IsVirtual c) (x : Fin (2 ^ kappa prog s c)) :
     ((leanIsaInstance prog s).column q c).values.get x =
@@ -118,8 +145,10 @@ theorem column_committed (c : Col) (h : ¬ IsVirtual c) (x : Fin (2 ^ kappa prog
           rw [size_blockOf]
         omega) := by
   refine (column_get prog s q c (fun ho ↦ h ho.isVirtual) x).trans ?_
+  have hk : ¬ IsKVirtual c := fun h' ↦ h (.inl h')
+  have hl : ¬ IsLimb c := fun h' ↦ h (.inr h')
   exact get_inl prog s q c x (blockOf c h) (size_blockOf prog s c h) (route prog s c)
-    (route_kappa prog s c) (by simp [route, h])
+    (route_kappa prog s c) (by simp [route, hk, hl])
 
 /-- Input lane `l` of the `KECCAK` table reads the stack at slot `l` of `QKECCAK`: its cell `x`
 is the region's cell `x + l · 2 ^ τ`. -/
@@ -133,7 +162,7 @@ theorem column_inCol_stack (l : Fin 25) (x : Fin (2 ^ s.τ 5)) :
           rw [size_keccakBlock]
         simp only [cubeIndex] at h1
         omega) := by
-  have hl : IsVirtual (inCol l) := ⟨rfl, by simp [inCol]; omega⟩
+  have hl : IsKVirtual (inCol l) := ⟨rfl, by simp [inCol]; omega⟩
   have ho : ¬ IsOut (inCol l) := fun h ↦ by have := h.2.1; simp [inCol] at this; omega
   refine (column_get prog s q (inCol l) ho x).trans ?_
   refine (get_inr prog s q (inCol l) x ⟨l, by omega⟩ rfl (route prog s (inCol l))
@@ -187,13 +216,13 @@ theorem column_inCol (l : Fin 25) (x : Fin (2 ^ s.τ 5)) :
 of `QKECCAK` (`IsSpare`) is word `x` of its slot `qSlot c`, one of `50 … 63`. -/
 theorem column_spare (c : Col) (h : IsSpare c) (x : Fin (2 ^ s.τ 5)) :
     ((leanIsaInstance prog s).column q c).values.get
-        (Fin.cast (congrArg (2 ^ ·) (kappa_of_isVirtual prog s h.isVirtual).symm) x) =
+        (Fin.cast (congrArg (2 ^ ·) (kappa_of_isKVirtual prog s h.isKVirtual).symm) x) =
       (keccakRegion prog s).word
         ((leanIsaInstance prog s).keccakColumn (keccakRegion prog s) q) (qSlot c) x := by
-  have hk := (kappa_of_isVirtual prog s h.isVirtual).symm
+  have hk := (kappa_of_isKVirtual prog s h.isKVirtual).symm
   refine (column_get prog s q c h.not_isOut _).trans ?_
   refine (get_inr prog s q c _ (qSlot c) hk (route prog s c) (route_kappa prog s c)
-    (by simp [route, h.isVirtual])).trans ?_
+    (by simp [route, h.isKVirtual])).trans ?_
   rw [word_keccakColumn prog s q (qSlot c) (qSlot c).isLt x]
   rfl
 
@@ -238,7 +267,62 @@ theorem column_outCol_of_aux (h : (leanIsaInstance prog s).aux q) (l : Fin 25)
     ((leanIsaInstance prog s).column q (outCol l)).values.get x =
       stateLanes (keccakF1600 ((keccakRegion prog s).state
         ((leanIsaInstance prog s).keccakColumn (keccakRegion prog s) q) 0 x)) l := by
-  rw [column_outCol, h (keccakRegion prog s) rfl x, keccakF_eq_segments]
+  rw [column_outCol, h.1 (keccakRegion prog s) rfl x, keccakF_eq_segments]
+
+/-! ## The `BLAKE3` value limbs (research build) -/
+
+/-- A `BLAKE3` value limb is not an output lane. -/
+theorem IsLimb.not_isOut {c : Col} (h : IsLimb c) : ¬ IsOut c := fun ho ↦ by
+  have := ho.1.symm.trans h.1
+  simp [opIdx] at this
+
+/-- A `BLAKE3` value limb does not ride `QKECCAK`. -/
+theorem IsLimb.not_isKVirtual {c : Col} (h : IsLimb c) : ¬ IsKVirtual c := fun hk ↦ by
+  have := hk.1.symm.trans h.1
+  simp [opIdx] at this
+
+/-- Word `x` of slot `slot < 256` is a cell of `QFLOCK`. -/
+theorem fslot_lt {n : ℕ} (x : Fin (2 ^ n)) (slot : ℕ) (hslot : slot < 256) :
+    x.val + 2 ^ n * slot < 2 ^ (n + 8) :=
+  (cubeIndex (k := n) (m := 8) x ⟨slot, hslot⟩).isLt
+
+/-- Word `x` of slot `slot < 256` of the Flock region is the stack's cell `x + slot · 2 ^ τ`
+past `QFLOCK`'s offset. -/
+theorem word_flockColumn (slot : ℕ) (hslot : slot < 256) (x : Fin (2 ^ s.τ 6)) :
+    (flockRegion prog s).word
+        ((leanIsaInstance prog s).flockColumn (flockRegion prog s) q) slot x =
+      q.values[x.val + 2 ^ s.τ 6 * slot + (blocks prog s).offset (flockBlock prog s)]'(by
+        have := (blocks prog s).offset_add_pow_le_total (flockBlock prog s)
+        have := blocks_fits prog s
+        have h1 := (cubeIndex (k := s.τ 6) (m := 8) x ⟨slot, hslot⟩).isLt
+        have h2 : 2 ^ (s.τ 6 + 8) = 2 ^ (blocks prog s).size (flockBlock prog s) := by
+          rw [size_flockBlock]
+        simp only [cubeIndex] at h1
+        omega) := by
+  have hlt : x.val + 2 ^ s.τ 6 * slot < 2 ^ (s.τ 6 + 8) := fslot_lt x slot hslot
+  have hw : (flockRegion prog s).word
+      ((leanIsaInstance prog s).flockColumn (flockRegion prog s) q) slot x =
+      ((leanIsaInstance prog s).column q flockCol).values.get ⟨_, hlt⟩ := by
+    show ((leanIsaInstance prog s).column q flockCol).values.toArray.getD
+      (x.val + 2 ^ s.τ 6 * slot) 0 = _
+    rw [Array.getD_eq_getD_getElem?,
+      Array.getElem?_eq_getElem (by rw [Vector.size_toArray]; exact hlt), Option.getD_some]
+    rfl
+  exact hw.trans (column_committed prog s q flockCol not_isVirtual_flockCol ⟨_, hlt⟩)
+
+/-- **The `BLAKE3` value limbs are words of the Flock region**: cell `x` of a value limb is word
+`x` of its slot `fSlot c` of `QFLOCK`. -/
+theorem column_limb (c : Col) (h : IsLimb c) (x : Fin (2 ^ s.τ 6)) :
+    ((leanIsaInstance prog s).column q c).values.get
+        (Fin.cast (congrArg (2 ^ ·) (kappa_of_isLimb prog s h).symm) x) =
+      (flockRegion prog s).word
+        ((leanIsaInstance prog s).flockColumn (flockRegion prog s) q) (fSlot c) x := by
+  have hk := (kappa_of_isLimb prog s h).symm
+  refine (column_get prog s q c h.not_isOut _).trans ?_
+  refine (get_flock prog s q c _ (fSlot c) hk (route prog s c) (route_kappa prog s c)
+    (by simp [route, h, h.not_isKVirtual])).trans ?_
+  rw [word_flockColumn prog s q (fSlot c) (fSlot c).isLt x]
+  rfl
 
 end
 

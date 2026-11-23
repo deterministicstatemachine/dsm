@@ -12,6 +12,7 @@ public import LeanVM.Arithmetization.Statement
 public import LeanVM.Protocol.Bus
 public import LeanVM.Protocol.FixedColumns
 public import LeanVM.Protocol.Stack
+public import Statement.Prover.Flock
 
 /-!
 # The leanISA instance
@@ -131,20 +132,21 @@ namespace LeanIsa
 
 /-! ## The components -/
 
-/-- The six opcode tables, in the ensemble's order. -/
-def opcodeComponent : Fin 6 → Component K
+/-- The seven opcode tables, in the ensemble's order. -/
+def opcodeComponent : Fin 7 → Component K
   | 0 => Arithmetization.opcodeComponent xorTable
   | 1 => Arithmetization.opcodeComponent mulTable
   | 2 => Arithmetization.opcodeComponent setTable
   | 3 => Arithmetization.opcodeComponent derefTable
   | 4 => Arithmetization.opcodeComponent jumpTable
   | 5 => Arithmetization.opcodeComponent keccakTable
+  | 6 => Arithmetization.opcodeComponent blake3Table
 
 /-- The channels whose coordinate `1` is a read count: the memory and bytecode pulls (§6.2). -/
 def counted (c : RawChannel K) : Bool := c.name = MemPull.name || c.name = BytecodePull.name
 
 /-- Opcode table `j` as an M3 table. -/
-def opcodeTable (j : Fin 6) : M3Table K Arithmetization.Direction :=
+def opcodeTable (j : Fin 7) : M3Table K Arithmetization.Direction :=
   (opcodeComponent j).toM3 channelSep channelDir counted
 
 /-- The side of the bus a direction flushes on. -/
@@ -154,7 +156,7 @@ def sideOf : Arithmetization.Direction → Side
 
 /-! ## Sizes -/
 
-/-- The announced sizes: the memory log-size, positive, and the six opcode tables'
+/-- The announced sizes: the memory log-size, positive, and the seven opcode tables'
 log-heights. -/
 structure Sizes where
   /-- The memory log-size `log_mem`. -/
@@ -162,16 +164,16 @@ structure Sizes where
   /-- The memory has at least two cells. -/
   logMem_pos : 0 < logMem
   /-- The opcode tables' row counts, in the ensemble's order. -/
-  rows : Fin 6 → ℕ
+  rows : Fin 7 → ℕ
 
 /-- An opcode table's log-height: the least `τ` with `rows ≤ 2^τ` (`log2_ceil`), at least the
 table's floor (`TABLE_LOG_FLOORS`, `crates/verifier/src/layout.rs`): `9` for `KECCAK`, `0`
 otherwise. -/
-def Sizes.τ (s : Sizes) (j : Fin 6) : ℕ :=
+def Sizes.τ (s : Sizes) (j : Fin 7) : ℕ :=
   max (Nat.clog 2 (s.rows j)) (Verifier.tableLogFloors.getD j 0)
 
 /-- An opcode table's rows fit in its height. -/
-theorem Sizes.rows_le (s : Sizes) (j : Fin 6) : s.rows j ≤ 2 ^ s.τ j :=
+theorem Sizes.rows_le (s : Sizes) (j : Fin 7) : s.rows j ≤ 2 ^ s.τ j :=
   (Nat.le_pow_clog (by norm_num) _).trans (Nat.pow_le_pow_right (by norm_num) (le_max_left _ _))
 
 /-- The `KECCAK` table has at least `2^9` rows (`KECCAK_MIN_STEPS_LOG`). -/
@@ -181,70 +183,78 @@ theorem Sizes.minSteps_le (s : Sizes) : Verifier.keccakMinStepsLog ≤ s.τ 5 :=
 /-! ## The tables -/
 
 /-- The index of opcode table `j` among the instance's tables. -/
-def opIdx (j : Fin 6) : Fin 9 := ⟨j + 3, by omega⟩
+def opIdx (j : Fin 7) : Fin 11 := ⟨j + 4, by omega⟩
 
-/-- The widths: the three memory columns, `BYTECODE_FINAL_COUNTERS`, `QKECCAK`, then the opcode tables'. -/
-def width : Fin 9 → ℕ
+/-- The widths: the three memory columns, `BYTECODE_FINAL_COUNTERS`, `QKECCAK`, `QFLOCK`, then the
+opcode tables'. -/
+def width : Fin 11 → ℕ
   | ⟨0, _⟩ => 3
   | ⟨1, _⟩ => 1
   | ⟨2, _⟩ => 1
-  | ⟨j + 3, h⟩ => (opcodeComponent ⟨j, by omega⟩).width
+  | ⟨3, _⟩ => 1
+  | ⟨j + 4, h⟩ => (opcodeComponent ⟨j, by omega⟩).width
 
-/-- The log-heights: the memory's, the program's, `QKECCAK`'s `τ_KECCAK + 6`, then the opcode
-tables'. -/
-def height (prog : LeanIsaProgram) (s : Sizes) : Fin 9 → ℕ
+/-- The log-heights: the memory's, the program's, `QKECCAK`'s `τ_KECCAK + 6`, `QFLOCK`'s
+`τ_BLAKE3 + 8`, then the opcode tables'. -/
+def height (prog : LeanIsaProgram) (s : Sizes) : Fin 11 → ℕ
   | ⟨0, _⟩ => s.logMem
   | ⟨1, _⟩ => prog.logSize
   | ⟨2, _⟩ => s.τ 5 + 6
-  | ⟨j + 3, h⟩ => s.τ ⟨j, by omega⟩
+  | ⟨3, _⟩ => s.τ 6 + 8
+  | ⟨j + 4, h⟩ => s.τ ⟨j, by omega⟩
 
 /-- The tables of the instance. -/
-def shape (prog : LeanIsaProgram) (s : Sizes) : Shape := ⟨9, height prog s, width⟩
+def shape (prog : LeanIsaProgram) (s : Sizes) : Shape := ⟨11, height prog s, width⟩
 
-/-- The row counts: every row of the memory, bytecode and `QKECCAK` column groups, then the
-announced ones. -/
-def rows (prog : LeanIsaProgram) (s : Sizes) : Fin 9 → ℕ
+/-- The row counts: every row of the memory, bytecode, `QKECCAK` and `QFLOCK` column groups, then
+the announced ones. -/
+def rows (prog : LeanIsaProgram) (s : Sizes) : Fin 11 → ℕ
   | ⟨0, _⟩ => 2 ^ s.logMem
   | ⟨1, _⟩ => 2 ^ prog.logSize
   | ⟨2, _⟩ => 2 ^ (s.τ 5 + 6)
-  | ⟨j + 3, h⟩ => s.rows ⟨j, by omega⟩
+  | ⟨3, _⟩ => 2 ^ (s.τ 6 + 8)
+  | ⟨j + 4, h⟩ => s.rows ⟨j, by omega⟩
 
 /-- Every table's rows fit in its height. -/
 theorem rows_le (prog : LeanIsaProgram) (s : Sizes) : ∀ j, rows prog s j ≤ 2 ^ height prog s j
   | ⟨0, _⟩ => le_rfl
   | ⟨1, _⟩ => le_rfl
   | ⟨2, _⟩ => le_rfl
-  | ⟨j + 3, h⟩ => s.rows_le ⟨j, by omega⟩
+  | ⟨3, _⟩ => le_rfl
+  | ⟨j + 4, h⟩ => s.rows_le ⟨j, by omega⟩
 
 /-- The constraint polynomials: the opcode tables' only. -/
-def constraints : (j : Fin 9) → List (CMvPolynomial (width j) K)
+def constraints : (j : Fin 11) → List (CMvPolynomial (width j) K)
   | ⟨0, _⟩ => []
   | ⟨1, _⟩ => []
   | ⟨2, _⟩ => []
-  | ⟨j + 3, h⟩ => (opcodeTable ⟨j, by omega⟩).constraints
+  | ⟨3, _⟩ => []
+  | ⟨j + 4, h⟩ => (opcodeTable ⟨j, by omega⟩).constraints
 
 /-- The flushes: the opcode tables' only, each on its channel's side. -/
-def flushes : (j : Fin 9) → List (Side × Vector (CMvPolynomial (width j) K) 16)
+def flushes : (j : Fin 11) → List (Side × Vector (CMvPolynomial (width j) K) 16)
   | ⟨0, _⟩ => []
   | ⟨1, _⟩ => []
   | ⟨2, _⟩ => []
-  | ⟨j + 3, h⟩ => (opcodeTable ⟨j, by omega⟩).flushes.map fun f ↦ (sideOf f.1, f.2)
+  | ⟨3, _⟩ => []
+  | ⟨j + 4, h⟩ => (opcodeTable ⟨j, by omega⟩).flushes.map fun f ↦ (sideOf f.1, f.2)
 
 /-- The count columns: the opcode tables' only. -/
-def counts : (j : Fin 9) → List (Fin (width j))
+def counts : (j : Fin 11) → List (Fin (width j))
   | ⟨0, _⟩ => []
   | ⟨1, _⟩ => []
   | ⟨2, _⟩ => []
-  | ⟨j + 3, h⟩ => (opcodeTable ⟨j, by omega⟩).count
+  | ⟨3, _⟩ => []
+  | ⟨j + 4, h⟩ => (opcodeTable ⟨j, by omega⟩).count
 
 /-- Every assert expression of an opcode table has syntactic degree at most two. -/
 theorem opcode_constraints_degreeBound :
-    ∀ j : Fin 6, ∀ e ∈ (opcodeComponent j).rowOperations.constraints, e.degreeBound ≤ 2 := by
+    ∀ j : Fin 7, ∀ e ∈ (opcodeComponent j).rowOperations.constraints, e.degreeBound ≤ 2 := by
   decide +kernel
 
 /-- Every message coordinate of an opcode table has syntactic degree at most two. -/
 theorem opcode_flushes_degreeBound :
-    ∀ j : Fin 6, ∀ i ∈ (opcodeComponent j).rowOperations.interactions,
+    ∀ j : Fin 7, ∀ i ∈ (opcodeComponent j).rowOperations.interactions,
       ∀ e ∈ i.msg.toList, e.degreeBound ≤ 2 := by
   decide +kernel
 
@@ -253,14 +263,16 @@ theorem constraints_degree : ∀ j, ∀ C ∈ constraints j, C.totalDegree ≤ 2
   | ⟨0, _⟩ => by simp [constraints]
   | ⟨1, _⟩ => by simp [constraints]
   | ⟨2, _⟩ => by simp [constraints]
-  | ⟨j + 3, h⟩ => toM3_constraints_degree _ _ _ _ (opcode_constraints_degreeBound ⟨j, by omega⟩)
+  | ⟨3, _⟩ => by simp [constraints]
+  | ⟨j + 4, h⟩ => toM3_constraints_degree _ _ _ _ (opcode_constraints_degreeBound ⟨j, by omega⟩)
 
 /-- Every flush coordinate has total degree at most two. -/
 theorem flushes_degree : ∀ j, ∀ f ∈ flushes j, ∀ k, (f.2.get k).totalDegree ≤ 2
   | ⟨0, _⟩ => by simp [flushes]
   | ⟨1, _⟩ => by simp [flushes]
   | ⟨2, _⟩ => by simp [flushes]
-  | ⟨j + 3, h⟩ => by
+  | ⟨3, _⟩ => by simp [flushes]
+  | ⟨j + 4, h⟩ => by
     intro f hf k
     obtain ⟨f', hf', rfl⟩ := List.mem_map.mp hf
     exact toM3_flushes_degree _ _ _ _ (opcode_flushes_degreeBound ⟨j, by omega⟩) f' hf' k
@@ -268,7 +280,7 @@ theorem flushes_degree : ∀ j, ∀ f ∈ flushes j, ∀ k, (f.2.get k).totalDeg
 /-! ## The columns -/
 
 /-- A column of the instance: table `j`, column `i`. -/
-abbrev Col : Type := Σ j : Fin 9, Fin (width j)
+abbrev Col : Type := Σ j : Fin 11, Fin (width j)
 
 /-- Memory column `i`: `MEMORY_0, MEMORY_1, MEMORY_FINAL_COUNTERS`. -/
 def memCol (i : Fin 3) : Col := ⟨⟨0, by decide⟩, i⟩
@@ -278,6 +290,12 @@ def bfcntCol : Col := ⟨⟨1, by decide⟩, ⟨0, by decide⟩⟩
 
 /-- The Keccak reduction's column `QKECCAK`. -/
 def keccakCol : Col := ⟨⟨2, by decide⟩, ⟨0, by decide⟩⟩
+
+/-- Flock's column `QFLOCK` (research build). -/
+def flockCol : Col := ⟨⟨3, by decide⟩, ⟨0, by decide⟩⟩
+
+/-- The `BLAKE3` table has fifty-eight columns (`BLAKE3_COLUMNS`). -/
+theorem width_blake3 : width (opIdx 6) = 58 := by decide +kernel
 
 /-- The `KECCAK` table has ninety-two columns. -/
 theorem width_keccak : width (opIdx 5) = 92 := by decide +kernel
@@ -304,23 +322,40 @@ def IsSpare (c : Col) : Prop := c.1 = opIdx 5 ∧ c.2.val < 14
 
 instance (c : Col) : Decidable (IsSpare c) := inferInstanceAs (Decidable (_ ∧ _))
 
-/-- The column has no block of its own: a `KECCAK` value lane or a column riding a spare slot of
+/-- The column rides `QKECCAK`: a `KECCAK` value lane or a column riding a spare slot of
 `QKECCAK`, the `KECCAK` table's columns `0 … 64` but `14` (`free`, committed in a block of its
 own) (the Rust's virtual columns, `keccak_value`, `crates/lean_vm_core/src/cpu/layout.rs`). -/
-def IsVirtual (c : Col) : Prop := c.1 = opIdx 5 ∧ c.2.val < 65 ∧ c.2.val ≠ 14
+def IsKVirtual (c : Col) : Prop := c.1 = opIdx 5 ∧ c.2.val < 65 ∧ c.2.val ≠ 14
 
-instance (c : Col) : Decidable (IsVirtual c) := inferInstanceAs (Decidable (_ ∧ _))
+instance (c : Col) : Decidable (IsKVirtual c) := inferInstanceAs (Decidable (_ ∧ _))
+
+/-- The column is one of the `BLAKE3` table's thirty value limbs, its columns `12 … 41`: a word
+of `QFLOCK` (`qflock_slot`, `crates/verifier/src/layout.rs`, research build). -/
+def IsLimb (c : Col) : Prop := c.1 = opIdx 6 ∧ 12 ≤ c.2.val ∧ c.2.val < 42
+
+instance (c : Col) : Decidable (IsLimb c) := inferInstanceAs (Decidable (_ ∧ _))
+
+/-- The column has no block of its own: it rides `QKECCAK` or `QFLOCK`. -/
+def IsVirtual (c : Col) : Prop := IsKVirtual c ∨ IsLimb c
+
+instance (c : Col) : Decidable (IsVirtual c) := inferInstanceAs (Decidable (_ ∨ _))
+
+/-- A lane rides `QKECCAK`. -/
+theorem IsLane.isKVirtual {c : Col} (h : IsLane c) : IsKVirtual c :=
+  ⟨h.1, by have := h.2; omega, by have := h.2; omega⟩
+
+/-- A spare column rides `QKECCAK`. -/
+theorem IsSpare.isKVirtual {c : Col} (h : IsSpare c) : IsKVirtual c :=
+  ⟨h.1, by have := h.2; omega, by have := h.2; omega⟩
 
 /-- A lane is virtual. -/
-theorem IsLane.isVirtual {c : Col} (h : IsLane c) : IsVirtual c :=
-  ⟨h.1, by have := h.2; omega, by have := h.2; omega⟩
+theorem IsLane.isVirtual {c : Col} (h : IsLane c) : IsVirtual c := .inl h.isKVirtual
 
 /-- A spare column is virtual. -/
-theorem IsSpare.isVirtual {c : Col} (h : IsSpare c) : IsVirtual c :=
-  ⟨h.1, by have := h.2; omega, by have := h.2; omega⟩
+theorem IsSpare.isVirtual {c : Col} (h : IsSpare c) : IsVirtual c := .inl h.isKVirtual
 
-/-- A virtual column is a lane or a spare column. -/
-theorem IsVirtual.lane_or_spare {c : Col} (h : IsVirtual c) : IsLane c ∨ IsSpare c := by
+/-- A column riding `QKECCAK` is a lane or a spare column. -/
+theorem IsKVirtual.lane_or_spare {c : Col} (h : IsKVirtual c) : IsLane c ∨ IsSpare c := by
   by_cases h' : 15 ≤ c.2.val ∧ c.2.val < 65
   · exact .inl ⟨h.1, h'⟩
   · exact .inr ⟨h.1, by have := h.2; omega⟩
@@ -331,10 +366,10 @@ def IsOut (c : Col) : Prop := c.1 = opIdx 5 ∧ 40 ≤ c.2.val ∧ c.2.val < 65
 instance (c : Col) : Decidable (IsOut c) := inferInstanceAs (Decidable (_ ∧ _))
 
 /-- Every column, in global order: table by table, column by column. -/
-def columns : List Col := (List.finRange 9).flatMap fun j ↦ (List.finRange (width j)).map (⟨j, ·⟩)
+def columns : List Col := (List.finRange 11).flatMap fun j ↦ (List.finRange (width j)).map (⟨j, ·⟩)
 
 /-- The committed columns, in global order: every column but the virtual ones, the `KECCAK`
-value lanes and the columns riding `QKECCAK`'s spare slots. -/
+value lanes, the columns riding `QKECCAK`'s spare slots and the `BLAKE3` value limbs. -/
 def committedColumns : List Col := columns.filter fun c ↦ !decide (IsVirtual c)
 
 /-- A column that is not virtual is committed. -/
@@ -413,6 +448,16 @@ def keccakBlock : Fin (blocks prog s).n := blockOf keccakCol not_isVirtual_kecca
 theorem size_keccakBlock : (blocks prog s).size (keccakBlock prog s) = s.τ 5 + 6 :=
   size_blockOf prog s _ _
 
+/-- `QFLOCK` is committed. -/
+theorem not_isVirtual_flockCol : ¬ IsVirtual flockCol := by decide
+
+/-- The block of `QFLOCK`. -/
+def flockBlock : Fin (blocks prog s).n := blockOf flockCol not_isVirtual_flockCol
+
+/-- The block of `QFLOCK` has `τ_BLAKE3 + 8` variables. -/
+theorem size_flockBlock : (blocks prog s).size (flockBlock prog s) = s.τ 6 + 8 :=
+  size_blockOf prog s _ _
+
 /-- The slot of `QKECCAK` a virtual column is read at: input lane `l`'s is `l`, output lane `l`
 is routed to input lane `l`'s (a reading no one makes, `derived`), and the spare columns `0 … 13`
 are slots `50 … 63` (`qkeccak_slot`, `crates/verifier/src/layout.rs`); `0` for a column
@@ -428,40 +473,68 @@ theorem qSlot_inCol (l : Fin 25) : qSlot (inCol l) = ⟨l, by omega⟩ := by
     if 15 + l.val < 65 then (15 + l.val - 15) % 25 else 0) = l.val
   split_ifs <;> omega
 
-/-- Where a column is read: a committed column at its block, a virtual one at its slot of
-`QKECCAK`. -/
-def route (c : Col) : Fin (blocks prog s).n ⊕ Fin 64 :=
-  if h : IsVirtual c then .inr (qSlot c) else .inl (blockOf c h)
+/-- The `QFLOCK` word a `BLAKE3` value limb is (`BLAKE3_SLOTS`, `crates/verifier/src/layout.rs`):
+the table's columns `12 … 41` are the limbs of `m₀ … m₃`, the output's two cells, the chaining
+value's two, the metadata, `X`'s, `Y`'s and `W`'s two; `0` for any other column. -/
+def limbSlot : Fin 30 → Fin 256 :=
+  ![10, 11, 12, 13, 14, 15, 16, 17, 4, 5, 6, 7, 0, 1, 2, 3, 18, 19, 181, 182, 183, 184, 185, 186,
+    187, 188, 189, 190, 191, 192]
+
+/-- The `QFLOCK` word a column is read at: a value limb's (`limbSlot`), `0` for any other. -/
+def fSlot (c : Col) : Fin 256 :=
+  if h : 12 ≤ c.2.val ∧ c.2.val < 42 then limbSlot ⟨c.2.val - 12, by omega⟩ else 0
+
+/-- Where a column is read: a committed column at its block, a column riding `QKECCAK` at its
+slot there, a `BLAKE3` value limb at its word of `QFLOCK`. -/
+def route (c : Col) : Fin (blocks prog s).n ⊕ (Fin 64 ⊕ Fin 256) :=
+  if h : IsKVirtual c then .inr (.inl (qSlot c))
+  else if h' : IsLimb c then .inr (.inr (fSlot c))
+  else .inl (blockOf c (by rintro (h₁ | h₁) <;> contradiction))
 
 /-- A route keeps the column's log-height. -/
 theorem route_kappa (c : Col) :
-    Sum.elim (blocks prog s).size (fun _ ↦ s.τ 5) (route prog s c) = kappa prog s c := by
+    Sum.elim (blocks prog s).size (Sum.elim (fun _ ↦ s.τ 5) (fun _ ↦ s.τ 6)) (route prog s c) =
+      kappa prog s c := by
   unfold route
-  split_ifs with h
-  · simp only [Sum.elim_inr, kappa, h.1]
+  split_ifs with h h'
+  · simp only [Sum.elim_inr, Sum.elim_inl, kappa, h.1]
+    rfl
+  · simp only [Sum.elim_inr, kappa, h'.1]
     rfl
   · simp only [Sum.elim_inl, size_blockOf]
 
-/-- The layout of the stack: the committed columns at their aligned blocks, a virtual column of
-the `KECCAK` table at its slot of `QKECCAK` (`qSlot`). -/
+/-- The layout of the stack: the committed columns at their aligned blocks, a column of the
+`KECCAK` table riding `QKECCAK` at its slot (`qSlot`), a `BLAKE3` value limb at its word of
+`QFLOCK` (`fSlot`). -/
 def layout : Layout (leanIsaμ prog s) Col (kappa prog s) :=
   (((blocks prog s).layout (blocks_fits prog s)).piecewise
-    ((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
+    (((blocks prog s).sliceLayout (blocks_fits prog s) (keccakBlock prog s) 6
       (fun l : Fin 64 ↦ (⟨l, by omega⟩ : Fin (2 ^ 6)))
-      (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s)).comap (route prog s)
+      (κ := fun _ ↦ s.τ 5) fun _ ↦ size_keccakBlock prog s).piecewise
+    ((blocks prog s).sliceLayout (blocks_fits prog s) (flockBlock prog s) 8
+      (fun l : Fin 256 ↦ (⟨l, by omega⟩ : Fin (2 ^ 8)))
+      (κ := fun _ ↦ s.τ 6) fun _ ↦ size_flockBlock prog s))).comap (route prog s)
     (route_kappa prog s)
 
-/-- A virtual column has `KECCAK`'s log-height. -/
-theorem kappa_of_isVirtual {c : Col} (h : IsVirtual c) : kappa prog s c = s.τ 5 := by
+/-- A column riding `QKECCAK` has `KECCAK`'s log-height. -/
+theorem kappa_of_isKVirtual {c : Col} (h : IsKVirtual c) : kappa prog s c = s.τ 5 := by
+  simp only [kappa, h.1]
+  rfl
+
+/-- A `BLAKE3` value limb has `BLAKE3`'s log-height. -/
+theorem kappa_of_isLimb {c : Col} (h : IsLimb c) : kappa prog s c = s.τ 6 := by
   simp only [kappa, h.1]
   rfl
 
 /-- A lane has `KECCAK`'s log-height. -/
 theorem kappa_of_isLane {c : Col} (h : IsLane c) : kappa prog s c = s.τ 5 :=
-  kappa_of_isVirtual prog s h.isVirtual
+  kappa_of_isKVirtual prog s h.isKVirtual
 
 /-- The Keccak region: `QKECCAK`, `2 ^ τ_KECCAK` steps. -/
 def keccakRegion : KeccakRegion (shape prog s) := ⟨keccakCol, s.τ 5, rfl⟩
+
+/-- The Flock region: `QFLOCK`, `2 ^ τ_BLAKE3` instances (research build). -/
+def flockRegion : FlockRegion (shape prog s) := ⟨flockCol, s.τ 6, rfl⟩
 
 /-- The state after twelve rounds the stack commits at step `x`: slots `25 … 49` of `QKECCAK`. -/
 def midState (q : Column (leanIsaμ prog s)) (x : Fin (2 ^ s.τ 5)) : KeccakState :=
@@ -575,12 +648,12 @@ theorem padRowK_keccak_getD (i : ℕ) (hi : i < 92) :
 
 /-- The public row a padding row holds: the verifier's (`padRowK`) for an opcode table, zero for
 the column groups, which have no padding row. -/
-def padRow (j : Fin 9) (i : Fin (width j)) : K :=
-  if 3 ≤ j.val then (padRowK (Verifier.tables.getD (j.val - 3) default)).getD i 0 else 0
+def padRow (j : Fin 11) (i : Fin (width j)) : K :=
+  if 4 ≤ j.val then (padRowK (Verifier.tables.getD (j.val - 4) default)).getD i 0 else 0
 
-/-- Off the `KECCAK` table, the padding row is zero. -/
+/-- Off the `KECCAK` and `BLAKE3` tables, the padding row is zero. -/
 theorem padRow_of_ne_keccak :
-    ∀ j : Fin 6, j ≠ 5 → ∀ i : Fin (width (opIdx j)), padRow (opIdx j) i = 0 := by
+    ∀ j : Fin 7, j ≠ 5 → j ≠ 6 → ∀ i : Fin (width (opIdx j)), padRow (opIdx j) i = 0 := by
   decide +kernel
 
 /-- The `KECCAK` padding row: Keccak-f[1600] of the zero state at the output lanes, zero
@@ -614,6 +687,7 @@ abbrev leanIsaInstance (prog : LeanIsaProgram) (s : Sizes) : M3Instance where
   nLines := 2
   publicLines := publicLines prog s
   keccak := some (keccakRegion prog s)
+  flock := some (flockRegion prog s)
 
 namespace LeanIsa
 
@@ -636,7 +710,7 @@ def validRate (ρ : ℕ) : Prop := 1 ≤ ρ ∧ ρ ≤ 4
 
 instance (ρ : ℕ) : Decidable (validRate ρ) := inferInstanceAs (Decidable (_ ∧ _))
 
-/-- The sizes a witness carries: the memory log-size of its image and the row counts of its six
+/-- The sizes a witness carries: the memory log-size of its image and the row counts of its seven
 opcode tables; none when the image has a single word. -/
 def Sizes.ofWitness {prog : LeanIsaProgram} {κ : ℕ} (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
     Option Sizes :=
@@ -656,7 +730,7 @@ abbrev cell (c : Col) (x : Fin (2 ^ kappa prog s c)) : K :=
 
 /-- The executed rows of opcode table `j`, read off the stack: its padding rows are not the
 witness's. -/
-def opcodeRows (j : Fin 6) : List (Array K) :=
+def opcodeRows (j : Fin 7) : List (Array K) :=
   List.ofFn fun x : Fin (s.rows j) ↦
     Array.ofFn ((leanIsaInstance prog s).row q (opIdx j) (Fin.castLE (s.rows_le j) x))
 
@@ -736,7 +810,7 @@ theorem bytecodeBlockRowsOf_row (i : Fin (2 ^ prog.logSize)) :
   exact fromElements_ofFn _ i.val (by simp)
 
 /-- Opcode table `j` read off the stack: its executed rows, none past `2^64` of them. -/
-def opTableOf (j : Fin 6) : Air.Flat.Table K :=
+def opTableOf (j : Fin 7) : Air.Flat.Table K :=
   if h : s.rows j ≤ UInt64.size then
     tableOf (opcodeComponent j) (opcodeRows prog s q j) (by
       simp only [opcodeRows, List.mem_ofFn, forall_exists_index]
@@ -796,7 +870,8 @@ def bytecodeTableOf : Air.Flat.Table K :=
 /-- The tables read off the stack, each with the data of its own rows. -/
 def witnessTables : List (Air.Flat.Table K) :=
   [opTableOf prog s q 0, opTableOf prog s q 1, opTableOf prog s q 2, opTableOf prog s q 3,
-    opTableOf prog s q 4, opTableOf prog s q 5, memTableOf prog s q, bytecodeTableOf prog s q]
+    opTableOf prog s q 4, opTableOf prog s q 5, opTableOf prog s q 6, memTableOf prog s q,
+    bytecodeTableOf prog s q]
 
 /-- The tables' components are the ensemble's. -/
 theorem witnessTables_components :
@@ -811,7 +886,7 @@ theorem witnessTables_names :
   rw [← witnessTables_components, List.map_map] at h
   exact h
 
-/-- The witness a stack carries: the six opcode tables from their rows, the memory and
+/-- The witness a stack carries: the seven opcode tables from their rows, the memory and
 bytecode blocks from the memory columns, the program and `BYTECODE_FINAL_COUNTERS`, the public input from the first
 two cells of `MEMORY_0` and `MEMORY_1`. Its prover data is derived from its tables: the image is the
 memory block's limbs. -/
@@ -832,7 +907,7 @@ def witnessOf : EnsembleWitness (leanIsaEnsemble prog s.logMem) where
   same_data := Air.Flat.withDerivedData_data _ _
 
 /-- The witness's tables are the ones read off the stack, rows for rows. -/
-theorem witnessOf_table (j : Fin 8) :
+theorem witnessOf_table (j : Fin 9) :
     (tableAt (witnessOf prog s q) j).table =
       ((witnessTables prog s q)[(j : ℕ)]'(by simp [witnessTables])).table := by
   have h := congrArg (·[(j : ℕ)]?) (Air.Flat.withDerivedData_map (witnessTables prog s q)
@@ -847,7 +922,7 @@ theorem witnessOf_table (j : Fin 8) :
 
 /-- Opcode table `j` read off the stack holds the executed rows, when they number at most
 `2^64`. -/
-theorem opTableOf_table {j : Fin 6} (h : s.rows j ≤ UInt64.size) :
+theorem opTableOf_table {j : Fin 7} (h : s.rows j ≤ UInt64.size) :
     (opTableOf prog s q j).table = opcodeRows prog s q j := by
   simp [opTableOf, h, tableOf]
 
@@ -866,7 +941,7 @@ theorem bytecodeTableOf_table : (bytecodeTableOf prog s q).table = bytecodeBlock
 theorem memRows_witnessOf (h : s.logMem < 64) :
     memRows (witnessOf prog s q).data = imageRows prog s q := by
   rw [memRows_data, show memBlockRows (witnessOf prog s q) = memBlockRowsOf prog s q from
-    (witnessOf_table prog s q 6).trans (memTableOf_table prog s q h)]
+    (witnessOf_table prog s q 7).trans (memTableOf_table prog s q h)]
   apply Array.ext
   · simp [imageRows, memBlockRowsOf_length]
   · intro i h1 h2
@@ -890,7 +965,7 @@ theorem Sizes.Admissible.logMem_lt {prog : LeanIsaProgram} {s : Sizes} (h : s.Ad
 
 /-- Admissible sizes fit the `u64` row indices: at most `2^64` rows per opcode table. -/
 theorem Sizes.Admissible.rows_le_size {prog : LeanIsaProgram} {s : Sizes} (h : s.Admissible prog)
-    (j : Fin 6) : s.rows j ≤ UInt64.size :=
+    (j : Fin 7) : s.rows j ≤ UInt64.size :=
   (h.2.2.1 j).trans (by norm_num [maxLogRows, UInt64.size])
 
 /-! ## The stack of a witness -/
@@ -936,14 +1011,24 @@ def keccakWitness (w : EnsembleWitness (leanIsaEnsemble prog κ)) : Vector K (2 
         ⟨i.val / 2 ^ s.τ 5 - 25, by omega⟩
     else cellOf (tableAt w 5) (i.val % 2 ^ s.τ 5) (spareColumn (i.val / 2 ^ s.τ 5 - 50))
 
+/-- `QFLOCK` of a witness (research build): Flock's instances of the `BLAKE3` rows, the padding
+instance past them, word `w` of instance `x` at `x + 2^τ · w`, as the honest prover commits it
+(`Flock.qflockColumn`, `Statement/Prover/Flock.lean`; `place`, `blake3flock.rs`). -/
+def flockWitness (w : EnsembleWitness (leanIsaEnsemble prog κ)) : Vector K (2 ^ (s.τ 6 + 8)) :=
+  let rows : Array (Array K) := ((tableAt w 6).table.take (s.rows 6)).toArray
+  let col := LeanVM.Prover.Flock.qflockColumn
+    (LeanVM.Prover.Flock.instancesOf rows (s.τ 6)) (s.τ 6)
+  Vector.ofFn fun i ↦ col.getD i.val 0
+
 /-- The column `c` a witness carries: the memory and bytecode blocks' committed cells,
-`QKECCAK` of the `KECCAK` rows, the opcode tables' cells. -/
+`QKECCAK` of the `KECCAK` rows, `QFLOCK` of the `BLAKE3` rows, the opcode tables' cells. -/
 def witnessColumn (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
     (c : Col) → Vector K (2 ^ kappa prog s c)
-  | ⟨⟨0, _⟩, i⟩ => Vector.ofFn fun x ↦ cellOf (tableAt w 6) x (memRowCell i)
-  | ⟨⟨1, _⟩, _⟩ => Vector.ofFn fun x ↦ cellOf (tableAt w 7) x 1
+  | ⟨⟨0, _⟩, i⟩ => Vector.ofFn fun x ↦ cellOf (tableAt w 7) x (memRowCell i)
+  | ⟨⟨1, _⟩, _⟩ => Vector.ofFn fun x ↦ cellOf (tableAt w 8) x 1
   | ⟨⟨2, _⟩, _⟩ => keccakWitness prog s w
-  | ⟨⟨j + 3, h⟩, i⟩ => Vector.ofFn fun x ↦ cellOf (tableAt w ⟨j, by omega⟩) x i
+  | ⟨⟨3, _⟩, _⟩ => flockWitness prog s w
+  | ⟨⟨j + 4, h⟩, i⟩ => Vector.ofFn fun x ↦ cellOf (tableAt w ⟨j, by omega⟩) x i
 
 /-- The stack of a witness at the sizes `s`: its committed columns at their blocks, zero past
 the last. -/
@@ -971,12 +1056,12 @@ private theorem sum_flatMap_replicate {α : Type} (l : List α) (a : α → ℕ)
       List.sum_replicate, smul_eq_mul, List.map_cons, List.sum_cons]
 
 /-- Every table has at most as many count columns as push flushes. -/
-theorem counts_le_pushes : ∀ j : Fin 9,
+theorem counts_le_pushes : ∀ j : Fin 11,
     (counts j).length ≤ ((flushes j).filter fun f ↦ decide (f.1 = Side.push)).length := by
   decide +kernel
 
 /-- A table with a constraint has a push flush. -/
-theorem constrained_pushes : ∀ j : Fin 9, 0 < (LeanIsa.constraints j).length →
+theorem constrained_pushes : ∀ j : Fin 11, 0 < (LeanIsa.constraints j).length →
     0 < ((LeanIsa.flushes j).filter fun f ↦ decide (f.1 = Side.push)).length := by
   decide +kernel
 
@@ -992,7 +1077,7 @@ private theorem leafCount_eq (I : M3Instance) (k : Fin 3) :
 private theorem leafCount_push :
     Bus.leafCount (leanIsaInstance prog s) 0 =
       (((boundary prog s).filter fun b ↦ decide (b.side = .push)).map fun b ↦ 2 ^ b.κ).sum +
-      ((List.finRange 9).map fun j ↦
+      ((List.finRange 11).map fun j ↦
         ((LeanIsa.flushes j).filter fun f ↦ decide (f.1 = Side.push)).length *
           2 ^ height prog s j).sum := by
   rw [leafCount_eq]
@@ -1021,12 +1106,13 @@ private theorem leafCount_count_le :
   exact Nat.mul_le_mul_right _ (counts_le_pushes j)
 
 /-- Every flush's first coordinate is its channel's separator, a constant. -/
-theorem flushes_separator : ∀ j : Fin 9, ∀ g ∈ LeanIsa.flushes j, ∀ r r' : Fin (width j) → K,
+theorem flushes_separator : ∀ j : Fin 11, ∀ g ∈ LeanIsa.flushes j, ∀ r r' : Fin (width j) → K,
     (g.2[0]).eval r = (g.2[0]).eval r'
   | ⟨0, _⟩ => by simp [LeanIsa.flushes]
   | ⟨1, _⟩ => by simp [LeanIsa.flushes]
   | ⟨2, _⟩ => by simp [LeanIsa.flushes]
-  | ⟨j + 3, h⟩ => by
+  | ⟨3, _⟩ => by simp [LeanIsa.flushes]
+  | ⟨j + 4, h⟩ => by
     intro g hg r r'
     obtain ⟨g', hg', rfl⟩ := List.mem_map.mp hg
     exact toM3_separator _ _ _ _ hg' r r'

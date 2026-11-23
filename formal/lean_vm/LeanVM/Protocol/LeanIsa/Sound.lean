@@ -35,8 +35,9 @@ from admissibility, or from how the witness is read:
   state, so an output lane is the permutation of the input lanes (`column_outCol_of_aux`,
   `keccakF_eq_segments`). The permutation is proved, not assumed.
 
-`satisfiedByB_witnessOf` gives every conjunct but the `KECCAK` validity; `satisfiedBy_witnessOf`
-adds it.
+`satisfiedByB_witnessOf` gives every conjunct but the `KECCAK` and `BLAKE3` validities;
+`satisfiedBy_witnessOf` adds them, the `BLAKE3` one from the Flock clause
+(`blake3RowsValid_witnessOf`, research build).
 
 Admissibility is a hypothesis because `Caps` does not follow from `M3Holds`: the compiled
 verifier checks the announced sizes before the protocol starts. It also keeps every table within
@@ -69,13 +70,13 @@ variable (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsaμ prog s))
 
 /-- The opcode tables of the witness read off a stack are the stack's rows, when they number at
 most `2^64`. -/
-private theorem opTable_witnessOf (j : Fin 6) (h : s.rows j ≤ UInt64.size) :
+private theorem opTable_witnessOf (j : Fin 7) (h : s.rows j ≤ UInt64.size) :
     (opTable (witnessOf prog s q) j).table = opcodeRows prog s q j := by
   rw [opTable, witnessOf_table]
   fin_cases j <;> exact opTableOf_table prog s q h
 
 /-- Past `2^64` rows, opcode table `j` of the witness read off a stack is empty. -/
-private theorem opTable_witnessOf_nil (j : Fin 6) (h : ¬ s.rows j ≤ UInt64.size) :
+private theorem opTable_witnessOf_nil (j : Fin 7) (h : ¬ s.rows j ≤ UInt64.size) :
     (opTable (witnessOf prog s q) j).table = [] := by
   have h0 : (opTableOf prog s q j).table = [] := by simp [opTableOf, tableOf, h]
   rw [opTable, witnessOf_table]
@@ -116,6 +117,112 @@ theorem keccakRowsValid_witnessOf (h : (leanIsaInstance prog s).aux q) :
   funext l'
   exact (column_inCol prog s q l' _).symm
 
+/-- The column of the low limb of each cell a `BLAKE3` row reads, in `blake3InputCellOffset`'s
+order (`BLAKE3_COLUMNS`: `m₀ … m₃` at `12 … 19`, `cv₀, cv₁` at `24 … 27`, `md` at `28`, `X`, `Y`,
+`W` at `30 … 41`); the high limb is the next column. -/
+def blake3InLo : Fin 13 → ℕ := ![12, 14, 16, 18, 24, 26, 28, 30, 32, 34, 36, 38, 40]
+
+set_option maxHeartbeats 4000000 in
+/-- A raw `BLAKE3` row's input cell `k` is the word of its limbs at its low limb's column and the
+next. -/
+theorem blake3RowAt_inCells {prog : LeanIsaProgram} {κ : ℕ}
+    (w : EnsembleWitness (leanIsaEnsemble prog κ)) (row : Array K) (k : Fin 13) :
+    (blake3RowAt w row).inCells k = E.ofLimbs (row[blake3InLo k]?.getD 0)
+      (row[blake3InLo k + 1]?.getD 0) := by
+  fin_cases k <;>
+    simp [Blake3Row.inCells, Blake3Row.word, blake3RowAt, valueFromOffset, explicit_provable_type,
+      circuit_norm, blake3InLo]
+
+set_option maxHeartbeats 4000000 in
+/-- A raw `BLAKE3` row's output cell `k < 2` is the word of its limbs at columns `20 + 2k, 21 + 2k`;
+past them, zero. -/
+theorem blake3RowAt_outCells {prog : LeanIsaProgram} {κ : ℕ}
+    (w : EnsembleWitness (leanIsaEnsemble prog κ)) (row : Array K) (k : Fin 13) :
+    (blake3RowAt w row).outCells k = if k.val < 2 then
+      E.ofLimbs (row[20 + 2 * k.val]?.getD 0) (row[20 + 2 * k.val + 1]?.getD 0) else 0 := by
+  fin_cases k <;>
+    simp [Blake3Row.outCells, Blake3Row.word, blake3RowAt, valueFromOffset, explicit_provable_type,
+      circuit_norm]
+
+/-- Two words of a region whose slots agree. -/
+private theorem ofLimbs_words {S : Shape} (r : FlockRegion S) (c : Column (r.logSteps + 8))
+    (x : Fin (2 ^ r.logSteps)) {a b a' b' : ℕ} (ha : a = a') (hb : b = b') :
+    E.ofLimbs (r.word c a x) (r.word c b x) = E.ofLimbs (r.word c a' x) (r.word c b' x) := by
+  rw [ha, hb]
+
+/-- The input cells' limb columns are value limbs. -/
+private theorem blake3InLo_bounds : ∀ k, 12 ≤ blake3InLo k ∧ blake3InLo k + 1 < 42 := by decide
+
+/-- The input cells' limb columns are the `QFLOCK` words the predicate reads. -/
+private theorem fSlot_inLo : ∀ k : Fin 13,
+    (fSlot ⟨opIdx 6, ⟨blake3InLo k, by rw [width_blake3]; have := blake3InLo_bounds k; omega⟩⟩ :
+      ℕ) = flockInSlots k ∧
+    (fSlot ⟨opIdx 6, ⟨blake3InLo k + 1, by rw [width_blake3]; have := blake3InLo_bounds k; omega⟩⟩ :
+      ℕ) = flockInSlots k + 1 := by decide
+
+/-- The output cells' limb columns are the `QFLOCK` words the predicate reads. -/
+private theorem fSlot_outLo : ∀ k : Fin 2,
+    (fSlot ⟨opIdx 6, ⟨20 + 2 * k.val, by rw [width_blake3]; omega⟩⟩ : ℕ) = 4 + 2 * k.val ∧
+    (fSlot ⟨opIdx 6, ⟨20 + 2 * k.val + 1, by rw [width_blake3]; omega⟩⟩ : ℕ) =
+      4 + 2 * k.val + 1 := by decide
+
+/-- **The `BLAKE3` validity** (research build). On a stack whose Flock region satisfies the Flock
+predicate, every `BLAKE3` row of the witness read off it compresses: its thirty value limbs are
+words of `QFLOCK` at their slots (`column_limb`), so its cells are the cells the predicate reads of
+the row's instance. -/
+theorem blake3RowsValid_witnessOf (h : (leanIsaInstance prog s).aux q) :
+    Blake3RowsValid (witnessOf prog s q) := by
+  intro row hrow
+  by_cases hr : s.rows 6 ≤ UInt64.size
+  swap
+  · rw [blake3Rows, show tableAt (witnessOf prog s q) 6 = opTable (witnessOf prog s q) 6 from rfl,
+      opTable_witnessOf_nil prog s q 6 hr] at hrow
+    simp at hrow
+  rw [blake3Rows, show tableAt (witnessOf prog s q) 6 = opTable (witnessOf prog s q) 6 from rfl,
+    opTable_witnessOf prog s q 6 hr, opcodeRows, List.mem_ofFn] at hrow
+  obtain ⟨x, rfl⟩ := hrow
+  set x' := Fin.castLE (s.rows_le 6) x
+  set C := (leanIsaInstance prog s).flockColumn (flockRegion prog s) q
+  -- A limb column of the row is a word of `QFLOCK`.
+  have hcell : ∀ (i : ℕ) (h1 : 12 ≤ i) (h2 : i < 42),
+      (Array.ofFn ((leanIsaInstance prog s).row q (opIdx 6) x'))[i]?.getD 0 =
+        (flockRegion prog s).word C
+          (fSlot ⟨opIdx 6, ⟨i, by rw [width_blake3]; omega⟩⟩) x' := fun i h1 h2 ↦ by
+    have hi : i < (leanIsaInstance prog s).width (opIdx 6) := by
+      show i < width (opIdx 6)
+      rw [width_blake3]; omega
+    rw [getElem?_pos _ _ (by rw [Array.size_ofFn]; exact hi), Array.getElem_ofFn,
+      Option.getD_some]
+    exact column_limb prog s q ⟨opIdx 6, ⟨i, hi⟩⟩ ⟨rfl, h1, h2⟩ x'
+  have hH := h.2 (flockRegion prog s) rfl x'
+  have hin : (blake3RowAt (witnessOf prog s q)
+      (Array.ofFn ((leanIsaInstance prog s).row q (opIdx 6) x'))).inCells =
+      (flockRegion prog s).inputs C x' := by
+    funext k
+    obtain ⟨b1, b2⟩ := blake3InLo_bounds k
+    rw [blake3RowAt_inCells, hcell _ b1 (by omega), hcell _ (by omega) b2]
+    exact ofLimbs_words _ _ _ (fSlot_inLo k).1 (fSlot_inLo k).2
+  have hout : (blake3RowAt (witnessOf prog s q)
+      (Array.ofFn ((leanIsaInstance prog s).row q (opIdx 6) x'))).outCells =
+      (flockRegion prog s).outputs C x' := by
+    funext k
+    rw [blake3RowAt_outCells]
+    by_cases hk : k.val < 2
+    · rw [ite_eq_left hk, hcell _ (by omega) (by omega), hcell _ (by omega) (by omega)]
+      have h' : (flockRegion prog s).outputs C x' k =
+          (flockRegion prog s).cell C (4 + 2 * k.val) x' := ite_eq_left hk
+      rw [h']
+      exact ofLimbs_words _ _ _ (fSlot_outLo ⟨k.val, hk⟩).1 (fSlot_outLo ⟨k.val, hk⟩).2
+    · rw [ite_eq_right hk]
+      exact (ite_eq_right hk).symm
+  have key : Blake3CellsRelation (blake3RowAt (witnessOf prog s q)
+      (Array.ofFn ((leanIsaInstance prog s).row q (opIdx 6) x'))).inCells
+      (blake3RowAt (witnessOf prog s q)
+        (Array.ofFn ((leanIsaInstance prog s).row q (opIdx 6) x'))).outCells := by
+    rw [hin, hout]
+    exact hH
+  exact key
+
 /-! ## The witness agrees with its stack -/
 
 /-- The witness read off a stack agrees with it, when its tables have at most `2^64` rows. -/
@@ -128,8 +235,8 @@ theorem agrees_witnessOf (hκ : s.logMem < 64) (hr : ∀ j, s.rows j ≤ UInt64.
     simp only [List.getElem?_ofFn, Array.getElem?_ofFn, Option.bind_some, Fin.is_lt, dite_true,
       hlt, Option.getD_some]
     rfl
-  memRows := (witnessOf_table prog s q 6).trans (memTableOf_table prog s q hκ)
-  bytecodeRows := (witnessOf_table prog s q 7).trans (bytecodeTableOf_table prog s q)
+  memRows := (witnessOf_table prog s q 7).trans (memTableOf_table prog s q hκ)
+  bytecodeRows := (witnessOf_table prog s q 8).trans (bytecodeTableOf_table prog s q)
 
 /-! ## The image and the public input -/
 
@@ -185,10 +292,10 @@ theorem constraints_witnessOf (hκ : s.logMem < 64) (hr : ∀ j, s.rows j ≤ UI
     (witnessOf prog s q).Constraints := by
   intro t ht
   obtain ⟨⟨j, hj⟩, rfl⟩ := mem_tables_iff.mp ht
-  by_cases h6 : j < 6
+  by_cases h6 : j < 7
   · exact (opcode_constraints_iff (agrees_witnessOf prog s q hκ hr) ⟨j, h6⟩).mpr
       fun x C hC ↦ hcv (opIdx ⟨j, h6⟩) C hC _
-  · have : j = 6 ∨ j = 7 := by omega
+  · have : j = 7 ∨ j = 8 := by omega
     rcases this with rfl | rfl
     · intro row _
       rw [tableAt_component]
@@ -199,17 +306,17 @@ theorem constraints_witnessOf (hκ : s.logMem < 64) (hr : ∀ j, s.rows j ≤ UI
 
 /-- The tables of the witness read off a stack have the announced row counts. -/
 private theorem table_length_witnessOf (hκ : s.logMem < 64) (hr : ∀ j, s.rows j ≤ UInt64.size)
-    (j : Fin 8) :
+    (j : Fin 9) :
     (tableAt (witnessOf prog s q) j).table.length =
-      ![s.rows 0, s.rows 1, s.rows 2, s.rows 3, s.rows 4, s.rows 5, 2 ^ s.logMem,
+      ![s.rows 0, s.rows 1, s.rows 2, s.rows 3, s.rows 4, s.rows 5, s.rows 6, 2 ^ s.logMem,
         2 ^ prog.logSize] j := by
-  by_cases h6 : (j : ℕ) < 6
+  by_cases h6 : (j : ℕ) < 7
   · have := opTable_witnessOf prog s q ⟨j, h6⟩ (hr _)
     rw [opTable] at this
-    rw [show j = ⟨(⟨j, h6⟩ : Fin 6), by omega⟩ from rfl, this, opcodeRows, List.length_ofFn]
+    rw [show j = ⟨(⟨j, h6⟩ : Fin 7), by omega⟩ from rfl, this, opcodeRows, List.length_ofFn]
     obtain ⟨j, hj⟩ := j
     interval_cases j <;> rfl
-  · have : (j : ℕ) = 6 ∨ (j : ℕ) = 7 := by omega
+  · have : (j : ℕ) = 7 ∨ (j : ℕ) = 8 := by omega
     obtain ⟨j, hj⟩ := j
     rcases this with h | h <;> simp only at h <;> subst h
     · rw [witnessOf_table]
@@ -228,7 +335,7 @@ theorem caps_witnessOf (hs : s.Admissible prog) : Caps (witnessOf prog s q) := b
   obtain ⟨j, rfl⟩ := mem_tables_iff.mp ht
   rw [table_length_witnessOf prog s q hκ hr j]
   fin_cases j
-  exacts [hrows 0, hrows 1, hrows 2, hrows 3, hrows 4, hrows 5,
+  exacts [hrows 0, hrows 1, hrows 2, hrows 3, hrows 4, hrows 5, hrows 6,
     Nat.pow_le_pow_right (by norm_num) hmax,
     Nat.pow_le_pow_right (by norm_num) prog.logSize_le]
 
@@ -276,7 +383,7 @@ theorem satisfiedBy_witnessOf {input : PublicInput} (hs : s.Admissible prog)
     (h : M3Holds (leanIsaInstance prog s) input q) :
     SatisfiedBy prog input (witnessOf prog s q) :=
   (satisfiedByB_witnessOf prog s q hs h.1 h.2.1 h.2.2.1 h.2.2.2.1).toSatisfiedBy
-    (keccakRowsValid_witnessOf prog s q h.2.2.2.2)
+    (keccakRowsValid_witnessOf prog s q h.2.2.2.2) (blake3RowsValid_witnessOf prog s q h.2.2.2.2)
 
 end
 

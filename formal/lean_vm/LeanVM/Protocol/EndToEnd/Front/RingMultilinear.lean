@@ -204,10 +204,10 @@ theorem isMultilinearFn_ringWeight (μ : ℕ) (pl : Placement) (r cs : List E) :
 
 /-- **The program's ring claim has a multilinear weight** (WHIR evaluates it at its terminal
 point). -/
-theorem isMultilinearFn_ringSwitchClaim (layout : LeanVM.Protocol.Verifier.Layout) (target : E)
-    (point cs : List E) :
+theorem isMultilinearFn_ringSwitchClaim (layout : LeanVM.Protocol.Verifier.Layout)
+    (region : ℕ) (target : E) (point cs : List E) :
     IsMultilinearFn layout.stackLog
-      (ringSwitchClaim layout target fun rPrime ↦ ringWeight point rPrime cs).1 :=
+      (ringSwitchClaim layout region target fun rPrime ↦ ringWeight point rPrime cs).1 :=
   isMultilinearFn_ringWeight _ _ _ _
 
 end

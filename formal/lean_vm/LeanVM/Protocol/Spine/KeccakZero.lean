@@ -234,35 +234,46 @@ variable (I : M3Instance)
 low `logSteps` coordinates (all of them when the region fits in the sumcheck), the point of the
 `KECCAK` table's claims. -/
 def auxAt (point : List E) (q : Column I.μ) : Prop :=
-  ∀ r ∈ I.keccak, r.HoldsOn (I.keccakColumn r q) (point.take (min r.logSteps I.τmax))
+  (∀ r ∈ I.keccak, r.HoldsOn (I.keccakColumn r q) (point.take (min r.logSteps I.τmax))) ∧
+    I.flockAux q
 
 /-- The Keccak predicate during the table sumcheck, after the challenges `ch` (in the order
 drawn): the challenges past the first `τmax − logSteps` bind the region's coordinates, highest
 first. -/
 def auxStage (ch : List E) (q : Column I.μ) : Prop :=
-  ∀ r ∈ I.keccak, r.HoldsOn (I.keccakColumn r q) ((ch.drop (I.τmax - r.logSteps)).reverse)
+  (∀ r ∈ I.keccak, r.HoldsOn (I.keccakColumn r q) ((ch.drop (I.τmax - r.logSteps)).reverse)) ∧
+    I.flockAux q
 
 /-- Before the first challenge, the Keccak predicate. -/
 theorem auxStage_nil (q : Column I.μ) : I.auxStage [] q ↔ I.aux q := by
-  simp only [auxStage, aux, List.drop_nil, List.reverse_nil, KeccakRegion.holdsOn_nil]
+  simp only [auxStage, aux, keccakAux, List.drop_nil, List.reverse_nil, KeccakRegion.holdsOn_nil]
 
 /-- After the last challenge, the Keccak predicate at the point, the challenges reversed. -/
 theorem auxStage_full (q : Column I.μ) {ch : List E} (hch : ch.length = I.τmax) :
     I.auxStage ch q ↔ I.auxAt ch.reverse q := by
   unfold auxStage auxAt
-  refine forall₂_congr fun r _ ↦ ?_
+  refine and_congr_left' (forall₂_congr fun r _ ↦ ?_)
   rw [List.reverse_drop, hch, show I.τmax - (I.τmax - r.logSteps) = min r.logSteps I.τmax by
     omega]
 
 /-- The Keccak predicate holds along every point. -/
 theorem auxAt_of_aux {q : Column I.μ} (h : I.aux q) (point : List E) : I.auxAt point q :=
-  fun r hr ↦ r.holdsOn_of_holds (h r hr) _ ((List.length_take_le _ _).trans (min_le_left _ _))
+  ⟨fun r hr ↦ r.holdsOn_of_holds (h.1 r hr) _ ((List.length_take_le _ _).trans (min_le_left _ _)),
+    h.2⟩
 
 /-- **The escape at a round of the table sumcheck**: a failing Keccak predicate passes after a
 fresh challenge at one value at most. -/
 theorem card_auxStage_push_le (q : Column I.μ) {ch : List E} (hch : ch.length < I.τmax)
     (hne : ¬ I.auxStage ch q) : Nat.card {x : E // I.auxStage (ch ++ [x]) q} ≤ 1 := by
   unfold auxStage at hne ⊢
+  by_cases hf : I.flockAux q
+  swap
+  · have : IsEmpty {x : E // (∀ r ∈ I.keccak, r.HoldsOn (I.keccakColumn r q)
+        (((ch ++ [x]).drop (I.τmax - r.logSteps)).reverse)) ∧ I.flockAux q} :=
+      ⟨fun x ↦ hf x.2.2⟩
+    rw [Nat.card_of_isEmpty]
+    exact Nat.zero_le _
+  simp only [hf, and_true] at hne ⊢
   rcases hk : I.keccak with _ | r
   · exact absurd (fun r hr ↦ by simp [hk] at hr) hne
   · simp only [hk, Option.mem_def, Option.some.injEq, forall_eq'] at hne ⊢

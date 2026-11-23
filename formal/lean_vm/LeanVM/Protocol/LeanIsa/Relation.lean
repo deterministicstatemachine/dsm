@@ -39,17 +39,17 @@ variable {prog : LeanIsaProgram} {s : Sizes} {q : Column (leanIsaμ prog s)}
 /-! ## Facts of the opcode components -/
 
 /-- No opcode table has a lookup. -/
-theorem opcode_lookups : ∀ j : Fin 6, (opcodeComponent j).rowOperations.lookups.isEmpty := by
+theorem opcode_lookups : ∀ j : Fin 7, (opcodeComponent j).rowOperations.lookups.isEmpty := by
   decide +kernel
 
 /-- Every assert expression of an opcode table reads within its width. -/
-theorem opcode_constraints_withinWidth : ∀ j : Fin 6,
+theorem opcode_constraints_withinWidth : ∀ j : Fin 7,
     ∀ e ∈ (opcodeComponent j).rowOperations.constraints,
         e.WithinWidth (opcodeComponent j).width := by
   decide +kernel
 
 /-- Every read count of an opcode table is a column. -/
-theorem opcode_countsAreVariables : ∀ j : Fin 6,
+theorem opcode_countsAreVariables : ∀ j : Fin 7,
     CountsAreVariables (opcodeComponent j) counted := by
   decide +kernel
 
@@ -82,7 +82,7 @@ private theorem forall_mem_table {t : Air.Flat.Table K} {n : ℕ} (hn : t.table.
 
 /-- On a row agreeing with `r` within the width, an opcode table's Clean constraints hold exactly
 when its constraint polynomials vanish at `r`. -/
-private theorem opcode_constraintsHold_iff (j : Fin 6) (row : Array K)
+private theorem opcode_constraintsHold_iff (j : Fin 7) (row : Array K)
     (r : Fin (opcodeComponent j).width → K) (hr : ∀ i : Fin (opcodeComponent j).width,
       row[(i : ℕ)]?.getD 0 = r i) (data : ProverData K) :
     (opcodeComponent j).operations.ConstraintsHold (Environment.fromArray row data) ↔
@@ -100,7 +100,7 @@ private theorem opcode_constraintsHold_iff (j : Fin 6) (row : Array K)
 
 /-- Opcode table `j`'s Clean constraints hold on every row exactly when the instance's constraint
 polynomials of that table vanish on every executed row of the stack. -/
-theorem opcode_constraints_iff (h : Agrees s q w) (j : Fin 6) :
+theorem opcode_constraints_iff (h : Agrees s q w) (j : Fin 7) :
     (opTable w j).Constraints ↔
       ∀ x : Fin (s.rows j), ∀ C ∈ (opcodeTable j).constraints,
         C.eval ((leanIsaInstance prog s).row q (opIdx j) (Fin.castLE (s.rows_le j) x)) = 0 := by
@@ -124,15 +124,15 @@ theorem balanced_iff_pairs (h : Agrees s q w) :
 
 /-- A counted interaction of an opcode table has at least two coordinates. -/
 private theorem opcode_counted_arity :
-    ∀ j : Fin 6, ∀ ai ∈ (opcodeComponent j).rowOperations.interactions,
+    ∀ j : Fin 7, ∀ ai ∈ (opcodeComponent j).rowOperations.interactions,
     counted ai.channel → 1 < ai.channel.arity := by
   decide +kernel
 
-/-- The first six tables of a witness are its opcode tables. -/
+/-- The first seven tables of a witness are its opcode tables. -/
 private theorem take_six_tables (w : EnsembleWitness (leanIsaEnsemble prog κ)) :
-    w.tables.take 6 = (List.finRange 6).map (opTable w) := by
-  rw [tables_eq, show List.finRange 8 = (List.finRange 6).map (fun j : Fin 6 ↦
-      (⟨j, by omega⟩ : Fin 8)) ++ [6, 7] by decide, List.map_append, List.map_map,
+    w.tables.take 7 = (List.finRange 7).map (opTable w) := by
+  rw [tables_eq, show List.finRange 9 = (List.finRange 7).map (fun j : Fin 7 ↦
+      (⟨j, by omega⟩ : Fin 9)) ++ [7, 8] by decide, List.map_append, List.map_map,
     List.take_left' (by simp)]
   rfl
 
@@ -140,16 +140,17 @@ private theorem take_six_tables (w : EnsembleWitness (leanIsaEnsemble prog κ)) 
 is nonzero on the stack's rows. -/
 private theorem m3_countsNonzero_iff :
     (leanIsaInstance prog s).CountsNonzero q ↔
-      ∀ j : Fin 6, ∀ k ∈ (opcodeTable j).count, ∀ x : Fin (s.rows j),
+      ∀ j : Fin 7, ∀ k ∈ (opcodeTable j).count, ∀ x : Fin (s.rows j),
         (leanIsaInstance prog s).row q (opIdx j) (Fin.castLE (s.rows_le j) x) k ≠ 0 := by
   constructor
   · exact fun hc j k hk x ↦ hc (opIdx j) k hk _ x.isLt
   · intro hc j'
-    rcases j' with ⟨_ | _ | _ | j, hj⟩
+    rcases j' with ⟨_ | _ | _ | _ | j, hj⟩
     · exact fun i hi ↦ absurd hi List.not_mem_nil
     · exact fun i hi ↦ absurd hi List.not_mem_nil
     · exact fun i hi ↦ absurd hi List.not_mem_nil
-    · have h9 : (leanIsaInstance prog s).ntab = 9 := rfl
+    · exact fun i hi ↦ absurd hi List.not_mem_nil
+    · have h9 : (leanIsaInstance prog s).ntab = 11 := rfl
       exact fun k hk x hx ↦ hc ⟨j, by omega⟩ k hk ⟨x.val, hx⟩
 
 /-- An interaction of a table of known length: one of its component's, on one of its rows. -/
@@ -176,7 +177,7 @@ private theorem name_of_counted {ch : RawChannel K} (h : counted ch = true) :
     ch.name = MemPull.name ∨ ch.name = BytecodePull.name := by
   simpa [counted] using h
 
-/-- **The read counts.** Every read count of the six opcode tables is nonzero exactly when every
+/-- **The read counts.** Every read count of the seven opcode tables is nonzero exactly when every
 cell of the instance's count columns is. -/
 theorem countsNonzero_iff (h : Agrees s q w) :
     CountsNonzero w ↔ (leanIsaInstance prog s).CountsNonzero q := by
