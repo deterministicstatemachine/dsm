@@ -80,7 +80,7 @@ pub(crate) enum OnlineSent {
     /// its admission is held, its outbox row was not marked, or its delivery
     /// is unknown. It stands and completes on its own: the sync finishes a
     /// held admission and the reconciliation sweep drives the outbox row
-    ///. Answered as the committed send it is, never as a refusal.
+    /// (§16.6). Answered as the committed send it is, never as a refusal.
     Undelivered { answer: AppResult, why: String },
     /// The debit is committed on this device and can never complete, for
     /// `why`: its admission cannot land (its position is held by another
@@ -145,7 +145,7 @@ pub(crate) struct CachedWithdrawalPlan {
     pub destination_address: String,
 }
 
-/// defect zero: per-step EK material captured at signing time and written
+/// §16.6 defect zero: per-step EK material captured at signing time and written
 /// LATER, inside the single pre-submit transaction.
 ///
 /// `expected_prev` is the committed Local cert head as it stood BEFORE signing.
@@ -515,7 +515,7 @@ impl AppRouterImpl {
     /// sender is this device; the relationship tip, the nonce, the signed
     /// operation and the token's ticker are derived here, never supplied.
     /// Whether the debit was committed is part of the answer: once it is, it
-    /// stands whatever becomes of its delivery (forward-only).
+    /// stands whatever becomes of its delivery (§16.6 forward-only).
     pub(crate) async fn send_online(&self, intent: OnlineSendIntent) -> OnlineSent {
         let from_device_id = self.device_id_bytes;
         let to_device_id = intent.to_device_id;
@@ -1236,7 +1236,7 @@ impl AppRouterImpl {
         let mut accepted_admission: Option<dsm::economic::admission::PendingEconomicAdmission> =
             None;
 
-        // CRITICAL: Use UNSIGNED canonical bytes for tip computation.
+        // §16.6 CRITICAL: Use UNSIGNED canonical bytes for tip computation.
         // signed_op.to_bytes() includes the SPHINCS+ signature, which the receiver cannot
         // know at σ-derivation time. signing_bytes was built from signing_op with
         // signature: Vec::new() — the same unsigned preimage used by the receiver when it
@@ -1254,7 +1254,7 @@ impl AppRouterImpl {
         // step 3, §39.3) — over h_n and the payload bytes. They are therefore
         // computed inside `build_online_send_artifacts`, from the outcome, not
         // here: nothing exists to hash before Core has prepared the step. The
-        // transfer nonce stays in the operation bytes. The receiver
+        // transfer nonce stays in the operation bytes (§39.4). The receiver
         // reads the entropy off the signed receipt (canonical field 21) and
         // recomputes both hashes.
         let op_bytes = op_bytes_for_tip;
@@ -1265,7 +1265,7 @@ impl AppRouterImpl {
         // A-side (asymmetric) chain tip that now sits in DeviceState.smt. The
         // symmetric `new_chain_tip` is still used downstream for
         // contacts.chain_tip + b0x addressing.
-        // defect zero: EK material captured during signing, written later
+        // §16.6 defect zero: EK material captured during signing, written later
         // inside the single pre-submit transaction (see PendingEkMaterial).
         // =====================================================================
         // GAP 1 — STAGED PAYLOAD.
@@ -1345,7 +1345,7 @@ impl AppRouterImpl {
 
                 // §4.2 + §11.1 Non-repudiation: Sender answers the receipt
                 // challenge as sig_a using a freshly-derived per-step ephemeral
-                // SPHINCS+ key.
+                // SPHINCS+ key (§11.1).
                 // The cert chain anchors the per-step EK back to the device's AK_pk;
                 // the receipt response is verified against the EK_pk_a carried in
                 // the envelope (proto field 16). Verifiers don't need the wallet's
@@ -1369,7 +1369,7 @@ impl AppRouterImpl {
             };
 
             // =====================================================================
-            // CANONICAL SENDER PROPOSAL (proposal authority) — ONE persisted
+            // §16.6 CANONICAL SENDER PROPOSAL (proposal authority) — ONE persisted
             // record written BEFORE any wire work. Its canonical pair comes from
             // the SIGNED artifact itself; its projection pair is the symmetric
             // routing lineage snapshotted at preparation. Every downstream
@@ -1415,7 +1415,7 @@ impl AppRouterImpl {
                 }
             };
             // =====================================================================
-            // DEFECT ZERO — ATOMIC PRE-SUBMIT COMMIT.
+            // §16.6 DEFECT ZERO — ATOMIC PRE-SUBMIT COMMIT.
             //
             // Everything the transfer needs locally lands in ONE transaction BEFORE
             // a single byte goes to the network: proposal, pending online gate,
@@ -1505,7 +1505,7 @@ impl AppRouterImpl {
             // into the transfer params below.
             let recipient_genesis_b32_for_evidence = recipient_genesis_b32.clone();
 
-            // Compute the tip-scoped b0x routing address.
+            // §16.4: Compute the tip-scoped b0x routing address.
             // The address is a single base32(32) digest over domain-separated
             // genesis/device/tip components, and the recipient derives the same
             // routing key during storage.sync polling.
@@ -1562,7 +1562,7 @@ impl AppRouterImpl {
             };
 
             // ============================================================
-            // DEFECT ZERO — DURABILITY BEFORE DELIVERABILITY.
+            // §16.6 DEFECT ZERO — DURABILITY BEFORE DELIVERABILITY.
             //
             // The submission inputs are now fully determined, so freeze them
             // into the outbox row and commit proposal + gate + pending EK head
@@ -1855,7 +1855,7 @@ impl AppRouterImpl {
                         );
                         b0x_succeeded = true;
                         b0x_message_id = Some(delivered.transfer_id.clone());
-                        // proposal authority: bind the wire identity to
+                        // §16.6 proposal authority: bind the wire identity to
                         // the persisted proposal (exactly once). Guarded on
                         // `proposed` so a late completion can never drag a
                         // step that already finalized back to `submitted`.
@@ -1904,7 +1904,7 @@ impl AppRouterImpl {
         // shared SMT, persisted transaction/projection rows, and in-memory caches.
         // =====================================================================
         // =====================================================================
-        // DEFECT ZERO — FORWARD-ONLY AFTER THE DURABLE COMMIT.
+        // §16.6 DEFECT ZERO — FORWARD-ONLY AFTER THE DURABLE COMMIT.
         //
         // A submission failure here is NOT proof of non-delivery. A quorum may
         // have accepted the envelope while the response was lost, the socket
@@ -2058,7 +2058,7 @@ impl AppRouterImpl {
     }
 
     /// Sign a built receipt as its sender (party A): sig_a with a per-step
-    /// ephemeral key chained from this device's AK, the
+    /// ephemeral key chained from this device's AK (whitepaper §11.1), the
     /// key encapsulated for the recipient's Kyber key. Returns the full
     /// receipt bytes with `sig_a`, `ek_pk_a` and `ek_cert_a` stamped, and the
     /// pending EK material the durable commit stashes beside the proposal.
@@ -2102,7 +2102,7 @@ impl AppRouterImpl {
                         }
                     };
 
-                    // defect zero: snapshot the committed Local cert head
+                    // §16.6 defect zero: snapshot the committed Local cert head
                     // BEFORE signing. Signing must run outside the durable
                     // transaction (it reads cert heads through its own
                     // connection), so this snapshot is what the later CAS
@@ -2122,7 +2122,7 @@ impl AppRouterImpl {
                         .ok()
                         .flatten();
 
-                    // Per-step Kyber: encapsulate
+                    // Per-step Kyber per whitepaper §11: encapsulate
                     // against the recipient's Kyber pubkey to derive
                     // `k_step`. Pull the pubkey from the contact record;
                     // fail-closed if missing (no root path — contact
@@ -2146,7 +2146,7 @@ impl AppRouterImpl {
                             }
                         };
 
-                    // Sign with per-step EK (cert chain).
+                    // Sign with per-step EK (whitepaper §11.1 cert chain).
                     let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
                         commitment: &commitment,
                         h_n: receipt.parent_tip,
@@ -2181,7 +2181,7 @@ impl AppRouterImpl {
                             // the sender's committed head unchanged for a transfer
                             // that is never accepted, so a failed/timed-out attempt
                             // cannot run the chain ahead of the receiver.
-                            // defect zero: the pending head is NOT written
+                            // §16.6 defect zero: the pending head is NOT written
                             // here. It is committed in ONE transaction with the
                             // proposal, the gate, and the durable outbox row —
                             // before anything is submitted — so a local failure can

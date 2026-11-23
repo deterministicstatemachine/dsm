@@ -9,13 +9,8 @@ A storage node keeps bytes and hands them back. It:
 
 - **never establishes validity** — Core's construction predicates do, on the
   device, from the bytes;
-- **keeps every value it takes** at a key, in arrival order, and replaces,
-  compares and deduplicates nothing; which value counts is the reader's
-  question (storage spec §6, §9);
-- **refuses a write on one check only**, the same on every node: a cell one
-  party owns, and every inbox, takes a write only when the key its address is
-  bound to signed it (storage spec §6 rule 6, §8). The node holds no list of
-  owners and makes no judgment;
+- **refuses no value** at a key and deduplicates nothing; which value counts is
+  the reader's question (storage spec §6, §9);
 - **never opens** a spool envelope (storage spec §8);
 - **holds no protocol key and signs no protocol object**; its TLS key
   authenticates its endpoint only, and its ByteCommits are unsigned evidence a
@@ -26,8 +21,8 @@ Client (Android / Web)
   │  HTTPS + protobuf
   ▼
 Storage Node (Rust / Axum)
-  ├── Keyed cells and indexes           (§6, §7)
-  ├── Immutable content-addressed store (§5)
+  ├── Keyed cells and indexes           (storage contract, Part II §12)
+  ├── Immutable content-addressed store (storage contract)
   ├── ByteCommits and the set-mate mirror (§14)
   └── b0x inbox spool                   (§8)
        │
