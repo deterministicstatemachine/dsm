@@ -144,5 +144,5 @@ pub(crate) fn output_claim(ps: &mut ProverState, shape: Shape, inputs: &[[u64; S
 /// holds the committed states alone.
 pub(crate) fn open_commitment(ps: &mut ProverState, committed: Committed, stack: Vec<F64>, openings: Openings) {
     let (ring, outputs) = openings.into_pcs_claims(0);
-    pcs::open(ps, committed, stack, outputs.as_slice(), &ring);
+    pcs::open(ps, committed, stack, outputs.as_slice(), std::slice::from_ref(&ring));
 }

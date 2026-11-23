@@ -361,7 +361,7 @@ mod tests {
                 let prove = |msg: &[F64]| {
                     let mut ps = ProverState::from_label(b"whir-test");
                     let committed = commit(&mut ps, msg, log_n, MIN_LOG_INV_RATE);
-                    open(&mut ps, committed, msg.to_vec(), &claims, &ring);
+                    open(&mut ps, committed, msg.to_vec(), &claims, std::slice::from_ref(&ring));
                     ps.into_proof()
                 };
                 assert_eq!(prove(&witness[..used]), prove(&witness), "n_lanes = {n_lanes}");

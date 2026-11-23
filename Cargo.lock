@@ -298,6 +298,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
+name = "flock"
+version = "0.1.0"
+dependencies = [
+ "flock_parallel",
+ "rand",
+ "stable_pcs",
+ "stable_primitives",
+ "tracing",
+]
+
+[[package]]
+name = "flock_parallel"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -92,7 +92,7 @@ pub fn open(
     committed: Committed,
     stack: Vec<F64>,
     point_claims: &[StackClaim],
-    ring: &RingSwitchOpen,
+    rings: &[RingSwitchOpen],
 ) {
     let Committed {
         prover_data,
@@ -103,30 +103,40 @@ pub fn open(
     let config = verifier::derive_config(log_n, log_inv_rate)
         .unwrap_or_else(|e| panic!("whir config for log_n={log_n}, log_inv_rate={log_inv_rate}: {e}"));
     let point_claims = [point_claims, &[ood]].concat();
-    let qkeccak = 1usize << ring.qkeccak_vars();
-    assert!(ring.offset.is_multiple_of(qkeccak), "q_keccak is aligned");
-    assert!(ring.offset + qkeccak <= stack.len(), "q_keccak lies inside the stack");
-    assert!(
-        ring.points.iter().all(|point| point.len() == ring.qkeccak_vars()),
-        "every ring claim is on q_keccak"
-    );
+    // Each region a reduction ring-switches (q_keccak, q_flock) is aligned, inside the stack, and every one of its
+    // claims spans it.
+    for ring in rings {
+        let region = 1usize << ring.qkeccak_vars();
+        assert!(ring.offset.is_multiple_of(region), "a ring region is aligned");
+        assert!(ring.offset + region <= stack.len(), "a ring region lies inside the stack");
+        assert!(
+            ring.points.iter().all(|point| point.len() == ring.qkeccak_vars()),
+            "every ring claim spans its region"
+        );
+    }
+    let n_rings: usize = rings.iter().map(|ring| ring.points.len()).sum();
     for StackClaim { offset, low_point } in &point_claims {
         assert!(
             offset + (1 << low_point.len()) <= 1 << log_n,
             "every claim lies inside the stack"
         );
     }
-    assert!(ring.points.len() + point_claims.len() <= MAX_STACKED_CLAIMS);
+    assert!(n_rings + point_claims.len() <= MAX_STACKED_CLAIMS);
     // One grind covers the map's challenges and lambda: one verifier message.
     ps.grind(BATCH_GRINDING_BITS);
     let phi = ring_switch::coordinate_weights(&std::array::from_fn(|_| ps.sample()));
-    let lambdas = powers(ps.sample(), ring.points.len() + point_claims.len());
-    let (ring_lambdas, point_lambdas) = lambdas.split_at(ring.points.len());
-    let rings: Vec<RingWeight> = ring
-        .points
+    let lambdas = powers(ps.sample(), n_rings + point_claims.len());
+    let (ring_lambdas, point_lambdas) = lambdas.split_at(n_rings);
+    // The ring claims in region order, then claim order within a region: the verifier's order.
+    let ring_points: Vec<(usize, &Vec<F128>)> = rings
+        .iter()
+        .flat_map(|ring| ring.points.iter().map(move |point| (ring.offset, point)))
+        .collect();
+    let ring_offsets: Vec<usize> = ring_points.iter().map(|&(offset, _)| offset).collect();
+    let weights: Vec<RingWeight> = ring_points
         .iter()
         .zip(ring_lambdas)
-        .map(|(point, &lambda)| RingWeight {
+        .map(|(&(_, point), &lambda)| RingWeight {
             phi: phi.map(|w| lambda * w),
             point: point.clone(),
         })
@@ -134,7 +144,7 @@ pub fn open(
 
     let lane_vars = log_n - INITIAL_FOLDING_FACTOR;
     let (terms, a) = tracing::info_span!("Basis")
-        .in_scope(|| basis::initial_basis(log_n, lane_vars, &point_claims, point_lambdas, ring.offset, &rings));
+        .in_scope(|| basis::initial_basis(log_n, lane_vars, &point_claims, point_lambdas, &ring_offsets, &weights));
     whir::open(ps, &config, LaneRounds::new(stack, terms, a), prover_data);
 }
 
@@ -254,7 +264,7 @@ mod tests {
                 }
 
                 let (terms, a) =
-                    basis::initial_basis(lane_vars + LANE_ROUNDS, lane_vars, &claims, &lambdas, offset, &rings);
+                    basis::initial_basis(lane_vars + LANE_ROUNDS, lane_vars, &claims, &lambdas, &[offset; 2], &rings);
                 let mut lanes = LaneRounds::new(stack.clone(), terms, a);
                 let context =
                     format!("lane_vars={lane_vars}, lanes={lanes_count}, qkeccak_vars={qkeccak_vars}, offset={offset}");

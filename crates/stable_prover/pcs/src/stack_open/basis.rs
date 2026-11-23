@@ -302,17 +302,18 @@ impl<'a> Projection<'a> {
 /// The opening's weight as terms, and its table `A`: a row of [`Terms::n_terms`] for each of the
 /// `2^(log_n - lane_vars)` lanes.
 ///
-/// `lane_vars` must be at least [`LOW_VARS`], and every claim must lie inside `2^log_n` words. The ring claims lie at
-/// `ring_offset`.
+/// `lane_vars` must be at least [`LOW_VARS`], and every claim must lie inside `2^log_n` words. Ring claim `i` lies at
+/// `ring_offsets[i]`.
 pub(super) fn initial_basis(
     log_n: usize,
     lane_vars: usize,
     claims: &[StackClaim],
     lambdas: &[F128],
-    ring_offset: usize,
+    ring_offsets: &[usize],
     rings: &[RingWeight],
 ) -> (Terms, Vec<F128>) {
     assert_eq!(claims.len(), lambdas.len());
+    assert_eq!(ring_offsets.len(), rings.len());
     assert!(lane_vars >= LOW_VARS, "a lane block holds at least one block");
     let factors: Vec<Vec<Factor>> = claims
         .iter()
@@ -352,6 +353,7 @@ pub(super) fn initial_basis(
     }
     let mut ring_lanes = Vec::new();
     for (i, weight) in rings.iter().enumerate() {
+        let ring_offset = ring_offsets[i];
         let factors = point_factors(&weight.point, ring_offset, log_n);
         terms.rings.push(Ring {
             fold: BitFold::new(&table(&factors[..LOW_VARS])),

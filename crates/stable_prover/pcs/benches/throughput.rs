@@ -69,7 +69,7 @@ fn main() {
 
         let stack = witness.clone();
         let t = Instant::now();
-        tracing::info_span!("PCS open").in_scope(|| open(&mut ps, committed, stack, &claims, &ring));
+        tracing::info_span!("PCS open").in_scope(|| open(&mut ps, committed, stack, &claims, std::slice::from_ref(&ring)));
         open_t.push(t.elapsed().as_secs_f64());
         black_box(ps.into_proof());
     });
