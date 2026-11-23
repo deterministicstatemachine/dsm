@@ -122,13 +122,13 @@ def tableCubic (e : List E) (m : ℕ) (eqm : Array E) (h : ℕ) (w σ : E)
     let a := w * (1 + e.getD m 0)
     (a * g.1, a * g.2.1 + w * g.1, a * g.2.2 + w * g.2.1, w * g.2.2)
 
-/-- **The round polynomial**, its four coefficients constant first: the six tables'
+/-- **The round polynomial**, its four coefficients constant first: the seven tables'
 contributions, the equality weights of the coordinates below the bound one computed once. -/
 def tableRound (e : List E) (logs : List ℕ) (terms : Array (List (List ℕ × E)))
     (sigma : Array E) (st : TableState) : List E :=
   let m := st.free - 1
   let eqm := eqTable (e.take m)
-  let c := Nat.fold 6 (fun t _ acc ↦ Cubic.add acc (tableCubic e m eqm (logs.getD t 0)
+  let c := Nat.fold 7 (fun t _ acc ↦ Cubic.add acc (tableCubic e m eqm (logs.getD t 0)
     (st.weights.getD t 0) (sigma.getD t 0) (terms.getD t []) (st.cols.getD t #[]))) (0, 0, 0, 0)
   [c.1, c.2.1, c.2.2.1, c.2.2.2]
 
@@ -136,9 +136,9 @@ def tableRound (e : List E) (logs : List ℕ) (terms : Array (List (List ℕ × 
 columns fixed there, every weight times its factor. -/
 def tableFold (e : List E) (logs : List ℕ) (st : TableState) (c : E) : TableState :=
   let m := st.free - 1
-  { cols := Array.ofFn (n := 6) fun t ↦
+  { cols := Array.ofFn (n := 7) fun t ↦
       if m < logs.getD t 0 then (st.cols.getD t #[]).map (foldHigh c) else st.cols.getD t #[]
-    weights := Array.ofFn (n := 6) fun t ↦
+    weights := Array.ofFn (n := 7) fun t ↦
       st.weights.getD t 0 * tableFactor e (logs.getD t 0) m c
     free := m }
 
@@ -159,7 +159,7 @@ def finalEvals (F : Array (Array E)) : List E :=
 
 /-- Every table's column evaluations at the end, in table order. -/
 def tableEvals (st : TableState) : List E :=
-  (List.range 6).flatMap fun t ↦ finalEvals (st.cols.getD t #[])
+  (List.range 7).flatMap fun t ↦ finalEvals (st.cols.getD t #[])
 
 /-- The number of powers of `ξ`: the constraints' and one per side (`n_xi_powers`,
 `crates/lean_vm_core/src/cpu/mod.rs`; `crates/verifier/src/lib.rs`). -/
@@ -173,17 +173,17 @@ def xiPowers (xi : E) : List E × List E :=
 
 /-- Every table's polynomial, batched by the powers of `ξ`. -/
 def tableTermsOf (xi : E) (bus : BusResult) : Array (List (List ℕ × E)) :=
-  Array.ofFn (n := 6) fun t ↦ rowTerms (xiPowers xi).1 (xiPowers xi).2 bus.forms t
+  Array.ofFn (n := 7) fun t ↦ rowTerms (xiPowers xi).1 (xiPowers xi).2 bus.forms t
 
 /-- Every table's columns, lifted to `E`, from the instance's columns by global number. -/
 def tableInit (cols : Array (Array K)) : Array (Array (Array E)) :=
-  Array.ofFn (n := 6) fun t ↦ Array.ofFn (n := (tables.getD t default).width) fun i ↦
+  Array.ofFn (n := 7) fun t ↦ Array.ofFn (n := (tables.getD t default).width) fun i ↦
     (cols.getD (globalColumnBases.getD t 0 + i.val) #[]).map ofK
 
 /-- Every table's `σ`. -/
 def tableSigmas (e : List E) (logs : List ℕ) (terms : Array (List (List ℕ × E)))
     (F0 : Array (Array (Array E))) : Array E :=
-  Array.ofFn (n := 6) fun t ↦
+  Array.ofFn (n := 7) fun t ↦
     tableSigma e (logs.foldl max 0) (logs.getD t 0) (terms.getD t []) (F0.getD t #[])
 
 /-- **The table phase, executable.** From the instance's columns `cols` (indexed by global
@@ -196,7 +196,7 @@ def tableFast (cols : Array (Array K)) (logs : List ℕ) (bus : BusResult) : Scr
     let terms := tableTermsOf xi bus
     let sigma := tableSigmas bus.point logs terms F0
     (sumcheckBy (tableRound bus.point logs terms sigma) (tableFold bus.point logs)
-      (List.replicate (logs.foldl max 0) none) ⟨F0, Array.replicate 6 1, logs.foldl max 0⟩).bind
+      (List.replicate (logs.foldl max 0) none) ⟨F0, Array.replicate 7 1, logs.foldl max 0⟩).bind
       fun r ↦ Script.sendList (tableEvals r.2)
 
 end LeanVM.Prover

@@ -563,8 +563,8 @@ def selectorPoint (selector length : ℕ) : List E :=
 def busBits : ℕ := 4
 
 /-- `NUM_GLOBAL_COLUMNS`: the columns no instruction table owns, first in the global numbering
-(`layout.rs`). -/
-def globalColumnCount : ℕ := 5
+(`layout.rs`; the research build's sixth, `QFLOCK`). -/
+def globalColumnCount : ℕ := 6
 
 /-- Global column `MEMORY_0` (`layout.rs`), the memory's low limb; then `MEMORY_1`, its high
 limb, `MEMORY_FINAL_COUNTERS`, `BYTECODE_FINAL_COUNTERS`. -/
@@ -576,9 +576,29 @@ def bytecodeFinalCounters : ℕ := 3
 lanes and the state after every `KECCAK_DEPTH` rounds but the last, a lane per slot, and in the
 slots left over the `KECCAK` table's own first committed columns (`keccakSlot`; `layout.rs`). -/
 def qkeccak : ℕ := 4
+/-- Global column `QFLOCK` (research build), Flock's packed witness of every `BLAKE3` instance,
+committed slot-major: word `w` of instance `j` at `w · 2^height + j`, so each 64-bit word the VM
+reads or writes is a column block of its own (`flockSlot`; `layout.rs`). -/
+def qflock : ℕ := 5
 
 /-- `K_BITS`: a `K` word's bits (`layout.rs`). -/
 def kBits : ℕ := 64
+
+/-- `BLAKE3_R1CS_LOG_SIZE`: Flock's BLAKE3 circuit, one compression per block of `2^14` witness
+bits, `2^8` words (`layout.rs`). -/
+def blake3R1csLogSize : ℕ := 14
+
+/-- `FLOCK_K_SKIP`: the univariate skip binds the `6` packing bits (`layout.rs`). -/
+def flockKSkip : ℕ := 6
+
+/-- `FLOCK_NUM_LINCHECK_ROUNDS`: the lincheck binds the `8` word bits (`layout.rs`). -/
+def flockNumLincheckRounds : ℕ := blake3R1csLogSize - flockKSkip
+
+/-- `QFLOCK_SLOT_BITS`: the bits of a word's index in an instance, `8` (`layout.rs`). -/
+def qflockSlotBits : ℕ := blake3R1csLogSize - flockKSkip
+
+/-- `BLAKE3_CONSTANT_COLUMN`: bit `512` of an instance is the constant wire (`layout.rs`). -/
+def blake3ConstantColumn : ℕ := 512
 
 /-- `KECCAK_DEPTH`: the reduction commits a step's state every `12` rounds (`layout.rs`). -/
 def keccakDepth : ℕ := 12
@@ -613,14 +633,15 @@ def sepState : E := 1
 def sepMem : E := gen
 def sepBytecode : E := gen ^ 2
 
-/-- The opcodes' numbers `OP_XOR`, `OP_MUL`, `OP_SET`, `OP_DEREF`, `OP_JUMP`, `OP_KECCAK`
-(`layout.rs`). -/
+/-- The opcodes' numbers `OP_XOR`, `OP_MUL`, `OP_SET`, `OP_DEREF`, `OP_JUMP`, `OP_KECCAK`,
+`OP_BLAKE3` (`layout.rs`). -/
 def opXor : ℕ := 0
 def opMul : ℕ := 1
 def opSet : ℕ := 2
 def opDeref : ℕ := 3
 def opJump : ℕ := 4
 def opKeccak : ℕ := 5
+def opBlake3 : ℕ := 6
 
 /-! ### Placements (`Placement`, `multilinear.rs`) -/
 
@@ -953,6 +974,73 @@ def flushesKeccak : Flushes :=
       else f.memoryIf (if cell = 1 then c "out_two" else c "out_all")
         (Form.prod fp (c "o_out") cell) count values) f) f
 
+/-- `BLAKE3_COLUMNS` (`layout.rs`, research build): the operands, the thirty value limbs, which
+are `q_flock`'s words and not committed here (`flockSlot`), then the read counts. -/
+def blake3Columns : List String :=
+  ["pc", "fp", "o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md", "o_x", "o_y", "o_w",
+    "m0_lo", "m0_hi", "m1_lo", "m1_hi", "m2_lo", "m2_hi", "m3_lo", "m3_hi",
+    "out0_lo", "out0_hi", "out1_lo", "out1_hi", "cv0_lo", "cv0_hi", "cv1_lo", "cv1_hi", "md_lo",
+    "md_hi", "x0_lo", "x0_hi", "x1_lo", "x1_hi", "y0_lo", "y0_hi", "y1_lo", "y1_hi", "w0_lo",
+    "w0_hi", "w1_lo", "w1_hi",
+    "cnt_m0", "cnt_m1", "cnt_m2", "cnt_m3", "cnt_cv0", "cnt_cv1", "cnt_out0", "cnt_out1", "cnt_md",
+    "cnt_x0", "cnt_x1", "cnt_y0", "cnt_y1", "cnt_w0", "cnt_w1", "cnt_bc"]
+
+/-- `BLAKE3_SLOTS` (`layout.rs`): which of Flock's 64-bit words each value limb is: the chaining
+value (words `0…4`), the output (`4…8`), the message block (`10…18`), the metadata (`18`, `19`),
+then `X`, `Y`, `W` (`181…193`). Word `8` holds the constant wire. -/
+def blake3Slots : List (String × ℕ) :=
+  [("cv0_lo", 0), ("cv0_hi", 1), ("cv1_lo", 2), ("cv1_hi", 3), ("out0_lo", 4), ("out0_hi", 5),
+    ("out1_lo", 6), ("out1_hi", 7), ("m0_lo", 10), ("m0_hi", 11), ("m1_lo", 12), ("m1_hi", 13),
+    ("m2_lo", 14), ("m2_hi", 15), ("m3_lo", 16), ("m3_hi", 17), ("md_lo", 18), ("md_hi", 19),
+    ("x0_lo", 181), ("x0_hi", 182), ("x1_lo", 183), ("x1_hi", 184), ("y0_lo", 185), ("y0_hi", 186),
+    ("y1_lo", 187), ("y1_hi", 188), ("w0_lo", 189), ("w0_hi", 190), ("w1_lo", 191), ("w1_hi", 192)]
+
+/-- `blake3_slot(name)` (`layout.rs`): the slot a `BLAKE3` column's name is, if it is a value
+limb. -/
+def blake3Slot (name : String) : Option ℕ := (blake3Slots.find? (·.1 = name)).map (·.2)
+
+/-- `limb(lo, hi)` (`blake3.rs`): two little-endian 32-bit words as a 64-bit limb. -/
+def blake3Limb (lo hi : UInt32) : ℕ := lo.toNat + 2 ^ 32 * hi.toNat
+
+/-- `ONE_BLOCK` (`blake3.rs`): the chunk counter, block length and flags of a one-block 64-byte
+message, `CHUNK_START | CHUNK_END | ROOT`. -/
+def blake3OneBlock : UInt64 × UInt32 × UInt32 := (0, 64, 1 ||| 2 ||| 8)
+
+/-- `blake3_padding_word(slot)` (`layout.rs`): the word of Flock's padding instance, `blake3(0^64)`
+as one block, at `slot`: the IV, the digest, a zero message, the metadata (chunk `0`; `64` bytes and
+the one-block flags), zero `X`, `Y`, `W`. The compression is the instruction's
+(`Semantics.Blake3.compress`, `LeanIsa.lean`; `blake3::compress`, `blake3.rs`). -/
+def blake3PaddingWord (slot : ℕ) : ℕ :=
+  let iv := Semantics.Blake3.iv
+  let digest := Semantics.Blake3.compress iv (Array.replicate 16 0) blake3OneBlock.1
+    blake3OneBlock.2.1 blake3OneBlock.2.2
+  if slot < 4 then blake3Limb iv[2 * slot]! iv[2 * slot + 1]!
+  else if slot < 8 then blake3Limb digest[2 * (slot - 4)]! digest[2 * (slot - 4) + 1]!
+  else if slot = 18 then blake3OneBlock.1.toNat
+  else if slot = 19 then blake3Limb blake3OneBlock.2.1 blake3OneBlock.2.2
+  else 0
+
+/-- `flushes_blake3()` (`layout.rs`): the state step, the bytecode read of the ten operands, then
+the fifteen cells accessed, as (cell, operand, offset from it): four addressed message cells, the
+consecutive chaining-value and output pairs, the metadata cell, then the `X`, `Y` and `W` pairs,
+each holding two of `q_flock`'s words, a low limb and a high one. -/
+def flushesBlake3 : Flushes :=
+  let c := columnIndexByName blake3Columns
+  let fp := c "fp"
+  let f : Flushes := {}
+  let f := f.stateStep (c "pc") fp
+  let f := f.bytecode (c "pc") (c "cnt_bc") opBlake3
+    (["o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md", "o_x", "o_y", "o_w"].map
+      fun name ↦ Form.col (c name))
+  let cells : List (String × String × ℕ) :=
+    [("m0", "o_0", 0), ("m1", "o_1", 0), ("m2", "o_2", 0), ("m3", "o_3", 0), ("cv0", "o_v", 0),
+      ("cv1", "o_v", 1), ("out0", "o_out", 0), ("out1", "o_out", 1), ("md", "o_md", 0),
+      ("x0", "o_x", 0), ("x1", "o_x", 1), ("y0", "o_y", 0), ("y1", "o_y", 1), ("w0", "o_w", 0),
+      ("w1", "o_w", 1)]
+  cells.foldl (fun f (cell, operand, exponent) ↦
+    f.memoryCols (Form.prod fp (c operand) exponent) (c ("cnt_" ++ cell))
+      [c (cell ++ "_lo"), c (cell ++ "_hi")]) f
+
 /-- One instruction's table: its columns, its bus flushes, its constraints
 (`layout.rs`). -/
 structure Table where
@@ -983,16 +1071,22 @@ def tables : List Table :=
     ⟨opSet, setColumns, flushesSet, fun _ ↦ []⟩,
     ⟨opDeref, derefColumns, flushesDeref, fun _ ↦ []⟩,
     ⟨opJump, jumpColumns, flushesJump, jumpConstraints⟩,
-    ⟨opKeccak, keccakColumns, flushesKeccak, fun _ ↦ []⟩]
+    ⟨opKeccak, keccakColumns, flushesKeccak, fun _ ↦ []⟩,
+    ⟨opBlake3, blake3Columns, flushesBlake3, fun _ ↦ []⟩]
 
 /-- `Table::padding` (`layout.rs`): the row a padding row holds, zero but for
 `KECCAK`'s output lanes `KECCAK_OUT …`, a padding row permuting zeros (`keccak_f` of the zero
-state). -/
+state), and `BLAKE3`'s value limbs, `q_flock`'s words, which hold its padding instance
+(`blake3PaddingWord`). -/
 def Table.padding (t : Table) : List E :=
   let output := keccakF1600 (Vector.replicate 25 0)
   (List.range t.width).map fun i ↦
     if t.opcode = opKeccak ∧ keccakOut ≤ i ∧ i < keccakOut + 25 then
       eOfNat (Keccak.lane output (i - keccakOut)).toNat
+    else if t.opcode = opBlake3 then
+      match blake3Slot (t.columns.getD i "") with
+      | some slot => eOfNat (blake3PaddingWord slot)
+      | none => 0
     else 0
 
 /-- `TABLE_WIDTHS` (`layout.rs`). -/
@@ -1004,7 +1098,7 @@ def globalColumnBases : List ℕ :=
 
 /-- `TABLE_LOG_FLOORS` (`layout.rs`): each table's least log-height, `0` but for
 `KECCAK`, the Keccak reduction's block of steps. -/
-def tableLogFloors : List ℕ := [0, 0, 0, 0, 0, keccakMinStepsLog]
+def tableLogFloors : List ℕ := [0, 0, 0, 0, 0, keccakMinStepsLog, 0]
 
 /-! ### The bus layout (`layout.rs`, `bus.rs`, `lib.rs`) -/
 
@@ -1106,34 +1200,45 @@ def keccakSlot (column : ℕ) : Option ℕ :=
     keccakSlotOf (column - globalColumnBases.getD opKeccak 0)
   else none
 
+/-- The `q_flock` word a global column is, if it is one of the `BLAKE3` value limbs
+(`qflock_slot`, `layout.rs`); `none` for every other column, those below the `BLAKE3` base
+(where `checked_sub` fails) among them. -/
+def flockSlot (column : ℕ) : Option ℕ :=
+  if globalColumnBases.getD opBlake3 0 ≤ column then
+    (blake3Columns[column - globalColumnBases.getD opBlake3 0]?).bind blake3Slot
+  else none
+
 /-- The global columns of the `KECCAK` output lanes, in lane order (`outputs`,
 `layout.rs`; the columns of `values[KECCAK_OUT..KECCAK_OUT + STATE_LANES]`,
 `lib.rs`). -/
 def keccakOutputColumns : List ℕ :=
   (List.range 25).map (globalColumnBases.getD opKeccak 0 + keccakOut + ·)
 
-/-- Every column's log-size, in global order: the framework's, `q_keccak`'s, then each table's
-block (`column_kappas`, `layout.rs`). -/
+/-- Every column's log-size, in global order: the framework's, `q_keccak`'s, `q_flock`'s, then
+each table's block (`column_kappas`, `layout.rs`). -/
 def columnKappas (logMemory logBytecode : ℕ) (tableLogHeights : List ℕ) : List ℕ :=
   let qkeccakKappa := tableLogHeights.getD opKeccak 0 + qkeccakSlotBits
-  [logMemory, logMemory, logMemory, logBytecode, qkeccakKappa] ++
+  let qflockKappa := tableLogHeights.getD opBlake3 0 + qflockSlotBits
+  [logMemory, logMemory, logMemory, logBytecode, qkeccakKappa, qflockKappa] ++
     tables.flatMap fun t ↦ List.replicate t.width (tableLogHeights.getD t.opcode 0)
 
 /-- The placements of every column, and the stack's log-size (`layout.rs`): the
 committed columns (every column but those with a `q_keccak` slot, the `KECCAK` input lanes and
-the table's first fourteen committed columns, and the `KECCAK` output lanes: `101` of `165`)
-stacked by `stack_offsets`, a column with a slot at `q_keccak`'s offset plus its slot's `2^κ`
-words, an output lane nowhere. -/
+the table's first fourteen committed columns, those with a `q_flock` slot, the `BLAKE3` value
+limbs, and the `KECCAK` output lanes) stacked by `stack_offsets`, a column with a slot at
+`q_keccak`'s or `q_flock`'s offset plus its slot's `2^κ` words, an output lane nowhere. -/
 def placementsOf (kappas : List ℕ) : List (Option Placement) × ℕ :=
   let blockCols := (List.range kappas.length).filter fun c ↦
-    (keccakSlot c).isNone ∧ c ∉ keccakOutputColumns
+    (keccakSlot c).isNone ∧ (flockSlot c).isNone ∧ c ∉ keccakOutputColumns
   let (blockOffsets, totalLog) := stackOffsets (blockCols.map (kappas.getD · 0))
   let offsetOf := fun c ↦ blockOffsets.getD (blockCols.idxOf c) 0
   let placements := kappas.zipIdx.map fun (kappa, column) ↦
-    match keccakSlot column with
-    | some slot =>
+    match keccakSlot column, flockSlot column with
+    | some slot, _ =>
       some ({ variableCount := kappa, index := offsetOf qkeccak + slot * 2 ^ kappa } : Placement)
-    | none =>
+    | none, some slot =>
+      some ({ variableCount := kappa, index := offsetOf qflock + slot * 2 ^ kappa } : Placement)
+    | none, none =>
       if column ∈ keccakOutputColumns then none
       else some { variableCount := kappa, index := offsetOf column }
   (placements, max Whir.minLogStack totalLog)
@@ -1987,10 +2092,335 @@ def verifyKeccak (logSteps : ℕ) (inst output : List E) : VerifierProgram
   return (outputs, low ++ claim.point.take packBits ++ slot, slices)
 
 /-!
+## Flock (`crates/verifier/src/flock.rs`, research build)
+
+Flock's reduction of the `BLAKE3` table's validity (Succinct Labs' Flock, carried to this tree's
+`E`): a zerocheck of the circuit's rank-one constraints `(A z) ∘ (B z) = C z`, `C = I`, over every
+instance of `q_flock`, its first `6` variables bound by one univariate-skip round on the `64`-point
+domain `PHI[0..64]`; then a lincheck of `A z`, `B z` and `C z` at the zerocheck's point, whose `64`
+slice claims ring switching binds to `q_flock`. The circuit is BLAKE3's compression, walked once
+forward (`blake3RowValues`) to evaluate `A₀ w` and `B₀ w`.
+-/
+
+/-- `PHI_BASIS` (`flock.rs`): the images of the eight bits of a byte. -/
+def phiBasis : List ℕ :=
+  [0x0000000000000001, 0x033CE8BEDDC8A656, 0x512620375ED2A108, 0x0C9E636090AAFC01,
+    0xBA4F3CD82801769C, 0xBA26E7904ADB4A47, 0x467698598926DC01, 0x4418AE808B28BDD0]
+
+/-- `phi(value)` (`flock.rs`): the F2-linear image of the byte `value` in the PHI basis, in
+limb `0`. -/
+def phi (value : ℕ) : E :=
+  eOfNat ((List.range 8).foldl (fun acc bit ↦
+    if (value >>> bit) % 2 = 1 then acc ^^^ phiBasis.getD bit 0 else acc) 0)
+
+/-- `MEDIUM_GENERATOR` (`flock.rs`): the old generator's first two limbs (hex digits of `π`). -/
+def mediumGenerator : E := E.ofLimbs (K.ofBits 0x243F6A8885A308D3) (K.ofBits 0x13198A2E03707344)
+
+/-- `N_FIXED_CHALLENGES` (`flock.rs`): the zerocheck point's fixed coordinates. -/
+def nFixedChallenges : ℕ := 7
+
+/-- `FLOCK_POINT_GRIND_BITS` (`flock.rs`): the grind before the zerocheck's sampled coordinates,
+whose count is at most `32`. -/
+def flockPointGrindBits : ℕ := grindingBits 32
+
+/-- `FLOCK_SKIP_GRIND_BITS` (`flock.rs`): the grind before the univariate-skip challenge, `P`
+being of degree `2·(2^k_skip − 1)` in it. -/
+def flockSkipGrindBits : ℕ := grindingBits (2 * (kBits - 1))
+
+/-- `fixed_challenges()` (`flock.rs`): `PHI[0xF7]`, `PHI[0x53]`, `PHI[0xB5]`, then
+`v/(1 + v)` for `v` the medium generator to the powers `2^0 … 2^3`. -/
+def fixedChallenges : List E :=
+  let medium := fun (power : ℕ) ↦
+    let value := mediumGenerator ^ (2 ^ power)
+    value * (1 + value)⁻¹
+  [phi 0xF7, phi 0x53, phi 0xB5, medium 0, medium 1, medium 2, medium 3]
+
+/-- `window_denominator(count)` (`flock.rs`): `Π_{0 < k < count} PHI[k]`, inverted, the one
+barycentric denominator of `PHI[:count]` (PHI is F2-linear, so every node has the same). -/
+def windowDenominator (count : ℕ) : E :=
+  ((List.range count).drop 1).foldl (fun acc k ↦ acc * phi k) 1 |>.inv
+
+/-- `lagrange_weights(count, point)` (`flock.rs`): the barycentric weights of `PHI[:count]` at
+`point`, by prefix and suffix products of `point + PHI[node]`. -/
+def lagrangeWeights (count : ℕ) (point : E) : List E :=
+  let differences := (List.range count).map fun node ↦ point + phi node
+  let prefixes := differences.scanl (· * ·) 1
+  let suffixes := differences.scanr (· * ·) 1
+  let denominator := windowDenominator count
+  (List.range count).map fun i ↦ prefixes.getD i 1 * suffixes.getD (i + 1) 1 * denominator
+
+/-- `lagrange_interpolate(count, values, point)` (`flock.rs`). -/
+def lagrangeInterpolate (count : ℕ) (values : List E) (point : E) : E :=
+  dot (lagrangeWeights count point) values
+
+/-- What the zerocheck leaves (`ZerocheckResult`, `flock.rs`): the skip challenge, the round
+challenges, and the three claims at that point. -/
+structure FlockZerocheck where
+  zSkip : E
+  chi : List E
+  vA : E
+  vB : E
+  vC : E
+  deriving Inhabited
+
+/-- `verify_flock_zerocheck(log_n, transcript)` (`flock.rs`): the point `r`, seven fixed
+coordinates and `log_n − 13` sampled after a grind; `P = P^{AB} + P^C` on the coset `PHI[64..128]`,
+its `64` zeros on `PHI[0..64]` assumed; a grind, the skip challenge `z_skip`, `P(z_skip)`; then a
+sumcheck of degree-two rounds in equality mode at `r`, closed by `v_a`, `v_b`, and `v_c` the running
+claim less `v_a·v_b`. -/
+def verifyFlockZerocheck (logN : ℕ) : VerifierProgram FlockZerocheck := do
+  let nSampled := logN - flockKSkip - nFixedChallenges
+  if 0 < nSampled then VerifierProgram.grindProofOfWork flockPointGrindBits
+  let sampled ← VerifierProgram.sampleChallenges nSampled
+  let r := fixedChallenges ++ sampled
+  let pCoset ← VerifierProgram.readScalars kBits
+  VerifierProgram.grindProofOfWork flockSkipGrindBits
+  let zSkip ← VerifierProgram.sampleChallenge
+  let vP := lagrangeInterpolate (2 * kBits) (List.replicate kBits 0 ++ pCoset) zSkip
+  let (chi, running) ← sumcheck vP 3 (r.map some)
+  let vA ← VerifierProgram.readScalar
+  let vB ← VerifierProgram.readScalar
+  return ⟨zSkip, chi, vA, vB, running + vA * vB⟩
+
+/-- What the reduction leaves (`FlockClaims`, `flock.rs`): the zerocheck's point and its three
+claims there, the lincheck's batching challenge, its round challenges in round order, the `64`
+slices it closes on, the terminal's matrix part (`matrixTerm`), and the claim its rounds leave. -/
+structure FlockClaims where
+  zSkip : E
+  chi : List E
+  vA : E
+  vB : E
+  vC : E
+  alpha : E
+  roundChallenges : List E
+  s : List E
+  matrix : E
+  terminal : E
+  deriving Inhabited
+
+/-- `FlockClaims::point` (`flock.rs`): the point the slices are claims at, the lincheck's
+challenges in coordinate order, then the rest of `chi`. -/
+def FlockClaims.point (claims : FlockClaims) : List E :=
+  claims.roundChallenges.reverse ++ claims.chi.drop flockNumLincheckRounds
+
+/-- `G_LANES` (`blake3.rs`): the lanes `(a, b, c, d)` of each `G`, four columns, then four
+diagonals. -/
+def blake3GLanes : List (List ℕ) :=
+  [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15], [0, 5, 10, 15], [1, 6, 11, 12],
+    [2, 7, 8, 13], [3, 4, 9, 14]]
+
+/-- `SIGMA` (`blake3.rs`): the message word each `G` input takes, per round, BLAKE3's permutation
+applied round by round. -/
+def blake3Sigma : List (List ℕ) :=
+  [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8],
+    [3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1],
+    [10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6],
+    [12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4],
+    [9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7],
+    [11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13]]
+
+/-- `relocation_source(bit)` (`flock.rs`): the bit of `X ‖ Y ‖ W` (counted from `X`'s first) the
+circuit places at block bit `bit`: `X` at bytes `25..57`, the first `7` bytes of `Y` at `57..64`,
+the last `25` of `W` at `0..25`. -/
+def relocationSource (bit : ℕ) : Option ℕ :=
+  let p := bit / 8
+  let k := bit % 8
+  if p < 25 then some (512 + 8 * (p + 7) + k)
+  else if p < 57 then some (8 * (p - 25) + k)
+  else if p < 64 then some (256 + 8 * (p - 57) + k)
+  else none
+
+/-- A word of the circuit walk: its `32` bits, each a linear combination of the columns' weights
+(`Word`, `flock.rs`). -/
+abbrev FlockWord : Type := Array E
+
+/-- The rows the walk has set so far, `(row, A₀ w, B₀ w)` in order (`RowValues`'s `left_values`
+and `right_values`, filled row by row, `flock.rs`). -/
+abbrev FlockRows : Type := Array (ℕ × E × E)
+
+/-- `RowValues::slots(base)` (`flock.rs`): the word of the columns `base … base + 31`. -/
+def flockSlots (w : Array E) (base : ℕ) : FlockWord :=
+  Array.ofFn (n := 32) fun bit ↦ w.getD (base + bit.val) 0
+
+/-- `RowValues::literal(value)` (`flock.rs`): a constant word, the constant column's weight at
+its one bits. -/
+def flockLiteral (w : Array E) (value : ℕ) : FlockWord :=
+  Array.ofFn (n := 32) fun bit ↦
+    if (value >>> bit.val) % 2 = 1 then w.getD blake3ConstantColumn 0 else 0
+
+/-- `xor(x, y)` (`flock.rs`). -/
+def flockXor (x y : FlockWord) : FlockWord :=
+  Array.ofFn (n := 32) fun bit ↦ x.getD bit.val 0 + y.getD bit.val 0
+
+/-- `rotate_right(word, amount)` (`flock.rs`). -/
+def flockRotr (word : FlockWord) (amount : ℕ) : FlockWord :=
+  Array.ofFn (n := 32) fun bit ↦ word.getD ((bit.val + amount) % 32) 0
+
+/-- `RowValues::add(x, y, carry_base)` (`flock.rs`): a ripple-carry add, row `carry_base + i`
+(`i < 31`) the carry step `(x_i + c_i)·(y_i + c_i)`, `c_i` the sum of the rows below it. -/
+def flockAdd (w : Array E) (rows : FlockRows) (x y : FlockWord) (carryBase : ℕ) :
+    FlockRows × FlockWord :=
+  let st := (List.range 32).foldl (fun (st : FlockRows × E × FlockWord) bit ↦
+    let (rows, carry, output) := st
+    let xb := x.getD bit 0
+    let yb := y.getD bit 0
+    let rows := if bit < 31 then rows.push (carryBase + bit, xb + carry, yb + carry) else rows
+    let output := output.push (xb + yb + carry)
+    let carry := if bit < 31 then carry + w.getD (carryBase + bit) 0 else carry
+    (rows, carry, output)) (rows, 0, #[])
+  (st.1, st.2.2)
+
+/-- `RowValues::add3(x, y, z, base)` (`flock.rs`): a fused three-operand add, `31` majority rows,
+then `30` ripple rows of `x ⊕ y ⊕ z` against the majorities shifted up one bit. -/
+def flockAdd3 (w : Array E) (rows : FlockRows) (x y z : FlockWord) (base : ℕ) :
+    FlockRows × FlockWord :=
+  let rows := (List.range 31).foldl (fun rows bit ↦
+    rows.push (base + bit, x.getD bit 0 + z.getD bit 0, y.getD bit 0 + z.getD bit 0)) rows
+  let majority : Array E := Array.ofFn (n := 31) fun bit ↦
+    w.getD (base + bit.val) 0 + z.getD bit.val 0
+  let rippleBase := base + 31
+  let st := (List.range 32).foldl (fun (st : FlockRows × E × FlockWord) bit ↦
+    let (rows, carry, output) := st
+    let q := if bit = 0 then 0 else majority.getD (bit - 1) 0
+    let left := x.getD bit 0 + y.getD bit 0 + z.getD bit 0 + carry
+    let output := output.push (left + q)
+    if 1 ≤ bit ∧ bit ≤ 30 then
+      (rows.push (rippleBase + bit - 1, left, q + carry),
+        carry + w.getD (rippleBase + bit - 1) 0, output)
+    else (rows, carry, output)) (rows, 0, #[])
+  (st.1, st.2.2)
+
+/-- `blake3_row_values(column_weights)` (`flock.rs`): `A₀ w` and `B₀ w`, by one forward walk of the
+circuit: the identity rows of the chaining value, the message, the metadata and `X`, `Y`, `W`
+against the constant column; the state `v` from the chaining value, the IV and the metadata; the
+effective message, the slots XOR the placed `X`/`Y`/`W` bits; the seven rounds of eight `G`s, each
+two fused and two plain adds over `184` rows; the output words `h ⊕ v[w] ⊕ v[w + 8]` as linear
+rows; the constant row. -/
+def blake3RowValues (w : Array E) : Array E × Array E :=
+  let size := 2 ^ blake3R1csLogSize
+  let constant := blake3ConstantColumn
+  let one := w.getD constant 0
+  let messageBase := 640
+  let counterLow := 1152
+  let counterHigh := 1184
+  let finalFlag := 1216
+  let lastNodeFlag := 1248
+  let gatesBase := 1280
+  let gateStride := 184
+  let xBase := gatesBase + gateStride * blake3Sigma.length * blake3GLanes.length
+  let rows : FlockRows := ([(0, 256), (messageBase, 512), (counterLow, 128), (xBase, 768)] :
+      List (ℕ × ℕ)).foldl (fun rows (base, length) ↦
+    (List.range length).foldl (fun rows i ↦ rows.push (base + i, w.getD (base + i) 0, one)) rows)
+    #[]
+  let iv := Semantics.Blake3.iv
+  let state : Array FlockWord := Array.ofFn (n := 16) fun word ↦
+    if word.val < 8 then flockSlots w (32 * word.val)
+    else if word.val < 12 then flockLiteral w (iv.getD (word.val - 8) 0).toNat
+    else flockSlots w ([counterLow, counterHigh, finalFlag, lastNodeFlag].getD (word.val - 12) 0)
+  let message : Array FlockWord := Array.ofFn (n := 16) fun i ↦ Array.ofFn (n := 32) fun j ↦
+    w.getD (messageBase + 32 * i.val + j.val) 0 +
+      match relocationSource (32 * i.val + j.val) with
+      | some source => w.getD (xBase + source) 0
+      | none => 0
+  let walked := blake3Sigma.zipIdx.foldl (fun (st : FlockRows × Array FlockWord) (sigma, round) ↦
+    blake3GLanes.zipIdx.foldl (fun (st : FlockRows × Array FlockWord) (lanes, gateIndex) ↦
+      let (rows, state) := st
+      let la := lanes.getD 0 0
+      let lb := lanes.getD 1 0
+      let lc := lanes.getD 2 0
+      let ld := lanes.getD 3 0
+      let gateBase := gatesBase + gateStride * (round * 8 + gateIndex)
+      let a := state.getD la #[]
+      let b := state.getD lb #[]
+      let c := state.getD lc #[]
+      let d := state.getD ld #[]
+      let mx := message.getD (sigma.getD (2 * gateIndex) 0) #[]
+      let my := message.getD (sigma.getD (2 * gateIndex + 1) 0) #[]
+      let (rows, a1) := flockAdd3 w rows a b mx gateBase
+      let d1 := flockRotr (flockXor d a1) 16
+      let (rows, c1) := flockAdd w rows c d1 (gateBase + 61)
+      let b1 := flockRotr (flockXor b c1) 12
+      let (rows, a2) := flockAdd3 w rows a1 b1 my (gateBase + 92)
+      let d2 := flockRotr (flockXor d1 a2) 8
+      let (rows, c2) := flockAdd w rows c1 d2 (gateBase + 153)
+      let b2 := flockRotr (flockXor b1 c2) 7
+      (rows, ((state.set! la a2).set! lb b2 |>.set! lc c2).set! ld d2)) st) (rows, state)
+  let (rows, state) := walked
+  let rows := (List.range 8).foldl (fun rows word ↦
+    let out := flockXor (state.getD word #[]) (state.getD (word + 8) #[])
+    (List.range 32).foldl (fun rows bit ↦ rows.push (256 + 32 * word + bit, out.getD bit 0, one))
+      rows) rows
+  let rows := rows.push (constant, one, one)
+  rows.foldl (fun (lr : Array E × Array E) (row, left, right) ↦
+    match lr with
+    | (ls, rs) => (ls.set! row left, rs.set! row right))
+    (Array.replicate size 0, Array.replicate size 0)
+
+/-- `w_col = eq(χ_in') ⊗ s` (`matrix_term`, `flock.rs`): entry `h·count + l` is slice `l` times
+the weight `h`, a column of it per slice. -/
+def sliceColumns (count : ℕ) (slices high : Array E) : Array E :=
+  Array.ofFn (n := high.size * count) fun i ↦
+    slices.getD (i.val % count) 0 * high.getD (i.val / count) 0
+
+/-- Each block of `count` rows met with the skip weights, a column at a time (`matrix_term`,
+`flock.rs`): block `h`'s `Σ_l skip_l · values[h·count + l]`. -/
+def skipBlocks (count : ℕ) (skip values : Array E) (blocks : ℕ) : List E :=
+  (List.range blocks).map fun h ↦
+    (List.range count).foldl (fun acc l ↦ acc + skip.getD l 0 * values.getD (h * count + l) 0) 0
+
+/-- `left + α·right`, the two matrices' parts batched (`matrix_term`, `flock.rs`). -/
+def batchPair (alpha left right : E) : E := left + alpha * right
+
+/-- `matrix_term(claims)` (`flock.rs`): the lincheck terminal's matrix part,
+`Σ_{r, c} (A₀ + α B₀)[r][c] e_row(r) w_col(c)`, `e_row` the PHI Lagrange weights at the skip
+coordinate times `eq` at the zerocheck's first coordinates, `w_col` the `64` slices times `eq` at
+the lincheck's challenges (bound top-down). -/
+def matrixTerm (claims : FlockClaims) : E :=
+  let skipWeights := (lagrangeWeights kBits claims.zSkip).toArray
+  let chiIn := claims.chi.take flockNumLincheckRounds
+  let chiInPrime := claims.roundChallenges.reverse
+  let high := (eqKernel chiInPrime).toArray
+  let (leftValues, rightValues) := blake3RowValues (sliceColumns kBits claims.s.toArray high)
+  batchPair claims.alpha (multilinearEval (skipBlocks kBits skipWeights leftValues high.size) chiIn)
+    (multilinearEval (skipBlocks kBits skipWeights rightValues high.size) chiIn)
+
+/-- `verify_flock_lincheck(zc, transcript)` (`flock.rs`): a grind for the batch's degree `3`, the
+batching challenge `α` over the two matrix identities, the `c` claim and the constant-position
+claim; `8` plain rounds of degree two binding the high column coordinates; the `64` slices; then
+the terminal identity, the matrix part plus the `c` term (`C = I`: `eq(χ_in, χ_in')` times the skip
+weights against the slices) plus the constant column's pin. -/
+def verifyFlockLincheck (zc : FlockZerocheck) : VerifierProgram FlockClaims := do
+  VerifierProgram.grindProofOfWork (grindingBits 3)
+  let alpha ← VerifierProgram.sampleChallenge
+  let claim := zc.vA + alpha * zc.vB + alpha ^ 2 * zc.vC + alpha ^ 3
+  let (roundChallenges, rLc) ← sumcheck claim 3 (List.replicate flockNumLincheckRounds none)
+  let s ← VerifierProgram.readScalars kBits
+  let unmatched : FlockClaims :=
+    ⟨zc.zSkip, zc.chi, zc.vA, zc.vB, zc.vC, alpha, roundChallenges, s, 0, rLc⟩
+  -- A guest defers the matrix part, so a replay computes it too.
+  let claims : FlockClaims :=
+    ⟨zc.zSkip, zc.chi, zc.vA, zc.vB, zc.vC, alpha, roundChallenges, s, matrixTerm unmatched, rLc⟩
+  let skipWeights := lagrangeWeights kBits claims.zSkip
+  let chiIn := claims.chi.take flockNumLincheckRounds
+  let chiInPrime := claims.roundChallenges.reverse
+  let pin := claims.s.getD (blake3ConstantColumn % kBits) 0 *
+    (eqKernel chiInPrime).getD (blake3ConstantColumn / kBits) 0
+  let terminal := claims.matrix + alpha ^ 2 * eqEval chiIn chiInPrime * dot skipWeights claims.s +
+    alpha ^ 3 * pin
+  VerifierProgram.require (terminal = rLc)
+  return claims
+
+/-- `verify_flock(log_n, transcript)` (`flock.rs`): the zerocheck, then the lincheck. -/
+def verifyFlock (logN : ℕ) : VerifierProgram FlockClaims := do
+  let zc ← verifyFlockZerocheck logN
+  verifyFlockLincheck zc
+
+/-!
 ## Ring switching (`crates/verifier/src/ring_switch.rs`)
 
-The 64 claims `s[i] = z(i, point)` on `q_keccak`'s bit slices become one dense claim
-`Σ_u W(u) q_keccak(u) = target` on the committed column. The map is `Φ(v) = Σ_p f_p Ψ(v)^(2^(8p))`
+Each claim's 64 slices `s[i] = z(i, point)` become one dense claim `Σ_u W(u) q(u) = target` on its
+region, `q_keccak`'s, then `q_flock`'s, with one map for every claim, drawn once they are all fixed. The map is `Φ(v) = Σ_p f_p Ψ(v)^(2^(8p))`
 of the inner stage `Ψ(v) = Σ_b g_b v^(2^b)`, sixteen challenges, `f` then `g` (Annex A).
 -/
 
@@ -2028,17 +2458,18 @@ def ringWeight (r rPrime coefficients : List E) : E :=
       (fun product (value, challenge) ↦ product * (1 + value + challenge)) c
     (acc.1 + product, acc.2.map fun value ↦ value * value)) (0, r)).1
 
-/-- `ring_switch(point, s, transcript)` (`ring_switch.rs`): one grind for the map's sixteen
-challenges and the stacked opening's batching challenge drawn next, the map, and the target `T`
-and the weight `W(u) = Φ(eq(point, u))` as a function of the opening point. -/
-def ringSwitch (point s : List E) : VerifierProgram (E × (List E → E)) := do
+/-- `ring_switch(claims, transcript)` (`ring_switch.rs`): one grind for the map's sixteen
+challenges and the stacked opening's batching challenge drawn next, the map, and for each claim
+`(point, s)` its target `T` and the weight `W(u) = Φ(eq(point, u))` as a function of the opening
+point. -/
+def ringSwitch (claims : List (List E × List E)) : VerifierProgram (List (E × (List E → E))) := do
   VerifierProgram.grindProofOfWork Whir.batchGrindingBits
   let challenges ← VerifierProgram.sampleChallenges (2 * ringMapWidth)
   let f := challenges.take ringMapWidth
   let g := challenges.drop ringMapWidth
   let coefficients := ringCoefficients f g
-  let target := ringTarget s f g
-  return (target, fun rPrime ↦ ringWeight point rPrime coefficients)
+  return claims.map fun (point, s) ↦
+    (ringTarget s f g, fun rPrime ↦ ringWeight point rPrime coefficients)
 
 open LeanVM.Semantics LeanVM.Protocol.KeccakHash
 
@@ -2051,7 +2482,8 @@ The program returns `true` where the Rust returns `Ok`; `Transcript::finish`, th
 proof is consumed, is `runProof`'s.
 
 **The seed.** The sponge starts at Keccak-f of `IV ‖ public_input ‖ 0^17`, `IV` the Keccak-256 hash
-of `TAG ‖ bytecode`, the tag `"leanvm-v1"` naming the proof system's version and the bytecode as its
+of `TAG ‖ bytecode`, the tag `"leanvm-b3"` (this research build's: the `BLAKE3` table and Flock) naming the proof
+system's version and the bytecode as its
 little-endian words. The seed's input has the capacity lanes zero, Keccak-256's initial state, and
 nothing separates its domain from a Keccak-256 block: in the random-permutation model the
 transcript's duplex calls and Keccak-256's sponge calls query the one permutation from states of the
@@ -2116,16 +2548,26 @@ def keccakPhase (layout : Layout) (evaluations : List (List E × List E)) : Veri
   verifyKeccak (layout.tableLogHeights.getD opKeccak 0) point
     ((List.range 25).map fun lane ↦ values.getD (keccakOut + lane) 0)
 
-/-- Step 7's ring-switching claim on the stack: supported on `q_keccak`'s region, its weight
-carries the placement's selector (`lib.rs`). -/
-def ringSwitchClaim (layout : Layout) (target : E) (weight : List E → E) : StackClaim :=
-  let qkeccakPlacement := layout.placement qkeccak
-  (fun x ↦ qkeccakPlacement.eqAbove x * weight (x.take qkeccakPlacement.variableCount), target)
+/-- Step 6b, `BLAKE3`'s validity (`lib.rs`, research build): Flock's zerocheck then lincheck over
+every instance of `q_flock`, `2^14` variables an instance and the `BLAKE3` table's height for the
+instances. Its `64` slices sit at the lincheck's point over `q_flock`'s words in instance-major
+order (word bits low); `q_flock` is committed slot-major, so the point's two halves trade places.
+The point and slices it leaves for ring switching. -/
+def flockPhase (layout : Layout) : VerifierProgram (List E × List E) := do
+  let flock ← verifyFlock (blake3R1csLogSize + layout.tableLogHeights.getD opBlake3 0)
+  return (flock.point.drop qflockSlotBits ++ flock.point.take qflockSlotBits, flock.s)
+
+/-- Step 7's ring-switching claim on the stack for the region `region`: supported on that region,
+its weight carries the placement's selector (`lib.rs`). -/
+def ringSwitchClaim (layout : Layout) (region : ℕ) (target : E) (weight : List E → E) :
+    StackClaim :=
+  let placement := layout.placement region
+  (fun x ↦ placement.eqAbove x * weight (x.take placement.variableCount), target)
 
 /-- `verify_execution(bytecode, public_input, proof)` without its `finish` (`walk`,
 `lib.rs`), the fixed polynomial's claimed value checked by `bytecodeValue`. The stacked
-opening's claims are the ring-switched one, every column claim with a placement, then the stack
-commitment's out-of-domain claim. -/
+opening's claims are the ring-switched ones, `q_keccak`'s then `q_flock`'s, every column claim with
+a placement, then the stack commitment's out-of-domain claim. -/
 def verifyExecution (bytecodeValue : List K → List E → E → VerifierProgram Unit)
     (bytecode : List K) (publicInput : Digest) : VerifierProgram Unit := do
   -- 1] memory log-size, table row counts, and the WHIR rate
@@ -2144,10 +2586,15 @@ def verifyExecution (bytecodeValue : List K → List E → E → VerifierProgram
   -- 6] KECCAK validity, by GKR over the rounds
   let (outputs, keccakPoint, keccakSlices) ← keccakPhase layout evaluations
   let claims := claims ++ outputs
-  -- 7] ring switching, then one opening of the stack for every claim with a placement
-  let (ringTarget, ringWeight) ← ringSwitch keccakPoint keccakSlices
+  -- 6b] BLAKE3 validity, by Flock: the zerocheck then the lincheck over every instance of q_flock
+  let (flockPoint, flockSlices) ← flockPhase layout
+  -- 7] ring switching, one map for both regions, then one opening of the stack for every claim
+  -- with a placement
+  let rings ← ringSwitch [(keccakPoint, keccakSlices), (flockPoint, flockSlices)]
   verifyStackedOpening layout.stackLog logInverseRate
-    (ringSwitchClaim layout ringTarget ringWeight :: claims.filterMap (·.onStack layout) ++ [ood])
+    (List.zipWith (fun region (target, weight) ↦ ringSwitchClaim layout region target weight)
+        [qkeccak, qflock] rings ++
+      claims.filterMap (·.onStack layout) ++ [ood])
 
 /-! ### The fixed polynomial's value -/
 
@@ -2194,7 +2641,7 @@ def deferringVerifierProgram (claim : BytecodeClaim) (bytecode : List K) (public
 
 /-- `TAG`, the proof system's version (`layout.rs`), as
 bytes. -/
-def versionTag : Bytes := "leanvm-v1".toUTF8.toList
+def versionTag : Bytes := "leanvm-b3".toUTF8.toList
 
 section Hash
 

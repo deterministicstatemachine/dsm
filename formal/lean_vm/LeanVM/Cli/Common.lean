@@ -99,7 +99,7 @@ section
 open LeanVM.Semantics LeanVM.Arithmetization
 /-- The opcode of a code. -/
 def opcodeOf? (c : K) : Option Opcode :=
-  [Opcode.xor, .mulNative, .setConstant, .deref, .jump, .keccak].find? (·.busCode = c)
+  [Opcode.xor, .mulNative, .setConstant, .deref, .jump, .keccak, .blake3].find? (·.busCode = c)
 
 /-- A flag word. -/
 def flagOf? (c : K) : Option Bool :=
@@ -136,6 +136,7 @@ def instrOf? (e : Array K) : Option LeanIsaInstruction := do
     let outOdd ← flagOf? (x 10)
     let outCells ← outCellsOf? (x 11) (x 12)
     some (.keccak ![x 1, x 2, x 3, x 4] (x 5) (x 6) (x 7) (x 8) inOdd outOdd outCells)
+  | .blake3 => some (.blake3 ![x 1, x 2, x 3, x 4] (x 5) (x 6) (x 7) (x 8) (x 9) (x 10))
 
 /-- The program a bytecode table encodes: `16 · 2^logSize` words, word `i + 2^logSize · s` slot
 `s` of instruction `i`; checked to re-encode to the same words. -/

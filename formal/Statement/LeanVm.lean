@@ -97,14 +97,17 @@ that opcode the execution executes (`Execution.opcodeCount`), with `13, 13, 7, 1
 committed columns for `XOR`, `MUL_NATIVE`, `SET_CONSTANT`, `DEREF`, `JUMP`, `KECCAK`
 (`layout.rs`; of the `KECCAK` table's `92` columns, the `25` input lanes and `14` more ride
 `q_keccak`'s slots and the `25` output lanes are not committed, `layout.rs`); and
-`q_keccak` has `2^6` rows per row of the `KECCAK` table. -/
+`q_keccak` has `2^6` rows per row of the `KECCAK` table; in the research build, `BLAKE3` has `28`
+committed columns (of its `58`, the `30` value limbs are `q_flock`'s words, `layout.rs`) and
+`q_flock` `2^8` rows per row of the `BLAKE3` table. -/
 noncomputable def Semantics.Execution.committedSize {program : LeanIsaProgram}
     (execution : Execution program) : ℕ :=
   let height (op : Opcode) : ℕ := 2 ^ Nat.clog 2 (execution.opcodeCount op)
   let keccakHeight : ℕ := 2 ^ max (Nat.clog 2 (execution.opcodeCount .keccak)) 9
   3 * 2 ^ execution.logMemorySize + 2 ^ program.logSize +
     13 * height .xor + 13 * height .mulNative + 7 * height .setConstant + 14 * height .deref +
-    14 * height .jump + 28 * keccakHeight + 2 ^ 6 * keccakHeight
+    14 * height .jump + 28 * keccakHeight + 2 ^ 6 * keccakHeight +
+    28 * height .blake3 + 2 ^ 8 * height .blake3
 
 /-! ### The experiment -/
 

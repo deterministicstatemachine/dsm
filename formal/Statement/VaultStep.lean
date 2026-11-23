@@ -23,58 +23,15 @@ open LeanVM.Parameters LeanVM.Protocol LeanVM.Protocol.Verifier LeanVM.Protocol.
 
 /-! ## BLAKE3 on one chunk -/
 
-/-- BLAKE3's IV, SHA-256's (`IV`, the `blake3` crate). -/
-def iv : Array UInt32 :=
-  #[0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
-
-/-- The message word permutation between rounds (`MSG_PERMUTATION`). -/
-def msgPermutation : Array ℕ := #[2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
-
-/-- Rotate right by `n < 32`. -/
-def rotr (x : UInt32) (n : UInt32) : UInt32 := (x >>> n) ||| (x <<< (32 - n))
-
-/-- The quarter-round on the state's words `a b c d` with message words `x y` (`g`). -/
-def quarter (v : Array UInt32) (a b c d : ℕ) (x y : UInt32) : Array UInt32 :=
-  let v := v.set! a (v[a]! + v[b]! + x)
-  let v := v.set! d (rotr (v[d]! ^^^ v[a]!) 16)
-  let v := v.set! c (v[c]! + v[d]!)
-  let v := v.set! b (rotr (v[b]! ^^^ v[c]!) 12)
-  let v := v.set! a (v[a]! + v[b]! + y)
-  let v := v.set! d (rotr (v[d]! ^^^ v[a]!) 8)
-  let v := v.set! c (v[c]! + v[d]!)
-  v.set! b (rotr (v[b]! ^^^ v[c]!) 7)
-
-/-- One round: the columns, then the diagonals (`round`). -/
-def round (v m : Array UInt32) : Array UInt32 :=
-  let v := quarter v 0 4 8 12 m[0]! m[1]!
-  let v := quarter v 1 5 9 13 m[2]! m[3]!
-  let v := quarter v 2 6 10 14 m[4]! m[5]!
-  let v := quarter v 3 7 11 15 m[6]! m[7]!
-  let v := quarter v 0 5 10 15 m[8]! m[9]!
-  let v := quarter v 1 6 11 12 m[10]! m[11]!
-  let v := quarter v 2 7 8 13 m[12]! m[13]!
-  quarter v 3 4 9 14 m[14]! m[15]!
-
-/-- The compression function's new chaining value: seven rounds, the message permuted between them,
-then the two halves of the state xored (`compress_in_place`). -/
-def compress (cv block : Array UInt32) (counter : UInt64) (blockLen flags : UInt32) : Array UInt32 :=
-  let v := cv ++ iv.extract 0 4 ++ #[counter.toUInt32, (counter >>> 32).toUInt32, blockLen, flags]
-  let rounds := (List.range 7).foldl (fun (vm : Array UInt32 × Array UInt32) i ↦
-      let v := round vm.1 vm.2
-      (v, if i < 6 then msgPermutation.map (vm.2[·]!) else vm.2)) (v, block)
-  (List.range 8).toArray.map fun i ↦ rounds.1[i]! ^^^ rounds.1[i + 8]!
+/-! The compression (`Semantics.Blake3.compress`) and a block's words (`blockWords`) are the
+`BLAKE3` instruction's, in `Statement/LeanIsa.lean`. -/
 
 /-- The flags (`CHUNK_START`, `CHUNK_END`, `ROOT`). -/
 def chunkStart : UInt32 := 1
 def chunkEnd : UInt32 := 2
 def rootFlag : UInt32 := 8
 
-/-- A block's sixteen little-endian words, its bytes zero-padded to `64`. -/
-def blockWords (bytes : List UInt8) : Array UInt32 :=
-  let b := bytes ++ List.replicate (64 - bytes.length) 0
-  (List.range 16).toArray.map fun i ↦
-    (List.range 4).foldl (fun w j ↦ w ||| ((b.getD (4 * i + j) 0).toUInt32 <<< (8 * j).toUInt32)) 0
-
+open LeanVM.Semantics.Blake3 in
 /-- **BLAKE3 of an input of at most one chunk** (`1024` bytes): its blocks chained from the IV, the
 first flagged as the chunk's start, the last as its end and the root, the counter zero; the
 32-byte output, little-endian. Every hash the step's hints need is of one chunk. -/
@@ -85,7 +42,7 @@ def blake3 (input : List UInt8) : List UInt8 :=
       let flags := (if i = 0 then chunkStart else 0) |||
         (if i + 1 = nBlocks then chunkEnd ||| rootFlag else 0)
       compress cv (blockWords block) 0 block.length.toUInt32 flags) iv
-  cv.toList.flatMap fun w ↦ (List.range 4).map fun j ↦ (w >>> (8 * j).toUInt32).toUInt8
+  wordBytes cv.toList
 
 /-- A domain-separated hash: the tag, a NUL, the parts (`h`, `reference.rs`). -/
 def taggedHash (tag : List UInt8) (parts : List (List UInt8)) : List UInt8 :=

@@ -9,7 +9,7 @@ public import Statement.LeanIsa
 (`cpu::execute`, `crates/lean_vm_core/src/cpu/execute.rs`), producing the execution the
 prover takes. The memory starts empty and is written once: each instruction fills the cell its
 relation determines (a `XOR`'s or a `MUL`'s result, a `MUL`'s one unknown operand, a `SET`'s cell,
-the unwritten side of a `DEREF`, a `KECCAK`'s outputs), and a `DEREF` between two unwritten cells
+the unwritten side of a `DEREF`, a `KECCAK`'s or a `BLAKE3`'s outputs), and a `DEREF` between two unwritten cells
 links them, a later write to either reaching both. The hints a `pc` carries (`RHint`,
 `crates/isa/src/lib.rs`) run before its instruction: they allocate (`next_free`, a bump pointer from the end
 of `main`'s frame), pop witness streams, and compute advice the instructions go on to check.
@@ -310,7 +310,8 @@ def Mem.link (m : Mem) (a b : ℕ) : Mem :=
 /-! ## The run -/
 
 /-- An instruction, its operands as offsets: `o = g^offset`. A `KECCAK`'s thirteen input cells and
-its first output cell, from `fp`. -/
+its first output cell, from `fp`; likewise a `BLAKE3`'s thirteen input cells, in the order
+`blake3InputCellOffset` reads them, and its first output cell. -/
 inductive Op where
   | xor (a b c : ℕ)
   | mul (a b c : ℕ)
@@ -318,6 +319,7 @@ inductive Op where
   | deref (o1 o2 o3 : ℕ) (mode : DerefMode)
   | jump (c d f : ℕ)
   | keccak (ins : Array ℕ) (out : ℕ) (inOdd outOdd : Bool) (count : ℕ)
+  | blake3 (ins : Array ℕ) (out : ℕ)
   deriving Inhabited
 
 /-- An operand's offset. -/
@@ -333,6 +335,9 @@ def decode : LeanIsaInstruction → Option Op
   | .keccak om otail ob8 ocap oout inOdd outOdd outCells => do
     let ins ← (List.finRange 13).mapM fun c ↦ offOf (keccakInputCellOffset om otail ob8 ocap c)
     return .keccak ins.toArray (← offOf oout) inOdd outOdd outCells.cellCount
+  | .blake3 om ocv oout omd ox oy ow => do
+    let ins ← (List.finRange 13).mapM fun c ↦ offOf (blake3InputCellOffset om ocv omd ox oy ow c)
+    return .blake3 ins.toArray (← offOf oout)
 
 /-- The program and advice, tabulated. -/
 structure Ctx where
@@ -578,6 +583,16 @@ def runOp (C : Ctx) (s : St) : Op → Except Fault St
     let outs ← (List.range count).mapM fun k ↦ cellAt s.fp (out + k)
     let s ← s.withMem fun m ↦ do
       let m ← outs.zipIdx.foldlM (fun m (c, k) ↦ m.put c (output ⟨k % 13, Nat.mod_lt _ (by decide)⟩)) m
+      return (cells ++ outs).foldl Mem.ensure m
+    pure { s with pc := s.pc + 1 }
+  | .blake3 ins out => do
+    -- Flock proves the output; the run computes it for the later reads (`Op::Blake3`).
+    let cells ← ins.toList.mapM (cellAt s.fp)
+    let input ← cells.mapM s.mem.read
+    let h := Blake3.compressCells fun c ↦ input.getD c.val 0
+    let outs ← (List.range 2).mapM fun k ↦ cellAt s.fp (out + k)
+    let s ← s.withMem fun m ↦ do
+      let m ← outs.zipIdx.foldlM (fun m (c, k) ↦ m.put c (Blake3.chainCell h k)) m
       return (cells ++ outs).foldl Mem.ensure m
     pure { s with pc := s.pc + 1 }
 

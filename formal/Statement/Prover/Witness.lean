@@ -7,7 +7,7 @@ public import Statement.LeanVmVerifier
 
 The run of a trace through the address indices (`powIndex`, `gLogIn`: a word's index looked up in a
 hash map), recording each state stepped from, its bytecode slot and the instruction fetched there
-(`runSteps`); then the six opcode tables' rows in one pass over the steps, each read carrying its
+(`runSteps`); then the seven opcode tables' rows in one pass over the steps, each read carrying its
 cell's count so far, the counters stepping by `g` in place (`rowsOf`). The address indices and the
 public boundary are the knowledge extractor's too (`lean_vm`,
 `LeanVM/Protocol/Extraction/Fast/Address.lean`, `candidateExecutionTable_eq`).
@@ -109,7 +109,8 @@ def committedSizeOf (logSize κ : ℕ) (count : Opcode → ℕ) : ℕ :=
   let keccakHeight : ℕ := 2 ^ max (log2Ceil (count .keccak)) 9
   3 * 2 ^ κ + 2 ^ logSize +
     13 * height .xor + 13 * height .mulNative + 7 * height .setConstant + 14 * height .deref +
-    14 * height .jump + 28 * keccakHeight + 2 ^ 6 * keccakHeight
+    14 * height .jump + 28 * keccakHeight + 2 ^ 6 * keccakHeight +
+    28 * height .blake3 + 2 ^ 8 * height .blake3
 
 /-- The greatest committed size the verifier admits, `2^30` (`MAX_STACKED_LOG`,
 `crates/verifier/src/layout.rs`). -/
@@ -123,9 +124,18 @@ def limbsIn (memIdx : Std.HashMap UInt64 ℕ) {κ : ℕ} (img : MemoryImage κ) 
   | some v => #v[v.limb 0, v.limb 1]
   | none => #v[0, 0]
 
+/-- The fifteen cells a `BLAKE3` with these operands accesses at `fp`, in flush order (`CELLS`,
+`blake3flock.rs`): `o_m₀ … o_m₃`, `o_cv`, `g·o_cv`, `o_out`, `g·o_out`, `o_md`, then `o_x`, `o_y`,
+`o_w` and each one's next. -/
+def blake3FlushAddresses (fp : K) (om : Fin 4 → K) (ocv oout omd ox oy ow : K) : List K :=
+  [fp * om 0, fp * om 1, fp * om 2, fp * om 3, fp * ocv, fp * (g * ocv), fp * oout, fp * (g * oout),
+    fp * omd, fp * ox, fp * (g * ox), fp * oy, fp * (g * oy), fp * ow, fp * (g * ow)]
+
 /-- The cells an instruction reads, in the order its row's reads carry them (`readAddrs`,
 computed): a `KECCAK`'s thirteen cells read, then the output cells it writes, the first
-`outCells.cellCount` (a cell it does not write keeps its count, `execute.rs`). -/
+`outCells.cellCount` (a cell it does not write keeps its count, `execute.rs`); a `BLAKE3`'s fifteen
+cells in flush order, the four message cells, the chaining value's two, the output's two, the
+metadata, then `X`'s, `Y`'s and `W`'s two (`CELLS`, `blake3flock.rs`). -/
 def addrsIn (memIdx : Std.HashMap UInt64 ℕ) {κ : ℕ} (img : MemoryImage κ) (fp : K) :
     LeanIsaInstruction → List K
   | .xor oA oB oC | .mulNative oA oB oC | .jump oA oB oC => [fp * oA, fp * oB, fp * oC]
@@ -134,6 +144,8 @@ def addrsIn (memIdx : Std.HashMap UInt64 ℕ) {κ : ℕ} (img : MemoryImage κ) 
   | .keccak om otail ob8 ocap oout _ _ outCells =>
       (List.finRange 13).map (fun c ↦ fp * keccakInputCellOffset om otail ob8 ocap c) ++
         (List.range outCells.cellCount).map fun k ↦ fp * (g ^ k * oout)
+  | .blake3 om ocv oout omd ox oy ow =>
+      blake3FlushAddresses fp om ocv oout omd ox oy ow
 
 /-- The counts of a sequence of reads: each read gets its cell's counter, which then steps by
 `g`, in place; the counts are pushed on `cs`. -/
@@ -181,6 +193,15 @@ def rowIn (memIdx : Std.HashMap UInt64 ℕ) {κ : ℕ} (img : MemoryImage κ) (p
         if inOdd then (input 0).limb 0 else (input 8).limb 1] ++
       Array.ofFn (fun l : Fin 25 ↦ laneK S l) ++ Array.ofFn (fun l : Fin 25 ↦ laneK out l) ++
       Array.ofFn (fun j : Fin 26 ↦ c j) ++ #[rbc]
+  | .blake3 om ocv oout omd ox oy ow =>
+    -- the fifteen cells in flush order; the value limbs in the columns' order, the message, the
+    -- output, the chaining value, the metadata, `X`, `Y`, `W` (`BLAKE3_COLUMNS`, `layout.rs`)
+    let cell := fun (k : ℕ) ↦
+      limbsIn memIdx img ((blake3FlushAddresses fp om ocv oout omd ox oy ow).getD k 0)
+    let limbs := fun (cells : List ℕ) ↦ cells.toArray.flatMap fun k ↦ #[(cell k)[0], (cell k)[1]]
+    #[pc, fp, om 0, om 1, om 2, om 3, ocv, oout, omd, ox, oy, ow] ++
+      limbs [0, 1, 2, 3, 6, 7, 4, 5, 8, 9, 10, 11, 12, 13, 14] ++
+      Array.ofFn (fun j : Fin 15 ↦ c j) ++ #[rbc]
 
 /-- The table of an opcode, in the ensemble's order. -/
 def opTableIdx : Opcode → ℕ
@@ -190,11 +211,12 @@ def opTableIdx : Opcode → ℕ
   | .deref => 3
   | .jump => 4
   | .keccak => 5
+  | .blake3 => 6
 
-/-- The rows built so far: the six tables' rows, the memory cells' and the bytecode slots'
+/-- The rows built so far: the seven tables' rows, the memory cells' and the bytecode slots'
 counters (`g^n` after `n` reads). -/
 structure Rows where
-  /-- The six opcode tables' rows, in the ensemble's order. -/
+  /-- The seven opcode tables' rows, in the ensemble's order. -/
   tabs : Array (Array (Array K))
   /-- The memory cells' counters, by index. -/
   mem : Array K
@@ -215,7 +237,7 @@ def stepRows (memIdx : Std.HashMap UInt64 ℕ) {κ : ℕ} (img : MemoryImage κ)
 def rowsOf (memIdx : Std.HashMap UInt64 ℕ) {κ : ℕ} (img : MemoryImage κ) (logSize : ℕ)
     (steps : Array Step) : Rows :=
   steps.foldl (stepRows memIdx img)
-    ⟨Array.replicate 6 #[], Array.replicate (2 ^ κ) 1, Array.replicate (2 ^ logSize) 1⟩
+    ⟨Array.replicate 7 #[], Array.replicate (2 ^ κ) 1, Array.replicate (2 ^ logSize) 1⟩
 
 end LeanVM.Prover
 

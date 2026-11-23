@@ -166,6 +166,8 @@ fn fixed(checkout: &Path) -> Vec<(String, Case, usize)> {
         ("fibonacci-rate4".to_string(), suite("fibonacci"), 4),
         ("hint-rate4".to_string(), suite("hint"), 4),
         ("unroll-rate4".to_string(), suite("unroll"), 4),
+        ("blake3-xyw-rate1".to_string(), suite("blake3_xyw"), 1),
+        ("blake3-xyw-rate3".to_string(), suite("blake3_xyw"), 3),
     ]
 }
 

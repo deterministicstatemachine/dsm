@@ -23,7 +23,8 @@ checks a relation on the words it reads, so all nondeterminism is the choice of 
 
 namespace LeanVM.Parameters
 
-/-- The six instructions, in bus-code order (`crates/lean_vm_core/src/tables.rs`). -/
+/-- The seven instructions, in bus-code order (`crates/lean_vm_core/src/tables.rs`; `OP_BLAKE3`,
+`crates/verifier/src/layout.rs`, the research build's seventh). -/
 inductive Opcode
   /-- `XOR`: an addition in `E`. -/
   | xor
@@ -37,9 +38,12 @@ inductive Opcode
   | jump
   /-- `KECCAK`: one Keccak-f[1600] permutation. -/
   | keccak
+  /-- `BLAKE3`: one BLAKE3 compression (research build). -/
+  | blake3
   deriving DecidableEq
 
-/-- The bus code of an opcode: `g^0, …, g^5` in constructor order (specification §6.4). -/
+/-- The bus code of an opcode: `g^0, …, g^6` in constructor order (specification §6.4; `OP_BLAKE3 = 6`,
+`crates/verifier/src/layout.rs`). -/
 def Opcode.busCode : Opcode → K
   | .xor => addressOfIndex 0
   | .mulNative => addressOfIndex 1
@@ -47,6 +51,7 @@ def Opcode.busCode : Opcode → K
   | .deref => addressOfIndex 3
   | .jump => addressOfIndex 4
   | .keccak => addressOfIndex 5
+  | .blake3 => addressOfIndex 6
 
 /-- The least memory log-size, `2^1` cells, the public input's two (`MIN_LOG_MEMORY`,
 `crates/verifier/src/layout.rs`). -/
@@ -125,7 +130,7 @@ def KeccakOutputCells.cellCount : KeccakOutputCells → ℕ
   | .two => 2
   | .all => 13
 
-/-- The six instructions. -/
+/-- The seven instructions. -/
 inductive LeanIsaInstruction
   /-- `[o_C] = [o_A] + [o_B]`. -/
   | xor (oA oB oC : K)
@@ -145,6 +150,12 @@ inductive LeanIsaInstruction
   others are left untouched (`KeccakCellsRelation`). -/
   | keccak (om : Fin 4 → K) (otail ob8 ocap oout : K) (inOdd outOdd : Bool)
       (outCells : KeccakOutputCells)
+  /-- One BLAKE3 compression (`Op::Blake3`, `crates/isa/src/lib.rs`): the thirteen cells
+  `[o_m₀], …, [o_m₃]` (the message block), `[o_cv]`, `[g · o_cv]` (the chaining value), `[o_md]` (the
+  metadata), `[o_x]`, `[g · o_x]`, `[o_y]`, `[g · o_y]`, `[o_w]`, `[g · o_w]` (the three placed
+  inputs), read in that order, compress to the new chaining value, which the two cells `[o_out]`,
+  `[g · o_out]` hold (`Blake3CellsRelation`). The operands are in bytecode order. -/
+  | blake3 (om : Fin 4 → K) (ocv oout omd ox oy ow : K)
   deriving DecidableEq
 
 /-- The opcode of an instruction. -/
@@ -155,6 +166,7 @@ def LeanIsaInstruction.opcode : LeanIsaInstruction → Opcode
   | .deref .. => .deref
   | .jump .. => .jump
   | .keccak .. => .keccak
+  | .blake3 .. => .blake3
 
 /-- A program: `2^logSize ≤ 2^30` instructions, instruction `i` at address `g^i`. -/
 structure LeanIsaProgram where
@@ -250,6 +262,138 @@ def readFirstCells (read : K → Option E) (fp : K) (offset : Fin 13 → K) (cou
     let rest ← acc
     pure fun c' ↦ if c' = c then v else rest c' else acc) (some fun _ ↦ 0)
 
+/-! ## `BLAKE3`
+
+One BLAKE3 compression, as the research build's `BLAKE3` instruction applies it (`Op::Blake3`,
+`crates/isa/src/lib.rs`; `compression` and `output`, `crates/lean_vm_core/src/blake3flock.rs`;
+`effective_message`, `reloc_source` and `blake2s_compress`, `crates/flock/src/hash.rs`). A cell
+holds four little-endian 32-bit words: limb `0`'s low and high halves, then limb `1`'s. The block
+compressed is the four message cells' sixteen words XOR three 32-byte inputs `X`, `Y`, `W` placed
+at the byte offsets a 25-byte prefix leaves: `X` at bytes `25..57`, the first `7` bytes of `Y` at
+`57..64`, the last `25` of `W` at `0..25`. The metadata cell holds the chunk counter in limb `0`,
+and the block length, then the flags, as limb `1`'s two 32-bit words. -/
+
+namespace Blake3
+
+/-- BLAKE3's IV, SHA-256's (`IV`, the `blake3` crate; `BLAKE2S_IV`, `crates/flock/src/hash.rs`). -/
+def iv : Array UInt32 :=
+  #[0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
+
+/-- The message word permutation between rounds (`MSG_PERMUTATION`). -/
+def msgPermutation : Array ℕ := #[2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
+
+/-- Rotate right by `n < 32`. -/
+def rotr (x : UInt32) (n : UInt32) : UInt32 := (x >>> n) ||| (x <<< (32 - n))
+
+/-- The quarter-round on the state's words `a b c d` with message words `x y` (`g`). -/
+def quarter (v : Array UInt32) (a b c d : ℕ) (x y : UInt32) : Array UInt32 :=
+  let v := v.set! a (v[a]! + v[b]! + x)
+  let v := v.set! d (rotr (v[d]! ^^^ v[a]!) 16)
+  let v := v.set! c (v[c]! + v[d]!)
+  let v := v.set! b (rotr (v[b]! ^^^ v[c]!) 12)
+  let v := v.set! a (v[a]! + v[b]! + y)
+  let v := v.set! d (rotr (v[d]! ^^^ v[a]!) 8)
+  let v := v.set! c (v[c]! + v[d]!)
+  v.set! b (rotr (v[b]! ^^^ v[c]!) 7)
+
+/-- One round: the columns, then the diagonals (`round`). -/
+def round (v m : Array UInt32) : Array UInt32 :=
+  let v := quarter v 0 4 8 12 m[0]! m[1]!
+  let v := quarter v 1 5 9 13 m[2]! m[3]!
+  let v := quarter v 2 6 10 14 m[4]! m[5]!
+  let v := quarter v 3 7 11 15 m[6]! m[7]!
+  let v := quarter v 0 5 10 15 m[8]! m[9]!
+  let v := quarter v 1 6 11 12 m[10]! m[11]!
+  let v := quarter v 2 7 8 13 m[12]! m[13]!
+  quarter v 3 4 9 14 m[14]! m[15]!
+
+/-- The compression function's new chaining value: seven rounds, the message permuted between them,
+then the two halves of the state xored (`compress_in_place`; `blake2s_compress`). -/
+def compress (cv block : Array UInt32) (counter : UInt64) (blockLen flags : UInt32) : Array UInt32 :=
+  let v := cv ++ iv.extract 0 4 ++ #[counter.toUInt32, (counter >>> 32).toUInt32, blockLen, flags]
+  let rounds := (List.range 7).foldl (fun (vm : Array UInt32 × Array UInt32) i ↦
+      let v := round vm.1 vm.2
+      (v, if i < 6 then msgPermutation.map (vm.2[·]!) else vm.2)) (v, block)
+  (List.range 8).toArray.map fun i ↦ rounds.1[i]! ^^^ rounds.1[i + 8]!
+
+/-- A block's sixteen little-endian words, its bytes zero-padded to `64`. -/
+def blockWords (bytes : List UInt8) : Array UInt32 :=
+  let b := bytes ++ List.replicate (64 - bytes.length) 0
+  (List.range 16).toArray.map fun i ↦
+    (List.range 4).foldl (fun w j ↦ w ||| ((b.getD (4 * i + j) 0).toUInt32 <<< (8 * j).toUInt32)) 0
+
+/-- The little-endian bytes of words. -/
+def wordBytes (ws : List UInt32) : List UInt8 :=
+  ws.flatMap fun w ↦ (List.range 4).map fun j ↦ (w >>> (8 * j).toUInt32).toUInt8
+
+/-- The four 32-bit words a cell holds: limb `0`'s low and high halves, then limb `1`'s (`words`,
+`blake3flock.rs`). -/
+def cellWords (v : E) : List UInt32 :=
+  [(v.limb 0).lane.toUInt32, ((v.limb 0).lane >>> 32).toUInt32,
+    (v.limb 1).lane.toUInt32, ((v.limb 1).lane >>> 32).toUInt32]
+
+/-- The byte of `X ‖ Y ‖ W` (`xyw`, 96 bytes) placed at block byte `p`: `W`'s byte `p + 7` below
+`25`, `X`'s byte `p − 25` below `57`, `Y`'s byte `p − 57` below `64` (`reloc_source`, by bytes:
+it maps block bit `8p + k` to source bit `8p' + k`). -/
+def placedByte (xyw : List UInt8) (p : ℕ) : UInt8 :=
+  if p < 25 then xyw.getD (64 + (p + 7)) 0
+  else if p < 57 then xyw.getD (p - 25) 0
+  else if p < 64 then xyw.getD (32 + (p - 57)) 0
+  else 0
+
+/-- The block a compression hashes: the message words XOR the placed `X`, `Y`, `W` bytes
+(`effective_message`). -/
+def effectiveMessage (m xyw : List UInt32) : Array UInt32 :=
+  let mb := wordBytes m
+  let xb := wordBytes xyw
+  blockWords ((List.range 64).map fun p ↦ mb.getD p 0 ^^^ placedByte xb p)
+
+/-- The words of the cells `lo ≤ c < hi` of thirteen, in order. -/
+def cellRangeWords (cells : Fin 13 → E) (lo hi : ℕ) : List UInt32 :=
+  ((List.finRange 13).filter fun c ↦ lo ≤ c.val ∧ c.val < hi).flatMap fun c ↦ cellWords (cells c)
+
+/-- The new chaining value of the compression the thirteen input cells describe, in the order
+`Blake3InputCellOffset` reads them: message cells `0..4`, chaining value `4..6`, metadata `6`, `X`
+`7..9`, `Y` `9..11`, `W` `11..13` (`compression`, then `output`, `blake3flock.rs`). -/
+def compressCells (input : Fin 13 → E) : Array UInt32 :=
+  let md := input 6
+  compress (cellRangeWords input 4 6).toArray
+    (effectiveMessage (cellRangeWords input 0 4) (cellRangeWords input 7 13))
+    (md.limb 0).lane ((md.limb 1).lane.toUInt32) (((md.limb 1).lane >>> 32).toUInt32)
+
+/-- Cell `k < 2` of a chaining value of eight words: words `4k..4k+4`, limb `0` the first two
+(`output`, `blake3flock.rs`). -/
+def chainCell (h : Array UInt32) (k : ℕ) : E :=
+  let limb := fun (i : ℕ) ↦ K.ofLane (h[2 * i]!.toUInt64 ||| (h[2 * i + 1]!.toUInt64 <<< 32))
+  E.ofLimbs (limb (2 * k)) (limb (2 * k + 1))
+
+end Blake3
+
+/-- The address of `BLAKE3`'s read cell `c` relative to the frame: `o_m₀, …, o_m₃`, `o_cv`,
+`g · o_cv`, `o_md`, `o_x`, `g · o_x`, `o_y`, `g · o_y`, `o_w`, `g · o_w` (`CELLS`,
+`blake3flock.rs`, the output's two cells left out). -/
+def blake3InputCellOffset (om : Fin 4 → K) (ocv omd ox oy ow : K) (c : Fin 13) : K :=
+  if h : c.val < 4 then om ⟨c.val, h⟩
+  else if c.val = 4 then ocv
+  else if c.val = 5 then g * ocv
+  else if c.val = 6 then omd
+  else if c.val = 7 then ox
+  else if c.val = 8 then g * ox
+  else if c.val = 9 then oy
+  else if c.val = 10 then g * oy
+  else if c.val = 11 then ow
+  else g * ow
+
+/-- What `BLAKE3` checks: its two output cells hold the new chaining value of the compression its
+thirteen input cells describe (`Blake3.compressCells`); a cell of `output` past the first two is
+not read (`crates/lean_vm_core/src/cpu/execute.rs`, `Op::Blake3`). -/
+def Blake3CellsRelation (input output : Fin 13 → E) : Prop :=
+  output 0 = Blake3.chainCell (Blake3.compressCells input) 0 ∧
+    output 1 = Blake3.chainCell (Blake3.compressCells input) 1
+
+instance {input output : Fin 13 → E} : Decidable (Blake3CellsRelation input output) := by
+  unfold Blake3CellsRelation; infer_instance
+
 /-! ## One step -/
 
 /-- The registers: the program counter and the frame pointer. -/
@@ -318,6 +462,11 @@ def executeWith (read : K → Option E) (registers : Registers K) :
     let input ← readCells read registers.fp (keccakInputCellOffset om otail ob8 ocap)
     let output ← readFirstCells read registers.fp (fun c ↦ g ^ c.val * oout) outCells.cellCount
     guard (KeccakCellsRelation input inOdd output outOdd outCells)
+    pure registers.next
+  | .blake3 om ocv oout omd ox oy ow => do
+    let input ← readCells read registers.fp (blake3InputCellOffset om ocv omd ox oy ow)
+    let output ← readFirstCells read registers.fp (fun c ↦ g ^ c.val * oout) 2
+    guard (Blake3CellsRelation input output)
     pure registers.next
 
 /-- Execute an instruction on `memory`. -/
@@ -436,7 +585,8 @@ def keccakOutputFlags (outCells : KeccakOutputCells) : K × K :=
 /-- The bus entry of an instruction, `(opcode, op₁, …, op₁₂)`: slots 3 to 15 of specification
 §8.1, the thirteen public columns of `encode` (`crates/isa/src/program.rs`): offsets as
 g-powers, a `SET` immediate as its two limbs, the `DEREF` store-mode flags and `KECCAK`'s
-layout and output flags as `0` or `1`, unused slots zero. -/
+layout and output flags as `0` or `1`, unused slots zero; `BLAKE3`'s ten offsets in the order
+`m₀, …, m₃, cv, out, md, x, y, w` (`encode`'s `Op::Blake3` arm). -/
 def busEntry : LeanIsaInstruction → Vector K 13
   | .xor oA oB oC => #v[Opcode.xor.busCode, oA, oB, oC, 0, 0, 0, 0, 0, 0, 0, 0, 0]
   | .mulNative oA oB oC => #v[Opcode.mulNative.busCode, oA, oB, oC, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -450,6 +600,8 @@ def busEntry : LeanIsaInstruction → Vector K 13
       #v[Opcode.keccak.busCode, om 0, om 1, om 2, om 3, otail, ob8, ocap, oout,
         layoutFlagWord inOdd, layoutFlagWord outOdd, (keccakOutputFlags outCells).1,
         (keccakOutputFlags outCells).2]
+  | .blake3 om ocv oout omd ox oy ow =>
+      #v[Opcode.blake3.busCode, om 0, om 1, om 2, om 3, ocv, oout, omd, ox, oy, ow, 0, 0]
 
 /-- The sixteen slots of an instruction (specification §8.1; `OPCODE_SLOT = 3`,
 `crates/isa/src/program.rs`): the entry at slots 3 to 15, zero at slots 0 to 2. -/
@@ -506,6 +658,10 @@ inductive OffsetInstruction
   thirteen cells of its Keccak-f[1600] in the layout `outOdd` (`KeccakCellsRelation`;
   `Op::Keccak`, `crates/isa/src/lib.rs`). -/
   | keccak (m0 m1 m2 m3 tail b8 cap out : ℕ) (inOdd outOdd : Bool) (outCells : KeccakOutputCells)
+  /-- `BLAKE3`: the cells `fp[m0], …, fp[m3]`, `fp[cv + k]`, `fp[md]`, `fp[x + k]`, `fp[y + k]`,
+  `fp[w + k]` (`k < 2`) describe a compression whose new chaining value the cells `fp[out + k]`
+  (`k < 2`) hold (`Blake3CellsRelation`; `Op::Blake3`, `crates/isa/src/lib.rs`). -/
+  | blake3 (m0 m1 m2 m3 cv out md x y w : ℕ)
   deriving DecidableEq
 
 /-- The padding instruction, `SET fp[0] = 0`. -/
@@ -525,6 +681,10 @@ def OffsetInstruction.toLeanIsaInstruction : OffsetInstruction → LeanIsaInstru
       .keccak ![addressOfIndex m0, addressOfIndex m1, addressOfIndex m2, addressOfIndex m3]
           (addressOfIndex tail) (addressOfIndex b8) (addressOfIndex cap) (addressOfIndex out)
         inOdd outOdd outCells
+  | .blake3 m0 m1 m2 m3 cv out md x y w =>
+      .blake3 ![addressOfIndex m0, addressOfIndex m1, addressOfIndex m2, addressOfIndex m3]
+        (addressOfIndex cv) (addressOfIndex out) (addressOfIndex md) (addressOfIndex x)
+        (addressOfIndex y) (addressOfIndex w)
 
 /-- The instructions per chunk of a compiled function's code. -/
 def chunkSize : ℕ := 2048

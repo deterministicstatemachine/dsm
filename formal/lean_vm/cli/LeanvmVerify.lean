@@ -168,11 +168,15 @@ def tracedExecution (total : ℕ) (bytecode : List K) (publicInput : Digest) : T
     (layout.tableLogHeights.getD opKeccak 0) point
     ((List.range 25).map fun lane ↦ values.getD (keccakOut + lane) 0)
   let claims := claims ++ outputs
+  mark total "flock"
+  let (flockPoint, flockSlices) ← exec total (flockPhase layout)
   mark total "ring"
-  let (ringTarget, ringWeight) ← exec total (ringSwitch keccakPoint keccakSlices)
+  let rings ← exec total (ringSwitch [(keccakPoint, keccakSlices), (flockPoint, flockSlices)])
   mark total "whir"
   exec total (verifyStackedOpening layout.stackLog logInverseRate
-    (ringSwitchClaim layout ringTarget ringWeight :: claims.filterMap (·.onStack layout) ++ [ood]))
+    (List.zipWith (fun region (target, weight) ↦ ringSwitchClaim layout region target weight)
+        [qkeccak, qflock] rings ++
+      claims.filterMap (·.onStack layout) ++ [ood]))
 
 /-- The JSON of the log: phases as `[name, offset]`, roots as offsets, nonces as `[offset, bits]`. -/
 def Log.json (log : Log) (total : ℕ) : String :=

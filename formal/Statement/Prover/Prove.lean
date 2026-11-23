@@ -7,6 +7,7 @@ public import Statement.Prover.Bus
 public import Statement.Prover.Table
 public import Statement.Prover.Keccak
 public import Statement.Prover.Whir
+public import Statement.Prover.Flock
 
 /-!
 # The honest prover
@@ -41,7 +42,8 @@ def oodFast (μ : ℕ) (stack : Array K) : Script (List E × E) :=
 /-- **The honest script** of an execution's witness `W` at the rate `ρ` and the public input
 `publicInput`: the moves of `verify_execution` (its `walk`, `crates/verifier/src/lib.rs`),
 each phase's executable prover beside the verifier's phase (`Script.alongside`), which hands the
-next phase its result. The public-input phase sends nothing; the output lanes' claims, on no
+next phase its result; Flock's after the Keccak reduction's, then one ring switch for both
+regions. The public-input phase sends nothing; the output lanes' claims, on no
 committed column, do not reach the stack (`ColumnClaim.onStack`); the commitment's out-of-domain
 claim joins the stacked opening's claims last. -/
 def honestScript (W : Witness) (ρ : ℕ) (publicInput : Digest) : Script Unit :=
@@ -56,11 +58,14 @@ def honestScript (W : Witness) (ρ : ℕ) (publicInput : Digest) : Script Unit :
   (Script.alongside (publicInputPhase layout publicInput) Script.sampleE).bind fun publicClaims ↦
   (Script.alongside (keccakPhase layout evaluations) (KeccakGkr.keccakPhaseProve
     (layout.tableLogHeights.getD opKeccak 0) W.cols evaluations)).bind fun keccak ↦
-  (ringFast keccak.2.1 keccak.2.2).bind fun r ↦
+  (Script.alongside (flockPhase layout)
+    (Flock.prove W.flock (layout.tableLogHeights.getD opBlake3 0))).bind fun flock ↦
+  (ringFast [(keccak.2.1, keccak.2.2), flock]).bind fun rings ↦
   let claims := (bus.claims ++ tableColumnClaims evaluations ++ publicClaims).filter
     (fun c ↦ c.column ∉ keccakOutputColumns) ++ keccak.1
   openingFast layout.stackLog ρ W.stack
-    (r.claim layout :: claims.map (ClaimDesc.column layout) ++ [.ood ood.1 ood.2])
+    (List.zipWith (fun r region ↦ r.claim layout region) rings [qkeccak, qflock] ++
+      claims.map (ClaimDesc.column layout) ++ [.ood ood.1 ood.2])
 
 /-- **leanVM's honest prover.** The proof of the execution `t` of `prog` on `input` at the rate
 `2^-ρ`, trying `fuel` nonces per proof of work; `none` for a trace that is no valid execution

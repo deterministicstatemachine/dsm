@@ -1,14 +1,15 @@
 module
 
 public import Statement.Prover.Witness
+public import Statement.Prover.Flock
 
 /-!
 # The columns and the stack of an execution, executable
 
 From the rows of a run (`rowsOf`, `Witness.lean`) and the verifier's layout of its sizes
 (`buildLayout`): every column of the instance as an array, by the verifier's global column number
-(`colsOf`), the `KECCAK` states computed once per row for `QKECCAK` and the output lanes; and the
-stack, each column written at its placement.
+(`colsOf`), the `KECCAK` states computed once per row for `QKECCAK` and the output lanes, Flock's
+instances once per `BLAKE3` row for `QFLOCK`; and the stack, each column written at its placement.
 `witness?` puts them together.
 -/
 
@@ -63,41 +64,56 @@ def qkeccakColumn (R : Array (Array K)) (h : ℕ) (mids : Array KeccakState) : A
     else if k < 50 then laneK (mids.getD x zeroState) (k - 25)
     else cellAt R x (k - 50)
 
-/-- The opcode table of a global column from `5` on (by `GLOBAL_COLUMN_BASES`). -/
+/-- The opcode table of a global column from `globalColumnCount` on (by `GLOBAL_COLUMN_BASES`). -/
 def tableIndexOf (c : ℕ) : ℕ :=
-  if c < 18 then 0 else if c < 31 then 1 else if c < 38 then 2 else if c < 52 then 3
-  else if c < 66 then 4 else 5
+  ((List.range tables.length).filter fun t ↦ globalColumnBases.getD t 0 ≤ c).getLastD 0
+
+/-- The number of global columns: the framework's, then every table's. -/
+def columnCount : ℕ := globalColumnCount + tableWidths.sum
+
+/-- A `BLAKE3` value limb's column at the height `2^h`: its rows' cells, the padding instance's
+word past them (`Table::padding`, `blake3_padding_word`, `layout.rs`). -/
+def blake3ValueColumn (R : Array (Array K)) (h i slot : ℕ) : Array K :=
+  Array.ofFn (n := 2 ^ h) fun x ↦
+    if x.val < R.size then cellAt R x.val i else K.ofBits (blake3PaddingWord slot)
 
 /-- The column of global number `c`: the memory's two limbs and finalize counts `0 … 2`, `BYTECODE_FINAL_COUNTERS`
-`3`, `QKECCAK` `4`, then column `c - base` of the opcode table `c` falls in, the `KECCAK` output lanes
-(its columns `40 … 64`) derived from the twelve-round states `mids`, through the twenty-four-round
-states `outs`. -/
+`3`, `QKECCAK` `4`, `QFLOCK` `5` (Flock's `instances`' words), then column `c - base` of the opcode
+table `c` falls in, the `KECCAK` output lanes (its columns `40 … 64`) derived from the
+twelve-round states `mids`, through the twenty-four-round states `outs`, and a `BLAKE3` value
+limb padded with the padding instance's word. -/
 def columnAt {κ : ℕ} (img : MemoryImage κ) (acc : Rows) (logs : List ℕ)
-    (mids outs : Array KeccakState) (c : ℕ) : Array K :=
+    (mids outs : Array KeccakState) (instances : Array Flock.Instance) (c : ℕ) : Array K :=
   if c = 0 then Array.ofFn (n := 2 ^ κ) fun x ↦ (img x).limb 0
   else if c = 1 then Array.ofFn (n := 2 ^ κ) fun x ↦ (img x).limb 1
   else if c = 2 then acc.mem
   else if c = 3 then acc.bc
   else if c = 4 then qkeccakColumn (acc.tabs.getD 5 #[]) (logs.getD 5 0) mids
+  else if c = 5 then Flock.qflockColumn instances (logs.getD 6 0)
   else
     let j := tableIndexOf c
     let i := c - globalColumnBases.getD j 0
     if j = 5 ∧ 40 ≤ i ∧ i < 65 then
       Array.ofFn (n := 2 ^ logs.getD 5 0) fun x ↦ laneK (outs.getD x.val zeroState) (i - 40)
+    else if j = 6 then
+      match blake3Slot (blake3Columns.getD i "") with
+      | some slot => blake3ValueColumn (acc.tabs.getD 6 #[]) (logs.getD 6 0) i slot
+      | none => tableColumn (acc.tabs.getD j #[]) (logs.getD j 0) i
     else tableColumn (acc.tabs.getD j #[]) (logs.getD j 0) i
 
-/-- **Every column of the instance**, by its global column number (`158` of them); the
-`KECCAK` states computed once per row, for `QKECCAK` and the output lanes. -/
-def colsOf {κ : ℕ} (img : MemoryImage κ) (acc : Rows) (logs : List ℕ) : Array (Array K) :=
+/-- **Every column of the instance**, by its global column number (`columnCount`, `217` of them);
+the `KECCAK` states computed once per row, for `QKECCAK` and the output lanes. -/
+def colsOf {κ : ℕ} (img : MemoryImage κ) (acc : Rows) (logs : List ℕ)
+    (instances : Array Flock.Instance) : Array (Array K) :=
   let mids := midStates (acc.tabs.getD 5 #[]) (logs.getD 5 0)
   let outs := outStates (acc.tabs.getD 5 #[]) mids
-  Array.ofFn (n := 158) fun c ↦ columnAt img acc logs mids outs c.val
+  Array.ofFn (n := columnCount) fun c ↦ columnAt img acc logs mids outs instances c.val
 
 /-! ## The stack -/
 
 /-- **The stack**: every placed column written from its placement's index on, over `2 ^ stackLog`
 zeros (`Placement.stack_point`'s cells); a column with a `q_keccak` slot writes again cells of
-`QKECCAK`. -/
+`QKECCAK`, one with a `q_flock` slot cells of `QFLOCK`. -/
 def stackArray (layout : Layout) (cols : Array (Array K)) : Array K :=
   (layout.placements.zip cols.toList).foldl (init := Array.replicate (2 ^ layout.stackLog) 0)
     fun stack (placement?, col) ↦ match placement? with
@@ -110,7 +126,7 @@ def stackArray (layout : Layout) (cols : Array (Array K)) : Array K :=
 /-- The prover's data of an execution: the announced row counts, the verifier's layout, every
 column by global number, and the stack. -/
 structure Witness where
-  /-- The six opcode tables' row counts, in the ensemble's order. -/
+  /-- The seven opcode tables' row counts, in the ensemble's order. -/
   rows : List ℕ
   /-- The verifier's layout of the announced sizes. -/
   layout : Layout
@@ -118,11 +134,14 @@ structure Witness where
   cols : Array (Array K)
   /-- The stack, `2 ^ layout.stackLog` cells. -/
   stack : Array K
+  /-- Flock's instances, the `BLAKE3` rows' then the padding instance's. -/
+  flock : Array Flock.Instance
 
 /-- The prover's data of the rows `acc` of a run on the memory `img`, at the layout `layout`. -/
 def buildWitness {κ : ℕ} (img : MemoryImage κ) (acc : Rows) (layout : Layout) : Witness :=
-  let cols := colsOf img acc layout.tableLogHeights
-  ⟨acc.tabs.toList.map (·.size), layout, cols, stackArray layout cols⟩
+  let instances := Flock.instancesOf (acc.tabs.getD 6 #[]) (layout.tableLogHeights.getD 6 0)
+  let cols := colsOf img acc layout.tableLogHeights instances
+  ⟨acc.tabs.toList.map (·.size), layout, cols, stackArray layout cols, instances⟩
 
 /-- **The prover's data of an execution**: `none` unless the trace has the public boundary of
 `input`, its run ends in the final state, its committed size is at most `2^30`, and its sizes pass
@@ -140,8 +159,8 @@ def witness? (prog : LeanIsaProgram) (input : PublicInput) (t : Execution prog) 
     | none => none
   else none
 
-/-- The eight scalars announcing the sizes and the rate `ρ` (`announce`): the memory log-size,
-the six row counts, the rate, each the word `n` in limb `0` (`eOfNat`). -/
+/-- The nine scalars announcing the sizes and the rate `ρ` (`announce`): the memory log-size,
+the seven row counts, the rate, each the word `n` in limb `0` (`eOfNat`). -/
 def Witness.announce (W : Witness) (ρ : ℕ) : List E :=
   (W.layout.logMemory :: W.rows ++ [ρ]).map eOfNat
 

@@ -371,6 +371,9 @@ instance : MachineEncoding LeanIsaInstruction where
     | .keccak om t b c o i j n =>
       .constructor 5 [encodeFiniteFunction om, encodeValue t, encodeValue b, encodeValue c,
         encodeValue o, encodeValue i, encodeValue j, encodeValue n]
+    | .blake3 om cv out md x y w =>
+      .constructor 6 [encodeFiniteFunction om, encodeValue cv, encodeValue out, encodeValue md,
+        encodeValue x, encodeValue y, encodeValue w]
 
 instance : MachineEncoding Semantics.LeanIsaProgram :=
   ⟨fun p ↦ .constructor 0 [encodeValue p.logSize, encodeFiniteFunction p.instructions]⟩
