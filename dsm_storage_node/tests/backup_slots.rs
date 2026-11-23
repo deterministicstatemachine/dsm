@@ -129,7 +129,9 @@ async fn write_whole(
 /// MUTATION CONTROL: keeping the earlier whole backup's parts in
 /// `db::backup_part` (dropping its DELETE) turns the store count red; taking
 /// a start of a lower generation in `db::backup_start` turns the replay red;
-/// taking a part whatever its digest turns the forged part red.
+/// taking a part whatever its digest turns the forged part red; taking a start
+/// unsigned in `dsm::wallet_backup::admit_start` turns the forged start red
+/// (run 2026-11-23, with the old backup cells' check dropped: that test red).
 #[test]
 fn a_device_holds_one_backup_and_it_is_written_over() {
     common::runtime().block_on(async {
@@ -199,9 +201,23 @@ fn a_device_holds_one_backup_and_it_is_written_over() {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(state(&body).highest_generation, 3, "names the highest");
 
-        // Another device's lock does not start a write here.
+        // Another device's lock does not start a write here: neither its own
+        // start, nor its signature carried under the owner's lock.
         let (_, theirs) = ok(keys.start(&lock(0x22), 9, &digests(&third)), "their start");
-        assert_eq!(start(&app, &slot, theirs).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            start(&app, &slot, theirs.clone()).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let mut forged = ok(
+            dsm::types::proto::BackupSlotStartV1::decode(theirs.as_slice()),
+            "their start decodes",
+        );
+        forged.lock_public_key = owner.public_key.clone();
+        assert_eq!(
+            start(&app, &slot, forged.encode_to_vec()).await.0,
+            StatusCode::FORBIDDEN,
+            "a stranger's signature under the owner's lock"
+        );
         assert_eq!(read_slot(&app, &slot).await.generation, 3);
     });
 }
