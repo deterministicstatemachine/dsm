@@ -18,7 +18,6 @@
 //! puts all three claims at ONE point and leaves lincheck a single family of
 //! bit slices for ring switching (doc/leanvm Annex C).
 
-use fiat_shamir::grinding_bits;
 use primitives::transcript::ProverState;
 use {crate::compat::F8, primitives::field::F128};
 
@@ -155,7 +154,7 @@ pub fn prove_packed_padded(
     // Prover and verifier use the same tower-valued challenges directly.
     // The sampled coordinates, degree one each in the eq sum: their count over |E| (the verifier's grind).
     let r_rest = equality_tail(m, |n| {
-        ps.grind(grinding_bits(n as u128));
+        ps.grind(verifier::flock::FLOCK_POINT_GRIND_BITS);
         ps.sample_vec(n)
     });
 
@@ -186,7 +185,7 @@ pub fn prove_packed_padded(
         ps.add_scalar(x);
     }
     // P is of degree 2 (2^k_skip - 1) in the skip variable.
-    ps.grind(grinding_bits(2 * ((1u128 << K_SKIP) - 1)));
+    ps.grind(verifier::flock::FLOCK_SKIP_GRIND_BITS);
     let z = ps.sample();
 
     // ---- Rounds 2 onwards: straight from the packed bits ----

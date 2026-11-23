@@ -31,6 +31,11 @@ fn phi(value: usize) -> E {
 /// The old generator's first two limbs (hex digits of pi), as the prover's `medium_generator`.
 const MEDIUM_GENERATOR: E = E::new(0x243F6A8885A308D3, 0x13198A2E03707344);
 const N_FIXED_CHALLENGES: usize = 7;
+/// The grind before the zerocheck's sampled coordinates: their count is at most 32.
+pub const FLOCK_POINT_GRIND_BITS: u32 = grinding_bits(32);
+const _: () = assert!(BLAKE3_R1CS_LOG_SIZE + crate::layout::MAX_TABLE_LOG - FLOCK_K_SKIP - N_FIXED_CHALLENGES <= 32);
+/// The grind before the univariate-skip challenge: P is of degree 2 (2^k_skip - 1) in it.
+pub const FLOCK_SKIP_GRIND_BITS: u32 = grinding_bits(2 * (K_BITS as u128 - 1));
 
 fn fixed_challenges() -> [E; N_FIXED_CHALLENGES] {
     let medium = |power: u32| {
@@ -86,16 +91,16 @@ struct ZerocheckResult {
 fn verify_flock_zerocheck(log_n: usize, transcript: &mut Transcript) -> Result<ZerocheckResult, VerifierError> {
     // The point r: seven fixed coordinates, the rest sampled.
     let mut r: Vec<Option<E>> = fixed_challenges().map(Some).into();
-    // The sampled coordinates, degree one each in the eq sum: their count over |E|.
+    // The sampled coordinates, degree one each in the eq sum: their count over |E|, at most 32 for every announced
+    // height (log_n <= BLAKE3_R1CS_LOG_SIZE + MAX_TABLE_LOG), so one grind fits every proof.
     let n_sampled = log_n - FLOCK_K_SKIP - N_FIXED_CHALLENGES;
-    transcript.grind_check(grinding_bits(n_sampled as u128))?;
+    transcript.grind_check(FLOCK_POINT_GRIND_BITS)?;
     let sampled = transcript.samples(n_sampled);
     r.extend(sampled.into_iter().map(Some));
 
     // P = P^AB + P^C on the coset, then z_skip; the 64 zeros on Lambda are assumed.
     let p_coset = transcript.next_scalars(K_BITS)?;
-    // P is of degree 2 (2^k_skip - 1) in the skip variable.
-    transcript.grind_check(grinding_bits(2 * (K_BITS as u128 - 1)))?;
+    transcript.grind_check(FLOCK_SKIP_GRIND_BITS)?;
     let z_skip = transcript.sample();
     let v_p = lagrange_interpolate(2 * K_BITS, &[vec![ZERO; K_BITS], p_coset].concat(), z_skip);
 
@@ -124,6 +129,9 @@ pub struct FlockClaims {
     pub alpha: E,
     pub round_challenges: Vec<E>,
     pub s: Vec<E>,
+    /// The terminal's matrix part ([`matrix_term`]), and the claim the lincheck's rounds leave.
+    pub matrix: E,
+    pub terminal: E,
 }
 
 impl FlockClaims {
@@ -147,40 +155,7 @@ fn verify_flock_lincheck(zc: ZerocheckResult, transcript: &mut Transcript) -> Re
 
     // The residual, then the terminal identity: pin term and c term included.
     let s = transcript.next_scalars(K_BITS)?;
-    if transcript.checked() {
-        // e_row: phi8 Lagrange in the skip coordinate, eq in the slot variables.
-        let skip_weights = lagrange_weights(K_BITS, zc.z_skip);
-        let chi_in = &zc.chi[..FLOCK_NUM_LINCHECK_ROUNDS];
-        // C = I, so the c weight is e_row itself, and both sides being tensors it
-        // collapses to eq(chi_in, chi_in_prime) times a 64-term Lagrange combination.
-        let chi_in_prime: Vec<E> = round_challenges.iter().rev().copied().collect();
-        // w_col = eq(chi_in_prime) ⊗ s, a column of it per slice: each slice multiplies the whole eq table.
-        let high = eq_kernel(&chi_in_prime);
-        let mut w_col = vec![ZERO; high.len() * K_BITS];
-        for (l, &slice) in s.iter().enumerate() {
-            let slice = Scaled::new(slice);
-            for (h, &weight) in high.iter().enumerate() {
-                w_col[h * K_BITS + l] = slice.mul(weight);
-            }
-        }
-        let (left_values, right_values) = blake3_row_values(&w_col);
-        // e_row = eq(chi_in) ⊗ skip_weights, never built: each block of 64 rows meets the skip weights, a column at a
-        // time, then chi_in folds the blocks.
-        let (mut left_blocks, mut right_blocks) = (vec![ZERO; high.len()], vec![ZERO; high.len()]);
-        for (l, &weight) in skip_weights.iter().enumerate() {
-            let weight = Scaled::new(weight);
-            for (h, (left, right)) in left_blocks.iter_mut().zip(&mut right_blocks).enumerate() {
-                *left += weight.mul(left_values[h * K_BITS + l]);
-                *right += weight.mul(right_values[h * K_BITS + l]);
-            }
-        }
-        let terminal = multilinear_eval(&left_blocks, chi_in)?
-            + alpha * multilinear_eval(&right_blocks, chi_in)?
-            + alpha.pow(2) * eq_eval(chi_in, &chi_in_prime) * dot(&skip_weights, &s)
-            + alpha.pow(3) * w_col[BLAKE3_CONSTANT_COLUMN];
-        require(terminal == r_lc, VerifierError::FlockLincheckTerminal)?;
-    }
-    Ok(FlockClaims {
+    let mut claims = FlockClaims {
         z_skip: zc.z_skip,
         chi: zc.chi,
         v_a: zc.v_a,
@@ -189,7 +164,65 @@ fn verify_flock_lincheck(zc: ZerocheckResult, transcript: &mut Transcript) -> Re
         alpha,
         round_challenges,
         s,
-    })
+        matrix: ZERO,
+        terminal: r_lc,
+    };
+    // A guest defers the matrix part, so a replay computes it too: it is a witness of the guest's.
+    claims.matrix = matrix_term(&claims)?;
+    if transcript.checked() {
+        let skip_weights = lagrange_weights(K_BITS, claims.z_skip);
+        let chi_in = &claims.chi[..FLOCK_NUM_LINCHECK_ROUNDS];
+        // C = I, so the c weight is e_row itself, and both sides being tensors it
+        // collapses to eq(chi_in, chi_in_prime) times a 64-term Lagrange combination.
+        let chi_in_prime: Vec<E> = claims.round_challenges.iter().rev().copied().collect();
+        // The constant column's weight: its slice, times its high bits' eq.
+        let pin = claims.s[BLAKE3_CONSTANT_COLUMN % K_BITS]
+            * eq_kernel(&chi_in_prime)[BLAKE3_CONSTANT_COLUMN / K_BITS];
+        let terminal = claims.matrix
+            + alpha.pow(2) * eq_eval(chi_in, &chi_in_prime) * dot(&skip_weights, &claims.s)
+            + alpha.pow(3) * pin;
+        require(terminal == r_lc, VerifierError::FlockLincheckTerminal)?;
+    }
+    Ok(claims)
+}
+
+/// The lincheck terminal's matrix part, `sum_(r, c) (A0 + alpha B0)[r][c] e_row(r) w_col(c)`: `e_row` the phi8
+/// Lagrange weights at the skip coordinate times eq at the zerocheck's first coordinates, `w_col` the 64 slices times
+/// eq at the lincheck's challenges (bound top-down). A recursion guest defers it.
+pub fn matrix_term(claims: &FlockClaims) -> Result<E, VerifierError> {
+    let skip_weights = lagrange_weights(K_BITS, claims.z_skip);
+    let chi_in = &claims.chi[..FLOCK_NUM_LINCHECK_ROUNDS];
+    let chi_in_prime: Vec<E> = claims.round_challenges.iter().rev().copied().collect();
+    // w_col = eq(chi_in_prime) ⊗ s, a column of it per slice: each slice multiplies the whole eq table.
+    let high = eq_kernel(&chi_in_prime);
+    let mut w_col = vec![ZERO; high.len() * K_BITS];
+    for (l, &slice) in claims.s.iter().enumerate() {
+        let slice = Scaled::new(slice);
+        for (h, &weight) in high.iter().enumerate() {
+            w_col[h * K_BITS + l] = slice.mul(weight);
+        }
+    }
+    let (left_values, right_values) = blake3_row_values(&w_col);
+    // e_row = eq(chi_in) ⊗ skip_weights, never built: each block of 64 rows meets the skip weights, a column at a
+    // time, then chi_in folds the blocks.
+    let (mut left_blocks, mut right_blocks) = (vec![ZERO; high.len()], vec![ZERO; high.len()]);
+    for (l, &weight) in skip_weights.iter().enumerate() {
+        let weight = Scaled::new(weight);
+        for (h, (left, right)) in left_blocks.iter_mut().zip(&mut right_blocks).enumerate() {
+            *left += weight.mul(left_values[h * K_BITS + l]);
+            *right += weight.mul(right_values[h * K_BITS + l]);
+        }
+    }
+    Ok(multilinear_eval(&left_blocks, chi_in)? + claims.alpha * multilinear_eval(&right_blocks, chi_in)?)
+}
+
+/// The multilinear extensions of `A0` and `B0` at `point`: the row coordinates, then the column coordinates. What
+/// the outermost verifier of an aggregate checks a deferred matrix claim with.
+pub fn matrix_values(point: &[E]) -> Result<(E, E), VerifierError> {
+    require(point.len() == 2 * BLAKE3_R1CS_LOG_SIZE, VerifierError::MultilinearSize)?;
+    let (row, column) = point.split_at(BLAKE3_R1CS_LOG_SIZE);
+    let (left_values, right_values) = blake3_row_values(&eq_kernel(column));
+    Ok((multilinear_eval(&left_values, row)?, multilinear_eval(&right_values, row)?))
 }
 
 type Word = [E; 32];

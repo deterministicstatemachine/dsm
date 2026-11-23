@@ -267,3 +267,58 @@ fn chain_of_seven() {
 fn chain_of_300_and_tampering() {
     chain(300, true);
 }
+
+/// Measurement, not a check: `BLAKE3_N` chained compressions (default 2020), proved 3 times; the median prove, one
+/// verify, the proof's bytes and the process's peak resident memory.
+#[test]
+#[ignore]
+fn bench_chain() {
+    let n: usize = std::env::var("BLAKE3_N").ok().and_then(|v| v.parse().ok()).unwrap_or(2020);
+    let flags = CHUNK_START | CHUNK_END | ROOT;
+    let x0: [u32; 8] = std::array::from_fn(|i| 0x0101_0101u32.wrapping_mul(i as u32 + 1));
+    let mut x = x0;
+    for _ in 0..n {
+        let mut block = [0u32; 16];
+        block[..8].copy_from_slice(&x);
+        block[8..].copy_from_slice(&x);
+        x = compress(&IV, &block, 0, 64, flags);
+    }
+    let iv = digest_cells(&IV);
+    let start = digest_cells(&x0);
+    let replacements: BTreeMap<String, String> = [
+        ("N_PLACEHOLDER", n.to_string()),
+        ("CV0", lit(iv[0])),
+        ("CV1", lit(iv[1])),
+        ("MD", lit(md(0, 64, flags))),
+        ("X0", lit(start[0])),
+        ("X1", lit(start[1])),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    let p = Program::from(compile(&parse_with_replacements(CHAIN, &replacements).unwrap()));
+    let public = digest_cells(&x);
+    let mut times = Vec::new();
+    let mut last = None;
+    for _ in 0..3 {
+        let t = std::time::Instant::now();
+        let (proof, stats) = prove(&p, &[], public, 1).expect("proves");
+        times.push(t.elapsed().as_secs_f64() * 1e3);
+        last = Some((proof, stats));
+    }
+    times.sort_by(f64::total_cmp);
+    let (proof, stats) = last.unwrap();
+    let t = std::time::Instant::now();
+    verify(&p, &public, &proof).expect("verifies");
+    let verify_ms = t.elapsed().as_secs_f64() * 1e3;
+    let hwm = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM:")).map(|l| l.to_string()))
+        .unwrap_or_default();
+    eprintln!(
+        "BENCH n={n} cycles={} prove_median_ms={:.1} verify_ms={verify_ms:.2} proof_kib={:.1} {hwm}",
+        stats.cycles,
+        times[1],
+        proof.to_bytes().len() as f64 / 1024.0
+    );
+}
