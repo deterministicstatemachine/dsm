@@ -1,17 +1,17 @@
 # Apps plugged into DSM
 
-These apps are plugged into DSM today. Each kept its own server and its own logic, added a DSM account of its own, and lets its users connect their DSM wallets to it. Their code is public, in [Irrefutable Labs' repositories](https://github.com/orgs/Irrefutable-Labs/repositories).
+These apps are plugged into DSM today. Each kept its own server and its own logic, added a DSM account of its own, and lets its users connect their DSM wallets to it. Their code is public, in [Irrefutable Labs' repositories](https://github.com/orgs/Irrefutable-Labs/repositories). The two games are demos, built to showcase DSM rather than as finished games; OpenBoxes for DSM is a working app; CBFpy for DSM is an experiment.
 
 | App | What it is | What DSM does in it |
 |---|---|---|
-| [Wildstate](#wildstate) | A creature-collecting game for Android | The coin and every creature are objects in the player's own wallet; the shop, the market and staked matches run through it |
-| [OpenBoxes for DSM](#openboxes-for-dsm) | The open-source warehouse and inventory system | Custody: a stock change stands only when DSM recorded it; staff sign in with their wallet; a carrier takes custody on a phone |
-| [CBFpy for DSM](#cbfpy-for-dsm) | A prototype AI with a body | Every step it takes is a DSM transition, decided by rules, and anyone can audit the chain from public keys |
-| [Sennite: Factions](#sennite-factions) | A battle royale for Android phones | Factions build their base from members' own materials, and every invitation, removal vote and change to the base is DSM state; the store is paid in D-bucks from the wallet; a match's prize is locked before it starts and collected by the winners |
+| [Wildstate](#wildstate) | A demo creature-collecting game for Android | The coin and every creature are objects in the player's own wallet; the shop, the market and staked matches run through it |
+| [OpenBoxes for DSM](#openboxes-for-dsm) | A working app: the open-source warehouse and inventory system | Custody: a stock change stands only when DSM recorded it; staff sign in with their wallet; a carrier takes custody on a phone |
+| [CBFpy for DSM](#cbfpy-for-dsm) | An experiment: a prototype AI with a body | Every step it takes is a DSM transition, decided by rules, and anyone can audit the chain from public keys |
+| [Sennite: Factions](#sennite-factions) | A demo battle royale for Android phones | Factions build their base from members' own materials, and every invitation, removal vote and change to the base is DSM state; the store is paid in D-bucks from the wallet; a match's prize is locked before it starts and collected by the winners |
 
 ## Wildstate
 
-Wildstate is a creature-collecting game for Android: walk the camp, catch creatures in the tall grass, battle trainers, buy capsules, trade at the market, and fight other players in the arena. Walking, encounters, battles and dialogue run on the game's own server and never touch DSM. What a player owns lives in their DSM wallet.
+Wildstate is a demo creature-collecting game for Android, built to showcase DSM: walk the camp, catch creatures in the tall grass, battle trainers, buy capsules, trade at the market, and fight other players in the arena. Walking, encounters, battles and dialogue run on the game's own server and never touch DSM. What a player owns lives in their DSM wallet.
 
 <div class="shots">
 <figure style="flex-basis:420px;max-width:420px"><a href="images/apps/wildstate-connect.webp"><img src="images/apps/wildstate-connect.webp" alt="Wildstate's connect screen: OPEN DSM WALLET, a QR code, and the list of what the game asks the wallet for"></a><figcaption>The game shows its code and lists what it asks the wallet for.</figcaption></figure>
@@ -110,7 +110,7 @@ It enforces the rules and the facts it is given, in a simulated world. It does n
 
 ## Sennite: Factions
 
-[Sennite: Factions](https://github.com/Irrefutable-Labs/sennite-factions) is a battle royale for Android phones, built in Unreal Engine 5.8: heroes, weapons, building in wood, stone and steel, and faction matches in an arena made for each match. The game and its publisher's server keep their own logic. What a player owns, and what a faction has put into its base, live on DSM.
+[Sennite: Factions](https://github.com/Irrefutable-Labs/sennite-factions) is a demo battle royale for Android phones, built in Unreal Engine 5.8 to showcase DSM: heroes, weapons, building in wood, stone and steel, and faction matches in an arena made for each match. The game and its publisher's server keep their own logic. What a player owns, and what a faction has put into its base, live on DSM.
 
 <figure class="term"><a href="images/apps/sennite.webp"><img src="images/apps/sennite.webp" alt="Sennite: Factions title screen"></a><figcaption>The title screen.</figcaption></figure>
 
