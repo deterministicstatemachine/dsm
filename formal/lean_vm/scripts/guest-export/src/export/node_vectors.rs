@@ -103,7 +103,7 @@ pub fn file() -> File {
         bytecode_value: element(&mut rng),
     };
     let seed = fs_seed();
-    let claims = AggregateClaims { lean_xmss: xmss_typed, lean_sphincs: sphincs_typed, da_commitment: Some(root) };
+    let claims = AggregateClaims { lean_xmss: xmss_typed, lean_sphincs: sphincs_typed, da_commitment: Some(root), vault: None };
     let statement = statement_digest(&claims, &defer);
 
     // Two children with true claims on the stacked bytecode: each one's public input and fresh claim.

@@ -3,8 +3,12 @@
 //! Each refusal gives the prover the attacker's own consistent statement (`statement_for`, the step's statement with
 //! Core's checks skipped) and self-consistent hints for the lie, so the refusal comes from the check under test, not
 //! from a mismatched public input.
+//!
+//! Each refusal is then tried on the verifier too: a malicious prover (`prove_forging`) runs the lie past every failed
+//! check, keeping each cell's first value, and proves that run as an honest prover proves its own; the verifier must
+//! refuse the proof.
 use isa::Program;
-use lean_vm_core::cpu::{prove, verify};
+use lean_vm_core::cpu::{Tactic, prove, prove_forging, verify};
 use primitives::field::{F128, g_pow};
 use vault_step::fixture::{Fixture, fixture};
 use vault_step::program::{Witness, cells, hints, program};
@@ -41,11 +45,38 @@ fn forged(w: &StepWitness, r_prev: &D32, post: &VaultStateLeaf, honest: &StepPub
     }
 }
 
-fn refused(p: &Program, what: &str, witness: &Witness, public: [F128; 2]) {
+/// How a lie was refused: by the verifier, on a proof of the lie's run gone past its failed checks; or, where the run
+/// stops at a fault no trace can carry, the fault.
+enum Refusal {
+    Verifier,
+    NoTrace(String),
+}
+
+fn refused(p: &Program, what: &str, witness: &Witness, public: [F128; 2]) -> Refusal {
     match run(p, witness, public) {
         Ok(()) => panic!("{what}: an invalid step proved and verified"),
         Err(e) => eprintln!("REFUSED {what}: {}", &e[..e.len().min(160)]),
     }
+    // Both tactics: the first value of each disputed cell kept, or the last.
+    let mut refusal = Refusal::Verifier;
+    for tactic in [Tactic::KeepFirst, Tactic::KeepLast] {
+        match prove_forging(p, witness, public, 1, tactic) {
+            Ok((proof, _, forged)) => {
+                assert!(forged > 0, "{what}: the forging run went past no check");
+                let why = match verify(p, &public, &proof) {
+                    Ok(_) => panic!("{what} ({tactic:?}): the verifier accepted a proof of a run past {forged} failed checks"),
+                    Err(e) => format!("{e:?}"),
+                };
+                eprintln!("  VERIFIER REFUSED {what} ({tactic:?}): past {forged} failed checks: {}", &why[..why.len().min(120)]);
+            }
+            Err(e) => {
+                let e = format!("{tactic:?}: {e:?}");
+                eprintln!("  NO TRACE {what}: {}", &e[..e.len().min(200)]);
+                refusal = Refusal::NoTrace(e);
+            }
+        }
+    }
+    refusal
 }
 
 #[test]
@@ -66,6 +97,14 @@ fn a_valid_step_proves() {
         p.prog.len()
     );
     verify(&p, &public, &proof).expect("verifies");
+    // The malicious prover on an honest run goes past no check, and its proof verifies: it is a working prover, so
+    // its proofs of the lies below are refused for the lies.
+    for tactic in [Tactic::KeepFirst, Tactic::KeepLast] {
+        let (forged, _, gone_past) =
+            prove_forging(&p, &witness, public, 1, tactic).expect("the forging prover proves an honest run");
+        assert_eq!(gone_past, 0);
+        verify(&p, &public, &forged).expect("the forging prover's proof of an honest run verifies");
+    }
     // The same proof against any other statement is refused.
     let mut other = public;
     other[1] = other[1] + F128::from(1u128);
@@ -93,6 +132,7 @@ fn invalid_steps_are_refused() {
     let f = fixture(1, true, 3, 0);
     let w = &f.witness;
     let honest = post(&f);
+    let mut seen = Vec::new();
     let take_out = |s: &mut VaultStateLeaf, in_is_a: bool, by: i64| {
         let r = if in_is_a { &mut s.reserve_b } else { &mut s.reserve_a };
         *r = (*r as i64 - by) as u64;
@@ -101,7 +141,7 @@ fn invalid_steps_are_refused() {
     // The honest witness under another statement.
     let (witness, mut public) = hints(w, &f.r_prev, &f.public);
     public[0] = public[0] + F128::from(1u128);
-    refused(&p, "honest step, other statement", &witness, public);
+    seen.push(refused(&p, "honest step, other statement", &witness, public));
 
     // 3: one unit more, or one less, out than the constant product pays.
     for by in [1i64, -1] {
@@ -111,7 +151,7 @@ fn invalid_steps_are_refused() {
         take_out(&mut s, w.hop.in_is_a, by);
         let public = forged(&bad, &f.r_prev, &s, &f.public);
         let (witness, _) = hints(&bad, &f.r_prev, &f.public);
-        refused(&p, &format!("amount out {by:+}"), &witness, public);
+        seen.push(refused(&p, &format!("amount out {by:+}"), &witness, public));
     }
 
     // 2: a fee the state's fee policy does not address, priced at that fee.
@@ -126,13 +166,13 @@ fn invalid_steps_are_refused() {
     let mut s = honest.clone();
     take_out(&mut s, w.hop.in_is_a, bad.hop.amount_out as i64 - w.hop.amount_out as i64);
     let (witness, _) = hints(&bad, &f.r_prev, &f.public);
-    refused(&p, "fee not the policy's", &witness, forged(&bad, &f.r_prev, &s, &f.public));
+    seen.push(refused(&p, "fee not the policy's", &witness, forged(&bad, &f.r_prev, &s, &f.public)));
 
     // 5: a generation that skips.
     let mut s = honest.clone();
     s.generation += 1;
     let (witness, _) = hints(w, &f.r_prev, &f.public);
-    refused(&p, "generation skips", &witness, forged(w, &f.r_prev, &s, &f.public));
+    seen.push(refused(&p, "generation skips", &witness, forged(w, &f.r_prev, &s, &f.public)));
 
     // 4: reserves that do not move by the amounts.
     let mut s = honest.clone();
@@ -141,13 +181,13 @@ fn invalid_steps_are_refused() {
     } else {
         s.reserve_b += 1;
     }
-    refused(&p, "reserve in off by one", &witness, forged(w, &f.r_prev, &s, &f.public));
+    seen.push(refused(&p, "reserve in off by one", &witness, forged(w, &f.r_prev, &s, &f.public)));
 
     // 8: the relationship leaf claimed absent while the tree holds it.
     let mut bad = w.clone();
     bad.relationship_present = false;
     let (witness, _) = hints(&bad, &f.r_prev, &f.public);
-    refused(&p, "present leaf claimed absent", &witness, forged(&bad, &f.r_prev, &honest, &f.public));
+    seen.push(refused(&p, "present leaf claimed absent", &witness, forged(&bad, &f.r_prev, &honest, &f.public)));
 
     // 8: a path that does not fold to R_prev, each leaf's, the attacker's R_next from it.
     for which in ["state", "relationship"] {
@@ -155,7 +195,7 @@ fn invalid_steps_are_refused() {
         let path = if which == "state" { &mut bad.state_path } else { &mut bad.relationship_path };
         path[200][3] ^= 1;
         let (witness, _) = hints(&bad, &f.r_prev, &f.public);
-        refused(&p, &format!("{which} path"), &witness, forged(&bad, &f.r_prev, &honest, &f.public));
+        seen.push(refused(&p, &format!("{which} path"), &witness, forged(&bad, &f.r_prev, &honest, &f.public)));
     }
 
     // 8: the wrong level for where the two keys part.
@@ -163,7 +203,7 @@ fn invalid_steps_are_refused() {
     let d = stream(&mut witness, "vs_divergence");
     let e = (0..256).find(|&e| d[0][0] == gp(e)).unwrap();
     d[0][0] = gp(e + 1);
-    refused(&p, "divergence level", &witness, public);
+    seen.push(refused(&p, "divergence level", &witness, public));
 
     // A digit out of range (17 for 1, the next digit one less: the same value in a wider alphabet).
     let (mut witness, public) = hints(w, &f.r_prev, &f.public);
@@ -173,20 +213,20 @@ fn invalid_steps_are_refused() {
     if d1 > 0 {
         amount_in[0] = gp(d0 + 16);
         amount_in[1] = gp(d1 - 1);
-        refused(&p, "digit out of range", &witness, public);
+        seen.push(refused(&p, "digit out of range", &witness, public));
     }
 
     // The price's remainder, one past the divisor.
     let (mut witness, public) = hints(w, &f.r_prev, &f.public);
     let digits = stream(&mut witness, "vs_digits");
     digits[11] = digits[11].iter().map(|_| gp(15)).collect();
-    refused(&p, "remainder slack", &witness, public);
+    seen.push(refused(&p, "remainder slack", &witness, public));
 
     // 2: a token gap that does not take token_a to token_b.
     let (mut witness, public) = hints(w, &f.r_prev, &f.public);
     let digits = stream(&mut witness, "vs_digits");
     digits[8][5] = if digits[8][5] == gp(0) { gp(1) } else { gp(0) };
-    refused(&p, "token gap", &witness, public);
+    seen.push(refused(&p, "token gap", &witness, public));
 
     // 9: a later attempt claimed as the first, under the first attempt's key.
     let f5 = fixture(2, false, 0, 5);
@@ -194,7 +234,7 @@ fn invalid_steps_are_refused() {
     first.attempt_key = successor_base_key(&f5.witness.vault_id, &f5.r_prev);
     let (mut witness, _) = hints(&f5.witness, &f5.r_prev, &f5.public);
     stream(&mut witness, "vs_attempt_is_zero")[0][0] = F128::from(1u128);
-    refused(&p, "attempt 5 as attempt 0", &witness, cells(&first.digest()));
+    seen.push(refused(&p, "attempt 5 as attempt 0", &witness, cells(&first.digest())));
 
     // 9: attempt 0 claimed as a non-first attempt (the zero flag cleared).
     let (mut witness, _) = hints(w, &f.r_prev, &f.public);
@@ -202,5 +242,12 @@ fn invalid_steps_are_refused() {
     let mut later = f.public.clone();
     let base = successor_base_key(&w.vault_id, &f.r_prev);
     later.attempt_key = h(TAG_SUCC_ATTEMPT, &[&base, &0u64.to_be_bytes()]);
-    refused(&p, "attempt 0 without the zero flag", &witness, cells(&later.digest()));
+    seen.push(refused(&p, "attempt 0 without the zero flag", &witness, cells(&later.digest())));
+
+    // Every lie whose run leaves a trace was refused by the verifier, not only by the honest prover.
+    let traced = seen.iter().filter(|r| matches!(r, Refusal::Verifier)).count();
+    let untraced: Vec<_> = seen.iter().filter_map(|r| if let Refusal::NoTrace(e) = r { Some(e) } else { None }).collect();
+    eprintln!("VERIFIER REFUSED {traced} of {} lies; no trace for {}: {untraced:?}", seen.len(), untraced.len());
+    assert_eq!(traced, seen.len(), "a lie the malicious prover could not even commit");
+    assert_eq!(seen.len(), 15);
 }

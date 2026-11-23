@@ -20,6 +20,10 @@ pub struct Execution {
     /// the lowering dropped or misplaced a store. A range-check touch, which only links its two cells, and an
     /// arithmetic back-solve, which writes its operand first, read none.
     pub unconstrained_reads: Vec<u32>,
+    /// Research build, a malicious prover's run ([`execute_forging`]): the failed checks it went past, each a second
+    /// value for a written cell (one of the two kept) or a `DEREF` at an address no memory holds (committed anyway). Zero
+    /// for [`execute`]'s runs.
+    pub checks_gone_past: usize,
     pub(crate) trace: Trace,
 }
 
@@ -275,6 +279,10 @@ struct Mem {
     links: QuickMap<u32, Vec<u32>>,
     /// Cells an instruction read before anything wrote them.
     unwritten_reads: Vec<u32>,
+    /// Research build: `Some` for a malicious prover's run, which on a conflict keeps one of the two values (its
+    /// tactic) and counts it here, rather than stopping.
+    forging: Option<usize>,
+    keep_last: bool,
 }
 
 impl Mem {
@@ -343,6 +351,13 @@ impl Mem {
         let state = c.state;
         if state == State::Written && c.word != v {
             let had = c.word;
+            if let Some(n) = self.forging.as_mut() {
+                *n += 1;
+                if self.keep_last {
+                    self.at(cell).word = v;
+                }
+                return Ok(false);
+            }
             return Err(Fault::Conflict {
                 cell,
                 had,
@@ -466,6 +481,39 @@ pub fn execute(
     witness: &[(String, Vec<Vec<F128>>)],
     public_input: [F128; 2],
 ) -> Result<Execution, ExecError> {
+    run(program, witness, public_input, None)
+}
+
+/// Research build: a malicious prover's run. As [`execute`], but a second value for a written cell (a failed
+/// `assert`, a wrong hint, two writes that disagree) keeps one of the two (`tactic`) and goes on, and a `DEREF` whose address is no
+/// memory cell (a failed range check, a wild pointer) is committed with no access, each counted in
+/// [`Execution::checks_gone_past`]. Its trace is what a prover who ignores the program's checks commits: each such
+/// row breaks the row's own constraint or the memory argument, which the verifier has to catch. Other faults still
+/// stop it.
+pub fn execute_forging(
+    program: &Program,
+    witness: &[(String, Vec<Vec<F128>>)],
+    public_input: [F128; 2],
+    tactic: Tactic,
+) -> Result<Execution, ExecError> {
+    run(program, witness, public_input, Some(tactic))
+}
+
+/// Research build: which value a malicious prover's run keeps when a write disagrees with a written cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tactic {
+    /// The first: the readers before the write saw it; the write's row is the lie.
+    KeepFirst,
+    /// The second: the write's row holds; the readers before it are the lie.
+    KeepLast,
+}
+
+fn run(
+    program: &Program,
+    witness: &[(String, Vec<Vec<F128>>)],
+    public_input: [F128; 2],
+    forging: Option<Tactic>,
+) -> Result<Execution, ExecError> {
     let ending_pc = (program.prog.len() - 1) as u32; // last bytecode slot, g^{B-1}
     if program.main_frame >= MAX_CELLS {
         return Err(ExecError::new(program, 0, Fault::OutOfMemory));
@@ -476,7 +524,11 @@ pub fn execute(
     }
     // `g^j` for the pcs, the return targets and the main frame, grown as the run reaches further.
     let mut g = GPow::new((program.prog.len() + 2).max(program.main_frame as usize));
-    let mut m = Mem::default();
+    let mut m = Mem {
+        forging: forging.map(|_| 0),
+        keep_last: forging == Some(Tactic::KeepLast),
+        ..Mem::default()
+    };
     m.ensure(program.main_frame.max(2) as usize - 1);
     let fail = |pc, fault| ExecError::new(program, pc, fault);
     m.put(0, public_input[0]).map_err(|f| fail(0, f))?;
@@ -591,11 +643,20 @@ pub fn execute(
                 // The AIR reads the cell at the product `p·g^o2`, so `p` need be no address: the pointer's log when it
                 // has one in range (an allocation notes it), else the product's.
                 let a2 = match g.log(p_addr).map(|b| u64::from(b) + u64::from(o2)) {
-                    Some(c) if c < u64::from(MAX_CELLS) => c as u32,
-                    _ => (g.log(p_addr * F64::G.pow(u128::from(o2))))
-                        .ok_or_else(|| fail(Fault::WildPointer { value: p }))?,
+                    Some(c) if c < u64::from(MAX_CELLS) => Some(c as u32),
+                    _ => match g.log(p_addr * F64::G.pow(u128::from(o2))) {
+                        Some(c) => Some(c),
+                        // Research build: a malicious prover's run commits the row at the address no memory holds
+                        // (the AIR's `p·g^o2`, never committed), with no access there.
+                        None if m.forging.is_some() => {
+                            *m.forging.as_mut().unwrap() += 1;
+                            None
+                        }
+                        None => return Err(fail(Fault::WildPointer { value: p })),
+                    },
                 };
                 let a3 = at(fp, o3)?;
+                if let Some(a2) = a2 {
                 match mode {
                     // `m[a2] = m[a3]`: carry a written side to the other (`put` checks it when both are), or
                     // link two unwritten sides until either is written. A range-check touch may leave both
@@ -619,11 +680,12 @@ pub fn execute(
                         m.put(a2, F128::from(g.pow(fp as usize))).map_err(fail)?;
                     }
                 }
+                }
                 deref.push(Drow {
                     pc,
                     fp,
                     r1: m.bump_access_count(a1),
-                    r2: m.bump_access_count(a2),
+                    r2: a2.map_or(0, |a2| m.bump_access_count(a2)),
                     r3: m.bump_access_count(a3),
                     bytecode_read,
                 });
@@ -744,6 +806,7 @@ pub fn execute(
         cycles: steps,
         mem_used: m.used,
         unconstrained_reads: m.unwritten_reads,
+        checks_gone_past: m.forging.unwrap_or(0),
         trace,
     })
 }

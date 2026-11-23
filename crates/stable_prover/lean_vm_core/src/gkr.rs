@@ -72,7 +72,11 @@ pub(crate) fn prove_products(
         top
     });
     let roots: [F128; N_BUS_TREES] = tops.each_ref().map(|top| top.iter().copied().product());
-    assert_eq!(roots[0], roots[1], "push and pull products must agree");
+    // The one root sent stands for both trees. A malicious prover's run (`cpu::prove_forging`) goes on with unequal
+    // ones, sending the push tree's, for the verifier to catch.
+    if !crate::cpu::forging() {
+        assert_eq!(roots[0], roots[1], "push and pull products must agree");
+    }
     ps.add_scalar(roots[0]);
     ps.add_scalar(roots[2]);
     let (mut point, mut values) = (Vec::new(), roots);

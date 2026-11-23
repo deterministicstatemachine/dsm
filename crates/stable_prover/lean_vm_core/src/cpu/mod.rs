@@ -18,7 +18,7 @@ mod execute;
 mod hints;
 pub mod layout;
 mod trace;
-pub use execute::{ExecError, Execution, Fault, Memory, execute};
+pub use execute::{ExecError, Execution, Fault, Memory, Tactic, execute, execute_forging};
 use isa::Program;
 pub use isa::{DerefMode, Op, OutCells, Stats};
 pub use layout::*;
@@ -147,6 +147,50 @@ pub fn prove(
     if !exec.unconstrained_reads.is_empty() {
         return Err(ProveError::UnconstrainedReads(exec.unconstrained_reads));
     }
+    prove_execution(program, exec, public_input, log_inv_rate)
+}
+
+/// Research build: a malicious prover. It runs the program with [`execute_forging`], going past every failed check,
+/// and proves that run exactly as [`prove`] proves an honest one, skipping `prove`'s own refusals. What it returns
+/// is a proof the verifier must refuse whenever the run went past a check (`Execution::checks_gone_past` > 0, the
+/// count it returns with the proof); it is no proof of anything otherwise.
+pub fn prove_forging(
+    program: &Program,
+    witness: &[(String, Vec<Vec<F128>>)],
+    public_input: [F128; 2],
+    log_inv_rate: usize,
+    tactic: Tactic,
+) -> Result<(Proof, Stats, usize), ProveError> {
+    if !(pcs::MIN_LOG_INV_RATE..=pcs::MAX_LOG_INV_RATE).contains(&log_inv_rate) {
+        return Err(ProveError::InvalidRate { log_inv_rate });
+    }
+    let exec = execute_forging(program, witness, public_input, tactic).map_err(ProveError::Execution)?;
+    let forged = exec.checks_gone_past;
+    FORGING.set(true);
+    let proved = prove_execution(program, exec, public_input, log_inv_rate);
+    FORGING.set(false);
+    let (proof, stats) = proved?;
+    Ok((proof, stats, forged))
+}
+
+thread_local! {
+    /// Research build: set while [`prove_forging`] proves, so the prover's own consistency checks let the forged run
+    /// through to the verifier.
+    static FORGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Research build: whether this thread is proving a malicious prover's run.
+pub(crate) fn forging() -> bool {
+    FORGING.get()
+}
+
+/// Commit an execution's witness and prove it: [`prove`] after the run.
+fn prove_execution(
+    program: &Program,
+    exec: Execution,
+    public_input: [F128; 2],
+    log_inv_rate: usize,
+) -> Result<(Proof, Stats), ProveError> {
     // The layout follows from the run's sizes alone, so a run too large to commit is refused before its witness.
     let log_mem = crate::log2_strict_usize(exec.mem.len());
     let layout = layout_of(

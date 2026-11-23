@@ -892,6 +892,11 @@ fn vault_steps_chain() {
         assert_eq!(chain.r_last, steps[i].public.r_next, "node {i} ends at its step's root");
         assert_eq!(chain.generation, steps[i].public.generation);
         assert!(proof.verify(claims), "node {i} verifies");
+        // Its claims' byte form (the sidecar's wire) carries the chain: the decoded claims verify, the proof too.
+        let wire = AggregateClaims::from_bytes(&claims.to_bytes()).expect("claims decode");
+        assert_eq!(&wire, claims);
+        let proof_wire = AggregateProof::from_bytes(&proof.to_bytes()).expect("proof decodes");
+        assert!(proof_wire.verify(&wire), "node {i} verifies from its bytes");
         // Its statement binds the chain: any other chain is refused.
         for forge in [
             |c: &mut VaultChain| c.r_first[0] ^= 1,

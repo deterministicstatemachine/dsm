@@ -344,6 +344,8 @@ impl Sidecar {
             ),
             // These bindings neither make nor accept leanDA blob commitments.
             da_commitment: None,
+            // Nor vault chains (research build).
+            vault: None,
         };
         if !self.check(&claims, bytes)? {
             return Err(Error::AggregateRejected);

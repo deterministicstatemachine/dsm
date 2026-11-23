@@ -496,7 +496,15 @@ mod tests {
             lean_xmss: vec![(xmss.0, xmss.1)],
             lean_sphincs: vec![(sphincs.0, sphincs.1)],
             da_commitment: Some([5; 32]),
-            vault: None,
+            // Research build: a child's and the output's claims carry a vault chain.
+            vault: Some(claims::VaultChain {
+                vault_id: [9; 32],
+                r_first: [10; 32],
+                r_last: [11; 32],
+                generation: 12,
+                external_commitment: [13; 32],
+                attempt_key: [14; 32],
+            }),
         };
         let child = (only.clone(), vec![6, 7, 8]);
         let frame = encode_request(

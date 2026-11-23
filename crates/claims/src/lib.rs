@@ -22,8 +22,7 @@ pub struct AggregateClaims {
     pub lean_sphincs: Vec<LeanSphincsClaim>,
     /// `None` for no blobs.
     pub da_commitment: Option<[u8; 32]>,
-    /// Research build: the vault chain this node's step extends, `None` for a node without a vault step. Not in the
-    /// byte form.
+    /// Research build: the vault chain this node's step extends, `None` for a node without a vault step.
     pub vault: Option<VaultChain>,
 }
 
@@ -93,6 +92,13 @@ impl AggregateClaims {
                 out.extend(root);
             }
         }
+        match &self.vault {
+            None => out.push(0),
+            Some(v) => {
+                out.push(1);
+                out.extend(v.to_bytes());
+            }
+        }
         out
     }
 
@@ -100,16 +106,98 @@ impl AggregateClaims {
     pub fn from_bytes(mut bytes: &[u8]) -> Option<Self> {
         let lean_xmss = decode_claims(&mut bytes, LeanXmssPublicKey::from_bytes)?;
         let lean_sphincs = decode_claims(&mut bytes, LeanSphincsPublicKey::from_bytes)?;
-        let da_commitment = match bytes {
-            [0] => None,
-            [1, root @ ..] => Some(<[u8; 32]>::try_from(root).ok()?),
+        let (da_commitment, rest) = match bytes.split_first()? {
+            (0, rest) => (None, rest),
+            (1, rest) => {
+                let (root, rest) = rest.split_first_chunk::<32>()?;
+                (Some(*root), rest)
+            }
+            _ => return None,
+        };
+        let vault = match rest.split_first()? {
+            (0, []) => None,
+            (1, rest) => Some(VaultChain::from_bytes(rest.try_into().ok()?)),
             _ => return None,
         };
         Some(Self {
             lean_xmss,
             lean_sphincs,
             da_commitment,
-            vault: None,
+            vault,
         })
+    }
+}
+
+impl VaultChain {
+    /// The byte length of [`Self::to_bytes`].
+    pub const BYTES: usize = 5 * 32 + 8;
+
+    /// The vault, the first root, the last root, the generation (`u64`), the external commitment and the attempt key.
+    pub fn to_bytes(&self) -> [u8; Self::BYTES] {
+        let mut out = [0; Self::BYTES];
+        let parts: [&[u8]; 6] = [
+            &self.vault_id,
+            &self.r_first,
+            &self.r_last,
+            &self.generation.to_le_bytes(),
+            &self.external_commitment,
+            &self.attempt_key,
+        ];
+        let mut at = 0;
+        for part in parts {
+            out[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        }
+        out
+    }
+
+    /// Reads [`Self::to_bytes`] back; every byte string of the length is one.
+    pub fn from_bytes(bytes: &[u8; Self::BYTES]) -> Self {
+        let d32 = |at: usize| -> [u8; 32] { bytes[at..at + 32].try_into().unwrap() };
+        Self {
+            vault_id: d32(0),
+            r_first: d32(32),
+            r_last: d32(64),
+            generation: u64::from_le_bytes(bytes[96..104].try_into().unwrap()),
+            external_commitment: d32(104),
+            attempt_key: d32(136),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_form_round_trips_and_is_canonical() {
+        let vault = VaultChain {
+            vault_id: [1; 32],
+            r_first: [2; 32],
+            r_last: [3; 32],
+            generation: 0x0102_0304_0506_0708,
+            external_commitment: [5; 32],
+            attempt_key: [6; 32],
+        };
+        for (da_commitment, vault) in [(None, None), (Some([9; 32]), None), (None, Some(vault)), (Some([9; 32]), Some(vault))] {
+            let claims = AggregateClaims {
+                da_commitment,
+                vault,
+                ..AggregateClaims::default()
+            };
+            let bytes = claims.to_bytes();
+            assert_eq!(AggregateClaims::from_bytes(&bytes), Some(claims.clone()));
+            // One byte more, one less, or another flag: not an encoding.
+            assert_eq!(AggregateClaims::from_bytes(&[&bytes[..], &[0]].concat()), None);
+            assert_eq!(AggregateClaims::from_bytes(&bytes[..bytes.len() - 1]), None);
+            let mut flag = bytes.clone();
+            let at = bytes.len() - 1 - vault.map_or(0, |_| VaultChain::BYTES);
+            flag[at] = 2;
+            assert_eq!(AggregateClaims::from_bytes(&flag), None);
+        }
+        // The vault's fields at their offsets.
+        let bytes = vault.to_bytes();
+        assert_eq!(bytes[96..104], [8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(VaultChain::from_bytes(&bytes), vault);
     }
 }

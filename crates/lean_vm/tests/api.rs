@@ -96,6 +96,7 @@ fn public_api_end_to_end() {
         lean_xmss: claims.lean_xmss.iter().filter(|(_, m)| *m != MSG_1).cloned().collect(),
         lean_sphincs: claims.lean_sphincs[1..].to_vec(),
         da_commitment: Some(commitment),
+        vault: None,
     };
     let narrowed = aggregate(
         &[(claims, received)],
