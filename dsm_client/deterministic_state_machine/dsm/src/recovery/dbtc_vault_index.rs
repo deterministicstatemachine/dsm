@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Posted dBTC vault index (spec §0.4 P5 — dBTC enumeration).
+//! Posted dBTC vault index (dBTC enumeration).
 //!
 //! A fresh recovered device has no local `vault_store`, so it cannot list its dBTC vaults.
 //! The healthy device therefore posts a `K_A`-signed index of its dBTC vault ids; the

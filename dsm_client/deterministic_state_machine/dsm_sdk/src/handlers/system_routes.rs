@@ -17,8 +17,8 @@ pub(crate) fn handle_generate_mnemonic_query() -> AppResult {
     }
 }
 
-/// system.createGenesisV2 — canonical mnemonic-rooted wallet creation (whitepaper §2.5,
-/// GenesisEntropyProfile::MnemonicV3). The BIP39 mnemonic is the sole root: derive `wallet_seed`,
+/// system.createGenesisV2 — canonical mnemonic-rooted wallet creation
+/// (GenesisEntropyProfile::MnemonicV3). The BIP39 mnemonic is the sole root: derive `wallet_seed`,
 /// cache it in the unlocked session, then run `create_genesis_v3_self_attested` and install the
 /// resulting GenesisState. Nothing is persisted but public values (no s0, no Smaster). Fails
 /// closed if the wallet seed cannot be derived/cached.

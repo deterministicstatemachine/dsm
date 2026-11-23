@@ -197,7 +197,7 @@ impl Default for TokenAmount {
 /// Core token balance type.
 ///
 /// Uses unsigned integers to represent balances, enforcing non-negative value
-/// invariants per whitepaper §8 eq. 10 (`B_{n+1} ≥ 0`).
+/// invariants (`B_{n+1} ≥ 0`).
 ///
 /// Per §4.3 no counter/height/timestamp participates in canonical encoding.
 /// A balance is just a scalar value plus an optional linkage hash to the
@@ -242,7 +242,7 @@ impl Balance {
 
     /// Returns the full token amount.
     ///
-    /// Per whitepaper §8 (balance binding), DSM uses a **single-value**
+    /// Per (balance binding), DSM uses a **single-value**
     /// balance model: token-affecting operations are enforced through
     /// atomic DSM state transitions, not by subtracting a separately
     /// tracked "locked" amount at display/accounting time. Subtracting

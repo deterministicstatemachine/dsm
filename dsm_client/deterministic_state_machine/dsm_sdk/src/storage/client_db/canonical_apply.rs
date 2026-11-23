@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Canonical apply identity/record (§16.6 single-commit apply).
+//! Canonical apply identity/record (single-commit apply).
 //!
 //! The durable proof that ONE exact authenticated parent state was consumed and
 //! replaced by ONE exact authenticated successor. Written INSIDE the full-state
@@ -403,7 +403,7 @@ pub fn get_canonical_apply_identity_by_id(id: &[u8; 32]) -> Result<Option<Canoni
     load_by_id_locked(&conn, id)
 }
 
-/// Pre-execution classification of an apply request (§16.6 lookup-before-execute).
+/// Pre-execution classification of an apply request (lookup-before-execute).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalApplyLookup {
     /// No record on any uniqueness dimension — fresh, proceed to execution.

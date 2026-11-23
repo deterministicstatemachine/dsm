@@ -83,16 +83,16 @@ pub const DBTC_DECIMALS: u8 = 8;
 pub const DBTC_MAX_SUPPLY_SATS: u64 = 21_000_000 * 100_000_000;
 
 /// Canonical minimum confirmation depth for entry and exit anchors.
-/// dBTC paper §6.4.1, §6.4.3, Definition 12.3, Remark 12.3:
+/// Definition 12.3, Remark 12.3:
 /// "min_entry_confirmations = min_exit_confirmations = 100 is recommended."
 pub const DBTC_MIN_CONFIRMATIONS: u64 = 100;
 
 /// Canonical successor lineage depth bound for dBTC fractional exits.
-/// dBTC paper §12.1.1 recommends a small bounded integer (example: 5).
+/// recommends a small bounded integer (example: 5).
 pub const DBTC_MAX_SUCCESSOR_DEPTH: u32 = 5;
 
 /// Canonical minimum vault remainder after fractional exit (satoshis).
-/// dBTC paper §12.1.2 worked example uses 100,000 sats.
+/// worked example uses 100,000 sats.
 pub const DBTC_MIN_VAULT_BALANCE_SATS: u64 = 100_000;
 
 /// Maximum settlement poll iterations before the resolver starts warning loudly.
@@ -104,7 +104,7 @@ pub const DBTC_MAX_SETTLEMENT_POLLS: u32 = 200;
 pub const DBTC_DUST_FLOOR_SATS: u64 = 546;
 
 /// Conservative estimate of P2WSH sweep tx fee (vbytes * sat/vbyte).
-/// dBTC paper §11.2: exit_amount >= dust_threshold + fee_sweep
+/// exit_amount >= dust_threshold + fee_sweep
 /// A P2WSH HTLC claim tx is ~170 vbytes; at 10 sat/vbyte = 1700 sats.
 pub const DBTC_ESTIMATED_SWEEP_FEE_SATS: u64 = 2_000;
 
@@ -126,7 +126,7 @@ pub fn estimated_partial_withdrawal_fee_sats() -> u64 {
 }
 
 /// Minimum exit amount: must cover dust + sweep fees.
-/// dBTC paper §11.2, Invariant 11.2.
+/// Invariant 11.2.
 pub const DBTC_MIN_EXIT_SATS: u64 = DBTC_DUST_FLOOR_SATS + DBTC_ESTIMATED_SWEEP_FEE_SATS;
 
 /// Runtime-resolved dBTC economic parameters.
@@ -345,7 +345,7 @@ pub struct VaultOperation {
     /// Creation state number
     pub created_at_state: u64,
     /// Bitcoin block header cached at entry time (80 bytes).
-    /// dBTC paper §12.2.3, Invariant 19: set when deposit completes.
+    /// Invariant 19: set when deposit completes.
     pub entry_header: Option<[u8; 80]>,
     /// Parent vault when this record represents a successor created by
     /// fractional sweep-and-change.
@@ -361,7 +361,7 @@ pub struct VaultOperation {
     /// Funding transaction ID (hex, display byte order) — set after broadcast.
     pub funding_txid: Option<String>,
     /// Bitcoin block header cached at exit time (80 bytes).
-    /// dBTC paper §6.4.3: exit anchor stored when sweep/claim tx is buried.
+    /// exit anchor stored when sweep/claim tx is buried.
     pub exit_header: Option<[u8; 80]>,
     /// Confirmation depth achieved for the exit anchor (dBTC §12.1.3).
     pub exit_confirm_depth: u32,
@@ -934,7 +934,7 @@ impl BitcoinTapSdk {
             })
     }
 
-    // Withdrawal State Machine (dBTC paper §13: Commit → Settle | Refund)
+    // Withdrawal State Machine (Commit → Settle | Refund)
     // -----------------------------------------------------------------------
 
     /// Commit dBTC into an in-flight withdrawal state.
@@ -2501,7 +2501,7 @@ impl BitcoinTapSdk {
         format!("{}{}", Self::vault_advertisement_prefix(), vault_id)
     }
 
-    // ── P5 dBTC bearer-state reconciliation (spec §0.4 — dBTC pass) ────────────────────
+    // ── P5 dBTC bearer-state reconciliation (dBTC pass) ────────────────────
     // dBTC is excluded from the generic recovery token path; it stays LockedRecovery until
     // its OWN posted vault-advertisement frontier reconciles it. The pure aggregation lives
     // in dsm::recovery::dbtc_reconcile; this layer classifies posted ads + writes the lock.
@@ -2531,7 +2531,7 @@ impl BitcoinTapSdk {
     }
 
     /// Reconcile the recovered device's dBTC bearer asset from posted vault advertisements
-    /// (spec §0.4 P5 — dBTC pass). FAIL-CLOSED throughout:
+    /// (dBTC pass). FAIL-CLOSED throughout:
     /// - empty `candidate_vault_ids` → `MissingDbtcVaultEnumeration` (dBTC stays
     ///   `LockedRecovery`; authenticated fresh-device enumeration is the deferred prerequisite);
     /// - any unfetchable / malformed / structurally-invalid / unknown-lifecycle ad → dBTC is
@@ -2541,7 +2541,7 @@ impl BitcoinTapSdk {
     /// device's restored dBTC balance projection — a hint only, never authority) and writes the
     /// resulting lock state for token `dBTC`.
     ///
-    /// SAFETY (spec §0.4): the posted advertisement is UNSIGNED and a recovery adversary holds
+    /// SAFETY: the posted advertisement is UNSIGNED and a recovery adversary holds
     /// the same mnemonic, so the ad is trusted ONLY to BLOCK (a `spent`/`claimed`/`expired`
     /// state is conservative — under-spending is safe). A vault becomes `Spendable` ONLY when
     /// **Bitcoin truth** confirms it: the HTLC UTXO is still unspent + confirmed and the bearer
@@ -2661,7 +2661,7 @@ impl BitcoinTapSdk {
         None
     }
 
-    /// Gather the three Bitcoin-verified facts for a vault (spec §0.4): HTLC UTXO unspent,
+    /// Gather the three Bitcoin-verified facts for a vault: HTLC UTXO unspent,
     /// funding confirmed, bearer claim-preimage derivable. Conservative (all-`false`) when
     /// Bitcoin is unreachable or evidence is missing — so the vault never unlocks unverified.
     async fn gather_dbtc_backing_facts(
@@ -5770,7 +5770,7 @@ mod tests {
         );
     }
 
-    // ── P5 dBTC reconciliation (spec §0.4 — dBTC pass) ────────────────────────────────
+    // ── P5 dBTC reconciliation (dBTC pass) ────────────────────────────────
 
     #[test]
     fn classify_dbtc_lifecycle_maps_states_and_fails_closed_on_unknown() {

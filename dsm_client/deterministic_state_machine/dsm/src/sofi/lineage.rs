@@ -276,7 +276,7 @@ pub struct ResolvedAdvance {
 impl ResolvedAdvance {
     /// The state each vault a `Realized` position moved is in after it,
     /// recomputed by the fold from the evidence the verdict was reached on
-    /// (§44.4): what this device keeps so the next trade against that vault
+    ///: what this device keeps so the next trade against that vault
     /// has evidence to stand on, and what its record of the vault follows
     /// (MR-DSM-0331). A Void moved no vault, and has none.
     pub fn vault_generations(&self) -> &[VaultPostState] {

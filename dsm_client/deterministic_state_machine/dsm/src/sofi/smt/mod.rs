@@ -14,7 +14,7 @@
 //! only disagreed because it matched names like `get` and `verify` against
 //! unrelated functions elsewhere in the workspace.
 //!
-//! Owner ruling, spec §44.4: replace the responsibility, not the dead
+//! Owner ruling,: replace the responsibility, not the dead
 //! implementation. The vault head past its genesis needs the leaf PREIMAGES a
 //! later acquisition consumes — a `VaultStateLeaf`, a relationship leaf — and
 //! a node store returns leaf VALUES, so wiring it would not have made one

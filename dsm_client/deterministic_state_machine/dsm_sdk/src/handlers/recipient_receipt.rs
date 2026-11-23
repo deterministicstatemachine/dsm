@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Recipient B-side acceptance-receipt orchestrator (§16.6).
+//! Recipient B-side acceptance-receipt orchestrator.
 //!
 //! The single authoritative recipient countersigning path, in three phases under
 //! one ASYNC relationship exclusion (see design doc): generate + journal WITH the

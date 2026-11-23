@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Recovery gate-set construction (spec §0.5 gap 13, R4 layer 3 + final rule).
+//! Recovery gate-set construction.
 //!
 //! Builds the FROZEN recovery gate-set as:
 //!

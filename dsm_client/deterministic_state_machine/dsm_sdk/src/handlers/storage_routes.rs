@@ -125,7 +125,7 @@ pub(crate) fn stored_sender_ak(sender_device_id: &str) -> Result<Option<Vec<u8>>
 /// `session_binding` for the online path is the receipt commitment itself.
 ///
 /// VERIFY ONLY — this does NOT mutate the Counterparty cert-chain head. The head
-/// is advanced by the acceptance fold's completion phase (CAS, §16.6) only after
+/// is advanced by the acceptance fold's completion phase (CAS) only after
 /// the transition is durably applied and the acceptance marker is written, so a
 /// receipt that verifies but fails to apply never advances the receiver's chain
 /// (lockstep: a failed acceptance leaves both chains where they were).
@@ -517,7 +517,7 @@ async fn finalize_from_countersign_delta(
     }
 
     // ====================================================================
-    // §16.6 DEFECT 1 — ONE ATOMIC FINALIZATION.
+    // DEFECT 1 — ONE ATOMIC FINALIZATION.
     //
     // Verified. Everything this acceptance proof authorises now commits in a
     // SINGLE transaction: projection tip advance, Local EK-head promotion,
@@ -985,7 +985,7 @@ async fn deliver_pending_finalization_checkpoints(
     Ok(released)
 }
 
-/// §16.6 reply-window delivery sweep.
+/// reply-window delivery sweep.
 ///
 /// Hands every durably-countersigned-but-undelivered acceptance receipt back to
 /// its original sender. Each reply is addressed to the tip the SENDER polls (the
@@ -1130,7 +1130,7 @@ async fn deliver_pending_acceptance_replies(
 const OUTBOX_RESUBMIT_ROWS_PER_POLL: usize = 8;
 
 impl AppRouterImpl {
-    /// §16.6 liveness — replay every unsettled frozen send through the shared
+    /// liveness — replay every unsettled frozen send through the shared
     /// delivery primitive. Returns how many logical sends reached full quorum
     /// on this pass.
     ///
@@ -1665,8 +1665,8 @@ impl AppRouterImpl {
                     // transition entropy is the receipt's canonical field 21 —
                     // the one value Core derived inside the sender's advance
                     // (Part VII step 3) — and it is what BOTH receipt hashes
-                    // take here (§39.3); the transfer nonce stays inside the
-                    // operation bytes (§39.4).
+                    // take here; the transfer nonce stays inside the
+                    // operation bytes.
                     let signed_parent = v.receipt.parent_tip;
                     let signed_child = v.receipt.child_tip;
                     let transition_entropy = v.receipt.transition_entropy;
@@ -2495,7 +2495,7 @@ impl AppRouterImpl {
             Ok(sdk) => sdk,
             Err(e) => return Err(report.stop(format!("b0x init failed: {e}"))),
         };
-        // §16.4: the per-contact rotated routes, tagged current or previous tip.
+        // the per-contact rotated routes, tagged current or previous tip.
         let my_genesis = match self.core_sdk.local_genesis_hash().await {
             Ok(genesis) => match <[u8; 32]>::try_from(genesis.as_slice()) {
                 Ok(genesis) => genesis,
@@ -2778,7 +2778,7 @@ impl AppRouterImpl {
         // Payments received offline wait in the offline balance for their unload
         // (`wallet.unloadReceived`, owner 2026-11-07): the sync moves none of them.
 
-        // §16.6 on-access acceptance recovery, from the durable apply record.
+        // on-access acceptance recovery, from the durable apply record.
         match crate::init::current_chain_head_at_rest_key() {
             Ok(wrap_key) => {
                 if let Err(e) =
@@ -2792,7 +2792,7 @@ impl AppRouterImpl {
                 "[storage.sync] §16.6 acceptance recovery waits for the wallet: {locked}"
             ),
         }
-        // §16.6 reply window: every countersigned receipt persisted but not
+        // reply window: every countersigned receipt persisted but not
         // yet delivered to its sender.
         if let Err(e) =
             deliver_pending_acceptance_replies(storage_endpoints, self.core_sdk.clone()).await
@@ -2882,7 +2882,7 @@ impl AppRouterImpl {
         }
     }
 
-    /// §16.6 sender finalization from the countersign deltas this poll
+    /// sender finalization from the countersign deltas this poll
     /// decoded. A delta finalized on (now or earlier) is consumed.
     async fn process_countersign_deltas(
         &self,

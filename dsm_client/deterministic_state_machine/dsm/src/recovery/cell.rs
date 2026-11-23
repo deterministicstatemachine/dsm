@@ -20,9 +20,9 @@ type D32 = [u8; 32];
 /// One recovery object's cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryCell {
-    /// The recovery-authority anchor a genesis binds (§0.5 step 5).
+    /// The recovery-authority anchor a genesis binds.
     AuthorityAnchor { genesis: D32 },
-    /// A device's posted PDSMT heads (§0.5 gap 13).
+    /// A device's posted PDSMT heads.
     PdsmtHead { device_id: D32 },
     /// A device's posted PDSMT leaf set at one head.
     PdsmtLeaves {

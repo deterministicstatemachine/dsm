@@ -164,25 +164,25 @@ pub enum FulfillmentProof {
     PaymentProof {
         state_transition: Vec<u8>,
         merkle_proof: Vec<u8>,
-        /// σ commitment from bilateral stitched receipt (§7.3).
+        /// σ commitment from bilateral stitched receipt.
         stitched_receipt_sigma: Option<[u8; 32]>,
     },
     CryptoConditionProof {
         solution: Vec<u8>,
         proof: Vec<u8>,
-        /// σ commitment from bilateral stitched receipt (§7.3).
+        /// σ commitment from bilateral stitched receipt.
         stitched_receipt_sigma: Option<[u8; 32]>,
     },
     MultiSignatureProof {
         signatures: Vec<(Vec<u8>, Vec<u8>)>, // (public_key, signature)
         signed_data: Vec<u8>,
-        /// σ commitment from bilateral stitched receipt (§7.3).
+        /// σ commitment from bilateral stitched receipt.
         stitched_receipt_sigma: Option<[u8; 32]>,
     },
     RandomWalkProof {
         positions: Vec<Position>,
         hash_chain_proof: Vec<u8>,
-        /// σ commitment from bilateral stitched receipt (§7.3).
+        /// σ commitment from bilateral stitched receipt.
         stitched_receipt_sigma: Option<[u8; 32]>,
     },
     /// Bitcoin HTLC proof: preimage reveal + SPV proof of Bitcoin payment
@@ -468,7 +468,7 @@ pub struct LimboVault {
     pub verification_positions: Vec<Position>,
     pub reference_state_hash: [u8; 32],
     /// Bitcoin block header cached at entry time (80 bytes).
-    /// dBTC paper §12.2.3, Invariant 19: exit proofs must chain back to this anchor.
+    /// Invariant 19: exit proofs must chain back to this anchor.
     pub entry_header: Option<[u8; 80]>,
     /// Tier 2 Foundation: monotonic sequence advanced on every accepted
     /// routed unlock.  The chunks #7 gate verifies a trader's
@@ -1455,7 +1455,7 @@ impl LimboVault {
             }
 
             // Bitcoin HTLC: SHA256(preimage) == hash_lock + SPV proof of Bitcoin payment + header chain
-            // dBTC paper §6.4/§12.1.3: confirmation depth is enforced, not advisory
+            // /§12.1.3: confirmation depth is enforced, not advisory
             (
                 FulfillmentMechanism::BitcoinHTLC {
                     hash_lock,
@@ -1633,12 +1633,12 @@ impl LimboVault {
         ))
     }
 
-    /// Verify a Bitcoin HTLC proof (dBTC paper §6.4.5 SPV Verification Stack):
+    /// Verify a Bitcoin HTLC proof (SPV Verification Stack):
     /// 1. SHA256(preimage) == hash_lock
     /// 2. SPV proof validates txid inclusion in block header's Merkle root
     /// 3. Block header meets minimum proof-of-work
     /// 4. Header chain connects block to a known checkpoint (mainnet only)
-    /// 5. Confirmation depth >= min_confirmations (dBTC paper §6.4.1/§6.4.3, §12.1.3)
+    /// 5. Confirmation depth >= min_confirmations
     #[allow(clippy::too_many_arguments)]
     fn verify_bitcoin_htlc(
         &self,
@@ -1678,7 +1678,7 @@ impl LimboVault {
             ));
         }
 
-        // 1. Deep-anchor depth check (dBTC paper §6.4, Invariants 10-11).
+        // 1. Deep-anchor depth check.
         //
         // KNOWN LIMITATION (issue #181 Finding 4) — `header_chain` is the
         // ancestor chain from a known checkpoint UP TO `block_header`, not
@@ -1794,7 +1794,7 @@ impl LimboVault {
             return Ok(false);
         }
 
-        // 7. Entry-header anchor check (dBTC paper §12.2.3, Invariant 19):
+        // 7. Entry-header anchor check:
         //    If this vault has a cached entry header (from BTC→dBTC entry),
         //    verify the exit block chains forward from it.
         let mut same_chain_anchored = true;

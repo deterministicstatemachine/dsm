@@ -53,25 +53,26 @@ kept out of the default suite to avoid slowing down the standard regression gate
 ## What this model *does* cover
 
 - Device membership under a genesis (`devices`), with no-duplicate-device invariant.
-- Symmetric bilateral relationship activation + a monotonically increasing `tip`.
-- Online message queuing (`pendingMsgs`) and processing.
-- A simple key-generation gate (`keys`) used as a precondition for “sign/encrypt”.
-- Offline session symmetry (`offlineSessions`) + a transfer step that increments tips.
+- The online relationship protocol between two devices: ESTABLISH and TERMINATE (DSM
+  Amendment A33), pins, admission, the send gates, crossing sends, the sender's outbox, the
+  recipient's journal of countersign deltas and the finality certificates (`online`, `outbox`,
+  `journal`, `certs`, `joins`), over an adversarial network bag (`net`).
+- Per-device SMT roots and leaves (`deviceRoots`, `smtState`), the accepted-receipt `ledger`,
+  and balances (`deviceBalance`).
+- A key-generation gate (`keys`) used as a precondition for "sign/encrypt".
+- Offline session symmetry (`offlineSessions`) and a transfer step that advances tips.
 - DLV ownership (`vaults` + `vaultState.owner`) and a trivial unlock predicate.
-- Storage node membership (`storageNodes`) with stub store/replicate actions.
-- DJTE counters (`activatedDevices`, `emissionIndex`, `shardTree`) in **placeholder** form.
+- Storage node membership (`storageNodes`).
+- DJTE: activations, the shard lists, spent activation digests and spent proofs, a finite
+  source, and exact-uniform winner selection by rejection sampling (`UniformIndex`).
 
 ## What this model *does NOT* cover
 
 - Canonical protobuf encodings, Base32, b0x addressing, replica placement.
 - SPHINCS+/Kyber algorithms, signature validation, proof objects, HKDF.
 - Explicit quantum attack simulation or Shor-style crypto-break modeling.
-- Per-device SMT replace semantics, tripwire consumption tracking.
-  (See `DSM_Tripwire.tla` for a focused model of these invariants).
-- DJTE proof-carrying winner selection, shard descent proofs, spent-proof SMT.
-	Winner selection in this model is deterministic and seed-based (k-th-min with
-	k = seed % |activatedDevices|). It is NOT proof-carrying and NOT exact-uniform;
-	modulo selection can introduce bias unless additional assumptions are modeled.
+- The storage nodes' cells and route chains (see `DSM_RouteChain.tla`), and resource-key
+  derivation (see `DSM_Guarded*.tla` and `lean4/DSMGuardedTripwire.lean`).
 
 If you need those, the model should be refined by introducing explicit structures
 (e.g., SMT/accumulator trees) and by replacing nondeterministic `CHOOSE` with
@@ -536,3 +537,21 @@ carry the full invariant set and must pass.
 | fulfillment | `_StaleLegNotSkipped` | arm (iii) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
 | fulfillment | `_TraderOnlyCompletion` | *P2:* completion by anyone (a write authorization) | `QuiescentFulfillmentResolved` |
 | fulfillment | `_VoidBeforeValidation` | Void requires RouteValidation = Valid | `ResolutionPermanent` |
+
+## Further models and proofs
+
+Modules and proofs in this tree that the sections above do not describe:
+
+- **TLA+:** `DSM_OfflineFinality.tla` (offline finality, with its configs, linked to the real-code
+  trace `bilateral_full_offline_finality`), `DSM_WriteLock.tla` (the inbox write lock, DSM
+  Amendments A34 and A37), `DSM_NonInterference.tla`, `DSM_dBTC_Abstract.tla`,
+  `DSM_dBTC_Concrete.tla` and `DSM_dBTC_TrustReduction.tla` (the dBTC design being replaced),
+  `DSM_InitProof.tla` (TLAPS: the concrete `Init` refines `DSM_ProtocolCore!Init`).
+- **`DSM.tla` falsification configs:** `DSM_CrossingSettles`, `DSM_RecipientSkipsAdmission`,
+  `DSM_RecipientSkipsAdmissionAndPin`, `DSM_SendBeforeEstablishment`, and the
+  `DSM_BilateralLiveness_*` reachability configs.
+- **Lean 4:** `DSMApplicationCell` (A35), `DSMCertChain`, `DSMCryptoBinding`,
+  `DSMNoCounterfeitValue`, `DSMNonInterference`, `DSMOfflineFinality`, `DSMRelationshipLifecycle`
+  (A33), `DSMRelationshipWriteLock` (A34, A37), `DSMRouteChain`, `DSMTokenIssuance`,
+  `DSM_dBTC_Conservation`, `DSM_dBTC_TrustReduction`, and the SPHINCS+ tree under `lean4/Sphincs/`
+  (see `specs/requirements/SPHINCS_PROOF_OVERVIEW.md`).

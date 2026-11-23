@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Canonical sender proposal (§16.6 proposal authority).
+//! Canonical sender proposal (proposal authority).
 //!
 //! ONE persisted record, written by the sender's online-send flow immediately
 //! after the canonical advance, is the single authority feeding every
@@ -111,7 +111,7 @@ pub fn insert_sender_proposal(p: &SenderOnlineProposal) -> Result<()> {
 
 /// Same insert, INSIDE a caller-owned transaction.
 ///
-/// §16.6 defect zero: the proposal is committed together with the canonical
+/// defect zero: the proposal is committed together with the canonical
 /// advance, the gate, the pending EK head, and the outbox row — one
 /// transaction, before anything is deliverable. Takes `&Connection` (a
 /// `&Transaction` derefs to one) and never calls `get_connection()`: the

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The vault head and evidence store (spec §44.4): the post state a resolved
+//! The vault head and evidence store: the post state a resolved
 //! transition SELECTED, kept so the next trade against that vault has
 //! evidence to stand on.
 //!

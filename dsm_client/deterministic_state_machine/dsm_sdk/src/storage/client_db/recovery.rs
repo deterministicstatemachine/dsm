@@ -662,7 +662,7 @@ pub fn is_device_tombstoned(device_id: &[u8; 32]) -> Result<bool> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// P5 — Bearer-asset reconciliation registry + per-asset egress gate (spec §0.4).
+// P5 — Bearer-asset reconciliation registry + per-asset egress gate.
 //
 // The two-gate model: identity succession does NOT make recovered bearer assets
 // spendable. Every capsule-restored bearer asset enters LockedRecovery and stays
@@ -673,7 +673,7 @@ pub fn is_device_tombstoned(device_id: &[u8; 32]) -> Result<bool> {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// True iff `token_id` names the dBTC bearer asset (canonical `DBTC_TOKEN_ID = "dBTC"`).
-/// dBTC MUST NOT be reconciled via the generic token path (spec §0.4 P5 cut). Matched
+/// dBTC MUST NOT be reconciled via the generic token path (cut). Matched
 /// case-insensitively so spelling variants stay conservatively locked.
 pub fn is_dbtc_token_id(token_id: &[u8]) -> bool {
     token_id.eq_ignore_ascii_case(b"dbtc")
@@ -806,7 +806,7 @@ pub fn any_recovery_locked_assets() -> Result<bool> {
     Ok(n > 0)
 }
 
-/// Per-asset egress gate (spec §0.4 P5). Returns a block reason for the egress `op`, or
+/// Per-asset egress gate. Returns a block reason for the egress `op`, or
 /// `None` if it may proceed. Fail-CLOSED: any DB read error blocks. This is checked IN
 /// ADDITION to the identity-level [`value_egress_block_reason`] and persists per-asset after
 /// recovery activation.
@@ -885,8 +885,8 @@ fn asset_lock_block_reason(token_id: &[u8], amount: u64) -> Option<String> {
     }
 }
 
-/// Reconcile an ORDINARY token asset against its independently-VERIFIED frontier (spec §0.4
-/// P5 generic path): `verified >= hint` → `Spendable`; `verified < hint` → `Reduced` capped
+/// Reconcile an ORDINARY token asset against its independently-VERIFIED frontier
+/// (P5 generic path): `verified >= hint` → `Spendable`; `verified < hint` → `Reduced` capped
 /// at `verified`. Returns the new state. Fail-CLOSED for dBTC: it stays `LockedRecovery`
 /// until the dedicated dBTC frontier-replay pass (a `MissingDbtcFrontierReplay` error).
 pub fn reconcile_token_asset(
@@ -914,7 +914,7 @@ pub fn reconcile_token_asset(
 }
 
 /// Recovery-time locking: mark every bearer asset in `device_id_str`'s balance projections
-/// `LockedRecovery` (spec §0.4 — the capsule is a continuity hint, not a balance oracle).
+/// `LockedRecovery` (the capsule is a continuity hint, not a balance oracle).
 /// Returns the count locked. Call for BOTH the old and new device ids on recovery so the
 /// token-keyed registry covers whichever device the restored projections landed under.
 /// Idempotent on token_id. (Post-recovery ingress creates fresh, unlocked projections.)

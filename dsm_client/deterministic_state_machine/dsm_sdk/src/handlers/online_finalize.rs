@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Sender-side online transition finalization (§16.6): the recipient's
+//! Sender-side online transition finalization: the recipient's
 //! countersign, bound to the A side the sender retained.
 //!
 //! Protocol boundary: a DSM online transition finalizes on the sender only when

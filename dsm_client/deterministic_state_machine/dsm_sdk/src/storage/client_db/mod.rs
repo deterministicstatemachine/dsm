@@ -56,7 +56,7 @@ pub mod relationship_write_authorization;
 pub mod route_writes;
 pub mod sender_outbox;
 pub mod sender_proposal;
-pub mod sofi_vault_head; // the vault head and evidence store (spec §44.4)
+pub mod sofi_vault_head; // the vault head and evidence store
 pub mod storage_sync_runs;
 pub mod token_registry;
 mod tokens;

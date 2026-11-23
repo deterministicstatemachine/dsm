@@ -115,7 +115,7 @@ pub fn update_rollup(
         new_height,
     };
 
-    // Compute new roll accumulator per whitepaper §13:
+    // Compute new roll accumulator:
     //   Roll_{t+1} := H("DSM/recovery-roll\0" || Roll_t || rid_t || H(Rec_t) || ID(8)_Bi || ht'_i)
     let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_RECOVERY_ROLL);
     hasher.update(&rollup.current_hash);

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Additional-device admission (§16.3) — the authorization that lets an already-trusted device
-//! admit a NEW device into an existing genesis Device Tree.
+//! Additional-device admission — the authorization that lets an already-trusted device
+//! admit a NEW device into an existing genesis Device Tree. No SDK flow calls this module
+//! yet; a device's membership of its genesis is what its directory entry proves (P0–P6,
+//! DSM Amendment A18).
 //!
 //! Doctrine (three separate device events): the root device *creates* genesis;
 //! an already-authorized device *admits* another device (this module); recovery authority
@@ -26,8 +28,8 @@ use crate::types::error::DsmError;
 use crate::types::proto::{AddDeviceAdmissionV1, Message as _};
 
 /// Canonical derivation of a secondary/Nth device id — `H("DSM/device\0" || client_entropy ||
-/// genesis_hash || device_secret)`. Byte-identical to the SDK's secondary-device derivation; the
-/// new device uses it to compute its own `DevID` (the verifier does NOT recompute it — the new
+/// genesis_hash || device_secret)`. The
+/// new device would use it to compute its own `DevID` (the verifier does NOT recompute it — the new
 /// device's self-attestation proves possession instead). `device_secret` is the joining device's
 /// wallet-seed-rooted master seed (Genesis v2 `Smaster`).
 pub fn derive_secondary_device_id(

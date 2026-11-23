@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Recovery-authority anchor (spec §0.5, step 5).
+//! Recovery-authority anchor.
 //!
 //! The recovery-authority SPHINCS+ public key `K_A_pub` (derived from the recovery
 //! mnemonic via `recovery::recovery_keys::derive_recovery_authority_seed`) authenticates a device's
 //! tombstone/succession pair during recovery. For that authentication to be a real
 //! trust root it MUST be anchored to the genesis `G_A` — otherwise a verifier would
 //! have to trust an arbitrary runtime-supplied pubkey (exactly the contacts-DB
-//! authority confusion §0.5 removes).
+//! authority confusion this removes).
 //!
 //! `K_A_pub` is not a genesis field. The authority is anchored by a separate
 //! **declaration chained off genesis**:
@@ -30,8 +30,10 @@
 //! at all, so a thief-authored first anchor grants nothing the thief lacks (they already control the device), and bearer assets independently stay
 //! `LOCKED_RECOVERY` until per-asset frontier reconciliation (two-gate model, P5).
 //!
-//! Bind-once is enforced at the storage/device-tree layer (append-once anchor leaf,
-//! §0.5 step 7); THIS module provides the pure declaration type and its verification:
+//! Bind-once is the reader's rule: the device's anchor is the one distinct anchor in
+//! its own anchor cell whose binding verifies; two that commit different authorities
+//! anchor none, and only the device's cell lock writes that cell (DSM Amendment A41).
+//! THIS module provides the pure declaration type and its verification:
 //! genesis-key signature, candidate-pubkey commitment binding, and authority
 //! self-signature. All digests are BLAKE3 domain-separated; all signatures SPHINCS+.
 

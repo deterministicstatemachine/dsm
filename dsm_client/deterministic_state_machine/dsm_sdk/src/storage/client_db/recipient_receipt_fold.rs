@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Durable state for the recipient B-side acceptance-receipt fold (§16.6).
+//! Durable state for the recipient B-side acceptance-receipt fold.
 //!
 //! Three durable phases (see design doc): the receipt is generated + persisted
 //! BEFORE application; the cert heads + outbox are produced only AFTER the
@@ -677,7 +677,7 @@ pub fn promote_held_replies_with_conn(conn: &rusqlite::Connection) -> Result<usi
 }
 
 /// One undelivered acceptance reply, joined with the routing material the
-/// §16.6 reply window needs to address it.
+/// reply window needs to address it.
 ///
 /// `projection_parent_tip` is the SYMMETRIC tip captured at PREPARE — the value
 /// the ORIGINAL SENDER is still polling its inbox at. The recipient's own
@@ -1375,7 +1375,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // §16.6 REPLY WINDOW — delivery queue semantics.
+    // REPLY WINDOW — delivery queue semantics.
     //
     // The sweep that drains these rows is what releases the SENDER's gate. A
     // reply that is invisible, mis-addressed, or re-sent forever is money left

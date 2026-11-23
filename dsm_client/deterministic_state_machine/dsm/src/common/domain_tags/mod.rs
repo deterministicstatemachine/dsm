@@ -120,7 +120,7 @@ mod tests {
     //
     // Every check above traverses `all_tags()`. None of them can see a tag that
     // was declared and never added to a `TAGS` array — and 21 were, including
-    // the two production §16.3 signing domains `DSM/add-device-admission` and
+    // the two production signing domains `DSM/add-device-admission` and
     // `DSM/add-device-self-attest`. The uniqueness and prefix-freedom tests were
     // blind to them, so "the domain tags are pairwise distinct" was a weaker
     // claim than its name.

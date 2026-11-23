@@ -213,7 +213,7 @@ pub fn verify_header_chain(
 
 /// Verify that an exit block header chains forward from a known entry anchor.
 ///
-/// dBTC paper §12.2.3, Invariant 19: the exit block must be on the same
+/// Invariant 19: the exit block must be on the same
 /// chain as the entry block. For mainnet, `connecting_headers` must form a
 /// valid prev_hash chain from `entry_header` to `exit_header`.
 ///

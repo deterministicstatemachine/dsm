@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Bearer-asset reconciliation lock states (spec §0.4 P5).
+//! Bearer-asset reconciliation lock states.
 //!
 //! The recovery **two-gate model** separates identity recovery from bearer-asset spend
 //! authority. Identity succession (Phase D) proves `A_new` is the valid successor — it does
@@ -8,7 +8,7 @@
 //! capsule enters [`BearerAssetLockState::LockedRecovery`] and stays there until its OWN
 //! verified frontier reconciles it — **the capsule is never a balance oracle.**
 //!
-//! State machine (spec §0.4):
+//! State machine:
 //! `LockedRecovery → reconciled{ Spendable | Reduced | InFlight | Finalized | RefundPending }`.
 //! Egress is refused while `LockedRecovery` or below the reconciled frontier.
 //!
@@ -96,7 +96,7 @@ impl BearerAssetLockState {
     }
 }
 
-/// Generic token-frontier reconciliation rule (spec §0.4 P5).
+/// Generic token-frontier reconciliation rule.
 ///
 /// Given the capsule-restored `hint` amount and the independently-VERIFIED latest frontier
 /// `verified`, returns the reconciled state + the spendable cap:

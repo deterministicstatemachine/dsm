@@ -224,7 +224,7 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
     Ok(true)
 }
 
-/// §16.6 startup acceptance recovery: finish applied-but-incomplete acceptance
+/// startup acceptance recovery: finish applied-but-incomplete acceptance
 /// journals from the durable `CanonicalApplyRecord` — no redelivery required.
 /// This init path is SYNCHRONOUS (JNI-invoked) and may already be inside an
 /// active Tokio runtime, so NEVER `block_on` here — schedule on the established
@@ -604,7 +604,7 @@ pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
     dev_fixed.copy_from_slice(&dev);
     gen_fixed.copy_from_slice(&gen);
 
-    // Backfill Device Tree root (§2.3) for existing identities created before this was
+    // Backfill Device Tree root for existing identities created before this was
     // persisted at genesis time.  The root of a single-device tree is deterministic from
     // dev_fixed, so it is always safe to recompute and overwrite.
     // Without the root no receipt is built: the producer checks each receipt's device

@@ -183,14 +183,14 @@ dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	886	crate::c
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	21	/// SPHINCS+ SPX256f, construction version 2 (`dsm_sphincs`: the FIPS 205
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	130	use crate::crypto::sphincs::{public_key_bytes, SphincsVariant, CONSTRUCTION_VERSION};
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	139	Some(public_key_bytes(SphincsVariant::SPX256f))
-dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	24	use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
-dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	53	sphincs_sign(
-dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	81	sphincs_verify(
-dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	119	sphincs_verify(
-dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	128	sphincs_verify(
-dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	214	a.signature_by_signer_device = sphincs_sign(signer_signing_sk, &a.gate_digest())?;
-dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	277	use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
-dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	280	let k = generate_keypair_from_seed(SphincsVariant::SPX256f, &[seed; 32]).expect("kp");
+dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	26	use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
+dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	55	sphincs_sign(
+dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	83	sphincs_verify(
+dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	121	sphincs_verify(
+dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	130	sphincs_verify(
+dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	216	a.signature_by_signer_device = sphincs_sign(signer_signing_sk, &a.gate_digest())?;
+dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	279	use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
+dsm_client/deterministic_state_machine/dsm/src/common/device_admission.rs	282	let k = generate_keypair_from_seed(SphincsVariant::SPX256f, &[seed; 32]).expect("kp");
 dsm_client/deterministic_state_machine/dsm/src/connect.rs	26	use crate::crypto::sphincs::sphincs_verify;
 dsm_client/deterministic_state_machine/dsm/src/connect.rs	121	match sphincs_verify(ak, &statement(kind, body), signature) {
 dsm_client/deterministic_state_machine/dsm/src/connect.rs	253	use crate::crypto::sphincs::{generate_keypair, sphincs_sign, SphincsVariant};
@@ -303,13 +303,13 @@ dsm_client/deterministic_state_machine/dsm/src/recovery/assembly.rs	328	let kp =
 dsm_client/deterministic_state_machine/dsm/src/recovery/assembly.rs	376	head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
 dsm_client/deterministic_state_machine/dsm/src/recovery/assembly.rs	406	let ka = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("ka");
 dsm_client/deterministic_state_machine/dsm/src/recovery/assembly.rs	564	let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x01; 32]).unwrap();
-dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	41	use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
-dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	129	if !sphincs_verify(
-dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	163	if !sphincs_verify(
-dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	235	let device_signature = sphincs_sign(genesis_signing_sk, &digest)?;
-dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	236	let authority_signature = sphincs_sign(authority_sk, &digest)?;
-dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	249	use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
-dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	255	generate_keypair_from_seed(SphincsVariant::SPX256f, &[seed; 32]).expect("kp")
+dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	43	use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
+dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	131	if !sphincs_verify(
+dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	165	if !sphincs_verify(
+dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	237	let device_signature = sphincs_sign(genesis_signing_sk, &digest)?;
+dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	238	let authority_signature = sphincs_sign(authority_sk, &digest)?;
+dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	251	use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
+dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs	257	generate_keypair_from_seed(SphincsVariant::SPX256f, &[seed; 32]).expect("kp")
 dsm_client/deterministic_state_machine/dsm/src/recovery/bundle.rs	80	use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm/src/recovery/bundle.rs	85	let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
 dsm_client/deterministic_state_machine/dsm/src/recovery/dbtc_vault_index.rs	21	use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
@@ -417,7 +417,7 @@ dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4933	let ov
 dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4954	let signed = sphincs_sign(&sk, &derive::setup_signing_digest(&body)).unwrap();
 dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	5105	use crate::crypto::sphincs::sphincs_sign;
 dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	5121	let sign = |message: &[u8]| sphincs_sign(&keys.secret_key, message).expect("signs");
-dsm_client/deterministic_state_machine/dsm/src/types/error.rs	1980	let err = DsmError::crypto_op("sphincs_sign", "signature failed", Some("oops"));
+dsm_client/deterministic_state_machine/dsm/src/types/error.rs	1981	let err = DsmError::crypto_op("sphincs_sign", "signature failed", Some("oops"));
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	175	crate::crypto::sphincs::verify(
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	176	crate::crypto::sphincs::SphincsVariant::SPX128f,
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	958	let kp = crate::crypto::sphincs::generate_keypair_from_seed(
@@ -436,14 +436,14 @@ dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	1236	let s
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	1237	crate::crypto::sphincs::SphincsVariant::SPX256f,
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	1387	let signature = crate::crypto::sphincs::sign(
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	1388	crate::crypto::sphincs::SphincsVariant::SPX256f,
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2375	match crate::crypto::sphincs::sphincs_verify(
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3619	use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3637	generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3649	let sig = sphincs_sign(&kp.secret_key, &canonical).expect("sign");
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3689	generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3695	let sig = sphincs_sign(&kp.secret_key, &tampered).expect("sign");
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3703	generate_keypair_from_seed(SphincsVariant::SPX256f, &[9u8; 32]).expect("keypair2");
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3704	let bad_sig = sphincs_sign(&other.secret_key, &canonical).expect("sign");
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2374	match crate::crypto::sphincs::sphincs_verify(
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3618	use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3636	generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3648	let sig = sphincs_sign(&kp.secret_key, &canonical).expect("sign");
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3688	generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3694	let sig = sphincs_sign(&kp.secret_key, &tampered).expect("sign");
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3702	generate_keypair_from_seed(SphincsVariant::SPX256f, &[9u8; 32]).expect("keypair2");
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3703	let bad_sig = sphincs_sign(&other.secret_key, &canonical).expect("sign");
 dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	513	let verified = crate::crypto::sphincs::sphincs_verify(
 dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	1687	use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	1688	let head = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x5Eu8; 32])

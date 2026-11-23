@@ -117,7 +117,7 @@ pub fn record_pending_online_transition(
 
 /// Same gate write, INSIDE a caller-owned transaction.
 ///
-/// §16.6 defect zero: the gate must be committed together with the canonical
+/// defect zero: the gate must be committed together with the canonical
 /// advance, the proposal, the pending EK head, and the outbox row — one
 /// transaction, before anything is deliverable. This variant therefore takes
 /// `&Connection` (a `&Transaction` derefs to one) and never calls
@@ -332,7 +332,7 @@ pub fn clear_pending_online_outbox(counterparty_device_id: &[u8]) -> Result<()> 
 /// concurrent online send.
 ///
 /// Returns `Ok(true)` if the exact row was deleted, `Ok(false)` if no match.
-/// Exact-match gate delete INSIDE a caller-owned transaction (§16.6 defect 1).
+/// Exact-match gate delete INSIDE a caller-owned transaction (defect 1).
 pub fn clear_pending_online_outbox_if_matches_with_conn(
     conn: &Connection,
     counterparty_device_id: &[u8],

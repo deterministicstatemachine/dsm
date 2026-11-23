@@ -44,7 +44,7 @@ pub use sdk_context::SdkContext;
 pub mod anchor_enrollment_store;
 pub mod app_lock; // The app lock: Rust enrolls and checks the PIN or pattern
 pub mod app_state; // Shared application state management
-pub mod apply_outcome; // §16.6 tri-state full-state apply outcome
+pub mod apply_outcome; // tri-state outcome of the staged full-state apply
 pub mod b0x_sdk;
 pub mod bounded_read; // every answer body read within its kind's limit or a local budget
 pub mod chain_tip_store;

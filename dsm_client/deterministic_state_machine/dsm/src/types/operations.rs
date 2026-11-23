@@ -818,7 +818,7 @@ pub enum Operation {
 }
 
 /// The bearer asset an egress operation moves, for the per-asset recovery spend-gate
-/// (spec §0.4 P5). Produced by [`Operation::egress_asset`] — the canonical, exhaustive
+///. Produced by [`Operation::egress_asset`] — the canonical, exhaustive
 /// companion to [`Operation::is_value_egress`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressAsset {
@@ -920,8 +920,7 @@ impl Operation {
     }
 
     /// Classify whether this operation is **value-bearing** — value moving in ANY
-    /// direction (egress OR ingress) — for the recovery gate-set criterion (spec
-    /// §0.5 step 6).
+    /// direction (egress OR ingress) — for the recovery gate-set criterion.
     ///
     /// A relationship is **value-capable** (and thus a recovery gate-set member) iff
     /// its posted state has accepted ≥1 value-bearing operation, OR its relationship
@@ -948,7 +947,7 @@ impl Operation {
         )
     }
 
-    /// The bearer asset this operation egresses (spec §0.4 P5 per-asset spend-gate).
+    /// The bearer asset this operation egresses (per-asset spend-gate).
     ///
     /// EXHAUSTIVE companion to [`Self::is_value_egress`]: every egress variant yields either
     /// [`EgressAsset::Asset`] (a canonical `token_id` + egress amount) or
@@ -1198,7 +1197,7 @@ impl Operation {
                 // Balance canonical
                 let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
-                // CPTA policy commitment (§9.5) — bound into the signed bytes.
+                // CPTA policy commitment — bound into the signed bytes.
                 put_bytes(&mut out, policy_commit);
                 // The terms, by their salted commitment only.
                 put_bytes(&mut out, terms_commitment);
@@ -1721,7 +1720,7 @@ impl Operation {
                 let to_device_id = get_bytes(&mut input)?;
                 let to_genesis = get_arr32(&mut input)?;
                 let amount = dec_balance(&mut input)?;
-                // CPTA policy commitment (§9.5) — required, exactly 32 bytes.
+                // CPTA policy commitment — required, exactly 32 bytes.
                 let policy_commit: [u8; 32] =
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("transfer policy_commit must be 32 bytes")

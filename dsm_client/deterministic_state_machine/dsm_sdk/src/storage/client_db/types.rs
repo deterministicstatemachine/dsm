@@ -44,7 +44,7 @@ pub struct ContactRecord {
     pub public_key: Vec<u8>,   // SPHINCS+ signing public key for bilateral verification
     /// Counterparty's Kyber-768 (ML-KEM) public key. Required for the
     /// per-step Kyber encapsulation in receipt EK derivation
-    /// (whitepaper §11). The sender encapsulates against this pubkey to
+    ///. The sender encapsulates against this pubkey to
     /// derive `k_step` for the per-step EK. Empty means the contact was
     /// established before per-step EK signing was wired (legacy path);
     /// such contacts cannot be used as receipt recipients under strict

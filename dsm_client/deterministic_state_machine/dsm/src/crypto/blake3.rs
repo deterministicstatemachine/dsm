@@ -61,7 +61,7 @@ pub fn dsm_domain_hasher(tag: TaggedHashDomain<'_>) -> Hasher {
 /// 32-byte key, then the domain tag (with the same `tag || 0x00` separation as
 /// [`dsm_domain_hasher`]) folded into the message.
 ///
-/// This is the per-step KDF primitive of whitepaper §11.1/§12: "keyed BLAKE3
+/// This is the per-step KDF primitive: "keyed BLAKE3
 /// with the secret as the key (NOT HKDF)". The secret key is the master seed
 /// `Smaster`; the tag plus the caller's subsequent `update()`s form the
 /// versioned, algorithm- and chain-bound context.

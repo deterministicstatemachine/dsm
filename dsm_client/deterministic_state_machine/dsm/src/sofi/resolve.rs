@@ -1626,7 +1626,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// set: for every leg the fulfillment names at attempt `a > 0`, the
     /// storage fact at `K^(a-1)` of that leg's vault at its parent root.
     ///
-    /// ONE PATH, SHARED (owner ruling, §44.4). The producer's install (R9)
+    /// ONE PATH, SHARED (owner ruling). The producer's install (R9)
     /// and the verifier's resolution (R12) read the same cell the same way,
     /// because they answer the same question: conformance item 5 requires
     /// the key before this one to have a permanent storage resolution

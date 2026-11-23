@@ -1852,7 +1852,7 @@ async fn a_granted_payment_does_not_run_while_the_wallet_is_locked() {
 /// A payment whose debit committed counts against its grant whatever became
 /// of its delivery (SA-19). With the fleet below quorum the send commits the
 /// debit and holds its admission for resume, so nothing is delivered yet;
-/// the debit stands (§16.6), and the grant's lifetime total is charged for it
+/// the debit stands, and the grant's lifetime total is charged for it
 /// as for any payment carried out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]

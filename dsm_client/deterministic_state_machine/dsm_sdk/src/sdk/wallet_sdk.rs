@@ -295,7 +295,7 @@ impl WalletSDK {
     }
 
     /// AK (attestation key) keypair access for cert-chain bootstrapping
-    /// (whitepaper §11.1). Used at relationship genesis (step 0) when no
+    ///. Used at relationship genesis (step 0) when no
     /// per-step chain head exists yet — `sign_receipt_with_per_step_ek`
     /// falls back to AK_sk to sign cert_1.
     ///
@@ -616,7 +616,7 @@ impl WalletSDK {
         })
     }
 
-    /// §16.6 defect zero — STAGED send.
+    /// defect zero — STAGED send.
     ///
     /// `build_artifacts` runs after the pure prepare and before the durable
     /// write (the only window where DB-reading work such as per-step EK signing
@@ -703,7 +703,7 @@ impl WalletSDK {
 
         self.transactions.write().push(tx_copy.clone());
 
-        // §16.6: Relationship chain tip h_{n+1} is the caller's responsibility.
+        // Relationship chain tip h_{n+1} is the caller's responsibility.
         // send_transfer_op advances the token state machine only; the caller
         // (app_router_impl or bilateral_sdk) persists the correct relationship tip
         // using compute_precommit + compute_successor_tip with the shared nonce.

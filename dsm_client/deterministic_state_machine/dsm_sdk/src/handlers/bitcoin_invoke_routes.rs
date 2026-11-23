@@ -1947,7 +1947,7 @@ impl AppRouterImpl {
                                 ))
                                     }
                                 };
-                            // DLV unlock via relationship-aware path (§9.5).
+                            // DLV unlock via relationship-aware path.
                             // rel_key = k_{device↔vault}
                             let device_id = match self.core_sdk.get_current_state() {
                                 Ok(s) => s.device_info.device_id,
@@ -4129,7 +4129,7 @@ impl AppRouterImpl {
                                 Ok(op) => op,
                                 Err(e) => return err(format!("bitcoin.deposit.await_and_complete: failed to sign DLV unlock op: {e}")),
                             };
-                            // DLV unlock via relationship path (§9.5)
+                            // DLV unlock via relationship path
                             let device_id = match self.core_sdk.get_current_state() {
                                 Ok(s) => s.device_info.device_id,
                                 Err(e) => return err(format!("await_and_complete: no state: {e}")),
@@ -4547,7 +4547,7 @@ impl AppRouterImpl {
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
             }
 
-            // -------- Withdrawal settlement tracker (dBTC paper §13) --------
+            // -------- Withdrawal settlement tracker --------
             //
             // Checks unresolved in-flight withdrawals for this device.
             // For each withdrawal with recorded sweep txid(s), queries Bitcoin

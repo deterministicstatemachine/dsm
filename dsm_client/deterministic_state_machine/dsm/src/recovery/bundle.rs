@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Recovery bundle (spec §0.5, Phase C) — the transmitted succession artifacts.
+//! Recovery bundle — the transmitted succession artifacts.
 //!
 //! A [`RecoveryBundle`] carries the genesis-anchored recovery authority pubkey
 //! (`K_A_pub`), the tombstone/succession pair, and the [`RecoveryActivationSeal`]. It is
 //! deliberately LIGHT: it does NOT inline per-counterparty
 //! [`crate::recovery::CrossRelationshipSuccessionEvidence`].
 //!
-//! Why no inlined evidence: per the §0.5 posted-state authority, each counterparty's
+//! Why no inlined evidence: per the posted-state authority, each counterparty's
 //! succession evidence is **re-derived and re-verified from that counterparty's OWN
 //! posted, genesis-authenticated state** — its PDSMT head + relationship state history,
 //! fetched from storage, not bundled. (Adversarial review confirmed this: with both
@@ -26,7 +26,7 @@ use crate::recovery::tombstone::{SuccessionReceipt, TombstoneReceipt};
 use crate::types::error::DsmError;
 use crate::types::proto::{Message as _, RecoveryBundleV1};
 
-/// The transmitted recovery succession artifacts (§0.5 Phase C).
+/// The transmitted recovery succession artifacts (Phase C).
 #[derive(Clone, Debug)]
 pub struct RecoveryBundle {
     /// The genesis-anchored recovery authority public key (`K_A_pub`). The verifier binds

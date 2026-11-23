@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Recovery succession proof (spec §0.5 — bilateral re-establish transport).
+//! Recovery succession proof (bilateral re-establish transport).
 //!
 //! A [`RecoverySuccessionProof`] is the minimal artifact A_new posts so a counterparty C can
 //! run its re-establish accept-guard ([`crate::recovery::verify_recovery_reestablish_request`])
@@ -24,7 +24,7 @@ use crate::types::error::DsmError;
 use crate::types::proto::{Message as _, RecoverySuccessionProofV1};
 
 /// The pre-co-sign recovery succession artifacts a counterparty needs to accept a
-/// bilateral re-establish (§0.5).
+/// bilateral re-establish.
 #[derive(Clone, Debug)]
 pub struct RecoverySuccessionProof {
     /// The recovery authority public key (`K_A_pub`). The receiver binds it to A_new's

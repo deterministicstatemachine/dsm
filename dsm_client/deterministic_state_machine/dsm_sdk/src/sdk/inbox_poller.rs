@@ -444,9 +444,9 @@ pub(crate) fn poller_stopping() -> bool {
 /// True while this device owes the network a settlement step that only polling
 /// can complete:
 ///   * a SENDER-side pending online gate awaiting the recipient's acceptance
-///     receipt (§16.6 finalize-on-receipt), or
+///     receipt (finalize-on-receipt), or
 ///   * a RECIPIENT-side countersigned reply that has not yet been delivered
-///     back to the sender (§16.6 reply window).
+///     back to the sender (reply window).
 ///
 /// Money in flight must not depend on the user keeping the app on screen. A
 /// transfer whose settlement stalls because the phone went in a pocket is

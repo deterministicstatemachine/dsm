@@ -7,44 +7,16 @@
 //! must sign with SPHINCS+ before submitting to the state machine.
 //! NOTE: No bincode/serde. `create_vault_post` encodes with `prost`.
 //!
-//! # DLV Settlement Status
+//! # What this manager holds
 //!
-//! The canonical σ-gated claim path lives in `limbo_vault::claim` per DSM spec
-//! §7.3 (`sk_V = BLAKE3-256("DSM/dlv-unlock\0" ‖ L ‖ C ‖ σ)`). `DlvClaim` and
-//! `DlvInvalidate` operations returned by this manager are unsigned signals —
-//! they do NOT themselves mutate token balances. Balance movement for a DLV
-//! release must be expressed through a separate canonical transfer receipt per
-//! DSM spec §18.4 ("normal stitched receipt with a smart commitment clause").
-//!
-//! ## Coverage map against SoFi §10.3 client verifier (11-step acceptance)
-//!
-//! Chunks #1–#7 of the routing pipeline cover the off-chain portions of the
-//! verifier directly; the SMT-side portions remain composed at higher layers.
-//!
-//!   * ExtCommit binding (`X = BLAKE3("DSM/ext\0", canonical(RouteCommit))`)
-//!     — chunk #3 (`route_commit_sdk`).
-//!   * Initiator signature verification (SPHINCS+ over the canonical
-//!     RouteCommit bytes with the signature field zeroed) — chunk #5
-//!     (`route_commit_sdk::verify_route_commit_unlock_eligibility`).
-//!   * Anchor-visible check (atomic-visibility trigger) — chunk #4.
-//!   * AMM-curve re-simulation against live reserves — chunk #7
-//!     (`route_commit_sdk::verify_amm_swap_against_reserves`).
-//!
-//! What §10.3 still asks for but is NOT enforced inside this manager:
-//!
-//!   * Inclusion proofs of vault state in the owner's Per-Device SMT.
-//!   * Encumbrance commit + claim availability proof (per-vault state
-//!     registry to detect double-claim across stitched receipts).
-//!   * Route-set membership proof.
-//!   * Intent-bounds verification (price slippage envelope, expiry).
-//!
-//! Until those land at the receipt-building layer, token-balance effects for
-//! DLV release must be composed through normal transfer operations in the
-//! same stitched receipt as the `DlvClaim` / `DlvInvalidate` signal.  A prior
-//! port (PR #196) wired `locked_amount` directly into
-//! `apply_token_balance_delta`; that was reverted because the fork lacks the
-//! upstream per-vault state registry required to cross-validate claims and
-//! the self-attested credit path enabled arbitrary mint.
+//! `LimboVault`s in memory for the Bitcoin tap (dBTC; not functional in this
+//! release). Each lifecycle method returns an unsigned `Operation` (`DlvCreate`,
+//! `DlvUnlock`, `DlvClaim`, `DlvInvalidate`) for the SDK to sign. These
+//! operations move no token balance: `DlvCreate` and `DlvUnlock` touch no
+//! economic leaf, and `DlvClaim` and `DlvInvalidate` have no economic write set
+//! (`economic::classifier`). The unlock key is
+//! `sk_V = BLAKE3-256("DSM/dlv-unlock\0" ‖ L ‖ C ‖ σ)` (`limbo_vault::claim`;
+//! Explainer §64). SoFi vaults are not held here: they are `sofi` objects.
 
 use super::{FulfillmentMechanism, FulfillmentProof, LimboVault, LimboVaultDraft, VaultState};
 use crate::types::operations::{Operation, TransactionMode};
