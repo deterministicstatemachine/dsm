@@ -1,5 +1,6 @@
 //! The instruction tables, their bus flushes, and where every committed column sits in the stack.
 
+use crate::blake3;
 use crate::bytecode::Bytecode;
 use crate::field::{E, GEN, ONE, ZERO};
 use crate::hash::{STATE_LANES, keccak_f};
@@ -65,17 +66,28 @@ pub struct BusBlock {
 /// transcript. Its length is fixed and Keccak's padding binds the preimage's, so the bytecode that
 /// follows needs no length field of its own. Nothing derives it from the constants below: any change
 /// to the constraint system bumps it by hand. Mirrored in `formal/Statement/LeanVmVerifier.lean`.
-pub const TAG: &[u8] = b"leanvm-v1";
+pub const TAG: &[u8] = b"leanvm-b3"; // this research build: the BLAKE3 table and Flock
 
 // The columns no instruction table owns. They come first in the global column numbering, the tables after.
-pub const NUM_GLOBAL_COLUMNS: usize = 5;
+pub const NUM_GLOBAL_COLUMNS: usize = 6;
 pub const MEMORY_0: usize = 0;
 pub const MEMORY_1: usize = 1;
 pub const MEMORY_FINAL_COUNTERS: usize = 2;
 pub const BYTECODE_FINAL_COUNTERS: usize = 3;
 pub const QKECCAK: usize = 4;
+/// Flock's packed witness of every `BLAKE3` instance, committed slot-major: word `w` of instance `j` at
+/// `w * 2^height + j`, so each 64-bit word the VM reads or writes is a column block of its own.
+pub const QFLOCK: usize = 5;
 
 pub const K_BITS: usize = 64;
+
+// Flock's BLAKE3 circuit: one compression per block of 2^14 witness bits, 2^8 words; the univariate skip binds the 6
+// packing bits, the lincheck the 8 word bits; bit 512 is the constant wire.
+pub const BLAKE3_R1CS_LOG_SIZE: usize = 14;
+pub const FLOCK_K_SKIP: usize = 6;
+pub const FLOCK_NUM_LINCHECK_ROUNDS: usize = BLAKE3_R1CS_LOG_SIZE - FLOCK_K_SKIP;
+pub const QFLOCK_SLOT_BITS: usize = BLAKE3_R1CS_LOG_SIZE - FLOCK_K_SKIP;
+pub const BLAKE3_CONSTANT_COLUMN: usize = 512;
 
 // The Keccak reduction commits a step's state every KECCAK_DEPTH rounds but the output, a lane per
 // slot of q_keccak and a word per step: lane l of the state after KECCAK_DEPTH * m rounds is slot 25 m + l.
@@ -106,6 +118,8 @@ pub struct Layout<'a> {
     pub stack_log: usize,
     pub table_log_heights: Vec<usize>,
     pub keccak: KeccakShape,
+    /// `log2` of Flock's instances: the `BLAKE3` table's height.
+    pub flock_log_blocks: usize,
 }
 
 fn cols<const N: usize>(columns: &[&str], names: [&str; N]) -> [usize; N] {
@@ -374,13 +388,74 @@ fn flushes_keccak() -> Flushes {
     flushes
 }
 
+fn flushes_blake3() -> Flushes {
+    let [pc, fp, cnt_bc] = cols(BLAKE3_COLUMNS, ["pc", "fp", "cnt_bc"]);
+    let operands = cols(BLAKE3_COLUMNS, ["o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md"]);
+    let mut flushes = Flushes::default();
+    flushes.state_step(pc, fp);
+    flushes.bytecode(pc, cnt_bc, OP_BLAKE3, operands.map(|i| col(i, 0)).to_vec());
+    // The nine cells accessed, as (cell, operand, offset from it): four addressed message cells, the consecutive
+    // chaining-value and output pairs, then the metadata cell (the chunk counter, then the block length and the flags).
+    // Each holds two of q_flock's words, a low limb and a high one.
+    #[rustfmt::skip]
+    let cells = [("m0", "o_0", 0), ("m1", "o_1", 0), ("m2", "o_2", 0), ("m3", "o_3", 0),
+                 ("cv0", "o_v", 0), ("cv1", "o_v", 1), ("out0", "o_out", 0), ("out1", "o_out", 1),
+                 ("md", "o_md", 0)];
+    for (cell, operand, exponent) in cells {
+        let names = [operand, &format!("cnt_{cell}"), &format!("{cell}_lo"), &format!("{cell}_hi")];
+        let [address, count, lo, hi] = cols(BLAKE3_COLUMNS, names);
+        flushes.memory_cols(prod(fp, address, exponent), count, &[lo, hi]);
+    }
+    flushes
+}
+
 pub const OP_XOR: usize = 0;
 pub const OP_MUL: usize = 1;
 pub const OP_SET: usize = 2;
 pub const OP_DEREF: usize = 3;
 pub const OP_JUMP: usize = 4;
 pub const OP_KECCAK: usize = 5;
-pub const N_TABLES: usize = 6;
+pub const OP_BLAKE3: usize = 6;
+pub const N_TABLES: usize = 7;
+
+/// `BLAKE3`'s columns: the operands, the eighteen value limbs, which are q_flock's words and not committed here,
+/// then the read counts.
+#[rustfmt::skip]
+pub const BLAKE3_COLUMNS: &[&str] = &[
+    "pc", "fp", "o_0", "o_1", "o_2", "o_3", "o_v", "o_out", "o_md",
+    "m0_lo", "m0_hi", "m1_lo", "m1_hi", "m2_lo", "m2_hi", "m3_lo", "m3_hi",
+    "out0_lo", "out0_hi", "out1_lo", "out1_hi", "cv0_lo", "cv0_hi", "cv1_lo", "cv1_hi", "md_lo", "md_hi",
+    "cnt_m0", "cnt_m1", "cnt_m2", "cnt_m3", "cnt_cv0", "cnt_cv1", "cnt_out0", "cnt_out1", "cnt_md", "cnt_bc",
+];
+
+/// Which of Flock's 64-bit words each value limb is: the chaining value (words 0..4), the output (4..8), the message
+/// block (10..18), then the metadata (18, 19). Word 8 holds the constant wire, and no memory cell carries 8 or 9.
+#[rustfmt::skip]
+pub const BLAKE3_SLOTS: [Option<&str>; 20] = [
+    Some("cv0_lo"), Some("cv0_hi"), Some("cv1_lo"), Some("cv1_hi"), Some("out0_lo"), Some("out0_hi"), Some("out1_lo"), Some("out1_hi"), None, None,
+    Some("m0_lo"), Some("m0_hi"), Some("m1_lo"), Some("m1_hi"), Some("m2_lo"), Some("m2_hi"), Some("m3_lo"), Some("m3_hi"), Some("md_lo"), Some("md_hi"),
+];
+
+/// Flock's padding instance, `blake3(0^64)` as one block, in [`BLAKE3_SLOTS`] order: the IV, the digest, a zero
+/// message, then the metadata (chunk 0; 64 bytes and the one-block flags).
+pub fn blake3_padding_words() -> [u64; 20] {
+    let (counter, len, flags) = blake3::ONE_BLOCK;
+    let digest = blake3::compress(&blake3::IV, &[0; 16], counter, len, flags);
+    std::array::from_fn(|slot| match slot {
+        0..4 => blake3::limb(blake3::IV[2 * slot], blake3::IV[2 * slot + 1]),
+        4..8 => blake3::limb(digest[2 * (slot - 4)], digest[2 * (slot - 4) + 1]),
+        18 => counter,
+        19 => blake3::limb(len, flags),
+        _ => 0,
+    })
+}
+
+/// The word of q_flock the global column `column` IS, if it is one of the `BLAKE3` value limbs.
+pub fn qflock_slot(column: usize) -> Option<usize> {
+    let local = column.checked_sub(GLOBAL_COLUMN_BASES[OP_BLAKE3])?;
+    let name = *BLAKE3_COLUMNS.get(local)?;
+    BLAKE3_SLOTS.iter().position(|&slot| slot == Some(name))
+}
 
 #[rustfmt::skip]
 const ARITH_COLUMNS: &[&str] = &["pc", "fp", "o_a", "o_b", "o_c", "va_0", "va_1", "vb_0", "vb_1", "cnt_a", "cnt_b", "cnt_c", "cnt_bc"];
@@ -456,6 +531,14 @@ pub fn tables() -> Vec<Table> {
     };
     let named = |columns: &[&str]| columns.iter().map(|name| name.to_string()).collect();
     let mut keccak = table(OP_KECCAK, keccak_columns(), flushes_keccak(), |_| vec![]);
+    // A padding row is zero, but for BLAKE3's value limbs: they are q_flock's words, so they hold its padding instance.
+    let mut blake3 = table(OP_BLAKE3, named(BLAKE3_COLUMNS), flushes_blake3(), |_| vec![]);
+    let padding = blake3_padding_words();
+    for (local, value) in blake3.padding.iter_mut().enumerate() {
+        if let Some(slot) = BLAKE3_SLOTS.iter().position(|&s| s == Some(BLAKE3_COLUMNS[local])) {
+            *value = E::new(padding[slot], 0);
+        }
+    }
     // A padding row is zero, but for KECCAK's output lanes: a padding row permutes zeros.
     let mut output = [0; STATE_LANES];
     keccak_f(&mut output);
@@ -469,6 +552,7 @@ pub fn tables() -> Vec<Table> {
         table(OP_DEREF, named(DEREF_COLUMNS), flushes_deref(), |_| vec![]),
         table(OP_JUMP, named(JUMP_COLUMNS), flushes_jump(), jump_constraints),
         keccak,
+        blake3,
     ]
 }
 
@@ -479,6 +563,7 @@ pub const TABLE_WIDTHS: [usize; N_TABLES] = [
     DEREF_COLUMNS.len(),
     JUMP_COLUMNS.len(),
     KECCAK_CNT_BC + 1,
+    BLAKE3_COLUMNS.len(),
 ];
 pub const GLOBAL_COLUMN_BASES: [usize; N_TABLES] = {
     let mut bases = [NUM_GLOBAL_COLUMNS; N_TABLES];
@@ -491,7 +576,7 @@ pub const GLOBAL_COLUMN_BASES: [usize; N_TABLES] = {
 };
 
 /// Each table's least log height: 0, but the Keccak reduction's block of steps for KECCAK.
-pub const TABLE_LOG_FLOORS: [usize; N_TABLES] = [0, 0, 0, 0, 0, KECCAK_MIN_STEPS_LOG];
+pub const TABLE_LOG_FLOORS: [usize; N_TABLES] = [0, 0, 0, 0, 0, KECCAK_MIN_STEPS_LOG, 0];
 
 fn keccak_shape(table_log_heights: &[usize]) -> KeccakShape {
     KeccakShape {
@@ -500,7 +585,7 @@ fn keccak_shape(table_log_heights: &[usize]) -> KeccakShape {
     }
 }
 
-/// Every column's log size, in global order: the framework's, q_keccak's, then each table's block.
+/// Every column's log size, in global order: the framework's, q_keccak's, q_flock's, then each table's block.
 fn column_kappas(tables: &[Table], log_memory: usize, log_bytecode: usize, table_log_heights: &[usize]) -> Vec<usize> {
     let keccak = keccak_shape(table_log_heights);
     let mut kappas = vec![
@@ -509,6 +594,7 @@ fn column_kappas(tables: &[Table], log_memory: usize, log_bytecode: usize, table
         log_memory,
         log_bytecode,
         keccak.log_steps + keccak.slot_bits(),
+        table_log_heights[OP_BLAKE3] + QFLOCK_SLOT_BITS,
     ];
     for table in tables {
         kappas.extend(vec![table_log_heights[table.opcode]; table.width()]);
@@ -523,7 +609,7 @@ fn stacked_blocks(columns: usize) -> Vec<usize> {
     let base = GLOBAL_COLUMN_BASES[OP_KECCAK];
     let outputs = base + KECCAK_OUT..base + KECCAK_OUT + STATE_LANES;
     (0..columns)
-        .filter(|column| qkeccak_slot(*column).is_none() && !outputs.contains(column))
+        .filter(|column| qkeccak_slot(*column).is_none() && qflock_slot(*column).is_none() && !outputs.contains(column))
         .collect()
 }
 
@@ -591,9 +677,10 @@ pub fn build_layout<'a>(
     let kappas = column_kappas(&tables, log_memory, log_bytecode, &table_log_heights);
     let (offsets, stack_log) = stack(&kappas);
     let placement = |(column, &kappa): (usize, &usize)| {
-        let index = match qkeccak_slot(column) {
-            Some(slot) => offsets[&QKECCAK] + ((slot as u64) << kappa),
-            None => *offsets.get(&column)?,
+        let index = match (qkeccak_slot(column), qflock_slot(column)) {
+            (Some(slot), _) => offsets[&QKECCAK] + ((slot as u64) << kappa),
+            (_, Some(slot)) => offsets[&QFLOCK] + ((slot as u64) << kappa),
+            _ => *offsets.get(&column)?,
         };
         Some(Placement {
             variables: kappa,
@@ -611,6 +698,7 @@ pub fn build_layout<'a>(
         count,
         placements,
         stack_log,
+        flock_log_blocks: table_log_heights[OP_BLAKE3],
         table_log_heights,
         keccak,
     })

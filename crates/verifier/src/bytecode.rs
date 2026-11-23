@@ -2,7 +2,7 @@
 
 use crate::field::{E, K};
 use crate::hash::{Digest, keccak_hash};
-use crate::layout::{BUS_BITS, MAX_LOG_BYTECODE, OP_DEREF, OP_KECCAK, TAG};
+use crate::layout::{BUS_BITS, MAX_LOG_BYTECODE, OP_BLAKE3, OP_DEREF, OP_KECCAK, TAG};
 use crate::multilinear::eq_kernel;
 use crate::{VerifierError, require};
 use std::collections::BTreeMap;
@@ -107,8 +107,9 @@ fn is_valid_encoding_of_a_leanisa_program(stacked_bytecode: &[u64]) -> bool {
         let slot = |s: usize| stacked_bytecode[s * n + pc];
         let zero_from = |first: usize| (first..1 << BUS_BITS).all(|s| slot(s) == 0);
         (0..3).all(|s| slot(s) == 0)
-            && match (0..=OP_KECCAK).find(|&op| slot(3) == 1 << op) {
+            && match (0..=OP_BLAKE3).find(|&op| slot(3) == 1 << op) {
                 Some(OP_DEREF) => matches!((slot(7), slot(8)), (0, 0) | (1, 0) | (0, 1)) && zero_from(9),
+                Some(OP_BLAKE3) => zero_from(11),
                 Some(OP_KECCAK) => {
                     slot(12) <= 1 && slot(13) <= 1 && matches!((slot(14), slot(15)), (0, 0) | (1, 0) | (1, 1))
                 }

@@ -301,6 +301,7 @@ checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 name = "flock"
 version = "0.1.0"
 dependencies = [
+ "fiat_shamir_prover",
  "flock_parallel",
  "rand",
  "stable_pcs",

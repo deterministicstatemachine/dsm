@@ -67,23 +67,29 @@ fn ring_weight(r: &[E], r_prime: &[E], coefficients: &[E]) -> E {
     total
 }
 
-/// The 64 claims s\[i\] = z(i, point) become the one dense claim `sum_u W(u) qkeccak(u) = target`.
+/// Each claim's 64 slices s\[i\] = z(i, point) become one dense claim `sum_u W(u) q(u) = target` on its region: one
+/// Phi for every claim (q_keccak's, then q_flock's), drawn once they are all fixed.
 ///
-/// Draw Phi once they are fixed, then take the target `T = sum_i x^i Phi(s_i)` against the
-/// MLE-friendly weight `W(u) = Phi(eq(point, u))`. Returns the target and W as a closure.
+/// Draw Phi, then take each target `T = sum_i x^i Phi(s_i)` against the MLE-friendly weight `W(u) = Phi(eq(point,
+/// u))`. Returns each target and W as a closure.
 ///
 /// One grind covers the map's challenges and the stacked opening's batching challenge, drawn next.
 pub fn ring_switch(
-    point: Vec<E>,
-    s: &[E],
+    claims: Vec<(Vec<E>, Vec<E>)>,
     transcript: &mut Transcript,
-) -> Result<(E, impl Fn(&[E]) -> E + use<>), VerifierError> {
+) -> Result<Vec<(E, impl Fn(&[E]) -> E + use<>)>, VerifierError> {
     transcript.grind_check(BATCH_GRINDING_BITS)?;
     let challenges = transcript.samples(2 * RING_MAP_WIDTH);
     let (f, g) = challenges.split_at(RING_MAP_WIDTH);
     let coefficients = ring_coefficients(f, g);
-    let target = ring_target(s, f, g);
-    Ok((target, move |r_prime: &[E]| ring_weight(&point, r_prime, &coefficients)))
+    Ok(claims
+        .into_iter()
+        .map(|(point, s)| {
+            let target = ring_target(&s, f, g);
+            let coefficients = coefficients.clone();
+            (target, move |r_prime: &[E]| ring_weight(&point, r_prime, &coefficients))
+        })
+        .collect())
 }
 
 #[cfg(test)]

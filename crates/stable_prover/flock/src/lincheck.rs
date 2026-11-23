@@ -87,6 +87,7 @@
 //!   `byte_idx` and apply it across all `i_inner` with one lookup + one XOR
 //!   per byte.
 
+use fiat_shamir::grinding_bits;
 use primitives::transcript::ProverState;
 use primitives::field::dot as inner_product_ext;
 use primitives::field::F128;
@@ -1011,6 +1012,8 @@ pub fn prove_padded_capture_s_hat_v(
 
     // 1. Sample α (matches verifier's order). Used to batch the scalar
     //    consistency checks v_a, v_b, v_c into a single sumcheck.
+    // Four terms batched, degree 3 in alpha (the verifier's grind).
+    ps.grind(grinding_bits(3));
     let alpha = ps.sample();
 
     // 2. Build the α-batched column marginal through the circuit.

@@ -8,10 +8,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod blake3;
 mod bus;
 mod bytecode;
 pub mod da;
 mod field;
+pub mod flock;
 mod hash;
 pub mod keccak;
 pub mod layout;
@@ -47,7 +49,10 @@ use bus::{ColumnClaim, N_TREES, table_sumcheck, verify_bus_balance};
 use field::{ZERO, powers};
 use hash::{ROUNDS, STATE_LANES};
 use keccak::{KeccakShape, verify_keccak};
-use layout::{GLOBAL_COLUMN_BASES, KECCAK_OUT, MEMORY_0, MEMORY_1, N_TABLES, OP_KECCAK, QKECCAK, build_layout};
+use layout::{
+    BLAKE3_R1CS_LOG_SIZE, GLOBAL_COLUMN_BASES, KECCAK_OUT, MEMORY_0, MEMORY_1, N_TABLES, OP_KECCAK, QFLOCK,
+    QFLOCK_SLOT_BITS, QKECCAK, build_layout,
+};
 use multilinear::{dot, eq_eval, multilinear_eval};
 use ring_switch::ring_switch;
 use std::ops::Range;
@@ -89,6 +94,7 @@ pub enum VerifierError {
     CommittedSize,
     StackedClaims,
     BytecodeShape,
+    FlockLincheckTerminal,
 }
 
 impl std::fmt::Display for VerifierError {
@@ -125,6 +131,7 @@ impl std::fmt::Display for VerifierError {
             Self::CommittedSize => "committed size outside the PCS window",
             Self::StackedClaims => "too many stacked claims",
             Self::BytecodeShape => "bytecode is not the encoding of a program",
+            Self::FlockLincheckTerminal => "Flock lincheck terminal mismatch",
         };
         f.write_str(message)
     }
@@ -186,6 +193,11 @@ pub struct Summary {
     pub bytecode_point: Vec<E>,
     /// The stream positions the Keccak reduction reads.
     pub keccak_scalars: Range<usize>,
+    /// The stream positions Flock's reduction reads.
+    pub flock_scalars: Range<usize>,
+    /// What Flock's reduction leaves: its point, claims and challenges, for a guest that defers the lincheck's
+    /// matrix evaluation.
+    pub flock: flock::FlockClaims,
 }
 
 /// Verify that `proof` shows an execution of `bytecode` (the stacked bytecode multilinear) on the 256-bit `public_input`.
@@ -243,8 +255,9 @@ pub fn verify_keccak_batch(
     let instance = transcript.samples(log_steps);
     let output = transcript.next_scalars(STATE_LANES)?;
     let openings = verify_keccak(&mut transcript, shape, &instance, &output)?;
-    let (point, slices) = openings.inputs;
-    let (target, weight) = ring_switch(point, &slices, &mut transcript)?;
+    let (target, weight) = ring_switch(vec![openings.inputs], &mut transcript)?
+        .pop()
+        .expect("one ring claim");
     let mut claims: Vec<StackClaim> = vec![(Box::new(weight), target)];
     if let Some((point, word)) = openings.outputs {
         claims.push((Box::new(move |x| eq_eval(&point, x)), word));
@@ -350,17 +363,30 @@ fn walk(bytecode: &Bytecode, public_input: &[u8; 32], proof: &Proof, checked: bo
         });
     }
 
-    // 7] Ring-switching
-    let (point, slices) = openings.inputs;
-    let (ringswitch_target, ringswitch_weight) = ring_switch(point, &slices, &mut transcript)?;
-    // That claim is supported on q_keccak's region of the stack, so its weight carries the
-    // placement's selector, and it leads the batch, taking the first power.
-    let qkeccak = layout.placements[QKECCAK].expect("q_keccak is committed");
-    let ringswitch: StackClaim = (
-        Box::new(move |x| qkeccak.eq_above(x) * ringswitch_weight(&x[..qkeccak.variables])),
-        ringswitch_target,
-    );
-    let mut stack_claims = vec![ringswitch];
+    // 6b] BLAKE3 validity, by Flock: the zerocheck then the lincheck over every instance of q_flock. Its 64 slices sit
+    // at the lincheck's point over q_flock's words in instance-major order (word bits low); q_flock is committed
+    // slot-major, so the point's two halves trade places.
+    let flock_start = transcript.stream_offset();
+    let flock = flock::verify_flock(BLAKE3_R1CS_LOG_SIZE + layout.flock_log_blocks, &mut transcript)?;
+    let flock_scalars = flock_start..transcript.stream_offset();
+    let flock_point = {
+        let point = flock.point();
+        [&point[QFLOCK_SLOT_BITS..], &point[..QFLOCK_SLOT_BITS]].concat()
+    };
+
+    // 7] Ring-switching, one map for both regions.
+    let mut rings = ring_switch(vec![openings.inputs, (flock_point, flock.s.clone())], &mut transcript)?.into_iter();
+    // Each claim is supported on its region of the stack, so its weight carries the placement's selector; the two
+    // lead the batch, taking the first powers.
+    let mut stack_claims: Vec<StackClaim> = Vec::new();
+    for region in [QKECCAK, QFLOCK] {
+        let placement = layout.placements[region].expect("the region is committed");
+        let (target, weight) = rings.next().expect("a ring claim per region");
+        stack_claims.push((
+            Box::new(move |x| placement.eq_above(x) * weight(&x[..placement.variables])),
+            target,
+        ));
+    }
     stack_claims.extend(claims.iter().filter_map(|claim| claim.on_stack(&layout)));
     stack_claims.push(ood);
     verify_stacked_opening(
@@ -377,6 +403,8 @@ fn walk(bytecode: &Bytecode, public_input: &[u8; 32], proof: &Proof, checked: bo
         log_inv_rate: log_inverse_rate as usize,
         bytecode_point: bus.bytecode_point,
         keccak_scalars,
+        flock_scalars,
+        flock,
     })
 }
 
