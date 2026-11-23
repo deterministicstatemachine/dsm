@@ -209,10 +209,9 @@ async fn a_backup_behind_the_register_is_never_installed() {
 /// generation 3: every member then holds 3 whole and nothing of 1 or of the
 /// one cut short, and a restore reads 3 back with exactly the body it wrote.
 ///
-/// MUTATION CONTROL: taking the next generation from the last whole one
-/// instead of the last used (dropping `record_latest` before the write in
-/// `back_up_now`) makes the next backup reuse 2, which every member refuses,
-/// and this goes red.
+/// MUTATION CONTROL: dropping `record_latest` before the write in
+/// `back_up_now` leaves the attempt cut short at generation 1, and this goes
+/// red (run 2026-11-23; with the generation set by hand it stayed green).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn a_backup_cut_short_is_written_over() {
@@ -237,7 +236,20 @@ async fn a_backup_cut_short_is_written_over() {
         .map(|p| dsm::wallet_backup::part_digest(p))
         .collect();
     let (_, start) = keys.start(&lock, 2, &digests).expect("the start");
-    crate::sdk::wallet_backup_flow::record_latest(2).expect("generation 2 used");
+    // An attempt cut short at its first step: it has taken its snapshot,
+    // used its generation and signed its start, and sent nothing.
+    let mark = crate::sdk::wallet_backup_flow::activity_mark().expect("the mark");
+    tokio::time::timeout(
+        std::time::Duration::ZERO,
+        crate::sdk::wallet_backup_flow::back_up_now(&set, mark),
+    )
+    .await
+    .expect_err("cut short");
+    assert_eq!(
+        crate::sdk::wallet_backup_flow::latest_written().expect("the setting"),
+        2,
+        "an attempt cut short has used its generation"
+    );
     let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("the members");
     for member in client.members() {
         member.backup_start(&slot, &start).await.expect("started");
