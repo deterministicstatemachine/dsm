@@ -3130,7 +3130,21 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         };
         let mut learned = false;
         for leg in exercise.precommit().body.legs() {
-            if leg.vault_id == *vault_id || chains.contains_key(&leg.vault_id) {
+            if leg.vault_id == *vault_id {
+                continue;
+            }
+            // A sibling's chain in hand that names this leg's parent answers
+            // it. One that does not was established while this vault's own
+            // chain stood lower, and the sibling could reach no further than
+            // this chain did then: it is asked for again, resumed where it
+            // stood, now that this chain has moved on. Kept as it was, the
+            // third two-hop exercise in a row over one pair of vaults named a
+            // parent no chain in hand held, and both vaults stopped there for
+            // every verifier (found on the rig, 2026-11-22).
+            if chains
+                .get(&leg.vault_id)
+                .is_some_and(|known| known.names(&leg.parent_root))
+            {
                 continue;
             }
             // POSITIVE evidence only for the RETRY decision: a sibling chain
@@ -3520,37 +3534,71 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                             usize::try_from(attempt - cursor)
                                 .map_or(WALK_BUDGET, |keys| keys.min(WALK_BUDGET))
                         };
-                        let mut chunk = self.walk_chain(
-                            chains,
-                            leg.vault_id,
-                            leg.parent_root,
-                            0,
-                            chunk_from(0),
-                            below,
-                            BTreeMap::new(),
-                        )?;
-                        loop {
-                            if let Some(why) = chunk.not_established {
-                                return Ok(Err(why));
+                        // Two passes at most, as a chain's extension takes
+                        // them (`next_generation`): an earlier key can hold a
+                        // route whose other leg's parent no chain in hand
+                        // names yet. That leg's vault is walked, and the keys
+                        // are walked again once with its chain. Without it a
+                        // key behind a route stayed unclassified, and the
+                        // position on it was held for good (found on the rig,
+                        // 2026-11-22).
+                        let mut with_siblings: Option<BTreeMap<D32, VaultChain>> = None;
+                        let chunk = loop {
+                            let in_hand = match &with_siblings {
+                                Some(more) => more,
+                                None => chains,
+                            };
+                            let mut chunk = self.walk_chain(
+                                in_hand,
+                                leg.vault_id,
+                                leg.parent_root,
+                                0,
+                                chunk_from(0),
+                                below,
+                                BTreeMap::new(),
+                            )?;
+                            loop {
+                                if let Some(why) = chunk.not_established {
+                                    return Ok(Err(why));
+                                }
+                                match chunk.outcome {
+                                    WalkOutcome::Continue { cursor } if cursor < attempt => {
+                                        chunk = self.walk_chain(
+                                            in_hand,
+                                            leg.vault_id,
+                                            leg.parent_root,
+                                            cursor,
+                                            chunk_from(cursor),
+                                            below,
+                                            chunk.known,
+                                        )?;
+                                    }
+                                    WalkOutcome::Continue { .. }
+                                    | WalkOutcome::Consumed { .. }
+                                    | WalkOutcome::Unresolved { .. }
+                                    | WalkOutcome::CounterExhausted { .. } => break,
+                                }
                             }
                             match chunk.outcome {
-                                WalkOutcome::Continue { cursor } if cursor < attempt => {
-                                    chunk = self.walk_chain(
-                                        chains,
-                                        leg.vault_id,
-                                        leg.parent_root,
-                                        cursor,
-                                        chunk_from(cursor),
-                                        below,
-                                        chunk.known,
-                                    )?;
+                                WalkOutcome::Unresolved { attempt: stalled }
+                                    if stalled < attempt && with_siblings.is_none() =>
+                                {
+                                    let mut more = chains.clone();
+                                    if !self.establish_siblings(
+                                        &leg.vault_id,
+                                        &leg.parent_root,
+                                        stalled,
+                                        chunk.unresolved_reading(),
+                                        &mut more,
+                                        depth,
+                                    )? {
+                                        break chunk;
+                                    }
+                                    with_siblings = Some(more);
                                 }
-                                WalkOutcome::Continue { .. }
-                                | WalkOutcome::Consumed { .. }
-                                | WalkOutcome::Unresolved { .. }
-                                | WalkOutcome::CounterExhausted { .. } => break,
+                                _ => break chunk,
                             }
-                        }
+                        };
                         let keys_below = usize::try_from(attempt).map_err(|e| {
                             VerifierFailure::Refused(format!("attempt {attempt}: {e}"))
                         })?;

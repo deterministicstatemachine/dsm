@@ -9908,3 +9908,178 @@ async fn a_vault_pairs_two_device_tokens_of_two_creators() {
     assert_eq!(balance(&p.b, &tkn), out, "B holds what the vault priced");
     assert_eq!(balance(&p.b, &tkb), 5_000 - 2_000 - 10);
 }
+
+/// Two-hop trades in a row over one pair of vaults leave both vaults tradable
+/// (found on the rig, 2026-11-22). A opens a vault of ERA against MID and one
+/// of MID against FAR. B trades as the rig's wallet did: one hop into MID,
+/// then two hops through MID into FAR, five times over. A two-hop trade's leg
+/// in one vault is established through the other vault's chain, and that
+/// chain reaches only as far as this one stood when it was asked for: it is
+/// asked for again once this one has moved on. B's next trade is drafted and
+/// realizes, and so is one of A's own, against the head B's trades left.
+///
+/// MUTATION CONTROL: with a sibling's chain kept as first handed over
+/// (`establish_siblings` passing over a vault it already holds a chain of),
+/// the third round's two-hop trade is the last any verifier establishes: B's
+/// trade after it is refused, `CoreDoesNotFold`, as the rig's wallet's was
+/// (run 2026-11-22).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn two_hop_trades_in_a_row_over_one_pair_of_vaults_leave_both_tradable() {
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let mid = create_token(&p.a, "MID", 1_000_000).await;
+    let far = create_token(&p.a, "FAR", 1_000_000).await;
+    let first = create_vault(&p.a, (era, 2_000), (mid, 200_000)).await;
+    let second = create_vault(&p.a, (mid, 100_000), (far, 5_000)).await;
+    adopt(&p.b, &mid).await;
+    adopt(&p.b, &far).await;
+    let one_hop = |d: &TestDevice| {
+        args(&generated::SofiTradeRequest {
+            vault_id: first.to_vec(),
+            token_in_policy_commit: era.to_vec(),
+            amount_in_entered: entered(d, &era, 100),
+            min_amount_out_entered: entered(d, &mid, 1),
+            token_out_policy_commit: mid.to_vec(),
+        })
+    };
+    let two_hops = |d: &TestDevice| {
+        args(&generated::SofiRouteRequest {
+            vault_ids: vec![first.to_vec(), second.to_vec()],
+            token_in_policy_commit: era.to_vec(),
+            amount_in_entered: entered(d, &era, 100),
+            min_amount_out_entered: entered(d, &far, 1),
+            token_out_policy_commit: far.to_vec(),
+        })
+    };
+    for _round in 1..=5u32 {
+        realized_through(&p.b, "sofi.trade", one_hop(&p.b)).await;
+        realized_through(&p.b, "sofi.route", two_hops(&p.b)).await;
+    }
+    let held_far = balance(&p.b, &far);
+    assert!(held_far > 0, "B holds what its five two-hop trades gave it");
+
+    // B again, one hop, on the head its two-hop trades left.
+    realized_through(&p.b, "sofi.trade", one_hop(&p.b)).await;
+    // And another trader against the same head: the vaults' owner.
+    realized_through(&p.a, "sofi.trade", one_hop(&p.a)).await;
+}
+
+/// What one online payment asks of each storage node, by kind: `METHOD /path`
+/// with the path's variable tail left out. The sender's send and the
+/// receiver's sync that takes the payment up, nothing else.
+async fn asked_by_one_payment(
+    p: &Pair,
+    from: &TestDevice,
+    to: &TestDevice,
+) -> Vec<BTreeMap<String, usize>> {
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let sent = from.send(to, 1).await;
+    assert!(
+        sent.success,
+        "{} pays {}: {:?}",
+        from.slot, to.slot, sent.error_message
+    );
+    let by_sender: Vec<usize> = p
+        .nodes
+        .nodes
+        .iter()
+        .map(|node| node.requests().len())
+        .collect();
+    to.sync().await;
+    from.sync().await;
+    println!("SCALE one payment: the sender asked each node {by_sender:?}");
+    let kinds: Vec<BTreeMap<String, usize>> = p
+        .nodes
+        .nodes
+        .iter()
+        .map(|node| {
+            let mut kinds = BTreeMap::new();
+            for asked in node.requests() {
+                let kind = asked.split('/').take(4).collect::<Vec<_>>().join("/");
+                *kinds.entry(kind).or_insert(0) += 1;
+            }
+            kinds
+        })
+        .collect();
+    println!(
+        "SCALE one payment, by kind at the first node: {:?}",
+        kinds.first()
+    );
+    kinds
+}
+
+/// An online payment asks the storage nodes the same whatever else the
+/// network has carried (owner, 2026-11-22: show how it scales). A pays B once
+/// and the requests each of the five nodes is asked are counted. Then the
+/// network carries more: C and D join, each funded, and pay each other twenty
+/// times, and A pays B ten times more. A's next payment to B stores exactly
+/// what the earlier one stored at each node, and asks the five nodes no more
+/// than 2% more reads: the work of a payment is its own relationship's, never
+/// the network's history or the other wallets on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_online_payment_asks_the_nodes_the_same_whatever_else_the_network_carries() {
+    let p = Pair::boot(500, 200).await;
+    // The first payment of a relationship opens it; the one after is the measure.
+    asked_by_one_payment(&p, &p.a, &p.b).await;
+    let before = asked_by_one_payment(&p, &p.a, &p.b).await;
+
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    let mut d = TestDevice::create("D", 0x0D);
+    d.boot(&p.fleet).await;
+    c.fund_admitted(100).await;
+    d.fund_admitted(100).await;
+    c.add_and_establish(&d).await;
+    d.add_and_establish(&c).await;
+    for n in 0..20 {
+        let (x, y) = if n % 2 == 0 { (&c, &d) } else { (&d, &c) };
+        let sent = x.send(y, 1).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        y.sync().await;
+        x.sync().await;
+    }
+    for _ in 0..10 {
+        let sent = p.a.send(&p.b, 1).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        p.b.sync().await;
+        p.a.sync().await;
+    }
+    let after = asked_by_one_payment(&p, &p.a, &p.b).await;
+
+    let total = |asked: &[BTreeMap<String, usize>]| -> usize {
+        asked.iter().map(|node| node.values().sum::<usize>()).sum()
+    };
+    for (i, (was, now)) in before.iter().zip(&after).enumerate() {
+        println!(
+            "SCALE node {i}: {} requests before, {} after: {now:?}",
+            was.values().sum::<usize>(),
+            now.values().sum::<usize>()
+        );
+    }
+    // Every write the same, at every node: a payment stores what it stored.
+    for (i, (was, now)) in before.iter().zip(&after).enumerate() {
+        let writes = |asked: &BTreeMap<String, usize>| -> Vec<(String, usize)> {
+            asked
+                .iter()
+                .filter(|(kind, _)| kind.starts_with("POST"))
+                .map(|(kind, n)| (kind.clone(), *n))
+                .collect()
+        };
+        assert_eq!(
+            writes(now),
+            writes(was),
+            "node {i} stored more for one payment"
+        );
+    }
+    // The reads within 2%: a node is asked whether it holds a copy (HEAD)
+    // according to which copies it already has, not to the network's size.
+    let (was, now) = (total(&before), total(&after));
+    assert!(
+        now * 100 <= was * 102,
+        "one payment asked the five nodes {now} times after the network grew, {was} before"
+    );
+}
