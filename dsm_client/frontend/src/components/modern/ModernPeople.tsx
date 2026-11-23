@@ -5,7 +5,6 @@
 // this tab shows where it stands and reads the list again as it moves on.
 
 import React, { useEffect, useState } from 'react';
-import { bridgeEvents } from '../../bridge/bridgeEvents';
 import logger from '../../utils/logger';
 import { pairingStage, pairingWordFor } from '../../domain/pairing';
 import { canSendTo, relationshipWordFor } from '../../domain/relationship';
@@ -17,22 +16,13 @@ export default function ModernPeople(): React.JSX.Element {
   const { contacts, isLoading, error, refreshContacts } = useContacts();
   const stage = pairingStage(contacts);
 
-  // While the tab is open the list is read again: on opening, every few
-  // seconds, and whenever a pairing moves on, so a finished pairing shows.
+  // The list is read on opening the tab; after that the contacts provider
+  // reads it again whenever Rust reports a change or a pairing moves on.
   useEffect(() => {
-    const read = () => {
-      refreshContacts().then(
-        () => undefined,
-        (e: unknown) => logger.warn('[modern] the contacts were not read again:', e),
-      );
-    };
-    read();
-    const every = setInterval(read, 5000);
-    const offStatus = bridgeEvents.on('ble.pairingStatus', read);
-    return () => {
-      clearInterval(every);
-      offStatus();
-    };
+    refreshContacts().then(
+      () => undefined,
+      (e: unknown) => logger.warn('[modern] the contacts were not read again:', e),
+    );
   }, [refreshContacts]);
   const [search, setSearch] = useState('');
   const shown = contacts.filter((c) => personName(c).toLowerCase().includes(search.trim().toLowerCase()));

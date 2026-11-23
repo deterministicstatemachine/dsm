@@ -63,6 +63,7 @@ impl AppRouterImpl {
                 self.begin_establishment(device_id)
                     .await
                     .map_err(|e| format!("contacts.add: {e}"))?;
+                crate::sdk::inbox_poller::wake();
                 return Ok(contact_add_response(&existing));
             }
             log::warn!(
@@ -100,6 +101,11 @@ impl AppRouterImpl {
             .await
             .map_err(|e| format!("contacts.add: {e}"))?;
         walk_new_contact(resolved.entry.body.genesis, device_id).await;
+        // A new contact is a new route to read: a sync now reads it, and the
+        // inbox waiter, which waits on the routes a sync leaves, holds a wait
+        // on it from there. Nothing else times either while the waits cover
+        // the fleet.
+        crate::sdk::inbox_poller::wake();
 
         #[cfg(feature = "bluetooth")]
         {

@@ -12,6 +12,9 @@
 //! another transaction comes through, it should interrupt it and cancel it").
 //! A backup is taken once the wallet has been still for [`QUIET`]; a step that
 //! comes while one is being written cancels it, and the quiet starts over.
+//! The loop learns the wallet moved from the database itself: a change to a
+//! row of the tables the activity mark reads ([`MARK_READS`]) wakes it, and a
+//! wallet that does not move wakes nothing.
 //!
 //! What: the tables in [`BACKUP_TABLES`], read in one transaction so the copy
 //! is the wallet as it stood at one moment. Never the sealed seed, the records
@@ -32,11 +35,9 @@ type D32 = [u8; 32];
 /// How long the wallet must be still before a backup is taken.
 pub const QUIET: Duration = Duration::from_secs(20);
 
-/// How often the backup loop looks whether the wallet moved.
-const TICK: Duration = Duration::from_secs(2);
-
-/// [`QUIET`] in the loop's looks: the loop counts them, and reads no clock.
-const QUIET_TICKS: u64 = QUIET.as_secs() / TICK.as_secs();
+/// The longest the loop waits before it tries a backup that could not be
+/// written again, the wallet still: the wait starts at [`QUIET`] and doubles.
+const RETRY_AT_MOST: Duration = Duration::from_secs(600);
 
 /// How often a backup being written looks whether the wallet moved.
 const WATCH: Duration = Duration::from_millis(250);
@@ -779,21 +780,42 @@ async fn read_whole(
 
 // ── backing up once the wallet is still ────────────────────────────────────
 
+/// The tables the activity mark reads, and the column of each it reads.
+pub const MARK_READS: [(&str, &str); 6] = [
+    ("bcr_device_heads", "head_bytes"),
+    ("economic_admitted_v2", "economic_root"),
+    ("economic_pending_admissions", "pre_economic_root"),
+    ("sender_outbox", "submission_id"),
+    ("acceptance_fold_journal", "relationship_key"),
+    ("own_offline_hop", "hop"),
+];
+
+/// Signalled when a row of a table the activity mark reads changes. A
+/// notify keeps one wake given while nobody waits, so a move made while the
+/// loop is busy is seen when it next waits.
+static MOVED: once_cell::sync::Lazy<tokio::sync::Notify> =
+    once_cell::sync::Lazy::new(tokio::sync::Notify::new);
+
+/// The device database changed a row of `table`: the backup loop is woken
+/// when the table is one the activity mark reads. Called by the database's
+/// update hook, inside the write; it only signals.
+pub fn row_changed(table: &str) {
+    if MARK_READS.iter().any(|(read, _)| *read == table) {
+        MOVED.notify_one();
+    }
+}
+
 /// What moving looks like from outside: the device head, the admitted register
 /// position and the in-flight steps. A step changes it the moment it lands.
 pub fn activity_mark() -> Result<D32, DsmError> {
+    #[cfg(test)]
+    MARKS_READ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let binding = crate::storage::client_db::get_connection().map_err(|e| storage("db", e))?;
     let conn = binding.lock().map_err(|e| storage("db lock", e))?;
     let mut h = dsm::crypto::blake3::Hasher::new_derive_key("DSM/wallet-backup/activity/v1\0");
-    for sql in [
-        "SELECT head_bytes FROM bcr_device_heads",
-        "SELECT economic_root FROM economic_admitted_v2",
-        "SELECT pre_economic_root FROM economic_pending_admissions",
-        "SELECT submission_id FROM sender_outbox",
-        "SELECT relationship_key FROM acceptance_fold_journal",
-        "SELECT hop FROM own_offline_hop",
-    ] {
-        let mut stmt = conn.prepare(sql).map_err(|e| storage("mark", e))?;
+    for (table, column) in MARK_READS {
+        let sql = format!("SELECT {column} FROM {table}");
+        let mut stmt = conn.prepare(&sql).map_err(|e| storage("mark", e))?;
         let values = stmt
             .query_map([], |r| r.get::<_, Value>(0))
             .map_err(|e| storage("mark", e))?;
@@ -876,6 +898,35 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
 
 static LOOP: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> = std::sync::Mutex::new(None);
 
+/// How many times this process has read the wallet's activity mark: each read
+/// scans the mark's tables whole.
+#[cfg(test)]
+static MARKS_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn marks_read() -> u64 {
+    MARKS_READ.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The next wake a move gives the backup loop, for a test that waits on one.
+#[cfg(test)]
+pub(crate) fn moved() -> tokio::sync::futures::Notified<'static> {
+    MOVED.notified()
+}
+
+/// End the backup loop a test started, so no later test finds it reading the
+/// database it has entered.
+#[cfg(test)]
+pub(crate) fn stop_for_test() {
+    let mut running = match LOOP.lock() {
+        Ok(running) => running,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(task) = running.take() {
+        task.abort();
+    }
+}
+
 /// Start the wallet's backup loop, once: it backs the wallet up each time it
 /// has been still for [`QUIET`] since it last moved.
 pub fn start() {
@@ -891,6 +942,26 @@ pub fn start() {
         return;
     }
     *running = Some(crate::runtime::get_runtime().spawn(run()));
+}
+
+/// What one look at the still wallet came to.
+enum Look {
+    /// The wallet is backed up as it stands, or a backup was cancelled by a
+    /// move: the loop waits for the next move.
+    Done,
+    /// No backup could be written now: tried again after a wait, or sooner
+    /// if the wallet moves.
+    TryAgain,
+}
+
+/// Wait until the wallet has been still for `quiet`: every move restarts it.
+async fn still_for(quiet: Duration) {
+    loop {
+        tokio::select! {
+            () = MOVED.notified() => {}
+            () = tokio::time::sleep(quiet) => return,
+        }
+    }
 }
 
 /// Forget this phone's records of writing the backup cells of before the
@@ -911,56 +982,74 @@ async fn run() {
     if let Err(e) = forget_old_backup_writes() {
         log::warn!("{e}");
     }
-    let mut seen: Option<D32> = None;
-    let mut still_ticks: u64 = 0;
     let mut backed_up: Option<D32> = None;
+    let mut retry = QUIET;
+    // A process starts as a move does: its first look comes once the wallet
+    // has been still for QUIET.
     loop {
-        tokio::time::sleep(TICK).await;
-        let mark = match activity_mark() {
-            Ok(mark) => mark,
-            Err(e) => {
-                log::debug!("[wallet backup] {e}");
-                continue;
+        still_for(QUIET).await;
+        match look(&mut backed_up).await {
+            Look::Done => {
+                retry = QUIET;
+                MOVED.notified().await;
             }
-        };
-        if seen != Some(mark) {
-            seen = Some(mark);
-            still_ticks = 0;
-            continue;
-        }
-        still_ticks = still_ticks.saturating_add(1);
-        if backed_up == Some(mark) || still_ticks < QUIET_TICKS {
-            continue;
-        }
-        let set = match crate::sdk::economic_admission_flow::committed_network_id()
-            .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
-        {
-            Ok(set) => set,
-            Err(e) => {
-                log::debug!("[wallet backup] no set yet: {e}");
-                continue;
-            }
-        };
-        match publish_own_steps(&set).await {
-            Ok(0) => {}
-            Ok(n) => log::info!("[wallet backup] {n} own offline steps put at their cells"),
-            Err(e) => {
-                still_ticks = 0;
-                log::warn!("[wallet backup] own offline steps not put yet: {e}");
-                continue;
+            Look::TryAgain => {
+                tokio::select! {
+                    () = MOVED.notified() => {}
+                    () = tokio::time::sleep(retry) => {}
+                }
+                retry = retry.saturating_mul(2).min(RETRY_AT_MOST);
             }
         }
-        match back_up_now(&set, mark).await {
-            Ok(Attempt::Written(n)) => {
-                backed_up = Some(mark);
-                log::info!("[wallet backup] generation {n} written over the last");
-            }
-            Ok(Attempt::NotNow(why)) => log::debug!("[wallet backup] not now: {why:?}"),
-            Ok(Attempt::Cancelled) => log::info!("[wallet backup] cancelled: the wallet moved"),
-            Err(e) => {
-                still_ticks = 0;
-                log::warn!("[wallet backup] {e}");
-            }
+    }
+}
+
+/// Back the still wallet up, unless it is backed up as it stands.
+async fn look(backed_up: &mut Option<D32>) -> Look {
+    let mark = match activity_mark() {
+        Ok(mark) => mark,
+        Err(e) => {
+            log::debug!("[wallet backup] {e}");
+            return Look::TryAgain;
+        }
+    };
+    if *backed_up == Some(mark) {
+        return Look::Done;
+    }
+    let set = match crate::sdk::economic_admission_flow::committed_network_id()
+        .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+    {
+        Ok(set) => set,
+        Err(e) => {
+            log::debug!("[wallet backup] no set yet: {e}");
+            return Look::TryAgain;
+        }
+    };
+    match publish_own_steps(&set).await {
+        Ok(0) => {}
+        Ok(n) => log::info!("[wallet backup] {n} own offline steps put at their cells"),
+        Err(e) => {
+            log::warn!("[wallet backup] own offline steps not put yet: {e}");
+            return Look::TryAgain;
+        }
+    }
+    match back_up_now(&set, mark).await {
+        Ok(Attempt::Written(n)) => {
+            *backed_up = Some(mark);
+            log::info!("[wallet backup] generation {n} written over the last");
+            Look::Done
+        }
+        Ok(Attempt::NotNow(why)) => {
+            log::debug!("[wallet backup] not now: {why:?}");
+            Look::TryAgain
+        }
+        Ok(Attempt::Cancelled) => {
+            log::info!("[wallet backup] cancelled: the wallet moved");
+            Look::Done
+        }
+        Err(e) => {
+            log::warn!("[wallet backup] {e}");
+            Look::TryAgain
         }
     }
 }

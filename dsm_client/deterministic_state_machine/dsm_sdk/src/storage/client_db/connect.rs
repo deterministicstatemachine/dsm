@@ -222,6 +222,8 @@ pub fn insert_session(s: &WalletSession) -> Result<()> {
         params![s.offer_digest.as_slice()],
     )?;
     tx.commit()?;
+    drop(conn);
+    tell_the_page();
     Ok(())
 }
 
@@ -271,6 +273,8 @@ pub fn disconnect(session_id: &[u8; 32]) -> Result<()> {
         params![session_id.as_slice()],
     )?;
     tx.commit()?;
+    drop(conn);
+    tell_the_page();
     Ok(())
 }
 
@@ -359,6 +363,14 @@ fn pending_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingRow> {
 
 const PENDING_COLUMNS: &str = "session_id, seq, request, reason, state";
 
+/// The connected applications or the requests waiting for the player
+/// changed: the page reads them again (`connect.changed`), and reads them on
+/// no timer. Posted once the database is let go, since the host waits for
+/// the page's thread to take it.
+fn tell_the_page() {
+    crate::host::post_event("connect.changed", &[]);
+}
+
 /// Hold `seq` for the player. Only the next request after `last_seq` can
 /// wait: requests are processed in order.
 pub fn put_pending(row: &PendingRow) -> Result<()> {
@@ -393,6 +405,8 @@ pub fn put_pending(row: &PendingRow) -> Result<()> {
         ],
     )?;
     tx.commit()?;
+    drop(conn);
+    tell_the_page();
     Ok(())
 }
 
@@ -440,6 +454,8 @@ pub fn approve_pending(session_id: &[u8; 32], seq: u64) -> Result<()> {
     if changed != 1 {
         return Err(anyhow!("request {seq} is not waiting"));
     }
+    drop(conn);
+    tell_the_page();
     Ok(())
 }
 
@@ -656,6 +672,8 @@ pub fn record_processed(
         ],
     )?;
     tx.commit()?;
+    drop(conn);
+    tell_the_page();
     Ok(())
 }
 

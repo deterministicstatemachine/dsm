@@ -22,6 +22,8 @@ export type BridgeEventMap = {
   'money.waiting': void;
   // Rust keeps a token a contact has added that it did not keep before.
   'contact.tokens': void;
+  // The connected applications or the requests waiting for the player changed.
+  'connect.changed': void;
   'visibility.change': { state: DocumentVisibilityState };
   'ble.permission.error': { message: string };
   'ble.deviceFound': { address: string; name: string; rssi: number };
