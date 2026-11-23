@@ -9998,7 +9998,12 @@ async fn asked_by_one_payment(
         .map(|node| {
             let mut kinds = BTreeMap::new();
             for asked in node.requests() {
-                let kind = asked.split('/').take(4).collect::<Vec<_>>().join("/");
+                let kind = asked
+                    .split('/')
+                    .take(5)
+                    .map(|part| if part.len() > 24 { "<id>" } else { part })
+                    .collect::<Vec<_>>()
+                    .join("/");
                 *kinds.entry(kind).or_insert(0) += 1;
             }
             kinds
@@ -10081,5 +10086,71 @@ async fn an_online_payment_asks_the_nodes_the_same_whatever_else_the_network_car
     assert!(
         now * 100 <= was * 102,
         "one payment asked the five nodes {now} times after the network grew, {was} before"
+    );
+}
+
+/// The position of `peer` that `d` kept the highest state at, if any.
+fn kept_position_of(d: &TestDevice, peer: &TestDevice) -> Option<u64> {
+    d.enter();
+    crate::storage::client_db::economic_lineage::kept_state_below(
+        &peer.genesis,
+        &peer.device_id,
+        u64::MAX,
+    )
+    .expect("the kept state reads")
+    .map(|kept| kept.economic_position())
+}
+
+/// The rig run of 2026-11-22: a wallet's first payment after a while took
+/// 63–95 s to show, because the payer had made steps since and the receiver
+/// checked each of them (the owner's ruling of 2026-11-15) only once the
+/// payment came. On five real nodes A pays C five times while B, A's other
+/// contact, is idle; B's kept state of A stays where it was. The pass the
+/// background poller runs after each cycle walks B's contacts, and B then
+/// holds a state of A proved at least five positions further, so A's next
+/// payment to B is checked from there.
+///
+/// MUTATION CONTROL: with `walk_contacts` returning before its loop, B's kept
+/// position of A does not move and the second assertion is red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_poller_walks_a_contact_forward_before_its_payment_arrives() {
+    let p = Pair::boot(500, 200).await;
+    let first = p.a.send(&p.b, 1).await;
+    assert!(first.success, "{:?}", first.error_message);
+    p.b.sync().await;
+    p.a.sync().await;
+
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    p.a.add_and_establish(&c).await;
+    c.add_and_establish(&p.a).await;
+    let before = kept_position_of(&p.b, &p.a).expect("B kept a state of A");
+    for _ in 0..5 {
+        let sent = p.a.send(&c, 1).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        c.sync().await;
+        p.a.sync().await;
+    }
+    assert_eq!(
+        kept_position_of(&p.b, &p.a),
+        Some(before),
+        "B was idle while A paid C"
+    );
+
+    p.b.enter();
+    crate::sdk::economic_registers::walk_contacts().await;
+    let after = kept_position_of(&p.b, &p.a).expect("B kept a state of A");
+    assert!(
+        after >= before + 5,
+        "B's pass over its contacts proved A from {before} only to {after}"
+    );
+
+    let sent = p.a.send(&p.b, 1).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    assert!(
+        kept_position_of(&p.b, &p.a).expect("B kept a state of A") > after,
+        "B took A's payment"
     );
 }

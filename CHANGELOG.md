@@ -22,6 +22,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Fixed
 
+- **A payment after a quiet spell no longer waits on its payer's earlier
+  steps.** A receiver checks each of a payer's steps since the state it kept of
+  the payer (the owner's ruling of 2026-11-15); until now it did so only when
+  the payment arrived, and on the rig a wallet's first payment after idle took
+  63–95 s to show. The background poller now walks each contact forward after
+  its cycles (one pass at a time, at most every 30 s), so the payment finds the
+  earlier steps already checked. Same check, run earlier.
+
 - Two-hop trades in a row over one pair of vaults no longer stop both vaults (rig, 2026-11-22). After the third such trade, no wallet could establish the vaults' newest generation: the trader's next trade was refused by its own verifier (`CoreDoesNotFold`, the entries' paths are not of one tree), and another trader's trade on the same vault was held for good (`AttemptLiveness`). A vault's walk took the other vault's chain once, as it stood when first asked for, and never asked again after its own chain moved on; and the check of an attempt behind a two-hop trade never fetched the other vault's chain at all. Both now fetch it again when the chain in hand does not name the parent they need, once. New test: two-hop trades five rounds in a row, then trades by the trader and by another wallet, on five storage nodes. The attempt check behind a two-hop trade is shown by the rig (a trade held since 17:23 resolved Void, nothing moved), not yet by a local test.
 
 - An escrow step says what it came to as soon as Rust answers it, and a lookup walks its vaults at once. The Escrow tab read its vault lists again before it said anything, and each list walked its vaults to their heads one after another: on the rig (2026-11-22) a release Rust finished in under 20 s showed nothing for 151 s on a wallet with 27 vaults of its own and a 12-vault cell looked up, a lock and a decide for 166 s and 106 s, and a lookup of that cell took 59 s. The tab now shows a lock's, a decide's and a release's answer when it arrives (3 s, 3 s and 18 s on that wallet) and reads the lists again afterwards; a re-read that fails is named as the re-read's failure, where it used to be reported as "Release failed" over a stake already released, and the balances are refreshed either way. `escrow.locked` and `escrow.vaults` accept their vaults' geneses at once and walk the vaults to their heads at once, sixteen at a time, through the same verifier and the same checks, in the order they were named: the 12-vault lookup takes 29 to 31 s on that wallet and 19 s on another. What is left of a lookup is each vault's walk checking again the same traders' positions another vault's walk checked; that is not changed here.

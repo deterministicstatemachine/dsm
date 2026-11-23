@@ -254,6 +254,9 @@ pub fn start_poller() {
             CYCLE_DONE.notify_waiters();
             #[cfg(test)]
             POLLER_CYCLE_DONE.notify_waiters();
+            // Each contact's steps since the state kept of it are checked
+            // now, so its next payment reads only its own.
+            crate::sdk::economic_registers::start_contact_walks();
             // Settlement-urgent covers BOTH directions: the sender awaiting an
             // acceptance receipt AND the recipient still holding an undelivered
             // countersigned reply. Polling the reply side at the idle interval
