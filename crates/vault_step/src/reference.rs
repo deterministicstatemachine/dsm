@@ -247,6 +247,10 @@ pub fn batch_fold(entries: &[FoldEntry]) -> Result<(D32, D32), &'static str> {
     if entries.is_empty() {
         return Err("NoEntries");
     }
+    // Core's paths are `[D32; FOLD_HEIGHT]`: a path of any other length is no path.
+    if entries.iter().any(|e| e.path.len() != HEIGHT) {
+        return Err("PathLength");
+    }
     if entries.windows(2).any(|w| w[0].key >= w[1].key) {
         return Err("KeysNotAscending");
     }
@@ -323,6 +327,10 @@ pub struct StepWitness {
     pub trader_genesis: D32,
     pub trader_device_id: D32,
     /// The relationship base `h_j`; whether the vault's tree held it before (else the leaf was absent).
+    ///
+    /// When the leaf is absent, nothing in the vault's step pins the base: Core pins it by agreement with the trader's
+    /// own core (`T°`, `validation.rs` `relationship_bases`), the trader's side of the trade, which the statement puts
+    /// outside the step (its row 12). The vault-step proof alone leaves it free there.
     pub relationship_base: D32,
     pub relationship_present: bool,
     pub external_commitment: D32,
@@ -375,6 +383,16 @@ pub fn step(w: &StepWitness, r_prev: &D32) -> Result<StepPublic, &'static str> {
     }
     // 1, 3, 4, 5.
     let post = swap_vault_post(&w.state, w.fee_bps, &w.hop)?;
+    let (pre_root, public) = statement_for(w, r_prev, &post)?;
+    if pre_root != *r_prev {
+        return Err("PreRootMismatch");
+    }
+    Ok(public)
+}
+
+/// The statement a step with post-state `post` would publish, and the pre-root its paths fold to, with none of
+/// `step`'s checks: what a prover who skips them would claim. Tests use it to forge consistent statements.
+pub fn statement_for(w: &StepWitness, r_prev: &D32, post: &VaultStateLeaf) -> Result<(D32, StepPublic), &'static str> {
     // 6, 7, 8.
     let state_key = vault_state_key(&w.vault_id);
     let rel_key = relationship_key(&w.trader_genesis, &w.trader_device_id, &w.vault_id);
@@ -387,7 +405,7 @@ pub fn step(w: &StepWitness, r_prev: &D32) -> Result<StepPublic, &'static str> {
         FoldEntry {
             key: state_key,
             pre: Some(vault_state_leaf_value(&w.state)),
-            post: Some(vault_state_leaf_value(&post)),
+            post: Some(vault_state_leaf_value(post)),
             path: w.state_path.clone(),
         },
         FoldEntry {
@@ -399,18 +417,18 @@ pub fn step(w: &StepWitness, r_prev: &D32) -> Result<StepPublic, &'static str> {
     ];
     entries.sort_by_key(|e| e.key);
     let (pre_root, post_root) = batch_fold(&entries)?;
-    if pre_root != *r_prev {
-        return Err("PreRootMismatch");
-    }
     // 9.
-    Ok(StepPublic {
-        vault_id: w.vault_id,
-        r_prev: *r_prev,
-        r_next: post_root,
-        generation: post.generation,
-        external_commitment: w.external_commitment,
-        attempt_key: successor_attempt_key(&w.vault_id, r_prev, w.attempt),
-    })
+    Ok((
+        pre_root,
+        StepPublic {
+            vault_id: w.vault_id,
+            r_prev: *r_prev,
+            r_next: post_root,
+            generation: post.generation,
+            external_commitment: w.external_commitment,
+            attempt_key: successor_attempt_key(&w.vault_id, r_prev, w.attempt),
+        },
+    ))
 }
 
 // ── a sparse tree for fixtures ──────────────────────────────────────────────
