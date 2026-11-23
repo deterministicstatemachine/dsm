@@ -25,7 +25,10 @@ fn ok<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
 }
 
 fn lock(seed: u8) -> SphincsKeyPair {
-    ok(generate_keypair_from_seed(CELL_LOCK_VARIANT, &[seed; 32]), "a lock")
+    ok(
+        generate_keypair_from_seed(CELL_LOCK_VARIANT, &[seed; 32]),
+        "a lock",
+    )
 }
 
 /// A backup of `parts`, sealed for `generation` at the slot.
@@ -50,7 +53,10 @@ fn path(slot: &[u8; 32]) -> String {
 }
 
 fn state(body: &[u8]) -> dsm::types::proto::BackupSlotV1 {
-    ok(dsm::types::proto::BackupSlotV1::decode(body), "BackupSlotV1")
+    ok(
+        dsm::types::proto::BackupSlotV1::decode(body),
+        "BackupSlotV1",
+    )
 }
 
 async fn start(app: &Router, slot: &[u8; 32], bytes: Vec<u8>) -> (StatusCode, Vec<u8>) {
@@ -64,7 +70,14 @@ async fn put_part(
     part: usize,
     bytes: Vec<u8>,
 ) -> (StatusCode, Vec<u8>) {
-    call(app, "POST", &format!("{}/{generation}/{part}", path(slot)), &[], bytes).await
+    call(
+        app,
+        "POST",
+        &format!("{}/{generation}/{part}", path(slot)),
+        &[],
+        bytes,
+    )
+    .await
 }
 
 async fn read_part(app: &Router, slot: &[u8; 32], generation: u64, part: usize) -> Vec<u8> {
@@ -161,7 +174,11 @@ fn a_device_holds_one_backup_and_it_is_written_over() {
         let writing = state(&body);
         assert_eq!((writing.generation, writing.highest_generation), (1, 2));
         assert!(read_part(&app, &slot, 2, 0).await.is_empty(), "not whole");
-        assert_eq!(read_part(&app, &slot, 1, 0).await, first[0], "1 still whole");
+        assert_eq!(
+            read_part(&app, &slot, 1, 0).await,
+            first[0],
+            "1 still whole"
+        );
 
         // A part whose digest the start does not name is refused.
         let forged = parts_of(&keys, &slot, 2, &[b"cut", b"forged", b"here"]);

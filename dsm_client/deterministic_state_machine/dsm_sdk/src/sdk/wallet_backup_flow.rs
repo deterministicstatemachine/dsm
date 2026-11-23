@@ -536,8 +536,14 @@ fn own_device() -> Result<(D32, D32), DsmError> {
         D32::try_from(bytes.as_slice()).map_err(|e| storage(what, e))
     };
     Ok((
-        id32(crate::sdk::app_state::AppState::get_genesis_hash(), "genesis")?,
-        id32(crate::sdk::app_state::AppState::get_device_id(), "device id")?,
+        id32(
+            crate::sdk::app_state::AppState::get_genesis_hash(),
+            "genesis",
+        )?,
+        id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device id",
+        )?,
     ))
 }
 
@@ -691,7 +697,9 @@ pub async fn latest(
         match state.map(|state| (state.generation, named(&state.part_digests))) {
             Ok((0, _)) => {}
             Ok((generation, Ok(digests))) => held.push((generation, digests, at)),
-            Ok((generation, Err(e))) => why.push(format!("{member:?}: generation {generation}: {e}")),
+            Ok((generation, Err(e))) => {
+                why.push(format!("{member:?}: generation {generation}: {e}"))
+            }
             Err(e) => {
                 unanswered += 1;
                 why.push(format!("{member:?}: {e}"));
@@ -743,10 +751,9 @@ async fn read_whole(
         for member in servers.iter().filter_map(|at| client.members().get(*at)) {
             let served = member.backup_whole_part(slot, generation, part).await;
             let opened = match served {
-                Ok(Some(sealed)) if dsm::wallet_backup::part_digest(&sealed) == *digest => {
-                    keys.open(slot, generation, part, &sealed)
-                        .map_err(|refusal| format!("{refusal:?}"))
-                }
+                Ok(Some(sealed)) if dsm::wallet_backup::part_digest(&sealed) == *digest => keys
+                    .open(slot, generation, part, &sealed)
+                    .map_err(|refusal| format!("{refusal:?}")),
                 Ok(Some(_other)) => Err("not the digest it names".to_string()),
                 Ok(None) => Err("holds no such part".to_string()),
                 Err(e) => Err(e),

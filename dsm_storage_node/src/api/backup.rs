@@ -95,7 +95,10 @@ async fn put_start(
     // Generations are a signed 64-bit integer in the store: a larger one is
     // a request that is not one, never a node that failed.
     i64::try_from(start.generation).map_err(|e| {
-        log::info!("backup start: generation {} past the store's range: {e}", start.generation);
+        log::info!(
+            "backup start: generation {} past the store's range: {e}",
+            start.generation
+        );
         StatusCode::BAD_REQUEST
     })?;
     let (taken, held) = crate::db::backup_start(

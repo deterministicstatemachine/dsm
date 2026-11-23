@@ -482,7 +482,9 @@ mod tests {
             "a flipped bit"
         );
         assert_eq!(k.open(&slot, 3, 1, b"short"), Err(BackupRefusal::Short));
-        let past = k.seal(&slot, 3, 2, 2, b"x").expect_err("no part past the count");
+        let past = k
+            .seal(&slot, 3, 2, 2, b"x")
+            .expect_err("no part past the count");
         assert!(past.to_string().contains("part 2 of 2"), "{past}");
         let full = k
             .seal(&slot, 5, 0, 1, &vec![0xAB; MAX_PART])
@@ -529,7 +531,10 @@ mod tests {
             admit_start(&slot, &s.encode_to_vec())
         };
         assert!(
-            matches!(tampered(&|s| s.generation = 10u64.to_be_bytes().to_vec()), Err(StartRefusal::Signature(_))),
+            matches!(
+                tampered(&|s| s.generation = 10u64.to_be_bytes().to_vec()),
+                Err(StartRefusal::Signature(_))
+            ),
             "another generation"
         );
         assert!(

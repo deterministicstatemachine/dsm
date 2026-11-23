@@ -61,8 +61,7 @@ fn core_path_allowed(rest: &[String]) -> bool {
             && item == Some("relationship_write_grant")
             && at(2).is_some_and(|i| WRITE_CHECK.contains(&i)))
         || (module == Some("owned_cell") && item.is_some_and(|i| CELL_WRITE_CHECK.contains(&i)))
-        || (module == Some("wallet_backup")
-            && item.is_some_and(|i| BACKUP_SLOT_CHECK.contains(&i)))
+        || (module == Some("wallet_backup") && item.is_some_and(|i| BACKUP_SLOT_CHECK.contains(&i)))
 }
 
 /// Names of application, economic and settlement concepts: what a node that

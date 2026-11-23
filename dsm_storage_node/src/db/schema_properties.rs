@@ -175,7 +175,10 @@ async fn a_database_at_4_is_brought_up_in_place_keeping_every_cell() {
         )
         .await
         .expect("the cell is still held");
-    assert_eq!(held.get::<_, Vec<u8>>(0), b"a board account's cell".to_vec());
+    assert_eq!(
+        held.get::<_, Vec<u8>>(0),
+        b"a board account's cell".to_vec()
+    );
     assert_eq!(
         (held.get::<_, i64>(1), held.get::<_, Vec<u8>>(2)),
         (i64::try_from(record.0).expect("index"), record.1.to_vec()),
