@@ -24,7 +24,7 @@
 //! bilateral step completed: its check is forward from the step it holds,
 //! one certificate, and nothing behind it is read. A verifier outside the
 //! relationship holds none of it and replays the chain to the signer's
-//! P0–P6-proven AK (whitepaper §11.1). A non-portable ancestry step fails
+//! P0–P6-proven AK. A non-portable ancestry step fails
 //! closed as `Incomplete`, never silently assumed A→A/B→B. A restart step
 //! (DSM Amendment A20) is walked through like any step: its predecessor is
 //! checked as any step is, and its new key is taken only on both devices'

@@ -8,7 +8,7 @@
 \* to report a Safety (NoRealizedForkAtKey) violation. Mirrors the Lean theorem
 \* `malformed_family_admits_fork`.
 \*
-\* The violation is reported at depth 0: Safety is the paper's STATIC Thm 2/4
+\* The violation is reported at depth 0: Safety is the paper's STATIC Thm 2/5
 \* reading over Step_K enabledness, and a key-split family already has two
 \* conflicting enabled steps before anything is realized. Two companion checks
 \* complete the picture:
@@ -18,7 +18,7 @@
 \*                                   Expected: No error.
 \*   DSM_GuardedBilateral.tla        TWO verifiers, same malformed family: the
 \*                                   genuine multi-step realized fork appears
-\*                                   across receivers (paper Thm 14 tail).
+\*                                   across receivers.
 \*
 \* Run:
 \*   java -cp tla2tools.jar tlc2.TLC -config DSM_GuardedMC_Fork.cfg DSM_GuardedMC_Fork.tla

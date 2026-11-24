@@ -267,7 +267,7 @@ pub enum BilateralSide {
     B,
 }
 
-/// Which key a side's next `ek_cert` chains to (§11.1), as the key of that
+/// Which key a side's next `ek_cert` chains to, as the key of that
 /// kind the caller holds: a public key to verify the certificate, a secret
 /// key to sign it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,7 +296,7 @@ impl<K> EkPredecessor<K> {
     }
 }
 
-/// The predecessor rule of the per-step EK chain (§11.1), the one rule its
+/// The predecessor rule of the per-step EK chain, the one rule its
 /// signer and every verifier use: a side's EK head on the relationship, or, at
 /// the relationship's first step, where the side has no EK head yet, its AK.
 /// A head the caller could not read is not "no head": it is the caller's to
@@ -328,7 +328,7 @@ pub fn per_step_ek_predecessor_in_lineage<K>(
     }
 }
 
-/// One side's per-step EK artifacts on `receipt` (§11.1) answer the standard
+/// One side's per-step EK artifacts on `receipt` answer the standard
 /// session-bound response target of the receipt's commitment. See
 /// [`verify_per_step_ek_signing_target`].
 pub fn verify_per_step_ek_signing(
@@ -346,7 +346,7 @@ pub fn verify_per_step_ek_signing(
     verify_per_step_ek_signing_target(receipt, side, expected_prev_pk, h_n, &signing_target)
 }
 
-/// One side's per-step EK artifacts on `receipt` (§11.1), against an explicit
+/// One side's per-step EK artifacts on `receipt`, against an explicit
 /// response target:
 ///
 /// 1. `ek_cert_{side}` is `expected_prev_pk`'s signature over
@@ -408,7 +408,7 @@ pub fn verify_per_step_ek_signing_target(
     Ok(())
 }
 
-/// The sender's verdict on a recipient acceptance receipt (§16.6).
+/// The sender's verdict on a recipient acceptance receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceiptVerifyOutcome {
     /// The receipt binds the exact step the sender proposed and its per-step
@@ -426,7 +426,7 @@ fn rejected(reason: &str) -> ReceiptVerifyOutcome {
     }
 }
 
-/// The sender's online finality predicate (§16.6): a recipient acceptance
+/// The sender's online finality predicate: a recipient acceptance
 /// receipt finalizes the sender's step only when, in order,
 ///
 ///  1. `receipt.devid_a` is `sender_device_id` and `receipt.devid_b` is

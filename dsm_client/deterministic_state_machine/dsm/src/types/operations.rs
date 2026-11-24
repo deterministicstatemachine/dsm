@@ -482,9 +482,12 @@ pub enum Operation {
         /// Human-readable description.
         message: String,
     },
-    /// Create a bilateral relationship with a counterparty (simplified form).
+    /// A relationship's ESTABLISH step (DSM Amendment A33) when `message` is the
+    /// marker `establish` (or recovery's re-establishment marker): the moneyless
+    /// first step, made by the lower device id and countersigned by the other.
+    /// Any other `CreateRelationship` writes nothing and is refused.
     CreateRelationship {
-        /// Human-readable description.
+        /// The lifecycle marker.
         message: String,
         /// Binary identifier of the counterparty device.
         counterparty_id: Vec<u8>,
@@ -495,7 +498,10 @@ pub enum Operation {
         /// Bilateral or unilateral execution mode.
         mode: TransactionMode,
     },
-    /// Remove an existing bilateral relationship.
+    /// A relationship's TERMINATE step (DSM Amendment A33) when `message` is the
+    /// marker `terminate`: the moneyless step that ends the relationship, made
+    /// from the maker's tip and countersigned by the other device as its
+    /// acknowledgement. Any other `RemoveRelationship` is refused.
     RemoveRelationship {
         /// 32-byte device ID of the relationship initiator.
         from_id: [u8; 32],
@@ -507,7 +513,7 @@ pub enum Operation {
         proof: Vec<u8>,
         /// Bilateral or unilateral execution mode.
         mode: TransactionMode,
-        /// Human-readable description.
+        /// The lifecycle marker.
         message: String,
     },
     /// Recovery operation to restore a compromised hash chain from a capsule/tombstone.
@@ -686,7 +692,6 @@ pub enum Operation {
         /// Execution mode (typically Unilateral).
         mode: TransactionMode,
     },
-    /// Invalidate a vault, returning any locked tokens to the creator.
     /// SoFi v8: the relationship setup claim (F1). Non-economic — it inserts
     /// exactly one relationship leaf at `h⁰` and moves no value — but signed,
     /// because the setup binds `(G, DevID, p, v)` to this identity's key.
@@ -797,6 +802,7 @@ pub enum Operation {
         /// `SofiVaultCreate`: a creation has no object digest of its own.
         signature: Vec<u8>,
     },
+    /// Invalidate a vault. Moves no value.
     DlvInvalidate {
         /// 32-byte vault identifier.
         vault_id: Vec<u8>,
@@ -812,7 +818,7 @@ pub enum Operation {
 }
 
 /// The bearer asset an egress operation moves, for the per-asset recovery spend-gate
-/// (spec §0.4 P5). Produced by [`Operation::egress_asset`] — the canonical, exhaustive
+///. Produced by [`Operation::egress_asset`] — the canonical, exhaustive
 /// companion to [`Operation::is_value_egress`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressAsset {
@@ -914,8 +920,7 @@ impl Operation {
     }
 
     /// Classify whether this operation is **value-bearing** — value moving in ANY
-    /// direction (egress OR ingress) — for the recovery gate-set criterion (spec
-    /// §0.5 step 6).
+    /// direction (egress OR ingress) — for the recovery gate-set criterion.
     ///
     /// A relationship is **value-capable** (and thus a recovery gate-set member) iff
     /// its posted state has accepted ≥1 value-bearing operation, OR its relationship
@@ -942,7 +947,7 @@ impl Operation {
         )
     }
 
-    /// The bearer asset this operation egresses (spec §0.4 P5 per-asset spend-gate).
+    /// The bearer asset this operation egresses (per-asset spend-gate).
     ///
     /// EXHAUSTIVE companion to [`Self::is_value_egress`]: every egress variant yields either
     /// [`EgressAsset::Asset`] (a canonical `token_id` + egress amount) or
@@ -1192,7 +1197,7 @@ impl Operation {
                 // Balance canonical
                 let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
-                // CPTA policy commitment (§9.5) — bound into the signed bytes.
+                // CPTA policy commitment — bound into the signed bytes.
                 put_bytes(&mut out, policy_commit);
                 // The terms, by their salted commitment only.
                 put_bytes(&mut out, terms_commitment);
@@ -1715,7 +1720,7 @@ impl Operation {
                 let to_device_id = get_bytes(&mut input)?;
                 let to_genesis = get_arr32(&mut input)?;
                 let amount = dec_balance(&mut input)?;
-                // CPTA policy commitment (§9.5) — required, exactly 32 bytes.
+                // CPTA policy commitment — required, exactly 32 bytes.
                 let policy_commit: [u8; 32] =
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("transfer policy_commit must be 32 bytes")

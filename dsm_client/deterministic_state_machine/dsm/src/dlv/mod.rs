@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure-crypto vault primitives that outlive the old market: the deployed
-//! beta storage profile, the one route arithmetic, and the owner-signed
-//! baseline over the canonical state identity. No proto, I/O or runtime
+//! Pure vault primitives: the one constant-product arithmetic (SoFi §19.5)
+//! and the owner-signed baseline over the canonical state identity. No proto, I/O or runtime
 //! state lives here.
 
 pub mod route_commit;

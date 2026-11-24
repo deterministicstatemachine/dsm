@@ -290,7 +290,7 @@ impl AppRouterImpl {
                 Err(e) => err(format!("recovery.resumeAll failed: {e}")),
             },
 
-            // -------- recovery.activate (spec §0.5 Phase D step 2) --------
+            // -------- recovery.activate (Phase D step 2) --------
             // Decode the persisted recovery state into a RecoveryActivationContext, then run
             // the activation orchestration: fetch A_old's + every counterparty's online-posted
             // genesis-authenticated state, assemble + verify per-counterparty cross-relationship
@@ -327,7 +327,7 @@ impl AppRouterImpl {
                 }
             }
 
-            // -------- recovery.reconcileDbtc (spec §0.4 P5 — dBTC pass) --------
+            // -------- recovery.reconcileDbtc (dBTC pass) --------
             // Reconcile the recovered dBTC bearer asset from posted vault advertisements.
             // Candidate vault ids are caller-supplied (comma-separated) until authenticated
             // fresh-device vault ENUMERATION exists (deferred); with none, dBTC stays

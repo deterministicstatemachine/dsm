@@ -569,7 +569,7 @@ def _local_ingress(name: str) -> Ingress:
 
 
 def local_app() -> AppAccount:
-    """The account `make app-dev` runs (or DSM_INGRESS_URL + DSM_INGRESS_SECRET_FILE)."""
+    """The account `dsm-app up` runs, `make app-dev` from the repo (or DSM_INGRESS_URL + DSM_INGRESS_SECRET_FILE)."""
     return AppAccount(_local_ingress("app"))
 
 

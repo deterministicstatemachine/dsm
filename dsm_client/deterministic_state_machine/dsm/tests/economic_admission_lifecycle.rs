@@ -1318,8 +1318,7 @@ struct AdmittedBoundary {
 
 /// The trader's board in software: the anchor-core appliance on a chip with a
 /// resident Ed25519 key and the SPHINCS+ partition key, born for the trader, so
-/// each load and unload is the board's signed advance (DSM Amendment A39 draft,
-/// option B).
+/// each load and unload is the board's signed advance (DSM Amendment A39).
 mod soft_board {
     use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
     use ed25519_dalek::{Signer, SigningKey};

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Recovery activation assembly (spec §0.5 Phase D step 2 — PURE core).
+//! Recovery activation assembly (Phase D step 2 — PURE core).
 //!
 //! Turns FETCHED, genesis-authenticated posted state into the
 //! `(seal, gate_set, evidence)` triple consumed by
@@ -66,7 +66,7 @@ pub struct CounterpartyRecoveryInput {
     pub h_cap: [u8; 32],
 }
 
-/// All inputs to assemble a recovery activation (spec §0.5 step 2).
+/// All inputs to assemble a recovery activation.
 #[derive(Clone, Debug)]
 pub struct RecoveryAssemblyInputs {
     pub genesis_id: [u8; 32],
@@ -96,7 +96,7 @@ pub struct AssembledActivation {
     pub evidence: BTreeMap<[u8; 32], CrossRelationshipSuccessionEvidence>,
 }
 
-/// Assemble + verify the recovery activation (spec §0.5 step 2). Fail-closed throughout.
+/// Assemble + verify the recovery activation. Fail-closed throughout.
 ///
 /// `recovery_authority_pubkey` is A's genesis-anchored `K_A_pub`; the SDK has already bound
 /// it to A's `RecoveryAuthorityAnchor`, and each counterparty's `authority_pubkey` to C's

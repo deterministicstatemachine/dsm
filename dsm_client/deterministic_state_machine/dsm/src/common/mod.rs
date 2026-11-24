@@ -9,9 +9,8 @@
 //! - No hex/json/base64/serde encodings for identifiers or binary values.
 //! - Binary-only helpers; canonicality first.
 
-/// Centralized canonical encoding for cryptographic commitments
-/// Deterministic ID generation (no UUID, no wall-clock)
-/// Additional-device admission (§16.3 — existing device admits a new device into the tree)
+/// Additional-device admission (existing device admits a new device into the
+/// tree). No SDK flow calls it yet.
 pub mod device_admission;
 pub mod device_tree;
 /// Domain tag constants for BLAKE3 domain-separated hashing

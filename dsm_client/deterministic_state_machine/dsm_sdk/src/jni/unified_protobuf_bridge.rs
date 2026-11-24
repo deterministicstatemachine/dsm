@@ -606,7 +606,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
 }
 
 /// App-backgrounded lifecycle transition. Rust performs the ENTIRE decision:
-/// it stops the inbox poller unless a §16.6 settlement step is still owed (a
+/// it stops the inbox poller unless a settlement step is still owed (a
 /// sender-side pending gate, or a countersigned reply not yet delivered), a
 /// contact can send to this device, or an application is connected (its
 /// requests are answered only while the wallet runs), and returns the single

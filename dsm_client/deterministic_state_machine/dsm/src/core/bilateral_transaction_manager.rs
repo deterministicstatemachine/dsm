@@ -3,9 +3,9 @@
 //! Bilateral Transaction Manager - Production Implementation (STRICT, bytes-only, no wall-clock)
 //!
 //! Invariants:
-//! - No wall-clock APIs anywhere. Use a deterministic, process-local monotonic counter.
+//! - No wall-clock APIs anywhere. Relationship tips, precommitments and signing targets are
+//!   bytes derived from the relationship tip and the operation.
 //! - No JSON/GSON at any boundary. No hex/base64 in data structures; bytes-only.
-//! - SMT proofs are derived deterministically from state + domain separators + counters.
 //! - No placeholders: real key retrieval from verified contacts; fail hard if missing.
 
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ use crate::common::domain_tags::{
 };
 
 // -------------------- Relationship Anchor (bytes-only, single shared tip) --------------------
-/// Per whitepaper §16.6: "For each {i,j} ∈ Rel there exists a forward-only chain C_{i,j}"
+/// "For each {i,j} ∈ Rel there exists a forward-only chain C_{i,j}"
 /// — a single joint mathematical object. ONE shared chain tip h_n^{A↔B} per relationship.
 /// Divergence between parties = fork = Tripwire violation (terminal), not reconcilable.
 #[derive(Clone, Debug)]
@@ -124,7 +124,7 @@ pub fn compute_precommit(
     crate::commitments::precommit::branch_commitment_hash(h_n, op_bytes, entropy)
 }
 
-/// §16.6: h_{n+1} = BLAKE3("DSM/tip\0" || h_n || op || e || σ) — successor shared tip.
+/// h_{n+1} = BLAKE3("DSM/tip\0" || h_n || op || e || σ) — successor shared tip.
 /// Both parties compute this identically from shared inputs. Deterministic and symmetric —
 /// it carries no device-private state (the fused anchor state is committed by its own
 /// per-device SMT leaf, not folded here).
@@ -259,7 +259,7 @@ impl BilateralPreCommitment {
 
 // -------------------- Transaction Manager --------------------
 /// Prepared bilateral advance — handoff from the tripwire-verified
-/// precommitment path to the canonical Per-Device SMT advance (§2.2).
+/// precommitment path to the canonical Per-Device SMT advance.
 ///
 /// Constructed by [`BilateralTransactionManager::prepare_bilateral_advance`]
 /// after §6.1 tripwire + §4.3 acceptance prechecks pass. The caller feeds
@@ -436,13 +436,13 @@ impl BilateralTransactionManager {
     }
 
     /// Return the local signing public key for inclusion in BLE prepare requests.
-    /// This allows offline receivers to verify signatures without prior key exchange.
+    /// The receiver takes it only when it is the key it pinned for this contact.
     pub fn local_signing_public_key(&self) -> Vec<u8> {
         self.signature_keypair.public_key().to_vec()
     }
 
     /// Return the local AK (long-term attestation) keypair as `(pk, sk)` for
-    /// cert-chain construction (whitepaper §11.1). Used at relationship genesis
+    /// cert-chain construction. Used at relationship genesis
     /// (step 0) when no per-step chain head exists yet — the receipt-signing
     /// path falls back to AK_sk to sign cert_1.
     ///
@@ -735,7 +735,7 @@ impl BilateralTransactionManager {
     /// [`PreparedBilateralAdvance`] handoff that the caller commits via
     /// `AppRouter::execute_on_relationship_for_bilateral` — which routes
     /// through the canonical `prepare_advance_relationship → commit_advance`
-    /// chokepoint on the Per-Device SMT (§2.2).
+    /// chokepoint on the Per-Device SMT.
     ///
     /// Body:
     ///   1. Refresh shared chain tip from persistent store.
@@ -789,7 +789,7 @@ impl BilateralTransactionManager {
             anchor.chain_tip = tip;
         }
 
-        // ===== TRIPWIRE ENFORCEMENT (§6.1) =====
+        // ===== TRIPWIRE ENFORCEMENT =====
         // Parent tip at precommit creation must equal current anchor tip; else
         // another transition already consumed the parent hash and finalizing
         // would violate the Tripwire theorem.
@@ -895,9 +895,6 @@ fn bytes32(slice: &[u8]) -> [u8; 32] {
     a.copy_from_slice(&slice[0..32]);
     a
 }
-
-// NOTE: This stays as a String because PreCommitment currently requires it.
-// It carries no wall-clock/epoch semantics and remains transport-agnostic.
 
 #[cfg(test)]
 mod tests {

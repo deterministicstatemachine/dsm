@@ -120,7 +120,7 @@ mod tests {
     //
     // Every check above traverses `all_tags()`. None of them can see a tag that
     // was declared and never added to a `TAGS` array — and 21 were, including
-    // the two production §16.3 signing domains `DSM/add-device-admission` and
+    // the two production signing domains `DSM/add-device-admission` and
     // `DSM/add-device-self-attest`. The uniqueness and prefix-freedom tests were
     // blind to them, so "the domain tags are pairwise distinct" was a weaker
     // claim than its name.
@@ -225,7 +225,7 @@ mod tests {
     // -1 with the first inbox bound to its writer's published lock (DSM
     // Amendment A37): the open address's `DSM/b0x` is gone, and the first
     // inbox's key seed is now the first-inbox lock's.
-    // +3 with offline origin cells (DSM Amendment A39 draft): the cell of an
+    // +3 with offline origin cells (DSM Amendment A39): the cell of an
     // offline account root, its seed, and the challenge a board signs a load
     // or an unload under.
     // +4 for owned cells (owner ruling, 2026-11-19): a device's cell lock, an

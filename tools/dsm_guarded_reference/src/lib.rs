@@ -1,14 +1,15 @@
 //! DSM guarded-candidate enforcement — reference implementation.
 //!
 //! Self-contained realization of Appendix D of Ramsay, "Deterministic State
-//! Machines as Guarded Linear Constraint Systems" (June 2026): the production
-//! enforcement rule for resource keys, as `verify_candidate` / `apply_candidate`.
+//! Machines as Guarded Linear Constraint Systems" (June 2026, revised July
+//! 2026): the production enforcement rule for resource keys, as
+//! `verify_candidate` / `apply_candidate`.
 //!
 //! This mirrors, in executable Rust, the formal model proved in
 //! `lean4/DSMGuardedTripwire.lean` and model-checked in `tla/DSM_Guarded.tla`:
 //!
 //!   * resource consumption keys are DERIVED from the parent state and the
-//!     canonical resource descriptors (paper Rule 2, Def 27 — never accepted
+//!     canonical resource descriptors (paper Rule 2, Def 28 — never accepted
 //!     from branch-supplied data);
 //!   * a candidate is rejected unless its committed keys equal the derived keys,
 //!     its guard family is well formed (no conflict-class key split — G5/G7),
@@ -23,7 +24,7 @@
 
 use std::collections::BTreeSet;
 
-/// Resource consumption key kappa_res(s, x) (paper Def 27). Derived from the
+/// Resource consumption key kappa_res(s, x) (paper Def 28). Derived from the
 /// parent root and a canonical resource descriptor — never branch-supplied.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ResKey {
@@ -37,7 +38,7 @@ pub struct Branch {
     pub bid: u64,
     /// The single resource consumption key this branch consumes.
     pub key: ResKey,
-    /// Canonically recomputed successor root digest (StructuralOK, Def 38).
+    /// Canonically recomputed successor root digest (StructuralOK, Def 39).
     pub succ: u64,
     /// Committed digest of the successor's guard family (rho component).
     pub next_fam_digest: u64,
@@ -81,7 +82,7 @@ pub enum Error {
 }
 
 /// Derive the authoritative resource consumption keys from the parent state and
-/// the candidate's canonical resource descriptors (paper Rule 2 / Def 27).
+/// the candidate's canonical resource descriptors (paper Rule 2 / Def 28).
 /// kappa_res(s, x) is modeled as `(parent.root, descriptor)`.
 fn derive_resource_keys(parent: &State, descriptors: &[u64]) -> BTreeSet<ResKey> {
     descriptors
@@ -177,7 +178,7 @@ pub fn verify_candidate<'a>(
     if consumed_set_contains_any(&parent.consumed, &derived_keys) {
         return Err(Error::AlreadyConsumed);
     }
-    // GuardOK (Def 37): the branch's guard must be fulfilled.
+    // GuardOK (Def 38): the branch's guard must be fulfilled.
     if !branch.guard {
         return Err(Error::GuardNotFulfilled);
     }

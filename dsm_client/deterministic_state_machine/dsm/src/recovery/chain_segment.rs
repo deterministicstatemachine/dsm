@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Relationship-state evidence postings (spec §0.5 Phase D prerequisite).
+//! Relationship-state evidence postings (Phase D prerequisite).
 //!
 //! PDSMT heads/leaves (see [`crate::recovery::pdsmt_posting`]) prove *what the current tip
 //! is* plus value-capability classification. They do NOT prove *how* a relationship

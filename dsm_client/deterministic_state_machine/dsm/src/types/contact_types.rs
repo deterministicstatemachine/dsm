@@ -6,14 +6,14 @@
 
 use crate::types::identifiers::NodeId;
 
-/// DSM-compliant verified contact with mandatory online genesis verification
+/// A contact, added from its self-proving directory entry (DSM Amendment A18)
 #[derive(Clone, Debug)]
 pub struct DsmVerifiedContact {
     /// User-friendly alias
     pub alias: String,
-    /// Device ID derived from genesis (immutable)
+    /// Device ID, `H(DSM/devid ‖ AK ‖ AttA)` (immutable)
     pub device_id: [u8; 32],
-    /// Genesis hash from decentralized storage (immutable)
+    /// The genesis the contact's directory entry proved (immutable)
     pub genesis_hash: [u8; 32],
     /// Contact's SPHINCS+ signing public key (bytes-only)
     pub public_key: Vec<u8>,
@@ -25,7 +25,7 @@ pub struct DsmVerifiedContact {
     /// and the members holding it), and a relationship stands on the signing
     /// key and the tip its store holds.
     pub genesis_verified_online: bool,
-    /// Storage nodes that verified the genesis (typed identifier)
+    /// The members the entry was read from; no member verifies anything
     pub verifying_storage_nodes: Vec<NodeId>,
     /// BLE MAC address for offline bilateral transfers (e.g., "AA:BB:CC:DD:EE:FF")
     pub ble_address: Option<String>,

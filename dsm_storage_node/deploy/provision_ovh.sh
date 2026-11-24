@@ -64,7 +64,7 @@ echo "=============================================="
 echo " DSM Storage Node Deployment (OVHcloud)"
 echo "=============================================="
 echo "  Tenant:     ${OS_TENANT_NAME:-${OS_PROJECT_NAME:-?}}"
-echo "  Nodes:      5 (quorum 3 of 5)"
+echo "  Nodes:      5 (one storage set)"
 echo "  SSH key:    ${SSH_KEY}"
 echo ""
 

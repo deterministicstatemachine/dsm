@@ -187,7 +187,7 @@ fn a_transfers_canonical_bytes_are_the_same_from_an_independent_encoder() {
     assert_eq!(operation.to_bytes(), independent);
 }
 
-/// A step receipt's canonical commit form (whitepaper §4.2.1, `ReceiptCommit`
+/// A step receipt's canonical commit form (`ReceiptCommit`
 /// in `proto/dsm_app.proto`): `genesis = 1`, `devid_a = 2`, `devid_b = 3`,
 /// `parent_tip = 4`, `child_tip = 5`, `parent_root = 6`, `child_root = 7`,
 /// `dev_proof = 10`, `transition_entropy = 21` and `step_writes = 22`, a

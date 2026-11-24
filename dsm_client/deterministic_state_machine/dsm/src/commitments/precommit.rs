@@ -35,7 +35,7 @@ mod tests {
     use super::*;
 
     /// LAYER PROOF for rule 3 (hash_lp*): the domain's bytes are frozen across
-    /// the delimiter cut (docs/adr/0001-impact-table.md rows 1-2).
+    /// the delimiter cut.
     #[test]
     fn rule3_precommit_domain_is_frozen_across_the_delimiter_cut() -> Result<(), DsmError> {
         let h = canonical_lp::hash_lp1(DOM_PRECOMMIT_COMMITMENT_HASH, b"layer-proof-input")?;

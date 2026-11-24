@@ -11,9 +11,8 @@
 //! - **Recovery operations** are not taken here: they run only as the router's
 //!   `recovery.*` routes, behind the gates those routes hold (SA-119, SA-120).
 //!
-//! Handlers are installed at runtime via `install_*` functions, stored in global `RwLock`
-//! slots, and retrieved on each dispatch. This allows the SDK to upgrade from a bootstrap
-//! router to a full application router without restarting the system.
+//! The router is installed once at runtime, held in a global `RwLock` slot and read on each
+//! dispatch; a second install is refused.
 //!
 //! The core bridge enforces structural validation only. Cryptographic signature verification,
 //! state persistence, and BLE transport framing are handled by higher layers in the SDK.
@@ -25,7 +24,7 @@ use std::sync::{Arc, RwLock};
 use crate::types::proto as gp;
 use crate::DsmError;
 
-/// Core app router storage. Uses RwLock to allow replacement (bootstrap → full router).
+/// Core app router storage, installed once.
 static APP_ROUTER: Lazy<RwLock<Option<Arc<dyn AppRouter>>>> = Lazy::new(|| RwLock::new(None));
 
 /// Application-level routing trait for query and invoke dispatch.

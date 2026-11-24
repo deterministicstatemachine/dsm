@@ -83,7 +83,7 @@ pub enum FulfillmentMechanism {
         /// Determines checkpoint set and difficulty floor for header chain verification.
         network: u32,
         /// Minimum Bitcoin block depth before vault transition is accepted.
-        /// dBTC paper §6.4, §12.1.3: canonical value = 100 for both entry and exit.
+        /// canonical value = 100 for both entry and exit.
         /// Enforced in verify_bitcoin_htlc — proofs with fewer confirmations are rejected.
         min_confirmations: u64,
     },

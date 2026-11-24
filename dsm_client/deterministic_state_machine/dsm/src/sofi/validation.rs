@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `RouteValidation(P, G, E)` — static semantic validity, three-valued.
+//! `RouteValidation(P, G, E)` — static semantic validity, Valid or Invalid
+//! over evidence in hand (SoFi Amendment S3).
 //!
 //! This is the whole of what a verifier can decide about an operation from the
 //! operation itself: the arithmetic, the write sets, the policies, the scope
@@ -9,17 +10,16 @@
 //! them out is what makes a verdict a function of `P` alone, so every
 //! fulfillment of one precommit sees the same one.
 //!
-//! ## Three values, and which is which
+//! ## Two values, and what is not one
 //!
 //! - `Invalid` — a bound was violated, arithmetic disagreed, or a rule the
 //!   verifier can evaluate was broken. Permanent.
-//! - `Unavailable` — an object the check needs was not supplied. Never a
-//!   verdict about the operation; more evidence may still make it Valid or
-//!   Invalid (notes 9 and 10).
 //! - `Valid` — every check passed.
 //!
-//! Missing evidence can never be read as invalidity, and a proven violation is
-//! never softened into Unavailable. That asymmetry is the whole of R13-1/R13-2.
+//! When an object the check needs is not in hand the predicate is not
+//! evaluated: the refusal is `Incomplete`, naming what is missing, and the
+//! acquisition layer fetches it. Missing evidence can never be read as
+//! invalidity, and a proven violation stands whatever else is missing. That asymmetry is the whole of R13-1/R13-2.
 //!
 //! ## What Valid does NOT create
 //!
@@ -110,7 +110,7 @@ pub enum Invalid {
     VaultIsNotActive,
     /// The close names the reserved DSM-succession authority, which this
     /// protocol has not activated (R18-1). A verifier KNOWS the branch is not
-    /// live, so this is Invalid and never Unavailable.
+    /// live, so this is Invalid and never Incomplete.
     OwnerAuthorityNotActivated,
     /// More hops than this release runs (`ROUTE_MAX_LEGS`, SoFi §19.4 rule
     /// 2). The bytes are canonical; the route is not run, so it never
@@ -152,7 +152,7 @@ pub enum Invalid {
     /// `𝒞_E^pre` does not name exactly one `TraderPreBalance` for each
     /// balance `T°` states as present before the trade: one is missing, one
     /// matches no such entry, or two name one entry (SoFi Amendment S12).
-    /// Known from the committed bytes, so never Unavailable.
+    /// Known from the committed bytes, so never Incomplete.
     TraderPreBalanceSetNotExact,
     /// Bytes that re-derive the address `𝒞_E^pre` names are not a
     /// `TraderPreBalance`: `E` committed an object that has no reading.
@@ -357,7 +357,7 @@ pub struct Evidence {
 ///
 /// Derived from the preimage alone, so an acquisition fetches exactly what
 /// Core will consume — no more (nothing is trusted because it exists) and no
-/// less (an item not fetched is `Unavailable`).
+/// less (an item not fetched is `Incomplete`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EvidenceNeeds {
     /// The addresses of the `TraderPreBalance` objects `𝒞_E^pre` names.
@@ -499,7 +499,7 @@ impl Evidence {
     /// Supplying bytes under a key proves nothing — the map is the verifier's
     /// own cache, not evidence. Bytes that do not re-derive the requested
     /// address are a non-verifying candidate: they leave the object
-    /// unsupplied (Unavailable) and can never make an operation Invalid, which
+    /// unsupplied (Incomplete) and can never make an operation Invalid, which
     /// is note 9 exactly. Only authenticated bytes may establish anything.
     fn policy_bytes(&self, addr: &D32, object_class: u16) -> Result<&[u8], Refusal> {
         let bytes = self
@@ -568,7 +568,7 @@ impl Evidence {
 
     /// The vault's own state before the operation.
     ///
-    /// A state the verifier has not fetched is Unavailable. A key it HAS
+    /// A state the verifier has not fetched is Incomplete. A key it HAS
     /// fetched and found empty, or holding another leaf class, is Invalid:
     /// that is an observation about the vault, not a gap in what is held.
     fn vault_state(&self, vault_id: &D32) -> Result<VaultStateLeaf, Refusal> {
@@ -2368,7 +2368,7 @@ fn validate_swap(
     }
 
     // Each vault: its own core, its own policies, its own price. A hop whose
-    // evidence is missing contributes Unavailable and the REST still runs, so
+    // evidence is missing contributes Incomplete and the REST still runs, so
     // an invalidity on any other hop is still proven.
     for (i, hop) in hops.iter().enumerate() {
         let Some(core) = verdict.get(
@@ -4794,7 +4794,7 @@ pub(crate) mod tests {
     }
 
     /// R18-1: the reserved branch has canonical bytes AND a live refusal. It is
-    /// Invalid, never Unavailable — the verifier KNOWS it is not activated, so
+    /// Invalid, never Incomplete — the verifier KNOWS it is not activated, so
     /// no amount of further evidence could change the answer.
     #[test]
     fn a_close_naming_the_reserved_dsm_successor_is_invalid_not_unavailable() {
@@ -5441,9 +5441,9 @@ pub(crate) mod tests {
 
     // ── the four invariants the owner's review of #908 required ──────────
 
-    /// A: `Invalid ∧ Unavailable = Invalid`. A Retired vault is already enough
+    /// A: `Invalid ∧ Incomplete = Invalid`. A Retired vault is already enough
     /// to prove invalidity, so a missing policy must NOT turn the answer into
-    /// Unavailable. Evidence a verifier happens not to hold cannot mask an
+    /// Incomplete. Evidence a verifier happens not to hold cannot mask an
     /// invalidity it can already prove.
     #[test]
     fn a_provable_invalidity_is_not_masked_by_missing_evidence() {

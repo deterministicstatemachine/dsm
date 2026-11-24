@@ -236,10 +236,11 @@ fn canonical_spool_key(value: &str) -> Option<String> {
     }
 }
 
-/// The b0x spool. A write is stored only when it carries its address's key,
-/// fixed by the address's first write, a grant under that key and the
-/// granted key's signature over the write (storage spec §8, DSM Amendment
-/// A34): one check, the same on every node. No reader authorization. The node
+/// The b0x spool. A write is stored only when its address is its route bound
+/// to the key the write carries, with a grant under that key and the granted
+/// key's signature over the write (storage spec §8, DSM Amendments A34 and
+/// A37): one check, the same on every node, and no node keeps a key per
+/// address. No reader authorization. The node
 /// never opens an envelope. The spool is append-only: nothing is marked read,
 /// hidden, expired, removed or deduplicated. Canonical encoding, the replay-protected message id and the
 /// recipient key are checked by the devices at both ends; which messages a
@@ -618,8 +619,8 @@ mod tests {
         }
     }
 
-    /// The key these tests write under: the first write at each test
-    /// address fixes it there (DSM Amendment A34).
+    /// The key these tests write under: each test address is its route
+    /// bound to this key (DSM Amendments A34, A37).
     fn test_key() -> &'static dsm::crypto::sphincs::SphincsKeyPair {
         static KEY: std::sync::OnceLock<dsm::crypto::sphincs::SphincsKeyPair> =
             std::sync::OnceLock::new();
@@ -865,7 +866,8 @@ mod tests {
         assert!(bytes.is_empty());
     }
 
-    /// Storage spec §8: the node refuses nothing and deduplicates nothing. A
+    /// Storage spec §8: the spool keeps every write that passes its key
+    /// check and deduplicates nothing. A
     /// second envelope carrying a message id already spooled — a different
     /// envelope under the same id, or the same bytes again — is appended and
     /// read back after the first; telling them apart is the recipient's

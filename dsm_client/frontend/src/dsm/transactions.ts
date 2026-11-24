@@ -424,10 +424,8 @@ export async function acceptOfflineTransfer(args: { commitmentHash: Uint8Array, 
       logger.warn('[DSM] Failed to emit bilateral accepted event:', e);
     }
     // Don't fire wallet.refresh here — the balance hasn't changed yet (Accept
-    // was sent, but Confirm hasn't arrived).  Firing now queries balance=0 and
-    // starts the 120-frame cooldown in useWalletRefreshListener, which can
-    // throttle the REAL refresh when TRANSFER_COMPLETE arrives milliseconds
-    // later.  Instead, schedule staggered priority refreshes that will catch
+    // was sent, but Confirm hasn't arrived).  Instead, schedule staggered
+    // re-reads that will catch
     // the Confirm's SQLite write once it lands (typically <2s after Accept).
     schedulePostAcceptRefreshes();
     return { success: true };

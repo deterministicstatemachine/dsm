@@ -1264,7 +1264,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     }
 
     /// The offline origin cell of `account_root` of `bundle` (DSM Amendment
-    /// A39 draft): its route chains evaluated from every seat's reads into a
+    /// A39): its route chains evaluated from every seat's reads into a
     /// read bound to the key. A step final at the cell is relied on only
     /// through its completion proof, checked against fresh reads (Amendment
     /// S10, [`Self::rely_on_final`]). Reads that do not decide the cell yet are
@@ -1581,7 +1581,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// set: for every leg the fulfillment names at attempt `a > 0`, the
     /// storage fact at `K^(a-1)` of that leg's vault at its parent root.
     ///
-    /// ONE PATH, SHARED (owner ruling, §44.4). The producer's install (R9)
+    /// ONE PATH, SHARED (owner ruling). The producer's install (R9)
     /// and the verifier's resolution (R12) read the same cell the same way,
     /// because they answer the same question: conformance item 5 requires
     /// the key before this one to have a permanent storage resolution

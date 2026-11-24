@@ -551,7 +551,7 @@ async fn pending_objects(
 /// the admission on it, and it builds the exercise from the trader's OWN
 /// closure objects. It is not the relay, whatever a passing device might
 /// want — only the owning device may touch its own admission, fence, lineage
-/// and leaf cache (owner ruling, §44.4). What any device may do is carry
+/// and leaf cache (owner ruling). What any device may do is carry
 /// already-signed material to storage: `sofi_relay::{relay_fulfillment,
 /// relay_exercise}`, which hold no `CoreSDK` and write nothing local.
 pub async fn complete_pending_fulfillment(

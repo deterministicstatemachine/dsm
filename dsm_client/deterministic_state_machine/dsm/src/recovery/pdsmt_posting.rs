@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Authenticated Enumerable Per-Device SMT posting (spec §0.5, gap 13).
+//! Authenticated Enumerable Per-Device SMT posting.
 //!
 //! Recovery gate-set enumeration must be rooted in A_old's online-posted,
 //! genesis-authenticated, ENUMERABLE, value-capable Per-Device SMT (PDSMT) leaf set
@@ -32,9 +32,9 @@
 //! pubkey is the genesis-anchored one (compose with `fetch_and_verify_authority_anchor`
 //! / the [`RecoveryAuthorityAnchor`]), proving `A_old ∈ G_A`'s Device Tree (device-tree
 //! quorum), SMT-inclusion of `rel_key → current_tip` against `pd_smt_root`, and the
-//! leaf-index inclusion against `leaf_index_root`. The R4 ANTI-SHRINK guarantee (the
-//! authority holder must not be able to post a SHRUNK value-capable set) is an open
-//! design point recorded in §0.2 gap 13 and is NOT resolved by this module.
+//! leaf-index inclusion against `leaf_index_root`. The anti-shrink guarantee (the
+//! authority holder must not be able to post a SHRUNK value-capable set) is
+//! `recovery::gate_set`'s, not this module's.
 
 use crate::crypto::domain::TaggedHashDomain;
 

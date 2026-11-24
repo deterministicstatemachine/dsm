@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The recipient economic RELEASE — the transport-only post-admission
-//! finalization authority (3.5b PR4).
+//! finalization authority.
 //!
-//! The PR2 acceptance bundle treats `sig_b` as the recipient acceptance
+//! The acceptance evidence (`peer_acceptance`) treats `sig_b` as the recipient acceptance
 //! FACT, and the bundle is published as admission evidence BEFORE
 //! `ECON_ADMITTED` (the evidence DAG must be q-durable before the root
 //! registers), so `sig_b` is discoverable independently of any held reply.
@@ -11,7 +11,7 @@
 //! SPLIT: bare `sig_b` is acceptance provenance and **insufficient to
 //! finalize the sender**. What a sender may finalize on is THIS object —
 //! signed by the recipient, naming the admitted coordinates — plus an
-//! INDEPENDENT quorum read of the recipient's register cell at the named
+//! INDEPENDENT read of the recipient's register cell, final by its route chain, at the named
 //! position whose claim must carry exactly `post_economic_root` and
 //! `admission_manifest_addr`. A hostile recipient's private "admitted" flag
 //! is never trusted; the network-registered root is the fact.

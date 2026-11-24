@@ -6,9 +6,15 @@
 //! that key, in the order the values arrive — one key at a time, or several
 //! keys in one local transaction, all or none; it returns everything it
 //! holds; it appends a content address under a locator; and it returns the
-//! addresses under a locator in append order. It never refuses, replaces,
-//! compares, decodes or decides. Which value counts at a key is the reader's
-//! question, answered from the bytes and the reader's own committed state.
+//! addresses under a locator in append order. It never replaces or compares,
+//! and it decides nothing about what a value means. Before it keeps a value
+//! it runs the one owner check (`dsm::owned_cell::admit_cell_write`, storage
+//! spec §6 rule 6): a cell one party owns takes only a write the key its
+//! address is bound to signed, and at a register, application or fulfillment
+//! cell the member decodes only the signed object that check reads. A cell
+//! several parties write by protocol takes a write with no proof. Which value
+//! counts at a key is the reader's question, answered from the bytes and the
+//! reader's own committed state.
 //!
 //! Every put answers with the entry's arrival record (storage spec §6, §14):
 //! this member's id, the cell, the entry's per-key arrival index, and the

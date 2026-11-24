@@ -132,7 +132,7 @@ One line per wallet: the connection's id, the wallet's identity, and whether it 
 
 ## 6. On a phone
 
-On Android, the wallet's **Apps** screen has **Connect an app**. Scan the starter's QR with **Scan code**, or open the code as a link on the same phone and press **Read**. The wallet shows the same list the terminal printed: who asks, what for, and the caps. The player approves.
+On Android, the wallet's **Apps** screen has **Connect an app**. The code names your app's relay at `127.0.0.1:8443`, your machine, so a phone on USB reaches it through adb: run `adb reverse tcp:8443 tcp:8443` once it is plugged in (`make phones-local` does this, with the local storage set). Scan the starter's QR with **Scan code**, or open the code as a link on the same phone and press **Read**. The wallet shows the same list the terminal printed: who asks, what for, and the caps. The player approves.
 
 When your app and the wallet are on the same phone and a request waits for the player, open that same code as a link again. The wallet is already connected to your app, so it shows what your app has waiting instead of asking to connect, and once the player has approved or declined it the wallet goes back to your app by itself. Nothing in the link is trusted: the wallet finds your connection in its own record and takes your requests in from the endpoint it connected to. On iOS the wallet shows the request and the player returns to your app themselves.
 
@@ -157,7 +157,7 @@ make phones-connect CODE="$CODE"
 
 The red box says the code came from outside the wallet. Any app or web page on a phone can open such a link, so the wallet asks the player to approve only an offer they opened themselves, from the app they mean to connect.
 
-These phones were recorded before the command line's `offer` asked to see contacts, so their lists are one line shorter than the one above.
+These phones were recorded before the command line's `offer` asked to see contacts, so their lists are one line shorter than the one above, and before the wallet said **Send** and **what you own** where these screens say Pay and holdings.
 
 ## What each side holds now
 

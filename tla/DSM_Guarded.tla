@@ -3,7 +3,7 @@
 \* DSM Guarded Linear Constraint System — key-scoped fork exclusion.
 \*
 \* Machine-checkable realization of Appendix B of Ramsay, "Deterministic State
-\* Machines as Guarded Linear Constraint Systems" (June 2026). This is the
+\* Machines as Guarded Linear Constraint Systems" (June 2026, revised July 2026). This is the
 \* GENERAL key-scoped model: uniqueness holds per resource consumption key, a
 \* guard family decides realization, candidate forks are permitted but realized
 \* forks are not, and disjoint resources may progress concurrently.
@@ -39,21 +39,21 @@ VARIABLES
 Vars == <<current, consumed, realized, pending, ledger>>
 
 \* ---------------------------------------------------------------------------
-\* Candidate accessors (paper Def 11, 27, 29)
+\* Candidate accessors (paper Def 11, 28, 30)
 \* ---------------------------------------------------------------------------
 Keys(c)      == {c.key}        \* the resource consumption key set of c
 Parent(c)    == c.parent
 Successor(c) == c.succ
 
 \* ---------------------------------------------------------------------------
-\* Layered realization predicate (paper Def 36-42)
+\* Layered realization predicate (paper Def 37-43)
 \* ---------------------------------------------------------------------------
-CandidateOK(c)  == c \in Candidate          \* committed candidate (Def 36)
-GuardOK(c)      == c.guard = TRUE            \* fulfilled branch (Def 37, Def 18)
-StructuralOK(c) == c.succ \in State          \* canonical recompute (Def 38)
-PolicyOK(c)     == TRUE                       \* admissible policy accepts (Def 39)
-ModeOK(c)       == TRUE                       \* online mode (Def 40)
-LinearityOK(c)  == c.key \notin consumed      \* key absent before step (Def 31/32)
+CandidateOK(c)  == c \in Candidate          \* committed candidate (Def 37)
+GuardOK(c)      == c.guard = TRUE            \* fulfilled branch (Def 38, Def 19)
+StructuralOK(c) == c.succ \in State          \* canonical recompute (Def 39)
+PolicyOK(c)     == TRUE                       \* admissible policy accepts (Def 40)
+ModeOK(c)       == TRUE                       \* online mode (Def 41)
+LinearityOK(c)  == c.key \notin consumed      \* key absent before step (Def 32/33)
 
 Step(c) ==
     /\ CandidateOK(c)
@@ -75,7 +75,7 @@ Deliver(c) ==
 
 \* Realization: a delivered candidate adjacent to the current state whose guard
 \* is fulfilled and whose key is unconsumed advances the state and consumes the
-\* key (paper Def 41 Step + Realize action of App B). The accepted receipt is
+\* key (paper Def 42 Step + Realize action of App B). The accepted receipt is
 \* appended to the ledger: the ledger is the realized history of this verifier.
 Realize(c) ==
     /\ c \in pending
@@ -110,7 +110,7 @@ TypeOK ==
     /\ ledger   \subseteq [parent : State, key : Key, succ : State, bid : Nat]
 
 \* ---------------------------------------------------------------------------
-\* Key-scoped step relation and safety (paper Def 42, 44, 52; Thm 2, 4)
+\* Key-scoped step relation and safety (paper Def 43, 45, 54; Thm 2, 5)
 \* ---------------------------------------------------------------------------
 \* Step_K: a realized step from s1 to s2 consuming key k. Depends on `consumed`
 \* through LinearityOK, so it is re-evaluated in every reachable state.
@@ -129,17 +129,17 @@ RealizedUniqueAtKey ==
     \A s1, s2, s3 \in State : \A k \in Key :
         (StepAtKey(s1, s2, k) /\ StepAtKey(s1, s3, k)) => (s2 = s3)
 
-\* Theorem 4: no key-scoped realized fork (Def 52).
+\* Theorem 5: no key-scoped realized fork (Def 54).
 NoRealizedForkAtKey ==
     \A s1, s2, s3 \in State : \A k \in Key :
         ~ (StepAtKey(s1, s2, k) /\ StepAtKey(s1, s3, k) /\ s2 # s3)
 
-\* The DSM guarded safety property (paper Thm 4 / Main Result Thm 15, key scope).
+\* The DSM guarded safety property (paper Thm 5 / Main Result Thm 14, key scope).
 Safety == RealizedUniqueAtKey /\ NoRealizedForkAtKey
 
 \* ---------------------------------------------------------------------------
 \* Trace-level (realized-history) uniqueness. `Safety` above states the paper's
-\* Thm 2/4 in their STATIC per-state form over the Step_K relation: no reachable
+\* Thm 2/5 in their STATIC per-state form over the Step_K relation: no reachable
 \* state may have two conflicting Step_K-enabled successors. This invariant
 \* states the DYNAMIC form over the realized history itself, the receipts this
 \* verifier actually accepted: the ledger never contains two receipts consuming

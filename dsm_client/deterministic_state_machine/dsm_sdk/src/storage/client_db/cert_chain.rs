@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Per-relationship cert chain head storage (whitepaper §11.1 ek-cert chain).
+//! Per-relationship cert chain head storage (ek-cert chain).
 //!
 //! Each bilateral relationship maintains TWO chain heads:
 //! - `Side::Local` — the SPHINCS+ public key the local device used to sign
@@ -29,7 +29,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 
-// =================== Encrypted chain-head SK helpers (§11.1) ===================
+// =================== Encrypted chain-head SK helpers ===================
 //
 // The local device's chain-head secret key is needed at receipt construction
 // time to sign cert_{n+1}. Persisting it in plaintext would defeat its
@@ -43,7 +43,7 @@ use super::get_connection;
 // 2. The SK lifetime is bounded: encrypted at receipt-build time for step n,
 //    used at receipt-build time for step n+1, then wiped (overwritten with
 //    NULL) when chain head advances.
-// 3. We use XChaCha20-Poly1305 (whitepaper §16.10) for nonce-misuse resistance
+// 3. We use XChaCha20-Poly1305 for nonce-misuse resistance
 //    and consistency.
 //
 // AEAD AD: a fixed domain marker. Per-blob random 24-byte nonce is prepended
@@ -307,7 +307,7 @@ pub fn cas_advance_local_cert_chain_head_with_sk(
 /// advance only if current == `expected_current` (or genesis when `None`);
 /// already-at-`new_pubkey` is idempotent; a third value is a fail-closed Conflict.
 /// CAS-advance the Counterparty head INSIDE a caller-owned transaction
-/// (§16.6 defect 1 — acceptance finalization is one transaction).
+/// (defect 1 — acceptance finalization is one transaction).
 ///
 /// Same semantics as [`cas_advance_counterparty_cert_chain_head`]: advance only
 /// if current == expected; target already present ⇒ done; any third value ⇒
@@ -608,7 +608,7 @@ pub fn stash_pending_local_head(
 
 /// Same stash, INSIDE a caller-owned transaction.
 ///
-/// §16.6 defect zero: the pending EK head is committed together with the
+/// defect zero: the pending EK head is committed together with the
 /// canonical advance so a signed-but-unrecorded step cannot exist. Takes
 /// `&Connection` (a `&Transaction` derefs to one) and never calls
 /// `get_connection()` — the advance already holds the global connection mutex.
@@ -780,7 +780,7 @@ pub fn discard_pending_local_head_with_conn(
 }
 
 /// Promote a pending Local chain-head advance into `cert_chain_heads`, inside
-/// the transaction the accepted step commits in (§16.6 defect 1). The
+/// the transaction the accepted step commits in (defect 1). The
 /// encrypted SK blob moves verbatim (it is never decrypted here). Returns the
 /// resulting step count, or `None` if no pending row exists for that
 /// (relationship, commitment) pair — already promoted, or dropped by a
@@ -1628,7 +1628,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // §16.6 defect zero — pending EK head CAS.
+    // defect zero — pending EK head CAS.
     //
     // Signing must happen OUTSIDE the advance transaction (the signer reads
     // cert heads through its own connection), which opens a window between

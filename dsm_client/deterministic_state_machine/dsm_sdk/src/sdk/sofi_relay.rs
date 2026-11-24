@@ -3,7 +3,7 @@
 //!
 //! **Any device may carry immutable signed protocol objects to storage. Only
 //! the owning device may touch its own admission, fence, lineage and leaf
-//! cache** (owner ruling, §44.4). Those are two different operations and this
+//! cache** (owner ruling). Those are two different operations and this
 //! module is one of them: everything here takes a fulfillment id and a
 //! committed set, holds no `CoreSDK`, reads no device head, and writes
 //! nothing local but the progress of its own route writes. The owner-local

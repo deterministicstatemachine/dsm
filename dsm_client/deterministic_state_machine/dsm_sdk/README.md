@@ -1,23 +1,25 @@
 # DSM SDK
 
-## Architecture Overview
+The wallet's engine behind one ingress: the router's routes (`src/handlers`), the storage-node
+clients and sync, SoFi and escrow, DSM Connect, and offline steps between contacts over BLE with
+each side's anchor board. It drives the pure core crate (`../dsm`), which does no I/O.
 
-The DSM SDK provides the core logic for the Deterministic State Machine, including cryptographic primitives, transaction handling, and bilateral (offline) protocols.
+## One ingress
 
-### JNI & Offline Transactions
+Every platform reaches the SDK through `ingress::dispatch_ingress` with an `IngressRequest`
+(`proto/dsm_app.proto`): Android through the JNI shim (`src/jni`), iOS through the C ABI of the
+`ffi` feature (`src/ffi`). The shims marshal bytes and decide nothing.
 
-For Android, the SDK exposes JNI bindings in `src/jni`. 
+## Offline sends
 
-**Critical Architecture Note:**
-The `bilateralOfflineSend` flow has a specific architectural divergence to ensure state consistency:
+An offline send is the router's `wallet.sendOffline` invoke. The BLE stack (`src/bluetooth`) runs
+the step between the two contacts over an authenticated link session (DSM Amendment A27); the
+payer's board signs the release and the receiver's board checks and commits the receive. Progress
+reaches the frontend as `BilateralEventNotification` messages on the `bilateral.event` topic.
 
-1.  **Direct BluetoothManager Access**: The JNI implementation of `bilateralOfflineSend` (in `src/jni/unified_protobuf_bridge.rs`) does **not** go through the `CoreBridge`. Instead, it interacts directly with the global `BluetoothManager` singleton.
-2.  **Single Source of Truth**: This bypass is intentional. It ensures that the offline transaction uses the *same* `ContactManager` instance that the QR code scanner writes to. Using the core bridge path could instantiate a parallel `ContactManager` with empty state, causing "Unknown Contact" errors during transfers.
-3.  **Event-Driven**: The frontend (TypeScript) calls `bilateralOfflineSend` but does **not** receive the transaction result in the return value. The return value only indicates "Transmission Started". The actual success/failure/progress is communicated via `BilateralEventNotification` protobufs emitted to the `bilateral.event` event bridge channel.
-4.  **Timeouts**: The frontend enforces a 60s hard timeout (`BLE_COMPLETION_TIMEOUT_MS`). The Rust layer must ensure it emits terminal events (`COMPLETED`, `REJECTED`, `FAILED`) before this timeout, or the UI will assume failure.
+## Tests
 
-### Testing
-
-*   **Unit Tests**: `cargo test` covers core logic.
-*   **Integration Tests**: `tests/` contains e2e flows matching `dsm_client` behavior.
-*   **Bilateral Event Guarantee**: `tests/bilateral_event_guarantee.rs` simulates the full offline flow (mocking only the raw BLE packets) to prove that the correct `BilateralEventNotification`s are emitted to the frontend.
+- Unit tests sit beside the code (`cargo test -p dsm_sdk`).
+- Node-backed tests start their own storage nodes on PostgreSQL and need `DSM_TEST_DATABASE_URL`.
+- `tests/` holds the integration suites, among them `ble_pairing_and_offline_e2e.rs` and
+  `bilateral_reject_tests.rs`.

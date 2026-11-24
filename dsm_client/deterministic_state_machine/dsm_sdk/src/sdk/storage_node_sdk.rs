@@ -4,9 +4,10 @@
 //! II): immutable objects (§5), keyed cells (§6), indexes (§7), and the
 //! ByteCommit reads route chains need (§14).
 //!
-//! Bytes in, bytes out. A member holds no key, checks no writer, and decides
-//! nothing, so nothing here authenticates to a member or counts what members
-//! answered. Every storage fact — `Stored`, `LeaderHeld`, `Final` — is Core's,
+//! Bytes in, bytes out. A member holds no protocol key and decides nothing
+//! about what a value means. At a cell one party owns it keeps a write only on
+//! the owner's proof, which these calls carry (DSM Amendment A41); nothing
+//! here counts what members answered. Every storage fact — `Stored`, `LeaderHeld`, `Final` — is Core's,
 //! derived from the raw answers these calls return.
 
 use dsm::crypto::domain::TaggedHashDomain;

@@ -56,16 +56,16 @@ release branches; security fixes land on `main` and the next beta tag.
 In-scope for security reports:
 
 - Wallet key handling and signing flows (SPHINCS+ ephemeral keys, cert chain).
-- Fused hardware-anchor enrollment (σ^chip / σ^host) + anti-clone gate, attractor commitment derivation.
+- The offline anchor board: enrollment (σ^chip / σ^host), the owner's board stamp and the receiver's pin (Amendments A24, A38), the board-sealed secret, the try-run before install (A32), and offline origin cells (A39).
 - JNI / Android / iOS boundary handling (memory safety, FFI signatures).
 - Protobuf parsing and Envelope v3 transport validation.
-- Bilateral 3-phase commit protocol (Phase 1/2/3 ordering, abort safety).
-- Receipt acceptance pipeline (verify_stitched_receipt, SMT replace, EK cert chain).
-- Storage node trust boundaries (PaidK gate, signal hysteresis, registry update).
-- Bitcoin SPV verifier, HTLC unlock, dBTC confirmation gate.
+- The BLE link between contacts (the authenticated session of Amendment A27) and the offline step's phase ordering and abort safety.
+- Receipt and peer-step acceptance (`verify_receipt_state`, `verify_acceptance_receipt`, the receiver's kept payer state of Amendment A36, SMT replace, EK cert chain).
+- Storage node trust boundaries: the inbox and owned-cell write locks every node checks (Amendments A34, A37, A41), and route-chain finality (storage spec §9).
 - Supply, accounting, double-spend, fork resolution, or state-transition invariants.
-- Recovery capsule (NFC ring, AEAD AAD format, nonce derivation, ring KDF).
-- Commitments layer (pre-commit, smart-commit, oracle binding).
+- Restore from the 24-word phrase and the sealed wallet backup (Amendment A40).
+- Commitments layer (pre-commit, external commitments).
+- DSM Connect: grants and their caps, the relay, and the app host's ingress.
 
 Out of scope (please report via normal issue tracker, not via security email):
 
@@ -251,7 +251,7 @@ For reports that include a proof-of-concept, please target the latest
 - The exact Android API level (if relevant to a JNI bug).
 - The storage-node deployment topology used (single-node vs replica set).
 - For protocol-layer bugs: the protobuf payload bytes that triggered the
-  bug, hex-encoded.
+  bug, as the raw file or Base32 Crockford.
 
 We will reproduce against `main` HEAD before triaging.
 

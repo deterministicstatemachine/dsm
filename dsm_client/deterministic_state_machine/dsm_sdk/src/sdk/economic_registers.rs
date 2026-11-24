@@ -5,7 +5,9 @@
 //!
 //! ## The root register is a cell (storage spec §9)
 //!
-//! `K_root(q)` is a keyed cell that keeps every value it is given. Core names
+//! `K_root(q)` is a keyed cell. A member keeps there only a route entry
+//! carrying a claim its trader signed, whoever delivers it (DSM Amendment
+//! A41), and keeps every such value in arrival order. Core names
 //! the cell and its route ([`RootCell`]); the writer writes the frozen claim
 //! along that route, leader first, and Core evaluates the route chains from
 //! the raw reads (`dsm::economic::register::read_root_cell`). Nothing is
@@ -172,8 +174,8 @@ pub async fn root_claim_settlement(
 
 /// The LIVE provenance resolver: raw reads of the register cells Core names,
 /// the native reserve walked from its genesis state, immutable objects
-/// re-hash-verified, and peers' steps validated by Core, each from its own
-/// parent (DSM Amendment A14).
+/// re-hash-verified, and peers' steps validated by Core from the state this
+/// device kept of each peer (DSM Amendment A36).
 pub struct LiveRegisterResolver<'a> {
     pub set: &'a StorageSet,
     pub runtime: tokio::runtime::Handle,
@@ -317,7 +319,7 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         })
     }
 
-    /// The seats' reads of a payer's origin cell (DSM Amendment A39 draft),
+    /// The seats' reads of a payer's origin cell (DSM Amendment A39),
     /// read fresh: only the reads Core evaluates decide it.
     fn origin_cell(
         &self,
@@ -472,8 +474,9 @@ impl dsm::economic::peer_lineage::KeptPeerStates for StoredOfflineRecords {
     }
 }
 
-/// What one check of a peer's step cost, logged where it ran (DSM Amendment
-/// A14): every count is bounded by a constant, whatever the position.
+/// What one check of a peer cost, logged where it ran: one routed read for
+/// each position since the state kept of the peer (DSM Amendment A36), one
+/// step for each credit's source, one hop back for a conditional claim.
 fn log_cost(what: &str, devid: &[u8; 32], position: u64, cost: &StepCost) {
     log::info!(
         "[A14] {what} of {} at position {position}: register_probes={} routed_reads={} \
@@ -510,12 +513,15 @@ fn record_established<T>(
     Ok(checked.into_answer())
 }
 
-/// A peer's step at `peer_economic_position`, validated from its own parent
-/// (DSM Amendment A14), over WHATEVER fetcher the caller supplies.
+/// A peer's step at `peer_economic_position`, validated from the state this
+/// device kept of that peer (DSM Amendment A36), over WHATEVER fetcher the
+/// caller supplies: every step after the kept state, each read at the cell
+/// routed from the root proved before it and validated with the predicate any
+/// device runs (A14's step); with nothing kept, from the activation root.
 ///
-/// Core answers every time it is asked here. What a validation read is kept
-/// as evidence (`final_reads`: final cells and immutable objects), and the
-/// process keeps no verdict (SA-92). One SoFi operation's contexts keep the
+/// The states the check proves are recorded with what else it validated, and
+/// what a validation read is kept as evidence (`final_reads`: final cells and
+/// immutable objects). One SoFi operation's contexts keep the
 /// answers they were given for that operation alone (`sofi_reads`).
 pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     fetcher: &F,
@@ -814,8 +820,8 @@ impl<'a> RecordingResolver<'a> {
         }
     }
 
-    /// The peer's step validated from its own parent (DSM Amendment A14), its
-    /// evidence recorded at the fetch boundary.
+    /// The peer's step validated from the state kept of the peer (DSM
+    /// Amendment A36), its evidence recorded at the fetch boundary.
     pub fn validated_peer_step(
         &self,
         peer_genesis: &[u8; 32],

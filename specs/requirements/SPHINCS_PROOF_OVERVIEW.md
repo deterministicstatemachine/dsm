@@ -169,7 +169,7 @@ Taking `B` to be the published bound for `(E_DSM, A_emb)` gives §1.
 
 All are kernel-checked by Lean 4 with warnings as errors. None uses `sorry`,
 `native_decide` or any axiom beyond Lean's standard three (`propext`,
-`Classical.choice`, `Quot.sound`); the ledger records 2,837 checked theorems.
+`Classical.choice`, `Quot.sound`); the ledger records every checked theorem.
 
 ## 6. What is trusted
 

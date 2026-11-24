@@ -20,30 +20,30 @@ pub const TAG_DSM_RECOVERY_ACK_ROOT: TaggedHashDomain<'static> =
 /// Domain tag for the recovery activation digest (P4).
 pub const TAG_DSM_RECOVERY_ACTIVATION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery-activation");
-/// Domain tag for the cross-relationship succession carry-forward commitment (§0.5).
+/// Domain tag for the cross-relationship succession carry-forward commitment.
 pub const TAG_DSM_RECOVERY_CARRY_FORWARD: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/carry-forward/v1");
-/// Domain tag for the commitment to the recovery-authority public key (§0.5 step 5).
+/// Domain tag for the commitment to the recovery-authority public key.
 pub const TAG_DSM_RECOVERY_AUTHORITY_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/authority-commit/v1");
-/// Domain tag for the recovery-authority anchor declaration's signing bytes (§0.5 step 5).
+/// Domain tag for the recovery-authority anchor declaration's signing bytes.
 pub const TAG_DSM_RECOVERY_AUTHORITY_ANCHOR: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/authority-anchor/v1");
-/// Domain tag for the posted PDSMT head signing digest (§0.5 gap 13).
+/// Domain tag for the posted PDSMT head signing digest.
 pub const TAG_DSM_PDSMT_HEAD: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/pdsmt-head/v1");
-/// Domain tag for a posted PDSMT leaf record's committed digest (leaf-index leaf value, §0.5 gap 13).
+/// Domain tag for a posted PDSMT leaf record's committed digest (leaf-index leaf value).
 pub const TAG_DSM_PDSMT_LEAF: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/pdsmt-leaf/v1");
-/// Domain tag for the posted PDSMT head snapshot_id (§0.5 gap 13).
+/// Domain tag for the posted PDSMT head snapshot_id.
 pub const TAG_DSM_PDSMT_SNAPSHOT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/pdsmt-snapshot/v1");
-/// Domain tag for the content-id of a posted relationship-chain ancestry segment (§0.5
-/// Phase D prerequisite) — proves how a relationship reached its tip (h_cap ->* T_old_current).
+/// Domain tag for the content-id of a posted relationship-chain ancestry segment
+/// (Phase D prerequisite) — proves how a relationship reached its tip (h_cap ->* T_old_current).
 pub const TAG_DSM_RECOVERY_REL_SEGMENT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/rel-chain-segment/v1");
-/// Domain tag for the content-id of a posted new-relationship establishment receipt (§0.5
-/// Phase D prerequisite) — the (A_new,C) first state binding the carry-forward commitment.
+/// Domain tag for the content-id of a posted new-relationship establishment receipt
+/// (Phase D prerequisite) — the (A_new,C) first state binding the carry-forward commitment.
 pub const TAG_DSM_RECOVERY_ESTABLISH_RECEIPT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/establish-receipt/v1");
 /// Domain tag for the signing digest of a posted dBTC vault index (P5 dBTC enumeration) —

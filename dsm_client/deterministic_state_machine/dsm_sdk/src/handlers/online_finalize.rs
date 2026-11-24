@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Sender-side online transition finalization (§16.6): the recipient's
+//! Sender-side online transition finalization: the recipient's
 //! countersign, bound to the A side the sender retained.
 //!
 //! Protocol boundary: a DSM online transition finalizes on the sender only when
 //! the sender verifies a recipient-produced acceptance receipt that binds the
 //! exact transition and carries the recipient's per-step EK countersignature
 //! (`sig_b`), cert-chained to the recipient's stored counterparty cert head.
-//! Storage-node ACK / message deletion is transport housekeeping and is DEMOTED
-//! to garbage collection — it MUST NOT determine finalization.
+//! Nothing a storage node does determines finalization: a node only keeps the
+//! spool, append-only.
 //!
 //! That predicate is Core's,
 //! [`verify_acceptance_receipt`](dsm::verification::receipt_verification::verify_acceptance_receipt),

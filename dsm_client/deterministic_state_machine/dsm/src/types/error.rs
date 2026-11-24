@@ -109,7 +109,7 @@ pub enum StorageNodeErrorType {
     InvalidObjectAddress,
     /// Storage node replication failure.
     ReplicationFailure,
-    /// Storage node consensus failure.
+    /// A storage read or write that could not be made final (storage nodes run no consensus).
     ConsensusFailure,
     /// Invalid partition or slot assignment.
     InvalidPartition,
@@ -182,7 +182,8 @@ pub enum ResourceType {
     DatabaseConnections,
 }
 
-/// Specific error types for consensus operations.
+/// Error kinds for a storage operation that did not complete. Storage nodes run no
+/// consensus; these name why a write or read was not final.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsensusErrorType {
     /// Consensus timeout.

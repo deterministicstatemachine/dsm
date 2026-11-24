@@ -2,7 +2,7 @@
 
 //! Bilateral BLE session types and session store.
 //!
-//! This module owns the core types for the 3-phase bilateral protocol
+//! This module owns the core types for the offline step between contacts
 //! (`BilateralBleSession`, `BilateralPhase`, `BilateralSettlementDelegate`),
 //! the one mapping between a session and its `bilateral_sessions` row, and the
 //! [`SessionStore`] that holds the in-memory session map.

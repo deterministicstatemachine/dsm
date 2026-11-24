@@ -15,10 +15,10 @@ import androidx.annotation.Keep
 //
 // HOW TO HOOK IN:
 //   1. Unified initializes automatically (System.loadLibrary("dsm_sdk")).
-//   2. Bootstrap: SinglePathWebViewBridge.bootstrapFromPrefs() or the
-//      shared startup/ingress boundary plus host measurement capture.
+//   2. Bootstrap: SinglePathWebViewBridge.bootstrapFromPrefs() (restores the
+//      identity context).
 //   3. Shared ingress: Unified.dispatchIngress(requestBytes) -> ByteArray
-//   5. Decode:   strip 0x03 prefix -> Envelope.parseFrom(rest)
+//   4. Decode:   strip 0x03 prefix -> Envelope.parseFrom(rest)
 //
 // PROTOCOL RULES:
 //   - All payloads are protobuf ByteArray. No serialization libraries.
@@ -205,8 +205,7 @@ object Unified {
         UnifiedNativeApi.isBleAddressPaired(address)
     
     /**
-     * Check if an envelope contains a BilateralCommit UniversalTx.
-     * Used to determine if the commit needs to be sent back to the receiver.
+     * Whether an envelope this device built carries a BilateralCommit.
      */
     @Keep @JvmStatic fun isCommitEnvelope(envelope: ByteArray): Boolean =
         UnifiedNativeApi.isCommitEnvelope(envelope)
@@ -274,6 +273,7 @@ object Unified {
         *   9 = ChainHistoryResponse
         *   10 = ReconciliationRequest
         *   11 = ReconciliationResponse
+     *   12 = BilateralConfirm
      *   0 = Unspecified/Unknown
      */
     @Keep @JvmStatic fun detectEnvelopeFrameType(envelopeBytes: ByteArray): Int =
@@ -348,10 +348,7 @@ object Unified {
     @Keep @JvmStatic fun onAppBackgrounded(): Boolean =
         try { UnifiedNativeApi.onAppBackgrounded() } catch (_: Throwable) { false }
     @Keep @JvmStatic fun getGenesisHashBin(): ByteArray = UnifiedNativeApi.getGenesisHashBin()
-    /**
-     * Resolve the persisted peer identity for a BLE address.
-     * Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.
-     */
+    /** Inspect an envelope for a reject; Rust answers the bytes the caller decodes. */
     @Keep @JvmStatic fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray =
         UnifiedNativeApi.isRejectEnvelope(envelopeBytes)
     @Keep @JvmStatic fun isErrorEnvelope(envelopeBytes: ByteArray): Int =

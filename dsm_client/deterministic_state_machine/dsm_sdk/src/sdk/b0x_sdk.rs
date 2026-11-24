@@ -4,8 +4,11 @@
 //!
 //! Deterministic, protobuf-only client for the b0x spool: Envelope v3
 //! submission to, and retrieval from, the storage-node `/api/v2/b0x/*`
-//! endpoints. A node's spool is append-only and checks no writer or reader
-//! (DSM Amendment A3): there is no registration, token or acknowledgement,
+//! endpoints. A node's spool is append-only. A node stores a write only when
+//! its inbox address is the route bound to the key the write carries, the
+//! grant verifies under that key and the write's signature under the granted
+//! key (DSM Amendments A34, A37); it checks no reader, and there is no
+//! registration, token or acknowledgement,
 //! and what this device consumed is its own state (`client_db::b0x_consumed`).
 //!
 //! Every payload is sealed end to end (DSM Amendment A7): a node holds an
@@ -428,7 +431,7 @@ pub struct B0xSubmissionParams {
     /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
-    /// §16.6 defect zero: the DETERMINISTIC submission id, derived from the
+    /// defect zero: the DETERMINISTIC submission id, derived from the
     /// receipt commitment (`dsm::crypto::spool_address::submission_id`), so it is
     /// known BEFORE the send is committed locally and is identical on every
     /// retry. A storage node keeps every write and deduplicates none (storage
@@ -454,7 +457,7 @@ pub struct B0xSDK {
     /// names there: it accepts only that member's certificate.
     member_clients: HashMap<String, reqwest::Client>,
     circuit_breaker: CircuitBreaker,
-    /// Write quorum K for multi-node ops (submit/ack). Default 3.
+    /// Write fan-out K for submits. Default 3.
     quorum_k: usize,
     /// ADR 0003 B-side countersign deltas decoded during the most recent
     /// retrieve. Buffered rather than returned so the retrieve signature (5 call
@@ -574,7 +577,7 @@ pub(crate) fn step_recipient(op: &Operation) -> Result<Vec<u8>, DsmError> {
 }
 
 /// One finality certificate as it came off the wire: the node message id it
-/// is ACKed under, the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`),
+/// is held under in the spool, the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`),
 /// and the content key of the copy it came in, by which one that never will be
 /// taken is passed over.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -942,10 +945,10 @@ impl B0xSDK {
     // ------------------------------------------------------------------------
 
     // ------------------------------------------------------------------------
-    // §16.6 reply window (Envelope v3 over HTTP)
+    // reply window (Envelope v3 over HTTP)
     // ------------------------------------------------------------------------
 
-    /// Decode a §16.6 acceptance artifact from a spooled envelope, or `None` if
+    /// Decode a acceptance artifact from a spooled envelope, or `None` if
     /// this envelope is not one.
     ///
     /// Discrimination is on the EXPLICIT invoke method name, so a forward
@@ -1918,7 +1921,7 @@ impl B0xSDK {
 
         // Build UniversalOp with the Invoke.
         //
-        // §16.6 defect zero: use the sender genesis ALREADY carried (and
+        // defect zero: use the sender genesis ALREADY carried (and
         // validated as base32(32)) in `params` rather than an async DB read.
         // That keeps envelope construction fully SYNCHRONOUS, which is the
         // precondition for building it inside the staged advance closure — the
@@ -2006,7 +2009,7 @@ impl B0xSDK {
                 "submit_to_b0x: the recipient the params name is not the one the operation names",
             ));
         }
-        // §16.4: the inbox key is always the explicit rotated address.
+        // the inbox key is always the explicit rotated address.
         let routing_key = params.routing_address.clone();
         let sealed = seal_for(&recipient, &message_id_b32, &buf)?;
         self.deliver(
@@ -2020,7 +2023,7 @@ impl B0xSDK {
         Ok(message_id_b32)
     }
 
-    /// §16.6 defect zero — submit the EXACT bytes frozen in the durable outbox:
+    /// defect zero — submit the EXACT bytes frozen in the durable outbox:
     /// the seal the send path made and kept when it froze them
     /// ([`seal_for`]). No envelope reconstruction, so retry identity cannot
     /// drift if envelope-building code changes across upgrades, and the
@@ -2752,7 +2755,7 @@ impl B0xSDK {
         let mut entries = Vec::new();
         let mut unknown = Vec::new();
         for (copy_key, env) in copies {
-            // §16.6 reply window: an acceptance artifact is NOT a forward transfer and
+            // reply window: an acceptance artifact is NOT a forward transfer and
             // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
             // (never a trial-decode) and buffered for the sender-finalization path;
             // dropping it here is what would strand a countersigned receipt.

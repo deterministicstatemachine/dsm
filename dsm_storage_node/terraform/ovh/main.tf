@@ -33,8 +33,9 @@ locals {
   ])
 }
 
-# The beta fleet: five members in one region, quorum 3 of 5, so every
-# quorum-bound operation stays inside one datacentre (as terraform/gcp says).
+# The beta fleet: five members in one region. A write is final once its route
+# chain has the leader's link and two more, so every write stays inside one
+# datacentre (as terraform/gcp says).
 module "beta" {
   source = "./modules/fleet"
 

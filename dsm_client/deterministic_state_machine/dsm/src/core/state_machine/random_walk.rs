@@ -6,7 +6,7 @@
 //! revealing the underlying data. Uses hashed commitment data as a seed for
 //! a deterministic random walk that generates coordinates in 3D space.
 //! The coordinates can then be verified against the hash of the data without
-//! revealing the data itself (whitepaper Sections 13-14).
+//! revealing the data itself.
 /// Provides functionality for generating random walk coordinates and verifying them.
 ///
 /// (Doc example removed: it referenced the deleted verify_state_transition

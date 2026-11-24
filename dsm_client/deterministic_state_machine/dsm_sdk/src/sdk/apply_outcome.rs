@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Tri-state outcome of the §16.6 full-state incoming-transfer apply.
+//! Tri-state outcome of the staged full-state incoming-transfer apply.
 
 use crate::storage::client_db::CanonicalApplyRecord;
 
-/// Outcome of [`crate::sdk::core_sdk::CoreSDK::apply_incoming_transfer_full_state`].
+/// Outcome of [`crate::sdk::core_sdk::CoreSDK::apply_incoming_transfer_staged`].
 ///
 /// Both populated variants carry the durable [`CanonicalApplyRecord`] so the
 /// downstream acceptance fold runs the exact same convergence steps

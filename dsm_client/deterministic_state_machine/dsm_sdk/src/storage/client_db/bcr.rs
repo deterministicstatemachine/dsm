@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Bilateral control resistance (BCR) state persistence.
 //!
-//! Canonical storage layout (whitepaper §2.2/§4.2/§8 aligned):
+//! Canonical storage layout (aligned):
 //!
 //! - `bcr_chain_states` — per-relationship [`RelationshipChainState`] archive
 //!   keyed by `(device_id, chain_tip)`. Authoritative per-advance history.
@@ -65,7 +65,7 @@ pub fn store_bcr_report(report: &[u8]) -> Result<()> {
 // balance-free (DSM/relationship-chain-tip/v2); R_econ is the sole
 // authenticated online balance representation. Beta wipe, no migration.
 const REL_CHAIN_STATE_VERSION: u8 = 0x03;
-// v0x02 (spec §0.5 gap 13): adds the canonical per-tip `value_capability` byte. This is a
+// v0x02: adds the canonical per-tip `value_capability` byte. This is a
 // BREAKING bump with NO back-compat reader by design (no-legacy directive) — an older blob
 // is rejected by `decode_device_state`; the device head is re-derived from the authoritative
 // BCR chain-state archive / re-initialized. There is no default-false and no silent fallback.

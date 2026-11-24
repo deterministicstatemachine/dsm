@@ -18,8 +18,9 @@
     - release      a unit leaves the reserve to a device (a faucet claim)
     - debit        an online transfer out, within the validated balance
     - credit       an online credit, only from a recorded debit naming this
-                   device, consumed once (the receiver's one-hop check of the
-                   source's own step, DSM Amendment A28)
+                   device, consumed once (the receiver's check of the
+                   source's step from the state it kept of the source,
+                   DSM Amendment A36)
     - load         the online balance moves into the offline account
     - unload       the offline account moves back to the online balance
     - offSpend     an offline transfer, drawn from the offline account only

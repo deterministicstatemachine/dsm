@@ -21,7 +21,9 @@
 //! | Realized | `P.realize_root` |
 //! | Void | the predecessor's root — the lineage continues where it was |
 //! | Invalid | none, ever: the lineage is terminal at `p` |
-//! | Pending | none yet |
+//!
+//! A position whose facts are not complete is not resolved, and installs
+//! nothing.
 //!
 //! Void installing the previous root IS "SofiVoid has zero mutations": the
 //! position exists, it is terminal, and it moved nothing.
@@ -274,7 +276,7 @@ pub struct ResolvedAdvance {
 impl ResolvedAdvance {
     /// The state each vault a `Realized` position moved is in after it,
     /// recomputed by the fold from the evidence the verdict was reached on
-    /// (§44.4): what this device keeps so the next trade against that vault
+    ///: what this device keeps so the next trade against that vault
     /// has evidence to stand on, and what its record of the vault follows
     /// (MR-DSM-0331). A Void moved no vault, and has none.
     pub fn vault_generations(&self) -> &[VaultPostState] {

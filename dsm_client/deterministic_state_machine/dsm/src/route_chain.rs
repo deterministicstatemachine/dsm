@@ -15,8 +15,11 @@
 //! Final(K, x)      ⇔ x's chain has a valid leader link and ≥ 2 further valid links
 //! ```
 //!
-//! Only Core evaluates chains. A node stores the bytes it is given and returns
-//! their arrival record; it never reads a route entry. A receiver relies only
+//! Only Core evaluates chains. A node never evaluates one: it stores the bytes
+//! it takes and returns their arrival record, and only at a register,
+//! application or fulfillment cell does a member decode the route entry, to
+//! check the signed object it carries (`owned_cell::admit_cell_write`). A
+//! receiver relies only
 //! on `Final`; `Preserved` matters only for loss (§12.6) and is never
 //! spendable.
 //!

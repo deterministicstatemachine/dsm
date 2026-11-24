@@ -312,7 +312,7 @@ fn every_inlined_site_is_reproduced_by_the_canonical_encoder() {
 
 /// The two KAT helpers are hand-inlined ON PURPOSE and must stay that way.
 ///
-/// `whitepaper_kat.rs:30` reimplements whitepaper §2.1 as the oracle the pinned
+/// `whitepaper_kat.rs:30` reimplements as the oracle the pinned
 /// digests are measured against, and `crypto_kat.rs:78` asserts
 /// `dsm_domain_hasher(x) == manual_construction(x)` outright. Routing either
 /// through the canonical encoder would make it compare the implementation to

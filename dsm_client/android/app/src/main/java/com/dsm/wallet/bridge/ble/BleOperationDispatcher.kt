@@ -18,7 +18,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  *   LIFECYCLE > PAIRING > TRANSFER
  *
  * LIFECYCLE: radio start/stop, GATT server lifecycle, connection state bookkeeping.
- * PAIRING  : identity exchange, pairing confirm writes, key handshakes.
+ * PAIRING  : a link becoming ready (MTU negotiated), so Rust opens its link handshake ahead of transfer traffic.
  * TRANSFER : bilateral transaction data, outbox processing, chunked notifications.
  *
  * Keeping radio / connection ops in the highest-priority lane prevents outbox retry

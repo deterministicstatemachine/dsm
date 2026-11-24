@@ -6,8 +6,9 @@ Milestone 2 (the game interfaces, obligations 1–5) is implemented: §11 and
 claims C72–C75. This document maps the published, EasyCrypt-verified SPHINCS+
 reduction onto DSM's actual construction and existing Lean evidence, lists
 every interface mismatch, specifies the first modular theorem, and orders the
-proof obligations. **No reduction or bound of the modular proof is claimed
-yet.** C57–C71, the Rust code and every existing security statement are
+proof obligations. Milestone 3 is done: the modular theorems are proved as
+claims C76–C81 (`dsm_openpre_bound`, `wots_bound`, `euf_cma_transfer`; §12–§13).
+C57–C71, the Rust code and every existing security statement are
 unchanged.
 
 The goal is a second machine-checked security result, beside C71:
@@ -672,7 +673,7 @@ equalities O6b and O9b are not proved, and the resource obligations 14 and
 reduction or any bound on DSM's forgery probability beyond what C31, C66,
 C67 and C71 already state.
 
-## 12. Milestone 3 (in progress)
+## 12. Milestone 3
 
 Authorized under the §7 decision: published games, target-before-`pp`
 ordering, full costs stated, no polynomial-time wording, no numerical DSM

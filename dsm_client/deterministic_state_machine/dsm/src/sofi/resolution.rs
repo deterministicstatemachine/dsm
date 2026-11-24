@@ -1661,7 +1661,7 @@ mod tests {
 
     /// Orphaning is a `RouteImpossible` condition, so a valid and conforming
     /// route that it defeats goes to Void — never Invalid, which would say
-    /// the operation never satisfied the rules (owner ruling §44.4).
+    /// the operation never satisfied the rules (owner ruling).
     #[test]
     fn an_orphaned_parent_voids_a_valid_route_and_never_invalidates_it() {
         let legs = [LegFacts {
@@ -1688,7 +1688,7 @@ mod tests {
     /// A parent that really was canonical and was then taken by another
     /// route is `parent_consumed_elsewhere`, not orphaned. The two are
     /// different facts with the same terminal answer, and keeping them apart
-    /// is what lets a skip be attributed (owner ruling §44.4).
+    /// is what lets a skip be attributed (owner ruling).
     ///
     /// The leg's own key is open: a cell final on THIS operation's `E` would
     /// say we consumed the parent ourselves, which is not a route another

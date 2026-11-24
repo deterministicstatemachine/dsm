@@ -5,7 +5,7 @@
 //! else's.").
 //!
 //! A cell one party owns lives at its route bound to the owner's cell lock,
-//! the key the owner's directory entry publishes: `address = H(DSM/owned-cell
+//! the key the owner's directory entry publishes: `address = H(DSM/owned-cell/v1
 //! ‖ route ‖ lock)`. A write carries the route, the lock and the lock's
 //! signature over the namespace, the address and the value's digest. Every
 //! member runs the one check here before it keeps the value: the address is
@@ -17,6 +17,13 @@
 //! bound to the device itself: its address is the directory key of the genesis
 //! and the device id, and the write carries the AK and AttA whose hash is that
 //! device id, signed by the AK.
+//!
+//! Three cells are their authorizer's, and anyone delivers to them, so their
+//! address holds no lock (DSM Amendment A41): a register cell keeps a route
+//! entry whose claim the trader's AK signed for that key; an application cell
+//! keeps one carrying a write that a writer of its committed set signed; and a
+//! fulfillment cell keeps one carrying an `F` that, with the 32-byte genesis
+//! the write carries, derives the cell and verifies under its own key.
 //!
 //! The check is the protocol running, the same code on every member, with no
 //! setting, no list of owners and no state (as DSM Amendment A34's inbox check

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! dBTC Bitcoin-backing decision core (spec §0.4 P5 — dBTC pass, SPV/UTXO hardening).
+//! dBTC Bitcoin-backing decision core (dBTC pass, SPV/UTXO hardening).
 //!
 //! The dBTC reconcile classifier ([`crate::recovery::dbtc_reconcile`]) can derive a vault's
 //! condition from its posted advertisement — but that advertisement is UNSIGNED and lives on

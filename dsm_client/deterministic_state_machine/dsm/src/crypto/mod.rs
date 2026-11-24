@@ -2,16 +2,20 @@
 
 //! Cryptographic primitives and operations for the DSM protocol.
 //!
-//! This module is the root of the DSM cryptographic stack. Every primitive
-//! is post-quantum safe and operates without wall-clock time. The stack
-//! comprises:
+//! This module is the root of the DSM cryptographic stack. DSM's own
+//! signatures and key encapsulation are post-quantum, and nothing here reads
+//! wall-clock time. The one classical primitive is the verification of the
+//! anchor chip's Ed25519 witness ([`classical_verify`]). The stack comprises:
 //!
 //! | Primitive | Module | Purpose |
 //! |-----------|--------|---------|
 //! | BLAKE3-256 | [`blake3`] | All hashing, domain-separated via `BLAKE3-256("DSM/<name>\0" \|\| data)` |
 //! | SPHINCS+ (BLAKE3-only) | [`sphincs`], [`signatures`] | Post-quantum EUF-CMA digital signatures |
 //! | ML-KEM-768 (Kyber) | [`kyber`] | Post-quantum key encapsulation mechanism |
-//! | AES-256-GCM | [`aead`] | Symmetric authenticated encryption |
+//! | XChaCha20-Poly1305 | [`spool_seal`], [`ble_link`] | The spool seal (DSM Amendment A7), the BLE link's records (A27) and the wallet backup's parts (A40) |
+//! | AES-256-GCM | [`aead`] | Symmetric authenticated encryption (the limbo vault's content) |
+//! | HKDF over BLAKE3 | [`hkdf`] | The master seed and the SPHINCS+ seed derivations |
+//! | Ed25519, verification only | [`classical_verify`] | The anchor chip's witness |
 //! | Salted-BLAKE3 commitments | [`blake3`] (`dsm_domain_hasher`) | Hiding + binding via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` (e.g. `dlv_content_commitment` in `vault::limbo_vault`) |
 //!
 //! # Removed: classical group-based commitment module
@@ -48,7 +52,7 @@
 //! - **Key exchange**: [`kyber`] (ML-KEM-768)
 //! - **Symmetric AEAD**: [`aead`] (AES-256-GCM)
 //! - **Commitments**: salted BLAKE3 (no dedicated module — call `blake3::dsm_domain_hasher` with a per-purpose tag; canonical pattern lives at `vault::limbo_vault::dlv_content_commitment`)
-//! - **RNG**: [`rng`] (OS and deterministic random byte generation)
+//! - **RNG**: [`rng`] (random bytes from the operating system only)
 
 use crate::types::error::DsmError;
 use crate::common::domain_tags::TAG_HASH_DATA;

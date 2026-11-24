@@ -42,13 +42,13 @@ use crate::crypto::anchor_enrollment::FusedAnchorPin;
 use crate::types::error::DsmError;
 use crate::types::offline_account::{verify_offline_state_at, SpendWitness};
 
-/// The most spends one chain carries. A payer with more unexposed spends than
-/// this goes online, where a boundary exposes them, before it pays offline
-/// again.
+/// The most spends one chain carries. A payer with more spends than this
+/// since its last boundary goes online and makes a boundary before it pays
+/// offline again.
 pub const MAX_CHAIN_HOPS: usize = 64;
 
-/// The board action of a load of an offline account (DSM Amendment A39 draft,
-/// option B): signed at the board's next counter, as a spend is. Core's
+/// The board action of a load of an offline account (DSM Amendment A39):
+/// signed at the board's next counter, as a spend is. Core's
 /// constant: the board signs every action but a receive alike, so its
 /// measured image is unchanged.
 pub const ACTION_OFFLINE_LOAD: u32 = 0x4F4C;
@@ -103,7 +103,7 @@ pub fn settle_transition(
 /// `payload`, from the account's `frontier` and `counter`: to the device itself, its payload that
 /// name, under the challenge drawn from it. Answers the transition with its successor frontier
 /// set, and the challenge. The one builder the wallet and every verifier share, so one step always
-/// yields one transition (DSM Amendment A39 draft, option B).
+/// yields one transition (DSM Amendment A39).
 pub fn board_step_transition(
     action_type: u32,
     device_id: &[u8; 32],
@@ -474,7 +474,7 @@ pub struct ReceiveHop {
 }
 
 /// The unload of one payment received offline, as a step of the account, with its board's
-/// release (DSM Amendment A39 draft, option B).
+/// release (DSM Amendment A39).
 #[derive(Clone)]
 pub struct SettleHop {
     release: OfflineRelease,
@@ -785,7 +785,7 @@ pub fn verify_account_hops(
             }
             AccountHop::Settle(settle) => {
                 // The board signed the unload at its next counter, from where the account stood
-                // (DSM Amendment A39 draft, option B).
+                // (DSM Amendment A39).
                 let cert = &settle.release.cert;
                 let w = &settle.witness;
                 if cert.anchor_bundle != anchor.bundle || cert.anchor_id != anchor.anchor_id {
@@ -1187,7 +1187,7 @@ pub(crate) mod fixture {
         }
 
         /// A load or an unload of `amount` of the token, signed by the board at its next counter
-        /// as the wallet has it signed (DSM Amendment A39 draft, option B): the boundary's
+        /// as the wallet has it signed (DSM Amendment A39): the boundary's
         /// transition built from its operation id, the board authorized, prepared over the two
         /// device roots, committed, emitted with the offline-state proofs and finalized. Answers
         /// the outcome Core took and the release's bytes; the head moves to the outcome's.
@@ -1461,7 +1461,7 @@ mod tests {
     /// A chain of spends verifies hop by hop from the account the payer's load
     /// left to the account the payer holds after them, and answers each
     /// payment: whom, what, and the account before and after.
-    /// DSM Amendment A39 draft, option B: the unload of a received payment is its board's signed
+    /// DSM Amendment A39: the unload of a received payment is its board's signed
     /// advance like every step of the account. One carrying a payment's release in place of its
     /// own — a step the board did not sign as this unload — is refused, so it never counts in an
     /// account's history.

@@ -584,7 +584,7 @@ exactly which steps are argued. The quantum picture is a narrative,
 `SPHINCS_QROM_NARRATIVE.md`, marked not machine-checked. `RomChecks.lean`
 runs the ROM controls.
 
-## Hidden-value bridge (phase 3, in progress)
+## Hidden-value bridge
 
 `RomCoord.lean`, `RomSym.lean` and `RomHidden.lean` formalize the resampling
 argument behind the WOTS and FORS hidden-value events for any challenger
@@ -592,8 +592,9 @@ written as a symbolic program: the symbolic run never reads an unrevealed
 oracle answer (`strace_inv`); real and symbolic runs agree unless a lookup
 disagrees (`coupling`); a disagreement is a counted guess or an unopened
 collision (`dis_entry`), and its probability is bounded (`hidden_bound`,
-`real_le_sym`). DSM's signer is not yet instantiated as such a program, so
-for DSM the link remains argued (`SPHINCS_ROM_BOUND.md`, phase 3).
+`real_le_sym`). DSM's signer is instantiated as such a program (`sim_sign`,
+`RomSigner.lean`; `rom_game_hidden`, `RomGame.lean`), and the resulting game
+bounds are stated in `SPHINCS_ROM_BOUND.md`.
 
 ## Remaining trusted computing base and review obligations
 
@@ -631,6 +632,10 @@ boundaries. These artifacts make the exact proof/test boundary reviewable; they
 are not a substitute for that review.
 
 ## Validation performed for this change
+
+The counts below record the validation run made when the refinement landed;
+today's figures are in the tree (`SPHINCS_REFINEMENT_MAP.tsv`, `SPHINCS_CALLERS.tsv`,
+`LEAN_AXIOM_LEDGER.tsv`).
 
 The final refinement run passed **114 cases**, matching **517,253 primitive
 requests** and all expected outputs/results; all five mutation controls rejected

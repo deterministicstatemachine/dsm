@@ -86,7 +86,7 @@ pub struct StitchedReceiptV2 {
     /// SPHINCS+ response from party B for this receipt challenge.
     pub sig_b: Vec<u8>,
 
-    /// Ephemeral-key certificate for party A's per-step EK (whitepaper §11.1).
+    /// Ephemeral-key certificate for party A's per-step EK.
     ///
     /// `cert_{n+1} = Sign_{SK_n}( BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n) )`
     ///
@@ -99,13 +99,13 @@ pub struct StitchedReceiptV2 {
     /// Ephemeral-key certificate for party B's per-step EK.
     pub ek_cert_b: Vec<u8>,
 
-    /// Per-step ephemeral SPHINCS+ public key for party A (whitepaper §11.1).
+    /// Per-step ephemeral SPHINCS+ public key for party A.
     ///
     /// `EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1})`, where
     /// `E_{n+1} = HKDF_Smaster("DSM/ek\0" || h_n || C_pre || k_step)`.
     ///
     /// Carried in the envelope alongside `sig_a` so verifiers don't need
-    /// the per-step EK out-of-band. NOT in canonical commit form (§4.2.1).
+    /// the per-step EK out-of-band. NOT in canonical commit form.
     /// Required for accepted offline bilateral receipts.
     /// The key changes each transition and is linked to the previous key by
     /// `ek_cert_a`, so copied public receipt state is not spend authority.
@@ -547,7 +547,7 @@ impl CountersignB {
     }
 }
 
-/// The session-bound receipt response target (§4.2.1):
+/// The session-bound receipt response target:
 /// `BLAKE3(DSM/receipt-bind-session, commitment ‖ session_binding)`.
 /// Online paths bind `session_binding == commitment`.
 pub fn compute_receipt_challenge_response_target(
@@ -833,7 +833,7 @@ impl StitchedReceiptV2 {
     }
 
     /// Set party A's per-step ephemeral-key certificate.
-    /// See whitepaper §11.1 ephemeral certification.
+    /// See ephemeral certification.
     pub fn set_ek_cert_a(&mut self, cert: Vec<u8>) {
         self.ek_cert_a = cert;
     }
@@ -844,7 +844,7 @@ impl StitchedReceiptV2 {
     }
 
     /// Set party A's per-step ephemeral SPHINCS+ public key.
-    /// See whitepaper §11.1.
+    /// See
     pub fn set_ek_pk_a(&mut self, pk: Vec<u8>) {
         self.ek_pk_a = pk;
     }

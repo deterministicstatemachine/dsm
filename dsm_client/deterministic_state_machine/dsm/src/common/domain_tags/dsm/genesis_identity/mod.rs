@@ -20,7 +20,7 @@ pub use system::*;
 #[cfg(test)]
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
-    // §16.3 additional-device enrolment: the GATE half signed by the
+    // additional-device enrolment: the GATE half signed by the
     // existing authorized device, and the NEW-DEVICE self-attestation.
     // Both are production signing-payload domains and both were absent
     // from this registry, so every domain-tag test was blind to them.

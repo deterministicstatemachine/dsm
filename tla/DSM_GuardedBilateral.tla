@@ -6,22 +6,23 @@
 \* Two structural facts, both encoded directly:
 \*
 \*   (1) Every counterparty relationship is its own straight, linear hash
-\*       chain (paper Sec 6). Candidates carry NO key field; the consumption
-\*       key is DERIVED: DerivedKey(c) == <<c.rel, c.parent>> (paper Def 27,
-\*       Def 33, Rule 2). A parent under relationship r is not replayable
+\*       chain (paper Sec 7). Candidates carry NO key field; the consumption
+\*       key is DERIVED: DerivedKey(c) == <<c.rel, c.parent>> (paper Def 28,
+\*       Def 34, Rule 2). A parent under relationship r is not replayable
 \*       under q, even when the chains reuse the same node names.
 \*
 \*   (2) The topology is bilateral. A relationship step has exactly ONE
 \*       receiver: the counterparty of that relationship. There is no second
 \*       independent acceptor of the same relationship parent in online DSM,
 \*       so each relationship is modeled with a single acceptance locus
-\*       (cons[r], led[r]). Online acceptance is the receiver's own one-hop
-\*       and proof checks (paper Def 55, DSM Amendment A28); no co-signing round is part of the
+\*       (cons[r], led[r]). Online acceptance is the receiver's own check of
+\*       each step from the state it kept of the payer (paper Def 57, DSM
+\*       Amendment A36); no co-signing round is part of the
 \*       online path. The only setting where one spendable object is
 \*       PRESENTED to multiple distinct receivers is offline bearer mode,
 \*       which is governed by the fused anchor, the pending lock against
-\*       conflicting offline initiation (Def 56), the co-signed precommit of
-\*       the offline anchor design, and reconciliation (Sec 29, Thm 14).
+\*       conflicting offline initiation (Def 58) and the offline anchor
+\*       design of paper Sec 30.
 \*       None of that is needed for the online claim and none of it is
 \*       modeled here.
 \*
@@ -48,7 +49,7 @@ VARIABLES
 
 Vars == <<cons, led>>
 
-\* Derived resource consumption key (paper Def 27/33, Rule 2): committed parent
+\* Derived resource consumption key (paper Def 28/34, Rule 2): committed parent
 \* state and relationship identity, never discretionary branch input.
 DerivedKey(c) == <<c.rel, c.parent>>
 
@@ -59,7 +60,7 @@ Receipt(c) == [rel |-> c.rel, parent |-> c.parent, succ |-> c.succ,
                key |-> DerivedKey(c), bid |-> c.bid]
 
 \* The relationship's receiver accepts a fulfilled candidate whose derived key
-\* it has not consumed (paper Def 41 conjuncts, Def 55 acceptance; frontier
+\* it has not consumed (paper Def 42 conjuncts, Def 57 acceptance; frontier
 \* adjacency is orthogonal to the scoping claim and omitted to keep the state
 \* space minimal). Delivery order across relationships is adversarial.
 Accept(c) ==
@@ -81,7 +82,7 @@ TypeOK ==
     /\ cons \in [Rel -> SUBSET KeyT]
     /\ led  \in [Rel -> SUBSET ReceiptT]
 
-\* Rule 2 / Def 33 as an invariant: every accepted receipt's key is the derived
+\* Rule 2 / Def 34 as an invariant: every accepted receipt's key is the derived
 \* key of its own relationship and parent. Name reuse across chains cannot
 \* collide because the relationship identity is inside the key.
 KeysDerivedAndScoped ==

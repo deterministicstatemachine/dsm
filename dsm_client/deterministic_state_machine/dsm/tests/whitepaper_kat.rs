@@ -1,6 +1,6 @@
 //! Whitepaper Known-Answer Tests (KAT)
 //!
-//! Pins one BLAKE3 digest per normative domain tag in whitepaper §2/§4/§11/§12/§13.
+//! Pins one BLAKE3 digest per normative domain tag
 //! Catches accidental tag renames or preimage byte-order changes that would
 //! silently break canonical digest equivalence. See GitHub issue #320 for the
 //! audit that produced this battery.
@@ -156,7 +156,7 @@ fn kat_dsm_ek_cert() {
 #[test]
 fn kat_dsm_kyber_coins() {
     // coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id ||
-    //         recipient_kem_pub_hash || h_n || C_pre || DevID)  (whitepaper §12)
+    //         recipient_kem_pub_hash || h_n || C_pre || DevID)
     let s_master = [4u8; 32];
     let recipient_kem_pub_hash = [5u8; 32];
     let h_n = [1u8; 32];
@@ -192,7 +192,7 @@ fn kat_dsm_kyber_ss() {
 // §11 — Kyber coins for per-step EK derivation
 // =============================================================================
 
-/// Pins the canonical kyber_coins form per spec (whitepaper §12):
+/// Pins the canonical kyber_coins form per spec:
 ///   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id ||
 ///           recipient_kem_pub_hash || h_n || C_pre || DevID_sender)
 /// This is what the sender feeds into the deterministic ML-KEM-768 encapsulation
@@ -253,7 +253,7 @@ fn kat_dsm_recovery_roll() {
 #[test]
 fn kat_dsm_ek_derivation_seed() {
     // E_{n+1} = keyed-BLAKE3(Smaster, "DSM/ek/v1\0" || alg_id || chain_id ||
-    //           h_n || C_pre || k_step)  (whitepaper §11.1/§12 Eq.14)
+    //           h_n || C_pre || k_step)
     // The dsm crate exposes the underlying derive_ephemeral_seed primitive;
     // sdk's PerStepEkContext + derive_per_step_ek wrap it.
     let s_master = [0x44; 32];

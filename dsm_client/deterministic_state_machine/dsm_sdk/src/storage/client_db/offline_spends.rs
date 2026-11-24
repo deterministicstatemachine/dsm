@@ -165,8 +165,8 @@ pub fn close_offline_accounts(
     Ok(payments)
 }
 
-/// A load or an unload this device's board is signing (DSM Amendment A39 draft,
-/// option B): the boundary's kind (its code), asset and amount.
+/// A load or an unload this device's board is signing (DSM Amendment A39):
+/// the boundary's kind (its code), asset and amount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundarySigning {
     pub kind: u8,

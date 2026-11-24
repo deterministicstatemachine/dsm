@@ -142,7 +142,7 @@ pub fn derive_device_ak_keypair(
     ak
 }
 
-/// Stable device identifier `DevID = H("DSM/devid" || AK_pk || AttA)` (whitepaper §2.4).
+/// Stable device identifier `DevID = H("DSM/devid" || AK_pk || AttA)`.
 pub fn derive_devid(ak_pk: &[u8], atta: &[u8; 32]) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_DEVID);
     h.update(ak_pk);

@@ -16,14 +16,15 @@
 //!
 //! # Module Organization
 //!
-//! - [`shard_count_smt`] — ShardCountSMT (§3.5): prefix-keyed count tree for O(b) rank descent
-//! - [`spent_proof_smt`] — SpentProofSMT (§3.6): tracks consumed JAP hashes
-//! - [`shard_activation_accumulator`] — SAA (§3.4): per-shard append-only activated identity list
+//! - [`shard_count_smt`] — ShardCountSMT: prefix-keyed count tree for O(b) rank descent
+//! - [`spent_proof_smt`] — SpentProofSMT: tracks consumed JAP hashes
+//! - [`shard_activation_accumulator`] — SAA: per-shard append-only activated identity list
 //!
 //! # Storage
 //!
-//! All emission data structures (ShardCountSMT, SpentProofSMT, SAA) live on storage
-//! nodes as part of the Source DLV state. Devices verify proofs against committed roots.
+//! These are Core's DJTE predicates (Explainer §62). No route in the SDK or the
+//! storage node calls them: beta ERA is released from the native reserve
+//! (`economic::native_reserve`).
 
 pub mod shard_activation_accumulator;
 pub mod shard_count_smt;

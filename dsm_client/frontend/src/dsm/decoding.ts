@@ -10,12 +10,9 @@ import { emitDeterministicSafetyForError } from '../utils/deterministicSafety';
  * 
  * FramedEnvelopeV3 = [1 byte framing] || Envelope(version=3, ...)
  * 
- * This is the single gate into DSM protocol layer:
- * - QR scanner: scan text → base32 decode → decodeFramedEnvelopeV3 → route
- * - BLE: reassemble chunks → decodeFramedEnvelopeV3 → route
- * - WebView bridge: bytes → decodeFramedEnvelopeV3 → route
- * - Storage sync: bytes → decodeFramedEnvelopeV3 → route
- * - Faucet: bytes → decodeFramedEnvelopeV3 → route
+ * Every framed Envelope v3 the page takes from Rust (a route's answer, or an
+ * event's envelope) is decoded here and nowhere else. BLE chunks are
+ * reassembled by Rust, never by the page.
  * 
  * NO exceptions. NO direct protobuf decoding. NO ad-hoc parsers.
  * One door into the castle.

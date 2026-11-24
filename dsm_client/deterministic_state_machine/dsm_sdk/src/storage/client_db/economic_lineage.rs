@@ -7,9 +7,9 @@
 //! Nothing here is faucet-specific; everything serves every admission kind.
 //! The native reserve's own state lives in `native_reserve.rs`.
 //!
-//! The peer memo is a cache of the verifier's OWN conclusions and is never
-//! authority over a live register read — a walk that fails `Invalid` from a
-//! cached start discards the rows and re-walks from the activation root.
+//! The kept states are what this receiver proved of each peer (DSM Amendment
+//! A36): a check of a peer's step starts from the highest state kept below
+//! it, and a row is only ever added.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension, Transaction};

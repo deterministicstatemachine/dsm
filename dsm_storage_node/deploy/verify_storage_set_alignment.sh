@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
-# Verify the CANONICAL STORAGE SET agrees across the two layers that must name
-# it identically. Read-only: it opens a TLS connection to each node and reads
-# the certificate subject. Nothing is written, deployed or restarted.
+# Verify one of the two inputs to the CANONICAL STORAGE SET id across the two
+# layers that must name it identically: the member names. Read-only: it opens
+# a TLS connection to each node and reads the certificate subject. Nothing is
+# written, deployed or restarted.
 #
-#   ./verify_storage_set_alignment.sh ../../scripts/dsm_env_config.gcp_beta.toml IP1 IP2 IP3 IP4 IP5
+#   ./verify_storage_set_alignment.sh ../../dsm_client/frontend/public/dsm_env_config.toml IP1 IP2 IP3 IP4 IP5
 #
-# WHY THIS EXISTS. A client hashes the sorted `[[nodes]] name` entries of its
-# env config into the storage_set_id every vault is born under, and counts a
-# member's acceptance only when that node echoes the same string back as
-# x-dsm-node-id. A node answers with its own `[node] id`. If the two lists
-# differ by even one character:
-#   - every settlement-slot claim is refused as a foreign set, so no vault
-#     generation can ever be consumed; and
-#   - no publication is ever counted toward quorum, so no vault is ever born.
-# Both failures are silent at deploy time and only appear on a device.
+# WHY THIS EXISTS. A client derives the storage_set_id every vault is born
+# under from the (`[[nodes]] name`, register incarnation) pairs of its env
+# config, and takes a member's answer only when that node echoes the same name
+# back as x-dsm-node-id. A node answers with its own `[node] id`. If the two
+# name lists differ by even one character, the client's set id is one no
+# member serves: no answer it reads is taken as a member's, so no write of its
+# becomes final and no vault is ever born. That failure is silent at deploy
+# time and only appears on a device.
 #
 # The member ids are compared directly rather than re-deriving the set id here:
-# the id is a pure function of the sorted list, so equal lists are necessary and
-# sufficient, and a second hash implementation in bash would be one more thing
-# that can drift from the Rust one.
+# equal name lists are necessary, and a second hash implementation in bash
+# would be one more thing that can drift from the Rust one. The register
+# incarnations, the id's other input, are checked by each node at startup
+# (a configured incarnation that is not the one in its database refuses to
+# start) and by the bundled-config test in dsm_sdk::sdk::storage_set.
 #
 # The node's `[node] id` is the CN of the certificate it serves (both come from
 # NODE_ID in generate_node_configs.sh), which is what makes this checkable from
@@ -66,9 +68,8 @@ LEFT="$(printf '%s\n' "$CLIENT_IDS" | grep . | sort)"
 RIGHT="$(printf "%b" "$NODE_IDS" | grep . | sort)"
 
 if [ "$LEFT" = "$RIGHT" ]; then
-    Q=$(( CLIENT_N / 2 + 1 ))
     echo
-    echo "OK: both layers name the same ${CLIENT_N}-member set; quorum = ${Q}."
+    echo "OK: both layers name the same ${CLIENT_N}-member set."
     exit 0
 fi
 
