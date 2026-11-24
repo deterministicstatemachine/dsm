@@ -265,6 +265,15 @@ pub(crate) fn established(
     if own != Some((*trader_genesis, *trader_device_id)) {
         return Ok(());
     }
+    // A generation reaches here from its trader's walk and from the
+    // position's commit: it is proven once.
+    if !STARTED
+        .lock()
+        .map_err(|e| storage("the proofs started", e))?
+        .insert((*post.vault_id(), post.generation()))
+    {
+        return Ok(());
+    }
     let (set, genesis, generation) = (set.clone(), genesis.clone(), post.generation());
     let proving = std::thread::Builder::new()
         .name("vault-proof".into())
@@ -287,6 +296,11 @@ pub(crate) fn established(
 /// generation it proves up to.
 static PROVING: Mutex<Vec<(u64, std::thread::JoinHandle<Result<(), DsmError>>)>> =
     Mutex::new(Vec::new());
+
+/// The generations this process started proving, by vault: each is proven
+/// once.
+static STARTED: Mutex<std::collections::BTreeSet<(D32, u64)>> =
+    Mutex::new(std::collections::BTreeSet::new());
 
 /// Wait for every proof this process started to be published or refused:
 /// what a device that is about to stop, or a reader that needs the records
