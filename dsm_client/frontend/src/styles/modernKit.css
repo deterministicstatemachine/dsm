@@ -51,6 +51,21 @@ html[data-skin="modern"] .sb-icon-btn.b0x-button {
 }
 html[data-skin="modern"] .sb-icon-btn.spinning::before { animation: s-spin 1s linear infinite; }
 
+/* The b0x inbox's panel: drawn inline in the DGen colours, so Modern's are set over them. */
+html[data-skin="modern"] .b0x-panel {
+  background: var(--s-surface) !important; color: var(--s-text) !important;
+  border: 1px solid var(--s-line) !important; border-radius: var(--s-radius) !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-skin="modern"] .b0x-panel * { font-family: inherit !important; }
+html[data-skin="modern"] .b0x-panel .b0x-head { border-bottom: 1px solid var(--s-line) !important; }
+html[data-skin="modern"] .b0x-panel .b0x-head strong { font-size: 16px !important; font-weight: 900; }
+html[data-skin="modern"] .b0x-panel .b0x-close { border: none !important; border-radius: 50% !important; background: var(--s-surface-2) !important; }
+html[data-skin="modern"] .b0x-panel .b0x-item {
+  border: none !important; border-radius: 12px; background: var(--s-surface-2) !important;
+}
+
 /* The info badge: a small round "i" in the Modern colours. */
 html[data-skin="modern"] .sb-info {
   width: 22px; height: 22px; border: none; background: var(--s-surface-2); color: var(--s-text);

@@ -83,6 +83,7 @@ html[data-skin="modern"] .stateboy-screen-host { height: 100%; }
 
 /* ---- Shell ---- */
 .s-app {
+  position: relative; /* the inbox's button and its panel are placed in it */
   display: flex; flex-direction: column; height: 100%; width: 100%;
   background: var(--s-bg); color: var(--s-text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -274,6 +275,26 @@ html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; 
 @keyframes s-spin { to { transform: rotate(360deg); } }
 .s-progress { width: 100%; height: 14px; border-radius: 999px; background: var(--s-surface-2); overflow: hidden; margin-top: 10px; }
 .s-progress > div { height: 100%; background: linear-gradient(90deg, var(--s-gold), var(--s-fuchsia)); border-radius: 999px; transition: width 180ms ease-out; }
+
+/* ---- The b0x inbox (InboxOverlay, in ModernShell) ----
+   Its button sits on the Wallet tab's banner, top right, and in the top bar
+   beside the card button on every other view; its panel opens under the top
+   bar. The slot itself is not positioned, so both are placed in .s-app. */
+.s-inbox-slot .b0x-button {
+  position: absolute; z-index: 5; width: 44px; height: 44px; border-radius: 50%;
+  border: none; background: var(--s-surface-2); color: var(--s-text);
+}
+.s-inbox-slot[data-over="topbar"] .b0x-button { top: 12px; right: 72px; }
+.s-inbox-slot[data-over="banner"] .b0x-button { top: 22px; right: 30px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18); }
+/* How many received transfers wait to be looked at. */
+html[data-skin="modern"] .s-inbox-slot .b0x-button.has-items::after {
+  content: attr(data-count); position: absolute; top: -3px; right: -3px;
+  min-width: 20px; height: 20px; padding: 0 5px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 999px; border: 2px solid var(--s-bg);
+  background: var(--s-fuchsia); color: #ffffff;
+  font: 800 12px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
 
 /* ---- The owner's banner, photo and name (ProfileHeader) ---- */
 .s-profile {

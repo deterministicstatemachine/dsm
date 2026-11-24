@@ -4,6 +4,8 @@
 // has no page of its own for (tokens, trading, the Bitcoin bridge, storage,
 // apps, the lock, …) opens inside it, in its colours, under a Back button.
 // Simple mode puts some of them away (runtime/navigationStore.ts).
+// The b0x inbox is on every view: its button on the Wallet tab's banner, and
+// in the top bar beside the card everywhere else.
 
 import React, { useEffect } from 'react';
 import AppScreenRouter from '../AppScreenRouter';
@@ -22,7 +24,11 @@ import ModernContact from './ModernContact';
 import ModernMyCard from './ModernMyCard';
 import ModernReceipts from './ModernReceipts';
 import ProfileHeader from './ProfileHeader';
+import InboxOverlay from '../screens/wallet/InboxOverlay';
 import { useOwnCard } from './ownCard';
+
+/** The top bar's height: the inbox opens just under it. */
+const TOPBAR_HEIGHT = 60;
 
 /** The DGen screens the Modern skin opens inside itself. */
 const CLASSIC_INSIDE = new Set<ScreenType>([
@@ -115,6 +121,11 @@ export default function ModernShell({ eraTokenSrc, btcLogoSrc }: { eraTokenSrc: 
         </button>
       </header>
       )}
+      {/* The received transfers not yet looked at, and what is queued on the
+          storage nodes: the same inbox as the DGen wallet's, in Modern. */}
+      <div className="s-inbox-slot" data-over={onWallet ? 'banner' : 'topbar'}>
+        <InboxOverlay headerHeight={TOPBAR_HEIGHT} />
+      </div>
       <main className="s-body">
         {onWallet ? <ProfileHeader mode="show" onOpen={() => modernNav.open({ kind: 'my_card' })} /> : null}
         {body}
