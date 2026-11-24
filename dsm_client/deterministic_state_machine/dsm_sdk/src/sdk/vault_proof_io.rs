@@ -267,7 +267,9 @@ pub(crate) fn established(
     }
     // A generation reaches here from its trader's walk and from the
     // position's commit: it is proven once.
-    let key: ProofKey = (*post.vault_id(), post.generation(), *post.root());
+    // One consumer per parent: this device's trade has one root at its
+    // generation, so the vault and the generation name it.
+    let key: ProofKey = (*post.vault_id(), post.generation());
     if !STARTED
         .lock()
         .map_err(|e| storage("the proofs started", e))?
@@ -300,15 +302,15 @@ pub(crate) fn established(
     Ok(())
 }
 
-/// A proof's vault, generation and root.
-type ProofKey = (D32, u64, D32);
+/// A proof's vault and generation, the unit `prove_up_to` proves.
+type ProofKey = (D32, u64);
 
 /// The proofs this process started and has not seen finish.
 static PROVING: Mutex<Vec<(ProofKey, std::thread::JoinHandle<Result<(), DsmError>>)>> =
     Mutex::new(Vec::new());
 
-/// The generations this process started proving, by vault, generation and
-/// root: each is proven once, and one that failed is started again by the
+/// The generations this process started proving, by vault and generation:
+/// each is proven once, and one that failed is started again by the
 /// next trade that reaches it.
 static STARTED: Mutex<std::collections::BTreeSet<ProofKey>> =
     Mutex::new(std::collections::BTreeSet::new());
@@ -337,29 +339,40 @@ pub(crate) async fn settled() -> Result<(), DsmError> {
         if proving.is_empty() {
             return Ok(());
         }
+        // Every proof is joined before any failure is reported, so none is
+        // left behind unjoined.
+        let mut first: Option<DsmError> = None;
         for (key, handle) in proving {
             let generation = key.1;
             let joined = tokio::task::spawn_blocking(move || handle.join())
                 .await
-                .map_err(|e| storage("waiting for a proof", e))?;
-            let finished = match joined {
-                Ok(finished) => finished,
-                Err(panic) => {
-                    forget_started(&key)?;
+                .map_err(|e| storage("waiting for a proof", e));
+            let failed = match joined {
+                Err(e) => Some(e),
+                Ok(Err(panic)) => {
                     let why = panic
                         .downcast_ref::<&str>()
                         .map(|why| why.to_string())
                         .or_else(|| panic.downcast_ref::<String>().cloned());
-                    return Err(storage(
+                    Some(storage(
                         "a proof",
                         format!("the thread proving generation {generation} panicked: {why:?}"),
-                    ));
+                    ))
                 }
+                Ok(Ok(Err(e))) => {
+                    forget_started(&key)?;
+                    log::warn!("[vault proof] generation {generation} not proven: {e}");
+                    None
+                }
+                Ok(Ok(Ok(()))) => None,
             };
-            if let Err(e) = finished {
+            if let Some(e) = failed {
                 forget_started(&key)?;
-                log::warn!("[vault proof] generation {generation} not proven: {e}");
+                first.get_or_insert(e);
             }
+        }
+        if let Some(e) = first {
+            return Err(e);
         }
     }
 }
