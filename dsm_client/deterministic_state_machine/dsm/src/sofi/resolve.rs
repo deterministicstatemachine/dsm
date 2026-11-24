@@ -2479,6 +2479,11 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         genesis: &AcceptedVaultGenesis,
         root: &D32,
     ) -> Result<Option<VaultChain>, VerifierFailure> {
+        // The genesis root is the accepted genesis's own: no record proves
+        // a step to it, and the chain there is the genesis.
+        if root == genesis.genesis_root() {
+            return Ok(Some(VaultChain::from_genesis(genesis)));
+        }
         for bytes in self
             .reads
             .proof_record_candidates(genesis, Some(root))?

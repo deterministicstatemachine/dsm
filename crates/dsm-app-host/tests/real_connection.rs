@@ -463,9 +463,10 @@ impl Host {
     }
 }
 
-/// How much of each host's log a failing test prints: enough to see what each
-/// wallet did in the step that failed.
-const LOG_TAIL: usize = 400;
+/// How much of each host's log a failing test prints: all of it, as long as
+/// a run logs (about 3,000 lines): a step can fail on what a host did steps
+/// before, and the tail of retries alone does not say what that was.
+const LOG_TAIL: usize = 8000;
 
 impl Drop for Host {
     /// A test that fails part-way still stops its processes, and says what

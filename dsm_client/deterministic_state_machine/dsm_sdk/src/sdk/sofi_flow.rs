@@ -671,6 +671,9 @@ pub(crate) async fn vault_at_head(
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
+    // This device's trades' proof records are published first: the walk
+    // starts at the vault's newest record (SoFi Amendment S36).
+    crate::sdk::vault_proof_io::settled().await?;
     let chain = tokio::task::block_in_place(|| verifier.chain(vault_id)).map_err(verifier_error)?;
     // The chain names every generation of this device's record it replaced
     // with what Core established (MR-DSM-0331): never silent, and never a

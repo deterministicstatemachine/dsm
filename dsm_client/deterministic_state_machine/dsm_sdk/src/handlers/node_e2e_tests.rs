@@ -2555,7 +2555,12 @@ async fn junk_at_more_attempt_keys_than_one_walk_examines_is_walked_past() {
     assert_eq!(balance(&p.b, &m.tkn), out1 + out2);
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 
-    // The vault's owner walks the chain afresh, past the junk.
+    // The vault's owner walks the chain afresh, past the junk, from the
+    // vault's newest proof record (SoFi Amendment S36): the trades' records
+    // are published first.
+    crate::sdk::vault_proof_io::settled()
+        .await
+        .expect("the trades' proofs are published");
     let (own_a, parents_a) = standing_of(&p.a);
     let owner = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
     let walked = owner
