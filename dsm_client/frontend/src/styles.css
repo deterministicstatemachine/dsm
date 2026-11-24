@@ -827,6 +827,49 @@ html, body {
   pointer-events: none; /* purely decorative */
 }
 
+/* Mail waiting: the envelope sits in the curl of the chameleon's tongue
+   (frame 17 of his animation, tongue tip near 436,360 of the 688 × 405 frame,
+   drawn 260 px wide) and sways there until it is tapped. The button is larger
+   than the envelope, for a finger. */
+.home-mail-envelope {
+  position: absolute;
+  left: 141px;
+  top: 100px;
+  width: 48px;
+  height: 44px;
+  padding: 8px;
+  margin: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transform-origin: 50% 36px;
+  animation: homeMailLand 140ms steps(2, end), homeMailSway 1.4s ease-in-out 140ms infinite alternate;
+}
+
+.home-mail-envelope svg {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.home-mail-envelope:focus-visible {
+  outline: 2px solid var(--text-dark);
+  outline-offset: 0;
+}
+
+@keyframes homeMailLand {
+  from { transform: scale(0.4); }
+  to { transform: scale(1); }
+}
+
+@keyframes homeMailSway {
+  from { transform: rotate(-7deg); }
+  to { transform: rotate(7deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-mail-envelope { animation: none; }
+}
+
 .dsm-logo-placeholder {
   /* Slightly larger so the on-screen logo reads better */
   width: 140px;

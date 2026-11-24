@@ -94,6 +94,13 @@ const dsmLogoMap: Record<ThemeName, string> = {
   crimson: 'images/logos/dsm-stateboy-on-screen-logo_red.png',
 };
 
+/**
+ * The chameleon's mail animation, beside each theme's loop: frames 8–17 of the
+ * loop played once, ending with the tongue out and the coin taken off it, for
+ * the envelope to sit on.
+ */
+export const mailChameleonOf = (loop: string) => loop.replace(/\.gif$/i, '-mail.gif');
+
 const themeChameleon = (t: ThemeName) => chameleonMap[t] || 'images/vaulthunters/chameleon.gif';
 const themeIntroGif = (t: ThemeName) => introGifMap[t] || 'images/cutscenes/stateboy.gif';
 export const themeEraToken = (t: ThemeName) => eraTokenMap[t] || 'images/logos/era_token_gb.gif';
