@@ -4,12 +4,16 @@
 // by ticker so a list is not one colour) holding the token's own artwork:
 // the logo shape its policy carries (the same shape the DGen coin is struck
 // from), drawn in white; a picture its policy links to; else the ticker's
-// first letter.
+// first letter. ERA's shape is built in: the hexagonal E its DGen coins are
+// struck from.
 
 import React, { useMemo } from 'react';
 import { decodeCoinSource, MASK_SIZE } from '../utils/coinArtwork';
 
 type Props = { ticker: string; iconUrl?: string; className?: string; alt?: string };
+
+/** ERA's mark, white on clear: the shape its DGen coins (era_token_gb*.gif) are struck from. */
+export const ERA_MARK_SRC = 'images/logos/era-mark.png';
 
 function tone(lower: string): 'fuchsia' | 'gold' {
   if (lower === 'era') return 'fuchsia';
@@ -44,9 +48,10 @@ function linkedPicture(iconUrl: string | undefined): string | null {
 }
 
 export function FlatTokenMark({ ticker, iconUrl, className, alt }: Props): React.JSX.Element {
-  const shape = useMemo(() => shapePicture(iconUrl), [iconUrl]);
-  const classes = ['s-token-flat', className].filter((c) => c !== undefined && c.length > 0).join(' ');
   const lower = ticker.toLowerCase();
+  const drawn = useMemo(() => shapePicture(iconUrl), [iconUrl]);
+  const shape = lower === 'era' ? ERA_MARK_SRC : drawn;
+  const classes = ['s-token-flat', className].filter((c) => c !== undefined && c.length > 0).join(' ');
   const label = alt !== undefined && alt.length > 0 ? alt : ticker;
   const linked = shape === null ? linkedPicture(iconUrl) : null;
   if (linked !== null) return <img src={linked} alt={label} className={classes} />;
