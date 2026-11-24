@@ -1,0 +1,62 @@
+name: Bench comment
+
+# Posts on a PR what its Bench run (bench.yml) found: each benchmark's base and PR proven in
+# turns on one runner. A size is shown when it changed; a time when it moved the same way in
+# every round and its median moved by at least 1%. One comment, edited on every run and
+# deleted once nothing is shown; every result is in it, collapsed.
+#
+# It runs from the default branch (GitHub runs a `workflow_run` workflow from nowhere else)
+# with a write token, on artifacts a PR's run wrote, a fork's included:
+# .github/scripts/pr_comment.py says what it trusts of them. It checks out the default
+# branch's own script, never the PR's code.
+
+on:
+  workflow_run:
+    workflows: [ Bench ]
+    types: [ completed ]
+
+permissions: {}
+
+jobs:
+  comment:
+    name: Comment
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Find the runs
+        id: results
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          count=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | select(.name | startswith("ab-")) | .name' | wc -l)
+          echo "found=$([ "$count" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.results.outputs.found == 'true'
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Test comment renderer
+        if: steps.results.outputs.found == 'true'
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+      - uses: actions/download-artifact@v4
+        if: steps.results.outputs.found == 'true'
+        with:
+          pattern: ab-*
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: runs
+      - name: Comment
+        if: steps.results.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 .github/scripts/pr_comment.py "$HEAD_SHA" runs/*/ab.json

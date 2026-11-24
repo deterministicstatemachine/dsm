@@ -1,0 +1,16 @@
+[package]
+name = "vault_step"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Research: one SoFi vault step (DSM Core's checks) as a leanVM program, and its reference"
+
+[dependencies]
+blake3 = { version = "1.8.7", default-features = false, features = ["pure"] }
+rand.workspace = true
+lean_vm_core = { package = "stable_lean_vm_core", path = "../stable_prover/lean_vm_core" }
+primitives = { package = "stable_primitives", path = "../stable_prover/primitives" }
+isa.workspace = true
+verifier.workspace = true
+zkdsl_compiler.workspace = true

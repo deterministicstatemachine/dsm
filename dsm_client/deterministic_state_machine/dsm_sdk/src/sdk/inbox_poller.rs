@@ -78,8 +78,8 @@ static POLLER_RUNNING: AtomicBool = AtomicBool::new(false);
 static POLLER_STOP: AtomicBool = AtomicBool::new(false);
 
 /// Whether the background poller is running: the device's own syncs then
-/// come round on their own, so work a sync owes but a payment never waits on
-/// can run beside them (`vault_baseline::start_owned_baselines`).
+/// come round on their own.
+#[cfg(test)]
 pub(crate) fn poller_running() -> bool {
     POLLER_RUNNING.load(Ordering::SeqCst)
 }

@@ -6,7 +6,7 @@
 # the owner's own hosting) after the GCP set went down, and reprovisioned on
 # 2026-11-11 (UTC) for the storage node's schema 3 (DSM Amendment A34's write
 # lock), and again on 2026-11-16 (UTC; 2026-11-15 ET) for schema 4 and release
-# 0.1.1-beta.4: every database was wiped, every member minted a new register
+# 0.1.1-beta.5: every database was wiped, every member minted a new register
 # incarnation into its fresh one, and the committed set id every member logs is
 #   RDAWE9EY5YBPZ6RCK8K43ET3GVX44QSWS7DTGZKYJNX8N976ZAJ0
 # which is the id core pins (dsm::economic::register), so this list must stay

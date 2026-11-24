@@ -31538,63 +31538,6 @@ export class ConnectPayV1 extends Message<ConnectPayV1> {
 }
 
 /**
- * A vault this account owns, at the generation of a baseline it published
- * (SoFi Amendment S24), with the session wallet's witness under that
- * baseline's root: the vault's state leaf and the wallet's relationship proof.
- * It carries no authority; the wallet authenticates the baseline it reads
- * under vault_baseline_locator(v, g) and checks the witness against its root.
- *
- * @generated from message dsm.ConnectVaultWitnessV1
- */
-export class ConnectVaultWitnessV1 extends Message<ConnectVaultWitnessV1> {
-  /**
-   * @generated from field: bytes vault_id = 1;
-   */
-  vaultId = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint64 generation = 2;
-   */
-  generation = protoInt64.zero;
-
-  /**
-   * class 0x0072
-   *
-   * @generated from field: bytes witness_ccb = 3;
-   */
-  witnessCcb = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<ConnectVaultWitnessV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.ConnectVaultWitnessV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 3, name: "witness_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectVaultWitnessV1 {
-    return new ConnectVaultWitnessV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectVaultWitnessV1 {
-    return new ConnectVaultWitnessV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectVaultWitnessV1 {
-    return new ConnectVaultWitnessV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: ConnectVaultWitnessV1 | PlainMessage<ConnectVaultWitnessV1> | undefined, b: ConnectVaultWitnessV1 | PlainMessage<ConnectVaultWitnessV1> | undefined): boolean {
-    return proto3.util.equals(ConnectVaultWitnessV1, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.ConnectQuoteV1
  */
 export class ConnectQuoteV1 extends Message<ConnectQuoteV1> {
@@ -31615,11 +31558,6 @@ export class ConnectQuoteV1 extends Message<ConnectQuoteV1> {
    */
   amountIn = protoInt64.zero;
 
-  /**
-   * @generated from field: repeated dsm.ConnectVaultWitnessV1 vault_witnesses = 4;
-   */
-  vaultWitnesses: ConnectVaultWitnessV1[] = [];
-
   constructor(data?: PartialMessage<ConnectQuoteV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -31631,7 +31569,6 @@ export class ConnectQuoteV1 extends Message<ConnectQuoteV1> {
     { no: 1, name: "token_in", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_out", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 4, name: "vault_witnesses", kind: "message", T: ConnectVaultWitnessV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectQuoteV1 {
@@ -31679,11 +31616,6 @@ export class ConnectSwapV1 extends Message<ConnectSwapV1> {
    */
   minAmountOut = protoInt64.zero;
 
-  /**
-   * @generated from field: repeated dsm.ConnectVaultWitnessV1 vault_witnesses = 5;
-   */
-  vaultWitnesses: ConnectVaultWitnessV1[] = [];
-
   constructor(data?: PartialMessage<ConnectSwapV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -31696,7 +31628,6 @@ export class ConnectSwapV1 extends Message<ConnectSwapV1> {
     { no: 2, name: "token_out", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "min_amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 5, name: "vault_witnesses", kind: "message", T: ConnectVaultWitnessV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSwapV1 {

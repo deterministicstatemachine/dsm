@@ -1,0 +1,669 @@
+"""Build a Lake package's targets in one `lake build`, its modules admitted by memory.
+
+  python3 -I lake-build.py DIR [TARGET ...] [--jobs N] [--mem GB] [--cap GB] [--no-scope] [--seed] [--dev [--dev-kernel ties|all|none]] [--keep-going]
+
+Lake has no job limit, and a parallel build of lean_vm's generated kernel-checked families runs more of them at once than
+a machine holds. Lake still decides what is built, with which options, and writes every trace: it runs `lean` and
+`leanir` from a sysroot whose two binaries are this script (`LEAN_SYSROOT`, `LAKE_OVERRIDE_LEAN`), and the script runs
+the real ones unchanged, with Lake's arguments and environment, once it admits the module. Lake's thread pool
+(`LEAN_NUM_THREADS`) only bounds how many modules wait for admission; the `lean`s get the caller's value back.
+
+Admission: at most `--jobs` modules at once (default: the cores), within `--mem` (default: the machine's memory less
+4 GB) counting each running module's estimate (or its current anonymous memory, if larger) and once the largest
+file-backed memory among them: the `.olean`s a `lean` maps are shared. A module that alone exceeds it runs alone.
+Among the waiting modules the longest path to the end of the build goes first, the module's own time included. The
+first that cannot be admitted holds its memory back, so a large module is not starved. The estimates are the peak
+anonymous memory from `DIR/.lake/lake-build.tsv`, which every run updates with each module's wall time, CPU time,
+peak RSS and peak anonymous memory, over `DIR/lake-build.tsv` (the heavy modules, committed, which `--seed`
+rewrites); an unknown module is taken at 2 GB.
+
+The run is a systemd scope capped at `--cap` (default: the machine's memory less 1 GB, without `OOMPolicy=stop`): a
+module killed by the kernel there, or whose allocation fails (`std::bad_alloc`), is run again, alone; one that crashes, or runs past a multiple of its recorded
+time (`HANG_FACTOR`), is run again (`RETRIES`). After the first module that fails nothing more is admitted
+and the run fails (with `--keep-going`, every module that does not import a failed one is still built, so one run
+lists every failure, as when adapting the proofs to a spec change); otherwise `lake build --no-build` must find the targets up to date, and a plain `lake build` of
+them, which replays the warnings, ends the run.
+
+macOS has neither a systemd scope nor an address-space limit: the budget is the only guard there, and a module's
+anonymous memory is its physical footprint.
+
+`--dev` is for development only, never for a gate or CI: it builds from `DIR/.lake/lakefile.dev.toml`, written from
+`DIR/lakefile.toml` with `buildDir = ".lake/build-dev"` and `debug.skipKernelTC` set on the package's libraries other
+than its test driver. Elaboration still runs (tactics, `simp`, `omega`, the elaborator's `decide`, warnings as
+errors), and the kernel checks only the modules `--dev-kernel` names (`kernel_modules`): by default those that
+tie a guest function's body or the core data to a template (`stmtsEqb`, or a `decide +kernel` that reads the core IR),
+so a stale template fails here as in the real build; `all`, every module the kernel decides something in, and the
+`kernel_lit` and `win_lit` values, but the guest's other certificates (budgets and tables too, slower);
+`none`, nothing, so that a false `decide +kernel` is accepted. `#print axioms` shows none of it. The option is
+in Lake's traces and the build directory is separate, so a dev `.olean` never satisfies the real build.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import socketserver
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tomllib
+from pathlib import Path
+
+GB = 1 << 30
+MB = 1 << 20
+DEFAULT_NEED = 2 * GB  # an unknown module's anonymous memory
+DEFAULT_WALL = 5.0  # an unknown module's time, for the priorities
+# Lean 4.35 now and then crashes (SIGSEGV) or stalls in a kernel cache's hash table on a module that otherwise builds
+# in seconds: a module past `HANG_FACTOR` times its recorded CPU time plus `HANG_SLACK` CPU seconds (`HANG_UNKNOWN`
+# without a record), doubled at each attempt, is stopped and, like a crashed one, run again, up to `RETRIES` times.
+# CPU time, not wall time, so that a module slowed by a busy machine is left alone.
+HANG_FACTOR, HANG_SLACK, HANG_UNKNOWN, RETRIES = 4.0, 180.0, 1800.0, 2
+TABLE = "lake-build.tsv"
+HEADER = "# module\twall s\tcpu s\tpeak rss MB\tpeak anon MB\n"
+ENV = ("LEAN_SYSROOT", "LAKE_OVERRIDE_LEAN", "LEAN_NUM_THREADS")  # what the run changes for Lake
+IMPORT = re.compile(r"(?:(?:public|private)\s+)?(?:meta\s+)?import\s+(?:all\s+)?([\w.«»']+)")
+
+
+def log(message: str) -> None:
+    print(f"lake-build: {message}", file=sys.stderr, flush=True)
+
+
+def hms(seconds: float) -> str:
+    return f"{int(seconds) // 3600}h{int(seconds) % 3600 // 60:02d}m{int(seconds) % 60:02d}s"
+
+
+# The wrapper: `lean` and `leanir` of the sysroot Lake runs.
+
+
+def wrap(tool: str, args: list[str]) -> None:
+    real = os.path.join(os.environ["LAKE_BUILD_BIN"], tool)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LAKE_BUILD_")}
+    for key, value in json.loads(os.environ["LAKE_BUILD_ENV"]).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    setup = args[args.index("--setup") + 1] if tool == "lean" and "--setup" in args else args[0] if tool == "leanir" and args else None
+    if setup is None:  # `lean --githash` and the like
+        os.execve(real, [real, *args], env)
+    with open(setup, encoding="utf-8") as file:
+        config = json.load(file)
+    name = config["name"] + ("" if tool == "lean" else f":{tool}")
+    kernel = os.environ.get("LAKE_BUILD_KERNEL")
+    if tool == "lean" and kernel and config.get("options", {}).get("debug.skipKernelTC") and \
+            config["name"] in Path(kernel).read_text(encoding="utf-8").split():
+        # `--dev`: a module `--dev-kernel` names (`kernel_modules`), checked by the kernel all the same.
+        del config["options"]["debug.skipKernelTC"]
+        checked = Path(kernel).parent / (config["name"] + ".setup.json")
+        checked.write_text(json.dumps(config), encoding="utf-8")
+        args = [str(checked) if a == setup else a for a in args]
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.connect(os.environ["LAKE_BUILD_SOCK"])
+        stream = conn.makefile("rw", encoding="utf-8")
+
+        def say(line: str) -> None:
+            stream.write(line + "\n")
+            stream.flush()
+
+        alone, attempt = False, 0
+        while True:
+            say(f"want {int(alone)} {name} {attempt}")
+            if stream.readline().strip() != "go":
+                print(f"lake-build: {name} not started: an earlier module failed", file=sys.stderr)
+                sys.exit(1)
+            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                start = time.monotonic()
+                child = subprocess.Popen([real, *args], env=env, stdout=out, stderr=err)
+                say(f"pid {child.pid}")
+                _, status, usage = os.wait4(child.pid, 0)
+                child.returncode = code = os.waitstatus_to_exitcode(status)
+                # once more, alone; or again, after the watchdog or a crash
+                again_alone = not alone and (code == -signal.SIGKILL or out_of_memory(code, err))
+                again = not again_alone and code in (-signal.SIGTERM, -signal.SIGSEGV) and attempt < RETRIES
+                maxrss = usage.ru_maxrss // 1024 if MAC else usage.ru_maxrss  # KB; macOS counts bytes
+                say(f"done {code} {time.monotonic() - start:.3f} {usage.ru_utime + usage.ru_stime:.3f} {maxrss} "
+                    f"{int(again_alone or again)}")
+                if again_alone:
+                    alone = True
+                    continue
+                if again:
+                    attempt += 1
+                    continue
+                for source, sink in ((out, sys.stdout.buffer), (err, sys.stderr.buffer)):
+                    source.seek(0)
+                    shutil.copyfileobj(source, sink)
+                    sink.flush()
+            sys.exit(code if code >= 0 else 128 - code)
+
+
+def out_of_memory(code: int, err) -> bool:
+    """Whether a module stopped because an allocation failed (the scope's memory cap, or `ulimit -v`)."""
+    if code != -signal.SIGABRT:
+        return False
+    err.seek(0)
+    return b"std::bad_alloc" in err.read()
+
+
+# The estimates and the priorities.
+
+
+def read_table(path: Path) -> dict[str, list[float]]:
+    table = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            fields = line.split("\t")
+            if len(fields) == 5 and not line.startswith("#"):
+                table[fields[0]] = [float(x) for x in fields[1:]]
+    return table
+
+
+def write_table(path: Path, table: dict[str, list[float]]) -> None:
+    rows = (f"{m}\t{w:.1f}\t{c:.1f}\t{r:.0f}\t{a:.0f}\n" for m, (w, c, r, a) in sorted(table.items()))
+    path.write_text(HEADER + "".join(rows), encoding="utf-8")
+
+
+def seed_rows(pkg: Path, table: dict[str, list[float]]) -> dict[str, list[float]]:
+    """The heavy modules that still exist, rounded so that a rewrite changes few lines: 3 GB of anonymous memory or a
+    minute."""
+    exist = {".".join(parts[i:]) for parts in source_files(pkg) for i in range(len(parts))}
+    return {m: [round(w, -1), round(c, -1), round(r, -2), round(a, -2)] for m, (w, c, r, a) in table.items()
+            if m in exist and (a >= 3000 or w >= 60)}
+
+
+def header_imports(path: Path) -> list[str]:
+    """The modules a file's header imports."""
+    found, comment = [], False
+    with path.open(encoding="utf-8", errors="replace") as file:
+        for line in file:
+            text = line.strip()
+            if comment:
+                comment = "-/" not in text
+                continue
+            if text.startswith("/-"):
+                comment = "-/" not in text[2:]
+                continue
+            if not text or text.startswith("--") or text in ("module", "prelude"):
+                continue
+            match = IMPORT.match(text)
+            if not match:
+                break
+            found.append(match.group(1))
+    return found
+
+
+def source_files(pkg: Path) -> dict[tuple[str, ...], list[str]]:
+    """The imports of each file of the package and of its path dependencies, by its path's parts (a dependency's
+    from its parent, so `Statement/X.lean` is `Statement.X`)."""
+    files = {}
+    deps = [Path(r["path"]) for r in tomllib.loads((pkg / "lakefile.toml").read_text(encoding="utf-8")).get("require", [])
+            if "path" in r] if (pkg / "lakefile.toml").exists() else []
+    for src, base in [(pkg, pkg), *(((pkg / d).resolve(), (pkg / d).resolve().parent) for d in deps)]:
+        for root, dirs, names in os.walk(src):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("target", "node_modules")]
+            for name in names:
+                if name.endswith(".lean"):
+                    path = Path(root) / name
+                    files[path.relative_to(base).with_suffix("").parts] = header_imports(path)
+    return files
+
+
+def priorities(pkg: Path, table: dict[str, list[float]]) -> dict[str, float]:
+    """Each module's longest path to the end of the build, its own time included, over the import graph of the package
+    and its path dependencies."""
+    files = source_files(pkg)
+    known = {m for imports in files.values() for m in imports} | set(table)
+    importers: dict[str, list[str]] = {}
+    for parts, imports in files.items():
+        name = next((n for n in (".".join(parts[i:]) for i in range(len(parts))) if n in known), ".".join(parts))
+        for imported in imports:
+            importers.setdefault(imported, []).append(name)
+
+    def wall(module: str) -> float:
+        return table[module][0] if module in table else DEFAULT_WALL
+
+    tail: dict[str, float] = {}
+
+    def length(module: str) -> float:
+        if module not in tail:
+            tail[module] = wall(module)  # a cycle of guessed names ends here
+            tail[module] = wall(module) + max((length(i) for i in importers.get(module, ())), default=0.0)
+        return tail[module]
+
+    sys.setrecursionlimit(100000)
+    for module in list(importers):
+        length(module)
+    return tail
+
+
+# The scheduler.
+
+# macOS has no `/proc`: the machine's and a process's memory and CPU time come from Mach and libproc.
+MAC = sys.platform == "darwin"
+if MAC:
+    import ctypes
+
+    LIBC = ctypes.CDLL(None)
+    HOST = LIBC.mach_host_self()
+    PAGE = os.sysconf("SC_PAGE_SIZE")
+    _timebase = (ctypes.c_uint32 * 2)()
+    LIBC.mach_timebase_info(_timebase)
+    MACH_TICK = _timebase[0] / _timebase[1] / 1e9  # seconds
+
+
+def mac_host(flavor: int) -> list[int]:
+    """The host's statistics as 32-bit words: `HOST_VM_INFO64` (4) or `HOST_CPU_LOAD_INFO` (3)."""
+    buf, count = (ctypes.c_uint32 * 64)(), ctypes.c_uint32(64)
+    LIBC.host_statistics64(HOST, flavor, buf, ctypes.byref(count))
+    return list(buf)
+
+
+def mac_rusage(pid: int) -> list[int]:
+    """A process's `rusage_info_v0` after its UUID: its CPU times in Mach ticks at 0 and 1, its resident size at 6 and
+    its physical footprint at 7."""
+    buf = (ctypes.c_uint64 * 12)()
+    return list(buf[2:]) if LIBC.proc_pid_rusage(pid, 0, buf) == 0 else [0] * 10
+
+
+def meminfo(key: str) -> int:
+    if MAC:  # available, as Linux counts it: the free, file-backed and purgeable pages (`vm_statistics64`)
+        if key == "MemTotal":
+            return os.sysconf("SC_PHYS_PAGES") * PAGE
+        vm = mac_host(4)
+        return (vm[0] + vm[34] + vm[22]) * PAGE
+    with open("/proc/meminfo", encoding="ascii") as file:
+        for line in file:
+            if line.startswith(key + ":"):
+                return int(line.split()[1]) * 1024
+    return 0
+
+
+def proc_status(pid: int) -> tuple[int, int]:
+    """A process's resident anonymous and file-backed memory, in bytes. On macOS its footprint, which counts its
+    compressed memory too, and the rest of its resident size."""
+    if MAC:
+        usage = mac_rusage(pid)
+        return usage[7], max(usage[6] - usage[7], 0)
+    anon = file_backed = 0
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii") as file:
+            for line in file:
+                if line.startswith("RssAnon:"):
+                    anon = int(line.split()[1]) * 1024
+                elif line.startswith("RssFile:"):
+                    file_backed = int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return anon, file_backed
+
+
+def cpu_seconds(pid: int) -> float:
+    """A process's user and system CPU time."""
+    if MAC:
+        usage = mac_rusage(pid)
+        return (usage[0] + usage[1]) * MACH_TICK
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as file:
+            fields = file.read().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return 0.0
+
+
+def cgroup_file(name: str) -> Path | None:
+    try:
+        line = Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    path = Path("/sys/fs/cgroup") / line.split("::", 1)[-1].lstrip("/") / name
+    return path if line.startswith("0::") and path.exists() else None
+
+
+def cpu_ticks() -> tuple[int, int]:
+    """The machine's busy and total CPU ticks."""
+    if MAC:
+        user, system, idle, nice = mac_host(3)[:4]
+        return user + system + nice, user + system + idle + nice
+    with open("/proc/stat", encoding="ascii") as file:
+        fields = [int(x) for x in file.readline().split()[1:]]
+    return sum(fields) - fields[3] - fields[4], sum(fields)
+
+
+class Run:
+    def __init__(self, name: str, need: int, ticket: int, alone: bool, limit: float) -> None:
+        self.name, self.need, self.ticket, self.alone, self.limit = name, need, ticket, alone, limit
+        self.pid = self.anon = self.peak = self.file = 0
+        self.stopped = False
+
+
+class Scheduler:
+    def __init__(self, slots: int, budget: int, table: dict[str, list[float]], tail: dict[str, float],
+                 keep_going: bool = False) -> None:
+        self.slots, self.budget, self.table, self.tail = slots, budget, table, tail
+        self.keep_going = keep_going
+        self.cv = threading.Condition()
+        self.waiting: dict[int, tuple[float, int]] = {}  # ticket -> (priority, need)
+        self.running: dict[int, Run] = {}
+        self.tickets = 0
+        self.failed: list[str] = []
+        self.killed: list[str] = []
+        self.done = 0
+        self.busy = self.cpu = 0.0  # module-seconds, CPU seconds
+        self.peak_committed = self.peak_anon = self.peak_used = 0
+        self.stop = threading.Event()
+
+    def need(self, name: str, alone: bool) -> int:
+        if alone:
+            return self.budget
+        if name in self.table:
+            return int(self.table[name][3] * MB * 1.15) + 256 * MB
+        return DEFAULT_NEED
+
+    def priority(self, name: str) -> float:
+        return self.tail.get(name, self.table[name][0] if name in self.table else DEFAULT_WALL)
+
+    def committed(self) -> int:
+        """The running modules' estimates, or their anonymous memory if larger, and the largest mapping of files."""
+        runs = self.running.values()
+        return sum(max(r.need, r.anon) for r in runs) + max((r.file for r in runs), default=0)
+
+    def choose(self) -> int | None:
+        """The ticket to admit now: the first by priority that fits, after the memory held back for the first that does not."""
+        if len(self.running) >= self.slots:
+            return None
+        used, available, held = self.committed(), meminfo("MemAvailable"), 0
+        for ticket, (_, need) in sorted(self.waiting.items(), key=lambda item: -item[1][0]):
+            if not self.running or (used + held + need <= self.budget and need + GB <= available):
+                return ticket
+            held = held or need
+        return None
+
+    def limit(self, name: str, attempt: int) -> float:
+        base = HANG_FACTOR * self.table[name][1] + HANG_SLACK if name in self.table else HANG_UNKNOWN
+        return base * 2 ** attempt
+
+    def admit(self, name: str, alone: bool, attempt: int = 0) -> Run | None:
+        with self.cv:
+            ticket = self.tickets
+            self.tickets += 1
+            self.waiting[ticket] = (float("inf") if alone else self.priority(name), self.need(name, alone))
+            try:
+                while self.keep_going or not self.failed:
+                    if self.choose() == ticket:
+                        run = self.running[ticket] = Run(name, self.waiting[ticket][1], ticket, alone, self.limit(name, attempt))
+                        return run
+                    self.cv.wait(1.0)
+                return None
+            finally:
+                del self.waiting[ticket]
+                self.cv.notify_all()
+
+    def release(self, run: Run, reply: list[str] | None) -> None:
+        with self.cv:
+            self.running.pop(run.ticket, None)
+            self.cv.notify_all()
+            if reply is None:
+                return
+            code, wall, cpu, maxrss, again = int(reply[1]), float(reply[2]), float(reply[3]), int(reply[4]), reply[5] == "1"
+            self.busy += wall
+            self.cpu += cpu
+            if code == 0:
+                self.done += 1
+                self.table[run.name] = [wall, cpu, maxrss / 1024, max(run.peak, run.anon) / MB]
+            elif again:
+                self.killed.append(run.name)  # its wrapper runs it again
+            else:
+                self.failed.append(run.name)
+
+    def poll(self) -> None:
+        """Every half second: the running modules' memory, the peaks, and a line of progress every two minutes."""
+        last = time.monotonic()
+        while not self.stop.wait(0.5):
+            with self.cv:
+                for run in self.running.values():
+                    if run.pid:
+                        run.anon, run.file = proc_status(run.pid)
+                        run.peak = max(run.peak, run.anon)
+                        if not run.stopped and cpu_seconds(run.pid) > run.limit:
+                            run.stopped = True
+                            log(f"{run.name}: past {run.limit:.0f} CPU s, stopped to be run again")
+                            try:
+                                os.kill(run.pid, signal.SIGTERM)
+                            except OSError:
+                                pass
+                self.peak_committed = max(self.peak_committed, self.committed())
+                self.peak_anon = max(self.peak_anon, sum(r.anon for r in self.running.values()))
+                self.peak_used = max(self.peak_used, meminfo("MemTotal") - meminfo("MemAvailable"))
+                self.cv.notify_all()
+                if time.monotonic() - last >= 120:
+                    last = time.monotonic()
+                    log(f"{self.done} built, {len(self.running)} running, {len(self.waiting)} waiting, "
+                        f"{self.committed() / GB:.1f} of {self.budget / GB:.1f} GB committed")
+
+
+def serve(scheduler: Scheduler, path: str) -> socketserver.UnixStreamServer:
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self) -> None:
+            run, reply = None, None
+            try:
+                for line in self.rfile:
+                    words = line.decode().split()
+                    if words[0] == "want":
+                        attempt = int(words[3]) if len(words) > 3 else 0
+                        run, reply = scheduler.admit(words[2], words[1] == "1", attempt), None
+                        self.wfile.write(b"go\n" if run else b"stop\n")
+                        self.wfile.flush()
+                        if run is None:
+                            return
+                    elif words[0] == "pid" and run:
+                        run.pid = int(words[1])
+                    elif words[0] == "done" and run:
+                        reply = words
+                        scheduler.release(run, reply)
+                        run = None
+            finally:
+                if run:  # the wrapper is gone without a word
+                    scheduler.release(run, None)
+
+    class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+
+    server = Server(path, Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+# The run.
+
+
+def in_scope(cap: int, budget: int) -> None:
+    """Run this script again, with the budget set, in a systemd scope capped at `cap` bytes, if one can be made."""
+    if os.environ.get("LAKE_BUILD_SCOPED") or not shutil.which("systemd-run"):
+        return
+    base = ["systemd-run", "--scope", "--quiet", "--collect", "--no-ask-password", "-p", f"MemoryMax={cap}", "-p", "OOMPolicy=continue"]
+    for command in (base, [*base, "--user"]):
+        if subprocess.run([*command, "true"], capture_output=True, check=False).returncode == 0:
+            os.environ["LAKE_BUILD_SCOPED"] = "1"
+            argv = [os.path.abspath(sys.argv[0]), *sys.argv[1:], "--mem", str(budget / GB)]
+            os.execvp(command[0], [*command, "--", sys.executable, "-I", *argv])
+    log("no systemd scope can be made here; the memory budget is the only guard")
+
+
+def fake_sysroot(real: Path, into: Path) -> None:
+    """A sysroot like `real` whose `lean` and `leanir` are this script."""
+    (into / "bin").mkdir(parents=True)
+    for entry in real.iterdir():
+        if entry.name != "bin":
+            (into / entry.name).symlink_to(entry)
+    for entry in (real / "bin").iterdir():
+        target = into / "bin" / entry.name
+        if entry.name in ("lean", "leanir"):
+            script = shlex.join([sys.executable, "-I", os.path.abspath(__file__), "--wrap", entry.name])
+            target.write_text(f'#!/bin/sh\nexec {script} "$@"\n', encoding="utf-8")
+            target.chmod(0o755)
+        else:
+            target.symlink_to(entry)
+
+
+# The modules the kernel still checks under `--dev`. `ties` (the default): those that equate a guest function's body,
+# or the core data, with a template, which a guest change makes stale and elaboration alone does not check: a
+# `stmtsEqb` tie (`tbStmtsEqb` too), a use of the `vc` tactic outside comments (whose proof only the kernel checks),
+# or a `decide +kernel` in a module that reads a body or the core program (`fn% «s»`, `core% «s» m`, `coreOf`,
+# `certOf`, …) or imports the core IR. `all`: every module the kernel decides
+# something in (budgets, tables), and every `kernel_lit` and `win_lit` value, but the other certificates `guest-cert`,
+# `guest-core` and `guest-memory` write, the generators' exact output, left to the gate.
+TIE = re.compile(r"stmtsEqb", re.I)
+# `vc` as a token outside comments; a binder named `vc` only keeps the kernel on one more module.
+VC = re.compile(r"(?<![\w.'`«])vc(?![\w.'»])")
+COMMENT = re.compile(r"/-.*?-/|--[^\n]*", re.S)
+CORE_READ = re.compile(r"\bfn% «|\bcore(?:_eq)?% «|\bFn\.«[^»]+»\.core\b|\bData\.core\d|\bcoreOf\b|\bcertOf\b|\bcoreProgram\b"
+                       r"|^(?:(?:public|private)\s+)?(?:meta\s+)?import\s+(?:all\s+)?LeanVM\.Guest\.(?:Data|Pack)\.", re.M)
+LIT = re.compile(r"^\s*(?:kernel_lit|win_lit)\b", re.M)
+CERT_HEADERS = ("Generated by `lake exe guest-cert`", "Generated by `lake exe guest-core`", "Generated by `lake exe guest-memory`")
+
+
+def kernel_checked(text: str, which: str) -> bool:
+    """Whether the kernel checks a module of text `text` under `--dev-kernel which`."""
+    if which == "all" and LIT.search(text):
+        return True
+    if any(h in text[:600] for h in CERT_HEADERS):
+        return False
+    if which == "all":
+        return "decide +kernel" in text
+    return (bool(TIE.search(text)) or bool(VC.search(COMMENT.sub("", text)))
+            or "decide +kernel" in text and bool(CORE_READ.search(text)))
+
+
+def kernel_modules(pkg: Path, which: str) -> list[str]:
+    """The modules of `pkg` the kernel checks under `--dev-kernel which`, by name."""
+    names = []
+    for path in sorted(pkg.rglob("*.lean")):
+        rel = path.relative_to(pkg)
+        if rel.parts[0] in (".lake", "scripts"):
+            continue
+        if kernel_checked(path.read_text(encoding="utf-8"), which):
+            parts = rel.with_suffix("").parts
+            names.append(".".join(parts[1:] if parts[0] in ("tests", "cli") else parts))
+    return names
+
+
+def dev_config(pkg: Path) -> Path:
+    """`DIR/.lake/lakefile.dev.toml`: `DIR/lakefile.toml` with its own build directory and the kernel skipped on the
+    libraries other than the test driver."""
+    text = (pkg / "lakefile.toml").read_text(encoding="utf-8")
+    config = tomllib.loads(text)
+    if "buildDir" in config:
+        sys.exit("lake-build: --dev: lakefile.toml already sets buildDir")
+    skip = [lib["name"] for lib in config.get("lean_lib", []) if lib["name"] != config.get("testDriver")]
+    for lib in config.get("lean_lib", []):
+        if lib["name"] in skip and "leanOptions" in lib:
+            sys.exit(f"lake-build: --dev: library {lib['name']} already sets leanOptions")
+    lines, out, lib = text.splitlines(), [], None
+    for i, line in enumerate(lines):
+        if i == next(j for j, l in enumerate(lines) if l.startswith("[")):
+            out += ['buildDir = ".lake/build-dev"  # lake-build.py --dev: kernel unchecked, never mixed with the real build', ""]
+        out.append(line)
+        if line.strip() == "[[lean_lib]]":
+            lib = True
+        elif line.startswith("["):
+            lib = None
+        elif lib and (m := re.fullmatch(r'name\s*=\s*"([^"]+)"\s*', line)) and m[1] in skip:
+            out.append("leanOptions = {debug.skipKernelTC = true}")  # a dotted key, unquoted
+    target = pkg / ".lake" / "lakefile.dev.toml"
+    target.parent.mkdir(exist_ok=True)
+    target.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return target
+
+
+def main() -> None:
+    if len(sys.argv) > 2 and sys.argv[1] == "--wrap":
+        wrap(sys.argv[2], sys.argv[3:])
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("dir", type=Path, help="the Lake package")
+    parser.add_argument("targets", nargs="*", help="what to build (default: the default targets)")
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+    parser.add_argument("--jobs", type=int, default=cores, help="modules at once (default: the cores)")
+    parser.add_argument("--mem", type=float, help="memory budget in GB (default: the machine's less 4)")
+    parser.add_argument("--cap", type=float, help="the scope's memory cap in GB (default: the machine's less 1)")
+    parser.add_argument("--no-scope", action="store_true", help="no systemd scope")
+    parser.add_argument("--seed", action="store_true", help=f"rewrite DIR/{TABLE} from the run's table")
+    parser.add_argument("--dev", action="store_true",
+                        help="development only: skip the kernel, in .lake/build-dev, but on --dev-kernel's modules")
+    parser.add_argument("--dev-kernel", choices=("ties", "all", "none"), default="ties",
+                        help="with --dev, the modules the kernel still checks: the templates' (default), every "
+                             "`decide +kernel`, or none")
+    parser.add_argument("--keep-going", action="store_true", help="after a failure, still build what does not import it")
+    opts = parser.parse_args()
+    if opts.dev and opts.seed:
+        sys.exit("lake-build: --seed records the real build, not a --dev one")
+    total = meminfo("MemTotal")
+    if limit := cgroup_file("memory.max"):
+        text = limit.read_text(encoding="ascii").strip()
+        total = min(total, int(text)) if text.isdigit() else total
+    budget = int(opts.mem * GB) if opts.mem else max(total - 4 * GB, 2 * GB)
+    if not opts.no_scope:
+        in_scope(int(opts.cap * GB) if opts.cap else total - GB, budget)
+    pkg = opts.dir.resolve()
+    lake = ["lake", "-f", str(dev_config(pkg))] if opts.dev else ["lake"]
+    if opts.dev:
+        log("--dev: the kernel checks nothing; development only, never a gate")
+    # A dev run's modules are lighter: its records stay apart, so they never understate the real build's.
+    local, seed = pkg / ".lake" / ("lake-build-dev.tsv" if opts.dev else TABLE), pkg / TABLE
+    table = {**read_table(seed), **read_table(local)}
+    scheduler = Scheduler(opts.jobs, budget, table, priorities(pkg, table), opts.keep_going)
+    real = Path(subprocess.run(["lean", "--print-prefix"], cwd=pkg, capture_output=True, text=True, check=True).stdout.strip())
+    work = Path(tempfile.mkdtemp(prefix="lake-build-"))
+    try:
+        fake_sysroot(Path(os.environ.get("LEAN_SYSROOT") or real), work / "sysroot")
+        server = serve(scheduler, str(work / "socket"))
+        threading.Thread(target=scheduler.poll, daemon=True).start()
+        env = {
+            **os.environ,
+            "LAKE_BUILD_ENV": json.dumps({k: os.environ.get(k) for k in ENV}),
+            "LAKE_BUILD_SOCK": str(work / "socket"),
+            "LAKE_BUILD_BIN": str(Path(os.environ.get("LEAN_SYSROOT") or real) / "bin"),
+            "LEAN_SYSROOT": str(work / "sysroot"),
+            "LAKE_OVERRIDE_LEAN": "true",
+            "LEAN_NUM_THREADS": str(4 * opts.jobs),  # Lake's pool: the modules waiting for admission, and Lake's own work
+        }
+        if opts.dev and opts.dev_kernel != "none":
+            (work / "kernel").mkdir()
+            (work / "kernel" / "modules.txt").write_text("\n".join(kernel_modules(pkg, opts.dev_kernel)) + "\n",
+                                                         encoding="utf-8")
+            env["LAKE_BUILD_KERNEL"] = str(work / "kernel" / "modules.txt")
+        log(f"{pkg.name}: {opts.jobs} at once within {budget / GB:.1f} GB, {len(table)} modules' records")
+        start, ticks = time.monotonic(), cpu_ticks()
+        code = subprocess.run([*lake, "build", "-q", *opts.targets], cwd=pkg, env=env, check=False).returncode
+        elapsed, (busy1, all1) = time.monotonic() - start, cpu_ticks()
+        server.shutdown()
+        scheduler.stop.set()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    local.parent.mkdir(exist_ok=True)
+    write_table(local, scheduler.table)
+    if opts.seed:
+        write_table(seed, seed_rows(pkg, scheduler.table))
+    peak = cgroup_file("memory.peak")
+    log(f"{scheduler.done} modules in {hms(elapsed)}, {scheduler.cpu / 3600:.2f} CPU-h; "
+        f"{scheduler.busy / max(elapsed, 1):.1f} of {opts.jobs} running on average, the machine's CPU "
+        f"{100 * (busy1 - ticks[0]) / max(all1 - ticks[1], 1):.0f}% busy; peak memory: {scheduler.peak_committed / GB:.1f} GB "
+        f"committed, {scheduler.peak_anon / GB:.1f} GB anonymous in the modules, {scheduler.peak_used / GB:.1f} GB used on the machine"
+        + (f", {int(peak.read_text()) / GB:.1f} GB in the scope" if peak else ""))
+    if scheduler.killed:
+        log(f"killed or stopped, and run again: {', '.join(scheduler.killed)}")
+    if scheduler.failed or code:
+        sys.exit(f"lake-build: failed: {', '.join(scheduler.failed) or f'lake build exited with {code}'}")
+    if subprocess.run([*lake, "build", "--no-build", "-q", *opts.targets], cwd=pkg, check=False).returncode:
+        sys.exit("lake-build: Lake finds the targets out of date after the run")
+    sys.exit(subprocess.run([*lake, "build", *opts.targets], cwd=pkg, check=False).returncode)
+
+
+if __name__ == "__main__":
+    main()

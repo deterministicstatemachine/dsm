@@ -159,7 +159,7 @@ def main():
         ("GENERATE_INFOPLIST_FILE", "NO"),
         ("INFOPLIST_FILE", quoted(f"{APP}/Info.plist")),
         ("LD_RUNPATH_SEARCH_PATHS", quoted("$(inherited) @executable_path/Frameworks")),
-        ("MARKETING_VERSION", quoted("0.1.1-beta.4")),
+        ("MARKETING_VERSION", quoted("0.1.1-beta.5")),
         ("OTHER_LDFLAGS", quoted("$(inherited) -lresolv")),
         ("PRODUCT_BUNDLE_IDENTIFIER", BUNDLE_ID),
         ("PRODUCT_NAME", quoted("$(TARGET_NAME)")),

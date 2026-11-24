@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 authors = ["DSM Development Team"]
 edition = "2021"
 repository = "https://github.com/deterministicstatemachine/dsm"
@@ -19,3 +19,42 @@ overflow-checks = true
 lto = false  # Disable LTO to preserve JNI exports
 codegen-units = 1
 strip = false  # Don't strip symbols for JNI
+
+# The per-trade vault proof's prover and verifier (`research/leanvm`) are optimized in every
+# profile: unoptimized, one proof takes minutes, and every test that trades proves its trade.
+[profile.dev.package.aggregation]
+opt-level = 3
+[profile.dev.package.claims]
+opt-level = 3
+[profile.dev.package.fiat_shamir_prover]
+opt-level = 3
+[profile.dev.package.flock]
+opt-level = 3
+[profile.dev.package.flock_parallel]
+opt-level = 3
+[profile.dev.package.isa]
+opt-level = 3
+[profile.dev.package.keccak256]
+opt-level = 3
+[profile.dev.package.lean_da]
+opt-level = 3
+[profile.dev.package.lean_sphincs]
+opt-level = 3
+[profile.dev.package.lean_xmss]
+opt-level = 3
+[profile.dev.package.stable_keccak_gkr]
+opt-level = 3
+[profile.dev.package.stable_lean_vm_core]
+opt-level = 3
+[profile.dev.package.stable_parallel]
+opt-level = 3
+[profile.dev.package.stable_pcs]
+opt-level = 3
+[profile.dev.package.stable_primitives]
+opt-level = 3
+[profile.dev.package.vault_step]
+opt-level = 3
+[profile.dev.package.verifier]
+opt-level = 3
+[profile.dev.package.zkdsl_compiler]
+opt-level = 3

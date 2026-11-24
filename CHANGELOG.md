@@ -9,7 +9,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.1.1-beta.5] — 2026-11-24
+
 ### Added
+
+- **Every trade leaves its vault's state and a proof; a reader checks one
+  proof (SoFi Amendment S36; owner, 2026-11-22).** After each swap the
+  trader's phone proves the vault step with leanVM (BLAKE3 proven by Flock)
+  and publishes one record: the vault's whole tree and a proof of every step
+  from the vault's genesis. A wallet reading a vault starts at the newest
+  record that verifies, checks that its trade consumed its parent from the
+  trade's own objects, and reads none of the vault's history. On a Galaxy A16
+  a proof takes about 2–3 s after the trade and is checked in about 95 ms.
+  The owner baselines, the vault histories and the vault witnesses in Connect
+  quotes and swaps are gone; a wallet backup taken before this release still
+  restores.
 
 - **A connected app sends the player to the wallet to approve, and the wallet
   goes back to it (DSM Amendment A11; owner, 2026-11-19).** A `dsm:connect/v1:`

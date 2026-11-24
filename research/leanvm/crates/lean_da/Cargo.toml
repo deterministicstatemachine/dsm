@@ -1,0 +1,20 @@
+[package]
+name = "lean_da"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+keccak256.workspace = true
+# The stable prover's additive NTT, the blobs' Reed-Solomon encoder.
+pcs = { package = "stable_pcs", path = "../stable_prover/pcs" }
+primitives = { package = "stable_primitives", path = "../stable_prover/primitives" }
+tracing.workspace = true
+verifier.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

@@ -139,57 +139,21 @@ pub const TAG_DSM_SOFI_VAULT_GENESIS_OBJECT: TaggedHashDomain<'static> =
 pub const TAG_DSM_SOFI_ROUTE_LANE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/route-lane/v1");
 
-// ── The owner baseline (SoFi Amendment S24) ────────────────────────────────
+// ── A vault's per-trade proof records (owner ruling 2026-11-22) ─────────────
 
-/// `c_f = H(tag ‖ CCB(VaultFrontierV1))` — a vault's frontier, economic
-/// state only.
-pub const TAG_DSM_SOFI_VAULT_FRONTIER: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-frontier/v1");
-/// `c_n = H(tag ‖ CCB(OwnerBaselineAuthV1))` — the state commitment an owner
-/// baseline's `AnchorPresentationV3` signs.
-pub const TAG_DSM_SOFI_VAULT_BASELINE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-baseline/v1");
-/// `H(tag ‖ v ‖ u64be(g))` — the locator under which a vault's owner
-/// baselines at generation `g` are indexed. Discovery only.
-pub const TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-baseline-locator/v1");
-/// Immutable-store namespace of a `VaultFrontierV1`, an
-/// `OwnerBaselineAuthV1`, a `VaultFrontierWitnessV1` and an owner baseline's
-/// presentation.
-pub const TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-frontier-object/v1");
-
-// ── A vault's history (SoFi Amendment S26) ──────────────────────────────────
-
-/// `H(tag ‖ v ‖ u64be(g) ‖ R_g)` — the leaf at position `g` of vault `v`'s
-/// history, and the immutable-store namespace of those exact bytes.
-pub const TAG_DSM_SOFI_VAULT_HISTORY_LEAF: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-history-leaf/v1");
-/// `H(tag ‖ left ‖ right)` — an interior node of a vault's history, and the
-/// immutable-store namespace of its 64 bytes: a node is fetched by its hash.
-pub const TAG_DSM_SOFI_VAULT_HISTORY_NODE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-history-node/v1");
-/// `H_n = H(tag ‖ CCB(VaultHistoryHeadV1))` — a vault's history root, which
-/// its frontier commits, and the immutable-store namespace of the head.
-pub const TAG_DSM_SOFI_VAULT_HISTORY_HEAD: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-history-head/v1");
-/// `H(tag ‖ v ‖ R)` — the locator under which the history leaf naming root
-/// `R` of vault `v` is indexed. Discovery only: a candidate stands only as
-/// a proof under an authenticated history root.
-pub const TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-history-locator/v1");
-
-// ── Contradictions of an owner baseline (SoFi Amendment S34) ───────────────
-
-/// `H(tag ‖ v)` — where contradictions of vault `v`'s owner baselines are
-/// indexed: one locator per vault, so one read covers every generation.
-/// Discovery only: a candidate stands only once the reader's own checks
-/// bear it out.
-pub const TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-contradiction-locator/v1");
-/// The immutable-store namespace of a `VaultBaselineContradictionV1`.
-pub const TAG_DSM_SOFI_VAULT_CONTRADICTION_OBJECT: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/vault-contradiction-object/v1");
+/// The immutable-store namespace of a vault's proof record: its tree after
+/// one trade and the proof of every step from its genesis to it.
+pub const TAG_DSM_SOFI_VAULT_PROOF_RECORD: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-proof-record/v1");
+/// `H(tag ‖ v ‖ u64be(g))` — the locator under which vault `v`'s proof
+/// records at generation `g` are indexed. Discovery only: a record stands
+/// only as Core verifies it and its trade's consumption of its parent.
+pub const TAG_DSM_SOFI_VAULT_PROOF_GENERATION_LOCATOR: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-proof-generation-locator/v1");
+/// `H(tag ‖ v ‖ R)` — the locator under which vault `v`'s proof records whose
+/// root is `R` are indexed. Discovery only, as above.
+pub const TAG_DSM_SOFI_VAULT_PROOF_ROOT_LOCATOR: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-proof-root-locator/v1");
 
 // ── Immutable-store namespaces of the published protocol objects (Part II
 //    §10, rebuild step R8). One per kind: the namespace is part of the
@@ -276,16 +240,9 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
     TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
     TAG_DSM_SOFI_ROUTE_LANE,
-    TAG_DSM_SOFI_VAULT_FRONTIER,
-    TAG_DSM_SOFI_VAULT_BASELINE,
-    TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR,
-    TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
-    TAG_DSM_SOFI_VAULT_HISTORY_LEAF,
-    TAG_DSM_SOFI_VAULT_HISTORY_NODE,
-    TAG_DSM_SOFI_VAULT_HISTORY_HEAD,
-    TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR,
-    TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR,
-    TAG_DSM_SOFI_VAULT_CONTRADICTION_OBJECT,
+    TAG_DSM_SOFI_VAULT_PROOF_RECORD,
+    TAG_DSM_SOFI_VAULT_PROOF_GENERATION_LOCATOR,
+    TAG_DSM_SOFI_VAULT_PROOF_ROOT_LOCATOR,
     TAG_DSM_SOFI_SETUP_OBJECT,
     TAG_DSM_SOFI_PRECOMMIT_OBJECT,
     TAG_DSM_SOFI_PREIMAGE_OBJECT,

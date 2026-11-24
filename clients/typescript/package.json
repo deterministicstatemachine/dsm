@@ -1,6 +1,6 @@
 {
   "name": "dsm-app-client",
-  "version": "0.1.1-beta.4",
+  "version": "0.1.1-beta.5",
   "description": "Plug your app into DSM: your app's own DSM account, wallet connections, payments, proofs of ownership and sign-in, from TypeScript or JavaScript.",
   "license": "MIT OR Apache-2.0",
   "homepage": "https://deterministicstatemachine.github.io/dsm/",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dsm-app-client"
-version = "0.1.1b4"
+version = "0.1.1b5"
 description = "Plug your app into DSM: your app's own DSM account, wallet connections, payments, proofs of ownership and sign-in, from Python."
 readme = "README.md"
 license = "MIT OR Apache-2.0"

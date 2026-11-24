@@ -1,0 +1,12 @@
+[package]
+name = "allocator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tikv-jemallocator.workspace = true

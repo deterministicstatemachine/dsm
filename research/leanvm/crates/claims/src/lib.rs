@@ -1,0 +1,213 @@
+//! The claims an aggregate proof attests, and their byte form: shared by the library, which proves and verifies
+//! them, and the sidecar's client, which builds neither.
+
+use lean_sphincs::LeanSphincsPublicKey;
+use lean_xmss::LeanXmssPublicKey;
+
+/// One leanXMSS claim: a pubkey, and the message it signed at whatever leaf index its
+/// signature carries.
+pub type LeanXmssClaim = (LeanXmssPublicKey, lean_xmss::Message);
+
+/// One leanSPHINCS claim: a pubkey, and the message it signed.
+pub type LeanSphincsClaim = (LeanSphincsPublicKey, lean_sphincs::Message);
+
+/// What an aggregate proof proves: every `(pubkey, message)` claim of two lists, one of leanXMSS and one of
+/// leanSPHINCS, had a valid signature, and, optionally, a commitment is the root of a well-formed matrix of blobs
+/// (`lean_da::BlobMatrix`).
+///
+/// Each list is strictly sorted (so without duplicates), and may be empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AggregateClaims {
+    pub lean_xmss: Vec<LeanXmssClaim>,
+    pub lean_sphincs: Vec<LeanSphincsClaim>,
+    /// `None` for no blobs.
+    pub da_commitment: Option<[u8; 32]>,
+    /// Research build: the vault chain this node's step extends, `None` for a node without a vault step.
+    pub vault: Option<VaultChain>,
+}
+
+/// Research build: a run of consecutive steps of one SoFi vault, as a reader sees it: the vault, the tree root the
+/// run starts from and the one it ends at, the last step's new generation, its external commitment, its attempt key,
+/// and, when it is a release, the digest of the verdict cell and outcome it names (zeros otherwise).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VaultChain {
+    pub vault_id: [u8; 32],
+    pub r_first: [u8; 32],
+    pub r_last: [u8; 32],
+    pub generation: u64,
+    pub external_commitment: [u8; 32],
+    pub attempt_key: [u8; 32],
+    pub op_digest: [u8; 32],
+}
+
+/// Which covered claims an aggregation proves.
+#[derive(Clone, Copy, Debug)]
+pub enum OutputClaims<'a> {
+    /// Every covered signature claim. The DA root is `blobs`' if any, otherwise the first
+    /// child's that has one, otherwise none.
+    All,
+    /// Exactly these, each covered by the inputs.
+    Only(&'a AggregateClaims),
+}
+
+// The claims' byte form is specified in `bins/leanvm-sidecar/README.md` (Claims). Decoding is canonical: it rejects
+// any other flag and trailing bytes. Order is kept, sorted or not.
+
+const _: () = assert!(lean_xmss::PUB_KEY_SIZE == 32 && lean_sphincs::PUB_KEY_SIZE == 32);
+const _: () = assert!(lean_xmss::MESSAGE_LEN == 32 && lean_sphincs::MESSAGE_LEN == 32);
+
+fn encode_claims<K>(out: &mut Vec<u8>, claims: &[(K, [u8; 32])], pk_bytes: impl Fn(&K) -> [u8; 32]) {
+    out.extend((claims.len() as u64).to_le_bytes());
+    for (pk, message) in claims {
+        out.extend(pk_bytes(pk));
+        out.extend(message);
+    }
+}
+
+/// Reads a count and that many `(pubkey, message)` pairs off the front of `bytes`. A forged count allocates nothing.
+fn decode_claims<K>(bytes: &mut &[u8], pk: impl Fn(&[u8; 32]) -> K) -> Option<Vec<(K, [u8; 32])>> {
+    let (count, rest) = bytes.split_first_chunk::<8>()?;
+    let count = usize::try_from(u64::from_le_bytes(*count)).ok()?;
+    let (pairs, rest) = rest.split_at_checked(count.checked_mul(64)?)?;
+    *bytes = rest;
+    let pairs = pairs.as_chunks::<32>().0.as_chunks::<2>().0;
+    Some(pairs.iter().map(|[key, message]| (pk(key), *message)).collect())
+}
+
+impl AggregateClaims {
+    /// The number of `(pubkey, message)` claims, not of distinct signers: a pubkey may sign
+    /// several messages.
+    pub fn num_signature_claims(&self) -> usize {
+        self.lean_xmss.len() + self.lean_sphincs.len()
+    }
+
+    /// Encode claims, which [`Self::from_bytes`] reads back.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_claims(&mut out, &self.lean_xmss, LeanXmssPublicKey::to_bytes);
+        encode_claims(&mut out, &self.lean_sphincs, LeanSphincsPublicKey::to_bytes);
+        match self.da_commitment {
+            None => out.push(0),
+            Some(root) => {
+                out.push(1);
+                out.extend(root);
+            }
+        }
+        match &self.vault {
+            None => out.push(0),
+            Some(v) => {
+                out.push(1);
+                out.extend(v.to_bytes());
+            }
+        }
+        out
+    }
+
+    /// Decode claims, `None` if the bytes are not exactly one encoding.
+    pub fn from_bytes(mut bytes: &[u8]) -> Option<Self> {
+        let lean_xmss = decode_claims(&mut bytes, LeanXmssPublicKey::from_bytes)?;
+        let lean_sphincs = decode_claims(&mut bytes, LeanSphincsPublicKey::from_bytes)?;
+        let (da_commitment, rest) = match bytes.split_first()? {
+            (0, rest) => (None, rest),
+            (1, rest) => {
+                let (root, rest) = rest.split_first_chunk::<32>()?;
+                (Some(*root), rest)
+            }
+            _ => return None,
+        };
+        let vault = match rest.split_first()? {
+            (0, []) => None,
+            (1, rest) => Some(VaultChain::from_bytes(rest.try_into().ok()?)),
+            _ => return None,
+        };
+        Some(Self {
+            lean_xmss,
+            lean_sphincs,
+            da_commitment,
+            vault,
+        })
+    }
+}
+
+impl VaultChain {
+    /// The byte length of [`Self::to_bytes`].
+    pub const BYTES: usize = 6 * 32 + 8;
+
+    /// The vault, the first root, the last root, the generation (`u64`), the external commitment, the attempt key and
+    /// the op digest.
+    pub fn to_bytes(&self) -> [u8; Self::BYTES] {
+        let mut out = [0; Self::BYTES];
+        let parts: [&[u8]; 7] = [
+            &self.vault_id,
+            &self.r_first,
+            &self.r_last,
+            &self.generation.to_le_bytes(),
+            &self.external_commitment,
+            &self.attempt_key,
+            &self.op_digest,
+        ];
+        let mut at = 0;
+        for part in parts {
+            out[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        }
+        out
+    }
+
+    /// Reads [`Self::to_bytes`] back; every byte string of the length is one.
+    pub fn from_bytes(bytes: &[u8; Self::BYTES]) -> Self {
+        let d32 = |at: usize| -> [u8; 32] { bytes[at..at + 32].try_into().unwrap() };
+        Self {
+            vault_id: d32(0),
+            r_first: d32(32),
+            r_last: d32(64),
+            generation: u64::from_le_bytes(bytes[96..104].try_into().unwrap()),
+            external_commitment: d32(104),
+            attempt_key: d32(136),
+            op_digest: d32(168),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_form_round_trips_and_is_canonical() {
+        let vault = VaultChain {
+            vault_id: [1; 32],
+            r_first: [2; 32],
+            r_last: [3; 32],
+            generation: 0x0102_0304_0506_0708,
+            external_commitment: [5; 32],
+            attempt_key: [6; 32],
+            op_digest: [7; 32],
+        };
+        for (da_commitment, vault) in [
+            (None, None),
+            (Some([9; 32]), None),
+            (None, Some(vault)),
+            (Some([9; 32]), Some(vault)),
+        ] {
+            let claims = AggregateClaims {
+                da_commitment,
+                vault,
+                ..AggregateClaims::default()
+            };
+            let bytes = claims.to_bytes();
+            assert_eq!(AggregateClaims::from_bytes(&bytes), Some(claims.clone()));
+            // One byte more, one less, or another flag: not an encoding.
+            assert_eq!(AggregateClaims::from_bytes(&[&bytes[..], &[0]].concat()), None);
+            assert_eq!(AggregateClaims::from_bytes(&bytes[..bytes.len() - 1]), None);
+            let mut flag = bytes.clone();
+            let at = bytes.len() - 1 - vault.map_or(0, |_| VaultChain::BYTES);
+            flag[at] = 2;
+            assert_eq!(AggregateClaims::from_bytes(&flag), None);
+        }
+        // The vault's fields at their offsets.
+        let bytes = vault.to_bytes();
+        assert_eq!(bytes[96..104], [8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(VaultChain::from_bytes(&bytes), vault);
+    }
+}

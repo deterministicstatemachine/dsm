@@ -226,7 +226,7 @@ A wallet that already made its identity on another storage set keeps it there: c
 Your app stays what it is and gets its own DSM account; players connect their wallets to it. Sign-in, payments, items, trades and matches, with no Kotlin, Swift or Rust. Plugging an app in needs none of this page's prerequisites but Node.js 20+ (and Python 3 for the Python client), and no clone: DSM's tools come prebuilt from a release, every download checked against its `SHA256SUMS`.
 
 ```bash
-curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.1-beta.4/install.sh
+curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.1-beta.5/install.sh
 sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```

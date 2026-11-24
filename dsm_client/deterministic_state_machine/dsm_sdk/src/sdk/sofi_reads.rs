@@ -12,10 +12,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 
 use dsm::ccb::StorageSetMembers;
-use dsm::common::domain_tags::{
-    TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
-    TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
-};
+use dsm::common::domain_tags::{TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR};
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::crypto::domain::TaggedHashDomain;
 use dsm::economic::peer_lineage::PeerEvidenceFetcher;
@@ -506,52 +503,6 @@ impl SofiReads for LiveSofiReads<'_> {
         )
     }
 
-    fn history_leaf_candidates(
-        &self,
-        vault_id: &D32,
-        root: &D32,
-    ) -> Result<Discovered<Vec<u8>>, ReadFailure> {
-        self.read(
-            "history leaf candidates",
-            resolve_locator_all(
-                self.set,
-                TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR.source_bytes(),
-                &dsm::sofi::history::history_locator(vault_id, root),
-                LOCATOR_BUDGET,
-                |bytes| {
-                    dsm::sofi::history::decode_leaf(bytes).map(|(named, .., leaf_root)| {
-                        (
-                            dsm::sofi::history::history_locator(&named, &leaf_root),
-                            bytes.to_vec(),
-                        )
-                    })
-                },
-            ),
-        )
-    }
-
-    fn baseline_contradiction_candidates(
-        &self,
-        vault_id: &D32,
-    ) -> Result<Discovered<Vec<u8>>, ReadFailure> {
-        self.read(
-            "baseline contradiction candidates",
-            resolve_locator_all(
-                self.set,
-                TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR.source_bytes(),
-                &dsm::sofi::derive::vault_contradiction_locator(vault_id),
-                LOCATOR_BUDGET,
-                |bytes| match dsm::sofi::wire::VaultBaselineContradictionV1::decode(bytes) {
-                    Ok(claim) => Some((
-                        dsm::sofi::derive::vault_contradiction_locator(&claim.vault_id),
-                        bytes.to_vec(),
-                    )),
-                    Err(..) => None,
-                },
-            ),
-        )
-    }
-
     fn token_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, ReadFailure> {
         anchored_policy_bytes(self.set, policy_commit, &self.runtime)
             .map_err(|failure| ReadFailure(format!("token policy: {failure}")))
@@ -643,24 +594,15 @@ impl SofiReads for LiveSofiReads<'_> {
             .map_err(|e| ReadFailure(format!("vault head: {e}")))
     }
 
-    fn recorded_baseline(
+    fn proof_record_candidates(
         &self,
         genesis: &dsm::sofi::lineage::AcceptedVaultGenesis,
-    ) -> Result<Option<dsm::sofi::frontier::VerifiedFrontier>, ReadFailure> {
-        let Some((generation, bundle)) = sofi_vault_head::baseline(genesis.vault_id())
-            .map_err(|e| ReadFailure(format!("vault baseline: {e}")))?
-        else {
-            return Ok(None);
-        };
-        // The record is this device's own; it stands only as Core
-        // authenticates it again now.
-        match crate::sdk::vault_baseline::authenticate(&bundle, genesis) {
-            Ok(verified) if verified.frontier().generation == generation => Ok(Some(verified)),
-            Ok(..) => Err(ReadFailure(
-                "the recorded baseline is not at the generation it was recorded at".into(),
-            )),
-            Err(e) => Err(ReadFailure(format!("the recorded baseline: {e}"))),
-        }
+        root: Option<&D32>,
+    ) -> Result<Vec<Vec<u8>>, ReadFailure> {
+        self.read(
+            "vault proof records",
+            crate::sdk::vault_proof_io::candidates(self.set, genesis, root),
+        )
     }
 
     fn trader_root_at(
@@ -743,12 +685,24 @@ impl SofiReads for LiveSofiReads<'_> {
             .map_err(|unresolved| PeerLineageFailure::Unresolved(unresolved.to_string()))
     }
 
+    fn record_proven(
+        &self,
+        head: &dsm::sofi::vault_proof::ProvenVaultHead,
+    ) -> Result<Option<dsm::sofi::resolve::ReplacedRecord>, ReadFailure> {
+        sofi_vault_head::record_proven(head.vault_id(), head.generation(), head.root(), head.tree())
+            .map_err(|e| ReadFailure(format!("record the proof record's state: {e}")))
+    }
+
     fn record_generation(
         &self,
         post: &VaultPostState,
+        genesis: &dsm::sofi::lineage::AcceptedVaultGenesis,
     ) -> Result<Option<dsm::sofi::resolve::ReplacedRecord>, ReadFailure> {
-        sofi_vault_head::record_walked(post)
-            .map_err(|e| ReadFailure(format!("record generation: {e}")))
+        let replaced = sofi_vault_head::record_walked(post)
+            .map_err(|e| ReadFailure(format!("record generation: {e}")))?;
+        crate::sdk::vault_proof_io::established(self.set, genesis, post, self.own)
+            .map_err(|e| ReadFailure(format!("record generation: {e}")))?;
+        Ok(replaced)
     }
 
     fn keep_completion(

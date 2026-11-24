@@ -6,14 +6,14 @@ Its protobuf types (`dsm_app_client/generated/dsm_app_pb2.py`) are committed, so
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install dsm-app-client==0.1.1b4
+pip install dsm-app-client==0.1.1b5
 ```
 
 From a release, `install.sh` also puts its wheel in `~/.local/share/dsm/clients`, with the examples beside it, for a machine that has run it:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.1b4-py3-none-any.whl
+pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.1b5-py3-none-any.whl
 python3 ~/.local/share/dsm/examples/account_status.py
 ```
 

@@ -1,6 +1,6 @@
 [package]
 name = "dsm"
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 edition = "2021"
 authors = ["DSM Development Team"]
 description = "Deterministic State Machine - Pure Core Business Logic (NO JNI)"
@@ -73,6 +73,12 @@ dsm-sphincs = { path = "../../../crates/dsm-sphincs" }
 # The offline anchor's release objects and their recomputation (`M`, `h_{i+1}`, `D`), the one
 # definition the chip signs under: Core verifies a payer's chain of offline spends with it.
 dsm-anchor-core = { path = "../../../crates/dsm-anchor-core" }
+# Per-trade vault proofs (owner ruling 2026-11-22): leanVM with the BLAKE3 instruction proven by Flock, the
+# vault step as a leanVM program, and its prover (`research/leanvm`).
+aggregation = { path = "../../../research/leanvm/crates/aggregation" }
+vault_step = { path = "../../../research/leanvm/crates/vault_step" }
+leanvm_prover = { package = "stable_lean_vm_core", path = "../../../research/leanvm/crates/stable_prover/lean_vm_core" }
+leanvm_isa = { package = "isa", path = "../../../research/leanvm/crates/isa" }
 getrandom = "0.4.2"
 merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }

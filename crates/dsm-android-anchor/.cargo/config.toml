@@ -1,0 +1,7 @@
+# The shipping arm64 library (this crate's cdylib, renamed libdsm_sdk.so): the per-trade vault proof's
+# binary-field multiply (`research/leanvm`) runs on the ARMv8 crypto extension's carry-less multiply
+# (PMULL), enabled here; without it the prover takes its portable path, several times slower. The Galaxy
+# A16's 2.3–3 s per proof was measured with it. A phone whose CPU lacks the extension cannot run a library
+# built this way.
+[target.aarch64-linux-android]
+rustflags = ["-C", "target-feature=+aes"]

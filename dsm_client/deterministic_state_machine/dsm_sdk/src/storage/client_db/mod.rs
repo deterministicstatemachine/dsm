@@ -219,7 +219,6 @@ pub fn init_database() -> Result<()> {
         // before the version is judged: see `upgrade`.
         upgrade::upgrade_in_place(&mut conn)?;
         create_schema(&conn)?;
-        sofi_vault_head::drop_superseded_baselines(&conn)?;
         // A changed row tells the backup loop the wallet moved: it reads no
         // table on a timer (`wallet_backup_flow::row_changed`).
         conn.update_hook(Some(
@@ -528,14 +527,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// Amendment A14), so no frontier is kept and `peer_frontier` is no longer
 /// created, read or written. A database made before keeps the table, unused.
 ///
-/// 29: the owner baseline (SoFi Amendment S24) adds
-/// `sofi_vault_witness`, `sofi_vault_baseline`, `sofi_vault_owner_baseline`
-/// and `sofi_vault_quarantine`, created on open; no existing table changes.
-/// The same for `sofi_vault_label`, an account's own names for its vaults,
-/// and for `sofi_vault_history_published`, how far an owner published a
-/// vault's history (SoFi Amendment S26). A baseline record whose frontier
-/// predates S26 is dropped when the database opens, and adopted or signed
-/// again (`sofi_vault_head::drop_superseded_baselines`).
+/// 29: `sofi_vault_witness` and `sofi_vault_quarantine`, created on open; no
+/// existing table changes. The same for `sofi_vault_label`, an account's own
+/// names for its vaults. The owner baseline tables 29 also made
+/// (`sofi_vault_baseline`, `sofi_vault_owner_baseline`,
+/// `sofi_vault_history_published`) are dropped on open: a vault's state is
+/// read from its proof records (owner ruling 2026-11-22).
 ///
 /// 30: key schedule KS1 (Extract-then-Expand). Every identity secret, and so
 /// every key, DevID and genesis this store records, comes from a new
@@ -894,21 +891,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             trader_device_id BLOB NOT NULL CHECK (length(trader_device_id) = 32),
             witness          BLOB NOT NULL      -- CCB VaultFrontierWitnessV1
         ) WITHOUT ROWID;
-        -- v25: the owner baseline this device started a vault's chain at,
-        -- authenticated again whenever the chain starts there.
-        CREATE TABLE IF NOT EXISTS sofi_vault_baseline(
-            vault_id   BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
-            generation INTEGER NOT NULL CHECK (generation > 0),
-            bundle     BLOB NOT NULL            -- VaultBaselineV1
-        ) WITHOUT ROWID;
-        -- v25: the baselines this device signed as a vault's owner, one per
-        -- generation, and whether each is published.
-        CREATE TABLE IF NOT EXISTS sofi_vault_owner_baseline(
-            vault_id   BLOB NOT NULL CHECK (length(vault_id) = 32),
-            generation INTEGER NOT NULL CHECK (generation > 0),
-            bundle     BLOB NOT NULL,           -- VaultBaselineV1
-            PRIMARY KEY (vault_id, generation)
-        ) WITHOUT ROWID;
         -- v25: a vault whose owner signed two frontiers at one generation
         -- (Req 6.3): quarantined for this device, never chosen between.
         -- Still 29: a name this account keeps for a vault it created (owner
@@ -917,12 +899,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
             vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
             label    TEXT NOT NULL
         ) WITHOUT ROWID;
-        -- SoFi Amendment S26: the highest generation of a vault's history
-        -- its owner published, with every node, leaf and state leaf below.
-        CREATE TABLE IF NOT EXISTS sofi_vault_history_published(
-            vault_id   BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
-            generation INTEGER NOT NULL CHECK (generation >= 0)
-        ) WITHOUT ROWID;
+        -- The owner baselines and published histories (SoFi Amendments S24,
+        -- S26) are gone: a vault's state is read from its proof records
+        -- (owner ruling 2026-11-22).
+        DROP TABLE IF EXISTS sofi_vault_baseline;
+        DROP TABLE IF EXISTS sofi_vault_owner_baseline;
+        DROP TABLE IF EXISTS sofi_vault_history_published;
         CREATE TABLE IF NOT EXISTS sofi_vault_quarantine(
             vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
             why      TEXT NOT NULL

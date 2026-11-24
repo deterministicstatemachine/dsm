@@ -591,7 +591,6 @@ mod tests {
                 token_in: era.clone(),
                 token_out: vec![9; 32],
                 amount_in: 150,
-                vault_witnesses: Vec::new(),
             })),
             "ask the wallet to price 1.50 ERA"
         );
@@ -602,7 +601,6 @@ mod tests {
                 token_out: vec![9; 5],
                 amount_in: 150,
                 min_amount_out: 4510,
-                vault_witnesses: Vec::new(),
             })),
             format!(
                 "ask the wallet to trade 1.50 ERA for at least 4510 smallest units of {}",

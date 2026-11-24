@@ -12,6 +12,8 @@ import RestoreWords from './restore/RestoreWords';
 import type { RestoreFlow } from '../hooks/useGenesisFlow';
 import { buildHomeStatusLines } from '../viewmodels/homeViewModel';
 import ModernBoot from './modern/ModernBoot';
+import HomeChameleon from './HomeChameleon';
+import { askForInbox } from './screens/wallet/inboxAsk';
 import type { Skin } from '../runtime/appRuntimeStore';
 
 type Props = {
@@ -335,11 +337,13 @@ export default function AppContent({
       if (currentScreen === 'home') {
         return (
           <div className="dsm-content dsm-content--home">
-            <img
+            <HomeChameleon
               src={chameleonSrc}
               onError={() => setChameleonSrc('images/vaulthunters/chameleon.gif')}
-              alt="Chameleon"
-              style={{ width: '260px', height: 'auto', position: 'absolute', top: '-23px', left: '-3px', zIndex: 1000 }}
+              onOpenInbox={() => {
+                askForInbox();
+                navigate('wallet');
+              }}
             />
             <div className="dsm-logo-placeholder" style={{ marginTop: '80px', marginBottom: '10px' }}>
               <img src={dsmLogoSrc} alt="DSM StateBoy Logo" style={{ width: '140%', height: '140%', objectFit: 'contain' }} />

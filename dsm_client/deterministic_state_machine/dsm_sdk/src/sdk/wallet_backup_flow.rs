@@ -99,15 +99,21 @@ pub const BACKUP_TABLES: &[&str] = &[
     "pending_offline_receipt",
     "pending_offline_origin",
     "pending_offline_origin_write",
-    "sofi_vault_baseline",
-    "sofi_vault_history_published",
     "sofi_vault_label",
     "sofi_vault_leaf",
-    "sofi_vault_owner_baseline",
     "sofi_vault_quarantine",
     "sofi_vault_root",
     "sofi_vault_step",
     "sofi_vault_witness",
+];
+
+/// Tables a backup taken before SoFi Amendment S36 holds and this build has
+/// none of: the owner baselines and the vault histories, which a vault's proof
+/// records replace (owner ruling 2026-11-22). A restore passes them over.
+const RETIRED_BACKUP_TABLES: &[&str] = &[
+    "sofi_vault_baseline",
+    "sofi_vault_history_published",
+    "sofi_vault_owner_baseline",
 ];
 
 fn storage(what: &str, e: impl std::fmt::Display) -> DsmError {
@@ -433,6 +439,9 @@ pub fn install(tx: &rusqlite::Transaction<'_>, body: &Body) -> Result<(), DsmErr
         ));
     }
     for table in &body.tables {
+        if RETIRED_BACKUP_TABLES.contains(&table.name.as_str()) {
+            continue;
+        }
         let Some(name) = BACKUP_TABLES.iter().find(|t| **t == table.name) else {
             return Err(storage(
                 "table",

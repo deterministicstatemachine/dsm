@@ -1,36 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The owner baseline and the reader's witness (SoFi Amendment S24).
+//! A reader's witness of a vault, and the vault's whole tree.
 //!
-//! A party that holds nothing of a vault starts from the latest baseline its
-//! owner signed, not from the genesis. The baseline is three objects, and
-//! each says one thing:
-//!
-//! - [`VaultFrontierV1`] — the vault's root at one generation. Economic state
-//!   only: `c_f = H(vault-frontier/v1; CCB)`.
-//! - [`OwnerBaselineAuthV1`] — `c_f`, and the owner-authority position the
-//!   signer is proven at. `c_n = H(vault-baseline/v1; CCB)`.
-//! - An `AnchorPresentationV3` over `c_n`, by the owner.
-//!
-//! [`authenticate_frontier_owner`] checks them in that order and is the only
-//! way to a [`VerifiedFrontier`]. Authority and economic state meet only at
-//! `frontier_commitment`, so a change in the owner's authority lineage
-//! changes no root and no parent identity.
-//!
-//! What a reader then holds is a [`VaultWitness`]: the vault's state leaf
+//! A [`VaultWitness`] is the vault's state leaf
 //! with its path, and the reader's own relationship leaf (or its absence)
 //! with its path, under one authenticated root. Constant in size, whatever
 //! the vault's age or the number of its traders. It is advanced through each
 //! generation's write set ([`VaultWitness::advance`]): a path is specific to
 //! its root, and the receipt's own paths recompute every sibling it wrote.
 
-use crate::common::domain_tags::{TAG_DSM_SOFI_VAULT_BASELINE, TAG_DSM_SOFI_VAULT_FRONTIER};
-use crate::core::identity::authority_resolver::{
-    resolve_owner_authority_at_position, OwnerAuthorityAtPosition, PresentedIdentity,
-    ResolveFailure,
-};
-use crate::crypto::blake3::dsm_domain_hasher;
-use crate::dlv::vault_state_anchor_v3::{verify_anchor_v3_candidate, SignedVaultStateAnchorV3};
 use crate::economic::tree::{leaf_node, root_from_path, EconomicSmt, ECONOMIC_SMT_HEIGHT};
 
 use super::derive;
@@ -38,144 +16,12 @@ use super::lineage::AcceptedVaultGenesis;
 use super::smt::fold::{advance_path, AdvanceError};
 use super::validation::VaultPostState;
 use super::wire::{
-    FrontierRelationship, OwnerBaselineAuthV1, SofiWireError, VaultFrontierV1,
-    VaultFrontierWitnessV1, VaultRelationshipLeaf, VaultStateLeaf,
+    FrontierRelationship, SofiWireError, VaultFrontierWitnessV1, VaultRelationshipLeaf,
+    VaultStateLeaf,
 };
 
 type D32 = [u8; 32];
 type Path = [D32; ECONOMIC_SMT_HEIGHT];
-
-fn tagged(tag: crate::crypto::domain::TaggedHashDomain<'static>, bytes: &[u8]) -> D32 {
-    let mut h = dsm_domain_hasher(tag);
-    h.update(bytes);
-    *h.finalize().as_bytes()
-}
-
-/// `c_f = H(vault-frontier/v1; CCB(VaultFrontierV1))`.
-pub fn frontier_commitment(frontier: &VaultFrontierV1) -> D32 {
-    tagged(TAG_DSM_SOFI_VAULT_FRONTIER, &frontier.encode())
-}
-
-/// `c_n = H(vault-baseline/v1; CCB(OwnerBaselineAuthV1))` — what the owner's
-/// anchor signs.
-pub fn baseline_commitment(auth: &OwnerBaselineAuthV1) -> D32 {
-    tagged(TAG_DSM_SOFI_VAULT_BASELINE, &auth.encode())
-}
-
-/// A frontier whose root the vault's owner signed, as Core authenticated it.
-/// Private fields and one constructor, [`authenticate_frontier_owner`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedFrontier {
-    frontier: VaultFrontierV1,
-    commitment: D32,
-    owner_genesis: D32,
-    owner: OwnerAuthorityAtPosition,
-}
-
-impl VerifiedFrontier {
-    pub fn frontier(&self) -> &VaultFrontierV1 {
-        &self.frontier
-    }
-
-    /// `c_f`: two baselines of one vault at one generation are one frontier
-    /// exactly when this agrees.
-    pub fn commitment(&self) -> &D32 {
-        &self.commitment
-    }
-}
-
-/// An owner baseline Core tied to its vault's history (SoFi Amendment S34):
-/// its history starts at the accepted genesis, holds the frontier's root at
-/// its generation, that root is the post root of the exercise final at the
-/// root before it, and no contradiction published for it held. Private field
-/// and one constructor, which only `Verifier::tie_baseline` calls; a reader
-/// adopts a baseline only as one of these.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TiedBaseline {
-    baseline: VerifiedFrontier,
-}
-
-impl TiedBaseline {
-    pub(crate) fn tied(baseline: VerifiedFrontier) -> Self {
-        TiedBaseline { baseline }
-    }
-
-    /// The authenticated baseline this tie holds.
-    pub fn baseline(&self) -> &VerifiedFrontier {
-        &self.baseline
-    }
-}
-
-fn invalid(msg: impl Into<String>) -> ResolveFailure {
-    ResolveFailure::Invalid(msg.into())
-}
-
-/// Authenticate an owner baseline of `genesis`'s vault, in the order SoFi
-/// Amendment S24 fixes:
-///
-/// 1. the anchor's candidate key signed `c_n`, and `auth_bytes` re-hash to it;
-/// 2. P0–P6 at the position `auth_bytes` commits prove the accepted genesis's
-///    owner, and the proven key is the candidate, byte for byte;
-/// 3. `frontier_bytes` re-hash to the `frontier_commitment` `auth_bytes`
-///    binds, and the frontier names this vault.
-///
-/// Only then is the frontier's root accepted. Every failure is the
-/// resolver's class: material missing is `Absent` or `Incomplete`, anything
-/// that does not verify is `Invalid`.
-pub fn authenticate_frontier_owner(
-    anchor: &SignedVaultStateAnchorV3,
-    auth_bytes: &[u8],
-    frontier_bytes: &[u8],
-    presented: &PresentedIdentity<'_>,
-    genesis: &AcceptedVaultGenesis,
-) -> Result<VerifiedFrontier, ResolveFailure> {
-    // 1 — the signature, and the bytes it signed.
-    verify_anchor_v3_candidate(anchor).map_err(|e| invalid(format!("baseline: {e}")))?;
-    if tagged(TAG_DSM_SOFI_VAULT_BASELINE, auth_bytes) != anchor.state_commitment {
-        return Err(invalid(
-            "baseline: the authentication bytes do not hash to the anchor's commitment",
-        ));
-    }
-    let auth = OwnerBaselineAuthV1::decode(auth_bytes)
-        .map_err(|e| invalid(format!("baseline: authentication object: {e}")))?;
-
-    // 2 — the owner, at the position the signer committed.
-    let owner_genesis = genesis.preimage().owner_genesis;
-    let proven = resolve_owner_authority_at_position(
-        &owner_genesis,
-        &auth.owner_authority_transition_digest,
-        presented,
-    )?;
-    if proven.device_id != genesis.preimage().owner_device_id {
-        return Err(invalid(
-            "baseline: the proven device is not the vault's owner device",
-        ));
-    }
-    if anchor.candidate_public_key != proven.ak_pk {
-        return Err(invalid(
-            "baseline: the anchor's candidate key is not the proven owner key",
-        ));
-    }
-
-    // 3 — the frontier the owner bound, and only that one.
-    let commitment = tagged(TAG_DSM_SOFI_VAULT_FRONTIER, frontier_bytes);
-    if commitment != auth.frontier_commitment {
-        return Err(invalid(
-            "baseline: the frontier bytes are not the frontier the owner bound",
-        ));
-    }
-    let frontier = VaultFrontierV1::decode(frontier_bytes)
-        .map_err(|e| invalid(format!("baseline: frontier: {e}")))?;
-    if frontier.vault_id != *genesis.vault_id() {
-        return Err(invalid("baseline: the frontier names another vault"));
-    }
-    Ok(VerifiedFrontier {
-        frontier,
-        commitment,
-        owner_genesis,
-        owner: proven,
-    })
-}
 
 /// Why a witness is not one of the vault at a root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,8 +34,6 @@ pub enum WitnessRefused {
     StateNotUnderRoot,
     /// The state leaf is not at the witness's generation.
     StateGeneration { expected: u64, got: u64 },
-    /// The state leaf names another owner than the baseline's.
-    StateOwner,
     /// The relationship, present or absent, does not fold to the root.
     RelationshipNotUnderRoot,
     /// The relationship leaf names another trader.
@@ -212,7 +56,6 @@ impl core::fmt::Display for WitnessRefused {
                 f,
                 "the state leaf is at generation {got}, the witness at {expected}"
             ),
-            Self::StateOwner => write!(f, "the state leaf names another owner"),
             Self::RelationshipNotUnderRoot => {
                 write!(f, "the relationship proof is not under the root")
             }
@@ -346,43 +189,6 @@ impl VaultWitness {
             state.generation,
             *genesis.genesis_root(),
             &wire,
-            trader_genesis,
-            trader_device_id,
-        )
-    }
-
-    /// The witness at an owner baseline Core tied to its vault's history
-    /// (SoFi Amendments S24, S34): `wire` checked against the root the owner
-    /// signed, its state leaf naming that owner.
-    pub fn from_baseline(
-        tied: &TiedBaseline,
-        wire: &VaultFrontierWitnessV1,
-        trader_genesis: D32,
-        trader_device_id: D32,
-    ) -> Result<Self, WitnessRefused> {
-        Self::under_frontier(tied.baseline(), wire, trader_genesis, trader_device_id)
-    }
-
-    /// `wire` checked against the root of `baseline`, a frontier Core
-    /// authenticated, its state leaf naming that frontier's owner: the
-    /// witness checks a tied baseline's witness goes through.
-    fn under_frontier(
-        baseline: &VerifiedFrontier,
-        wire: &VaultFrontierWitnessV1,
-        trader_genesis: D32,
-        trader_device_id: D32,
-    ) -> Result<Self, WitnessRefused> {
-        if wire.state_leaf.owner_genesis != baseline.owner_genesis
-            || wire.state_leaf.owner_device_id != baseline.owner.device_id
-        {
-            return Err(WitnessRefused::StateOwner);
-        }
-        let frontier = baseline.frontier();
-        Self::checked(
-            frontier.vault_id,
-            frontier.generation,
-            frontier.root,
-            wire,
             trader_genesis,
             trader_device_id,
         )

@@ -1,0 +1,157 @@
+% !TeX root = ../drafts/10-ethereum.tex
+\section{Ethereum use cases}\label{sec:ethereum}
+
+An aggregate proof certifies signature claims and the correct encoding of blob data. One guest program establishes these claims by checking raw signatures, checking a blob matrix, or recursively verifying child proofs of the same program.
+
+\subsection{Recursive aggregation}\label{sec:recursion}\label{sec:xmss-agg}\label{sec:sphincs-agg}
+
+A signature claim identifies what was signed and by whom. For both leanXMSS, two layers of XMSS~\cite{rfc8391}, and SPHINCS+~\cite{sphincs}, it is a $(\text{public key},\text{message})$ pair. Each leanXMSS signature carries the leaf index it was made at, so its Merkle path is its own, and the guest derives that signature's addresses from the index's bits; the claim does not record it.
+
+A node may publish any subset of the signature claims supported by its raw signatures and verified children. The default is their sorted, deduplicated union. The essential condition is coverage: every published claim must be justified, either directly at this node or recursively through a child.
+
+The DA claim is at most one LeanDA root $\daroot$, paired with the challenge $\dachal$ of its membership test (\S\ref{sec:da-membership}). A node that checks blobs publishes their root; otherwise it may pass on one child's root, or none.
+
+\subsubsection{The public input}\label{sec:rec-stmt}
+
+Digests bind the two variable-length claim lists into a fixed-size statement. The VM's public input is the hash (Keccak-256, \S\ref{sec:prog-hashing}) of the following fields, in order:
+\begin{center}
+\begin{tabular}{@{}rl@{}}
+\hline
+$32$ bytes & Fiat-Shamir IV\\
+$32$ bytes & leanXMSS claim list digest\\
+$32$ bytes & leanSPHINCS claim list digest\\
+$32$ bytes & DA digest $H(\daroot,\dachal)$ (zeros if none)\\
+$(\kbc+5)\times16$ bytes & deferred bytecode point and value\\
+\hline
+\end{tabular}
+\end{center}
+The deferred claim lets recursion postpone an expensive polynomial evaluation until the final verification (\S\ref{sec:deferred-claims}).
+
+Each list digest is the hash of that scheme's claim list, $64$ bytes per $(\text{public key},\text{message})$ pair (\S\ref{sec:prog-hashing}); the native verifier checks that the published lists are strictly sorted (deduplicated), while the guest checks coverage alone. Every field above has a fixed width, so the preimage parses one way and the statement needs no length fields.
+
+\subsubsection{Checking coverage}
+
+Every published claim needs support from a direct check or a recursively verified child. The guest builds a table with one region for leanXMSS and one for SPHINCS+. Each region starts with the claims the parent publishes, followed by extra slots for duplicates and omitted claims.
+
+Each occurrence of a supporting claim needs its own slot. If two children prove the same published claim, one occurrence uses its published slot and the other uses an extra slot. Every occurrence of a claim the parent omits uses an extra slot. These claims are still verified; only the published prefixes enter the parent's list digests.
+
+The prover supplies the extra claims and assigns each supporting occurrence to a slot. The guest checks that they match, confines the assignment to the correct region, and writes a distinct counter value there. Write-once memory prevents slot reuse. Requiring as many writes as slots ensures that every slot is covered, including every published claim.
+
+\subsubsection{Deferred evaluation claims}\label{sec:deferred-claims}
+
+Verifying a child requires one evaluation of a fixed polynomial: the bytecode multilinear, in $\kbc+4$ variables (\S\ref{sec:e2e-bc}). Computing it inside the guest would be very expensive. Instead, the guest carries one evaluation claim in its statement, a point and a value. This expensive computation is moved `outside of the SNARK': only the root's claim is checked, natively, by the final verifier. Nothing else is deferred, the Keccak argument's weights being cheap to evaluate in the guest (Annex~\ref{annex:keccak}).
+
+A node with $n$ children ($n\le16$) combines the claim each child carries with the new claim produced while verifying it, $2n$ claims on the one polynomial. After a $2$-bit grind (\S\ref{sec:grinding}; $\lceil\log_2(2\cdot16-1)\rceil-3=2$), the verifier samples the batching challenge whose powers weight the $2n$ claims, and one sumcheck over the $\kbc+4$ variables reduces their random combination to a single evaluation, which is the claim the node carries (each sumcheck round has degree $2$ and no grind). A node with no child carries the claim at the all-zeros point. The Fiat-Shamir for the batching and the sumcheck is seeded with the hash of \texttt{leanvm/recursion-aggregation/v1} as IV and zero public input, absorbing the child count and every child's statement and both of its claims, each padded with zeros to whole rates of the sponge (\S\ref{sec:e2e-fiat-shamir}).
+
+\subsection{Data availability: LeanDA}\label{sec:leanda}
+
+Erasure coding makes data recoverable from a subset of its encoded symbols. Sampling checks whether those symbols can be retrieved, but does not establish that they form a valid encoding. An approach using leanVM was introduced in \href{https://frisitano.github.io/slides/presentations/leanvm-fold-in-circuit-das-2026-05-08/index.html}{Risitano's presentation} and developed in LeanDA~\cite{LeanDA} by Meng, Wagner, Kadianakis and Risitano: commit to an encoded matrix and prove every row is a codeword, then sample authenticated cells. A formal security proof can be found in \cite{LeanDASecurity}.
+
+Our construction uses Keccak-256 and the additive Reed-Solomon encoder of the PCS, on symbols of $\E$, one VM word each, with a different commitment (\S\ref{sec:da-commit}) and codeword membership test (\S\ref{sec:da-membership}) from LeanDA's. The polynomial basis, transform, and membership lemmas are collected in Annex~\ref{app:ntt}.
+
+
+\subsubsection{The commitment}\label{sec:da-commit}
+
+A blob is a polynomial in $\E[X]$ of degree less than $\kdim$, represented by its $\kdim$ evaluations on $\subsp_{\log_2\kdim}$. Its Reed-Solomon encoding is the vector of evaluations on the larger domain $\dom=\subsp_{\log_2\blen}$, where $\blen=2\kdim$: a codeword of $\RS[\E,\dom,\kdim]$ (Definition~\ref{def:rs-code}). The first $\kdim$ symbols are the original blob, so the encoding is systematic; the remaining symbols provide redundancy. Any $\kdim$ encoded evaluations recover the blob.
+
+One commitment covers a nonempty matrix of $\nblob$ encoded blobs, one per row.
+
+Split each encoded row into cells of $\cellsz$ symbols, a symbol being $16$ bytes. The guest fixes these dimensions, matching the byte sizes of an \href{https://eips.ethereum.org/EIPS/eip-4844}{EIP-4844} blob and an \href{https://eips.ethereum.org/EIPS/eip-7594}{EIP-7594} sampling cell:
+\begin{center}
+\begin{tabular}{@{}rll@{}}
+\hline
+$\kdim$ & $2^{13}$ symbols & $128$ KiB of payload per row\\
+$\blen$ & $2^{14}$ symbols & $256$ KiB per encoded row\\
+$\cellsz$ & $2^7$ symbols & $2$ KiB per cell\\
+$\blen/\cellsz$ & $128$ cells & any $64$ reconstruct a row\\
+$\nblob$ & $1$ to $32$ & dynamic parameter\\
+\hline
+\end{tabular}
+\end{center}
+The matrix always has $32$ rows: zero codewords pad the $\nblob$ blobs, and the root binds this padded matrix.
+
+Let $H$ denote the hash and $e_{i,j}$ the hash of cell $j$ in row $i$, its symbols in order, each as its two little-endian $64$-bit limbs. Each row has a Merkle tree of its own: its leaves are $e_{i,0},\ldots,e_{i,127}$, each inner node is the hash of its two children, and its root is $\dablob{i}$. The left child of $\dablob{i}$ covers the first $\kdim/\cellsz$ cells, the original blob. Let $\datree$ be the root of the Merkle tree whose leaves are the row roots of the padded matrix, each padding row having the zero codeword's root. The commitment is $\daroot=H(\datree,\nblob)$, $\nblob$ serialized as a $32$-byte little-endian integer (Figure~\ref{fig:da-hashing}). A sampled cell is authenticated by its path to its row's root, then that root's path to $\datree$: $7+5=12$ siblings, whatever $\nblob$, the verifier hashing the end of the path with $\nblob$.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  >={Stealth[length=1.5mm]},
+  edge/.style={semithick,draw=black!65},
+  blobedge/.style={semithick,draw=blue!65!black},
+  digest/.style={circle,fill=black!65,inner sep=1.5pt},
+  blobdigest/.style={circle,fill=blue!65!black,inner sep=1.5pt}
+]
+\node[anchor=west,font=\small\bfseries] at (0,1.3) {Encoded blobs: one row per blob, $128$ cells per row};
+\node[blue!65!black] at (2,0.75) {First $64$ cells};
+\node at (6,0.75) {Remaining $64$ cells};
+\foreach \j/\label in {0/0,1/1,2/\cdots,3/63,4/64,5/\cdots,6/126,7/127} {
+  \node at (\j+0.5,0.25) {$\label$};
+}
+\foreach \i in {0,1,2,3} {
+  \fill[blue!8] (0,-\i*0.65) rectangle (4,-\i*0.65-0.65);
+  \foreach \j/\label in {0/0,1/1,2/\cdots,3/63,4/64,5/\cdots,6/126,7/127} {
+    \draw[black!35] (\j,-\i*0.65) rectangle (\j+1,-\i*0.65-0.65);
+    \ifnum\j=2
+      \node at (\j+0.5,-\i*0.65-0.325) {$\cdots$};
+    \else\ifnum\j=5
+      \node at (\j+0.5,-\i*0.65-0.325) {$\cdots$};
+    \else
+      \node at (\j+0.5,-\i*0.65-0.325) {$e_{\i,\label}$};
+    \fi\fi
+  }
+  \node[inner sep=1pt] (row\i) at (-0.75,-\i*0.65-0.325) {$\dablob{\i}$};
+  \draw[edge,->] (0,-\i*0.65-0.325) -- (row\i);
+}
+\draw[blue!65!black,thick] (0,0) rectangle (4,-2.6);
+\draw[orange!85!black,thick] (0,-1.95) rectangle (8,-2.6);
+\node[digest] (row01) at (-1.9,-0.65) {};
+\node[digest] (row23) at (-1.9,-1.95) {};
+\node[digest,label=below:{$\datree$}] (root) at (-2.8,-1.3) {};
+\node[inner sep=1pt] (count) at (-3.7,-0.5) {$\nblob$};
+\node[digest,label=left:{$\daroot$}] (commit) at (-3.7,-1.3) {};
+\draw[edge] (root) -- (commit) -- (count);
+\draw[edge] (row0.west) -- (row01) -- (row1.west);
+\draw[edge] (row2.west) -- (row23) -- (row3.west);
+\draw[edge] (row01) -- (root) -- (row23);
+\node[align=center] at (4,-3.05) {Each rectangle: one $2$ KiB cell, labelled by\\its digest $e_{i,j}=H(\text{cell}_{i,j})$.};
+
+\node[anchor=west,font=\small\bfseries,orange!85!black] at (-0.3,-3.85) {Expand row $3$};
+\node[anchor=west] at (2.6,-3.85) {The same tree is built for every row.};
+\foreach \x/\label/\fill in {0.6/0/blue!8,2.2/1/blue!8,5.8/126/white,7.4/127/white} {
+  \node[draw=orange!85!black,fill=\fill,minimum width=1.05cm,minimum height=0.45cm] (leaf\label) at (\x,-4.6) {$e_{3,\label}$};
+}
+\node at (4,-4.6) {$\cdots$};
+\node[blobdigest] (low) at (1.4,-5.35) {};
+\node[digest] (high) at (6.6,-5.35) {};
+\draw[blobedge] (leaf0) -- (low) -- (leaf1);
+\draw[edge] (leaf126) -- (high) -- (leaf127);
+\node[blobdigest,label={[blue!65!black]below left:{the first $64$ cells}}] (blob) at (2.6,-6.1) {};
+\node[digest,label=below right:{the remaining $64$ cells}] (redundancy) at (5.4,-6.1) {};
+\draw[blobedge,dashed] (low) -- (blob);
+\draw[edge,dashed] (high) -- (redundancy);
+\node[digest,label=below:{$\dablob{3}$}] (row) at (4,-6.85) {};
+\draw[blobedge] (blob) -- (row);
+\draw[edge] (redundancy) -- (row);
+\end{tikzpicture}
+\caption{The commitment, drawn with $4$ rows instead of $32$.}
+\label{fig:da-hashing}
+\end{figure}
+
+\subsubsection{Codeword membership}\label{sec:da-membership}\label{sec:da-circuit}
+
+A row is valid exactly when it consists of evaluations of a polynomial of degree less than $\kdim$. On our additive domain at rate $1/2$, such rows are orthogonal to every codeword, and this condition also characterizes them: the code is self-dual (Corollary~\ref{cor:rs-dual}). This gives an efficient membership test.
+
+The challenge is one element $\dachal\in\E$, drawn from the VM's transcript (\S\ref{sec:e2e-fiat-shamir}) with the hash of \texttt{leanDA/rs-membership/v1} as IV and $\daroot$ as public input, after a $10$-bit grind (\S\ref{sec:grinding}) whose nonce is not sent: the transcript absorbs the smallest valid nonce, which anyone deriving $\dachal$ finds. It defines $\dual$ by \eqref{eq:dual-product} and $\davec=(\dual(x))_{x\in\dom}$. The statement carries $H(\daroot,\dachal)$, $\dachal$ serialized as its two little-endian $64$-bit limbs and two zero words.
+
+The guest recomputes $\daroot$, takes $\dachal$ as a hint, computes $\davec$ and checks
+\[
+  \inner{\davec}{w_i}
+  =\sum_{x\in\dom}\dual(x)w_i(x)
+  \;\qeq\;0
+\]
+for every row $w_i$. Factor $j$ of \eqref{eq:dual-product} depends only on the bits of $x$ from $j$ up, so $\davec$ is a product tree over those bits, built once for all rows.
+
+The native verifier derives $\dachal$ from $\daroot$ outside the SNARK, as the security proof requires, and checks the proof against $H(\daroot,\dachal)$. A node passing on a child's root passes its digest unchanged.
+
+Every valid row passes. Under a uniform challenge, a fixed invalid matrix passes with probability at most $(\kdim-1)/|\E|<2^{-115}$ (Proposition~\ref{prop:rs-membership}), which the $10$-bit grind brings to $2^{-125}$ per permutation call of a prover trying roots (\S\ref{sec:grinding}); the root it finally submits adds one untried $2^{-115}$.

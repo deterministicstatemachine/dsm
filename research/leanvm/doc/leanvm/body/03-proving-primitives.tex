@@ -1,0 +1,133 @@
+% !TeX root = ../drafts/03-proving-primitives.tex
+\section{Proving primitives}\label{sec:prelim}
+
+\begin{definition}[Iverson bracket]\label{def:iverson}
+For a proposition $P$, \ $[P]=1$ if $P$ holds and $[P]=0$ otherwise.
+\end{definition}
+
+\begin{definition}[Multiset]\label{def:multiset}
+A \emph{multiset} $\mset{\cdots}$ over a set $S$ is a multiplicity function $S\to\mathbb{N}$; $\uplus$ adds multiplicities.
+\end{definition}
+
+\begin{definition}[Multilinear extension]\label{def:mle}
+A polynomial is \emph{multilinear} if it has degree at most one in each variable. Every $f:\cube{\kappa}\to\E$ has a unique multilinear $\mle{f}\in\E[X_1,\dots,X_\kappa]$ such that $\mle{f}(b)=f(b)$ for all $b\in\cube{\kappa}$: its \emph{multilinear extension}. We often write $f$ for $\mle{f}$.
+\end{definition}
+
+
+\begin{definition}[Equality indicator]\label{def:eq}
+For $X,Y\in\E^{\kappa}$,
+\[
+  \eq(X,Y)= \prod_j\bigl(X_jY_j+(1+X_j)(1+Y_j)\bigr) = \prod_{j=1}^{\kappa}\bigl(1+X_j+Y_j\bigr).
+\]
+\end{definition}
+
+$\eq$ is multilinear, and $\eq(X,Y)=[X=Y]$ on the boolean hypercube $\cube{2\kappa}$.
+
+\begin{definition}[Inner product over the boolean hypercube]\label{def:inner}
+For $a,b$ on $\cube{\kappa}$, \ $\inner{a}{b}=\sum_{x\in\cube{\kappa}}a(x)\,b(x)$.
+\end{definition}
+
+\begin{fact}[$\eq$ carries the interpolation weights]\label{fact:eq}
+For an arbitrary point $r\in\E^{\kappa}$,
+\[
+  \mle{f}(r)=\sum_{x\in\cube{\kappa}}f(x)\,\eq(r,x)=\inner{f}{\eq(r,\cdot)}.
+\]
+Binding only the first $\ell\le\kappa$ variables gives the same identity with the rest left free: for $r\in\E^{\ell}$ and $x\in\cube{\kappa-\ell}$,
+\[
+  \mle{f}(r,x)=\sum_{u\in\cube{\ell}}\eq(r,u)\,f(u,x),
+\]
+so a partial evaluation is again a multilinear, its values the $\eq(r,\cdot)$-weighted combination of the rows $f(u,\cdot)$.
+\end{fact}
+
+\begin{lemma}[Weight of a suffix]\label{lem:suffix}
+Read $x\in\cube{\kappa}$ as an integer, low bit first, and let $\padw{n}(r)=\sum_{x\ge n}\eq(r,x)$, the multilinear extension of $[x\ge n]$. Then $\padw{0}=1$, $\padw{2^{\kappa}}=0$, and for $n<2^{\kappa}$, with top bit $n_{\kappa-1}$,
+\[
+  \padw{n}(r)\;=\;(1-n_{\kappa-1})\,r_{\kappa-1}+\eq(n_{\kappa-1},r_{\kappa-1})\,\padw{n\bmod2^{\kappa-1}}(r_{<\kappa-1}),
+\]
+so $\padw{n}$ costs $\kappa$ steps, unrolled from the low bit.
+\end{lemma}
+
+\begin{proof}
+Split on the top bit $x_{\kappa-1}$. If $n_{\kappa-1}=0$, every $x$ with $x_{\kappa-1}=1$ counts; if $n_{\kappa-1}=1$, none with $x_{\kappa-1}=0$ does. The others count when their low bits do.
+\end{proof}
+
+
+\begin{lemma}[Every element outside $\K$ generates $\E$]\label{lem:kbasis}
+For $a\in\E\setminus\K$, the set $\{1,a\}$ is a $\K$-basis of $\E$.
+\end{lemma}
+
+\begin{proof}
+A $\K$-relation $c_0+c_1a=0$ with $c_1\neq0$ would put $a=-c_0/c_1$ in $\K$, so $c_1=0$ and then $c_0=0$: the two are $\K$-independent, and two independent elements of a space of $\K$-dimension $[\E:\K]=2$ are a basis.
+\end{proof}
+
+\begin{lemma}[Schwartz-Zippel]\label{lem:sz}
+A nonzero $P\in\E[X_1,\dots,X_{\kappa}]$ of total degree at most $d$ satisfies
+\[
+  \Pr_{r\leftarrow\E^{\kappa}}\bigl[P(r)=0\bigr]\;\le\;\frac{d}{|\E|}.
+\]
+A nonzero multilinear has total degree at most $\kappa$, so it vanishes at a random point with probability at most $\kappa/|\E|$.
+\end{lemma}
+
+\begin{proof}
+Induction on $\kappa$. For $\kappa=1$ a nonzero univariate of degree at most $d$ has at most $d$ roots, so a uniform $r_1$ is one of them with probability at most $d/|\E|$. For $\kappa>1$ write $P$ in its last variable,
+\[
+  P(X_1,\dots,X_{\kappa})=\sum_{k=0}^{d}X_{\kappa}^{\,k}\,Q_k(X_1,\dots,X_{\kappa-1}),
+\]
+and let $k^{\ast}$ be the largest $k$ with $Q_k\neq0$. Then $Q_{k^{\ast}}$ is nonzero in $\kappa-1$ variables of total degree at most $d-k^{\ast}$, so by induction $Q_{k^{\ast}}(r_{<\kappa})=0$ with probability at most $(d-k^{\ast})/|\E|$. Fix $r_{<\kappa}$ with $Q_{k^{\ast}}(r_{<\kappa})\neq0$: then $X_{\kappa}\mapsto P(r_{<\kappa},X_{\kappa})$ has degree exactly $k^{\ast}$, hence at most $k^{\ast}$ roots, and a uniform $r_{\kappa}$ is one with probability at most $k^{\ast}/|\E|$. Adding the two bounds gives $d/|\E|$.
+\end{proof}
+
+\begin{corollary}[Testing an identity at one random point]\label{cor:idtest}
+Let $A,B\in\E[X_1,\dots,X_{\kappa}]$ have total degree at most $d$, and let $r\leftarrow\E^{\kappa}$ be drawn after both are fixed. If $A\neq B$ then
+\[
+  \Pr_{r}\bigl[A(r)=B(r)\bigr]\;\le\;\frac{d}{|\E|}.
+\]
+\end{corollary}
+
+\begin{proof}
+Apply Lemma~\ref{lem:sz} to $A-B$, nonzero of total degree at most $d$.
+\end{proof}
+
+
+\begin{fact}[Sumcheck~\cite{LFKN92}]\label{fact:sumcheck}
+Over $\kappa$ rounds, sumcheck reduces a claim $\sum_{x\in\cube{\kappa}}P(x)=\rc{0}$, on a polynomial $P$ of degree at most $d$ in each variable, to one evaluation $P(\fc)$ at a random $\fc\in\E^{\kappa}$. Round $j$ carries the running claim $\rc{j-1}$: the prover sends the univariate
+\[
+  h_j(Y)=\sum_{x\in\cube{\kappa-j}}P(\fc_1,\dots,\fc_{j-1},Y,x)
+\]
+of degree at most $d$, the verifier checks $h_j(0)+h_j(1)\qeq\rc{j-1}$, samples $\fc_j\leftarrow\E$ and takes $\rc{j}=h_j(\fc_j)$. It ends holding $\rc{\kappa}=P(\fc)$, for the caller to settle. A false $\rc{0}$ survives with probability at most $d\kappa/|\E|$.
+\end{fact}
+
+\begin{definition}[Zerocheck]\label{def:zerocheck}
+To prove that a polynomial $P$ vanishes on $\cube{\kappa}$, the verifier samples $r\in\E^{\kappa}$ uniformly and the two parties run sumcheck on
+\[
+  \sum_{x\in\cube{\kappa}}P(x)\,\eq(r,x)\qeq 0 .
+\]
+By Fact~\ref{fact:eq} that sum is $\mle{g}(r)$, for $g$ the restriction of $P$ to the boolean hypercube: the zero polynomial if $P$ vanishes there, and otherwise a nonzero multilinear, which a random $r$ sends to $0$ with probability at most $\kappa/|\E|$ (Lemma~\ref{lem:sz}).
+\end{definition}
+
+\paragraph{Two savings on a round message~\cite{Gru24}.} The round check $h_j(0)+h_j(1)\qeq\rc{j-1}$ determines one coefficient of $h_j$ from the claim, so the prover sends one coefficient fewer. When the summand is $\eq(r,x)\,P(x)$ with $r$ public, as in a zerocheck, the prover also leaves out the equality factor and sends only
+\[
+  \eqcofactor_j(Y)=\sum_{x\in\cube{\kappa-j}}\eq(r_{>j},x)\,P(\fc_1,\dots,\fc_{j-1},Y,x),
+\]
+where $r_{>j}=(r_{j+1},\dots,r_{\kappa})$. As $\eq(r_j,0)=1+r_j$ and $\eq(r_j,1)=r_j$, the verifier checks $(1+r_j)\,\eqcofactor_j(0)+r_j\,\eqcofactor_j(1)\qeq\rc{j-1}$, then samples $\fc_j$ and sets $\rc{j}=\eqcofactor_j(\fc_j)$. A round on a degree-$d$ cofactor thus costs $d$ field elements. The factors $\eq(r_i,\fc_i)=1+r_i+\fc_i$ of the bound coordinates appear nowhere, neither in the claims nor in the final check, so the verifier never multiplies or divides by one, even when it is zero.
+
+\begin{definition}[RBR soundness, informal; cf.~\cite{CCHLRR19,ACFY25}]\label{def:rbr}
+A public-coin protocol is \emph{round-by-round (RBR) sound with errors} $(\varepsilon_1, \varepsilon_2, \dots)$, one per verifier message, if there is an \emph{invariant} on partial transcripts (not necessarily efficiently computable) marking the positions where a cheating prover has already lost:
+\begin{enumerate}[itemsep=1pt,label=(\roman*)]
+\item on a false statement, the invariant holds before any message is sent;
+\item the prover alone cannot escape it: it survives every prover message;
+\item the $i$-th verifier message lets it escape with probability at most $\varepsilon_i$;
+\item if it survives to the end of the interaction, the verifier rejects.
+\end{enumerate}
+\end{definition}
+
+Interactive soundness error is then at most $\sum_i \varepsilon_i$. After Fiat-Shamir, it is $\max_i \varepsilon_i$ per random-oracle query~\cite{CCHLRR19,BCS16}.
+
+\paragraph{Grinding.}\label{sec:grinding} Before a verifier message, the prover may have to find a proof of work of $b$ bits (\S\ref{sec:e2e-fiat-shamir}), which divides the message's round-by-round error (Definition~\ref{def:rbr}) by $2^b$. Every message is held to $2^{-125}$: one of error $N/|\E|$ grinds $\max(0,\lceil\log_2N\rceil-3)$ bits, hence none for $N\le8$, as for every sumcheck round. The PCS fixes its own grinds.
+
+\begin{definition}[Inner-product commitment scheme]\label{def:ipcs}
+A \emph{weighted claim} about a multilinear $g:\cube{M}\to\K$ is a pair $(W,c)$ asserting $\inner{W}{g}=c$, with $c\in\E$ and the weight $W:\cube{M}\to\E$ \emph{MLE-friendly}: the verifier can evaluate $\mle{W}$ anywhere in $\mathrm{poly}(M)$ operations. An \emph{inner-product commitment scheme} commits to $g$ and later proves any such claim,
+\[
+  \inner{W}{g}=\sum_{w\in\cube{M}}W(w)\,g(w)=c .
+\]
+The commitment is over $\K$, the opening over $\E$ (see Annex~\ref{annex:pcs}). An evaluation claim $\mle{g}(r)=c$ is the case $W=\eq(r,\cdot)$, by Fact~\ref{fact:eq}.
+\end{definition}

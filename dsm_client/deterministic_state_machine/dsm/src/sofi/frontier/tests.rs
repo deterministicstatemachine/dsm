@@ -1,139 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! SoFi Amendment S24: an owner baseline authenticates only through the
-//! owner's own P0–P6, in order; a witness is accepted only when both of its
-//! paths fold to the authenticated root; and a witness advanced through each
-//! generation's write set is, after every step, exactly the reference tree's.
+//! A witness is accepted only when both of its paths fold to the root a
+//! reader established, and a witness advanced through each generation's
+//! write set is, after every step, exactly the reference tree's.
 
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::ccb::{
-    delegation_genesis_sentinel, genesis_v3_commitment, role, sigalg, transition_genesis_sentinel,
-    DeviceTreeRootTransition, GenesisParamsV3, RootProgressionDelegation,
-};
-use crate::common::device_tree::{DevTreeProof, DeviceTree};
-use crate::core::identity::authority_resolver::{SignedDelegation, SignedTransition};
-use crate::core::identity::genesis_v2::derive_devid;
-use crate::crypto::signatures::SignatureKeyPair;
-use crate::crypto::sphincs::sphincs_sign;
-use crate::dlv::vault_state_anchor_v3::sign_vault_state_anchor_v3;
 use crate::merkle::batch_fold::FoldEntry;
-use crate::sofi::history::{history_root, HistoryBuilder};
 use crate::sofi::wire::{VaultGenesisPreimage, VAULT_STATUS_ACTIVE};
-
-const NET: &[u8] = b"dsm-test";
 
 fn d(byte: u8) -> D32 {
     [byte; 32]
 }
 
-/// A single-device identity, as the beta wallet derives one: `D_0` under the
-/// GRK, `T_0` establishing the one-device tree under the device key.
+/// A vault's owner: its genesis and origin device.
 struct Identity {
     g: D32,
     devid: D32,
-    ak: SignatureKeyPair,
-    params: GenesisParamsV3,
-    delegations: Vec<SignedDelegation>,
-    transitions: Vec<SignedTransition>,
-    t0: D32,
-    proof: DevTreeProof,
-    atta: D32,
-}
-
-impl Identity {
-    fn new(seed: u8) -> Self {
-        let kp = |s: u8| SignatureKeyPair::generate_from_entropy(&[s; 32]).expect("keypair");
-        let grk = kp(seed);
-        let ak = kp(seed.wrapping_add(1));
-        let atta = d(seed.wrapping_add(2));
-        let devid = derive_devid(&ak.public_key, &atta);
-        let params = GenesisParamsV3::new(
-            d(seed.wrapping_add(3)),
-            NET,
-            3,
-            sigalg::SPHINCS_PLUS_SPX256F,
-            &grk.public_key,
-        )
-        .expect("params");
-        let g = genesis_v3_commitment(&params).expect("G");
-        let d0 = RootProgressionDelegation {
-            genesis_id: g,
-            role: role::DEVICE_TREE_ROOT_PROGRESSION,
-            role_version: role::BETA_ROLE_VERSION,
-            delegated_alg_id: sigalg::SPHINCS_PLUS_SPX256F,
-            delegated_pk: ak.public_key.clone(),
-            delegation_number: 0,
-            parent_delegation_digest: delegation_genesis_sentinel(),
-            activation_transition_digest: transition_genesis_sentinel(),
-        };
-        let tree = DeviceTree::single(devid);
-        let t0 = DeviceTreeRootTransition {
-            genesis_id: g,
-            predecessor_transition_digest: transition_genesis_sentinel(),
-            new_root: tree.root(),
-            version_number: 0,
-            delegation_digest: d0.digest().expect("D_0"),
-        };
-        let delegations = vec![SignedDelegation {
-            grk_signature: sphincs_sign(&grk.secret_key, &d0.signing_digest().expect("D_0"))
-                .expect("sign"),
-            delegation: d0,
-        }];
-        let transitions = vec![SignedTransition {
-            delegate_signature: sphincs_sign(&ak.secret_key, &t0.signing_digest()).expect("sign"),
-            transition: t0.clone(),
-        }];
-        Self {
-            g,
-            devid,
-            proof: tree.proof(&devid).expect("the device's own proof"),
-            ak,
-            params,
-            delegations,
-            transitions,
-            t0: t0.digest(),
-            atta,
-        }
-    }
-
-    fn presented(&self) -> PresentedIdentity<'_> {
-        PresentedIdentity {
-            genesis_params: &self.params,
-            delegations: &self.delegations,
-            transitions: &self.transitions,
-            inclusion: &self.proof,
-            ak_pk: &self.ak.public_key,
-            atta: &self.atta,
-        }
-    }
-
-    /// The baseline this identity signs over `frontier`, at its own `T_0`:
-    /// `(anchor, auth bytes, frontier bytes)`.
-    fn baseline(&self, frontier: &VaultFrontierV1) -> (SignedVaultStateAnchorV3, Vec<u8>, Vec<u8>) {
-        let auth = OwnerBaselineAuthV1 {
-            frontier_commitment: frontier_commitment(frontier),
-            owner_authority_transition_digest: self.t0,
-        };
-        let anchor = sign_vault_state_anchor_v3(
-            &baseline_commitment(&auth),
-            &self.ak.secret_key,
-            &self.ak.public_key,
-        )
-        .expect("sign");
-        (anchor, auth.encode(), frontier.encode())
-    }
 }
 
 fn owner() -> &'static Identity {
-    static OWNER: std::sync::OnceLock<Identity> = std::sync::OnceLock::new();
-    OWNER.get_or_init(|| Identity::new(0x31))
-}
-
-fn stranger() -> &'static Identity {
-    static STRANGER: std::sync::OnceLock<Identity> = std::sync::OnceLock::new();
-    STRANGER.get_or_init(|| Identity::new(0x51))
+    static OWNER: Identity = Identity {
+        g: [0x31; 32],
+        devid: [0x32; 32],
+    };
+    &OWNER
 }
 
 fn state_of(who: &Identity, generation: u64, reserve_a: u64) -> VaultStateLeaf {
@@ -180,29 +72,36 @@ struct Vault {
     tree: EconomicSmt,
     state: VaultStateLeaf,
     relationships: BTreeMap<D32, VaultRelationshipLeaf>,
-    /// Every root the reference had, generation by generation (SoFi
-    /// Amendment S26).
-    history: HistoryBuilder,
 }
 
 impl Vault {
     /// The vault at generation `generation`, with traders `0..traders`
-    /// already holding relationship leaves; its history is the root its
-    /// tree had at each generation before.
+    /// already holding relationship leaves.
     fn at(genesis: &AcceptedVaultGenesis, generation: u64, traders: u8) -> Self {
-        let mut history = HistoryBuilder::new(*genesis.vault_id());
-        for earlier in 0..generation {
-            history.append(&Self::tree_at(genesis, earlier, traders).0.root());
-        }
         let (tree, state, relationships) = Self::tree_at(genesis, generation, traders);
-        history.append(&tree.root());
         Self {
             id: *genesis.vault_id(),
             tree,
             state,
             relationships,
-            history,
         }
+    }
+
+    /// `wire` checked as `who`'s witness under this vault's root, the root a
+    /// reader established.
+    fn checked(
+        &self,
+        wire: &VaultFrontierWitnessV1,
+        who: (D32, D32),
+    ) -> Result<VaultWitness, WitnessRefused> {
+        VaultWitness::checked(
+            self.id,
+            self.state.generation,
+            self.tree.root(),
+            wire,
+            who.0,
+            who.1,
+        )
     }
 
     fn tree_at(
@@ -234,17 +133,6 @@ impl Vault {
             relationships.insert(key, leaf);
         }
         (tree, state, relationships)
-    }
-
-    fn frontier(&self) -> VaultFrontierV1 {
-        let head = self.history.head().expect("a vault has a history");
-        assert_eq!(head.generation, self.state.generation);
-        VaultFrontierV1 {
-            vault_id: self.id,
-            generation: self.state.generation,
-            root: self.tree.root(),
-            history_root: history_root(&head).expect("the head encodes"),
-        }
     }
 
     fn witness_for(&self, who: (D32, D32)) -> VaultFrontierWitnessV1 {
@@ -310,7 +198,6 @@ impl Vault {
         }
         self.state = post_state;
         self.relationships.insert(rel_key, leaf);
-        self.history.append(&self.tree.root());
         post
     }
 
@@ -333,161 +220,24 @@ impl Vault {
     }
 }
 
-fn authenticate(
-    who: &Identity,
-    signed: &(SignedVaultStateAnchorV3, Vec<u8>, Vec<u8>),
-    genesis: &AcceptedVaultGenesis,
-) -> Result<VerifiedFrontier, ResolveFailure> {
-    authenticate_frontier_owner(&signed.0, &signed.1, &signed.2, &who.presented(), genesis)
-}
-
-/// The owner's baseline authenticates, and what it accepts is the frontier
-/// the owner bound: its vault, generation and root.
-#[test]
-fn an_owner_baseline_authenticates_its_frontier() {
-    let genesis = genesis_of(owner());
-    let vault = Vault::at(&genesis, 12, 5);
-    let frontier = vault.frontier();
-    let verified = authenticate(owner(), &owner().baseline(&frontier), &genesis)
-        .expect("the owner's baseline");
-    assert_eq!(*verified.frontier(), frontier);
-    assert_eq!(*verified.commitment(), frontier_commitment(&frontier));
-    assert_eq!(verified.owner.device_id, owner().devid);
-}
-
-/// Every binding is load-bearing: each mutation below breaks one, and each
-/// is refused. The control is the test above.
-#[test]
-fn a_baseline_is_refused_for_each_broken_binding() {
-    let genesis = genesis_of(owner());
-    let vault = Vault::at(&genesis, 12, 5);
-    let frontier = vault.frontier();
-    let honest = owner().baseline(&frontier);
-    let refused = |signed: &(SignedVaultStateAnchorV3, Vec<u8>, Vec<u8>), who: &Identity| {
-        authenticate(who, signed, &genesis).expect_err("refused")
-    };
-
-    // The signature does not verify.
-    let mut bent = honest.clone();
-    bent.0.signature[9] ^= 0x10;
-    assert!(matches!(
-        refused(&bent, owner()),
-        ResolveFailure::Invalid(..)
-    ));
-
-    // The authentication bytes are not the ones signed.
-    let mut other_auth = honest.clone();
-    other_auth.1 = OwnerBaselineAuthV1 {
-        frontier_commitment: frontier_commitment(&frontier),
-        owner_authority_transition_digest: d(0x77),
-    }
-    .encode();
-    assert!(matches!(
-        refused(&other_auth, owner()),
-        ResolveFailure::Invalid(..)
-    ));
-
-    // Signed, but at a position the owner's chain never reached.
-    let unreached = {
-        let auth = OwnerBaselineAuthV1 {
-            frontier_commitment: frontier_commitment(&frontier),
-            owner_authority_transition_digest: d(0x77),
-        };
-        let anchor = sign_vault_state_anchor_v3(
-            &baseline_commitment(&auth),
-            &owner().ak.secret_key,
-            &owner().ak.public_key,
-        )
-        .expect("sign");
-        (anchor, auth.encode(), frontier.encode())
-    };
-    assert!(matches!(
-        refused(&unreached, owner()),
-        ResolveFailure::Incomplete(..)
-    ));
-
-    // A stranger's own valid baseline of this vault: not the vault's owner.
-    let by_stranger = stranger().baseline(&frontier);
-    assert!(matches!(
-        refused(&by_stranger, stranger()),
-        ResolveFailure::Invalid(..)
-    ));
-
-    // The owner's identity presented beside a stranger's signature: the
-    // position the stranger committed is not on the owner's chain.
-    assert!(matches!(
-        refused(&by_stranger, owner()),
-        ResolveFailure::Incomplete(..)
-    ));
-
-    // The owner's baseline bytes and presentation, under a signature by
-    // another key: both halves verify, and they are not one key.
-    let mut other_signer = honest.clone();
-    other_signer.0 = sign_vault_state_anchor_v3(
-        &baseline_commitment(&OwnerBaselineAuthV1::decode(&honest.1).expect("auth")),
-        &stranger().ak.secret_key,
-        &stranger().ak.public_key,
-    )
-    .expect("sign");
-    assert!(matches!(
-        refused(&other_signer, owner()),
-        ResolveFailure::Invalid(..)
-    ));
-
-    // The owner signed, but the frontier presented is another one.
-    let mut swapped = honest.clone();
-    swapped.2 = VaultFrontierV1 {
-        root: d(0x99),
-        ..frontier
-    }
-    .encode();
-    assert!(matches!(
-        refused(&swapped, owner()),
-        ResolveFailure::Invalid(..)
-    ));
-
-    // The owner signed a frontier of another vault.
-    let elsewhere = owner().baseline(&VaultFrontierV1 {
-        vault_id: d(0x98),
-        ..frontier
-    });
-    assert!(matches!(
-        refused(&elsewhere, owner()),
-        ResolveFailure::Invalid(..)
-    ));
-
-    // A stranger's vault: the owner's baseline proves the wrong owner.
-    let theirs = genesis_of(stranger());
-    let of_theirs = owner().baseline(&VaultFrontierV1 {
-        vault_id: *theirs.vault_id(),
-        ..frontier
-    });
-    assert!(matches!(
-        authenticate(owner(), &of_theirs, &theirs).expect_err("refused"),
-        ResolveFailure::Invalid(..)
-    ));
-}
-
 /// A witness is accepted only when both of its paths fold to the root the
-/// owner signed. Each mutation is refused; the control is accepted.
+/// reader established. Each mutation is refused; the control is accepted.
 #[test]
-fn a_witness_is_accepted_only_under_the_authenticated_root() {
+fn a_witness_is_accepted_only_under_the_established_root() {
     let genesis = genesis_of(owner());
     let vault = Vault::at(&genesis, 12, 5);
-    let verified = authenticate(owner(), &owner().baseline(&vault.frontier()), &genesis)
-        .expect("the owner's baseline");
     let (present, absent) = (trader(2), trader(9));
 
     // Controls: a trader with a leaf, and one without.
     for who in [present, absent] {
-        let witness =
-            VaultWitness::under_frontier(&verified, &vault.witness_for(who), who.0, who.1)
-                .expect("the owner's witness");
+        let witness = vault
+            .checked(&vault.witness_for(who), who)
+            .expect("the owner's witness");
         vault.agrees(&witness);
     }
 
     let from = |wire: &VaultFrontierWitnessV1, who: (D32, D32)| {
-        VaultWitness::under_frontier(&verified, wire, who.0, who.1).expect_err("refused")
+        vault.checked(wire, who).expect_err("refused")
     };
 
     let mut bent_state = vault.witness_for(present);
@@ -503,10 +253,6 @@ fn a_witness_is_accepted_only_under_the_authenticated_root() {
         from(&old_state, present),
         WitnessRefused::StateGeneration { .. }
     ));
-
-    let mut other_owner = vault.witness_for(present);
-    other_owner.state_leaf.owner_genesis = stranger().g;
-    assert_eq!(from(&other_owner, present), WitnessRefused::StateOwner);
 
     // Another trader's leaf, presented as this trader's.
     assert_eq!(
@@ -543,7 +289,7 @@ fn a_witness_is_accepted_only_under_the_authenticated_root() {
     ));
 }
 
-/// Baseline at g-10, then ten trades by other traders: the reader's witness,
+/// A witness at g-10, then ten trades by other traders: the reader's witness,
 /// advanced through each write set, is the reference tree's after every one —
 /// for a reader with a relationship leaf and for one without.
 #[test]
@@ -551,11 +297,9 @@ fn a_witness_advances_through_ten_other_traders_trades() {
     let genesis = genesis_of(owner());
     for reader in [trader(1), trader(30)] {
         let mut vault = Vault::at(&genesis, 20, 6);
-        let verified = authenticate(owner(), &owner().baseline(&vault.frontier()), &genesis)
-            .expect("the owner's baseline");
-        let mut witness =
-            VaultWitness::under_frontier(&verified, &vault.witness_for(reader), reader.0, reader.1)
-                .expect("the owner's witness");
+        let mut witness = vault
+            .checked(&vault.witness_for(reader), reader)
+            .expect("the owner's witness");
         for step in 0..10u8 {
             // Old traders and new ones, never the reader.
             let other = trader(if step % 2 == 0 { 3 } else { 10 + step });
@@ -596,11 +340,9 @@ fn an_advance_the_write_set_does_not_prove_is_refused() {
     let genesis = genesis_of(owner());
     let reader = trader(2);
     let mut vault = Vault::at(&genesis, 8, 4);
-    let verified = authenticate(owner(), &owner().baseline(&vault.frontier()), &genesis)
-        .expect("the owner's baseline");
-    let witness =
-        VaultWitness::under_frontier(&verified, &vault.witness_for(reader), reader.0, reader.1)
-            .expect("the owner's witness");
+    let witness = vault
+        .checked(&vault.witness_for(reader), reader)
+        .expect("the owner's witness");
     let before = vault.clone();
     let post = vault.trade(trader(3), 1);
 
@@ -689,44 +431,6 @@ fn the_witness_is_constant_in_size() {
         })
         .collect();
     assert_eq!(sizes[0], sizes[1]);
-}
-
-/// The three objects round-trip through their CCB bytes, and a trailing byte
-/// or another class's envelope is refused.
-#[test]
-fn the_baseline_objects_decode_strictly() {
-    let genesis = genesis_of(owner());
-    let vault = Vault::at(&genesis, 6, 3);
-    let frontier = vault.frontier();
-    let auth = OwnerBaselineAuthV1 {
-        frontier_commitment: frontier_commitment(&frontier),
-        owner_authority_transition_digest: owner().t0,
-    };
-    let witness = vault.witness_for(trader(1));
-    let absent = vault.witness_for(trader(50));
-    assert_eq!(
-        VaultFrontierV1::decode(&frontier.encode()).expect("frontier"),
-        frontier
-    );
-    assert_eq!(
-        OwnerBaselineAuthV1::decode(&auth.encode()).expect("auth"),
-        auth
-    );
-    for w in [&witness, &absent] {
-        let bytes = w.encode().expect("encodes");
-        assert_eq!(&VaultFrontierWitnessV1::decode(&bytes).expect("witness"), w);
-        let mut trailing = bytes.clone();
-        trailing.push(0x01);
-        VaultFrontierWitnessV1::decode(&trailing).expect_err("a trailing byte is refused");
-    }
-    let mut trailing = frontier.encode();
-    trailing.push(0x01);
-    VaultFrontierV1::decode(&trailing).expect_err("a trailing byte is refused");
-    let mut trailing = auth.encode();
-    trailing.push(0x01);
-    OwnerBaselineAuthV1::decode(&trailing).expect_err("a trailing byte is refused");
-    VaultFrontierV1::decode(&auth.encode()).expect_err("another class is refused");
-    OwnerBaselineAuthV1::decode(&frontier.encode()).expect_err("another class is refused");
 }
 
 /// A vault record's rows: the state leaf at the vault's state key, and a

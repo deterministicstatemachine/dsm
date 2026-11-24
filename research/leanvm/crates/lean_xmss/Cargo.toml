@@ -1,0 +1,15 @@
+[package]
+name = "lean_xmss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+keccak256.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

@@ -239,7 +239,7 @@ mod tests {
     // +2 for the inbox doorbell (owner, 2026-11-23: the node signals the
     // phone when something is ready): a device's per-node doorbell key and
     // the hash a node names a doorbell by.
-    const EXPECTED_TAG_COUNT: usize = 466;
+    const EXPECTED_TAG_COUNT: usize = 459;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

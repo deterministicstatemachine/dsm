@@ -1,0 +1,10 @@
+[package]
+name = "stable_parallel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Fixed-size thread pool for flat data-parallel kernels"
+
+[lints]
+workspace = true

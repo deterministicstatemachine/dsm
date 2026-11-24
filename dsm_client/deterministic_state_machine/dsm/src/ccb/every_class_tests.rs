@@ -63,15 +63,14 @@ use crate::sofi::wire::{
     AttemptEntry, ComputedBranch, ComputedEscrowTerms, ComputedTable, CoreEntry, DlvCore,
     DlvPolicyFulfillmentBody, EntryKind, EquivocationProof, EscrowBranch, EscrowOutcome,
     EscrowSigner, EscrowTerms, EscrowVerdict, FrontierRelationship, MatchSide, MatchStart,
-    OutcomeTable, OwnerAuthority, OwnerBaselineAuthV1, ParentClaimRef, PrecommitLeg,
-    PreEClosureIndex, RouteDigestPreimage, RouteLegEntry, RouteLegSet, SettlementBody,
-    SettlementPreimage, SideSignature, SignedHead, SignedSofiObject, SignedSofiResolutionClaim,
-    StartReveals, SofiExercise, SofiResolutionClaim, SofiSetupBody, StartBody, SwapHop, TraderCore,
+    OutcomeTable, OwnerAuthority, ParentClaimRef, PrecommitLeg, PreEClosureIndex,
+    RouteDigestPreimage, RouteLegEntry, RouteLegSet, SettlementBody, SettlementPreimage,
+    SideSignature, SignedHead, SignedSofiObject, SignedSofiResolutionClaim, StartReveals,
+    SofiExercise, SofiResolutionClaim, SofiSetupBody, StartBody, SwapHop, TraderCore,
     TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, TraderRelationshipLeaf,
-    TranscriptEntry, TranscriptOutcome, ValidationRef, VaultCreation, VaultFrontierV1,
-    VaultBaselineContradictionV1, BaselineContradiction, VaultFrontierWitnessV1,
-    VaultGenesisPreimage, VaultHistoryHeadV1, VaultRelationshipLeaf, VaultStateLeaf,
-    VerdictSignature, COMPUTED_LABELS, SCHEMA_V1, VAULT_STATUS_ACTIVE,
+    TranscriptEntry, TranscriptOutcome, ValidationRef, VaultCreation, VaultFrontierWitnessV1,
+    VaultGenesisPreimage, VaultRelationshipLeaf, VaultStateLeaf, VerdictSignature, COMPUTED_LABELS,
+    SCHEMA_V1, VAULT_STATUS_ACTIVE,
 };
 use crate::types::device_state::OfflineBoundaryKind;
 
@@ -1266,18 +1265,6 @@ fn every_class() -> Vec<Shown> {
     ));
 
     // ── frontier family ─────────────────────────────────────────────────
-    let frontier = VaultFrontierV1 {
-        vault_id: b(0x31),
-        generation: 3,
-        root: b(0x9A),
-        history_root: b(0x9B),
-    };
-    all.push(shown(
-        class::SOFI_VAULT_FRONTIER,
-        SCHEMA_V1,
-        frontier.encode(),
-        Read::Parsed(|b| Ok(VaultFrontierV1::decode(b).map_err(text)?.encode())),
-    ));
     let frontier_witness = VaultFrontierWitnessV1 {
         state_leaf: vault_state_leaf(),
         state_path: path(),
@@ -1291,43 +1278,6 @@ fn every_class() -> Vec<Shown> {
         SCHEMA_V1,
         ok(frontier_witness.encode(), "frontier witness"),
         Read::Parsed(|b| re(VaultFrontierWitnessV1::decode(b).map_err(text)?.encode())),
-    ));
-    all.push(shown(
-        class::SOFI_OWNER_BASELINE_AUTH,
-        SCHEMA_V1,
-        OwnerBaselineAuthV1 {
-            frontier_commitment: b(0x9C),
-            owner_authority_transition_digest: b(0x9D),
-        }
-        .encode(),
-        Read::Parsed(|b| Ok(OwnerBaselineAuthV1::decode(b).map_err(text)?.encode())),
-    ));
-    // Generation 2 is three leaves, so two peaks.
-    let history = VaultHistoryHeadV1 {
-        vault_id: b(0x31),
-        generation: 2,
-        peaks: vec![b(0x9E), b(0x9F)],
-    };
-    all.push(shown(
-        class::SOFI_VAULT_HISTORY_HEAD,
-        SCHEMA_V1,
-        ok(history.encode(), "history head"),
-        Read::Parsed(|b| re(VaultHistoryHeadV1::decode(b).map_err(text)?.encode())),
-    ));
-    all.push(shown(
-        class::SOFI_VAULT_BASELINE_CONTRADICTION,
-        SCHEMA_V1,
-        VaultBaselineContradictionV1 {
-            vault_id: b(0x31),
-            frontier_commitment: b(0xA0),
-            kind: BaselineContradiction::Step { generation: 3 },
-        }
-        .encode(),
-        Read::Parsed(|b| {
-            Ok(VaultBaselineContradictionV1::decode(b)
-                .map_err(text)?
-                .encode())
-        }),
     ));
 
     // ── application cells (DSM Amendment A35) ───────────────────────────

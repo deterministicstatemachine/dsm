@@ -15,6 +15,7 @@ import { bridgeEvents } from '../../../bridge/bridgeEvents';
 import type { InboxItemView } from '../../../dsm/types';
 import type { DomainTransaction } from '../../../domain/types';
 import { getMoneyWaiting, markMoneySeen, type MoneyWaiting } from '../../../dsm/moneyWaiting';
+import { takeInboxAsk } from './inboxAsk';
 
 // ---------------------------------------------------------------------------
 // Component
@@ -83,6 +84,11 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
     showReceived();
     void loadPending();
   }, [open, loadPending, showReceived]);
+
+  // The home screen's chameleon held out the mail and the user tapped it.
+  useEffect(() => {
+    if (takeInboxAsk() === 'open') handleOpen();
+  }, [handleOpen]);
 
   const handleClose = useCallback(() => {
     setOpen(false);
