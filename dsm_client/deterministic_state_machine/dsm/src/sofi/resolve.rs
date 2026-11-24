@@ -493,9 +493,19 @@ pub enum KeptCompletion {
 /// completion digest of the proof its fresh reads checked.
 type ProvenKey = (Vec<u8>, D32, D32, D32, D32);
 
-/// The finals one verification has checked against fresh reads, so a cell
-/// relied on twice in one verification is read fresh once.
-type ProvenFinals = std::sync::Mutex<BTreeSet<ProvenKey>>;
+/// The finals one operation's verifications have checked against fresh
+/// reads, so a cell relied on again in the same operation is read fresh
+/// once. A final value holds its cell for good; a new operation checks
+/// afresh. Shared by the verifiers its caller hands it to
+/// ([`Verifier::with_proven`]); a verifier given none keeps its own.
+#[derive(Clone, Default)]
+pub struct ProvenFinals(std::sync::Arc<std::sync::Mutex<BTreeSet<ProvenKey>>>);
+
+impl ProvenFinals {
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, BTreeSet<ProvenKey>>> {
+        self.0.lock()
+    }
+}
 
 /// An attempt key as a walk judged it: the pinned set its cell is routed
 /// over, the vault, the parent root and the attempt, and the exact bytes of
@@ -759,7 +769,7 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     /// ([`Verifier::with_programs`]); a computed escrow vault whose program
     /// is not here has no established outcome.
     programs: ProgramRegistry,
-    /// The finals this verifier checked against fresh reads
+    /// The finals this verifier's operation checked against fresh reads
     /// ([`Verifier::rely_on_final`]).
     proven: ProvenFinals,
     /// What this verifier's walks replaced in this device's record of a
@@ -843,6 +853,14 @@ impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
     /// party sends adds a program.
     pub fn with_programs(mut self, programs: ProgramRegistry) -> Self {
         self.programs = programs;
+        self
+    }
+
+    /// This verifier, standing on the finals `proven` holds: the ones its
+    /// operation's other verifiers checked against fresh reads. What it
+    /// checks is added there for them.
+    pub fn with_proven(mut self, proven: ProvenFinals) -> Self {
+        self.proven = proven;
         self
     }
 }

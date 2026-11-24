@@ -143,6 +143,16 @@ struct ReadOnce {
     peer_steps: std::sync::Mutex<BTreeMap<PeerAt, ValidatedPeerTransition>>,
     peer_roots: std::sync::Mutex<BTreeMap<PeerAt, (ValidatedEconomicRoot, ParentClaimRef)>>,
     peer_claims: std::sync::Mutex<BTreeMap<PeerAt, AcceptedClaim>>,
+    /// Another trader's positions Core found not resolved yet during this
+    /// operation, with why: a route search meets the same unresolved vault
+    /// owner through the accept-ahead, each chain and each head, and asks
+    /// its cells once. Kept for the operation alone: the position may
+    /// resolve at any time, and the next operation asks afresh.
+    peer_not_yet: std::sync::Mutex<BTreeMap<PeerAt, String>>,
+    /// The finals this operation's verifiers checked against fresh reads
+    /// (SoFi Amendment S10): each final the operation relies on is read
+    /// fresh once, not once for every verifier its contexts build.
+    proven: dsm::sofi::resolve::ProvenFinals,
 }
 
 /// A trader's position: `(genesis, device_id, position)`.
@@ -209,6 +219,28 @@ fn established_once<K: Ord, V: Clone, E: From<Unkept>>(
     let established = establish()?;
     lock()?.insert(key, established.clone());
     Ok(established)
+}
+
+/// [`established_once`] for another trader's position at `key`, where a
+/// position Core found not resolved yet is kept in `not_yet` and answered
+/// from there for the rest of the operation: its cells are read once.
+fn peer_established_once<V: Clone>(
+    not_yet: &std::sync::Mutex<BTreeMap<PeerAt, String>>,
+    memo: &std::sync::Mutex<BTreeMap<PeerAt, V>>,
+    key: PeerAt,
+    establish: impl FnOnce() -> Result<V, PeerLineageFailure>,
+) -> Result<V, PeerLineageFailure> {
+    let lock = || not_yet.lock().map_err(|e| Unkept(e.to_string()));
+    if let Some(why) = lock()?.get(&key) {
+        return Err(PeerLineageFailure::Unresolved(why.clone()));
+    }
+    match established_once(memo, key, establish) {
+        Err(PeerLineageFailure::Unresolved(why)) => {
+            lock()?.insert(key, why.clone());
+            Err(PeerLineageFailure::Unresolved(why))
+        }
+        answer => answer,
+    }
 }
 
 /// Every candidate under the locator was examined.
@@ -361,7 +393,8 @@ impl<'a> LiveSofiReads<'a> {
             network_id: &self.network,
             programs: crate::sdk::outcome_programs::registry(),
         };
-        established_once(
+        peer_established_once(
+            &self.once.peer_not_yet,
             &self.once.peer_steps,
             (*genesis, *device_id, position),
             || {
@@ -623,7 +656,8 @@ impl SofiReads for LiveSofiReads<'_> {
             network_id: &self.network,
             programs: crate::sdk::outcome_programs::registry(),
         };
-        established_once(
+        peer_established_once(
+            &self.once.peer_not_yet,
             &self.once.peer_roots,
             (*genesis, *device_id, position),
             || {
@@ -661,7 +695,8 @@ impl SofiReads for LiveSofiReads<'_> {
                 network_id: &self.network,
                 programs: crate::sdk::outcome_programs::registry(),
             };
-            return established_once(
+            return peer_established_once(
+                &self.once.peer_not_yet,
                 &self.once.peer_claims,
                 (*genesis, *device_id, position),
                 || {
@@ -900,6 +935,7 @@ impl<'a> VerifierContext<'a> {
             self.accepted.clone(),
         )
         .with_programs(crate::sdk::outcome_programs::registry().clone())
+        .with_proven(self.reads.once.proven.clone())
     }
 }
 
