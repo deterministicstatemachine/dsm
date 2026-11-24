@@ -122,8 +122,11 @@ must ring for the doorbells to count as covering the fleet.
     for it, because iOS suspends the app once the push is answered. When iOS
     launched the app for the push, `HeadlessWallet` first runs the same Rust
     startup the wallet screen runs, with no screen.
-  - The app declares `UIBackgroundModes: remote-notification` and the
-    `aps-environment` entitlement (`DsmWallet/DsmWallet.entitlements`).
+  - The app declares `UIBackgroundModes: remote-notification`. It does not
+    yet carry the `aps-environment` entitlement: signing a device build with
+    it needs the Push Notifications capability on the Apple account, which
+    is not set up. Until then registration fails, the app logs why, and it
+    keeps its waits while open.
 
 ## How the node authenticates to Google, with no signing in the node
 
@@ -242,7 +245,13 @@ to APNs**, a TLS client certificate Apple issues for the app, not a `.p8` key
 (which would make the node sign a JWT and read the clock).
 
 1. The app's App ID (`com.dsm.wallet`) needs the Push Notifications
-   capability, in the Apple Developer account that signs the app.
+   capability, in the Apple Developer account that signs the app. Then give
+   the app the entitlement: add `DsmWallet/DsmWallet.entitlements` holding
+   `aps-environment` = `development` (Xcode signs a distribution build with
+   the production environment its profile names), and add
+   `("CODE_SIGN_ENTITLEMENTS", quoted(f"{APP}/DsmWallet.entitlements"))` to
+   `app_settings` in `dsm_client/ios/scripts/generate_xcodeproj.py`, then run
+   it.
 2. In Certificates, Identifiers & Profiles, create an **Apple Push
    Notification service SSL (Sandbox & Production)** certificate for that App
    ID, from a certificate signing request made on your Mac. Download it and
