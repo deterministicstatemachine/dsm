@@ -7,7 +7,17 @@
 
 #![allow(dead_code)]
 
+pub mod apple_push;
 pub mod google_push;
+
+/// What the node suites make Apple do beyond taking pushes.
+impl apple_push::ApplePush {
+    /// From now on the app is gone from `device` (hex, as Apple's path names
+    /// it): Apple answers `410`.
+    pub fn uninstall(&self, device: &str) {
+        google_push::held(&self.taken.gone).insert(device.to_string());
+    }
+}
 
 /// What the node suites make Google do beyond taking pushes.
 impl google_push::GooglePush {

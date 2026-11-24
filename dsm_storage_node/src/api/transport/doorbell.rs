@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Inbox doorbells: a device asks a node to push its phone (Firebase Cloud
-//! Messaging) when an entry lands on any of its spools, so a wallet off
+//! Messaging for Android, the Apple Push Notification service for an
+//! iPhone) when an entry lands on any of its spools, so a wallet off
 //! screen is woken instead of keeping a connection open. The push carries
 //! nothing ([`crate::push`]); the device wakes and reads its spools as it
 //! always does, so nothing a device or a node verifies depends on a doorbell,
@@ -46,8 +47,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use axum::{body::Bytes, http::StatusCode, routing::post, Extension, Router};
 use prost::Message;
 
-use crate::push::{Delivery, FcmSender};
+use crate::push::{Delivery, Pusher};
 use crate::AppState;
+use dsm::types::proto::PushService;
 use dsm::utils::text_id;
 
 /// Spools one doorbell watches: every inbox route of a device with a few
@@ -70,6 +72,11 @@ pub const MAX_DOORBELLS_PER_PEER: usize = super::b0x::MAX_WAITERS_PER_PEER;
 /// stands.
 pub const MAX_DOORBELLS_PER_SPOOL: usize = 8;
 
+/// The shortest and the longest APNs device token taken, in bytes. Apple's
+/// are 32 today and documented as variable in length.
+pub const MIN_APNS_DEVICE_BYTES: usize = 16;
+pub const MAX_APNS_DEVICE_BYTES: usize = 100;
+
 /// The longest push token taken. Firebase registration tokens are a few
 /// hundred characters.
 pub const MAX_PUSH_TOKEN_BYTES: usize = 1024;
@@ -88,9 +95,11 @@ type DoorbellId = [u8; 32];
 /// served without the node's listener.
 type Registrant = Option<crate::liveness::Peer>;
 
-/// One doorbell: where its push goes, the spools it watches, the peer it was
-/// registered from, and when, in the node's own order of registrations.
+/// One doorbell: the service its push goes through and where, the spools it
+/// watches, the peer it was registered from, and when, in the node's own
+/// order of registrations.
 struct Doorbell {
+    service: PushService,
     push_token: String,
     spools: Vec<[u8; 32]>,
     registrant: Registrant,
@@ -141,6 +150,7 @@ impl Book {
         &mut self,
         id: DoorbellId,
         registrant: Registrant,
+        service: PushService,
         push_token: String,
         spools: Vec<[u8; 32]>,
     ) -> Result<(), BookFull> {
@@ -185,6 +195,7 @@ impl Book {
         self.by_id.insert(
             id,
             Doorbell {
+                service,
                 push_token,
                 spools,
                 registrant,
@@ -204,9 +215,11 @@ impl Book {
     }
 }
 
-/// The node's doorbells and the queue their pushes are sent from.
+/// The node's doorbells, the push services it is configured for, and the
+/// queue their pushes are sent from.
 pub struct Doorbells {
     book: Mutex<Book>,
+    services: Vec<PushService>,
     queued: Mutex<HashSet<DoorbellId>>,
     rings: tokio::sync::mpsc::Sender<DoorbellId>,
 }
@@ -221,13 +234,14 @@ fn whole<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Doorbells {
-    /// The node's doorbells, their pushes sent by `sender`. Starts the task
+    /// The node's doorbells, their pushes sent by `pusher`. Starts the task
     /// that sends them, on the current Tokio runtime, for as long as the
     /// doorbells are kept.
-    pub fn start(sender: FcmSender) -> Arc<Self> {
+    pub fn start(pusher: Pusher) -> Arc<Self> {
         let (rings, mut queue) = tokio::sync::mpsc::channel(RING_QUEUE);
         let doorbells = Arc::new(Self {
             book: Mutex::new(Book::default()),
+            services: pusher.services(),
             queued: Mutex::new(HashSet::new()),
             rings,
         });
@@ -237,7 +251,7 @@ impl Doorbells {
                 let Some(doorbells) = kept.upgrade() else {
                     break;
                 };
-                doorbells.send(&sender, id).await;
+                doorbells.send(&pusher, id).await;
             }
         });
         doorbells
@@ -258,15 +272,15 @@ impl Doorbells {
     }
 
     /// Send the push for `id`, as its doorbell stands now.
-    async fn send(&self, sender: &FcmSender, id: DoorbellId) {
+    async fn send(&self, pusher: &Pusher, id: DoorbellId) {
         // Taken off the queue first: an entry landing while this push is out
         // rings again.
         whole(&self.queued).remove(&id);
-        let push_token = match whole(&self.book).by_id.get(&id) {
-            Some(doorbell) => doorbell.push_token.clone(),
+        let (service, push_token) = match whole(&self.book).by_id.get(&id) {
+            Some(doorbell) => (doorbell.service, doorbell.push_token.clone()),
             None => return,
         };
-        match sender.ring(&push_token).await {
+        match pusher.ring(service, &push_token).await {
             Delivery::Taken => {}
             Delivery::TokenGone => {
                 log::info!("doorbell: its push token is no app's any more; taking it down");
@@ -283,6 +297,14 @@ impl Doorbells {
             }
             Delivery::NotSent(why) => log::warn!("doorbell: a push was not sent: {why}"),
         }
+    }
+
+    /// The service the doorbell `key` names rings through, if it is up.
+    pub fn service(&self, key: &[u8; 32]) -> Option<PushService> {
+        whole(&self.book)
+            .by_id
+            .get(&doorbell_id(key))
+            .map(|d| d.service)
     }
 
     /// The doorbell `key` names: its token and the spools it watches, if it
@@ -326,6 +348,18 @@ fn push_token(registration: &str) -> Result<String, StatusCode> {
     Ok(registration.to_string())
 }
 
+/// An APNs device: the device token's bytes, Base32 Crockford, between
+/// [`MIN_APNS_DEVICE_BYTES`] and [`MAX_APNS_DEVICE_BYTES`] long, kept in its
+/// one canonical spelling.
+fn apns_device(registration: &str) -> Result<String, StatusCode> {
+    let bytes = text_id::decode_base32_crockford(registration).ok_or(StatusCode::BAD_REQUEST)?;
+    if !(MIN_APNS_DEVICE_BYTES..=MAX_APNS_DEVICE_BYTES).contains(&bytes.len()) {
+        log::info!("doorbell: an APNs device token is {} bytes", bytes.len());
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(text_id::encode_base32_crockford(&bytes))
+}
+
 /// The spools a doorbell names, each once, in their canonical spelling.
 fn doorbell_spools(addresses: &[String]) -> Result<Vec<[u8; 32]>, StatusCode> {
     if addresses.is_empty() || addresses.len() > MAX_DOORBELL_ADDRESSES {
@@ -346,8 +380,9 @@ fn doorbell_spools(addresses: &[String]) -> Result<Vec<[u8; 32]>, StatusCode> {
 }
 
 /// The doorbell routes, served only by a node configured to push
-/// (`[push.fcm]`): a node that is not answers `404`, and its devices keep
-/// their waits.
+/// (`[push.fcm]`, `[push.apns]`, or both): a node that is not answers `404`,
+/// and its devices keep their waits. A doorbell through a service the node
+/// is not configured for is answered `404` as well.
 ///
 /// - `POST /api/v2/b0x/doorbell`: a [`dsm::types::proto::B0xDoorbell`]. Puts
 ///   up the doorbell its key names, in place of the one that key had.
@@ -385,10 +420,21 @@ async fn put_up(
         StatusCode::BAD_REQUEST
     })?;
     let key = doorbell_key(&doorbell.key)?;
-    let push_token = push_token(&doorbell.push_token)?;
+    let service = PushService::try_from(doorbell.service).map_err(|e| {
+        log::info!("doorbell: no such push service: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+    if !doorbells.services.contains(&service) {
+        log::info!("doorbell: this node does not push through {service:?}");
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let push_token = match service {
+        PushService::Fcm => push_token(&doorbell.push_token)?,
+        PushService::Apns => apns_device(&doorbell.push_token)?,
+    };
     let spools = doorbell_spools(&doorbell.addresses)?;
     whole(&doorbells.book)
-        .put_up(doorbell_id(&key), registrant, push_token, spools)
+        .put_up(doorbell_id(&key), registrant, service, push_token, spools)
         .map_err(|BookFull| {
             log::warn!("doorbell: the node keeps as many doorbells as it can; one refused");
             StatusCode::SERVICE_UNAVAILABLE
@@ -434,15 +480,33 @@ mod tests {
         let mine = doorbell_id(&[1; 32]);
         let theirs = doorbell_id(&[2; 32]);
         assert_eq!(
-            book.put_up(mine, peer(1), "mine-1".into(), vec![spool(7)]),
+            book.put_up(
+                mine,
+                peer(1),
+                PushService::Fcm,
+                "mine-1".into(),
+                vec![spool(7)]
+            ),
             Ok(())
         );
         assert_eq!(
-            book.put_up(theirs, peer(2), "theirs".into(), vec![spool(7)]),
+            book.put_up(
+                theirs,
+                peer(2),
+                PushService::Fcm,
+                "theirs".into(),
+                vec![spool(7)]
+            ),
             Ok(())
         );
         assert_eq!(
-            book.put_up(mine, peer(1), "mine-2".into(), vec![spool(7), spool(8)]),
+            book.put_up(
+                mine,
+                peer(1),
+                PushService::Fcm,
+                "mine-2".into(),
+                vec![spool(7), spool(8)]
+            ),
             Ok(())
         );
         assert_eq!(book.ringing(&spool(7)), vec![theirs, mine]);
@@ -482,6 +546,7 @@ mod tests {
                 book.put_up(
                     doorbell_id(&key(n)),
                     peer(n as u32),
+                    PushService::Fcm,
                     format!("t{n}"),
                     spools
                 ),
@@ -491,7 +556,13 @@ mod tests {
         assert_eq!(book.watches, MAX_DOORBELL_WATCHES);
         let newcomer = doorbell_id(&[0xEE; 32]);
         assert_eq!(
-            book.put_up(newcomer, peer(9_999), "newcomer".into(), vec![spool(0xEE)]),
+            book.put_up(
+                newcomer,
+                peer(9_999),
+                PushService::Fcm,
+                "newcomer".into(),
+                vec![spool(0xEE)]
+            ),
             Err(BookFull)
         );
         assert_eq!(book.by_id.len(), bells);
@@ -500,6 +571,7 @@ mod tests {
             book.put_up(
                 doorbell_id(&key(0)),
                 peer(0),
+                PushService::Fcm,
                 "t0-new".into(),
                 vec![spool(0xEF)]
             ),
@@ -515,7 +587,13 @@ mod tests {
         let mut book = Book::default();
         let other = doorbell_id(&[0xBB; 32]);
         assert_eq!(
-            book.put_up(other, peer(2), "other".into(), vec![spool(1)]),
+            book.put_up(
+                other,
+                peer(2),
+                PushService::Fcm,
+                "other".into(),
+                vec![spool(1)]
+            ),
             Ok(())
         );
         let ids: Vec<DoorbellId> = (0..=MAX_DOORBELLS_PER_PEER)
@@ -529,7 +607,7 @@ mod tests {
             let mut own = [0xDD; 32];
             own[..8].copy_from_slice(&(n as u64).to_be_bytes());
             assert_eq!(
-                book.put_up(*id, peer(1), format!("t{n}"), vec![own]),
+                book.put_up(*id, peer(1), PushService::Fcm, format!("t{n}"), vec![own]),
                 Ok(())
             );
         }
@@ -549,7 +627,13 @@ mod tests {
             .collect();
         for (n, id) in ids[..MAX_DOORBELLS_PER_SPOOL].iter().enumerate() {
             assert_eq!(
-                book.put_up(*id, peer(n as u32), format!("t{n}"), vec![spool(9)]),
+                book.put_up(
+                    *id,
+                    peer(n as u32),
+                    PushService::Fcm,
+                    format!("t{n}"),
+                    vec![spool(9)]
+                ),
                 Ok(())
             );
         }
@@ -557,6 +641,7 @@ mod tests {
             book.put_up(
                 ids[MAX_DOORBELLS_PER_SPOOL],
                 peer(99),
+                PushService::Fcm,
                 "late".into(),
                 vec![spool(9)]
             ),
@@ -567,7 +652,13 @@ mod tests {
             ids[..MAX_DOORBELLS_PER_SPOOL].to_vec()
         );
         assert_eq!(
-            book.put_up(ids[0], peer(0), "t0-new".into(), vec![spool(9)]),
+            book.put_up(
+                ids[0],
+                peer(0),
+                PushService::Fcm,
+                "t0-new".into(),
+                vec![spool(9)]
+            ),
             Ok(())
         );
         assert_eq!(book.ringing(&spool(9)).len(), MAX_DOORBELLS_PER_SPOOL);

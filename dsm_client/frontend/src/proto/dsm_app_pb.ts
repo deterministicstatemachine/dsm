@@ -1067,6 +1067,29 @@ proto3.util.setEnumType(BleFrameType, "dsm.BleFrameType", [
 ]);
 
 /**
+ * The push service a doorbell rings through: Firebase Cloud Messaging for an
+ * Android phone, the Apple Push Notification service for an iPhone.
+ *
+ * @generated from enum dsm.PushService
+ */
+export enum PushService {
+  /**
+   * @generated from enum value: PUSH_SERVICE_FCM = 0;
+   */
+  FCM = 0,
+
+  /**
+   * @generated from enum value: PUSH_SERVICE_APNS = 1;
+   */
+  APNS = 1,
+}
+// Retrieve enum metadata with: proto3.getEnumType(PushService)
+proto3.util.setEnumType(PushService, "dsm.PushService", [
+  { no: 0, name: "PUSH_SERVICE_FCM" },
+  { no: 1, name: "PUSH_SERVICE_APNS" },
+]);
+
+/**
  * How much of the token indexes the search established (Amendment S16).
  *
  * @generated from enum dsm.SofiSearch
@@ -18415,13 +18438,12 @@ export class B0xWaitResponse extends Message<B0xWaitResponse> {
 }
 
 /**
- * A device's doorbell on a node: while the app is off screen, an entry that
- * lands on any of these spools makes the node send one empty push (Firebase
- * Cloud Messaging) to `push_token`. The push carries nothing; the device
- * wakes and reads its spools as it always does. Only the holder of `key`
- * replaces or removes this doorbell: a doorbell is named by the hash of its
- * key, and a device derives a key of its own for each node. Nothing about a
- * doorbell enters what any device or node verifies.
+ * A device's doorbell on a node: an entry that lands on any of these spools
+ * makes the node send one empty push, through `service`, to `push_token`. The
+ * push carries nothing; the device wakes and reads its spools as it always
+ * does. Only the holder of `key` replaces or removes this doorbell: a doorbell
+ * is named by the hash of its key, and a device derives a key of its own for
+ * each node. Nothing about a doorbell enters what any device or node verifies.
  *
  * @generated from message dsm.B0xDoorbell
  */
@@ -18432,7 +18454,8 @@ export class B0xDoorbell extends Message<B0xDoorbell> {
   key = new Uint8Array(0);
 
   /**
-   * the FCM registration token of the device's app
+   * FCM: the app's registration token. APNs: the device token's bytes,
+   * Base32 Crockford.
    *
    * @generated from field: string push_token = 2;
    */
@@ -18445,6 +18468,11 @@ export class B0xDoorbell extends Message<B0xDoorbell> {
    */
   addresses: string[] = [];
 
+  /**
+   * @generated from field: dsm.PushService service = 4;
+   */
+  service = PushService.FCM;
+
   constructor(data?: PartialMessage<B0xDoorbell>) {
     super();
     proto3.util.initPartial(data, this);
@@ -18456,6 +18484,7 @@ export class B0xDoorbell extends Message<B0xDoorbell> {
     { no: 1, name: "key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "push_token", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "addresses", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 4, name: "service", kind: "enum", T: proto3.getEnumType(PushService) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): B0xDoorbell {

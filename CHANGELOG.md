@@ -9,6 +9,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- **The storage nodes ring an iPhone too (APNs).** The inbox doorbell of
+  #1269 now has a push service: an iPhone registers its APNs device token and
+  each node sends one background push, through Apple's certificate-based
+  connection (a TLS client certificate, so the node still signs nothing and
+  reads no clock), when an entry lands for it. The app wakes, starts the
+  wallet with no screen if iOS launched it for the push, and runs the same
+  sync a wait's answer runs, waiting for it before answering the system. A
+  node pushes iPhones only with `[push.apns]` configured
+  (`dsm_storage_node/deploy/operator/PUSH_DOORBELL.md`).
+
 ## [0.1.1-beta.5] — 2026-11-24
 
 ### Added

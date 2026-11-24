@@ -389,6 +389,15 @@ impl Node {
         }
     }
 
+    /// The service the doorbell `key` names on this node rings through, if
+    /// it stands.
+    pub fn doorbell_service(&self, key: &[u8; 32]) -> Option<dsm::types::proto::PushService> {
+        match &self.state.doorbells {
+            Some(doorbells) => doorbells.service(key),
+            None => panic!("every node of a set pushes"),
+        }
+    }
+
     /// The pool the node draws its database connections from.
     pub fn pool(&self) -> &db::DBPool {
         &self.state.db_pool
@@ -494,13 +503,16 @@ impl Drop for Node {
 }
 
 /// The network's pinned register members, one node each, each pushing
-/// devices' phones through [`NodeSet::google`] as the fleet pushes them
-/// through Firebase.
+/// devices' phones through [`NodeSet::google`] and [`NodeSet::apple`] as the
+/// fleet pushes them through Firebase and APNs.
 pub struct NodeSet {
     pub nodes: Vec<Node>,
-    /// Google's push endpoints every node's doorbells ring through: what
-    /// Firebase took is read here.
+    /// Google's push endpoints every node's Android doorbells ring through:
+    /// what Firebase took is read here.
     pub google: super::google_push::GooglePush,
+    /// Apple's push endpoint every node's iPhone doorbells ring through: what
+    /// APNs took is read here.
+    pub apple: super::apple_push::ApplePush,
     ca: TestCa,
 }
 
@@ -598,8 +610,10 @@ impl NodeSet {
             .collect();
 
         // Phase 2: each node, with the set checked against its own register,
-        // serving the binary's app and pushing through Google's endpoints.
+        // serving the binary's app and pushing through Google's endpoints and
+        // Apple's.
         let google = super::google_push::GooglePush::start().await;
+        let apple = super::apple_push::ApplePush::start().await;
         let mut nodes = Vec::with_capacity(prepared.len());
         for p in prepared {
             let endpoint = endpoint_of(&p.address);
@@ -611,11 +625,20 @@ impl NodeSet {
                 Ok(set) => set,
                 Err(e) => panic!("set-mates: {e}"),
             };
-            let sender = match dsm_storage_node::push::FcmSender::new(google.config()) {
+            let fcm = match dsm_storage_node::push::FcmSender::new(google.config()) {
                 Ok(sender) => sender,
-                Err(e) => panic!("the node's push sender: {e}"),
+                Err(e) => panic!("the node's FCM sender: {e}"),
             };
-            let doorbells = dsm_storage_node::api::transport::doorbell::Doorbells::start(sender);
+            let apns = match dsm_storage_node::push::ApnsSender::new(apple.config()) {
+                Ok(sender) => sender,
+                Err(e) => panic!("the node's APNs sender: {e}"),
+            };
+            let doorbells = dsm_storage_node::api::transport::doorbell::Doorbells::start(
+                dsm_storage_node::push::Pusher {
+                    fcm: Some(fcm),
+                    apns: Some(apns),
+                },
+            );
             let state = match AppState::new(p.member_id.clone(), p.pool) {
                 Ok(state) => Arc::new(state.with_storage_set(set).with_doorbells(doorbells)),
                 Err(e) => panic!("app state: {e}"),
@@ -642,7 +665,12 @@ impl NodeSet {
                 rival,
             });
         }
-        Self { nodes, google, ca }
+        Self {
+            nodes,
+            google,
+            apple,
+            ca,
+        }
     }
 
     /// The TLS a member serves, from this node set's CA: a certificate naming

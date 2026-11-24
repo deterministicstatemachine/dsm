@@ -17,8 +17,10 @@
 #[path = "../../../dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/nodes.rs"]
 pub mod nodes;
 
-/// The Google endpoints the harness's nodes push through, included beside
-/// the harness as the SDK suites include it.
+#[path = "../../../dsm_storage_node/tests/common/apple_push.rs"]
+pub mod apple_push;
+/// The Google and Apple endpoints the harness's nodes push through, included
+/// beside the harness as the SDK suites include them.
 #[path = "../../../dsm_storage_node/tests/common/google_push.rs"]
 pub mod google_push;
 

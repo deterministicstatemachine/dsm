@@ -138,6 +138,8 @@ pub(crate) mod test_support {
     pub mod arrivals;
     // Google's push endpoints, served by the test (the node's own suites
     // serve the same ones).
+    #[path = "../../../../../dsm_storage_node/tests/common/apple_push.rs"]
+    pub mod apple_push;
     #[path = "../../../../../dsm_storage_node/tests/common/google_push.rs"]
     pub mod google_push;
     pub mod grants;

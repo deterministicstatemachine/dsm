@@ -224,3 +224,103 @@ async fn a_wallet_off_screen_is_rung_by_the_nodes_instead_of_holding_waits() {
     inbox_poller::put_back_the_stop(stopping_before);
     inbox_doorbell::push_unavailable("the test is over");
 }
+
+/// The iPhone's APNs device token in the recipient's app.
+const IPHONE_B: [u8; 32] = [0xB0; 32];
+
+/// An iPhone puts its doorbell up at every member through APNs, with its
+/// device token's bytes, for exactly the routes its waiter plans on; off
+/// screen it holds no wait (`Backgrounded::Ringing`). A transfer to it rings
+/// Apple's endpoint for its device, as a background push carrying nothing
+/// of the transfer, and nothing goes through Firebase. The wake the iOS host
+/// calls (`dsm_ffi_on_push_wake`) runs the sync and waits for it, and the
+/// sync takes the transfer.
+/// MUTATION CONTROL: an iPhone's doorbell put up as Firebase's, or a wake
+/// that does not wait for its sync, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn an_iphone_is_rung_through_apns_and_its_wake_runs_the_sync() {
+    let stopping_before = inbox_poller::poller_stopping();
+    let mut p = Pair::boot(1_000, 0).await;
+    p.b.enter();
+    put_app(Screen::Shown);
+    inbox_doorbell::set_apns_device_token(&IPHONE_B);
+    p.release_background_poller();
+    let started = p.b.invoke("inbox.startPoller", &()).await;
+    assert!(started.success, "{:?}", started.error_message);
+
+    let device = crate::util::text_id::encode_base32_crockford(&IPHONE_B);
+    let routes = planned_routes();
+    until("every node holding the iPhone's doorbell", || {
+        p.nodes.nodes.iter().all(|node| {
+            let key = inbox_doorbell::doorbell_key(&node.endpoint).expect("a doorbell key");
+            node.doorbell(&key) == Some((device.clone(), routes.clone()))
+                && node.doorbell_service(&key) == Some(generated::PushService::Apns)
+        })
+    })
+    .await;
+
+    put_app(Screen::Hidden);
+    let backgrounded = inbox_poller::stop_poller_for_lifecycle().expect("the lifecycle stop");
+    assert_eq!(backgrounded, inbox_poller::Backgrounded::Ringing);
+
+    // A transfer lands: the nodes ring the iPhone through APNs.
+    inbox_poller::stop_poller_and_wait().expect("the poller stops");
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let mut nodes_taking = 0;
+    for node in &p.nodes.nodes {
+        let took = node
+            .spool()
+            .await
+            .into_iter()
+            .any(|spooled| routes.contains(&spooled.address));
+        nodes_taking += usize::from(took);
+    }
+    assert!(nodes_taking > 0, "the transfer reached no node");
+    let pushes = p
+        .nodes
+        .apple
+        .until_pushes(nodes_taking, Duration::from_secs(30))
+        .await;
+    assert!(
+        pushes.len() >= nodes_taking,
+        "{} pushes for {nodes_taking} nodes",
+        pushes.len()
+    );
+    let hex: String = IPHONE_B.iter().map(|b| format!("{b:02x}")).collect();
+    for push in &pushes {
+        assert_eq!(push.device, hex);
+        assert_eq!(push.push_type, "background");
+        assert_eq!(push.priority, "5");
+        assert_eq!(push.body["aps"]["content-available"], 1);
+        assert_eq!(push.body.as_object().map(|body| body.len()), Some(1));
+    }
+    assert!(
+        p.nodes.google.pushes().is_empty(),
+        "an iPhone's doorbell rang through Firebase"
+    );
+
+    // The wake the iOS host calls runs the sync and waits for it. It blocks,
+    // as the host's thread does, so it runs on a thread of its own.
+    inbox_poller::stop_poller_and_wait().expect("the poller stops");
+    p.b.enter();
+    put_app(Screen::Hidden);
+    let woken =
+        std::thread::spawn(|| inbox_doorbell::on_push_wake_and_wait(Duration::from_secs(60)));
+    let woken = tokio::task::spawn_blocking(move || woken.join())
+        .await
+        .expect("the wake's thread is joined")
+        .expect("the wake's thread did not panic");
+    assert_eq!(woken, inbox_doorbell::PushWake::Synced);
+    p.b.enter();
+    assert_eq!(
+        p.b.era_balance(),
+        10,
+        "the sync the wake waited for did not take the transfer"
+    );
+
+    inbox_poller::stop_poller_and_wait().expect("the poller stops");
+    inbox_poller::put_back_the_stop(stopping_before);
+    inbox_doorbell::push_unavailable("the test is over");
+}

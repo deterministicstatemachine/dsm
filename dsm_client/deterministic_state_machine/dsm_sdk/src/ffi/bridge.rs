@@ -280,6 +280,54 @@ pub extern "C" fn dsm_ffi_on_app_backgrounded() -> i32 {
     }
 }
 
+/// `setApnsDeviceToken`: the APNs device token iOS handed over (at start,
+/// and whenever it changes), as its bytes. The waiter puts this device's
+/// doorbells up with it, so the storage nodes push the phone when something
+/// lands for it. Answers nothing, or why the token was not taken.
+///
+/// # Safety
+/// `device` points at `len` readable bytes, or is null with `len` 0.
+#[no_mangle]
+pub unsafe extern "C" fn dsm_ffi_set_apns_device_token(device: *const u8, len: usize) -> DsmBytes {
+    let device = bytes_from(device, len);
+    if device.is_empty() {
+        return DsmBytes::text("the APNs device token is empty");
+    }
+    crate::sdk::inbox_doorbell::set_apns_device_token(device);
+    DsmBytes::none()
+}
+
+/// `pushUnavailable`: this phone has no push (APNs registration failed):
+/// the app keeps listening as it did before. `why` is the system's reason.
+///
+/// # Safety
+/// `why` is a NUL-terminated UTF-8 string, or null.
+#[no_mangle]
+pub unsafe extern "C" fn dsm_ffi_push_unavailable(why: *const c_char) {
+    match str_from(why, "the reason") {
+        Ok(why) => crate::sdk::inbox_doorbell::push_unavailable(why),
+        Err(unreadable) => crate::sdk::inbox_doorbell::push_unavailable(&unreadable),
+    }
+}
+
+/// `onPushWake`: a storage node pushed this phone. Runs the sync a wait's
+/// answer runs and waits for it, at most `wait_ms`, because iOS suspends the
+/// app once the host answers the push. 0: the wallet is not started in this
+/// process yet (iOS launched it for the push), and the host starts it and
+/// asks again; 1: the sync ran to its end; 2: it was started and had not
+/// ended within `wait_ms`.
+#[no_mangle]
+pub extern "C" fn dsm_ffi_on_push_wake(wait_ms: u32) -> i32 {
+    use crate::sdk::inbox_doorbell::PushWake;
+    match crate::sdk::inbox_doorbell::on_push_wake_and_wait(std::time::Duration::from_millis(
+        u64::from(wait_ms),
+    )) {
+        PushWake::NotStarted => 0,
+        PushWake::Synced => 1,
+        PushWake::Started => 2,
+    }
+}
+
 /// `ensureAppRouterInstalled`: 1 when the full AppRouter is ready, else 0.
 #[no_mangle]
 pub extern "C" fn dsm_ffi_ensure_app_router_installed() -> i32 {

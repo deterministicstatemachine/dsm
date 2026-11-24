@@ -47,8 +47,26 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             HostBridge.badgeAuthorization = granted ? .granted : .denied
             if let error { DsmLog.warn(tag, "the badge permission request failed: \(error)") }
         }
+        // The storage nodes' doorbell: APNs hands over this phone's device
+        // token (a background push needs no permission from the user).
+        application.registerForRemoteNotifications()
         // The app can carry on only as the SDK's host.
         return hostRefusal == nil
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        InboxPush.tokenIssued(deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        InboxPush.registrationFailed(error)
+    }
+
+    /// A storage node rang: something landed for this wallet.
+    func application(_ application: UIApplication,
+                     didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        InboxPush.rang(completionHandler)
     }
 
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {

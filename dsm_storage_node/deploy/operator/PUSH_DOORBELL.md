@@ -2,14 +2,16 @@
 
 An open wallet waits on its spools with long-polls (`POST /api/v2/b0x/wait`).
 Off screen, it holds no connection: each storage node keeps a **doorbell** for
-it and sends one empty Firebase Cloud Messaging (FCM) push when an entry lands
-on one of its spools. The push wakes the app, which runs the same sync a wait's
+it and sends one empty push when an entry lands on one of its spools: Firebase
+Cloud Messaging (FCM) for an Android phone, the Apple Push Notification service
+(APNs) for an iPhone. The push wakes the app, which runs the same sync a wait's
 answer runs. What landed is read and verified exactly as before. Nothing in
 acceptance or verification changed.
 
 ## What a push carries
 
-Every push the node sends is the same message, apart from the token it goes to:
+Every FCM push the node sends is the same message, apart from the token it goes
+to:
 
 ```json
 {"message": {"token": "<the phone's FCM token>",
@@ -22,6 +24,15 @@ same constant in every push. It is there because Firebase documents delivery to
 the app's `onMessageReceived` only for data messages, and a message with no data
 at all is not a documented case. `HIGH` priority wakes a phone in Doze.
 `collapse_key` folds several waiting wakes into one.
+
+Every APNs push is the same background push, apart from the device it goes to:
+`POST /3/device/<device token, hex>` over HTTP/2 with `apns-push-type:
+background`, `apns-priority: 5`, `apns-topic: <bundle id>`, `apns-collapse-id:
+dsm-inbox`, and the body `{"aps":{"content-available":1}}`. A background push
+needs no permission from the user and shows nothing on screen. Apple requires
+priority 5 for it, and may hold or drop background pushes to a phone it judges
+busy (low power, many recent pushes): the wake is best-effort, and the app
+reads its inbox whenever it is opened.
 
 ## Who may change a doorbell, and why no write grant guards it
 
@@ -100,9 +111,19 @@ must ring for the doorbells to count as covering the fleet.
     no screen. The wallet seed is unsealed from the hardware vault, as on any
     cold start.
   - The battery exemption is asked for only on a phone with no push.
-- **iOS (APNs)**: not built yet. It would use the same doorbell with an APNs
-  token. iOS answers `Ringing` only once it has handed over a token, which it
-  never does today.
+- **iOS (APNs)**:
+  - `AppDelegate` registers for remote notifications and hands the device
+    token's bytes to Rust (`dsm_ffi_set_apns_device_token`). The doorbell
+    carries them as Base32 Crockford with `service = PUSH_SERVICE_APNS`; the
+    node renders Apple's hex form only in the path it calls.
+  - A failed registration calls `dsm_ffi_push_unavailable`, logs the reason,
+    and the app keeps its waits while open.
+  - A push calls `dsm_ffi_on_push_wake(25000)`, which runs the sync and waits
+    for it, because iOS suspends the app once the push is answered. When iOS
+    launched the app for the push, `HeadlessWallet` first runs the same Rust
+    startup the wallet screen runs, with no screen.
+  - The app declares `UIBackgroundModes: remote-notification` and the
+    `aps-environment` entitlement (`DsmWallet/DsmWallet.entitlements`).
 
 ## How the node authenticates to Google, with no signing in the node
 
@@ -207,10 +228,50 @@ client_cert_path = "/certs/push-client.crt"
 client_key_path = "/certs/push-client.key"
 ```
 
-On start, the node logs `push configured: devices' doorbells are rung through
+On start, the node logs `push configured: Android doorbells are rung through
 Firebase Cloud Messaging`. A missing file or malformed PEM stops it at
-start-up with the reason. A node without `[push.fcm]` serves no doorbell
-route, and its devices keep their waits.
+start-up with the reason. A node without `[push.fcm]` and `[push.apns]` serves
+no doorbell route, and its devices keep their waits. A node with only one of
+them answers a doorbell for the other service `404`, and that phone keeps its
+waits.
+
+### 6. APNs, for iPhones
+
+No signing here either: the node uses Apple's **certificate-based connection
+to APNs**, a TLS client certificate Apple issues for the app, not a `.p8` key
+(which would make the node sign a JWT and read the clock).
+
+1. The app's App ID (`com.dsm.wallet`) needs the Push Notifications
+   capability, in the Apple Developer account that signs the app.
+2. In Certificates, Identifiers & Profiles, create an **Apple Push
+   Notification service SSL (Sandbox & Production)** certificate for that App
+   ID, from a certificate signing request made on your Mac. Download it and
+   export it with its private key from Keychain Access as a `.p12`.
+3. Convert it to PEM:
+
+```bash
+openssl pkcs12 -in apns.p12 -clcerts -nokeys -out apns-provider.crt
+openssl pkcs12 -in apns.p12 -nocerts -nodes -out apns-provider.key
+```
+
+4. On each node, copy them to `/certs/apns-provider.crt` and
+   `/certs/apns-provider.key`, readable by the node only, and add:
+
+```toml
+[push.apns]
+topic = "com.dsm.wallet"
+client_cert_path = "/certs/apns-provider.crt"
+client_key_path = "/certs/apns-provider.key"
+# endpoint = "https://api.sandbox.push.apple.com"   # for phones running a development build
+```
+
+A development build of the app (Xcode, TestFlight not included) gets a
+**sandbox** device token, which only `api.sandbox.push.apple.com` accepts; the
+production endpoint answers it `BadDeviceToken`, and the node takes that
+doorbell down (the phone keeps its waits while open). A fleet serving
+development phones names the sandbox endpoint; one serving App Store or
+TestFlight builds names none (production is the default). The provider
+certificate is valid for both and lasts a year: renew it before it ends.
 
 ## Tests
 
@@ -223,7 +284,14 @@ route, and its devices keep their waits.
   - no device replaces or removes another's doorbell;
   - a refused access token is made again;
   - a token FCM has forgotten takes its doorbell down;
-  - a node without `[push.fcm]` serves no doorbell.
+  - a node without `[push.fcm]` serves no doorbell;
+  - an iPhone's doorbell rings through APNs (`tests/common/apple_push.rs`:
+    HTTP/2, a provider certificate from the CA it trusts), as one background
+    push per delivery carrying only `content-available`, and nothing through
+    Firebase;
+  - an iPhone whose app Apple says is gone (`410`) takes its doorbell down;
+  - a node without `[push.apns]` answers an iPhone's doorbell `404`, and a
+    device token that is not one `400`.
 - `dsm_sdk/src/sdk/inbox_doorbell_tests.rs`: a booted pair on five nodes. It
   checks:
   - the recipient's doorbell stands on every node for exactly its planned
@@ -231,4 +299,8 @@ route, and its devices keep their waits.
   - off screen it is `Ringing` and holds no wait;
   - a transfer rings its token, and the push carries nothing;
   - the push-woken sync takes the transfer;
-  - the doorbells follow the moved routes.
+  - the doorbells follow the moved routes;
+  - an iPhone's doorbell stands on every node through APNs with its device
+    token, a transfer rings Apple's endpoint for its device and nothing
+    through Firebase, and the wake the iOS host calls runs the sync and waits
+    for it.

@@ -150,6 +150,8 @@ def main():
     ]
     app_settings = [
         ("ASSETCATALOG_COMPILER_APPICON_NAME", "AppIcon"),
+        # The push entitlement (aps-environment): the storage nodes' doorbell.
+        ("CODE_SIGN_ENTITLEMENTS", quoted(f"{APP}/DsmWallet.entitlements")),
         ("CODE_SIGN_STYLE", "Automatic"),
         ("CURRENT_PROJECT_VERSION", "1"),
         # One executable, not Xcode's debug stub plus dylib: the simulator's

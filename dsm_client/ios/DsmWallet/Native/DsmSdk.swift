@@ -117,6 +117,26 @@ enum DsmSdk {
         dsm_ffi_ensure_app_router_installed()
     }
 
+    // MARK: Push (the storage nodes' doorbell)
+
+    /// The APNs device token iOS handed over; Rust puts this phone's
+    /// doorbells up on the storage nodes with it.
+    static func setApnsDeviceToken(_ device: Data) -> String? {
+        reason(withBytes(device) { dsm_ffi_set_apns_device_token($0, $1) })
+    }
+
+    /// No push on this phone: Rust keeps the waits while the app is open.
+    static func pushUnavailable(_ why: String) {
+        dsm_ffi_push_unavailable(why)
+    }
+
+    /// A storage node rang: Rust runs the sync and waits for it, at most
+    /// `waitMs`. 0: the wallet is not started in this process yet; 1: the
+    /// sync ran to its end; 2: it was started and had not ended in time.
+    static func onPushWake(waitMs: UInt32) -> Int32 {
+        dsm_ffi_on_push_wake(waitMs)
+    }
+
     static func appRouterStatus() -> Int32 {
         dsm_ffi_app_router_status()
     }

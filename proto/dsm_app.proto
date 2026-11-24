@@ -2836,17 +2836,26 @@ message B0xWaitResponse {
   repeated string ready = 1; // the listed spools holding an entry at or after their position
 }
 
-// A device's doorbell on a node: while the app is off screen, an entry that
-// lands on any of these spools makes the node send one empty push (Firebase
-// Cloud Messaging) to `push_token`. The push carries nothing; the device
-// wakes and reads its spools as it always does. Only the holder of `key`
-// replaces or removes this doorbell: a doorbell is named by the hash of its
-// key, and a device derives a key of its own for each node. Nothing about a
-// doorbell enters what any device or node verifies.
+// The push service a doorbell rings through: Firebase Cloud Messaging for an
+// Android phone, the Apple Push Notification service for an iPhone.
+enum PushService {
+  PUSH_SERVICE_FCM  = 0;
+  PUSH_SERVICE_APNS = 1;
+}
+
+// A device's doorbell on a node: an entry that lands on any of these spools
+// makes the node send one empty push, through `service`, to `push_token`. The
+// push carries nothing; the device wakes and reads its spools as it always
+// does. Only the holder of `key` replaces or removes this doorbell: a doorbell
+// is named by the hash of its key, and a device derives a key of its own for
+// each node. Nothing about a doorbell enters what any device or node verifies.
 message B0xDoorbell {
   bytes key = 1 [(dsm_fixed_len)=32];
-  string push_token = 2;          // the FCM registration token of the device's app
+  // FCM: the app's registration token. APNs: the device token's bytes,
+  // Base32 Crockford.
+  string push_token = 2;
   repeated string addresses = 3;  // spool keys, Base32 Crockford of 32 bytes
+  PushService service = 4;
 }
 
 // Take down the doorbell `key` names.
