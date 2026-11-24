@@ -2294,6 +2294,16 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         // extended already, so the root asked for is one the chain so far
         // names — and extending it again would ask again, without end.
         if let Some(so_far) = Extending::so_far(&vault_id) {
+            // A root below where the chain so far starts, the parent of an
+            // earlier position of a trader this extension judges: the proof
+            // record at that root answers it, its trade checked as its
+            // parent's last link (SoFi Amendments S34, S36), never by
+            // extending this vault's chain again.
+            if let Some(root) = until.filter(|root| !so_far.names(root)) {
+                if let Some(at_root) = self.proven_at_root(&vault_id, &genesis, root)? {
+                    return Ok(at_root);
+                }
+            }
             return Ok(so_far);
         }
         let walked =
@@ -2425,6 +2435,59 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             root,
         )
         .map_err(|why| format!("{why:?}")))
+    }
+
+    /// `vault_id`'s chain at `root` from the proof record whose root is
+    /// `root`, when one verifies and its trade is its parent's last link:
+    /// the record's state recorded, and the chain holding `root` alone.
+    /// `None` where no such record stands.
+    fn proven_at_root(
+        &self,
+        vault_id: &D32,
+        genesis: &AcceptedVaultGenesis,
+        root: &D32,
+    ) -> Result<Option<VaultChain>, VerifierFailure> {
+        for bytes in self
+            .reads
+            .proof_record_candidates(genesis, Some(root))?
+            .iter()
+            .take(PROOF_RECORDS_TRIED)
+        {
+            let head =
+                match super::vault_proof::verify_record(bytes, vault_id, genesis.genesis_root()) {
+                    Ok(head) if head.root() == root => head,
+                    Ok(..) => continue,
+                    Err(why) => {
+                        log::info!(
+                            "[sofi verifier] vault {}: a proof record passed over: {why}",
+                            short_id(vault_id)
+                        );
+                        continue;
+                    }
+                };
+            match self.last_link(vault_id, head.r_prev(), head.generation(), head.root())? {
+                Ok(()) => {
+                    if let Some(replaced) = self.reads.record_proven(&head)? {
+                        log::warn!("[sofi verifier] {replaced}");
+                        self.replaced
+                            .lock()
+                            .map_err(|e| {
+                                VerifierFailure::Read(format!("the replaced records: {e}"))
+                            })?
+                            .push(replaced);
+                    }
+                    return Ok(Some(VaultChain::from_proof(&head)));
+                }
+                Err(why) => {
+                    log::info!(
+                        "[sofi verifier] vault {}: a record's last link does not hold: {why}",
+                        short_id(vault_id)
+                    );
+                    continue;
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// `vault_id`'s chain from its newest proof record (owner ruling
