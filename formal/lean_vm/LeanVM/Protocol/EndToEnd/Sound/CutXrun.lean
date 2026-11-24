@@ -450,9 +450,8 @@ theorem xcut_veBodyG (ev : List K → List E → E → VerifierProgram Unit) (pu
   unfold veBodyG veBodyCut
   simp only [VerifierProgram.bind_eq]
   refine XCut.bind _ fun _ _ ↦ XCut.bind _ fun ood _ ↦ XCut.bind _ fun r _ ↦ ?_
-  obtain ⟨cl, kp, ks⟩ := r
-  refine XCut.bind _ fun y _ ↦ ?_
-  obtain ⟨t, w⟩ := y
+  obtain ⟨cl, kp, ks, fp, fs⟩ := r
+  refine XCut.bind _ fun _ _ ↦ ?_
   exact xcut_verifyStackedOpeningG _ _ _
 
 /-- What the cut verifier's run ends with: the final query's proof of work hits at the announced

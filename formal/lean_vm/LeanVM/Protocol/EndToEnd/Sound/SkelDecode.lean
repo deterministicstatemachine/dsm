@@ -301,7 +301,7 @@ theorem dec_veBodyCut (pd : Digest) (layout : Verifier.Layout) (ρ : ℕ) :
   unfold veBodyCut
   simp only [VerifierProgram.bind_eq]
   refine DecP.congr (DecP.drop (skel_commitStack _ _) fun _ _ ↦ DecP.drop (skel_readOod _)
-    fun _ _ ↦ DecP.drop (skel_frontProg layout pd) fun _ _ ↦ DecP.drop (skel_ringSwitch _ _)
+    fun _ _ ↦ DecP.drop (skel_frontProg layout pd) fun _ _ ↦ DecP.drop (skel_ringSwitch _)
     fun _ _ ↦ dec_verifyStackedOpeningCut _ _ _) fun h ↦ ?_
   simp only [decBody, skBodyHead, List.drop_drop, List.length_append, List.length_singleton]
 

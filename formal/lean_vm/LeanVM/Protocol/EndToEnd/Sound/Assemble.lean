@@ -14,6 +14,7 @@ public import LeanVM.Protocol.EndToEnd.Sound.Moves
 public import LeanVM.Protocol.EndToEnd.Sound.Runs
 public import LeanVM.Protocol.EndToEnd.Front.CommitDoom
 public import LeanVM.Protocol.EndToEnd.Front.RingFidelity
+public import LeanVM.Protocol.EndToEnd.Front.FlockPhase
 public import LeanVM.Protocol.EndToEnd.Front.RingMultilinear
 public import LeanVM.Protocol.EndToEnd.Front.LayoutBridgeB
 public import LeanVM.Protocol.Whir.Sound.Sumcheck
@@ -36,15 +37,16 @@ in doom, every group of challenges at most `εmsg = 2^-125` after the grind befo
 3. the commitment's OOD sample (`commitOodSpec`): after its grind, the point separates the
    candidates except with probability `C(L₀, 2)·μ/|E|` (`OpeningIface.ood_row`), and then at most one
    candidate answers `y₀` (`oodCands`);
-4. the front phases, the bus, the table sumcheck, the public input and the Keccak reduction
-   (`FrontIface.frontSpec`, W3's), on that one candidate (`L₀ = 1`), ending in "it does not meet the
-   column claims with true slices";
-5. ring switching (`ringSpec`), its sixteen challenges and the opening's `λ` one group under the
-   batching grind: `2/|E|` for the candidate and `(J − 1)·L₀/|E|` for `λ`, at most
-   `(maxStackedClaims + 1)·L₀/|E|` (`OpeningIface.lambda_row`);
+4. the front phases, the bus, the table sumcheck, the public input, the Keccak reduction and
+   (research build) Flock's phase (`FrontIface.frontSpec`), on that one candidate (`L₀ = 1`),
+   ending in "it does not meet the column claims with true `q_keccak` and `q_flock` slices";
+5. ring switching over the two regions (`ringSpec`, `n = 2`), its sixteen challenges and the
+   opening's `λ` one group under the batching grind: `2·2/|E|` for the candidate and
+   `(J − 1)·L₀/|E|` for `λ`, `J ≤ maxStackedClaims − 2`, at most `(maxStackedClaims + 1)·L₀/|E|`
+   (`OpeningIface.lambda_row`);
 6. the stacked opening (`OpeningIface.stackedSpec`, W2's), from `StackedPreOf`: every member of the
-   level-0 list violates one of `ring :: claims ++ [ood]`, the one left by the OOD sample a front
-   claim or the ring claim, every other the OOD claim (`exists_violated_of_ood`).
+   level-0 list violates one of `rings ++ claims ++ [ood]`, the one left by the OOD sample a front
+   claim or a ring claim, every other the OOD claim (`exists_violated_of_ood`).
 
 The opening's and the front phases' specifications are taken at the boundary as the structures
 `OpeningIface` and `FrontIface`, in the shapes W2 and W3 deliver; the assembly is proved against
@@ -186,14 +188,26 @@ theorem isMultiaffine_eqEval_any (O : OpeningIface) (z : List E) (n : ℕ) :
 
 /-! ## The front phases' interface -/
 
-/-- The front phases after the OOD sample: the bus, the table sumcheck, the public input and the
-Keccak reduction, returning the column claims left, and the point and slices of `q_keccak`. -/
+/-- What the front phases return: the column claims left, then the point and slices of
+`q_keccak`, then those of `q_flock`. -/
+abbrev FrontOut : Type := List Verifier.ColumnClaim × List E × List E × List E × List E
+
+/-- The Keccak reduction, then Flock's phase (research build). -/
+def keccakFlockClaims (layout : Verifier.Layout) (claims : List Verifier.ColumnClaim) :
+    VerifierProgram FrontOut := do
+  let (claims, keccakPoint, keccakSlices) ← keccakPhaseClaims layout claims
+  let (flockPoint, flockSlices) ← flockPhase layout
+  return (claims, keccakPoint, keccakSlices, flockPoint, flockSlices)
+
+/-- The front phases after the OOD sample: the bus, the table sumcheck, the public input, the
+Keccak reduction and Flock's phase. -/
 def frontProg (ev : List K → List E → E → VerifierProgram Unit) (layout : Verifier.Layout)
-    (publicInput : Digest) : VerifierProgram (List Verifier.ColumnClaim × List E × List E) := do
+    (publicInput : Digest) : VerifierProgram FrontOut := do
   let bus ← verifyBusBalance ev layout
   let claims ← tablePhaseClaims layout bus
   let publicClaims ← publicInputPhase layout publicInput
-  keccakPhaseClaims layout (claims ++ publicClaims)
+  keccakFlockClaims layout (claims ++ publicClaims)
+
 
 section Sizes
 
@@ -202,13 +216,16 @@ variable (prog : LeanIsaProgram) (input : PublicInput) (s : Sizes)
 /-- `q_keccak`'s offset on the verifier's layout. -/
 abbrev qkOff : ℕ := (blocks prog s).offset (keccakBlock prog s)
 
-/-- **After the front phases**: the point and slices have their lengths, the claims fit the
-opening, and no candidate of `S` meets the column claims with true slices. -/
-def FrontPost (S : Set (Column (verifierLayout prog s).stackLog))
-    (r : List Verifier.ColumnClaim × List E × List E) (_ : List Ev) : Prop :=
-  r.2.1.length = s.τ 5 + 6 ∧ r.2.2.length = 64 ∧ r.1.length ≤ maxStackedClaims - 2 ∧
+/-- **After the front phases**: the points and slices have their lengths, the claims fit the
+opening, and no candidate of `S` meets the column claims with true `q_keccak` and `q_flock`
+slices. -/
+def FrontPost (S : Set (Column (verifierLayout prog s).stackLog)) (r : FrontOut) (_ : List Ev) :
+    Prop :=
+  r.2.1.length = s.τ 5 + 6 ∧ r.2.2.1.length = 64 ∧ r.2.2.2.1.length = s.τ 6 + 2 + 6 ∧
+    r.2.2.2.2.length = 64 ∧ r.1.length ≤ maxStackedClaims - 5 ∧
     ∀ q ∈ S, ¬ (ColumnClaimsHold (verifierLayout prog s) r.1 q ∧
-      ∀ i : Fin 64, sliceExt (s.τ 5) (qkAt (qkOff prog s) q) r.2.1 i = r.2.2.getD i 0)
+      (∀ i : Fin 64, sliceExt (s.τ 5) (qkAt (qkOff prog s) q) r.2.1 i = r.2.2.1.getD i 0) ∧
+      FlockSlicesTrue prog s q r.2.2.2.1 r.2.2.2.2)
 
 end Sizes
 
@@ -236,20 +253,22 @@ def veBody (ev : List K → List E → E → VerifierProgram Unit) (publicInput 
     (layout : Verifier.Layout) (ρ : ℕ) : VerifierProgram Unit := do
   commitStack layout.stackLog ρ
   let ood ← readOod layout.stackLog
-  let (claims, keccakPoint, keccakSlices) ← frontProg ev layout publicInput
-  let (ringTarget, ringWeight) ← ringSwitch keccakPoint keccakSlices
+  let (claims, keccakPoint, keccakSlices, flockPoint, flockSlices) ←
+    frontProg ev layout publicInput
+  let rings ← ringSwitch [(keccakPoint, keccakSlices), (flockPoint, flockSlices)]
   verifyStackedOpening layout.stackLog ρ
-    (ringSwitchClaim layout ringTarget ringWeight :: claims.map (·.stackClaim layout) ++ [ood])
+    (ringStackClaims layout rings ++ claims.map (·.stackClaim layout) ++ [ood])
 
 /-- `veBody`, returning the opening's trace. -/
 def veBodyG (ev : List K → List E → E → VerifierProgram Unit) (publicInput : Digest)
     (layout : Verifier.Layout) (ρ : ℕ) : VerifierProgram Whir.Sound.WhirTrace := do
   commitStack layout.stackLog ρ
   let ood ← readOod layout.stackLog
-  let (claims, keccakPoint, keccakSlices) ← frontProg ev layout publicInput
-  let (ringTarget, ringWeight) ← ringSwitch keccakPoint keccakSlices
+  let (claims, keccakPoint, keccakSlices, flockPoint, flockSlices) ←
+    frontProg ev layout publicInput
+  let rings ← ringSwitch [(keccakPoint, keccakSlices), (flockPoint, flockSlices)]
   Whir.Sound.verifyStackedOpeningG layout.stackLog ρ
-    (ringSwitchClaim layout ringTarget ringWeight :: claims.map (·.stackClaim layout) ++ [ood])
+    (ringStackClaims layout rings ++ claims.map (·.stackClaim layout) ++ [ood])
 
 /-- The ghost body, its trace dropped, is the body. -/
 theorem veBodyG_unit (ev : List K → List E → E → VerifierProgram Unit) (publicInput : Digest)
@@ -260,9 +279,8 @@ theorem veBodyG_unit (ev : List K → List E → E → VerifierProgram Unit) (pu
   refine congrArg (VerifierProgram.bind _) (funext fun _ ↦ ?_)
   refine congrArg (VerifierProgram.bind _) (funext fun ood ↦ ?_)
   refine congrArg (VerifierProgram.bind _) (funext fun r ↦ ?_)
-  obtain ⟨cl, kp, ks⟩ := r
+  obtain ⟨cl, kp, ks, fp, fs⟩ := r
   refine congrArg (VerifierProgram.bind _) (funext fun y ↦ ?_)
-  obtain ⟨t, w⟩ := y
   exact Whir.Sound.verifyStackedOpeningG_unit _ _ _
 
 /-- `verify_execution` is the announced sizes, then `veBody`. -/
@@ -273,6 +291,19 @@ theorem verifyExecutionClaims_eq (ev : List K → List E → E → VerifierProgr
         | (layout, ρ) => veBody ev publicInput layout ρ := by
   simp only [verifyExecutionClaims, veBody, frontProg, VerifierProgram.bind_eq,
     VerifierProgram.bind_assoc]
+  refine congrArg (VerifierProgram.bind _) (funext fun a ↦ ?_)
+  obtain ⟨layout, ρ⟩ := a
+  refine congrArg (VerifierProgram.bind _) (funext fun _ ↦ ?_)
+  refine congrArg (VerifierProgram.bind _) (funext fun _ ↦ ?_)
+  refine congrArg (VerifierProgram.bind _) (funext fun _ ↦ ?_)
+  refine congrArg (VerifierProgram.bind _) (funext fun _ ↦ ?_)
+  refine congrArg (VerifierProgram.bind _) (funext fun _ ↦ ?_)
+  simp only [keccakFlockClaims, VerifierProgram.bind_eq, VerifierProgram.bind_assoc]
+  refine congrArg (VerifierProgram.bind _) (funext fun r ↦ ?_)
+  obtain ⟨cl, kp, ks⟩ := r
+  refine congrArg (VerifierProgram.bind _) (funext fun f ↦ ?_)
+  obtain ⟨fp, fs⟩ := f
+  rfl
 
 /-! ## Moves of the claim-list phases -/
 
@@ -318,13 +349,22 @@ theorem moves_keccakPhaseClaims (layout : Verifier.Layout) (claims : List Verifi
   obtain ⟨outputs, point, slices⟩ := r
   exact Moves.pure trivial
 
+theorem moves_keccakFlockClaims (layout : Verifier.Layout) (claims : List Verifier.ColumnClaim) :
+    Moves G64 False (fun _ ↦ True) (fun _ ↦ False) (keccakFlockClaims layout claims) := by
+  unfold keccakFlockClaims
+  refine Moves.seq' (moves_keccakPhaseClaims _ _) fun r _ ↦ ?_
+  obtain ⟨cl, kp, ks⟩ := r
+  refine Moves.seq' (moves_flockPhase _) fun f _ ↦ ?_
+  obtain ⟨fp, fs⟩ := f
+  exact Moves.pure trivial
+
 theorem moves_frontProg {ev : List K → List E → E → VerifierProgram Unit}
     (hb : ∀ w p v, Moves G64 False (fun _ ↦ True) (fun _ ↦ False) (ev w p v)) (layout : Verifier.Layout)
     (publicInput : Digest) :
     Moves G64 False (fun _ ↦ True) (fun _ ↦ False) (frontProg ev layout publicInput) :=
   Moves.seq' (moves_verifyBusBalance hb layout) fun _ _ ↦
     Moves.seq' (moves_tablePhaseClaims _ _) fun _ _ ↦
-      Moves.seq' (moves_publicInputPhase _ _) fun _ _ ↦ moves_keccakPhaseClaims _ _
+      Moves.seq' (moves_publicInputPhase _ _) fun _ _ ↦ moves_keccakFlockClaims _ _
 
 /-- A sub-program without commitments keeps any property of the commitments. -/
 theorem keep_commits {α : Type} {p : VerifierProgram α} {Q G : α → Prop}
@@ -382,21 +422,75 @@ theorem leftBad_ncard_le (hadm : Whir.Admissible (μs prog s) ρ) (W : Word) (z 
   (Set.ncard_le_ncard Set.inter_subset_left
     ((O.candidates_finite W hadm).subset (oodCands_subset _ z y))).trans (oodCands_ncard_le _ z y)
 
-/-- The ring claim's reading on a candidate. -/
-def ringRC (prog : LeanIsaProgram) (s : Sizes) (r : E × (List E → E)) (q : Column (μs prog s)) :
-    Prop :=
-  StackClaim.Holds (μs prog s) (ringSwitchClaim (verifierLayout prog s) r.1 r.2) q
+/-- The opening's claims: the two ring claims, the column claims, the OOD claim. -/
+def openClaims (layout : Verifier.Layout) (cl : List Verifier.ColumnClaim)
+    (rings : List (E × (List E → E))) (ood : StackClaim) : List StackClaim :=
+  ringStackClaims layout rings ++ cl.map (·.stackClaim layout) ++ [ood]
 
-/-- The opening's claims. -/
-def openClaims (layout : Verifier.Layout) (cl : List Verifier.ColumnClaim) (y : E × (List E → E)) (ood : StackClaim) :
-    List StackClaim :=
-  ringSwitchClaim layout y.1 y.2 :: cl.map (·.stackClaim layout) ++ [ood]
+theorem length_openClaims_le (layout : Verifier.Layout) (cl : List Verifier.ColumnClaim)
+    (rings : List (E × (List E → E))) (ood : StackClaim) :
+    (openClaims layout cl rings ood).length ≤ cl.length + 3 := by
+  simp only [openClaims, ringStackClaims, List.length_append, List.length_zipWith, List.length_map,
+    List.length_cons, List.length_nil]
+  omega
 
-theorem length_openClaims (layout : Verifier.Layout) (cl : List Verifier.ColumnClaim)
-    (y : E × (List E → E)) (ood : StackClaim) :
-    (openClaims layout cl y ood).length = cl.length + 2 := by
-  simp only [openClaims, List.cons_append, List.length_cons, List.length_append, List.length_map,
-    List.length_nil]
+theorem eBatchOf_mono {J J' : ℕ} (h : J ≤ J') (L : ℕ) : eBatchOf J L ≤ eBatchOf J' L := by
+  unfold eBatchOf
+  gcongr
+
+/-- **What ring switching returns** on its claims: one result per claim, each weight the ring
+weight of its claim's point. -/
+def RingShape (claims : List (List E × List E)) (y : List (E × (List E → E))) : Prop :=
+  y.length = claims.length ∧ ∀ x ∈ y, ∃ point cs, x.2 = fun r ↦ ringWeight point r cs
+
+theorem ringSwitch_shape (claims : List (List E × List E)) :
+    ∀ l y, (ringSwitch claims).after l = some (.ret y) → RingShape claims y := by
+  have hm : Moves G64 False (RingShape claims) (fun _ ↦ False) (ringSwitch claims) := by
+    rw [Ring.ringSwitch_eq]
+    refine Moves.bind (Moves.grindP fun _ ↦ by decide)
+      (fun _ _ ↦ Moves.bind (Moves.sampleN 16) (fun _ _ ↦ Moves.ret ⟨by simp, ?_⟩)
+        fun _ _ h ↦ h.elim) fun _ _ _ ↦ trivial
+    intro x hx
+    obtain ⟨c, -, rfl⟩ := List.mem_map.1 hx
+    exact ⟨c.1, _, rfl⟩
+  intro l y hl
+  have := hm.after hl
+  unfold Moves at this
+  exact this
+
+/-- The ring claims at a return of ring switching on two claims: two of them, multilinear. -/
+def RingOk (layout : Verifier.Layout) (rings : List (E × (List E → E))) : Prop :=
+  rings.length = 2 ∧ ∀ c ∈ ringStackClaims layout rings, IsMultilinearFn layout.stackLog c.1
+
+theorem ringOk_of_shape (layout : Verifier.Layout) {claims : List (List E × List E)}
+    (hc : claims.length = 2) {y : List (E × (List E → E))} (h : RingShape claims y) :
+    RingOk layout y := by
+  have hy : y.length = 2 := h.1.trans hc
+  refine ⟨hy, ?_⟩
+  match y, hy, h with
+  | [(t₁, w₁), (t₂, w₂)], _, h =>
+    obtain ⟨p₁, c₁, h₁⟩ := h.2 (t₁, w₁) (by simp)
+    obtain ⟨p₂, c₂, h₂⟩ := h.2 (t₂, w₂) (by simp)
+    simp only at h₁ h₂
+    subst h₁ h₂
+    intro c hc
+    simp only [ringStackClaims, List.zipWith_cons_cons, List.zipWith_nil_right, List.mem_cons,
+      List.not_mem_nil, or_false] at hc
+    rcases hc with rfl | rfl
+    · exact isMultilinearFn_ringSwitchClaim _ _ _ _ _
+    · exact isMultilinearFn_ringSwitchClaim _ _ _ _ _
+
+/-- Every ring claim of two holding is `RingClaims` on the two regions. -/
+theorem ringClaims_of_holds {layout : Verifier.Layout} {rings : List (E × (List E → E))}
+    (hr : rings.length = 2) (q : Column layout.stackLog)
+    (h : ∀ c ∈ ringStackClaims layout rings, StackClaim.Holds layout.stackLog c q) :
+    RingClaims layout ![qkeccak, qflock] rings q := by
+  match rings, hr with
+  | [(t₁, w₁), (t₂, w₂)], _ =>
+    intro i
+    fin_cases i
+    · exact h _ (by simp [ringStackClaims])
+    · exact h _ (by simp [ringStackClaims])
 
 /-- An accepting opening's trace is good from the bad stacks. -/
 abbrev goodTr (prog : LeanIsaProgram) (input : PublicInput) (s : Sizes) (ρ : ℕ)
@@ -408,23 +502,26 @@ open Classical in
 separation of the candidates and the stack's word and shape. -/
 noncomputable def openingPart (hadm : Whir.Admissible (μs prog s) ρ) (W : Word) (z : List E)
     (y : E) (hsep : OodSep (cands₀ O prog s ρ W) z) (cl : List Verifier.ColumnClaim)
-    (hcl : cl.length ≤ maxStackedClaims - 2) (r : E × (List E → E)) :
+    (hcl : cl.length ≤ maxStackedClaims - 5) (rings : List (E × (List E → E))) :
     Spec (Whir.Sound.verifyStackedOpeningG (μs prog s) ρ
-        (openClaims (verifierLayout prog s) cl r (oodClaim z y)))
+        (openClaims (verifierLayout prog s) cl rings (oodClaim z y)))
       (fun h ↦ (RingPost (leftBad O prog input s ρ W z y)
-          (fun q ↦ ColumnClaimsHold (verifierLayout prog s) cl q) (ringRC prog s) r h ∧
-          IsMultilinearFn (μs prog s) (ringSwitchClaim (verifierLayout prog s) r.1 r.2).1) ∧
+          (fun q ↦ ColumnClaimsHold (verifierLayout prog s) cl q)
+          (RingClaims (verifierLayout prog s) ![qkeccak, qflock]) rings h ∧
+          RingOk (verifierLayout prog s) rings) ∧
         WordShape O prog s ρ W h)
-      (goodTr O prog input s ρ) εmsg (eBatchOf (cl.length + 2) (O.listMax₀ (μs prog s) ρ)) 0 :=
-  if hq : IsMultilinearFn (μs prog s) (ringSwitchClaim (verifierLayout prog s) r.1 r.2).1 then
-    (O.stackedSpec hadm (openClaims (verifierLayout prog s) cl r (oodClaim z y))
-      (by rw [length_openClaims]; simp only [maxStackedClaims] at hcl ⊢; omega)
+      (goodTr O prog input s ρ) εmsg (eBatchOf (cl.length + 3) (O.listMax₀ (μs prog s) ρ)) 0 :=
+  if hok : RingOk (verifierLayout prog s) rings then
+    (O.stackedSpec hadm (openClaims (verifierLayout prog s) cl rings (oodClaim z y))
+      (by
+        have := length_openClaims_le (verifierLayout prog s) cl rings (oodClaim z y)
+        simp only [maxStackedClaims] at hcl ⊢
+        omega)
       (by
         intro c hc
-        simp only [openClaims, List.cons_append, List.mem_cons, List.mem_append, List.mem_map,
-          List.not_mem_nil, or_false] at hc
-        rcases hc with rfl | ⟨c', -, rfl⟩ | rfl
-        · exact O.multiaffine_of_multilinear hq
+        simp only [openClaims, List.mem_append, List.mem_map, List.mem_singleton] at hc
+        rcases hc with (hc | ⟨c', -, rfl⟩) | rfl
+        · exact O.multiaffine_of_multilinear (hok.2 c hc)
         · exact isMultiaffine_eqEval_any O _ _
         · exact isMultiaffine_eqEval_any O _ _) (badOf prog input s)).mono
       (fun h hp ↦ by
@@ -438,92 +535,121 @@ noncomputable def openingPart (hadm : Whir.Admissible (μs prog s) ρ) (W : Word
         intro q hq' hbad
         have hv := exists_violated_of_ood
           (hsep.mono (Set.inter_subset_left (t := {q | badOf prog input s q})))
-          (ringSwitchClaim (verifierLayout prog s) r.1 r.2 ::
+          (ringStackClaims (verifierLayout prog s) rings ++
             cl.map (·.stackClaim (verifierLayout prog s)))
           (fun q hq hall ↦ hring q
             ⟨mem_oodCands_of_sep hsep hq.1.1 hq.2.1, hq.1.2⟩
-            ⟨fun c hc ↦ hall _ (List.mem_cons_of_mem _ (List.mem_map_of_mem hc)),
-              hall _ List.mem_cons_self⟩) q ⟨hq', hbad⟩
-        simpa only [openClaims, List.cons_append] using hv)
+            ⟨fun c hc ↦ hall _ (List.mem_append_right _ (List.mem_map_of_mem hc)),
+              ringClaims_of_holds hok.1 q fun c hc ↦ hall c (List.mem_append_left _ hc)⟩)
+          q ⟨hq', hbad⟩
+        simpa only [openClaims] using hv)
       (fun _ _ h ↦ h) le_rfl
-      (by rw [length_openClaims]) le_rfl
-  else Spec.dead.mono (fun _ hp ↦ hq hp.1.2) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl
+      (eBatchOf_mono (length_openClaims_le _ _ _ _) _) le_rfl
+  else Spec.dead.mono (fun _ hp ↦ hok hp.1.2) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl
 
-/-- The ring switch's returned claim is multilinear. -/
-theorem ringSwitch_multilinear (layout : Verifier.Layout) (point sv : List E) :
-    ∀ l y, (ringSwitch point sv).after l = some (.ret y) →
-      IsMultilinearFn layout.stackLog (ringSwitchClaim layout y.1 y.2).1 := by
-  have hm : Moves G64 False
-      (fun y : E × (List E → E) ↦ ∃ cs, y.2 = fun r ↦ ringWeight point r cs)
-      (fun _ ↦ False) (ringSwitch point sv) := by
-    rw [Ring.ringSwitch_eq]
-    exact Moves.bind (Moves.grindP fun _ ↦ by decide)
-      (fun _ _ ↦ Moves.bind (Moves.sampleN 16) (fun _ _ ↦ Moves.ret ⟨_, rfl⟩) fun _ _ h ↦ h.elim)
-      fun _ _ _ ↦ trivial
-  intro l y hl
-  obtain ⟨cs, hcs⟩ : ∃ cs, y.2 = fun r ↦ ringWeight point r cs := by
-    have := hm.after hl
-    unfold Moves at this
-    exact this
-  obtain ⟨t, w⟩ := y
-  simp only at hcs
-  subst hcs
-  exact isMultilinearFn_ringSwitchClaim layout t point cs
+/-- The two regions' error, `1 · (2 · 2/|E|) = 4/|E|`. -/
+theorem ring_two_eq :
+    ((1 : ℕ) : ℝ≥0∞) * (((2 : ℕ) : ℝ≥0∞) * (2 / Fintype.card E)) =
+      ((4 : ℕ) : ℝ≥0∞) / Fintype.card E := by
+  rw [Nat.cast_one, one_mul, ← mul_div_assoc]
+  norm_num
 
-/-- The ring's group error with the opening's `λ` is at most `2^-125` after the batch grind. -/
-theorem ring_eps (hadm : Whir.Admissible (μs prog s) ρ) {J : ℕ} (hJ : J ≤ maxStackedClaims) :
+/-- The ring's group error over the two regions with the opening's `λ` is at most `2^-125` after
+the batch grind. -/
+theorem ring_eps (hadm : Whir.Admissible (μs prog s) ρ) {J : ℕ} (hJ : J ≤ maxStackedClaims - 2) :
     (2 : ℝ≥0∞)⁻¹ ^ Whir.batchGrindingBits *
-        (((1 : ℕ) : ℝ≥0∞) * (2 / Fintype.card E) + eBatchOf J (O.listMax₀ (μs prog s) ρ)) ≤
+        (((1 : ℕ) : ℝ≥0∞) * (((2 : ℕ) : ℝ≥0∞) * (2 / Fintype.card E)) +
+          eBatchOf J (O.listMax₀ (μs prog s) ρ)) ≤
       εmsg := by
   have hrow := O.lambda_row hadm
-  have hsum : ((1 : ℕ) : ℝ≥0∞) * (2 / Fintype.card E) + eBatchOf J (O.listMax₀ (μs prog s) ρ) =
-      ((2 + (J - 1) * O.listMax₀ (μs prog s) ρ : ℕ) : ℝ≥0∞) / Fintype.card E := by
-    rw [eBatchOf, Nat.cast_one, one_mul, ENNReal.div_add_div_same, Nat.cast_add, Nat.cast_ofNat]
+  have hsum : ((1 : ℕ) : ℝ≥0∞) * (((2 : ℕ) : ℝ≥0∞) * (2 / Fintype.card E)) +
+      eBatchOf J (O.listMax₀ (μs prog s) ρ) =
+      ((4 + (J - 1) * O.listMax₀ (μs prog s) ρ : ℕ) : ℝ≥0∞) / Fintype.card E := by
+    rw [ring_two_eq, eBatchOf, ENNReal.div_add_div_same, Nat.cast_add]
   rw [hsum]
   refine discount_le Whir.batchGrindingBits _ ?_
-  have : (J - 1) * O.listMax₀ (μs prog s) ρ ≤ (maxStackedClaims - 1) * O.listMax₀ (μs prog s) ρ :=
+  have : (J - 1) * O.listMax₀ (μs prog s) ρ ≤ (maxStackedClaims - 3) * O.listMax₀ (μs prog s) ρ :=
     Nat.mul_le_mul_right _ (by omega)
   rcases Nat.eq_zero_or_pos (O.listMax₀ (μs prog s) ρ) with h0 | hpos
   · rw [h0, mul_zero, add_zero]
-    exact Nat.pow_le_pow_right (n := 2) (by norm_num) (by omega : 1 ≤ Whir.batchGrindingBits + 3)
+    exact Nat.pow_le_pow_right (n := 2) (by norm_num) (by omega : 2 ≤ Whir.batchGrindingBits + 3)
   · simp only [maxStackedClaims, Nat.reduceAdd, Nat.reduceSub] at hrow this
     omega
 
+/-- The two regions' points, `q_keccak`'s then `q_flock`'s. -/
+def ringPt (r : FrontOut) : Fin 2 → List E := ![r.2.1, r.2.2.2.1]
+
+/-- The two regions' claimed slices. -/
+def ringSv (r : FrontOut) : Fin 2 → Fin 64 → E :=
+  ![fun i ↦ r.2.2.1.getD i 0, fun i ↦ r.2.2.2.2.getD i 0]
+
+/-- The two regions' heights. -/
+def ringHs (s : Sizes) : Fin 2 → ℕ := ![s.τ 5, s.τ 6 + 2]
+
+/-- The two regions' offsets on the verifier's layout. -/
+def ringOffs (prog : LeanIsaProgram) (s : Sizes) : Fin 2 → ℕ := ![qkOff prog s, qfOff prog s]
+
+theorem ofFn_getD_eq (l : List E) (hl : l.length = 64) :
+    List.ofFn (fun i : Fin 64 ↦ l.getD i 0) = l := by
+  apply List.ext_getElem (by simp [hl])
+  intro i h1 h2
+  rw [List.getElem_ofFn]
+  simp only [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h2, Option.getD_some]
+
+theorem ringClaims_ringPt (r : FrontOut) (h1 : r.2.2.1.length = 64)
+    (h2 : r.2.2.2.2.length = 64) :
+    ringClaims (ringPt r) (ringSv r) = [(r.2.1, r.2.2.1), (r.2.2.2.1, r.2.2.2.2)] := by
+  rw [ringClaims, List.ofFn_succ (n := 1), List.ofFn_succ (n := 0), List.ofFn_zero]
+  show [(r.2.1, List.ofFn fun i : Fin 64 ↦ r.2.2.1.getD i 0),
+    (r.2.2.2.1, List.ofFn fun i : Fin 64 ↦ r.2.2.2.2.getD i 0)] = _
+  rw [ofFn_getD_eq _ h1, ofFn_getD_eq _ h2]
+
+theorem ringLayoutHyp_two (prog : LeanIsaProgram) (s : Sizes) :
+    ∀ i, RingLayoutHyp (verifierLayout prog s) (![qkeccak, qflock] i) (ringHs s i)
+      (ringOffs prog s i) := by
+  intro i
+  fin_cases i
+  · exact ringLayoutHyp_verifierLayout prog s
+  · exact ringLayoutHyp_flock prog s
+
 open Classical in
-/-- **Ring switching, then the stacked opening**, for the front phases' result `r`. -/
+/-- **Ring switching over `q_keccak` and `q_flock`, then the stacked opening**, for the front
+phases' result `r`. -/
 noncomputable def ringPart (hadm : Whir.Admissible (μs prog s) ρ) (W : Word) (z : List E) (y : E)
-    (hsep : OodSep (cands₀ O prog s ρ W) z) (r : List Verifier.ColumnClaim × List E × List E) :
-    Spec ((ringSwitch r.2.1 r.2.2).bind fun y' ↦
+    (hsep : OodSep (cands₀ O prog s ρ W) z) (r : FrontOut) :
+    Spec ((ringSwitch [(r.2.1, r.2.2.1), (r.2.2.2.1, r.2.2.2.2)]).bind fun rings ↦
         Whir.Sound.verifyStackedOpeningG (μs prog s) ρ
-          (openClaims (verifierLayout prog s) r.1 y' (oodClaim z y)))
+          (openClaims (verifierLayout prog s) r.1 rings (oodClaim z y)))
       (fun h ↦ FrontPost prog s (leftBad O prog input s ρ W z y) r h ∧ WordShape O prog s ρ W h)
       (goodTr O prog input s ρ) εmsg 0 0 :=
-  if hr : r.2.1.length = s.τ 5 + 6 ∧ r.2.2.length = 64 ∧ r.1.length ≤ maxStackedClaims - 2 then
-    have hsv : List.ofFn (fun i : Fin 64 ↦ r.2.2.getD i 0) = r.2.2 := by
-      apply List.ext_getElem (by simp [hr.2.1])
-      intro i h1 h2
-      rw [List.getElem_ofFn]
-      simp only [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h2, Option.getD_some]
+  if hr : r.2.1.length = s.τ 5 + 6 ∧ r.2.2.1.length = 64 ∧ r.2.2.2.1.length = s.τ 6 + 2 + 6 ∧
+      r.2.2.2.2.length = 64 ∧ r.1.length ≤ maxStackedClaims - 5 then
     (Spec.frame (Spec.retInv
       ((ringSpec (leftBad O prog input s ρ W z y)
-        (fun q ↦ ColumnClaimsHold (verifierLayout prog s) r.1 q)
-        (fun q i ↦ sliceExt (s.τ 5) (qkAt (qkOff prog s) q) r.2.1 i) (fun i ↦ r.2.2.getD i 0)
-        (ringRC prog s) (ringClaimBad_stack (ringLayoutHyp_verifierLayout prog s) hr.1 _)
+        (fun q ↦ ColumnClaimsHold (verifierLayout prog s) r.1 q) (ringPt r)
+        (fun i q j ↦ sliceExt (ringHs s i) (qkAt (ringOffs prog s i) q) (ringPt r i) j)
+        (ringSv r) (RingClaims (verifierLayout prog s) ![qkeccak, qflock])
+        (ringClaimBad_stack (ringLayoutHyp_two prog s)
+          (by intro i; fin_cases i; exacts [hr.1, hr.2.2.1]) (ringSv r))
         (leftBad_finite O hadm W z y)
-        (leftBad_ncard_le O hadm W z y) (by simpa using div_card_lt_one (N := 2) (by norm_num))
-        (ring_eps O hadm (J := r.1.length + 2)
-          (by have := hr.2.2; simp only [maxStackedClaims] at this ⊢; omega))).congr (by rw [hsv]))
-      _ (ringSwitch_multilinear (verifierLayout prog s) r.2.1 r.2.2))
+        (leftBad_ncard_le O hadm W z y)
+        (by rw [ring_two_eq]; exact div_card_lt_one (N := 4) (by norm_num))
+        (ring_eps O hadm (J := r.1.length + 3)
+          (by have := hr.2.2.2.2; simp only [maxStackedClaims] at this ⊢; omega))).congr
+        (by rw [ringClaims_ringPt r hr.2.1 hr.2.2.2.1]))
+      (RingOk (verifierLayout prog s))
+      (fun l y hl ↦ ringOk_of_shape _ rfl (ringSwitch_shape _ l y hl)))
       (WordShape O prog s ρ W) (fun h₀ l hl hJ ↦
-        ⟨keep_commits (moves_ringSwitch r.2.1 r.2.2) (fun cs ↦ firstWordC cs = some W) h₀ l hl hJ.1,
-          keep_commits (moves_ringSwitch r.2.1 r.2.2) (O.ShapeOK₀ (μs prog s) ρ) h₀ l hl hJ.2⟩)
+        ⟨keep_commits (moves_ringSwitch _) (fun cs ↦ firstWordC cs = some W) h₀ l hl hJ.1,
+          keep_commits (moves_ringSwitch _) (O.ShapeOK₀ (μs prog s) ρ) h₀ l hl hJ.2⟩)
       ).mono (Pre' := fun h ↦ FrontPost prog s (leftBad O prog input s ρ W z y) r h ∧
         WordShape O prog s ρ W h)
-      (fun h hp ↦ ⟨fun q hq hG ↦ hp.1.2.2.2 q hq ⟨hG.1, fun i ↦ congrFun hG.2 i⟩, hp.2⟩)
-      (fun _ _ h ↦ h) le_rfl le_rfl le_rfl |>.bind' fun y' ↦
-      openingPart O hadm W z y hsep r.1 hr.2.2 y'
-  else Spec.dead.mono (fun _ hp ↦ hr ⟨hp.1.1, hp.1.2.1, hp.1.2.2.1⟩) (fun _ _ h ↦ h) le_rfl
-    le_rfl le_rfl
+      (fun h hp ↦ ⟨fun q hq hG ↦ hp.1.2.2.2.2.2 q hq
+        ⟨hG.1, fun j ↦ congrFun (hG.2 0) j, fun j ↦ congrFun (hG.2 1) j⟩, hp.2⟩)
+      (fun _ _ h ↦ h) le_rfl le_rfl le_rfl |>.bind' fun rings ↦
+      openingPart O hadm W z y hsep r.1 hr.2.2.2.2 rings
+  else Spec.dead.mono (fun _ hp ↦ hr ⟨hp.1.1, hp.1.2.1, hp.1.2.2.1, hp.1.2.2.2.1,
+    hp.1.2.2.2.2.1⟩) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl
 
 open Classical in
 /-- **The front phases, ring switching and the opening**, on the bad candidate the OOD sample
@@ -532,11 +658,11 @@ noncomputable def afterOodPart (hev : ∀ w p v, Moves G64 False (fun _ ↦ True
     (hs : s.Admissible prog) (hadm : Whir.Admissible (μs prog s) ρ) (W : Word) (z : List E) (y : E)
     (hsep : OodSep (cands₀ O prog s ρ W) z) :
     Spec (frontProg ev (verifierLayout prog s) pd >>= fun r ↦ match r with
-        | (claims, keccakPoint, keccakSlices) => ringSwitch keccakPoint keccakSlices >>= fun y' ↦
-          match y' with
-          | (ringTarget, ringWeight) => Whir.Sound.verifyStackedOpeningG (μs prog s) ρ
-            (ringSwitchClaim (verifierLayout prog s) ringTarget ringWeight ::
-              claims.map (·.stackClaim (verifierLayout prog s)) ++ [oodClaim z y]))
+        | (claims, keccakPoint, keccakSlices, flockPoint, flockSlices) =>
+          ringSwitch [(keccakPoint, keccakSlices), (flockPoint, flockSlices)] >>= fun rings ↦
+            Whir.Sound.verifyStackedOpeningG (μs prog s) ρ
+              (ringStackClaims (verifierLayout prog s) rings ++
+                claims.map (·.stackClaim (verifierLayout prog s)) ++ [oodClaim z y]))
       (WordShape O prog s ρ W) (goodTr O prog input s ρ) εmsg εmsg 0 :=
   (Spec.frame (F.frontSpec s ρ hs hadm (leftBad O prog input s ρ W z y)
       (leftBad_finite O hadm W z y) (leftBad_ncard_le O hadm W z y) 0 zero_le)
@@ -546,9 +672,9 @@ noncomputable def afterOodPart (hev : ∀ w p v, Moves G64 False (fun _ ↦ True
     (Pre' := WordShape O prog s ρ W)
     (fun _ hp ↦ ⟨⟨⟨W, hp.1⟩, fun q hq ↦ hq.2⟩, hp⟩) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl |>.bind'
     fun r ↦ by
-      obtain ⟨claims, keccakPoint, keccakSlices⟩ := r
-      exact (ringPart O hadm W z y hsep (claims, keccakPoint, keccakSlices)).congr
-        (by congr 1)
+      obtain ⟨claims, keccakPoint, keccakSlices, flockPoint, flockSlices⟩ := r
+      exact (ringPart O hadm W z y hsep
+        (claims, keccakPoint, keccakSlices, flockPoint, flockSlices)).congr rfl
 
 open Classical in
 /-- **After the OOD sample**: the claim it returned, the separation of the candidates at its point,
@@ -556,11 +682,11 @@ and the root's doom. -/
 noncomputable def oodThen (hev : ∀ w p v, Moves G64 False (fun _ ↦ True) (fun _ ↦ False) (ev w p v))
     (hs : s.Admissible prog) (hadm : Whir.Admissible (μs prog s) ρ) (ood : StackClaim) :
     Spec (frontProg ev (verifierLayout prog s) pd >>= fun r ↦ match r with
-        | (claims, keccakPoint, keccakSlices) => ringSwitch keccakPoint keccakSlices >>= fun y' ↦
-          match y' with
-          | (ringTarget, ringWeight) => Whir.Sound.verifyStackedOpeningG (μs prog s) ρ
-            (ringSwitchClaim (verifierLayout prog s) ringTarget ringWeight ::
-              claims.map (·.stackClaim (verifierLayout prog s)) ++ [ood]))
+        | (claims, keccakPoint, keccakSlices, flockPoint, flockSlices) =>
+          ringSwitch [(keccakPoint, keccakSlices), (flockPoint, flockSlices)] >>= fun rings ↦
+            Whir.Sound.verifyStackedOpeningG (μs prog s) ρ
+              (ringStackClaims (verifierLayout prog s) rings ++
+                claims.map (·.stackClaim (verifierLayout prog s)) ++ [ood]))
       (OodPost (firstCands (μs prog s) ρ (O.thr₀ (μs prog s) ρ)) (RootDoom O prog s ρ) ood)
       (goodTr O prog input s ρ) εmsg εmsg 0 :=
   (Spec.exPre (ι := Word × List E × E) (Pre := fun i h ↦ ood = oodClaim i.2.1 i.2.2 ∧

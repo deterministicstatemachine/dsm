@@ -1,8 +1,9 @@
 /-
   LeanVM.Protocol.EndToEnd.Sound.SkelFront
 
-  The front phases' skeletons: the table sumcheck, the public input, the Keccak reduction, and
-  the out-of-domain sample and ring switching around them, fixed by the layout.
+  The front phases' skeletons: the table sumcheck, the public input, the Keccak reduction,
+  Flock's phase (research build), and the out-of-domain sample and ring switching around them,
+  fixed by the layout.
 -/
 
 module
@@ -263,6 +264,67 @@ theorem skel_keccakPhaseClaims (layout : Verifier.Layout) (claims : List Verifie
     SkelP.ret (Q := fun _ : List Verifier.ColumnClaim × List E × List E ↦ True) trivial).mono
     (by simp) fun _ h ↦ h
 
+/-! ## Flock's phase (research build) -/
+
+/-- The skeleton of Flock's zerocheck with `n` sampled coordinates. -/
+def skFlockZero (n : ℕ) : List Op :=
+  skGrind (if 0 < n then flockPointGrindBits else 0) ++ List.replicate n .sample ++
+    List.replicate kBits .read ++ skGrind flockSkipGrindBits ++ [.sample] ++
+    skSum 3 (List.replicate (nFixedChallenges + n) true) ++ [.read, .read]
+
+theorem skel_verifyFlockZerocheck (logN : ℕ) :
+    SkelP (verifyFlockZerocheck logN) (skFlockZero (logN - flockKSkip - nFixedChallenges))
+      fun _ ↦ True := by
+  unfold verifyFlockZerocheck
+  simp only [VerifierProgram.bind_eq, VerifierProgram.pure_eq]
+  exact ((skel_grindProofOfWork _).bind fun _ _ ↦ (skel_sampleChallenges _).bind fun sampled hs ↦
+    (skel_readScalars _).bind fun _ _ ↦ (skel_grindProofOfWork _).bind fun _ _ ↦
+    skel_sampleChallenge.bind fun _ _ ↦
+    ((skel_sumcheck 3 _ _).mono
+      (sk' := skSum 3 (List.replicate (nFixedChallenges + (logN - flockKSkip - nFixedChallenges))
+        true))
+      (by rw [List.map_map, map_comp_isSome_some, List.length_append, hs]; rfl)
+      fun _ h ↦ h).bind fun _ _ ↦
+    skel_readScalar.bind fun _ _ ↦ skel_readScalar.bind fun _ _ ↦
+    SkelP.ret (Q := fun _ : FlockZerocheck ↦ True) trivial).mono
+    (by simp [skFlockZero, List.append_assoc]) fun _ h ↦ h
+
+/-- The skeleton of Flock's lincheck. -/
+def skFlockLin : List Op :=
+  skGrind (grindingBits 3) ++ [.sample] ++ skSum 3 (List.replicate flockNumLincheckRounds false) ++
+    List.replicate kBits .read
+
+theorem skel_verifyFlockLincheck (zc : FlockZerocheck) :
+    SkelP (verifyFlockLincheck zc) skFlockLin fun _ ↦ True := by
+  unfold verifyFlockLincheck
+  simp only [VerifierProgram.bind_eq, VerifierProgram.pure_eq]
+  exact ((skel_grindProofOfWork _).bind fun _ _ ↦ skel_sampleChallenge.bind fun _ _ ↦
+    (skel_sumcheck 3 _ _).bind fun _ _ ↦ (skel_readScalars kBits).bind fun _ _ ↦
+    (skel_require _).bind fun _ _ ↦
+    SkelP.ret (Q := fun _ : FlockClaims ↦ True) trivial).mono
+    (by simp [skFlockLin, List.append_assoc, List.map_replicate]) fun _ h ↦ h
+
+/-- The skeleton of Flock's phase at a `BLAKE3` height `h`. -/
+def skFlock (h : ℕ) : List Op :=
+  skFlockZero (blake3R1csLogSize + h - flockKSkip - nFixedChallenges) ++ skFlockLin
+
+theorem skel_flockPhase (layout : Verifier.Layout) :
+    SkelP (flockPhase layout) (skFlock (layout.tableLogHeights.getD opBlake3 0)) fun _ ↦ True := by
+  unfold flockPhase verifyFlock
+  simp only [VerifierProgram.bind_eq, VerifierProgram.pure_eq, VerifierProgram.bind_assoc]
+  exact ((skel_verifyFlockZerocheck _).bind fun zc _ ↦ (skel_verifyFlockLincheck zc).bind
+    fun _ _ ↦ SkelP.ret (Q := fun _ : List E × List E ↦ True) trivial).mono
+    (by simp [skFlock]) fun _ h ↦ h
+
+theorem skel_keccakFlockClaims (layout : Verifier.Layout) (claims : List Verifier.ColumnClaim)
+    {L : ℕ} (hc : KL L claims) :
+    SkelP (keccakFlockClaims layout claims)
+      (skKeccak L ++ skFlock (layout.tableLogHeights.getD opBlake3 0)) fun _ ↦ True := by
+  unfold keccakFlockClaims
+  simp only [VerifierProgram.bind_eq, VerifierProgram.pure_eq]
+  exact ((skel_keccakPhaseClaims layout claims hc).bind fun _ _ ↦ (skel_flockPhase layout).bind
+    fun _ _ ↦ SkelP.ret (Q := fun _ : FrontOut ↦ True) trivial).mono (by simp) fun _ h ↦ h
+
 /-! ## Around the front -/
 
 /-- The skeleton of the out-of-domain sample. -/
@@ -279,7 +341,8 @@ theorem skel_readOod (stackLog : ℕ) : SkelP (readOod stackLog) (skOod stackLog
 /-- The skeleton of ring switching. -/
 def skRing : List Op := skGrind Whir.batchGrindingBits ++ List.replicate (2 * ringMapWidth) .sample
 
-theorem skel_ringSwitch (point s : List E) : SkelP (ringSwitch point s) skRing fun _ ↦ True := by
+theorem skel_ringSwitch (claims : List (List E × List E)) :
+    SkelP (ringSwitch claims) skRing fun _ ↦ True := by
   rw [ringSwitch_eq]
   exact ((skel_grindProofOfWork _).bind fun _ _ ↦ (skel_sampleChallenges _).bind fun _ _ ↦
     (skel_liftOption _).weaken).mono (by simp [skRing]) fun _ h ↦ h
@@ -287,7 +350,8 @@ theorem skel_ringSwitch (point s : List E) : SkelP (ringSwitch point s) skRing f
 /-- The skeleton of the front phases. -/
 def skFront (layout : Verifier.Layout) : List Op :=
   skBus (busLayout [0, layout.logMemory, layout.logBytecode] layout.push).depth ++
-    skTablePhase layout.tableLogHeights ++ [.sample] ++ skKeccak (kLen layout.tableLogHeights)
+    skTablePhase layout.tableLogHeights ++ [.sample] ++ skKeccak (kLen layout.tableLogHeights) ++
+    skFlock (layout.tableLogHeights.getD opBlake3 0)
 
 /-- **The front phases' skeleton**, fixed by the layout. -/
 theorem skel_frontProg (layout : Verifier.Layout) (pd : Digest) :
@@ -297,7 +361,7 @@ theorem skel_frontProg (layout : Verifier.Layout) (pd : Digest) :
   exact ((skel_verifyBusBalance layout).bind fun bus hbus ↦
     (skel_tablePhaseClaims layout bus hbus).bind fun cl hcl ↦
     (skel_publicInputPhase layout pd).bind fun pc hpc ↦
-    skel_keccakPhaseClaims layout _ (KL.append hcl (KL.of_off hpc))).mono
+    skel_keccakFlockClaims layout _ (KL.append hcl (KL.of_off hpc))).mono
     (by simp [skFront, List.append_assoc]) fun _ h ↦ h
 
 end

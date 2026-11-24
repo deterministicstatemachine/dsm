@@ -30,10 +30,11 @@ def veBodyCut (ev : List K → List E → E → VerifierProgram Unit) (publicInp
     (layout : Verifier.Layout) (ρ : ℕ) : VerifierProgram WhirTrace := do
   commitStack layout.stackLog ρ
   let ood ← readOod layout.stackLog
-  let (claims, keccakPoint, keccakSlices) ← frontProg ev layout publicInput
-  let (ringTarget, ringWeight) ← ringSwitch keccakPoint keccakSlices
+  let (claims, keccakPoint, keccakSlices, flockPoint, flockSlices) ←
+    frontProg ev layout publicInput
+  let rings ← ringSwitch [(keccakPoint, keccakSlices), (flockPoint, flockSlices)]
   verifyStackedOpeningCut layout.stackLog ρ
-    (ringSwitchClaim layout ringTarget ringWeight :: claims.map (·.stackClaim layout) ++ [ood])
+    (Front.ringStackClaims layout rings ++ claims.map (·.stackClaim layout) ++ [ood])
 
 /-- `verifyExecutionClaimsG` cut at the final polynomial. -/
 def verifyExecutionClaimsCut (ev : List K → List E → E → VerifierProgram Unit) (bytecode : List K)

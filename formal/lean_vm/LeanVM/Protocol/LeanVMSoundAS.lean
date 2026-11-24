@@ -54,14 +54,18 @@ noncomputable def soundnessErrorAS (Q : ℕ) : ℝ≥0∞ :=
 /-- **Knowledge soundness in the random-oracle model, for the agreement-set extractor.** For an
 adversary making at most `Q` queries, which chooses the program, the public input and the proof,
 the verifier accepts while `extractorAS D` does not return a valid execution of the program on
-the public input with probability at most `soundnessErrorAS Q`. -/
-theorem knowledgeSoundnessRomAS (D : NearDecoder) {A : Adversary} {Q : ℕ}
+the public input with probability at most `soundnessErrorAS Q`.
+
+Research build: conditional on `hfl : FlockSound`, Flock's soundness, a named hypothesis that is NOT
+proved (`EndToEnd.Front.FlockPhase`). -/
+theorem knowledgeSoundnessRomAS (hfl : EndToEnd.Front.FlockSound) (D : NearDecoder) {A : Adversary}
+    {Q : ℕ}
     (hA : A.IsTotalQueryBound Q) :
     Pr{let z ← experiment A}[Breaks (extractorAS D) z] ≤ soundnessErrorAS Q := by
   -- Doom or failure, read off the final log.
-  have h1 := romSound_logG Sound.anyProgram (Sound.anyCert Whir.Params.openingIface)
+  have h1 := romSound_logG Sound.anyProgram (Sound.anyCert Whir.Params.openingIface hfl)
     Sound.leanVmSeeds (fun x ↦ Sound.rootOk_stmtHistory x) εmsg
-    (Sound.anyCert_bound Whir.Params.openingIface) A Q hA leanVmQueryBound
+    (Sound.anyCert_bound Whir.Params.openingIface hfl) A Q hA leanVmQueryBound
     Sound.isTotalQueryBound_leanVmFam
     (fun z ℓ ↦ Fail Sound.leanVmSeeds ℓ ∨
       Rom.verify (lookH ℓ) (lookF ℓ)
@@ -75,8 +79,8 @@ theorem knowledgeSoundnessRomAS (D : NearDecoder) {A : Adversary} {Q : ℕ}
       rcases hb with hb | hb | hb
       · exact absurd hb hf
       · exact absurd hv hb
-      · exact ⟨Sound.doomed_of_doomedRun Whir.Params.openingIface hv
-          (Sound.doomedRun_of_verify Whir.Params.openingIface z.1.1 z.1.2 hv),
+      · exact ⟨Sound.doomed_of_doomedRun Whir.Params.openingIface hfl hv
+          (Sound.doomedRun_of_verify Whir.Params.openingIface hfl z.1.1 z.1.2 hv),
           Sound.not_anyG_of (c := cacheOf ℓ) Whir.Params.openingIface hv hb⟩)
   rw [Sound.logExperiment_eq_logged2, prEvent_map] at h1
   -- A fresh hit of the final proof of work, and a fresh root.

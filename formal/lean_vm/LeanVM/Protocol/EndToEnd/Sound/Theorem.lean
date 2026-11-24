@@ -27,7 +27,7 @@ statements, for an adversary that chooses the statement, are in
 `LeanVM.Protocol.EndToEnd.Sound.Statements`. Everything is stated against the stacked opening's
 interface `O : OpeningIface` (`Sound.Assemble`); the front phases' is built (`frontIface`).
 
-* `stmtCert_bound`: every escape bound of `stmtCert O prog input` (`Assemble.leanVmCert` with the
+* `stmtCert_bound`: every escape bound of `stmtCert O hfl prog input` (`Assemble.leanVmCert` with the
   front phases of `frontIface`), discounted by the proof of work before its group, is at most
   `2^-125`.
 * `extractStack O prog input c π`: **the extractor**. It reads the extracted history of `π` under
@@ -56,7 +56,7 @@ open scoped ENNReal
 /- The enumeration of `Digest` must never be unfolded by unification. -/
 attribute [local irreducible] instFintypeDigest
 
-variable (O : OpeningIface) (prog : LeanIsaProgram) (input : PublicInput)
+variable (O : OpeningIface) (hfl : FlockSound) (prog : LeanIsaProgram) (input : PublicInput)
 
 /-! ## The certificate of a statement -/
 
@@ -69,13 +69,13 @@ phases built, accepting from doom only good runs. -/
 noncomputable abbrev stmtCert :
     CertG (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input))
       (stmtG O prog input) :=
-  leanVmCert O (frontIface prog input) (bytecodeWords prog)
+  leanVmCert O (frontIface hfl prog input) (bytecodeWords prog)
 
 /-- **The certificate's bound**: every escape bound, discounted by the proof of work before its
 group, is at most `2^-125`. -/
 theorem stmtCert_bound (h : List Ev) :
-    (2 : ℝ≥0∞)⁻¹ ^ min (grindBits h) 64 * (stmtCert O prog input).ε h ≤ εmsg :=
-  leanVmCert_bound O (frontIface prog input) (bytecodeWords prog) h
+    (2 : ℝ≥0∞)⁻¹ ^ min (grindBits h) 64 * (stmtCert O hfl prog input).ε h ≤ εmsg :=
+  leanVmCert_bound O (frontIface hfl prog input) (bytecodeWords prog) h
 
 /-- Some boundary prefix of the extracted history of the seeded verifier's run of `P` on `π`,
 under the answers of the cache `c` to both oracles, is doomed. -/
@@ -121,7 +121,7 @@ theorem realSpec_D {s : Sizes} {ρ : ℕ} (hs : s.Admissible prog)
     (hadm : Whir.Admissible (μs prog s) ρ) {h₀ : List Ev} {e : Ev}
     (hce : (commitStack (μs prog s) ρ).after [e] = some (.ret ()))
     (hpost : RootDoom O prog s ρ (commits (h₀ ++ [e]))) :
-    (realSpec O (frontIface prog input) moves_computedBytecodeValue hs hadm).D h₀ [e] := by
+    (realSpec O (frontIface hfl prog input) moves_computedBytecodeValue hs hadm).D h₀ [e] := by
   refine (Spec.bindD_some (VerifierProgram.retSplit_self hce)).2
     ⟨fun _ ↦ ?_, Spec.start_D _ _ hpost⟩
   obtain ⟨q₀, rest, hc, -⟩ := Whir.Complete.exists_ladder hadm
@@ -136,7 +136,7 @@ theorem leanVmSpec_D_commit {l₁ : List Ev} {s : Sizes} {ρ : ℕ}
     (hg : Good prog (verifierLayout prog s, ρ) s) {e : Ev}
     (hce : (commitStack (μs prog s) ρ).after [e] = some (.ret ()))
     (hpost : RootDoom O prog s ρ (commits (l₁ ++ [e]))) :
-    (leanVmSpec O (frontIface prog input) (bytecodeWords prog)).D [] (l₁ ++ [e]) := by
+    (leanVmSpec O (frontIface hfl prog input) (bytecodeWords prog)).D [] (l₁ ++ [e]) := by
   -- After the root, the ghost body is at its OOD sample, which does not return at once.
   set pd := publicInputDigest input
   have hbody : ∀ {γ : Type} (g : Whir.Sound.WhirTrace → VerifierProgram γ),
@@ -175,8 +175,8 @@ theorem leanVmSpec_D_commit {l₁ : List Ev} {s : Sizes} {ρ : ℕ}
   apply (Spec.bindD_none hs₂).2
   have hex : AdmAt prog (verifierLayout prog s, ρ) := ⟨s, rfl, hg.2.1, hg.2.2⟩
   have hs' : hex.choose = s := verifierLayout_injective prog hex.choose_spec.1.symm
-  rw [bodySpec_D O (frontIface prog input) moves_computedBytecodeValue _ hex]
-  refine realSpec_D O prog input _ _ ?_ ?_
+  rw [bodySpec_D O (frontIface hfl prog input) moves_computedBytecodeValue _ hex]
+  refine realSpec_D O hfl prog input _ _ ?_ ?_
   · rw [hs']; exact hce
   · rw [hs', List.nil_append]; exact hpost
 
@@ -308,7 +308,7 @@ theorem doomedRun_of_verify {c : KeccakCalls.QueryCache} {π : Proof}
     (hv : Rom.verify (fun x ↦ c (.inl x)) (fun s ↦ c (.inr s))
       (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
       (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input)) π = some true) :
-    DoomedRun (stmtCert O prog input) (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
+    DoomedRun (stmtCert O hfl prog input) (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
       π c := by
   set hist := extractedHistory (fun x ↦ c (.inl x)) (fun s ↦ c (.inr s))
     (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
@@ -347,7 +347,7 @@ theorem doomedRun_of_verify {c : KeccakCalls.QueryCache} {π : Proof}
   have hdoom : RootDoom O prog s ρ (commits (l₁ ++ [e])) :=
     ⟨hshape, O.word₀ (commits (l₁ ++ [e])), O.shape_word hshape⟩
   exact ⟨l₁ ++ [e], hpre, by rw [he]; exact boundary_append_commit _ _ _ _,
-    leanVmSpec_D_commit O prog input hl₁ ⟨rfl, hs, hadm⟩ hce' hdoom⟩
+    leanVmSpec_D_commit O hfl prog input hl₁ ⟨rfl, hs, hadm⟩ hce' hdoom⟩
 
 
 /-- **Accepted, and the extractor fails, is doomed and not a good run**: the prefix of the
@@ -358,12 +358,12 @@ theorem doomed_of_not_extracted {c : KeccakCalls.QueryCache} {π : Proof}
       (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
       (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input)) π = some true)
     (hne : ¬ Extracted O prog input c π) :
-    DoomedRun (stmtCert O prog input) (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
+    DoomedRun (stmtCert O hfl prog input) (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
       π c ∧
     ¬ stmtG O prog input (extractedHistory (fun x ↦ c (.inl x)) (fun s ↦ c (.inr s))
       (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
       (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input)) π) :=
-  ⟨doomedRun_of_verify O prog input hv, fun hG ↦ hne (extracted_of_goodRun O prog input hv hG)⟩
+  ⟨doomedRun_of_verify O hfl prog input hv, fun hG ↦ hne (extracted_of_goodRun O prog input hv hG)⟩
 
 end
 end LeanVM.Protocol.EndToEnd.Sound

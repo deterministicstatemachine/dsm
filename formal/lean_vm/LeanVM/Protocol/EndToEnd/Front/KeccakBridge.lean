@@ -339,12 +339,20 @@ theorem delta_eq (q : Column (verifierLayout prog s).stackLog) (l : Fin 25) {w :
   · exact congrArg (fun S ↦ stateLanes (keccakSegment 0 S) l) h0
   · exact h1
 
-/-- **The Keccak predicate at the table sumcheck's point is the Keccak reduction's `midAgree`**
-at the point's low `τ_KECCAK` coordinates. -/
+/-- The Flock predicate of a candidate (research build): its `QFLOCK` read as the instance's,
+every instance compressing. -/
+def FlockAuxQ (q : Column (verifierLayout prog s).stackLog) : Prop :=
+  (leanIsaInstance prog s).flockAux (toI prog s q)
+
+/-- **The reductions' predicate at the table sumcheck's point is the Keccak reduction's
+`midAgree`** at the point's low `τ_KECCAK` coordinates, **and the Flock predicate**, which no
+challenge of the table sumcheck binds. -/
 theorem auxAt_iff_midAgree (q : Column (verifierLayout prog s).stackLog) (pt : List E)
     (hpt : s.τ 5 ≤ pt.length) (hτ : s.τ 5 ≤ (leanIsaInstance prog s).τmax) :
     (leanIsaInstance prog s).auxAt pt (toI prog s q) ↔
-      KeccakGkr.midAgree (s.τ 5) (qkOf (verifierLayout prog s) q) (pt.take (s.τ 5)) := by
+      KeccakGkr.midAgree (s.τ 5) (qkOf (verifierLayout prog s) q) (pt.take (s.τ 5)) ∧
+        FlockAuxQ prog s q := by
+  refine and_congr_left' ?_
   have hmin : min (keccakRegion prog s).logSteps (leanIsaInstance prog s).τmax = s.τ 5 :=
     min_eq_left hτ
   have hlen : (pt.take (s.τ 5)).length = s.τ 5 := by simp [hpt]
@@ -499,13 +507,14 @@ def KeccakPre (claims : List Verifier.ColumnClaim) (h : List Ev) : Prop :=
     Doomed C (fun q ↦ ClaimsHoldBy (WireHolds prog s) claims q ∧
       (leanIsaInstance prog s).auxAt pt.toList (toI prog s q)) h
 
-/-- **The Keccak phase's postcondition**, ring switching's precondition: the point has
+/-- **The Keccak phase's postcondition**, Flock's phase's precondition: the point has
 `τ_KECCAK + 6` coordinates and there are 64 slices, and no candidate satisfies the claims left on
-the stack and the slices of its `q_keccak`. -/
+the stack, the slices of its `q_keccak` and the Flock predicate. -/
 def KeccakOut (r : List Verifier.ColumnClaim × List E × List E) (h : List Ev) : Prop :=
   (r.2.1.length = s.τ 5 + 6 ∧ r.2.2.length = 64) ∧
     Doomed C (fun q ↦ ColumnClaimsHold (verifierLayout prog s) r.1 q ∧
-      KeccakGkr.slicesTrue (s.τ 5) (qkOf (verifierLayout prog s) q) r.2.1 r.2.2) h
+      KeccakGkr.slicesTrue (s.τ 5) (qkOf (verifierLayout prog s) q) r.2.1 r.2.2 ∧
+      FlockAuxQ prog s q) h
 
 /-- The output lanes' claims of a claim list. -/
 abbrev lanesOf (claims : List Verifier.ColumnClaim) : List Verifier.ColumnClaim :=
@@ -562,8 +571,8 @@ theorem gkrPre_of_keccakPre {claims : List Verifier.ColumnClaim} {h : List Ev}
         ((lanesOf claims).headD default).point ((lanesOf claims).map (·.value)) ∧
       KeccakGkr.midAgree (s.τ 5) (qkOf (verifierLayout prog s) q)
         ((lanesOf claims).headD default).point ∧
-      ColumnClaimsHold (verifierLayout prog s)
-        (claims.filter fun c ↦ c.column ∉ keccakOutputColumns) q) h := by
+      (ColumnClaimsHold (verifierLayout prog s)
+        (claims.filter fun c ↦ c.column ∉ keccakOutputColumns) q ∧ FlockAuxQ prog s q)) h := by
   obtain ⟨pt, hout, hdoom⟩ := hpre
   have hinst := inst_eq s hok hout
   have hτ : s.τ 5 ≤ (leanIsaInstance prog s).τmax :=
@@ -571,7 +580,7 @@ theorem gkrPre_of_keccakPre {claims : List Verifier.ColumnClaim} {h : List Ev}
   have hptl : s.τ 5 ≤ pt.toList.length := by simpa using hτ
   have hil : ((lanesOf claims).headD default).point.length = s.τ 5 := by
     rw [hinst]; simpa using hτ
-  intro q hq ⟨hmid, hagree, hR⟩
+  intro q hq ⟨hmid, hagree, hR, hfl⟩
   refine hdoom q hq ⟨fun c hc ↦ ?_, ?_⟩
   · by_cases hm : c.column ∈ keccakOutputColumns
     · have hcl : c ∈ lanesOf claims := List.mem_filter.mpr ⟨hc, by simpa using hm⟩
@@ -589,7 +598,7 @@ theorem gkrPre_of_keccakPre {claims : List Verifier.ColumnClaim} {h : List Ev}
     · rw [wireHolds_of_not_mem prog s hm]
       exact hR c (List.mem_filter.mpr ⟨hc, by simpa using hm⟩)
   · rw [auxAt_iff_midAgree prog s q pt.toList hptl hτ, ← hinst]
-    exact hagree
+    exact ⟨hagree, hfl⟩
 
 open Classical in
 /-- **The Keccak phase's specification**: from the doom the table sumcheck and the public input
@@ -615,7 +624,7 @@ noncomputable def keccakPhaseSpec (hst : Stable C) {L₀ : ℕ} (hcard : ∀ h, 
   let output := (lanesOf claims).map (·.value)
   let claims' := claims.filter fun c ↦ c.column ∉ keccakOutputColumns
   let qk := qkOf (verifierLayout prog s)
-  let R := fun q ↦ ColumnClaimsHold (verifierLayout prog s) claims' q
+  let R := fun q ↦ ColumnClaimsHold (verifierLayout prog s) claims' q ∧ FlockAuxQ prog s q
   Spec.congr (keccakPhase_eq _ claims).symm <|
   (Spec.require (Post := fun _ h ↦ LanesOk claims ∧ KeccakPre prog s C claims h)
       (fun _ hp hc ↦ ⟨hc, hp⟩)).bind' fun _ ↦
@@ -633,14 +642,15 @@ noncomputable def keccakPhaseSpec (hst : Stable C) {L₀ : ℕ} (hcard : ∀ h, 
         (Spec.ret (Post := KeccakOut prog s C) (claims' ++ r.1, r.2.1, r.2.2)).mono
           (fun h ⟨hpost, hshape, hpl, hsl⟩ ↦ by
             rw [hi, hP] at hpl hshape
-            refine ⟨⟨hpl, hsl⟩, fun q hq ⟨hcl, hsq⟩ ↦ hpost q hq ⟨fun c hc ↦ ?_, ?_, ?_⟩⟩
+            refine ⟨⟨hpl, hsl⟩, fun q hq ⟨hcl, hsq, hfl⟩ ↦
+              hpost q hq ⟨fun c hc ↦ ?_, ?_, fun c hc ↦ ?_, hfl⟩⟩
             · obtain ⟨hcc, hcp⟩ := hshape c hc
               rw [hP]
               refine ⟨hcc, hcp, ?_⟩
               exact (qkHolds_iff prog s q c hcc hcp).mp
                 (hcl c (List.mem_append_right _ hc))
             · rw [hP]; exact hsq
-            · exact fun c hc ↦ hcl c (List.mem_append_left _ hc))
+            · exact hcl c (List.mem_append_left _ hc))
           (fun _ _ h ↦ h) le_rfl le_rfl le_rfl)
     else specOfFalse fun _ hp ↦ ho (by simp [output, length_lanesOf hp.1])
   else specOfFalse fun _ hp ↦ by

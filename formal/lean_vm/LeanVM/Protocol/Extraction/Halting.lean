@@ -28,7 +28,7 @@ public import LeanVM.Protocol.EndToEnd.Sound.Extractor
   **`candidateExecution_of_extracted`**: it gives a valid execution.
 
 **The cap is structural.** **`stepCap_le_stack`**: `stepCap (verifierLayout prog s)` is at most
-`2^μ`, the stack's size: the six opcode tables, the memory and the bytecode each own a committed
+`2^μ`, the stack's size: the seven opcode tables, the memory and the bytecode each own a committed
 column, hence a block of the stack of their height. **`stepCap_le_maxMu`**: at admissible sizes, at
 most `2^30`.
 -/
@@ -110,9 +110,9 @@ theorem tables_eq_ofFn {κ : ℕ} (w : Air.Flat.EnsembleWitness (leanIsaEnsemble
 /-- The tables of the witness read off a stack have the announced row counts, when they fit
 Clean's `2^64` rows (`Sizes.Admissible.logMem_lt`, `rows_le_size`). -/
 theorem table_length_witnessOf' (s : Sizes) (q : Column (leanIsaμ prog s)) (hκ : s.logMem < 64)
-    (hr : ∀ j, s.rows j ≤ UInt64.size) (j : Fin 8) :
+    (hr : ∀ j, s.rows j ≤ UInt64.size) (j : Fin 9) :
     (tableAt (witnessOf prog s q) j).table.length =
-      ![s.rows 0, s.rows 1, s.rows 2, s.rows 3, s.rows 4, s.rows 5, 2 ^ s.logMem,
+      ![s.rows 0, s.rows 1, s.rows 2, s.rows 3, s.rows 4, s.rows 5, s.rows 6, 2 ^ s.logMem,
         2 ^ prog.logSize] j := by
   rw [witnessOf_table]
   fin_cases j
@@ -129,9 +129,11 @@ theorem rows_witnessOf (s : Sizes) (q : Column (leanIsaμ prog s)) (hκ : s.logM
     ((witnessOf prog s q).tables.map fun tb ↦ tb.table.length).sum =
       (∑ j, s.rows j) + 2 ^ s.logMem + 2 ^ prog.logSize := by
   rw [tables_eq_ofFn, List.map_ofFn, List.sum_ofFn]
-  simp only [Function.comp_def, table_length_witnessOf' s q hκ hr, Fin.sum_univ_eight,
-    Fin.sum_univ_six]
-  simp only [Fin.isValue, Matrix.cons_val, Matrix.cons_val_zero, Matrix.cons_val_one]
+  simp only [Function.comp_def, table_length_witnessOf' s q hκ hr, Fin.sum_univ_succ (n := 8),
+    Fin.sum_univ_eight, Fin.sum_univ_seven]
+  simp only [Fin.isValue, Matrix.cons_val, Matrix.cons_val_zero, Matrix.cons_val_one,
+    Matrix.cons_val_succ]
+  omega
 
 /-- The step cap of the layout of the sizes `s`. -/
 theorem stepCap_verifierLayout (s : Sizes) :
@@ -158,11 +160,11 @@ section Structural
 variable (prog : LeanIsaProgram) (s : Sizes)
 
 /-- Every opcode table has a column. -/
-theorem width_opIdx_pos : ∀ j : Fin 6, 0 < width (opIdx j) := by decide +kernel
+theorem width_opIdx_pos : ∀ j : Fin 7, 0 < width (opIdx j) := by decide +kernel
 
 /-- A committed column of each table the cap counts: `MEMORY_0`, `BYTECODE_FINAL_COUNTERS`, and the last column of
 each opcode table. -/
-def capCol : Fin 8 → Col
+def capCol : Fin 9 → Col
   | ⟨0, _⟩ => memCol 0
   | ⟨1, _⟩ => bfcntCol
   | ⟨j + 2, h⟩ => ⟨opIdx ⟨j, by omega⟩,

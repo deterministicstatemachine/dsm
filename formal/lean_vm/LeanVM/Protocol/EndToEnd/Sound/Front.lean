@@ -25,7 +25,10 @@ composes W3's phase specifications on a constant candidate set `S` of at most on
    on the candidates `toI '' S` (`HDoom`) to the table seam (`TablePost`);
 2. at the table sumcheck's point (`tablePost_pubPre`), the public input (`pubPhaseSpec`);
 3. the Keccak reduction (`keccakPhaseSpec`), ending in `KeccakOut`: no candidate meets the claims
-   left with true slices, which is `FrontPost`.
+   left with true slices and Flock's predicate;
+4. (research build) Flock's phase, from `FlockSound`, a named hypothesis that is NOT proved: no
+   candidate meets the claims left with true `q_keccak` and `q_flock` slices, which is
+   `FrontPost`.
 
 The public input's challenge and the Keccak reduction's six first challenges are one group, of
 error `7/|E|`; the table sumcheck's final values are read before it (`TableFid.rows`), so it is
@@ -137,33 +140,63 @@ theorem candsS_ncard (hS : S.Finite) (h1 : S.ncard ≤ 1) (W : Word) :
     (candsS prog s S W).ncard ≤ 1 :=
   (Set.ncard_image_le hS).trans h1
 
-/-- **The Keccak reduction, to `FrontPost`**, for at most `159` claims. -/
-noncomputable def keccakPart (hS1 : S.ncard ≤ 1) {T : ℝ≥0∞} (hT : T ≤ εmsg)
-    (claims : List Verifier.ColumnClaim) (hcl : claims.length ≤ 159) :
-    Spec (keccakPhaseClaims (verifierLayout prog s) claims) (KeccakPre prog s (CS prog s S) claims)
+open Classical in
+/-- **Flock's phase, to `FrontPost`**, after the Keccak reduction returned `(cl, kp, ks)`, Flock's
+soundness taken as the hypothesis `hfl` (`FlockSound`, not proved). -/
+noncomputable def flockPart (hfl : FlockSound) (hs : s.Admissible prog) (hS : S.Finite)
+    (hS1 : S.ncard ≤ 1) {T : ℝ≥0∞} (hT : T ≤ εmsg) (n : ℕ) (hn : n ≤ 217)
+    (cl : List Verifier.ColumnClaim) (kp ks : List E) :
+    Spec ((flockPhase (verifierLayout prog s)) >>= fun f ↦ match f with
+        | (fp, fs) => VerifierProgram.ret (cl, kp, ks, fp, fs))
+      (fun h ↦ KeccakOut prog s (CS prog s S) (cl, kp, ks) h ∧ cl.length ≤ n + 1)
+      (FrontPost prog s S) εmsg εmsg T :=
+  if hk : kp.length = s.τ 5 + 6 ∧ ks.length = 64 ∧ cl.length ≤ n + 1 then
+    ((Spec.retInv (Classical.choice (hfl prog s hs S hS hS1
+        (fun q ↦ ColumnClaimsHold (verifierLayout prog s) cl q ∧
+          KeccakGkr.slicesTrue (s.τ 5) (qkOf (verifierLayout prog s) q) kp ks) T hT))
+      (fun f ↦ f.1.length = s.τ 6 + 2 + 6 ∧ f.2.length = 64)
+      (retOK_flockPhase_verifierLayout prog s)).mono
+      (Pre' := fun h ↦ KeccakOut prog s (CS prog s S) (cl, kp, ks) h ∧ cl.length ≤ n + 1)
+      (fun _ hp q hq hG ↦ hp.1.2 q hq ⟨hG.1.1, hG.1.2, hG.2⟩) (fun _ _ h ↦ h)
+      le_rfl le_rfl le_rfl).bind' fun f ↦ by
+      obtain ⟨fp, fs⟩ := f
+      exact (Spec.ret (Post := FrontPost prog s S) (εmax := εmsg) (T := T)
+        (cl, kp, ks, fp, fs)).mono
+        (fun _ hp ↦ ⟨hk.1, hk.2.1, hp.2.1, hp.2.2, by simp only [maxStackedClaims]; omega,
+          fun q hq hG ↦ hp.1 q hq ⟨⟨hG.1, hk.1, hk.2.1, fun i hi ↦ by
+            have := (hG.2.1 ⟨i, hi⟩).symm
+            rw [qkOf_eq_qkAt, placement_qkeccak]
+            exact this⟩, hG.2.2⟩⟩)
+        (fun _ _ h ↦ h) le_rfl le_rfl le_rfl
+  else Spec.dead.mono (fun _ hp ↦ hk ⟨hp.1.1.1, hp.1.1.2, hp.2⟩) (fun _ _ h ↦ h) le_rfl le_rfl
+    le_rfl
+
+/-- **The Keccak reduction, then Flock's phase, to `FrontPost`**, for at most `217` claims, Flock's
+soundness taken as the hypothesis `hfl`. -/
+noncomputable def keccakPart (hfl : FlockSound) (hs : s.Admissible prog) (hS : S.Finite)
+    (hS1 : S.ncard ≤ 1) {T : ℝ≥0∞} (hT : T ≤ εmsg)
+    (claims : List Verifier.ColumnClaim) (hcl : claims.length ≤ 217) :
+    Spec (keccakFlockClaims (verifierLayout prog s) claims) (KeccakPre prog s (CS prog s S) claims)
       (FrontPost prog s S) εmsg keccakLead T :=
-  (Spec.retInv (keccakPhaseSpec prog s (CS prog s S) (fun _ _ _ ↦ rfl) (L₀ := 1) (fun _ ↦ hS1) hT
+  (Spec.retInv (keccakPhaseSpec prog s (CS prog s S) (fun _ _ _ ↦ rfl) (L₀ := 1) (fun _ ↦ hS1)
+      (le_refl εmsg)
       (by
         rw [KeccakGkr.grindingBits_product, mul_errE_one]
         exact discount_le 3 46 (by norm_num))
       (le_εmsg (mul_errE_one 3) (by norm_num)) claims)
-    (fun r ↦ r.1.length ≤ claims.length + 1) (retOK_keccakPhase _ claims)).mono (fun _ h ↦ h)
-    (fun r h ⟨⟨⟨hpl, hsl⟩, hD⟩, hlen⟩ ↦ by
-      refine ⟨hpl, hsl, by simp only [maxStackedClaims]; omega, fun q hq hG ↦ hD q hq ⟨hG.1, ?_⟩⟩
-      refine ⟨hpl, hsl, fun i hi ↦ ?_⟩
-      have := (hG.2 ⟨i, hi⟩).symm
-      rw [qkOf_eq_qkAt, placement_qkeccak]
-      exact this)
-    le_rfl le_rfl le_rfl
+    (fun r ↦ r.1.length ≤ claims.length + 1) (retOK_keccakPhase _ claims)).bind' fun r ↦ by
+    obtain ⟨cl, kp, ks⟩ := r
+    exact flockPart hfl hs hS hS1 hT claims.length hcl cl kp ks
 
 open Classical in
 /-- **The public input at the table sumcheck's point `pt`, then the Keccak reduction**, after at
 most `215` claims of the table phase. -/
-noncomputable def pubPart (hS1 : S.ncard ≤ 1) {T : ℝ≥0∞} (hT : T ≤ εmsg)
+noncomputable def pubPart (hfl : FlockSound) (hs : s.Admissible prog) (hS : S.Finite)
+    (hS1 : S.ncard ≤ 1) {T : ℝ≥0∞} (hT : T ≤ εmsg)
     (cl : List Verifier.ColumnClaim) (hcl : cl.length ≤ 215)
     (pt : Vector E (leanIsaInstance prog s).τmax) :
     Spec ((Verifier.publicInputPhase (verifierLayout prog s) (publicInputDigest input)).bind
-        fun pc ↦ keccakPhaseClaims (verifierLayout prog s) (cl ++ pc))
+        fun pc ↦ keccakFlockClaims (verifierLayout prog s) (cl ++ pc))
       (fun h ↦ OutLanesAt s cl pt.toList ∧
         PubPre prog s (verifierLayout prog s) (CS prog s S) (toI prog s) (WireHolds prog s) cl
           input pt h)
@@ -179,7 +212,7 @@ noncomputable def pubPart (hS1 : S.ncard ≤ 1) {T : ℝ≥0∞} (hT : T ≤ εm
           input pt h)
       (fun _ hp ↦ hp.2) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl).bind' fun pc ↦
       if hpc : pc.length ≤ 2 then
-        (keccakPart hS1 hT (cl ++ pc) (by rw [List.length_append]; omega)).mono
+        (keccakPart hfl hs hS hS1 hT (cl ++ pc) (by rw [List.length_append]; omega)).mono
           (fun _ hp ↦ ⟨pt, fun l ↦ (hout l).imp fun _ hv ↦ List.mem_append_left _ hv, hp.1⟩)
           (fun _ _ h ↦ h) le_rfl le_rfl le_rfl
       else Spec.dead.mono (fun _ hp ↦ hpc hp.2) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl
@@ -229,7 +262,7 @@ theorem frontErrors (hs : s.Admissible prog) :
     omega
 
 /-- **The front phases**, from the commitment's doom on `S` to `FrontPost`. -/
-noncomputable def frontSpecAt (hs : s.Admissible prog) (hS : S.Finite) (hS1 : S.ncard ≤ 1)
+noncomputable def frontSpecAt (hfl : FlockSound) (hs : s.Admissible prog) (hS : S.Finite) (hS1 : S.ncard ≤ 1)
     {T : ℝ≥0∞} (hT : T ≤ εmsg) :
     Spec (frontProg computedBytecodeValue (verifierLayout prog s) (publicInputDigest input))
       (fun h ↦ (∃ W, firstWord h = some W) ∧
@@ -249,17 +282,18 @@ noncomputable def frontSpecAt (hs : s.Admissible prog) (hS : S.Finite) (hS1 : S.
         exact ⟨W, hW, by rintro _ ⟨q, hq, rfl⟩ hin; exact hd q hq hin⟩)
       (fun _ _ h ↦ h) le_rfl (grindLead_le_of_discount he.2.1) le_rfl).bind' fun cl ↦
     if hcl : cl.length ≤ 215 then
-      (Spec.exPre fun pt ↦ pubPart input hS1 hT cl hcl pt).mono
+      (Spec.exPre fun pt ↦ pubPart input hfl hs hS hS1 hT cl hcl pt).mono
         (fun h hp ↦ tablePost_pubPre prog s (candsS prog s S) input (CS prog s S)
           (fun _ q hq _ _ ↦ ⟨q, hq, rfl⟩) cl h hp.1) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl
     else Spec.dead.mono (fun _ hp ↦ hcl hp.2) (fun _ _ h ↦ h) le_rfl le_rfl le_rfl
 
 end Front
 
-/-- **The front phases' interface**, built. -/
-noncomputable def frontIface (prog : LeanIsaProgram) (input : PublicInput) :
+/-- **The front phases' interface**, built from Flock's soundness `hfl` (`FlockSound`, a named
+hypothesis, not proved). -/
+noncomputable def frontIface (hfl : FlockSound) (prog : LeanIsaProgram) (input : PublicInput) :
     FrontIface computedBytecodeValue prog input (publicInputDigest input) where
-  frontSpec _ _ hs _ _ hS hS1 _ hT := frontSpecAt input hs hS hS1 hT
+  frontSpec _ _ hs _ _ hS hS1 _ hT := frontSpecAt input hfl hs hS hS1 hT
 
 end
 end LeanVM.Protocol.EndToEnd.Sound

@@ -235,6 +235,13 @@ theorem ringClaim_holds_iff {layout : Verifier.Layout} {region h off μ : ℕ}
   rw [pair_ringClaim hpl hal hfit q hpt f g, eq_comm]
   rfl
 
+/-- The ring-switched claims on the stack (research build), `q_keccak`'s then `q_flock`'s: the
+program's opening claims ahead of the column claims (`verifyExecutionClaims`). -/
+def ringStackClaims (layout : Verifier.Layout) (rings : List (E × (List E → E))) :
+    List StackClaim :=
+  List.zipWith (fun region (target, weight) ↦ ringSwitchClaim layout region target weight)
+    [qkeccak, qflock] rings
+
 /-- The program's ring claims, one per region, read on a stack: every one holds. -/
 def RingClaims {n : ℕ} (layout : Verifier.Layout) (regions : Fin n → ℕ)
     (r : List (E × (List E → E))) (q : Column layout.stackLog) : Prop :=

@@ -14,6 +14,7 @@ public import LeanVM.Protocol.EndToEnd.Complete.Sizes
 public import LeanVM.Protocol.EndToEnd.Complete.Public
 public import LeanVM.Protocol.EndToEnd.Complete.Facts
 public import LeanVM.Protocol.EndToEnd.Complete.KeccakPhase
+public import LeanVM.Protocol.EndToEnd.Complete.Flock
 public import LeanVM.Protocol.Whir.Complete.OpeningProof
 
 /-!
@@ -32,7 +33,8 @@ sequence of the phases' honest scripts (`honestRun`), and the simulation compose
 | `tablePhase` | `Phases.table` | the claims are true, the output lanes' the honest ones |
 | `publicInputPhase` | `hPub` | the claims are true, on the memory columns |
 | `keccakPhase` | `Phases.keccak` | true claims on no output lane, the true slices of `q_keccak` |
-| `ringSwitch` | `Phases.ring` | the ring-switching claim holds and is multilinear |
+| `flockPhase` (research build) | `Phases.flock` | the true slices of `q_flock` |
+| `ringSwitch` | `Phases.ring` | the two ring-switching claims hold and are multilinear |
 | `verifyStackedOpening` | `Whir.Complete.honestOpening` | accepts (`openingComplete`) |
 
 `Phases` packages the four phase scripts whose proofs live in their own modules, and
@@ -57,8 +59,8 @@ open LeanVM.Protocol.LeanIsa LeanVM.Protocol.EndToEnd.Front LeanVM.Protocol.Whir
 
 @[expose] public section
 
-/-- The four phase scripts whose simulations are proved in their own modules: the bus, the table
-sumcheck, the Keccak phase and ring switching. -/
+/-- The five phase scripts whose simulations are stated in their own modules: the bus, the table
+sumcheck, the Keccak phase, Flock's phase (research build) and ring switching. -/
 structure Phases where
   /-- The bus phase. -/
   bus : Script BusResult
@@ -66,8 +68,10 @@ structure Phases where
   table : BusResult → Script (List Verifier.ColumnClaim)
   /-- The Keccak phase, from the claims so far. -/
   keccak : List Verifier.ColumnClaim → Script (List Verifier.ColumnClaim × List E × List E)
-  /-- Ring switching, from the Keccak phase's point and slices. -/
-  ring : List E → List E → Script (E × (List E → E))
+  /-- Flock's phase (research build). -/
+  flock : Script (List E × List E)
+  /-- Ring switching, from the Keccak and Flock phases' points and slices. -/
+  ring : List (List E × List E) → Script (List (E × (List E → E)))
 
 /-- **The phases are honest** for the stack `q`: each follows its sub-program of the verifier
 program, at the verifier's layout, to true data. -/
@@ -91,18 +95,24 @@ structure Phases.Honest (prog : LeanIsaProgram) (s : Sizes) (q : Column (leanIsa
         (∀ c ∈ b.1, TrueClaim prog s q c ∧ c.column ∉ keccakOutputColumns) ∧
         KeccakGkr.slicesTrue (s.τ 5) (qkH prog s q) b.2.1 b.2.2 ∧ b.1.length ≤ claims.length + 1)
       (P.keccak claims) (keccakPhaseClaims (verifierLayout prog s) claims) cs
-  /-- Ring switching, from the true slices, ends in a true multilinear claim. -/
-  ring : ∀ r : List E × List E, KeccakGkr.slicesTrue (s.τ 5) (qkH prog s q) r.1 r.2 → ∀ cs,
-    Follows (fun cs' a b ↦ cs' = cs ∧ a = b ∧
-        StackClaim.Holds (leanIsaμ prog s) (ringSwitchClaim (verifierLayout prog s) b.1 b.2) q ∧
-        IsMultilinearFn (leanIsaμ prog s) (ringSwitchClaim (verifierLayout prog s) b.1 b.2).1)
-      (P.ring r.1 r.2) (ringSwitch r.1 r.2) cs
+  /-- Flock's phase ends in the true slices of `q_flock`. -/
+  flock : ∀ cs, Follows (fun cs' a b ↦ cs' = cs ∧ a = b ∧
+      KeccakGkr.slicesTrue (s.τ 6 + 2) (Front.qkAt (Front.qfOff prog s) q) b.1 b.2)
+    P.flock (flockPhase (verifierLayout prog s)) cs
+  /-- Ring switching, from the true slices of both regions, ends in two true multilinear
+  claims. -/
+  ring : ∀ kp ks fp fs : List E, KeccakGkr.slicesTrue (s.τ 5) (qkH prog s q) kp ks →
+    KeccakGkr.slicesTrue (s.τ 6 + 2) (Front.qkAt (Front.qfOff prog s) q) fp fs → ∀ cs,
+    Follows (fun cs' a b ↦ cs' = cs ∧ a = b ∧ b.length = 2 ∧
+        ∀ c ∈ Front.ringStackClaims (verifierLayout prog s) b,
+          StackClaim.Holds (leanIsaμ prog s) c q ∧ IsMultilinearFn (leanIsaμ prog s) c.1)
+      (P.ring [(kp, ks), (fp, fs)]) (ringSwitch [(kp, ks), (fp, fs)]) cs
 
-/-- The claims the opening receives from the honest run: the ring-switching claim, the column
+/-- The claims the opening receives from the honest run: the ring-switching claims, the column
 claims, then the commitment's out-of-domain claim. -/
-def openingClaims (prog : LeanIsaProgram) (s : Sizes) (rs : E × (List E → E))
+def openingClaims (prog : LeanIsaProgram) (s : Sizes) (rs : List (E × (List E → E)))
     (claims : List Verifier.ColumnClaim) (ood : StackClaim) : List StackClaim :=
-  ringSwitchClaim (verifierLayout prog s) rs.1 rs.2 ::
+  Front.ringStackClaims (verifierLayout prog s) rs ++
     claims.map (·.stackClaim (verifierLayout prog s)) ++ [ood]
 
 /-- **The honest run of `verify_execution`**: announce, commit, take the commitment's
@@ -118,7 +128,8 @@ noncomputable def honestRun (prog : LeanIsaProgram) (s : Sizes) (ρ : ℕ) (q : 
   (P.table bus).bind fun claims ↦
   (hPub prog s q).bind fun pub ↦
   (P.keccak (claims ++ pub)).bind fun kr ↦
-  (P.ring kr.2.1 kr.2.2).bind fun rs ↦
+  P.flock.bind fun fr ↦
+  (P.ring [(kr.2.1, kr.2.2), (fr.1, fr.2)]).bind fun rs ↦
   honestOpening (leanIsaμ prog s) ρ q (openingClaims prog s rs kr.1 ood)
 
 /-- **The honest run follows `verify_execution`.** For sizes admissible for the program, a valid
@@ -153,27 +164,30 @@ theorem follows_verifyExecution {prog : LeanIsaProgram} {s : Sizes}
     (hP.keccak _ (trueClaims_append htab hpub) z
       (lanesOf_honest prog s q hbcol hpcol z hz) _)
   obtain ⟨rfl, rfl, hkc, hsl, hkl⟩ := hc
-  refine Follows.bind (fun cs₇ rs rs' hc ↦ ?_) _ _ _ (hP.ring (kr.2.1, kr.2.2) hsl _)
-  obtain ⟨rfl, rfl, hrh, hrm⟩ := hc
+  refine Follows.bind (fun cs₇ fr fr' hc ↦ ?_) _ _ _ (hP.flock _)
+  obtain ⟨rfl, rfl, hfl⟩ := hc
+  refine Follows.bind (fun cs₈ rs rs' hc ↦ ?_) _ _ _ (hP.ring _ _ _ _ hsl hfl _)
+  obtain ⟨rfl, rfl, hrl, hrall⟩ := hc
   refine (follows_verifyStackedOpening Whir.Complete.openingComplete hadm q _ ?_ ?_ ?_)
-  · have hl : (openingClaims prog s rs kr.1 ood).length = kr.1.length + 2 := by
-      simp [openingClaims]
+  · have hl : (openingClaims prog s rs kr.1 ood).length = kr.1.length + 3 := by
+      simp [openingClaims, Front.ringStackClaims, hrl]
+      omega
     rw [hl]
     simp only [List.length_append, hbus.claims_length, htc, hpl] at hkl
     simp only [maxStackedClaims]
     omega
   · intro c hc
     rcases List.mem_append.mp hc with hc | hc
-    · rcases List.mem_cons.mp hc with rfl | hc
-      · exact hrh
+    · rcases List.mem_append.mp hc with hc | hc
+      · exact (hrall c hc).1
       · obtain ⟨cl, hcl, rfl⟩ := List.mem_map.mp hc
         exact (hkc cl hcl).1.holds (hkc cl hcl).2
     · rw [List.mem_singleton.mp hc]
       exact hoh
   · intro c hc
     rcases List.mem_append.mp hc with hc | hc
-    · rcases List.mem_cons.mp hc with rfl | hc
-      · exact hrm
+    · rcases List.mem_append.mp hc with hc | hc
+      · exact (hrall c hc).2
       · obtain ⟨cl, hcl, rfl⟩ := List.mem_map.mp hc
         exact (hkc cl hcl).1.multilinear (hkc cl hcl).2
     · rw [List.mem_singleton.mp hc]

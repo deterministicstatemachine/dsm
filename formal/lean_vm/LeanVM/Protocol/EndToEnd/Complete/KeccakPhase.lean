@@ -184,8 +184,8 @@ theorem midAgree_honest {input : PublicInput} (hq : M3Holds (inst prog s) input 
     (z : Vector E (s.τ 5)) : midAgree (s.τ 5) (qkH prog s q) z.toList := by
   have hτ : s.τ 5 ≤ (leanIsaInstance prog s).τmax :=
     (leanIsaInstance prog s).τ_le_τmax ⟨opIdx 5, keccak_sumcheckTable prog s⟩
-  have h := (auxAt_iff_midAgree prog s (fromI prog s q) z.toList (by simp) hτ).mp
-    (by rw [toI_fromI]; exact (leanIsaInstance prog s).auxAt_of_aux hq.2.2.2.2 _)
+  have h := ((auxAt_iff_midAgree prog s (fromI prog s q) z.toList (by simp) hτ).mp
+    (by rw [toI_fromI]; exact (leanIsaInstance prog s).auxAt_of_aux hq.2.2.2.2 _)).1
   rwa [qkOf_fromI, List.take_of_length_le (by simp)] at h
 
 /-- **A true claim of the reduction on `q_keccak` is a true claim** on `QKECCAK`. -/

@@ -168,7 +168,7 @@ theorem skel_veBodyCut (pd : Digest) (layout : Verifier.Layout) (ρ : ℕ) :
   unfold veBodyCut
   simp only [VerifierProgram.bind_eq]
   exact ((skel_commitStack _ _).bind fun _ _ ↦ (skel_readOod _).bind fun _ _ ↦
-    (skel_frontProg layout pd).bind fun r _ ↦ (skel_ringSwitch _ _).bind fun y _ ↦
+    (skel_frontProg layout pd).bind fun r _ ↦ (skel_ringSwitch _).bind fun y _ ↦
     skel_verifyStackedOpeningCut _ _ _).mono (by simp [skBody, List.append_assoc]) fun _ h ↦ h
 
 /-- The skeleton of the announced sizes. -/
