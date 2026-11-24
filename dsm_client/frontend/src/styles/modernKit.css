@@ -51,6 +51,29 @@ html[data-skin="modern"] .sb-icon-btn.b0x-button {
 }
 html[data-skin="modern"] .sb-icon-btn.spinning::before { animation: s-spin 1s linear infinite; }
 
+/* The b0x inbox's panel: drawn inline in the DGen colours, so Modern's are set over them. */
+html[data-skin="modern"] .b0x-panel {
+  background: var(--s-surface) !important; color: var(--s-text) !important;
+  border: 1px solid var(--s-line) !important; border-radius: var(--s-radius) !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-skin="modern"] .b0x-panel * { font-family: inherit !important; }
+html[data-skin="modern"] .b0x-panel .b0x-head { border-bottom: 1px solid var(--s-line) !important; }
+/* Text in the Modern weights and sizes: the title and amounts heavy, the
+   section labels bold and small, the detail lines muted, never monospace. */
+html[data-skin="modern"] .b0x-panel .b0x-title { font-size: 20px !important; font-weight: 900; letter-spacing: -0.3px; }
+html[data-skin="modern"] .b0x-panel .b0x-section {
+  font-size: 12px !important; font-weight: 800; letter-spacing: 0.04em !important; color: var(--s-muted); opacity: 1 !important;
+}
+html[data-skin="modern"] .b0x-panel .b0x-amount { font-size: 17px !important; font-weight: 900; }
+html[data-skin="modern"] .b0x-panel .b0x-detail { font-size: 13px !important; font-weight: 600; color: var(--s-muted); opacity: 1 !important; }
+html[data-skin="modern"] .b0x-panel .b0x-empty { font-size: 15px !important; font-weight: 700; color: var(--s-muted); opacity: 1 !important; }
+html[data-skin="modern"] .b0x-panel .b0x-close { border: none !important; border-radius: 50% !important; background: var(--s-surface-2) !important; }
+html[data-skin="modern"] .b0x-panel .b0x-item {
+  border: none !important; border-radius: 14px; background: var(--s-surface-2) !important; padding: 12px 14px !important;
+}
+
 /* The info badge: a small round "i" in the Modern colours. */
 html[data-skin="modern"] .sb-info {
   width: 22px; height: 22px; border: none; background: var(--s-surface-2); color: var(--s-text);

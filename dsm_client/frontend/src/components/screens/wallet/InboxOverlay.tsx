@@ -107,6 +107,7 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
         className={`sb-icon-btn b0x-button${badgeCount > 0 ? ' has-items' : ''}`}
         title={badgeCount > 0 ? `Inbox — ${badgeCount} new` : 'Inbox'}
         aria-label={badgeCount > 0 ? `Inbox (${badgeCount} new)` : 'Inbox'}
+        data-count={badgeCount}
       >
         <img src="images/icons/Mail-DSM-b0x.svg" alt="" style={{ width: 20, height: 20 }} />
       </button>
@@ -115,12 +116,12 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
       {open && (
         <>
           <div onClick={handleClose} style={{ position: 'absolute', inset: 0, zIndex: 9997, background: 'transparent' }} />
-          <div role="dialog" aria-label="Inbox" style={{ position: 'absolute', top: headerHeight + 8, right: 8, width: 300, maxWidth: 'calc(100% - 16px)', maxHeight: 'calc(100% - 24px)', overflowY: 'auto', overflowX: 'hidden', zIndex: 9998, background: 'var(--bg)', color: 'var(--text-dark)', border: '2px solid var(--border)', borderRadius: 12, boxSizing: 'border-box' }}>
+          <div role="dialog" aria-label="Inbox" className="b0x-panel" style={{ position: 'absolute', top: headerHeight + 8, right: 8, width: 300, maxWidth: 'calc(100% - 16px)', maxHeight: 'calc(100% - 24px)', overflowY: 'auto', overflowX: 'hidden', zIndex: 9998, background: 'var(--bg)', color: 'var(--text-dark)', border: '2px solid var(--border)', borderRadius: 12, boxSizing: 'border-box' }}>
 
             {/* Header row */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 10px', borderBottom: '2px solid var(--border)' }}>
-              <strong style={{ ...mono, fontSize: 12 }}>Inbox — b0x</strong>
-              <button onClick={handleClose} aria-label="Close inbox" style={{ minWidth: 28, minHeight: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'inherit', cursor: 'pointer' }}>
+            <div className="b0x-head" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 10px', borderBottom: '2px solid var(--border)' }}>
+              <strong className="b0x-title" style={{ ...mono, fontSize: 12 }}>Inbox</strong>
+              <button onClick={handleClose} aria-label="Close inbox" className="b0x-close" style={{ minWidth: 28, minHeight: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'inherit', cursor: 'pointer' }}>
                 {'\u00D7'}
               </button>
             </div>
@@ -133,14 +134,14 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
               {/* ---- Received since the b0x was last opened, as Rust lists them ---- */}
               {shown.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div style={{ ...mono, fontSize: 10, opacity: 0.6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <div className="b0x-section" style={{ ...mono, fontSize: 10, opacity: 0.6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                     Received
                   </div>
                   {shown.map((tx) => (
-                    <div key={tx.txId} style={{ border: '1px solid var(--border)', padding: '8px 10px', background: 'rgba(var(--text-dark-rgb),0.06)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <div style={{ ...mono, fontSize: 12 }}>{tx.displayAmount} {tx.tokenId}</div>
-                      <div style={{ ...mono, fontSize: 10, opacity: 0.7, wordBreak: 'break-all', overflowWrap: 'break-word' }}>from {tx.recipient}</div>
-                      {tx.memo && <div style={{ ...mono, fontSize: 10, opacity: 0.7 }}>{tx.memo}</div>}
+                    <div key={tx.txId} className="b0x-item" style={{ border: '1px solid var(--border)', padding: '8px 10px', background: 'rgba(var(--text-dark-rgb),0.06)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div className="b0x-amount" style={{ ...mono, fontSize: 12 }}>{tx.displayAmount} {tx.tokenId}</div>
+                      <div className="b0x-detail" style={{ ...mono, fontSize: 10, opacity: 0.7, wordBreak: 'break-all', overflowWrap: 'break-word' }}>from {tx.recipient}</div>
+                      {tx.memo && <div className="b0x-detail" style={{ ...mono, fontSize: 10, opacity: 0.7 }}>{tx.memo}</div>}
                     </div>
                   ))}
                 </div>
@@ -149,24 +150,24 @@ function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
               {/* ---- Items queued on the storage nodes, as Rust lists them ---- */}
               {(loadingPending || pending.length > 0) && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div style={{ ...mono, fontSize: 10, opacity: 0.6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <div className="b0x-section" style={{ ...mono, fontSize: 10, opacity: 0.6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                     Queued on storage node
                   </div>
                   {loadingPending ? (
-                    <div style={{ ...mono, fontSize: 12 }}>Loading{'\u2026'}</div>
+                    <div className="b0x-detail" style={{ ...mono, fontSize: 12 }}>Loading{'\u2026'}</div>
                   ) : pending.map((it) => (
-                    <div key={it.id} style={{ border: it.isStaleRoute ? '1px solid #b8860b' : '1px solid var(--border)', padding: '8px 8px', fontSize: 12, background: it.isStaleRoute ? 'rgba(184,134,11,0.08)' : 'rgba(var(--text-dark-rgb),0.06)' }}>
+                    <div key={it.id} className="b0x-item" style={{ border: it.isStaleRoute ? '1px solid #b8860b' : '1px solid var(--border)', padding: '8px 8px', fontSize: 12, background: it.isStaleRoute ? 'rgba(184,134,11,0.08)' : 'rgba(var(--text-dark-rgb),0.06)' }}>
                       {it.isStaleRoute && (
                         <div style={{ ...mono, fontSize: 10, color: '#b8860b', marginBottom: 4 }}>STALE ROUTE — awaiting reconciliation</div>
                       )}
-                      <div style={{ ...mono, wordBreak: 'break-all', overflowWrap: 'break-word' }}>{it.preview}</div>
+                      <div className="b0x-detail" style={{ ...mono, wordBreak: 'break-all', overflowWrap: 'break-word' }}>{it.preview}</div>
                     </div>
                   ))}
                 </div>
               )}
 
               {shown.length === 0 && pending.length === 0 && !loadingPending && (
-                <div style={{ ...mono, fontSize: 12, opacity: 0.6 }}>No new notifications.</div>
+                <div className="b0x-empty" style={{ ...mono, fontSize: 12, opacity: 0.6 }}>No new notifications.</div>
               )}
 
               {/* ---- Footer (notification-only, no manual sync) ---- */}
