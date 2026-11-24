@@ -267,15 +267,16 @@ pub(crate) fn established(
     }
     // A generation reaches here from its trader's walk and from the
     // position's commit: it is proven once.
+    let key: ProofKey = (*post.vault_id(), post.generation(), *post.root());
     if !STARTED
         .lock()
         .map_err(|e| storage("the proofs started", e))?
-        .insert((*post.vault_id(), post.generation()))
+        .insert(key)
     {
         return Ok(());
     }
     let (set, genesis, generation) = (set.clone(), genesis.clone(), post.generation());
-    let proving = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("vault-proof".into())
         .spawn(move || -> Result<(), DsmError> {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -283,24 +284,42 @@ pub(crate) fn established(
                 .build()
                 .map_err(|e| storage("the proving thread's runtime", e))?;
             runtime.block_on(prove_up_to(&set, &genesis, generation))
-        })
-        .map_err(|e| storage("the proving thread", e))?;
+        });
+    let proving = match spawned {
+        Ok(proving) => proving,
+        Err(e) => {
+            // Not started: the next trade that reaches it starts it again.
+            forget_started(&key)?;
+            return Err(storage("the proving thread", e));
+        }
+    };
     PROVING
         .lock()
         .map_err(|e| storage("the proofs in progress", e))?
-        .push((generation, proving));
+        .push((key, proving));
     Ok(())
 }
 
-/// The proofs this process started and has not seen finish, each with the
-/// generation it proves up to.
-static PROVING: Mutex<Vec<(u64, std::thread::JoinHandle<Result<(), DsmError>>)>> =
+/// A proof's vault, generation and root.
+type ProofKey = (D32, u64, D32);
+
+/// The proofs this process started and has not seen finish.
+static PROVING: Mutex<Vec<(ProofKey, std::thread::JoinHandle<Result<(), DsmError>>)>> =
     Mutex::new(Vec::new());
 
-/// The generations this process started proving, by vault: each is proven
-/// once.
-static STARTED: Mutex<std::collections::BTreeSet<(D32, u64)>> =
+/// The generations this process started proving, by vault, generation and
+/// root: each is proven once, and one that failed is started again by the
+/// next trade that reaches it.
+static STARTED: Mutex<std::collections::BTreeSet<ProofKey>> =
     Mutex::new(std::collections::BTreeSet::new());
+
+fn forget_started(key: &ProofKey) -> Result<(), DsmError> {
+    STARTED
+        .lock()
+        .map_err(|e| storage("the proofs started", e))?
+        .remove(key);
+    Ok(())
+}
 
 /// Wait for every proof this process started to be published or refused:
 /// what a device that is about to stop, or a reader that needs the records
@@ -318,21 +337,27 @@ pub(crate) async fn settled() -> Result<(), DsmError> {
         if proving.is_empty() {
             return Ok(());
         }
-        for (generation, handle) in proving {
-            let finished = tokio::task::spawn_blocking(move || handle.join())
+        for (key, handle) in proving {
+            let generation = key.1;
+            let joined = tokio::task::spawn_blocking(move || handle.join())
                 .await
-                .map_err(|e| storage("waiting for a proof", e))?
-                .map_err(|panic| {
+                .map_err(|e| storage("waiting for a proof", e))?;
+            let finished = match joined {
+                Ok(finished) => finished,
+                Err(panic) => {
+                    forget_started(&key)?;
                     let why = panic
                         .downcast_ref::<&str>()
                         .map(|why| why.to_string())
                         .or_else(|| panic.downcast_ref::<String>().cloned());
-                    storage(
+                    return Err(storage(
                         "a proof",
                         format!("the thread proving generation {generation} panicked: {why:?}"),
-                    )
-                })?;
+                    ));
+                }
+            };
             if let Err(e) = finished {
+                forget_started(&key)?;
                 log::warn!("[vault proof] generation {generation} not proven: {e}");
             }
         }
