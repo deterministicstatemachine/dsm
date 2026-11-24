@@ -3218,8 +3218,8 @@ impl AppRouter for AppRouterImpl {
             "token.burn" | "tokens.publishPolicy" | "tokens.addByAnchor" => {
                 Box::pin(self.handle_token_invoke(i)).await
             }
-            // Preferences
-            "prefs.set" => Box::pin(self.handle_prefs_invoke(i)).await,
+            // Preferences, and the wallet's backup taken by hand.
+            "prefs.set" | "wallet.backupNow" => Box::pin(self.handle_prefs_invoke(i)).await,
             // Pull the inbox, apply it and push what is owed.
             "storage.sync" => Box::pin(self.handle_storage_invoke(i)).await,
             // SoFi (SoFi §27): the only way the app reaches SoFi.

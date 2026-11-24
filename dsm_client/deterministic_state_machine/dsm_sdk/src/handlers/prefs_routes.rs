@@ -77,6 +77,17 @@ impl AppRouterImpl {
                     },
                 ))
             }
+            // The owner pressed Back up on the send screen (owner, 2026-11-24):
+            // one backup now, answered in the words the screen shows.
+            "wallet.backupNow" => match crate::sdk::wallet_backup_flow::back_up_by_hand().await {
+                Ok(words) => pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+                    generated::AppStateResponse {
+                        key: crate::sdk::wallet_backup_flow::BACKUP_MODE.to_string(),
+                        value: Some(words),
+                    },
+                )),
+                Err(e) => err(format!("wallet.backupNow: {e}")),
+            },
             _ => err(format!("unknown prefs invoke: {}", i.method)),
         }
     }

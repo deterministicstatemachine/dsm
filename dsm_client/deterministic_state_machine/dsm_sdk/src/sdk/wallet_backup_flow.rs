@@ -7,14 +7,16 @@
 //! under a key only its 24 words give (`dsm::wallet_backup`), and a wallet
 //! restored from those words installs the latest one.
 //!
-//! When: never while the wallet is moving (owner, 2026-11-19: "It should happen
-//! automatically unless you're starting another transaction right away. If
-//! another transaction comes through, it should interrupt it and cancel it").
-//! A backup is taken once the wallet has been still for [`QUIET`]; a step that
-//! comes while one is being written cancels it, and the quiet starts over.
-//! The loop learns the wallet moved from the database itself: a change to a
-//! row of the tables the activity mark reads ([`MARK_READS`]) wakes it, and a
-//! wallet that does not move wakes nothing.
+//! When: its owner chooses in Settings (owner, 2026-11-24): after every
+//! transaction, the default, or only when the owner presses Back up on the
+//! send screen ([`BACKUP_MODE`]). After every transaction, a backup is taken
+//! once the transaction's rows have landed ([`SETTLE`]); another transaction
+//! that comes while one is being written cancels it (owner, 2026-11-19: "If
+//! another transaction comes through, it should interrupt it and cancel it"),
+//! and the backup after that one is taken instead. The loop learns the wallet
+//! moved from the database itself: a change to a row of the tables the
+//! activity mark reads ([`MARK_READS`]) wakes it, and a wallet that does not
+//! move wakes nothing. Nothing is read on a timer.
 //!
 //! What: the tables in [`BACKUP_TABLES`], read in one transaction so the copy
 //! is the wallet as it stood at one moment. Never the sealed seed, the records
@@ -32,15 +34,31 @@ use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
 
-/// How long the wallet must be still before a backup is taken.
-pub const QUIET: Duration = Duration::from_secs(20);
+/// A transaction writes several rows: it is backed up once none has landed for
+/// this long, so one transaction is one backup.
+pub const SETTLE: Duration = Duration::from_millis(1500);
+
+/// The first wait before a backup that could not be written is tried again,
+/// the wallet still; it doubles each time, to [`RETRY_AT_MOST`].
+const RETRY_FIRST: Duration = Duration::from_secs(30);
 
 /// The longest the loop waits before it tries a backup that could not be
-/// written again, the wallet still: the wait starts at [`QUIET`] and doubles.
+/// written again, the wallet still.
 const RETRY_AT_MOST: Duration = Duration::from_secs(600);
 
-/// How often a backup being written looks whether the wallet moved.
-const WATCH: Duration = Duration::from_millis(250);
+/// The setting choosing when the wallet backs up (owner, 2026-11-24): unset or
+/// anything but [`BACKUP_MANUAL`], after every transaction; [`BACKUP_MANUAL`],
+/// only when its owner presses Back up on the send screen.
+pub const BACKUP_MODE: &str = "wallet_backup_mode";
+
+/// [`BACKUP_MODE`]'s value for backing up only by hand.
+pub const BACKUP_MANUAL: &str = "manual";
+
+/// Whether this wallet backs up after every transaction: unless its owner set
+/// [`BACKUP_MODE`] to [`BACKUP_MANUAL`].
+fn after_every_transaction() -> bool {
+    crate::sdk::app_state::AppState::get_pref(BACKUP_MODE).as_deref() != Some(BACKUP_MANUAL)
+}
 
 /// The setting naming the last backup this wallet wrote or restored.
 const LATEST: &str = "wallet_backup_latest";
@@ -805,28 +823,19 @@ pub const MARK_READS: [(&str, &str); 6] = [
 static MOVED: once_cell::sync::Lazy<tokio::sync::Notify> =
     once_cell::sync::Lazy::new(tokio::sync::Notify::new);
 
-/// Signalled when a quote or a trade starts: a backup being taken or written
-/// stops, and the loop waits for the wallet to be still again. A backup reads
-/// the wallet's tables under the database's one connection while it is taken
-/// and watched, and a quote's or a trade's own reads and writes waited
-/// behind it.
-static QUOTE_OR_TRADE_STARTING: once_cell::sync::Lazy<tokio::sync::Notify> =
+/// Signalled with [`MOVED`], to every backup being written at that moment: the
+/// wallet moved under it, and it is cancelled.
+static MOVED_UNDER_A_WRITE: once_cell::sync::Lazy<tokio::sync::Notify> =
     once_cell::sync::Lazy::new(tokio::sync::Notify::new);
 
-/// A quote or a trade is starting (owner ruling 2026-11-24): stop the backup
-/// under way, if one is, and count it as a move, so the next backup waits for
-/// the wallet to be still for [`QUIET`] after it.
-pub(crate) fn quote_or_trade_starting() {
-    QUOTE_OR_TRADE_STARTING.notify_waiters();
-    MOVED.notify_one();
-}
-
-/// The device database changed a row of `table`: the backup loop is woken
-/// when the table is one the activity mark reads. Called by the database's
-/// update hook, inside the write; it only signals.
+/// The device database changed a row of `table`: the backup loop is woken, and
+/// a backup being written cancelled, when the table is one the activity mark
+/// reads. Called by the database's update hook, inside the write; it only
+/// signals.
 pub fn row_changed(table: &str) {
     if MARK_READS.iter().any(|(read, _)| *read == table) {
         MOVED.notify_one();
+        MOVED_UNDER_A_WRITE.notify_waiters();
     }
 }
 
@@ -866,13 +875,13 @@ pub enum Attempt {
 
 /// Take a backup now and write it as the next one, unless the wallet is
 /// moving. `mark` is the wallet's activity mark the backup is taken at: a
-/// change of it while the write is under way cancels the write.
+/// move of the wallet while the write is under way cancels the write.
 pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmError> {
-    // A quote or a trade that starts from here on stops this attempt, though it starts
-    // while the snapshot is taken.
-    let trade = QUOTE_OR_TRADE_STARTING.notified();
-    tokio::pin!(trade);
-    trade.as_mut().enable();
+    // A move from here on cancels this attempt, though it comes while the
+    // snapshot is taken.
+    let moved = MOVED_UNDER_A_WRITE.notified();
+    tokio::pin!(moved);
+    moved.as_mut().enable();
     let keys = keys()?;
     let lock = slot_lock(own_device()?)?;
     let body = match snapshot()? {
@@ -888,19 +897,6 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
     // The generation is used from here: an attempt the wallet's next step
     // cuts short is written over by the next, which goes higher.
     record_latest(generation)?;
-    let moved = async {
-        loop {
-            tokio::time::sleep(WATCH).await;
-            match activity_mark() {
-                Ok(now) if now == mark => {}
-                Ok(_moved) => break,
-                Err(e) => {
-                    log::debug!("[wallet backup] watching the wallet: {e}");
-                    break;
-                }
-            }
-        }
-    };
     tokio::select! {
         written = write(set, &keys, &lock, generation, &body) => match written? {
             Written::Whole => Ok(Attempt::Written(generation)),
@@ -923,7 +919,6 @@ pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmErro
             )),
         },
         () = moved => Ok(Attempt::Cancelled),
-        () = trade => Ok(Attempt::Cancelled),
     }
 }
 
@@ -958,8 +953,8 @@ pub(crate) fn stop_for_test() {
     }
 }
 
-/// Start the wallet's backup loop, once: it backs the wallet up each time it
-/// has been still for [`QUIET`] since it last moved.
+/// Start the wallet's backup loop, once: it backs the wallet up after every
+/// transaction, unless its owner chose to back up by hand ([`BACKUP_MODE`]).
 pub fn start() {
     #[cfg(test)]
     if crate::sdk::inbox_poller::background_held() {
@@ -975,7 +970,7 @@ pub fn start() {
     *running = Some(crate::runtime::get_runtime().spawn(run()));
 }
 
-/// What one look at the still wallet came to.
+/// What one look at the wallet came to.
 enum Look {
     /// The wallet is backed up as it stands, or a backup was cancelled by a
     /// move: the loop waits for the next move.
@@ -985,12 +980,13 @@ enum Look {
     TryAgain,
 }
 
-/// Wait until the wallet has been still for `quiet`: every move restarts it.
-async fn still_for(quiet: Duration) {
+/// Wait until the transaction that moved the wallet has landed: no row of it
+/// for [`SETTLE`].
+async fn settled() {
     loop {
         tokio::select! {
             () = MOVED.notified() => {}
-            () = tokio::time::sleep(quiet) => return,
+            () = tokio::time::sleep(SETTLE) => return,
         }
     }
 }
@@ -1014,14 +1010,20 @@ async fn run() {
         log::warn!("{e}");
     }
     let mut backed_up: Option<D32> = None;
-    let mut retry = QUIET;
+    let mut retry = RETRY_FIRST;
     // A process starts as a move does: its first look comes once the wallet
-    // has been still for QUIET.
+    // has settled.
     loop {
-        still_for(QUIET).await;
+        settled().await;
+        if !after_every_transaction() {
+            // Backed up by hand: the loop only waits for the next move, and
+            // looks again then, in case its owner changed the setting.
+            MOVED.notified().await;
+            continue;
+        }
         match look(&mut backed_up).await {
             Look::Done => {
-                retry = QUIET;
+                retry = RETRY_FIRST;
                 MOVED.notified().await;
             }
             Look::TryAgain => {
@@ -1035,47 +1037,44 @@ async fn run() {
     }
 }
 
-/// Back the still wallet up, unless it is backed up as it stands.
+/// One backup of the wallet as it stands now: its own offline steps put at
+/// their cells first, then the backup written ([`back_up_now`]). With the
+/// activity mark it was taken at.
+async fn back_up_as_it_stands() -> Result<(D32, Attempt), DsmError> {
+    let mark = activity_mark()?;
+    let set = crate::sdk::economic_admission_flow::committed_network_id()
+        .and_then(|network| crate::sdk::storage_set::canonical_set(&network))?;
+    match publish_own_steps(&set).await? {
+        0 => {}
+        n => log::info!("[wallet backup] {n} own offline steps put at their cells"),
+    }
+    Ok((mark, back_up_now(&set, mark).await?))
+}
+
+/// Back the wallet up, unless it is backed up as it stands.
 async fn look(backed_up: &mut Option<D32>) -> Look {
-    let mark = match activity_mark() {
-        Ok(mark) => mark,
+    match activity_mark() {
+        Ok(mark) if *backed_up == Some(mark) => return Look::Done,
+        Ok(..) => {}
         Err(e) => {
             log::debug!("[wallet backup] {e}");
             return Look::TryAgain;
         }
-    };
-    if *backed_up == Some(mark) {
-        return Look::Done;
     }
-    let set = match crate::sdk::economic_admission_flow::committed_network_id()
-        .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
-    {
-        Ok(set) => set,
-        Err(e) => {
-            log::debug!("[wallet backup] no set yet: {e}");
-            return Look::TryAgain;
-        }
-    };
-    match publish_own_steps(&set).await {
-        Ok(0) => {}
-        Ok(n) => log::info!("[wallet backup] {n} own offline steps put at their cells"),
-        Err(e) => {
-            log::warn!("[wallet backup] own offline steps not put yet: {e}");
-            return Look::TryAgain;
-        }
-    }
-    match back_up_now(&set, mark).await {
-        Ok(Attempt::Written(n)) => {
+    match back_up_as_it_stands().await {
+        Ok((mark, Attempt::Written(n))) => {
             *backed_up = Some(mark);
             log::info!("[wallet backup] generation {n} written over the last");
             Look::Done
         }
-        Ok(Attempt::NotNow(why)) => {
+        Ok((_, Attempt::NotNow(why))) => {
             log::debug!("[wallet backup] not now: {why:?}");
             Look::TryAgain
         }
-        Ok(Attempt::Cancelled) => {
-            log::info!("[wallet backup] cancelled: the wallet moved, or a quote or trade started");
+        Ok((_, Attempt::Cancelled)) => {
+            log::info!(
+                "[wallet backup] cancelled: another transaction came; the next backup follows it"
+            );
             Look::Done
         }
         Err(e) => {
@@ -1083,6 +1082,22 @@ async fn look(backed_up: &mut Option<D32>) -> Look {
             Look::TryAgain
         }
     }
+}
+
+/// The owner pressed Back up (owner, 2026-11-24): one backup of the wallet as
+/// it stands, now, whatever [`BACKUP_MODE`] says; and what came of it, in the
+/// words the send screen shows.
+pub async fn back_up_by_hand() -> Result<String, DsmError> {
+    Ok(match back_up_as_it_stands().await?.1 {
+        Attempt::Written(n) => format!("Backed up (backup {n})"),
+        Attempt::NotNow(NotNow::Moving(why)) => {
+            format!("Not backed up yet: {why}. Press Back up again once it is done.")
+        }
+        Attempt::Cancelled => {
+            "Not backed up: a transaction came while it was written. Press Back up again."
+                .to_string()
+        }
+    })
 }
 
 // ── the offline account on the network ─────────────────────────────────────

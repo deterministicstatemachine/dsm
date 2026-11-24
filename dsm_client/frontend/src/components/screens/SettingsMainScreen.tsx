@@ -6,7 +6,7 @@
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { tourStore } from '../tour/tourStore';
-import { chooseSkin, setReceiptsEmail } from '../../runtime/skinPreferences';
+import { chooseSkin, setBackupMode, setReceiptsEmail } from '../../runtime/skinPreferences';
 import { RECEIPT_CONSENT } from '../../domain/receiptConsent';
 import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
 import { versionLabel } from '../../appVersion';
@@ -165,6 +165,31 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
             }}
           >
             {runtime.receiptsEmail === 'on' ? 'Turn receipts off' : 'I agree, turn receipts on'}
+          </button>
+        </section>
+      ) : null}
+
+      {/* When the wallet backs up (owner, 2026-11-24). The Modern skin has it
+          on its own settings page. */}
+      {runtime.skin === 'dgen' ? (
+        <section className="sb-card" aria-labelledby="backup-section-title">
+          <div id="backup-section-title" className="sb-card__title">Backup</div>
+          <p className="sb-hint">
+            {runtime.backupMode === 'manual'
+              ? 'By hand: the wallet backs up only when you press Back up on the Send screen.'
+              : 'Every transaction: the wallet backs up after each one.'}
+          </p>
+          <button
+            type="button"
+            className="sb-btn sb-btn--block"
+            onClick={() => {
+              setBackupMode(runtime.backupMode === 'manual' ? 'auto' : 'manual').then(
+                () => undefined,
+                (e: unknown) => setStatus(e instanceof Error ? e.message : String(e)),
+              );
+            }}
+          >
+            {runtime.backupMode === 'manual' ? 'Back up after every transaction' : 'Back up only by hand'}
           </button>
         </section>
       ) : null}
