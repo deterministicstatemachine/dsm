@@ -805,18 +805,19 @@ pub const MARK_READS: [(&str, &str); 6] = [
 static MOVED: once_cell::sync::Lazy<tokio::sync::Notify> =
     once_cell::sync::Lazy::new(tokio::sync::Notify::new);
 
-/// Signalled when a trade starts: a backup being taken or written stops, and
-/// the loop waits for the wallet to be still again. A backup reads the
-/// wallet's tables under the database's one connection while it is taken
-/// and watched, and a trade's own reads and writes waited behind it.
-static TRADE_STARTING: once_cell::sync::Lazy<tokio::sync::Notify> =
+/// Signalled when a quote or a trade starts: a backup being taken or written
+/// stops, and the loop waits for the wallet to be still again. A backup reads
+/// the wallet's tables under the database's one connection while it is taken
+/// and watched, and a quote's or a trade's own reads and writes waited
+/// behind it.
+static QUOTE_OR_TRADE_STARTING: once_cell::sync::Lazy<tokio::sync::Notify> =
     once_cell::sync::Lazy::new(tokio::sync::Notify::new);
 
-/// A trade is starting (owner ruling 2026-11-24): stop the backup under
-/// way, if one is, and count the trade as a move, so the next backup waits
-/// for the wallet to be still for [`QUIET`] after it.
-pub(crate) fn trade_starting() {
-    TRADE_STARTING.notify_waiters();
+/// A quote or a trade is starting (owner ruling 2026-11-24): stop the backup
+/// under way, if one is, and count it as a move, so the next backup waits for
+/// the wallet to be still for [`QUIET`] after it.
+pub(crate) fn quote_or_trade_starting() {
+    QUOTE_OR_TRADE_STARTING.notify_waiters();
     MOVED.notify_one();
 }
 
@@ -867,9 +868,9 @@ pub enum Attempt {
 /// moving. `mark` is the wallet's activity mark the backup is taken at: a
 /// change of it while the write is under way cancels the write.
 pub async fn back_up_now(set: &StorageSet, mark: D32) -> Result<Attempt, DsmError> {
-    // A trade that starts from here on stops this attempt, though it starts
+    // A quote or a trade that starts from here on stops this attempt, though it starts
     // while the snapshot is taken.
-    let trade = TRADE_STARTING.notified();
+    let trade = QUOTE_OR_TRADE_STARTING.notified();
     tokio::pin!(trade);
     trade.as_mut().enable();
     let keys = keys()?;
@@ -1074,7 +1075,7 @@ async fn look(backed_up: &mut Option<D32>) -> Look {
             Look::TryAgain
         }
         Ok(Attempt::Cancelled) => {
-            log::info!("[wallet backup] cancelled: the wallet moved or a trade started");
+            log::info!("[wallet backup] cancelled: the wallet moved, or a quote or trade started");
             Look::Done
         }
         Err(e) => {

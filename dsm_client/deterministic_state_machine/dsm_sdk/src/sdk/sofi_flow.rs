@@ -1476,6 +1476,9 @@ pub async fn find_route(
     set: &StorageSet,
     intent: &FindRouteIntent,
 ) -> Result<RouteFound, DsmError> {
+    // A wallet backup under way stops: the search's reads do not wait behind
+    // it (owner ruling 2026-11-24).
+    crate::sdk::wallet_backup_flow::quote_or_trade_starting();
     let accepted = &AcceptedGeneses::default();
     let standing = standing(core)?;
     let ctx = standing.context(set, accepted)?;
@@ -2771,7 +2774,7 @@ pub async fn trade(
 ) -> Result<PositionOutcome, DsmError> {
     // A wallet backup under way stops: the trade's reads and writes do not
     // wait behind it (owner ruling 2026-11-24).
-    crate::sdk::wallet_backup_flow::trade_starting();
+    crate::sdk::wallet_backup_flow::quote_or_trade_starting();
     // This device's earlier trades' proof records are published first (owner
     // ruling 2026-11-22): the trade's own record folds the newest one, and a
     // reader of the vault starts at it.
