@@ -20,6 +20,7 @@ import type { TokenBalanceView } from '../../dsm/types';
 import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
 import { ScreenGuard } from '../common/ScreenGuard';
 import ModernOffline from './ModernOffline';
+import { BackupNowButton } from '../common/BackupNowButton';
 
 const QUICK = ['10', '50', '100', '200'];
 
@@ -244,6 +245,7 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
         <Icon name="send" /> Review Send
       </button>
       {tried === 'tried' && missing !== null ? <p className="s-hint" role="alert" style={{ textAlign: 'center', marginTop: 10 }}>{missing}</p> : null}
+      <BackupNowButton className="s-backup-now" />
 
       {stage.kind === 'review' ? (
         <ReviewSheet

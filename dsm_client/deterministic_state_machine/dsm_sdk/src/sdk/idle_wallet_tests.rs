@@ -18,8 +18,9 @@ use crate::test_support::two_device::Pair;
 use dsm::types::proto as generated;
 
 /// How long the wallet is left to settle after its waits cover the fleet: its
-/// first backup is taken once it has been still for `wallet_backup_flow::QUIET`,
-/// and a sync that took something hurries the next few.
+/// first backup is taken once its last transaction has landed
+/// (`wallet_backup_flow::SETTLE`), and a sync that took something hurries the
+/// next few.
 const SETTLE: Duration = Duration::from_secs(45);
 
 /// The window in which the idle wallet is watched.

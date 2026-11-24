@@ -49,6 +49,11 @@ function hostWith(anchor: 'attached' | 'none') {
         const { route, body } = routeOf(reqBytes);
         asked.push(route);
         if (route === 'anchor.status') return answerOf({ case: 'anchorStatusResponse', value: status });
+        if (route === 'prefs.get') {
+          // The send page reads when the wallet backs up; this wallet has not set it.
+          const req = pb.AppStateRequest.fromBinary(pb.ArgPack.fromBinary(body).body);
+          return answerOf({ case: 'appStateResponse', value: new pb.AppStateResponse({ key: req.key }) });
+        }
         if (route === 'wallet.loadOffline') {
           const arg = pb.ArgPack.fromBinary(body);
           const req = pb.OfflineCashRequest.fromBinary(arg.body);
@@ -106,7 +111,7 @@ describe('offline on the Modern send page', () => {
     renderSend([era()]);
     expect(screen.getByText('100.00')).toBeInTheDocument();
     expect(screen.queryByLabelText('Appliance')).not.toBeInTheDocument();
-    expect(host.asked).toEqual([]);
+    expect(host.asked).not.toContain('anchor.status');
   });
 
   it('choosing Offline reads the appliance, shows cash in hand, and loads through Rust', async () => {

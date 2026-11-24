@@ -11,7 +11,8 @@
 import { dsmClient } from '../services/dsmClient';
 import { AGREEMENT_VERSION } from '../domain/betaAgreement';
 import logger from '../utils/logger';
-import { appRuntimeStore, type Look, type Scheme, type Skin, type Switch } from './appRuntimeStore';
+import { getBackupMode, putBackupMode } from '../dsm/backup';
+import { appRuntimeStore, type BackupMode, type Look, type Scheme, type Skin, type Switch } from './appRuntimeStore';
 import {
   AGREEMENT_PREFERENCE,
   RECEIPTS_EMAIL_PREFERENCE,
@@ -110,6 +111,21 @@ export async function keepLook(look: Look): Promise<void> {
 export async function setSimpleOffline(value: Switch): Promise<void> {
   await dsmClient.setPreference(SIMPLE_OFFLINE_PREFERENCE, value);
   appRuntimeStore.setSimpleOffline(value);
+}
+
+/**
+ * When the wallet backs up, read from Rust, which keeps the setting and acts
+ * on it; it is a wallet's setting, not the page's, so it is read once the
+ * wallet's screens open, never with the look.
+ */
+export async function loadBackupMode(): Promise<void> {
+  appRuntimeStore.setBackupMode(await getBackupMode());
+}
+
+/** When the wallet backs up: after every transaction, or by hand. */
+export async function setBackupMode(value: BackupMode): Promise<void> {
+  await putBackupMode(value);
+  appRuntimeStore.setBackupMode(value);
 }
 
 /**
