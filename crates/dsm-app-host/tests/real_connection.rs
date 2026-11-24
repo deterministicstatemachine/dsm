@@ -17,6 +17,11 @@
 #[path = "../../../dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/nodes.rs"]
 pub mod nodes;
 
+/// The Google endpoints the harness's nodes push through, included beside
+/// the harness as the SDK suites include it.
+#[path = "../../../dsm_storage_node/tests/common/google_push.rs"]
+pub mod google_push;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -458,9 +463,32 @@ impl Host {
     }
 }
 
+/// How much of each host's log a failing test prints: enough to see what each
+/// wallet did in the step that failed.
+const LOG_TAIL: usize = 400;
+
 impl Drop for Host {
-    /// A test that fails part-way still stops its processes.
+    /// A test that fails part-way still stops its processes, and says what
+    /// they logged: a step that times out names only its last answer, and
+    /// the cause is in the hosts' logs.
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            for start in 1..=self.starts {
+                let path = self.dir.join(format!("{}-{start}.log", self.name));
+                let text = said(&path);
+                let lines: Vec<&str> = text.lines().collect();
+                let from = lines.len().saturating_sub(LOG_TAIL);
+                eprintln!(
+                    "---- {} (start {start}): the last {} of {} lines it logged ----",
+                    self.name,
+                    lines.len() - from,
+                    lines.len()
+                );
+                for line in &lines[from..] {
+                    eprintln!("{line}");
+                }
+            }
+        }
         if let Some(child) = self.child.as_mut() {
             if let Err(e) = child.start_kill() {
                 eprintln!("{}: stopping the process: {e}", self.name);

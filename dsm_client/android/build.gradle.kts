@@ -9,6 +9,8 @@ buildscript {
         // hooks can resolve BaseExtension under Gradle 8.9+ isolation rules.
         classpath("com.android.tools.build:gradle:8.7.3")
         classpath("io.gitlab.arturbosch.detekt:detekt-gradle-plugin:1.23.7")
+        // Reads app/google-services.json, the owner's Firebase project, when it is there.
+        classpath("com.google.gms:google-services:4.4.2")
     }
 }
 

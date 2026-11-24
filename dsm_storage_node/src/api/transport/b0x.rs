@@ -304,7 +304,7 @@ fn message_id_header(headers: &HeaderMap) -> Result<[u8; 16], StatusCode> {
     })
 }
 
-fn require_protobuf(headers: &HeaderMap) -> Result<(), StatusCode> {
+pub(super) fn require_protobuf(headers: &HeaderMap) -> Result<(), StatusCode> {
     match headers.get(axum::http::header::CONTENT_TYPE) {
         Some(v) if v == "application/octet-stream" => Ok(()),
         Some(v) if v == "application/protobuf" => Ok(()),
@@ -355,6 +355,9 @@ async fn submit_b0x_envelope(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     app.spool_waits.announce(&address, seq_num);
+    if let Some(doorbells) = &app.doorbells {
+        doorbells.ring(&address);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

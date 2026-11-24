@@ -55,6 +55,16 @@ plugins {
     id("com.google.protobuf")
 }
 
+// The storage nodes ring the phone through Firebase Cloud Messaging. Which Firebase project
+// is the owner's: app/google-services.json, downloaded from his Firebase console, never
+// committed. A build without it names no project; the app then finds no push and keeps
+// listening off screen with its waits, its foreground service and the battery exemption.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+} else {
+    logger.warn("dsm: app/google-services.json is absent: this build has no push (the app keeps its foreground service)")
+}
+
 android {
     namespace = "com.dsm.wallet"
     compileSdk = 35
@@ -507,6 +517,11 @@ dependencies {
     implementation("com.google.android.material:material:1.10.0")
     implementation("androidx.webkit:webkit:1.8.0")
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+    // The storage nodes' doorbell: Firebase Cloud Messaging, and the Play services check
+    // that says whether this phone has it.
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
+    implementation("com.google.android.gms:play-services-base:18.5.0")
     implementation("no.nordicsemi.android:ble:2.7.1")
     implementation("no.nordicsemi.android:ble-ktx:2.7.1")
     

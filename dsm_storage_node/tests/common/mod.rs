@@ -7,6 +7,34 @@
 
 #![allow(dead_code)]
 
+pub mod google_push;
+
+/// What the node suites make Google do beyond taking pushes.
+impl google_push::GooglePush {
+    /// The tokens of every push taken, in order.
+    pub fn pushed_tokens(&self) -> Vec<String> {
+        self.pushes().into_iter().map(|p| p.push_token).collect()
+    }
+
+    /// Certificates exchanged for a federated token so far.
+    pub fn exchanges(&self) -> u32 {
+        *google_push::held(&self.seen.exchanges)
+    }
+
+    /// From now on Firebase refuses the access token it last handed out, as
+    /// it refuses one that has expired.
+    pub fn expire_access(&self) {
+        if let Some(access) = google_push::held(&self.seen.access).clone() {
+            google_push::held(&self.seen.refused).insert(access);
+        }
+    }
+
+    /// From now on `push_token` is no app's: Firebase answers `404`.
+    pub fn uninstall(&self, push_token: &str) {
+        google_push::held(&self.seen.gone).insert(push_token.to_string());
+    }
+}
+
 pub fn ok_or_panic<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
     match result {
         Ok(value) => value,

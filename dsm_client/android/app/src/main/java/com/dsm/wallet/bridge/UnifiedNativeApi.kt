@@ -56,6 +56,9 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun processEnvelopeV3(envelope: ByteArray): ByteArray
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
+    @Keep @JvmStatic external fun setPushToken(token: String)
+    @Keep @JvmStatic external fun pushUnavailable(why: String)
+    @Keep @JvmStatic external fun onPushWake(): Int
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
     @Keep @JvmStatic external fun hasContactForDeviceId(deviceId: ByteArray): Boolean
     @Keep @JvmStatic external fun isBleAddressPaired(address: String): Boolean

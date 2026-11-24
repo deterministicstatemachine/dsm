@@ -16,6 +16,12 @@
 //! does not serve waits yet, a member down, no connection — the poller is
 //! woken to sync, and polls at its own cadence until they cover it again.
 //!
+//! Off screen, the members ring the phone instead (`inbox_doorbell`): each
+//! plan puts this device's doorbell up at every member for the routes it
+//! plans on, and while the doorbells cover the fleet the waiter holds no
+//! wait at all; a push wakes the sync a wait's answer would have. On screen,
+//! or without doorbells that cover the fleet, it holds its waits as before.
+//!
 //! The waiter runs while the poller runs, and stops with it.
 
 use std::collections::{BTreeSet, HashSet};
@@ -69,6 +75,10 @@ static MEMBERS_NEEDED: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Ends a held round at once when the poller is stopped.
 static WAITER_STOP: once_cell::sync::Lazy<Notify> = once_cell::sync::Lazy::new(Notify::new);
 
+/// Ends a held round, or the rest of one with no waits, at once when what it
+/// planned on changed: the app went off screen, or the push token changed.
+static WAITER_REPLAN: once_cell::sync::Lazy<Notify> = once_cell::sync::Lazy::new(Notify::new);
+
 /// Whether waits are held on enough members that every delivery lands on one
 /// of them: a delivery is complete at the register quorum K of N members, so
 /// waits held on N - K + 1 of them see every delivery. While they are, the
@@ -108,6 +118,12 @@ pub(crate) fn members_to_cover(members: usize, quorum_k: usize) -> usize {
 /// Ends a round held now; the waiter then sees the poller stopped and stops.
 pub(crate) fn wake_to_stop() {
     WAITER_STOP.notify_waiters();
+}
+
+/// Ends a round held now, or a rest with no waits, and plans again: the app
+/// went off screen, or the push token changed.
+pub(crate) fn replan() {
+    WAITER_REPLAN.notify_waiters();
 }
 
 /// Clears the running flag when the waiter ends, however it ends.
@@ -249,6 +265,7 @@ async fn run() {
     let resting = Resting::default();
     let mut holding: HashSet<String> = HashSet::new();
     let mut idle_wakes = IdleWakes::new();
+    let mut refreshed_at = crate::sdk::inbox_doorbell::refreshes_asked();
     while !crate::sdk::inbox_poller::poller_stopping() {
         let plan = match plan(&resting) {
             Ok(Planned::Waits(plan)) => plan,
@@ -269,6 +286,37 @@ async fn run() {
                 continue;
             }
         };
+
+        let refreshes = crate::sdk::inbox_doorbell::refreshes_asked();
+        let refresh = if refreshes != refreshed_at {
+            crate::sdk::inbox_doorbell::Refresh::Everywhere
+        } else {
+            crate::sdk::inbox_doorbell::Refresh::WhereChanged
+        };
+        let members: Vec<crate::sdk::inbox_doorbell::Member<'_>> = plan
+            .members
+            .iter()
+            .map(|m| crate::sdk::inbox_doorbell::Member {
+                endpoint: &m.endpoint,
+                client: &m.client,
+            })
+            .collect();
+        crate::sdk::inbox_doorbell::put_up(&members, &plan.addresses, plan.needed, refresh).await;
+        refreshed_at = refreshes;
+        if !crate::sdk::session_manager::app_in_foreground()
+            && crate::sdk::inbox_doorbell::covers_fleet()
+        {
+            // Off screen, every delivery rings this phone: no wait is held,
+            // and the poller keeps no timer for arrivals.
+            holding.clear();
+            record_coverage(plan.needed, plan.needed);
+            log::info!(
+                "[inbox_waiter] off screen, and the doorbells cover the fleet: no waits; a push \
+                 wakes the sync"
+            );
+            wait_for_next_cycle(crate::sdk::inbox_poller::cycles_completed()).await;
+            continue;
+        }
 
         let floor = tokio::time::sleep(MIN_ROUND);
         tokio::pin!(floor);
@@ -437,10 +485,20 @@ async fn hold(plan: &Plan, resting: &Resting, holding: &mut HashSet<String>) -> 
         let stop = WAITER_STOP.notified();
         tokio::pin!(stop);
         stop.as_mut().enable();
+        let replanned = WAITER_REPLAN.notified();
+        tokio::pin!(replanned);
+        replanned.as_mut().enable();
         if crate::sdk::inbox_poller::poller_stopping() {
             return Round::Stopped;
         }
         if crate::sdk::inbox_poller::cycles_completed() != cycles_at_start && routes_moved(plan) {
+            return Round::Replan;
+        }
+        // Off screen with doorbells that cover the fleet: the nodes ring the
+        // phone, and no wait is held.
+        if !crate::sdk::session_manager::app_in_foreground()
+            && crate::sdk::inbox_doorbell::covers_fleet()
+        {
             return Round::Replan;
         }
         tokio::select! {
@@ -472,12 +530,14 @@ async fn hold(plan: &Plan, resting: &Resting, holding: &mut HashSet<String>) -> 
                             "[inbox_waiter] {endpoint} does not hold waits ({status}); the poller \
                              reads it"
                         );
+                        crate::sdk::inbox_doorbell::forget(&endpoint);
                         holding.remove(&endpoint);
                         resting.rest(endpoint);
                         record_coverage(holding.len(), plan.needed);
                     }
                     Err(e) => {
                         log::warn!("[inbox_waiter] wait at {endpoint} failed: {e}");
+                        crate::sdk::inbox_doorbell::forget(&endpoint);
                         holding.remove(&endpoint);
                         resting.rest(endpoint);
                         record_coverage(holding.len(), plan.needed);
@@ -486,6 +546,7 @@ async fn hold(plan: &Plan, resting: &Resting, holding: &mut HashSet<String>) -> 
             }
             () = &mut cycle_done => {}
             () = &mut stop => return Round::Stopped,
+            () = &mut replanned => return Round::Replan,
         }
     }
 }
@@ -553,8 +614,9 @@ async fn wait_for_cycle_after(before: u64, limit: Duration) {
     }
 }
 
-/// Wait until a poller cycle after the `before`-th has completed, or the
-/// poller stops: with no time limit.
+/// Wait until a poller cycle after the `before`-th has completed, the poller
+/// stops, or what the waiter planned on changed ([`replan`]): with no time
+/// limit.
 async fn wait_for_next_cycle(before: u64) {
     loop {
         let cycle_done = crate::sdk::inbox_poller::cycle_done();
@@ -563,6 +625,9 @@ async fn wait_for_next_cycle(before: u64) {
         let stop = WAITER_STOP.notified();
         tokio::pin!(stop);
         stop.as_mut().enable();
+        let replanned = WAITER_REPLAN.notified();
+        tokio::pin!(replanned);
+        replanned.as_mut().enable();
         if crate::sdk::inbox_poller::cycles_completed() > before
             || crate::sdk::inbox_poller::poller_stopping()
         {
@@ -571,6 +636,7 @@ async fn wait_for_next_cycle(before: u64) {
         tokio::select! {
             () = &mut cycle_done => {}
             () = &mut stop => return,
+            () = &mut replanned => return,
         }
     }
 }

@@ -265,12 +265,13 @@ pub extern "C" fn dsm_ffi_balances_strict() -> DsmBytes {
 
 /// `onAppBackgrounded`: Rust stops the inbox poller unless something is still
 /// owed or listening. Answers 1 when the host must keep running for it, 0
-/// when it may stop.
+/// when it may stop: nothing is owed and nobody can send, or the nodes ring
+/// the phone when someone does.
 #[no_mangle]
 pub extern "C" fn dsm_ffi_on_app_backgrounded() -> i32 {
     use crate::sdk::inbox_poller::Backgrounded;
     match crate::sdk::inbox_poller::stop_poller_for_lifecycle() {
-        Ok(Backgrounded::Stopped) => 0,
+        Ok(Backgrounded::Stopped | Backgrounded::Ringing) => 0,
         Ok(Backgrounded::Settling | Backgrounded::Listening | Backgrounded::Serving) => 1,
         Err(e) => {
             log::error!("onAppBackgrounded: settlement state unreadable, keeping alive: {e}");

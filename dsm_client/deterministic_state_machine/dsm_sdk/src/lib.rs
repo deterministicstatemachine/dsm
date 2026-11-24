@@ -136,6 +136,10 @@ pub(crate) mod test_support {
     // 2026-09-23, 2026-09-24).
     pub mod appliance;
     pub mod arrivals;
+    // Google's push endpoints, served by the test (the node's own suites
+    // serve the same ones).
+    #[path = "../../../../../dsm_storage_node/tests/common/google_push.rs"]
+    pub mod google_push;
     pub mod grants;
     pub mod nodes;
     mod nodes_tests;

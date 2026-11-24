@@ -18415,6 +18415,106 @@ export class B0xWaitResponse extends Message<B0xWaitResponse> {
 }
 
 /**
+ * A device's doorbell on a node: while the app is off screen, an entry that
+ * lands on any of these spools makes the node send one empty push (Firebase
+ * Cloud Messaging) to `push_token`. The push carries nothing; the device
+ * wakes and reads its spools as it always does. Only the holder of `key`
+ * replaces or removes this doorbell: a doorbell is named by the hash of its
+ * key, and a device derives a key of its own for each node. Nothing about a
+ * doorbell enters what any device or node verifies.
+ *
+ * @generated from message dsm.B0xDoorbell
+ */
+export class B0xDoorbell extends Message<B0xDoorbell> {
+  /**
+   * @generated from field: bytes key = 1;
+   */
+  key = new Uint8Array(0);
+
+  /**
+   * the FCM registration token of the device's app
+   *
+   * @generated from field: string push_token = 2;
+   */
+  pushToken = "";
+
+  /**
+   * spool keys, Base32 Crockford of 32 bytes
+   *
+   * @generated from field: repeated string addresses = 3;
+   */
+  addresses: string[] = [];
+
+  constructor(data?: PartialMessage<B0xDoorbell>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.B0xDoorbell";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "push_token", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "addresses", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): B0xDoorbell {
+    return new B0xDoorbell().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): B0xDoorbell {
+    return new B0xDoorbell().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): B0xDoorbell {
+    return new B0xDoorbell().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: B0xDoorbell | PlainMessage<B0xDoorbell> | undefined, b: B0xDoorbell | PlainMessage<B0xDoorbell> | undefined): boolean {
+    return proto3.util.equals(B0xDoorbell, a, b);
+  }
+}
+
+/**
+ * Take down the doorbell `key` names.
+ *
+ * @generated from message dsm.B0xDoorbellRemove
+ */
+export class B0xDoorbellRemove extends Message<B0xDoorbellRemove> {
+  /**
+   * @generated from field: bytes key = 1;
+   */
+  key = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<B0xDoorbellRemove>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.B0xDoorbellRemove";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): B0xDoorbellRemove {
+    return new B0xDoorbellRemove().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): B0xDoorbellRemove {
+    return new B0xDoorbellRemove().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): B0xDoorbellRemove {
+    return new B0xDoorbellRemove().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: B0xDoorbellRemove | PlainMessage<B0xDoorbellRemove> | undefined, b: B0xDoorbellRemove | PlainMessage<B0xDoorbellRemove> | undefined): boolean {
+    return proto3.util.equals(B0xDoorbellRemove, a, b);
+  }
+}
+
+/**
  * =============================== ENVELOPE ============================
  * The sender of an addressed envelope. A local answer (this device's Core or
  * SDK answering its own caller) makes no sender claim and carries no Headers.
