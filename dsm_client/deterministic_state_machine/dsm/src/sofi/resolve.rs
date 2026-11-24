@@ -2480,7 +2480,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         root: &D32,
     ) -> Result<Option<VaultChain>, VerifierFailure> {
         // The genesis root is the accepted genesis's own: no record proves
-        // a step to it, and the chain there is the genesis.
+        // a step to it, and the chain there is the genesis, as the chain at
+        // any other root is the one its record starts.
         if root == genesis.genesis_root() {
             return Ok(Some(VaultChain::from_genesis(genesis)));
         }

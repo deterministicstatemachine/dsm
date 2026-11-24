@@ -8361,6 +8361,11 @@ async fn vault_head(
     set: &crate::sdk::storage_set::StorageSet,
     vault_id: &[u8; 32],
 ) -> dsm::sofi::wire::VaultStateLeaf {
+    // The trades' proof records are published first: the walk starts at the
+    // vault's newest record (SoFi Amendment S36).
+    crate::sdk::vault_proof_io::settled()
+        .await
+        .expect("the trades' proofs are published");
     let (own, parents) = standing_of(d);
     let ctx = VerifierContext::new(set, Some(own), parents.as_ref()).expect("a verifier");
     let (head, ..) = crate::sdk::sofi_flow::vault_at_head(set, &ctx.verifier(), vault_id)
