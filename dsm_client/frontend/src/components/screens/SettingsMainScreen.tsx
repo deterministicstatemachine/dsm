@@ -6,7 +6,7 @@
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { tourStore } from '../tour/tourStore';
-import { chooseSkin, setBackupMode, setReceiptsEmail } from '../../runtime/skinPreferences';
+import { chooseSkin, loadBackupMode, setBackupMode, setReceiptsEmail } from '../../runtime/skinPreferences';
 import { RECEIPT_CONSENT } from '../../domain/receiptConsent';
 import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
 import { versionLabel } from '../../appVersion';
@@ -53,6 +53,14 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // When the wallet backs up is Rust's setting, read once these settings open.
+  useEffect(() => {
+    loadBackupMode().then(
+      () => undefined,
+      (e: unknown) => setStatus(`The backup setting was not read: ${e instanceof Error ? e.message : String(e)}`),
+    );
   }, []);
 
   const enableDevMode = useCallback(async () => {

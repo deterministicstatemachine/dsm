@@ -3,9 +3,9 @@
 // email receipts, your card, the lock, every other setting, reporting a
 // problem, and the app's version.
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAppRuntimeStore, type BackupMode, type Scheme, type Skin, type Switch } from '../../runtime/appRuntimeStore';
-import { chooseScheme, chooseSkin, setBackupMode, setSimpleMode, setSimpleOffline } from '../../runtime/skinPreferences';
+import { chooseScheme, chooseSkin, loadBackupMode, setBackupMode, setSimpleMode, setSimpleOffline } from '../../runtime/skinPreferences';
 import { versionLabel } from '../../appVersion';
 import { navigationStore } from '../../runtime/navigationStore';
 import { Icon } from './parts';
@@ -48,6 +48,13 @@ export default function ModernSettings(): React.JSX.Element {
       (e: unknown) => setSaid(e instanceof Error ? e.message : String(e)),
     );
   };
+
+  useEffect(() => {
+    loadBackupMode().then(
+      () => undefined,
+      (e: unknown) => setSaid(`The backup setting was not read: ${e instanceof Error ? e.message : String(e)}`),
+    );
+  }, []);
 
   return (
     <>

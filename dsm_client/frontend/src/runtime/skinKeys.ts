@@ -8,13 +8,6 @@ export const SCHEME_PREFERENCE = 'ui_scheme';
 export const SIMPLE_MODE_PREFERENCE = 'simple_mode';
 export const SIMPLE_OFFLINE_PREFERENCE = 'simple_offline';
 export const RECEIPTS_EMAIL_PREFERENCE = 'receipts_email';
-/**
- * When the wallet backs up (owner, 2026-11-24): unset or 'auto', after every
- * transaction; 'manual', only when its owner presses Back up on the send
- * screen. Rust reads it (`wallet_backup_flow::BACKUP_MODE`); not a skin
- * preference, so the tour cannot change it.
- */
-export const BACKUP_MODE_PREFERENCE = 'wallet_backup_mode';
 /** The beta agreement's version the user accepted (domain/betaAgreement.ts). */
 export const AGREEMENT_PREFERENCE = 'beta_agreement';
 

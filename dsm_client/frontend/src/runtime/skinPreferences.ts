@@ -11,10 +11,10 @@
 import { dsmClient } from '../services/dsmClient';
 import { AGREEMENT_VERSION } from '../domain/betaAgreement';
 import logger from '../utils/logger';
+import { getBackupMode, putBackupMode } from '../dsm/backup';
 import { appRuntimeStore, type BackupMode, type Look, type Scheme, type Skin, type Switch } from './appRuntimeStore';
 import {
   AGREEMENT_PREFERENCE,
-  BACKUP_MODE_PREFERENCE,
   RECEIPTS_EMAIL_PREFERENCE,
   SCHEME_PREFERENCE,
   SIMPLE_MODE_PREFERENCE,
@@ -57,16 +57,14 @@ export function readSwitch(value: string | null): Switch {
 
 /** Reads every preference into the runtime store. */
 export async function loadSkinPreferences(): Promise<void> {
-  const [skin, scheme, simpleMode, offline, receipts, agreement, backup] = await Promise.all([
+  const [skin, scheme, simpleMode, offline, receipts, agreement] = await Promise.all([
     dsmClient.getPreference(SKIN_PREFERENCE),
     dsmClient.getPreference(SCHEME_PREFERENCE),
     dsmClient.getPreference(SIMPLE_MODE_PREFERENCE),
     dsmClient.getPreference(SIMPLE_OFFLINE_PREFERENCE),
     dsmClient.getPreference(RECEIPTS_EMAIL_PREFERENCE),
     dsmClient.getPreference(AGREEMENT_PREFERENCE),
-    dsmClient.getPreference(BACKUP_MODE_PREFERENCE),
   ]);
-  appRuntimeStore.setBackupMode(backup === 'manual' ? 'manual' : 'auto');
   appRuntimeStore.setSkin(readSkin(skin));
   keepSkinHint(readSkin(skin));
   appRuntimeStore.setScheme(readScheme(scheme));
@@ -116,15 +114,24 @@ export async function setSimpleOffline(value: Switch): Promise<void> {
 }
 
 /**
- * Email receipts are switched on only from the consent screen, which states
- * what the receipt service is sent; switching them off needs no consent.
+ * When the wallet backs up, read from Rust, which keeps the setting and acts
+ * on it; it is a wallet's setting, not the page's, so it is read once the
+ * wallet's screens open, never with the look.
  */
-/** When the wallet backs up: after every transaction, or by hand. Rust reads the setting. */
+export async function loadBackupMode(): Promise<void> {
+  appRuntimeStore.setBackupMode(await getBackupMode());
+}
+
+/** When the wallet backs up: after every transaction, or by hand. */
 export async function setBackupMode(value: BackupMode): Promise<void> {
-  await dsmClient.setPreference(BACKUP_MODE_PREFERENCE, value);
+  await putBackupMode(value);
   appRuntimeStore.setBackupMode(value);
 }
 
+/**
+ * Email receipts are switched on only from the consent screen, which states
+ * what the receipt service is sent; switching them off needs no consent.
+ */
 export async function setReceiptsEmail(value: Switch): Promise<void> {
   await dsmClient.setPreference(RECEIPTS_EMAIL_PREFERENCE, value);
   appRuntimeStore.setReceiptsEmail(value);
