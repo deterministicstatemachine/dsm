@@ -1334,8 +1334,7 @@ impl AppRouterImpl {
                 token_in,
                 token_out,
                 amount_in,
-                witnesses,
-            } => match Box::pin(self.quote(token_in, token_out, *amount_in, witnesses)).await {
+            } => match Box::pin(self.quote(token_in, token_out, *amount_in)).await {
                 Ok(found) => match found.ends {
                     Some(ends) => {
                         Executed::carried_out(Some(generated::app_response_body_v1::Result::Quote(
@@ -1356,11 +1355,7 @@ impl AppRouterImpl {
                 token_out,
                 amount_in,
                 min_amount_out,
-                witnesses,
-            } => {
-                Box::pin(self.swap(token_in, token_out, *amount_in, *min_amount_out, witnesses))
-                    .await
-            }
+            } => Box::pin(self.swap(token_in, token_out, *amount_in, *min_amount_out)).await,
             Request::Holdings { policy_commits } => {
                 match holdings::prove(&self.core_sdk, policy_commits) {
                     Ok(proof) => Executed::carried_out(Some(
@@ -1976,18 +1971,8 @@ impl AppRouterImpl {
         token_in: &[u8; 32],
         token_out: &[u8; 32],
         amount_in: u64,
-        witnesses: &[crate::sdk::connect::grant::OfferedWitness],
     ) -> Result<crate::sdk::sofi_flow::RouteFound, String> {
         let set = own_set()?;
-        // The vaults the application owns, offered at its baselines (SoFi
-        // Amendment S24): a vault this wallet holds nothing of starts there.
-        if !witnesses.is_empty() {
-            let offered: Vec<generated::ConnectVaultWitnessV1> =
-                witnesses.iter().map(|w| w.to_wire()).collect();
-            crate::sdk::sofi_flow::adopt_offered(&self.core_sdk, &set, &offered)
-                .await
-                .map_err(|e| format!("sofi.findRoute: {e}"))?;
-        }
         crate::sdk::sofi_flow::find_route(
             &self.core_sdk,
             &set,
@@ -2010,7 +1995,6 @@ impl AppRouterImpl {
         token_out: &[u8; 32],
         amount_in: u64,
         min_amount_out: u64,
-        witnesses: &[crate::sdk::connect::grant::OfferedWitness],
     ) -> Executed {
         // A trade that lost its vault's key to another resolves Void: nothing
         // moved, and the swap is quoted and traded again at the vault's new
@@ -2019,7 +2003,7 @@ impl AppRouterImpl {
         let mut attempt = 1;
         loop {
             let (state, executed) = self
-                .swap_once(token_in, token_out, amount_in, min_amount_out, witnesses)
+                .swap_once(token_in, token_out, amount_in, min_amount_out)
                 .await;
             if state != Some(crate::sdk::sofi_flow::PositionState::Void) || attempt >= SWAP_ATTEMPTS
             {
@@ -2041,9 +2025,8 @@ impl AppRouterImpl {
         token_out: &[u8; 32],
         amount_in: u64,
         min_amount_out: u64,
-        witnesses: &[crate::sdk::connect::grant::OfferedWitness],
     ) -> (Option<crate::sdk::sofi_flow::PositionState>, Executed) {
-        let found = match self.quote(token_in, token_out, amount_in, witnesses).await {
+        let found = match self.quote(token_in, token_out, amount_in).await {
             Ok(found) => found,
             Err(e) => return (None, Executed::failed(e)),
         };
@@ -2943,26 +2926,6 @@ impl AppRouterImpl {
         Ok(())
     }
 
-    /// The witnesses this account offers `wallet` for its vaults that trade
-    /// `token_in` or `token_out`, and why any vault it owns was left out.
-    async fn witnesses(
-        &self,
-        token_in: &[u8],
-        token_out: &[u8],
-        wallet: ([u8; 32], [u8; 32]),
-    ) -> Result<Vec<generated::ConnectVaultWitnessV1>, String> {
-        let tokens = [
-            d32(token_in, "the object in")?,
-            d32(token_out, "the object out")?,
-        ];
-        let offered =
-            crate::sdk::vault_baseline::offer(&self.core_sdk, &own_set()?, &tokens, wallet).await;
-        for why in &offered.not_offered {
-            log::info!("[connect] no witness offered for {why}; the wallet walks it");
-        }
-        Ok(offered.witnesses)
-    }
-
     /// `connect.app.request`: the application signs a request for a
     /// connected wallet. A lock is checked as the wallet will build it: the
     /// opponent is neither the wallet nor this account.
@@ -2980,22 +2943,11 @@ impl AppRouterImpl {
         }
         use generated::app_request_body_v1::Kind as Body;
         use generated::connect_app_request_intent_v1::Kind as Intent;
-        // A quote or a swap carries, for each vault this account owns that
-        // trades either token, the wallet's witness at the baseline this
-        // account published (SoFi Amendment S24). A vault it cannot witness
-        // is left out, and the wallet walks that one from its genesis.
-        let wallet = (session.wallet_genesis, session.wallet_device_id);
         let kind = match req.kind {
             Some(Intent::AcceptIssued(k)) => Body::AcceptIssued(k),
             Some(Intent::Pay(k)) => Body::Pay(k),
-            Some(Intent::Quote(mut k)) => {
-                k.vault_witnesses = self.witnesses(&k.token_in, &k.token_out, wallet).await?;
-                Body::Quote(k)
-            }
-            Some(Intent::Swap(mut k)) => {
-                k.vault_witnesses = self.witnesses(&k.token_in, &k.token_out, wallet).await?;
-                Body::Swap(k)
-            }
+            Some(Intent::Quote(k)) => Body::Quote(k),
+            Some(Intent::Swap(k)) => Body::Swap(k),
             Some(Intent::Holdings(k)) => Body::Holdings(k),
             Some(Intent::Contacts(k)) => Body::Contacts(k),
             Some(Intent::Sign(k)) => Body::Sign(k),

@@ -94,6 +94,12 @@ pub fn fixture(seed: u64, present: bool, others: usize, attempt: u64) -> Fixture
     }
 }
 
+/// A vault's first trade, from `seed`: the tree holds the vault's state leaf alone and the trader has no leaf yet,
+/// so the tree after the step is the state leaf and the trader's new leaf, both rebuilt from their preimages.
+pub fn first_trade(seed: u64) -> Fixture {
+    fixture(seed, false, 0, 0)
+}
+
 /// `steps` consecutive valid steps of one vault from `seed`: each step's `R_prev` the one before's `R_next`, each a
 /// trade by a new trader (its leaf absent) or, every third step, by the first trader again (its leaf present).
 pub fn chain(seed: u64, steps: usize) -> Vec<Fixture> {

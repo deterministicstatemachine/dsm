@@ -36,7 +36,6 @@
 //! R12), so a registered `F` that never conformed is Invalid — never Void,
 //! never Realized.
 
-use std::collections::BTreeMap;
 use crate::route_chain::{CellFact, ChainState};
 use super::conformance::Validation;
 use super::registration::PairStanding;
@@ -178,67 +177,27 @@ pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> Paren
 /// rather than recording past it.
 ///
 /// A chain is established, never assembled: it starts at an accepted genesis
-/// ([`VaultChain::from_genesis`]) or at an owner baseline Core authenticated
-/// ([`VaultChain::from_baseline`], SoFi Amendment S24), and grows by one
-/// Core-recomputed consumption at a time ([`VaultChain::extend`]). Nothing a
+/// ([`VaultChain::from_genesis`]) or at the parent of a proof record Core
+/// verified ([`VaultChain::from_proof`], owner ruling 2026-11-22), and grows
+/// by one Core-recomputed consumption at a time ([`VaultChain::extend`]). Nothing a
 /// device recorded and nothing read off the network becomes a root here
 /// (MR-DSM-0331): a recorded generation tells a walk where to read, never
 /// what holds.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultChain {
     /// The generation `roots[0]` is at: zero for a chain from the genesis,
-    /// the baseline's for a chain from an owner baseline (SoFi Amendment
-    /// S24). Below it, only what `proven` holds is established.
+    /// the proven parent's for a chain from a proof record. Below it nothing
+    /// is established.
     base: u64,
     roots: Vec<[u8; 32]>,
-    /// `steps[i]` is the bundle step of the exercise that consumed
-    /// `roots[i]` and built `roots[i + 1]`, as Core derived it (SoFi
-    /// Amendment S23): the attempt, `E`, the trader's `(G, DevID, q)` and
-    /// the route's other legs.
-    steps: Vec<crate::shared_lineage::BundleStep>,
-    /// Roots below `base`, each proven under the baseline's authenticated
-    /// history root (SoFi Amendment S26), by generation.
-    proven: BTreeMap<u64, [u8; 32]>,
     /// Why the walk that built this chain stopped before the vault's head:
     /// what it read did not decide the generation after the last one. `None`
     /// when it stopped at the head, or where it was asked to.
     not_complete: Option<String>,
-}
-
-/// A vault's generation chain from its genesis as a [`VaultChain`]
-/// established it, and each generation's step digest.
-pub type EstablishedGenerationChain = (
-    crate::shared_lineage::GenerationChain,
-    BTreeMap<u64, [u8; 32]>,
-);
-
-/// `vault_id`'s genesis as a shared lineage (SoFi Amendment S23): the accepted
-/// genesis root, and the address of its preimage object.
-pub fn vault_lineage_genesis(
-    vault_id: &[u8; 32],
-    genesis: &super::lineage::AcceptedVaultGenesis,
-) -> Result<crate::shared_lineage::SharedGenesisV1, super::wire::SofiWireError> {
-    let preimage = genesis.preimage().encode()?;
-    Ok(crate::shared_lineage::SharedGenesisV1::new(
-        crate::shared_lineage::LineageKind::Vault,
-        *vault_id,
-        *genesis.genesis_root(),
-        crate::storage_object::immutable_addr(
-            crate::common::domain_tags::TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
-            &preimage,
-        ),
-    ))
-}
-
-/// Why a chain's generation chain cannot be built.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GenerationChainError {
-    /// The accepted genesis's preimage does not encode.
-    Genesis(super::wire::SofiWireError),
-    /// A generation does not extend the chain.
-    Lineage(crate::shared_lineage::LineageObjectError),
-    /// A generation of the chain was built by a step that is not a vault's.
-    NotAVaultStep(u64),
+    /// For a chain from a proof record (owner ruling 2026-11-22), until its
+    /// first generation is established: the root and `E` of the step the
+    /// record proves, which that generation must be.
+    proven_next: Option<([u8; 32], [u8; 32])>,
 }
 
 /// Why a post state does not extend a chain: it was not built on the chain's
@@ -269,40 +228,44 @@ impl VaultChain {
         Self {
             base: 0,
             roots: vec![*genesis.genesis_root()],
-            steps: Vec::new(),
-            proven: BTreeMap::new(),
             not_complete: None,
+            proven_next: None,
         }
     }
 
-    /// The chain at an owner baseline (SoFi Amendment S24): `R*_b` is the
-    /// root of the frontier the vault's owner signed, as Core authenticated
-    /// it, and nothing below `b` is established. The CI gate pins this
+    /// The chain at a proof record's root (owner ruling 2026-11-22): Core
+    /// verified the record's proof from the accepted genesis to its root, and
+    /// the record's trade is its parent's last link, final at the parent's
+    /// first key (SoFi Amendments S34, S36). The CI gate pins this
     /// constructor to its one caller, the chain walk's start.
-    pub fn from_baseline(baseline: &super::frontier::VerifiedFrontier) -> Self {
-        let frontier = baseline.frontier();
+    pub(crate) fn from_proof(head: &super::vault_proof::ProvenVaultHead) -> Self {
         Self {
-            base: frontier.generation,
-            roots: vec![frontier.root],
-            steps: Vec::new(),
-            proven: BTreeMap::new(),
+            base: head.generation(),
+            roots: vec![*head.root()],
             not_complete: None,
+            proven_next: None,
         }
     }
 
-    /// A chain at `root`, the root an owner baseline's history holds at
-    /// `generation`, for checking the one step from it (SoFi Amendment S34).
-    /// Never a walk's start and never recorded: what it establishes is only
-    /// whether the exercise final at `root` builds the root the history
-    /// holds next.
-    pub(crate) fn at_history_root(generation: u64, root: [u8; 32]) -> Self {
+    /// The chain at a proof record's parent, for the full check of the
+    /// record's trade where its last link does not hold: Core verified the
+    /// record's proof, so the parent the proof's last step was built on is
+    /// established, and the chain's first generation must be that step. The
+    /// CI gate pins this constructor to its one caller, the chain walk's
+    /// start.
+    pub(crate) fn from_proof_parent(head: &super::vault_proof::ProvenVaultHead) -> Self {
         Self {
-            base: generation,
-            roots: vec![root],
-            steps: Vec::new(),
-            proven: BTreeMap::new(),
+            base: head.generation() - 1,
+            roots: vec![*head.r_prev()],
             not_complete: None,
+            proven_next: Some((*head.root(), *head.external_commitment())),
         }
+    }
+
+    /// The root and `E` the chain's next generation must be, while the chain
+    /// stands at a proof record's parent.
+    pub fn proven_next(&self) -> Option<([u8; 32], [u8; 32])> {
+        self.proven_next
     }
 
     /// Extend the chain by the consumption `post` recomputes: `R*_{g+1}` is
@@ -321,60 +284,8 @@ impl VaultChain {
             });
         }
         self.roots.push(*post.root());
-        self.steps.push(post.step().clone());
+        self.proven_next = None;
         Ok(())
-    }
-
-    /// The vault's generation chain as this chain established it (DSM
-    /// Amendment A15): the genesis `d_0` from the accepted genesis, then each
-    /// generation with its consumption's step digest, and that step digest
-    /// by generation. `None` for a chain that starts at an owner baseline,
-    /// which holds no generation digest from the genesis.
-    pub fn generation_chain(
-        &self,
-        vault_id: &[u8; 32],
-        genesis: &super::lineage::AcceptedVaultGenesis,
-    ) -> Result<Option<EstablishedGenerationChain>, GenerationChainError> {
-        if self.base != 0 {
-            return Ok(None);
-        }
-        let mut chain = crate::shared_lineage::GenerationChain::from_genesis(
-            &vault_lineage_genesis(vault_id, genesis).map_err(GenerationChainError::Genesis)?,
-        );
-        let mut steps = BTreeMap::new();
-        for (at, (root, consumed)) in self.roots.iter().skip(1).zip(&self.steps).enumerate() {
-            let crate::shared_lineage::BundleStep::Vault {
-                external_commitment,
-                ..
-            } = consumed
-            else {
-                return Err(GenerationChainError::NotAVaultStep(at as u64 + 1));
-            };
-            let step = crate::shared_lineage::vault_step_digest(external_commitment);
-            chain
-                .push(*root, step)
-                .map_err(GenerationChainError::Lineage)?;
-            steps.insert(at as u64 + 1, step);
-        }
-        Ok(Some((chain, steps)))
-    }
-
-    /// The bundle steps of the `count` generations after `start`, as Core
-    /// derived each from the exercise that built it: what a segment's
-    /// bundle carries (SoFi Amendment S23). `None` where the chain does not
-    /// hold all of them.
-    pub fn bundle_steps(
-        &self,
-        start: u64,
-        count: u64,
-    ) -> Option<&[crate::shared_lineage::BundleStep]> {
-        let from = start.checked_sub(self.base)?;
-        let to = from.checked_add(count)?;
-        // Within the chain's own length, which a `usize` holds, or nothing.
-        if to > self.steps.len() as u64 {
-            return None;
-        }
-        self.steps.get(from as usize..to as usize)
     }
 
     /// Why the walk that built this chain did not reach the vault's head,
@@ -408,26 +319,13 @@ impl VaultChain {
         Self {
             base: 0,
             roots,
-            steps: Vec::new(),
-            proven: BTreeMap::new(),
             not_complete: None,
-        }
-    }
-
-    /// Admit `R_g` below this chain's baseline, as a path under the
-    /// baseline's history root proved it (SoFi Amendment S26). A root at or
-    /// above the baseline is the chain's own to establish, and is left to it.
-    pub(crate) fn admit_proven(&mut self, proven: &super::history::ProvenRoot) {
-        if proven.generation() < self.base {
-            self.proven.insert(proven.generation(), *proven.root());
+            proven_next: None,
         }
     }
 
     /// `R*_g`, when this chain established generation `g`.
     fn root_at(&self, generation: u64) -> Option<[u8; 32]> {
-        if generation < self.base {
-            return self.proven.get(&generation).copied();
-        }
         let offset = generation.checked_sub(self.base)?;
         usize::try_from(offset)
             .ok()
@@ -436,8 +334,8 @@ impl VaultChain {
     }
 
     /// The status of a parent asked about at `generation` — [`parent_status`]
-    /// over what this chain established there. Below a baseline nothing is
-    /// established, so nothing there is refuted.
+    /// over what this chain established there. Below the chain's start
+    /// nothing is established, so nothing there is refuted.
     pub fn status_of(&self, generation: u64, claimed: &[u8; 32]) -> ParentStatus {
         parent_status(self.root_at(generation), claimed)
     }
@@ -458,12 +356,6 @@ impl VaultChain {
             .iter()
             .position(|r| r == root)
             .map(|g| self.base + g as u64)
-            .or_else(|| {
-                self.proven
-                    .iter()
-                    .find(|(.., r)| *r == root)
-                    .map(|(g, ..)| *g)
-            })
     }
 
     /// The highest generation this chain established.
@@ -1376,22 +1268,6 @@ mod tests {
     fn accepted_genesis() -> crate::sofi::lineage::AcceptedVaultGenesis {
         use crate::sofi::lineage::genesis_acceptance::{accept, valid};
         accept(&valid()).expect("the fixture's genesis is accepted")
-    }
-
-    /// A chain at its start yields the vault's generation chain from the
-    /// genesis the verifier accepted: generation 0 at the genesis root, with
-    /// no step before a consumption.
-    #[test]
-    fn a_chain_from_the_genesis_yields_its_generation_chain_from_that_genesis() {
-        let genesis = accepted_genesis();
-        let Ok(Some((chain, steps))) =
-            VaultChain::from_genesis(&genesis).generation_chain(&[0x5B; 32], &genesis)
-        else {
-            panic!("a chain from the genesis has a generation chain")
-        };
-        assert_eq!(chain.head().generation(), 0);
-        assert_eq!(chain.head().state_root(), genesis.genesis_root());
-        assert_eq!(steps.len(), 0);
     }
 
     /// A leg that consumed its canonical parent on this operation's E.

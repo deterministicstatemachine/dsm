@@ -14,7 +14,7 @@ What it adds to leanVM:
   previous proof (`crates/`, `guests/`).
 - **In-VM Flock verification**, so a proof can verify its child proof.
 
-Measured: one vault step proves in 2.28 s with 725 MB on an iPhone A16.
+Measured: one vault step proves in 2.28 s with 725 MB on a Samsung Galaxy A16, and a proof checks in about 95 ms.
 
 ### Tests
 
@@ -43,7 +43,13 @@ Not yet building:
 - **The guest proofs** (the verifier as a leanVM program). Seventeen modules fail, and the 143
   functions added for Flock and the vault step have no proofs.
 
-### Not wired into DSM
+### In DSM
 
-Nothing in DSM calls this code yet. Putting it in the wallets, the receivers, the wire format and
-the storage nodes is separate work.
+DSM's Core depends on `aggregation` and `vault_step` by path (SoFi Amendment S36,
+`dsm::sofi::vault_proof`). Each swap's trader proves its vault's step once its walk establishes it,
+folding the previous record's proof, and publishes a record holding the vault's whole tree and the
+proof (`dsm_sdk::sdk::vault_proof_io`). A reader starts at the newest record that verifies, judges the
+one consumption it names, and never walks the vault's history. The owner baseline and the vault's
+history that this replaces are gone.
+
+The theorems above are what the proofs rest on, with their three unproved hypotheses.

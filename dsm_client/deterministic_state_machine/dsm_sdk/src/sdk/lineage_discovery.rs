@@ -68,6 +68,7 @@ pub(crate) struct Candidates {
 
 impl Candidates {
     /// The roots someone claims generation `g` has.
+    #[cfg(test)]
     pub(crate) fn roots_at(&self, generation: u64) -> impl Iterator<Item = &D32> {
         self.roots.get(&generation).into_iter().flatten()
     }
@@ -746,20 +747,6 @@ mod tests {
             assert!(
                 !discovery.contains(forbidden),
                 "lineage_discovery names {forbidden}"
-            );
-        }
-        let vault_history = include_str!("vault_history.rs");
-        for forbidden in [
-            "from_recorded",
-            "VaultChain::",
-            ".extend(&",
-            "record_generation",
-            "record_walked",
-            "record_resolved",
-        ] {
-            assert!(
-                !vault_history.contains(forbidden),
-                "vault_history names {forbidden}"
             );
         }
     }

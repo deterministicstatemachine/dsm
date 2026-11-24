@@ -663,69 +663,54 @@ async fn vault_terms(set: &StorageSet, state: &VaultStateLeaf) -> Result<VaultTe
     VaultTerms::resolve(&evidence, state).map_err(|refusal| refuse(format!("{refusal:?}")))
 }
 
-/// §30: walk `vault_id` to its head — from the genesis, or from the owner
-/// baseline this device started its record at — and witness it there.
+/// `vault_id` at its head, witnessed there: its newest proof record, Core
+/// verified, and the consumption that record's trade made, judged from its
+/// parent, with any generation after it (owner ruling 2026-11-22).
 pub(crate) async fn vault_at_head(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
-    // The history others published is read ahead of the walk (SoFi
-    // Amendment S23); the walk establishes the chain exactly as before.
-    let mut history = crate::sdk::vault_history::discover(set, vault_id).await?;
-    let chain = tokio::task::block_in_place(|| {
-        crate::sdk::vault_history::walk(set, verifier, &mut history)
-    })?;
+    let chain = tokio::task::block_in_place(|| verifier.chain(vault_id)).map_err(verifier_error)?;
+    // The chain names every generation of this device's record it replaced
+    // with what Core established (MR-DSM-0331): never silent, and never a
+    // verdict on the vault.
+    match verifier
+        .replaced_records()
+        .map_err(verifier_error)?
+        .as_slice()
+    {
+        [] => {}
+        replaced => log::warn!(
+            "[sofi flow] {}: the chain replaced {} contradicted generation(s) of this \
+             device's record: {}",
+            crate::util::text_id::encode_base32_crockford(&vault_id[..5]),
+            replaced.len(),
+            replaced
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    }
     head_of(set, verifier, vault_id, chain).await
 }
 
-/// Start the record of each vault `offered` at the owner baseline offered
-/// for it, when that is later than the one the record starts at (SoFi
-/// Amendment S24; MR-DSM-0331): what a quote and a swap do before they walk
-/// the vaults' heads. Names each baseline the record contradicts.
-pub(crate) async fn adopt_offered(
-    core: &CoreSDK,
-    set: &StorageSet,
-    offered: &[dsm::types::proto::ConnectVaultWitnessV1],
-) -> Result<Vec<crate::sdk::vault_baseline::ContradictedBaseline>, DsmError> {
-    let accepted = &AcceptedGeneses::default();
-    let standing = standing(core)?;
-    let ctx = standing.context(set, accepted)?;
-    let verifier = ctx.verifier();
-    crate::sdk::vault_baseline::adopt(
-        set,
-        &verifier,
-        offered,
-        (standing.genesis, standing.device_id),
-    )
-    .await
-}
-
-/// Each of `vault_ids`' chains, walked at once, in the order given. A vault's
-/// walk reads its owner's lineage and its own cells, and needs nothing
-/// another vault's walk finds first, so each runs on a thread of its own over
-/// the one verifier: the reads it keeps are shared, and each read blocks only
-/// its own walk.
+/// Each of `vault_ids`' chains, established at once, in the order given. A
+/// vault's chain reads its newest proof record and its own cells, and needs
+/// nothing another vault's finds first, so each runs on a thread of its own
+/// over the one verifier: the reads it keeps are shared, and each read blocks
+/// only its own vault.
 async fn chains_at_once(
-    set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_ids: &[D32],
 ) -> Vec<Result<VaultChain, DsmError>> {
-    // Each vault's history is read from the epoch index first, at once
-    // (SoFi Amendment S23), and read ahead of its walk.
-    let mut histories = crate::sdk::vault_history::discover_all(set, vault_ids).await;
     tokio::task::block_in_place(|| {
         std::thread::scope(|scope| {
-            let walks: Vec<_> = histories
-                .iter_mut()
-                .map(|history| {
-                    scope.spawn(move || match history {
-                        Ok(history) => crate::sdk::vault_history::walk(set, verifier, history),
-                        Err(e) => Err(DsmError::storage(
-                            format!("vault history: {e}"),
-                            None::<std::io::Error>,
-                        )),
-                    })
+            let walks: Vec<_> = vault_ids
+                .iter()
+                .map(|vault_id| {
+                    scope.spawn(move || verifier.chain(vault_id).map_err(verifier_error))
                 })
                 .collect();
             // A walk that panicked panics here, as it would have in line.
@@ -749,7 +734,7 @@ async fn heads_at_once(
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_ids: &[D32],
 ) -> Vec<Result<(VaultAtHead, VaultChain), DsmError>> {
-    let chains = chains_at_once(set, verifier, vault_ids).await;
+    let chains = chains_at_once(verifier, vault_ids).await;
     futures::future::join_all(
         vault_ids
             .iter()
@@ -822,6 +807,28 @@ pub(crate) async fn head_of(
     ))
 }
 
+/// `vault_id`'s whole tree at `generation`, its state, and its relationship
+/// leaves by key: this device's record, which Core binds leaf by leaf and
+/// refuses unless it recomputes the root recorded there
+/// (`sofi::frontier::vault_tree_at`). `None` when the record does not
+/// recompute that root: this device did not see every leaf.
+fn tree_at(
+    vault_id: &D32,
+    generation: u64,
+    root: &D32,
+) -> Result<Option<dsm::sofi::frontier::VaultTree>, DsmError> {
+    let rows: Vec<(D32, D32, Vec<u8>)> = sofi_vault_head::leaf_rows(vault_id, generation)
+        .map_err(|e| storage("vault leaves", e))?
+        .into_iter()
+        .map(|(key, value, _, preimage)| (key, value, preimage))
+        .collect();
+    match dsm::sofi::frontier::vault_tree_at(vault_id, root, &rows) {
+        Ok(tree) => Ok(Some(tree)),
+        Err(dsm::sofi::frontier::VaultTreeError::DoesNotRecomputeTheRoot { .. }) => Ok(None),
+        Err(e) => Err(storage("vault tree", e)),
+    }
+}
+
 /// This device's witness of `vault_id` at the head of `chain`: the one it
 /// recorded and advanced to that head; at the genesis, the genesis's; or,
 /// where this device holds the whole tree at the head (it walked every
@@ -877,12 +884,9 @@ fn head_witness(
             VaultWitness::at_genesis(&accepted, own.0, own.1).map_err(refuse)?
         }
         _ => {
-            let whole = crate::sdk::vault_baseline::tree_at(vault_id, generation, &root)?
-                .ok_or_else(|| {
-                    refuse(
-                        "this device holds no witness of the vault's head, and not its whole tree",
-                    )
-                })?;
+            let whole = tree_at(vault_id, generation, &root)?.ok_or_else(|| {
+                refuse("this device holds no witness of the vault's head, and not its whole tree")
+            })?;
             let rel_key = derive::relationship_key(&own.0, &own.1, vault_id);
             let wire = dsm::sofi::frontier::witness_from_tree(
                 &whole.tree,
@@ -2693,7 +2697,7 @@ pub(crate) async fn draft_trade(
     for (vault_id, chain) in intent
         .vault_ids
         .iter()
-        .zip(chains_at_once(set, verifier, &intent.vault_ids).await)
+        .zip(chains_at_once(verifier, &intent.vault_ids).await)
     {
         chains.push(chain_past_withheld_pairs(set, verifier, vault_id, chain?).await?);
     }
@@ -2749,6 +2753,10 @@ pub async fn trade(
     set: &StorageSet,
     intent: &TradeIntent,
 ) -> Result<PositionOutcome, DsmError> {
+    // This device's earlier trades' proof records are published first (owner
+    // ruling 2026-11-22): the trade's own record folds the newest one, and a
+    // reader of the vault starts at it.
+    crate::sdk::vault_proof_io::settled().await?;
     // One memo for the whole operation: the check, the setups, the plan at
     // the heads and the settle each read a vault's genesis from it.
     let accepted = &AcceptedGeneses::default();

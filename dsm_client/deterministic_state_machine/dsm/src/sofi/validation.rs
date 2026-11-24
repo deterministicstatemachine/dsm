@@ -833,25 +833,6 @@ pub fn route_validation(
     }
 }
 
-/// [`route_validation`] short of the trader's lineage (SoFi Amendment S34):
-/// every check it makes, except that a setup's `claim_ref` is the claim the
-/// trader's lineage accepted. What a history's last link is held to, so a
-/// reader's cost does not grow with that lineage. Core's own: it establishes
-/// no generation and reaches no other layer, and a position is resolved only
-/// through [`route_validation`].
-pub(crate) fn route_validation_short_of_lineage(
-    precommit: &TraderPrecommitBody,
-    preimage: &SettlementPreimage,
-    evidence: &Evidence,
-) -> Result<Validation, Missing> {
-    match validate_each_setup(precommit, preimage, evidence, |p, leg, held| {
-        setup_signed(p, leg, held).map(drop)
-    }) {
-        Ok(()) => Ok(Validation::Valid),
-        Err(r) => r.validation(),
-    }
-}
-
 /// `RouteValidation` over the operation alone — nothing fetched and nothing
 /// of the verifier's (MR-DSM-0041, MR-DSM-0042): `Some(reason)` when the
 /// route is Invalid whatever storage holds, so nothing is read to know it;
@@ -916,6 +897,12 @@ pub struct VaultPostState {
     /// q)` and the route's other legs. Discovery only: the step a
     /// checkpoint's bundle carries for this generation.
     step: BundleStep,
+    /// What the vault step's proof is proven from (owner ruling 2026-11-22):
+    /// the pre state, the operation, the trader's relationship and both
+    /// paths against `pre_root`, all as this recomputation took them. `None`
+    /// where the operation is not the one shape the vault step proves (the
+    /// state leaf and the trader's relationship leaf, nothing else).
+    witness: Option<vault_step::reference::StepWitness>,
 }
 
 impl VaultPostState {
@@ -966,6 +953,12 @@ impl VaultPostState {
     pub fn step(&self) -> &BundleStep {
         &self.step
     }
+
+    /// The vault step's witness for this generation, when the operation is
+    /// one the vault step proves.
+    pub fn proof_witness(&self) -> Option<&vault_step::reference::StepWitness> {
+        self.witness.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -997,6 +990,7 @@ impl VaultPostState {
                 trader_position: 1,
                 siblings: Vec::new(),
             },
+            witness: None,
         }
     }
 }
@@ -1113,6 +1107,15 @@ pub(crate) fn vault_post_states(
         let entries = dlv_fold_entries(core, &e, evidence)?;
         let root = fold_core(&entries, core.pre_root())?;
         let step = vault_bundle_step(precommit, fulfillment, &vault_id)?;
+        let witness = step_witness(
+            core,
+            &pre_state,
+            preimage.settlement(),
+            evidence,
+            &entries,
+            &e,
+            &step,
+        )?;
         out.push(VaultPostState {
             vault_id,
             pre_root: *core.pre_root(),
@@ -1123,9 +1126,104 @@ pub(crate) fn vault_post_states(
             consumed_by: e,
             entries,
             step,
+            witness,
         });
     }
     Ok(out)
+}
+
+/// [`route_validation`] short of the trader's lineage (SoFi Amendments S34,
+/// S36): every check it makes, except that a setup's `claim_ref` is the claim
+/// the trader's lineage accepted. What a proof record's last link is held to,
+/// so a reader's cost does not grow with that lineage. Core's own: it establishes
+/// no generation and reaches no other layer, and a position is resolved only
+/// through [`route_validation`].
+pub(crate) fn route_validation_short_of_lineage(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<Validation, Missing> {
+    match validate_each_setup(precommit, preimage, evidence, |p, leg, held| {
+        setup_signed(p, leg, held).map(drop)
+    }) {
+        Ok(()) => Ok(Validation::Valid),
+        Err(r) => r.validation(),
+    }
+}
+
+/// The vault step's witness of one vault's swap generation (owner ruling
+/// 2026-11-22), from what `vault_post_states` already took. A close or a
+/// release retires the vault, so it is always the vault's last step: a reader
+/// judges it as the one step after the newest proof, and it carries no
+/// witness. `None` too unless the vault core writes exactly the state leaf
+/// and the trader's relationship leaf, the one shape the vault step proves.
+fn step_witness(
+    core: &DlvCore,
+    pre_state: &VaultStateLeaf,
+    settlement: &SettlementBody,
+    evidence: &Evidence,
+    entries: &[FoldEntry],
+    e: &D32,
+    step: &BundleStep,
+) -> Result<Option<vault_step::reference::StepWitness>, Refusal> {
+    use vault_step::reference as vs;
+    let vault_id = *core.vault_id();
+    let (SettlementBody::Swap { hops, .. }, BundleStep::Vault { attempt, .. }) = (settlement, step)
+    else {
+        return Ok(None);
+    };
+    let state_key = derive::vault_state_key(&vault_id);
+    let rel_key =
+        derive::relationship_key(core.trader_genesis(), core.trader_device_id(), &vault_id);
+    let (Some(state_entry), Some(rel_entry), Some(relationship_base), Some(hop)) = (
+        entries.iter().find(|entry| entry.key == state_key),
+        entries.iter().find(|entry| entry.key == rel_key),
+        core.entries().iter().find_map(|entry| match entry {
+            CoreEntry::Relationship { base, .. } => Some(*base),
+            _ => None,
+        }),
+        hops.iter().find(|hop| hop.vault_id == vault_id),
+    ) else {
+        return Ok(None);
+    };
+    if entries.len() != 2 {
+        return Ok(None);
+    }
+    let policies = Policies::resolve(evidence, pre_state)?;
+    let (token_a, token_b) = (*policies.market.token_a(), *policies.market.token_b());
+    Ok(Some(vs::StepWitness {
+        vault_id,
+        state: vs::VaultStateLeaf {
+            owner_genesis: pre_state.owner_genesis,
+            owner_device_id: pre_state.owner_device_id,
+            create_position: pre_state.create_position,
+            market_policy: pre_state.market_policy,
+            fee_policy: pre_state.fee_policy,
+            release_policy: pre_state.release_policy,
+            storage_set_id: pre_state.storage_set_id,
+            generation: pre_state.generation,
+            reserve_a: pre_state.reserve_a,
+            reserve_b: pre_state.reserve_b,
+            status: pre_state.status,
+        },
+        token_a,
+        token_b,
+        fee_bps: policies.fee.fee_bps(),
+        hop: vs::Hop {
+            in_is_a: hop.token_in == token_a,
+            amount_in: hop.amount_in,
+            amount_out: hop.amount_out,
+        },
+        kind: vs::Kind::Swap,
+        trader_genesis: *core.trader_genesis(),
+        trader_device_id: *core.trader_device_id(),
+        relationship_base,
+        relationship_present: rel_entry.pre.is_some(),
+        external_commitment: *e,
+        attempt: *attempt,
+        state_path: state_entry.path.to_vec(),
+        relationship_path: rel_entry.path.to_vec(),
+    }))
 }
 /// What a settlement MOVES in the trader's own balances: `(token, credit,
 /// debit)` per endpoint.

@@ -1982,10 +1982,8 @@ impl AppRouterImpl {
 
     /// A sync on a payment's path (`wallet.send`'s preflight and its wait for
     /// the recipient's certificate): the same pull, processing and push as any
-    /// sync, but the owner's baseline duty (SoFi Amendment S24) is left to the
-    /// next sync off the path. That duty walks every vault this device created
-    /// from its genesis, and a baseline costs a fresh reader speed, never an
-    /// admission, so a payment never waits on it.
+    /// sync, but the backlog sweeps are left to the next sync off the path:
+    /// they are this device's standing debts, never the payment's.
     pub(crate) async fn run_payment_path_sync_request(
         &self,
         req: generated::StorageSyncRequest,
@@ -3089,18 +3087,15 @@ impl AppRouterImpl {
             self.deliver_owed_write_authorizations(storage_endpoints, None)
                 .await,
         );
-        // The owner's duty (SoFi Amendment S24): a baseline at the head of
-        // every vault this device created. One not published is reported and
-        // the sync goes on: it costs a fresh reader speed, never an admission,
-        // so a sync on a payment's path leaves it to the next sync. The same
-        // goes for the two backlog sweeps: the frozen artifacts still owed the
-        // set and the route writes still short of their route's end (a wallet
+        // The two backlog sweeps: the frozen artifacts still owed the set and
+        // the route writes still short of their route's end (a wallet
         // backup's, for one) are this device's standing debts, none of them
-        // the payment's. A payment publishes its own evidence and writes its
+        // the payment's, so a sync on a payment's path leaves them to the
+        // next sync. A payment publishes its own evidence and writes its
         // own claim itself. On the rig phones (2026-11-21) continuing a
         // backup's route write held a send's pre-send sync 1.1 s.
         if path == SyncPath::Payment {
-            log::info!("[storage.sync] backlog sweeps and owner baselines left to the next sync: this one is on a payment's path");
+            log::info!("[storage.sync] backlog sweeps left to the next sync: this one is on a payment's path");
         } else {
             match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
                 Ok(n) => report.pushed += n,
@@ -3129,25 +3124,6 @@ impl AppRouterImpl {
                 Err(e) => report
                     .errors
                     .push(format!("own token list: no committed set: {e}")),
-            }
-            match crate::sdk::economic_admission_flow::committed_network_id()
-                .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
-            {
-                Ok(set) if crate::sdk::inbox_poller::poller_running() => {
-                    crate::sdk::vault_baseline::start_owned_baselines(self.core_sdk.clone(), set);
-                }
-                Ok(set) => {
-                    let (published, left) =
-                        crate::sdk::vault_baseline::publish_owned_baselines(&self.core_sdk, &set)
-                            .await;
-                    report.pushed += published;
-                    report
-                        .errors
-                        .extend(left.into_iter().map(|why| format!("owner baseline: {why}")));
-                }
-                Err(e) => report
-                    .errors
-                    .push(format!("owner baselines: no committed set: {e}")),
             }
         }
         // A pending admission no running handler holds: its handler returned

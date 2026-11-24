@@ -313,23 +313,9 @@ pub mod class {
     /// `0x0070` — a segment's read plan, discovery only (SoFi Amendment
     /// S23).
     pub const SHARED_LINEAGE_TRANSITION_BUNDLE: u16 = 0x0070;
-    /// `0x0071` — a vault's frontier `(vault, generation, root)`, which an
-    /// owner baseline binds (SoFi Amendment S24).
-    pub const SOFI_VAULT_FRONTIER: u16 = 0x0071;
     /// `0x0072` — a vault's state leaf and one trader's relationship proof
-    /// under a frontier's root (SoFi Amendment S24).
+    /// under one of the vault's roots: a device's record of its own witness.
     pub const SOFI_VAULT_FRONTIER_WITNESS: u16 = 0x0072;
-    /// `0x0073` — a frontier commitment and the owner-authority position the
-    /// baseline's signer is proven at (SoFi Amendment S24).
-    pub const SOFI_OWNER_BASELINE_AUTH: u16 = 0x0073;
-    /// `0x0074` — the head of a vault's history: its generation and the
-    /// peaks of the append-only tree whose leaf `g` is `R_g` (SoFi
-    /// Amendment S26).
-    pub const SOFI_VAULT_HISTORY_HEAD: u16 = 0x0074;
-    /// `0x0076` — what a reader found an owner baseline to contradict in its
-    /// vault's history: the genesis leaf, the frontier's own root, or one
-    /// step (SoFi Amendment S34).
-    pub const SOFI_VAULT_BASELINE_CONTRADICTION: u16 = 0x0076;
     /// `0x0077` — a write at an application cell (DSM Amendment A35): the
     /// application, the name it gives the cell, the writer set, the payload
     /// and one writer's signature. It occupies the cell only when it proves

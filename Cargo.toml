@@ -22,6 +22,9 @@ members = [
 # receiving offline) and the board setup into the SDK bridge; it is excluded (built only in the Android cargo-ndk
 # pipeline). The default workspace stays tropic01-free (verify: `cargo tree --workspace -i tropic01`).
 exclude = [
+    # leanVM with the BLAKE3 instruction and the vault step (per-trade vault proofs): its own workspace, which Core
+    # depends on by path.
+    "research/leanvm",
     "crates/dsm-android-anchor",
     # Host bench tool (native serialport dep); built, linted and tested in its own CI step.
     "crates/dsm-anchor-bench",

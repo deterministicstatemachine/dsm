@@ -2,6 +2,7 @@
 name = "flock"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 description = "Flock (Succinct Labs) BLAKE3-compression R1CS reduction, ported from leanVM 4242200163b0 onto this tree's F128 (scratch research port)"
 

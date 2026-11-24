@@ -521,7 +521,7 @@ pub fn swap_vault_post(state: &VaultStateLeaf, fee_bps: u32, hop: &Hop) -> Resul
 // ── one step ────────────────────────────────────────────────────────────────
 
 /// What the prover holds for one step (the statement's private inputs).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepWitness {
     pub vault_id: D32,
     pub state: VaultStateLeaf,

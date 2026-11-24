@@ -10,10 +10,9 @@
 //! | Table | Holds | Why |
 //! |---|---|---|
 //! | `sofi_vault_root` | `(vault, generation) -> root` | the chain this verifier established, one row per generation, kept forever because a parent's status is asked about a GENERATION |
-//! | `sofi_vault_leaf` | `(vault, generation, leaf_key) -> value + preimage` | every generation's state leaf, which the verifier reads as the state at a root it established (every other leaf an operation reads is proven by its core's path, SoFi Amendment S24), and the leaves this device saw, which rebuild the whole tree where it saw them all: an owner's record, from which it hands traders their witnesses |
+//! | `sofi_vault_leaf` | `(vault, generation, leaf_key) -> value + preimage` | every generation's state leaf, which the verifier reads as the state at a root it established (every other leaf an operation reads is proven by its core's path), and the leaves this device saw or a proof record carried, which rebuild the whole tree where it holds them all: what this device witnesses itself from |
 //! | `sofi_vault_step` | `(vault, generation) -> bundle step` | what a checkpoint's bundle carries for each generation (SoFi Amendment S23): the attempt, `E`, the trader's `(G, DevID, q)` and the route's other legs, written with the generation's row; discovery only |
 //! | `sofi_vault_witness` | `vault -> generation, root, witness` | this device's own witness at the generation it established last: the state leaf and its relationship leaf with their paths, advanced as each generation is recorded |
-//! | `sofi_vault_baseline` | `vault -> generation, baseline` | the owner baseline a chain starts at, when it does not start at the genesis |
 //!
 //! **The record follows Core** (MR-DSM-0331). The rows are a cache of what
 //! Core established and have no standing to block Core: where a generation
@@ -43,7 +42,7 @@ use dsm::sofi::derive;
 use dsm::sofi::frontier::VaultWitness;
 use dsm::sofi::resolve::{Contradicted, ReplacedRecord};
 use dsm::sofi::validation::VaultPostState;
-use dsm::sofi::wire::{VaultFrontierV1, VaultFrontierWitnessV1, VaultStateLeaf};
+use dsm::sofi::wire::{VaultFrontierWitnessV1, VaultStateLeaf};
 
 use super::get_connection;
 
@@ -524,6 +523,59 @@ fn write(
     Ok(())
 }
 
+/// Record `tree`, `vault_id`'s whole tree at `generation`, with its root:
+/// the tree a proof record carried, Core verified (owner ruling 2026-11-22).
+/// What a reader that starts at the record witnesses itself from, and what
+/// every generation it records after builds on. A root recorded there that
+/// is not `root` contradicts it: it is replaced, with every generation above
+/// it, and named.
+pub fn record_proven(
+    vault_id: &D32,
+    generation: u64,
+    root: &D32,
+    tree: &dsm::sofi::frontier::VaultTree,
+) -> Result<Option<ReplacedRecord>> {
+    let mut leaves = vec![(
+        derive::vault_state_key(vault_id),
+        derive::vault_state_leaf_value(&tree.state)
+            .map_err(|e| anyhow!("state leaf value: {e}"))?,
+        KIND_STATE,
+        tree.state
+            .encode()
+            .map_err(|e| anyhow!("state leaf: {e}"))?,
+    )];
+    for (key, leaf) in &tree.relationships {
+        leaves.push((
+            *key,
+            derive::vault_relationship_leaf_value(leaf),
+            KIND_RELATIONSHIP,
+            leaf.encode(),
+        ));
+    }
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the vault head store: {e}"))?;
+    let tx = conn.transaction()?;
+    let replaced = match root_row_with_conn(&tx, vault_id, generation)? {
+        Some(row) if row.root != *root => {
+            let replaced = ReplacedRecord {
+                vault_id: *vault_id,
+                generation,
+                recorded_root: Some(row.root),
+                established_root: *root,
+                contradicted: Contradicted::Root,
+            };
+            forget_from_with_conn(&tx, &replaced)?;
+            Some(replaced)
+        }
+        Some(..) | None => None,
+    };
+    write(&tx, vault_id, generation, root, None, &leaves)?;
+    tx.commit()?;
+    Ok(replaced)
+}
+
 /// The highest generation this verifier established for `vault_id`.
 pub fn head(vault_id: &D32) -> Result<Option<VaultHead>> {
     let binding = get_connection()?;
@@ -835,256 +887,6 @@ fn advance_witness_with_conn(tx: &Transaction<'_>, post: &VaultPostState) -> Res
             ),
         ),
     }
-}
-
-/// What adopting an owner baseline did to this device's record of its vault.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BaselineAdoption {
-    /// The record starts at the baseline now, and holds no generation below
-    /// it.
-    Adopted,
-    /// The record already starts at a baseline at this generation or a later
-    /// one: this one is not the latest, and is not taken. Nothing is refused
-    /// or decided about it.
-    NotLater { held: u64 },
-    /// The record holds another root at the baseline's generation. Two
-    /// authenticated roots at one generation: nothing is replaced and
-    /// nothing is decided, and the record is kept as it is. A record a walk
-    /// heals takes the baseline after.
-    Contradicted { held_root: D32 },
-}
-
-/// Start `vault_id`'s record at an owner baseline Core authenticated, when it
-/// is later than the one the record starts at (MR-DSM-0331: the latest
-/// authenticated owner baseline): the baseline's generation and root, its
-/// state leaf where the record holds no row there, the baseline's bytes
-/// (authenticated again whenever the chain starts there) and this device's
-/// witness under its root, unless the record keeps a later one. A reader
-/// holding a baseline holds no generation below it, so every row below is
-/// removed. All in one transaction; a record that contradicts the baseline
-/// at its generation is kept as it is.
-pub fn adopt_baseline(witness: &VaultWitness, bundle: &[u8]) -> Result<BaselineAdoption> {
-    let binding = get_connection()?;
-    let mut conn = binding
-        .lock()
-        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
-    let tx = conn.transaction()?;
-    let vault_id = witness.vault_id();
-    let generation = witness.generation();
-    let generation_i64 = i64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?;
-    let held: Option<i64> = tx
-        .query_row(
-            "SELECT generation FROM sofi_vault_baseline WHERE vault_id = ?1",
-            params![vault_id.as_slice()],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(held) = held {
-        if held >= generation_i64 {
-            return Ok(BaselineAdoption::NotLater {
-                held: u64::try_from(held).map_err(|e| anyhow!("held baseline: {e}"))?,
-            });
-        }
-    }
-    let row = root_row_with_conn(&tx, vault_id, generation)?;
-    if let Some(row) = &row {
-        if row.root != *witness.root() {
-            return Ok(BaselineAdoption::Contradicted {
-                held_root: row.root,
-            });
-        }
-    }
-    for table in ["sofi_vault_root", "sofi_vault_leaf", "sofi_vault_step"] {
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE vault_id = ?1 AND generation < ?2"),
-            params![vault_id.as_slice(), generation_i64],
-        )?;
-    }
-    if row.is_none() {
-        let state = witness.state();
-        write(
-            &tx,
-            vault_id,
-            generation,
-            witness.root(),
-            None,
-            &[(
-                derive::vault_state_key(vault_id),
-                derive::vault_state_leaf_value(state)
-                    .map_err(|e| anyhow!("state leaf value: {e}"))?,
-                KIND_STATE,
-                state.encode().map_err(|e| anyhow!("state leaf: {e}"))?,
-            )],
-        )?;
-    }
-    tx.execute(
-        "INSERT OR REPLACE INTO sofi_vault_baseline (vault_id, generation, bundle)
-         VALUES (?1, ?2, ?3)",
-        params![vault_id.as_slice(), generation_i64, bundle],
-    )?;
-    // This device's own witness stands when it is past the baseline: it was
-    // advanced by the generations Core established after it.
-    let keeps_later = witness_with_conn(&tx, vault_id)?.is_some_and(|held| {
-        held.generation > generation
-            && (&held.trader_genesis, &held.trader_device_id) == witness.trader()
-    });
-    if !keeps_later {
-        put_witness_with_conn(&tx, witness)?;
-    }
-    tx.commit()?;
-    Ok(BaselineAdoption::Adopted)
-}
-
-/// The baseline `vault_id`'s record starts at, as adopted: its generation
-/// and bytes.
-pub fn baseline(vault_id: &D32) -> Result<Option<(u64, Vec<u8>)>> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
-    conn.query_row(
-        "SELECT generation, bundle FROM sofi_vault_baseline WHERE vault_id = ?1",
-        params![vault_id.as_slice()],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
-    )
-    .optional()?
-    .map(|(generation, bundle)| {
-        Ok((
-            u64::try_from(generation).map_err(|e| anyhow!("baseline generation: {e}"))?,
-            bundle,
-        ))
-    })
-    .transpose()
-}
-
-/// The baseline this device signed as `vault_id`'s owner at `generation`.
-pub fn owner_baseline(vault_id: &D32, generation: u64) -> Result<Option<Vec<u8>>> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
-    Ok(conn
-        .query_row(
-            "SELECT bundle FROM sofi_vault_owner_baseline WHERE vault_id = ?1 AND generation = ?2",
-            params![
-                vault_id.as_slice(),
-                i64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?
-            ],
-            |r| r.get::<_, Vec<u8>>(0),
-        )
-        .optional()?)
-}
-
-/// Keep the baseline this device signed as `vault_id`'s owner at
-/// `generation`. One per generation: the owner signs one frontier there.
-pub fn put_owner_baseline(vault_id: &D32, generation: u64, bundle: &[u8]) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
-    conn.execute(
-        "INSERT OR IGNORE INTO sofi_vault_owner_baseline (vault_id, generation, bundle)
-         VALUES (?1, ?2, ?3)",
-        params![
-            vault_id.as_slice(),
-            i64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?,
-            bundle
-        ],
-    )?;
-    Ok(())
-}
-
-/// How far this device, as `vault_id`'s owner, published its history (SoFi
-/// Amendment S26): every leaf, node and state leaf up to that generation.
-pub fn history_published(vault_id: &D32) -> Result<Option<u64>> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
-    conn.query_row(
-        "SELECT generation FROM sofi_vault_history_published WHERE vault_id = ?1",
-        params![vault_id.as_slice()],
-        |r| r.get::<_, i64>(0),
-    )
-    .optional()?
-    .map(|g| u64::try_from(g).map_err(|e| anyhow!("history generation: {e}")))
-    .transpose()
-}
-
-/// Record that `vault_id`'s history is published up to `generation`.
-pub fn put_history_published(vault_id: &D32, generation: u64) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
-    conn.execute(
-        "INSERT INTO sofi_vault_history_published (vault_id, generation) VALUES (?1, ?2)
-         ON CONFLICT(vault_id) DO UPDATE SET generation = max(generation, excluded.generation)",
-        params![
-            vault_id.as_slice(),
-            i64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?
-        ],
-    )?;
-    Ok(())
-}
-
-/// The frontier a stored `VaultBaselineV1` carries, or why this build does
-/// not decode it.
-fn stored_frontier(bundle: &[u8]) -> std::result::Result<VaultFrontierV1, String> {
-    use prost::Message;
-    crate::generated::VaultBaselineV1::decode(bundle)
-        .map_err(|e| e.to_string())
-        .and_then(|baseline| {
-            VaultFrontierV1::decode(&baseline.frontier_ccb).map_err(|e| e.to_string())
-        })
-}
-
-/// SoFi Amendment S26 put a history root in the frontier, so a baseline
-/// signed before it no longer decodes. A record this device started at such
-/// a baseline is dropped whole — its rows, leaves, witness and baseline —
-/// and the vault is adopted again from a current baseline; a baseline this
-/// device signed as owner is dropped and signed again when next offered.
-/// Nothing else is touched.
-pub(crate) fn drop_superseded_baselines(conn: &rusqlite::Connection) -> Result<()> {
-    let adopted: Vec<(Vec<u8>, Vec<u8>)> = {
-        let mut stmt = conn.prepare("SELECT vault_id, bundle FROM sofi_vault_baseline")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
-    for (vault_id, bundle) in adopted {
-        let Err(why) = stored_frontier(&bundle) else {
-            continue;
-        };
-        for table in [
-            "sofi_vault_leaf",
-            "sofi_vault_root",
-            "sofi_vault_witness",
-            "sofi_vault_baseline",
-        ] {
-            conn.execute(
-                &format!("DELETE FROM {table} WHERE vault_id = ?1"),
-                params![vault_id],
-            )?;
-        }
-        log::info!("[vault head] a record started at a superseded baseline was dropped: {why}");
-    }
-    let signed: Vec<(Vec<u8>, i64, Vec<u8>)> = {
-        let mut stmt =
-            conn.prepare("SELECT vault_id, generation, bundle FROM sofi_vault_owner_baseline")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
-    for (vault_id, generation, bundle) in signed {
-        let Err(why) = stored_frontier(&bundle) else {
-            continue;
-        };
-        conn.execute(
-            "DELETE FROM sofi_vault_owner_baseline WHERE vault_id = ?1 AND generation = ?2",
-            params![vault_id, generation],
-        )?;
-        log::info!("[vault head] a superseded owner baseline was dropped: {why}");
-    }
-    Ok(())
 }
 
 /// The longest name an account keeps for one of its vaults.
