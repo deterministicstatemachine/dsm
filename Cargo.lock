@@ -1181,7 +1181,7 @@ dependencies = [
  "parking_lot 0.13.0",
  "pbkdf2",
  "proptest",
- "prost 0.14.4",
+ "prost 0.14.6",
  "prost-build 0.14.4",
  "prost-types 0.14.4",
  "protoc-bin-vendored",
@@ -1213,7 +1213,7 @@ dependencies = [
  "blake3",
  "dsm-sphincs",
  "ed25519-dalek",
- "prost 0.14.4",
+ "prost 0.14.6",
  "prost-build 0.14.4",
  "protoc-bin-vendored",
 ]
@@ -1232,7 +1232,7 @@ dependencies = [
  "futures",
  "hyper-util",
  "log",
- "prost 0.14.4",
+ "prost 0.14.6",
  "rcgen",
  "reqwest",
  "rustls",
@@ -1277,7 +1277,7 @@ dependencies = [
  "hyper-util",
  "lettre",
  "log",
- "prost 0.14.4",
+ "prost 0.14.6",
  "reqwest",
  "tokio",
  "tower-http",
@@ -1343,7 +1343,7 @@ dependencies = [
  "once_cell",
  "parking_lot 0.13.0",
  "proptest",
- "prost 0.14.4",
+ "prost 0.14.6",
  "prost-build 0.14.4",
  "prost-types 0.14.4",
  "protoc-bin-vendored",
@@ -1397,7 +1397,7 @@ dependencies = [
  "hyper-util",
  "log",
  "proc-macro2",
- "prost 0.14.4",
+ "prost 0.14.6",
  "rand 0.8.6",
  "rcgen",
  "reqwest",
@@ -1426,7 +1426,7 @@ dependencies = [
  "clap",
  "dsm",
  "instant",
- "prost 0.14.4",
+ "prost 0.14.6",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "regex",
@@ -3192,12 +3192,12 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.14.4"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
+checksum = "3ef0b569d1d907ab3a28596aee62cf1f61dacb0529a4bedcd8e7460e2d5228b4"
 dependencies = [
  "bytes",
- "prost-derive 0.14.4",
+ "prost-derive 0.14.6",
 ]
 
 [[package]]
@@ -3232,7 +3232,7 @@ dependencies = [
  "multimap",
  "petgraph 0.8.3",
  "prettyplease",
- "prost 0.14.4",
+ "prost 0.14.6",
  "prost-types 0.14.4",
  "regex",
  "syn 2.0.117",
@@ -3254,9 +3254,9 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.14.4"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
+checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
  "itertools",
@@ -3280,7 +3280,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
 dependencies = [
- "prost 0.14.4",
+ "prost 0.14.6",
 ]
 
 [[package]]
