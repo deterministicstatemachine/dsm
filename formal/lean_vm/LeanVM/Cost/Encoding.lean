@@ -23,6 +23,9 @@ open LeanVM LeanVM.Parameters LeanVM.Semantics Common LeanVM.Protocol.Compile
 
 /-- A byte: its number. -/
 instance : MachineEncoding UInt8 := ⟨fun x ↦ .nat x.toNat⟩
+
+/-- A 32-bit word (research build: BLAKE3's compression): its number. -/
+instance : MachineEncoding UInt32 := ⟨fun x ↦ .nat x.toNat⟩
 instance : MachineEncoding Unit := ⟨fun _ ↦ .constructor 0 []⟩
 
 /-- A character: its code point. -/

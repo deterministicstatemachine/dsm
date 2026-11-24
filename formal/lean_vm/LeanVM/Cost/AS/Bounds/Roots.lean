@@ -135,6 +135,9 @@ theorem not_commit_skLayer (L : ℕ) : Op.commit h w ∉ skLayer L := by
 theorem not_commit_skKeccak (L : ℕ) : Op.commit h w ∉ skKeccak L := by
   simp [skKeccak, skOpen, not_commit_skGrind, not_commit_skSum, not_commit_skLayer]
 
+theorem not_commit_skFlock (H : ℕ) : Op.commit h w ∉ skFlock H := by
+  simp [skFlock, skFlockZero, skFlockLin, not_commit_skGrind, not_commit_skSum]
+
 theorem not_commit_skOod (L : ℕ) : Op.commit h w ∉ skOod L := by
   simp [skOod, not_commit_skGrind]
 
@@ -183,7 +186,8 @@ theorem commitsOf_skBodyL (lay : LayoutLite) (ρ : ℕ) :
   simp only [skBodyL, commitsOf_append, bodyCommits]
   rw [commitsOf_eq_nil _ fun _ _ ↦ not_commit_skOod _, commitsOf_eq_nil _ fun _ _ ↦ not_commit_skBus _,
     commitsOf_eq_nil _ fun _ _ ↦ not_commit_skTablePhaseL _,
-    commitsOf_eq_nil _ fun _ _ ↦ not_commit_skKeccak _, commitsOf_eq_nil _ fun _ _ ↦ not_commit_skRing]
+    commitsOf_eq_nil _ fun _ _ ↦ not_commit_skKeccak _, commitsOf_eq_nil _ fun _ _ ↦ not_commit_skFlock _,
+    commitsOf_eq_nil _ fun _ _ ↦ not_commit_skRing]
   simp only [skWhir]
   split <;> rename_i hl <;> simp [hl, commitsOf, commitsOf_skLevels]
 

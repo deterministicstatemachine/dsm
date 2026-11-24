@@ -94,6 +94,18 @@ def rules : List (Name × Name) := [
   (``Nat.toUInt64, ``Rule.natToUInt64),
   (``LeanVM.Parameters.K.lane, ``Rule.kLane),
   (``UInt8.toUInt64, ``Rule.u8ToUInt64),
+  (``HXor.hXor, ``Rule.u32Xor),
+  (``HAnd.hAnd, ``Rule.u32And),
+  (``HOr.hOr, ``Rule.u32Or),
+  (``HAdd.hAdd, ``Rule.u32Add),
+  (``HSub.hSub, ``Rule.u32Sub),
+  (``HShiftLeft.hShiftLeft, ``Rule.u32Shl),
+  (``HShiftRight.hShiftRight, ``Rule.u32Shr),
+  (``UInt32.toUInt64, ``Rule.u32ToUInt64),
+  (``UInt8.toUInt32, ``Rule.u8ToUInt32),
+  (``UInt64.toUInt32, ``Rule.u64ToUInt32),
+  (``UInt32.toUInt8, ``Rule.u32ToUInt8),
+  (``Nat.toUInt32, ``Rule.natToUInt32),
   (``UInt64.toUInt8, ``Rule.u64ToUInt8),
   (``BEq.beq, ``Rule.natBEq),
   (``BEq.beq, ``Rule.wordBEq),
@@ -172,6 +184,7 @@ def rewrites : List (Name × Name) := [
   (``Eq.ndrec, ``Rewrite.eqNdrecConst),
   (``List.getLastD, ``Rewrite.listGetLastD),
   (``Inhabited.default, ``Rewrite.uint8Default),
+  (``Inhabited.default, ``Rewrite.uint32Default),
   (``Vector.ofFn, ``Rewrite.vecOfFn),
   (``Array.map, ``Rewrite.arrMap),
   (``Array.foldl, ``Rewrite.arrFoldl),
@@ -650,6 +663,8 @@ partial def translate (ctx : Ctx) (e : Expr) : MetaM (Expr × Expr × Expr) := d
       return ← lit ``Rule.wordLit (← mkAppM ``UInt64.toNat #[e])
     if ← isDefEq ty (mkConst ``UInt8) then
       return ← lit ``Rule.u8Lit (← mkAppM ``UInt8.toNat #[e])
+    if ← isDefEq ty (mkConst ``UInt32) then
+      return ← lit ``Rule.u32Lit (← mkAppM ``UInt32.toNat #[e])
   -- `let`: the body with the value itself, read from the environment where it occurs
   if let .letE _ ty v b _ := e then
     -- a function, a type, a proof, an instance: substituted

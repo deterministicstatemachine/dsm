@@ -90,7 +90,7 @@ theorem kToNatLane (a : K) : LeanVM.Protocol.Verifier.kToNat a = (K.lane a).toNa
 cost_rewrite kToNatLane
 
 /-- The number of tables (their descriptors hold functions: not data). -/
-theorem tablesLength : LeanVM.Protocol.Verifier.tables.length = 6 := rfl
+theorem tablesLength : LeanVM.Protocol.Verifier.tables.length = 7 := rfl
 
 cost_rewrite tablesLength
 
@@ -98,17 +98,17 @@ cost_rewrite tablesLength
 literals. -/
 
 open LeanVM.Protocol.Verifier in
-theorem tableWidthsLit : tableWidths = [13, 13, 7, 14, 14, 92] := rfl
+theorem tableWidthsLit : tableWidths = [13, 13, 7, 14, 14, 92, 58] := rfl
 
 cost_rewrite tableWidthsLit
 
 open LeanVM.Protocol.Verifier in
-theorem globalColumnBasesLit : globalColumnBases = [5, 18, 31, 38, 52, 66] := rfl
+theorem globalColumnBasesLit : globalColumnBases = [6, 19, 32, 39, 53, 67, 159] := rfl
 
 cost_rewrite globalColumnBasesLit
 
 open LeanVM.Protocol.Verifier in
-theorem keccakOutputColumnsLit : keccakOutputColumns = (List.range 25).map (106 + ·) := rfl
+theorem keccakOutputColumnsLit : keccakOutputColumns = (List.range 25).map (107 + ·) := rfl
 
 cost_rewrite keccakOutputColumnsLit
 
@@ -116,8 +116,9 @@ open LeanVM.Protocol.Verifier in
 theorem columnKappasLit (logMemory logBytecode : ℕ) (tableLogHeights : List ℕ) :
     columnKappas logMemory logBytecode tableLogHeights =
       [logMemory, logMemory, logMemory, logBytecode,
-          tableLogHeights.getD opKeccak 0 + qkeccakSlotBits] ++
-        [(13, 0), (13, 1), (7, 2), (14, 3), (14, 4), (92, 5)].flatMap fun p ↦
+          tableLogHeights.getD opKeccak 0 + qkeccakSlotBits,
+          tableLogHeights.getD opBlake3 0 + qflockSlotBits] ++
+        [(13, 0), (13, 1), (7, 2), (14, 3), (14, 4), (92, 5), (58, 6)].flatMap fun p ↦
           List.replicate p.1 (tableLogHeights.getD p.2 0) := rfl
 
 cost_rewrite columnKappasLit
@@ -129,11 +130,35 @@ theorem keccakSlotOfLit (l : ℕ) : keccakSlotOf l =
 
 cost_rewrite keccakSlotOfLit
 
+/-- The `q_flock` slots of the `BLAKE3` value limbs (global columns `171 … 200`), as a table. -/
+def flockSlotTable : List ℕ :=
+  [10, 11, 12, 13, 14, 15, 16, 17, 4, 5, 6, 7, 0, 1, 2, 3, 18, 19, 181, 182, 183, 184, 185, 186,
+    187, 188, 189, 190, 191, 192]
+
+open LeanVM.Protocol.Verifier in
+theorem flockSlotLit_lt : ∀ c : Fin 217, flockSlot c =
+    if 171 ≤ c.val ∧ c.val < 201 then some (flockSlotTable.getD (c.val - 171) 0) else none := by
+  decide +kernel
+
+open LeanVM.Protocol.Verifier in
+/-- `flockSlot` without its column names (research build): the cost machine reads no strings. -/
+theorem flockSlotLit (c : ℕ) : flockSlot c =
+    if 171 ≤ c ∧ c < 201 then some (flockSlotTable.getD (c - 171) 0) else none := by
+  by_cases hc : c < 217
+  · exact flockSlotLit_lt ⟨c, hc⟩
+  · have hb : globalColumnBases.getD opBlake3 0 = 159 := by decide +kernel
+    have hl : blake3Columns.length = 58 := by decide +kernel
+    unfold flockSlot
+    rw [hb, ite_eq_left (by omega), List.getElem?_eq_none (by omega), ite_eq_right (by omega)]
+    rfl
+
+cost_rewrite flockSlotLit
+
 open LeanVM.Semantics in
-/-- The opcodes' bus codes `g^0, …, g^5` as words. -/
+/-- The opcodes' bus codes `g^0, …, g^6` as words. -/
 theorem opcodeCodeLit (o : Opcode) : Opcode.busCode o = K.ofLane (match o with
     | .xor => 1 | .mulNative => 2 | .setConstant => 4 | .deref => 8 | .jump => 16
-    | .keccak => 32) := by
+    | .keccak => 32 | .blake3 => 64) := by
   cases o <;> decide +kernel
 
 cost_rewrite opcodeCodeLit

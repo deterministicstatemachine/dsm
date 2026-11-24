@@ -100,6 +100,8 @@ theorem linearlyPriced_one {r a b : ℕ} (hr : r < 2 ^ 64) (ha : a < 2 ^ 64) (hb
 
 theorem u8_lt (x : UInt8) : x.toNat < 2 ^ 64 := Nat.lt_of_lt_of_le x.toNat_lt (by decide)
 
+theorem u32_lt (x : UInt32) : x.toNat < 2 ^ 64 := Nat.lt_of_lt_of_le x.toNat_lt (by decide)
+
 theorem uint64_toNat_not (a : UInt64) : (~~~a).toNat = a.toNat ^^^ 18446744073709551615 := by
   rw [← UInt64.toNat_toBitVec, UInt64.toBitVec_not, ← BitVec.xor_allOnes, BitVec.toNat_xor,
     BitVec.toNat_allOnes, UInt64.toNat_toBitVec]
@@ -187,6 +189,7 @@ variable {α β : Type} [MachineEncoding α] [MachineEncoding β]
 @[simp] theorem enc_nat (n : ℕ) : encodeValue n = .nat n := rfl
 @[simp] theorem enc_word (x : UInt64) : encodeValue x = .nat x.toNat := rfl
 @[simp] theorem enc_u8 (x : UInt8) : encodeValue x = .nat x.toNat := rfl
+@[simp] theorem enc_u32 (x : UInt32) : encodeValue x = .nat x.toNat := rfl
 @[simp] theorem enc_k (x : K) : encodeValue x = .nat x.lane.toNat := rfl
 @[simp] theorem enc_array (a : Array α) : encodeValue a = .array (a.map encodeValue) := rfl
 
@@ -938,6 +941,172 @@ theorem u8Lt {t u : Term} {a b : UInt8} {inst : Decidable (a < b)} {c d : ℕ}
       · simp [hab, show ¬ a.toNat < b.toNat from fun e ↦ hab (UInt8.lt_iff_toNat_lt.2 e)]
     simp only [PrimitiveOperation.apply, limbs_of_lt (u8_lt a), limbs_of_lt (u8_lt b), max_self,
       enc_bool, this])
+/-! ### 32-bit words (research build: BLAKE3's compression)
+
+A `UInt32` is its number below `2^32`, one limb; wrap-arounds are masked with `2^32 - 1`, shift
+amounts with `31`. -/
+
+theorem u32Lit (x : UInt32) {n : ℕ} (hn : x.toNat = n) :
+    Runs P env (.literal (.nat n)) (encodeValue x) 1 :=
+  hn ▸ Runs.val _
+
+theorem u32Xor {t u : Term} {a b : UInt32} {c d : ℕ} (h : Runs P env t (encodeValue a) c)
+    (hb : Runs P env u (encodeValue b) d) :
+    Runs P env (.primitive .bitwiseXor [t, u]) (encodeValue (a ^^^ b)) (c + d + 1) :=
+  word₂ h hb (by
+    simp only [PrimitiveOperation.apply, enc_u32, UInt32.toNat_xor]
+    exact linearlyPriced_one (UInt32.toNat_xor a b ▸ u32_lt (a ^^^ b)) (u32_lt a) (u32_lt b))
+
+theorem u32And {t u : Term} {a b : UInt32} {c d : ℕ} (h : Runs P env t (encodeValue a) c)
+    (hb : Runs P env u (encodeValue b) d) :
+    Runs P env (.primitive .bitwiseAnd [t, u]) (encodeValue (a &&& b)) (c + d + 1) :=
+  word₂ h hb (by
+    simp only [PrimitiveOperation.apply, enc_u32, UInt32.toNat_and]
+    exact linearlyPriced_one (UInt32.toNat_and a b ▸ u32_lt (a &&& b)) (u32_lt a) (u32_lt b))
+
+theorem u32Or {t u : Term} {a b : UInt32} {c d : ℕ} (h : Runs P env t (encodeValue a) c)
+    (hb : Runs P env u (encodeValue b) d) :
+    Runs P env (.primitive .bitwiseOr [t, u]) (encodeValue (a ||| b)) (c + d + 1) :=
+  word₂ h hb (by
+    simp only [PrimitiveOperation.apply, enc_u32, UInt32.toNat_or]
+    exact linearlyPriced_one (UInt32.toNat_or a b ▸ u32_lt (a ||| b)) (u32_lt a) (u32_lt b))
+
+/-- `a + b`: `(a + b) &&& (2^32 - 1)`. -/
+theorem u32Add {t u : Term} {a b : UInt32} {c d : ℕ} (h : Runs P env t (encodeValue a) c)
+    (hb : Runs P env u (encodeValue b) d) :
+    Runs P env (.primitive .bitwiseAnd [.primitive .add [t, u], .literal (.nat 4294967295)])
+      (encodeValue (a + b)) (c + d + 1 + 1 + 1) := by
+  have ha := a.toNat_lt
+  have hb' := b.toNat_lt
+  have h1 : Runs P env (.primitive .add [t, u]) (.nat (a.toNat + b.toNat)) (c + d + 1) :=
+    word₂ h hb (by
+      simp only [PrimitiveOperation.apply]
+      exact linearlyPriced_one (by omega) (u32_lt a) (u32_lt b))
+  refine (word₂ h1 (Runs.val _) ?_).cost_eq (by omega)
+  have hv : (a.toNat + b.toNat) &&& 4294967295 = (a + b).toNat := by
+    rw [UInt32.toNat_add, show (4294967295 : ℕ) = 2 ^ 32 - 1 from rfl,
+      Nat.and_two_pow_sub_one_eq_mod]
+  simp only [PrimitiveOperation.apply, enc_u32, hv]
+  exact linearlyPriced_one (u32_lt _) (by omega) (by decide)
+
+/-- `a - b`: `((2^32 - b) + a) &&& (2^32 - 1)`. -/
+theorem u32Sub {t u : Term} {a b : UInt32} {c d : ℕ} (h : Runs P env t (encodeValue a) c)
+    (hb : Runs P env u (encodeValue b) d) :
+    Runs P env (.primitive .bitwiseAnd [.primitive .add
+        [.primitive .truncatedSubtract [.literal (.nat 4294967296), u], t],
+        .literal (.nat 4294967295)])
+      (encodeValue (a - b)) (1 + d + 1 + c + 1 + 1 + 1) := by
+  have ha := a.toNat_lt
+  have hb' := b.toNat_lt
+  have h1 : Runs P env (.primitive .truncatedSubtract [.literal (.nat 4294967296), u])
+      (.nat (4294967296 - b.toNat)) (1 + d + 1) :=
+    word₂ (Runs.val _) hb (by
+      simp only [PrimitiveOperation.apply]
+      exact linearlyPriced_one (by omega) (by decide) (u32_lt b))
+  have h2 : Runs P env (.primitive .add [.primitive .truncatedSubtract [.literal (.nat 4294967296), u], t])
+      (.nat (4294967296 - b.toNat + a.toNat)) (1 + d + 1 + c + 1) :=
+    word₂ h1 h (by
+      simp only [PrimitiveOperation.apply]
+      exact linearlyPriced_one (by omega) (by omega) (u32_lt a))
+  refine (word₂ h2 (Runs.val _) ?_).cost_eq (by omega)
+  have hv : (4294967296 - b.toNat + a.toNat) &&& 4294967295 = (a - b).toNat := by
+    rw [UInt32.toNat_sub, show (4294967295 : ℕ) = 2 ^ 32 - 1 from rfl,
+      Nat.and_two_pow_sub_one_eq_mod]
+  simp only [PrimitiveOperation.apply, enc_u32, hv]
+  exact linearlyPriced_one (u32_lt _) (by omega) (by decide)
+
+/-- `a <<< b`: `(a <<< (b &&& 31)) &&& (2^32 - 1)`. -/
+theorem u32Shl {t u : Term} {a b : UInt32} {c d : ℕ} (h : Runs P env t (encodeValue a) c)
+    (hb : Runs P env u (encodeValue b) d) :
+    Runs P env (.primitive .bitwiseAnd [.primitive .shiftLeft [t, .primitive .bitwiseAnd
+        [u, .literal (.nat 31)]], .literal (.nat 4294967295)])
+      (encodeValue (a <<< b)) (c + (d + 1 + 1) + 1 + 1 + 1) := by
+  have ha := a.toNat_lt
+  have hs : b.toNat &&& 31 < 32 := Nat.lt_of_le_of_lt Nat.and_le_right (by decide)
+  have h2 : Runs P env (.primitive .bitwiseAnd [u, .literal (.nat 31)]) (.nat (b.toNat &&& 31))
+      (d + 1 + 1) :=
+    word₂ hb (Runs.val _) (by
+      simp only [PrimitiveOperation.apply]
+      exact linearlyPriced_one (by omega) (u32_lt b) (by decide))
+  have hsh : a.toNat <<< (b.toNat &&& 31) < 2 ^ 64 := by
+    rw [Nat.shiftLeft_eq]
+    calc a.toNat * 2 ^ (b.toNat &&& 31) < 2 ^ 32 * 2 ^ 32 :=
+          Nat.mul_lt_mul_of_lt_of_le ha (Nat.pow_le_pow_right (by omega) (by omega))
+            (Nat.two_pow_pos _)
+      _ = 2 ^ 64 := by norm_num
+  have h3 : Runs P env (.primitive .shiftLeft [t, .primitive .bitwiseAnd [u, .literal (.nat 31)]])
+      (.nat (a.toNat <<< (b.toNat &&& 31))) (c + (d + 1 + 1) + 1) :=
+    word₂ h h2 (by
+      simp only [PrimitiveOperation.apply]
+      exact linearlyPriced_one hsh (u32_lt a) (by omega))
+  refine (word₂ h3 (Runs.val _) ?_).cost_eq (by omega)
+  have hv : a.toNat <<< (b.toNat &&& 31) &&& 4294967295 = (a <<< b).toNat := by
+    rw [UInt32.toNat_shiftLeft, show (4294967295 : ℕ) = 2 ^ 32 - 1 from rfl,
+      Nat.and_two_pow_sub_one_eq_mod, show (31 : ℕ) = 2 ^ 5 - 1 from rfl,
+      Nat.and_two_pow_sub_one_eq_mod]
+  simp only [PrimitiveOperation.apply, enc_u32, hv]
+  exact linearlyPriced_one (u32_lt _) hsh (by decide)
+
+/-- `a >>> b`: `a >>> (b &&& 31)`. -/
+theorem u32Shr {t u : Term} {a b : UInt32} {c d : ℕ} (h : Runs P env t (encodeValue a) c)
+    (hb : Runs P env u (encodeValue b) d) :
+    Runs P env (.primitive .shiftRight [t, .primitive .bitwiseAnd [u, .literal (.nat 31)]])
+      (encodeValue (a >>> b)) (c + (d + 1 + 1) + 1) := by
+  have hs : b.toNat &&& 31 < 32 := Nat.lt_of_le_of_lt Nat.and_le_right (by decide)
+  have h2 : Runs P env (.primitive .bitwiseAnd [u, .literal (.nat 31)]) (.nat (b.toNat &&& 31))
+      (d + 1 + 1) :=
+    word₂ hb (Runs.val _) (by
+      simp only [PrimitiveOperation.apply]
+      exact linearlyPriced_one (by omega) (u32_lt b) (by decide))
+  refine word₂ h h2 ?_
+  have hv : a.toNat >>> (b.toNat &&& 31) = (a >>> b).toNat := by
+    rw [UInt32.toNat_shiftRight, show (31 : ℕ) = 2 ^ 5 - 1 from rfl,
+      Nat.and_two_pow_sub_one_eq_mod]
+  simp only [PrimitiveOperation.apply, enc_u32, hv]
+  exact linearlyPriced_one (u32_lt _) (u32_lt a) (by omega)
+
+/-- A 32-bit word as a 64-bit one: the same number. -/
+theorem u32ToUInt64 {t : Term} {a : UInt32} {c : ℕ} (h : Runs P env t (encodeValue a) c) :
+    Runs P env t (encodeValue a.toUInt64) c := by
+  rw [enc_word, UInt32.toNat_toUInt64]; exact h
+
+/-- A byte as a 32-bit word: the same number. -/
+theorem u8ToUInt32 {t : Term} {a : UInt8} {c : ℕ} (h : Runs P env t (encodeValue a) c) :
+    Runs P env t (encodeValue a.toUInt32) c := by
+  rw [enc_u32, UInt8.toNat_toUInt32]; exact h
+
+/-- A word's low 32 bits: `&&& (2^32 - 1)`. -/
+theorem u64ToUInt32 {t : Term} {a : UInt64} {c : ℕ} (h : Runs P env t (encodeValue a) c) :
+    Runs P env (.primitive .bitwiseAnd [t, .literal (.nat 4294967295)]) (encodeValue a.toUInt32)
+      (c + 1 + 1) :=
+  word₂ h (Runs.val _) (by
+    simp only [PrimitiveOperation.apply, enc_u32, UInt64.toNat_toUInt32,
+      show (4294967295 : ℕ) = 2 ^ 32 - 1 from rfl, Nat.and_two_pow_sub_one_eq_mod]
+    exact linearlyPriced_one (by have := Nat.mod_lt a.toNat (Nat.two_pow_pos 32); omega)
+      a.toNat_lt (by decide))
+
+/-- A 32-bit word's low byte: `&&& 255`. -/
+theorem u32ToUInt8 {t : Term} {a : UInt32} {c : ℕ} (h : Runs P env t (encodeValue a) c) :
+    Runs P env (.primitive .bitwiseAnd [t, .literal (.nat 255)]) (encodeValue a.toUInt8)
+      (c + 1 + 1) :=
+  word₂ h (Runs.val _) (by
+    simp only [PrimitiveOperation.apply, enc_u8, UInt32.toNat_toUInt8,
+      show (255 : ℕ) = 2 ^ 8 - 1 from rfl, Nat.and_two_pow_sub_one_eq_mod]
+    exact linearlyPriced_one (by have := Nat.mod_lt a.toNat (Nat.two_pow_pos 8); omega)
+      (u32_lt a) (by decide))
+
+/-- `n.toUInt32`: `n &&& (2^32 - 1)`. -/
+theorem natToUInt32 {t : Term} {n : ℕ} {c : ℕ} (h : Runs P env t (encodeValue n) c) :
+    Runs P env (.primitive .bitwiseAnd [t, .literal (.nat 4294967295)]) (encodeValue n.toUInt32)
+      (c + 1 + limbCount n) :=
+  op₂ (b := (4294967295 : ℕ)) h (natLit _) (by
+    have hv : n &&& 4294967295 = n.toUInt32.toNat := by
+      rw [show (4294967295 : ℕ) = 2 ^ 32 - 1 from rfl, Nat.and_two_pow_sub_one_eq_mod]
+      simp
+    simp only [enc_nat, enc_u32, PrimitiveOperation.apply, linearlyPricedResult, hv,
+      limbs_of_lt (u32_lt n.toUInt32), limbs_of_lt (show 4294967295 < 2 ^ 64 by decide),
+      max_limbs_one, max_one_limbs])
+
 /-- `decide (b = true)` is `b`. -/
 theorem decideEqTrue {t : Term} {b : Bool} {c : ℕ} (h : Runs P env t (encodeValue b) c) :
     Runs P env t (encodeValue (decide (b = true))) c := by
@@ -1270,6 +1439,8 @@ theorem listGetLastD {α : Type} (l : List α) (d : α) : l.getLastD d = l.rever
 theorem uint64Default : (default : UInt64) = 0 := rfl
 
 theorem uint8Default : (default : UInt8) = 0 := rfl
+
+theorem uint32Default : (default : UInt32) = 0 := rfl
 
 /-- `K.ofBits`: the word of the number modulo `2^64`. -/
 theorem kOfBits (n : ℕ) : K.ofBits n = K.ofLane n.toUInt64 := rfl

@@ -112,6 +112,11 @@ cost_rewrite keccakRound_shared
     let s := keccakF1600 (stateOfCells input inOdd)
     guard (∀ c : Fin 13, outCells.cellCount ≤ c.val ∨ output c = cellsOfState s outOdd c)
     pure r.next
+  | .blake3 om ocv oout omd ox oy ow => do
+    let input ← readCells read r.fp (blake3InputCellOffset om ocv omd ox oy ow)
+    let output ← readFirstCells read r.fp (fun c ↦ LeanVM.Parameters.g ^ c.val * oout) 2
+    guard (Blake3CellsRelation input output)
+    pure r.next
 
 theorem executeWith_shared (read : K → Option E) (r : Registers K) (i : LeanIsaInstruction) :
     executeWith read r i = executeWithShared read r i := by
