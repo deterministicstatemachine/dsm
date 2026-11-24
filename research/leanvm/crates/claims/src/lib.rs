@@ -184,7 +184,12 @@ mod tests {
             attempt_key: [6; 32],
             op_digest: [7; 32],
         };
-        for (da_commitment, vault) in [(None, None), (Some([9; 32]), None), (None, Some(vault)), (Some([9; 32]), Some(vault))] {
+        for (da_commitment, vault) in [
+            (None, None),
+            (Some([9; 32]), None),
+            (None, Some(vault)),
+            (Some([9; 32]), Some(vault)),
+        ] {
             let claims = AggregateClaims {
                 da_commitment,
                 vault,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A vault's per-trade proof records on the storage nodes (owner ruling,
 //! 2026-11-22: "Okay, good, then do it." and "Do it. That's two.").
 //!

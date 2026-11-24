@@ -178,8 +178,7 @@ fn verify_flock_lincheck(zc: ZerocheckResult, transcript: &mut Transcript) -> Re
         // collapses to eq(chi_in, chi_in_prime) times a 64-term Lagrange combination.
         let chi_in_prime: Vec<E> = claims.round_challenges.iter().rev().copied().collect();
         // The constant column's weight: its slice, times its high bits' eq.
-        let pin = claims.s[BLAKE3_CONSTANT_COLUMN % K_BITS]
-            * eq_kernel(&chi_in_prime)[BLAKE3_CONSTANT_COLUMN / K_BITS];
+        let pin = claims.s[BLAKE3_CONSTANT_COLUMN % K_BITS] * eq_kernel(&chi_in_prime)[BLAKE3_CONSTANT_COLUMN / K_BITS];
         let terminal = claims.matrix
             + alpha.pow(2) * eq_eval(chi_in, &chi_in_prime) * dot(&skip_weights, &claims.s)
             + alpha.pow(3) * pin;
@@ -224,7 +223,10 @@ pub fn matrix_values(point: &[E]) -> Result<(E, E), VerifierError> {
     require(point.len() == 2 * BLAKE3_R1CS_LOG_SIZE, VerifierError::MultilinearSize)?;
     let (row, column) = point.split_at(BLAKE3_R1CS_LOG_SIZE);
     let (left_values, right_values) = blake3_row_values(&eq_kernel(column));
-    Ok((multilinear_eval(&left_values, row)?, multilinear_eval(&right_values, row)?))
+    Ok((
+        multilinear_eval(&left_values, row)?,
+        multilinear_eval(&right_values, row)?,
+    ))
 }
 
 type Word = [E; 32];

@@ -21,7 +21,9 @@ fn gp(e: usize) -> F128 {
 /// Prove and verify; `Err` with the reason when either refuses.
 fn run(p: &Program, witness: &Witness, public: [F128; 2]) -> Result<(), String> {
     let (proof, _) = prove(p, witness, public, 1).map_err(|e| format!("prove: {e:?}"))?;
-    verify(p, &public, &proof).map(drop).map_err(|e| format!("verify: {e:?}"))
+    verify(p, &public, &proof)
+        .map(drop)
+        .map_err(|e| format!("verify: {e:?}"))
 }
 
 fn stream<'a>(w: &'a mut Witness, name: &str) -> &'a mut Vec<Vec<F128>> {
@@ -64,10 +66,15 @@ fn refused(p: &Program, what: &str, witness: &Witness, public: [F128; 2]) -> Ref
             Ok((proof, _, forged)) => {
                 assert!(forged > 0, "{what}: the forging run went past no check");
                 let why = match verify(p, &public, &proof) {
-                    Ok(_) => panic!("{what} ({tactic:?}): the verifier accepted a proof of a run past {forged} failed checks"),
+                    Ok(_) => panic!(
+                        "{what} ({tactic:?}): the verifier accepted a proof of a run past {forged} failed checks"
+                    ),
                     Err(e) => format!("{e:?}"),
                 };
-                eprintln!("  VERIFIER REFUSED {what} ({tactic:?}): past {forged} failed checks: {}", &why[..why.len().min(120)]);
+                eprintln!(
+                    "  VERIFIER REFUSED {what} ({tactic:?}): past {forged} failed checks: {}",
+                    &why[..why.len().min(120)]
+                );
             }
             Err(e) => {
                 let e = format!("{tactic:?}: {e:?}");
@@ -108,14 +115,24 @@ fn a_valid_step_proves() {
     // The same proof against any other statement is refused.
     let mut other = public;
     other[1] = other[1] + F128::from(1u128);
-    assert!(verify(&p, &other, &proof).is_err(), "a proof verified against another statement");
+    assert!(
+        verify(&p, &other, &proof).is_err(),
+        "a proof verified against another statement"
+    );
 }
 
 #[test]
 fn every_kind_of_valid_step_proves() {
     let p = program();
     // Leaf present or absent, other traders or none, first attempt or a later one, either side coming in.
-    let cases = [(1, true, 3, 0), (2, false, 0, 5), (3, false, 6, 1), (4, true, 0, 0), (5, true, 9, 2), (6, false, 2, 0)];
+    let cases = [
+        (1, true, 3, 0),
+        (2, false, 0, 5),
+        (3, false, 6, 1),
+        (4, true, 0, 0),
+        (5, true, 9, 2),
+        (6, false, 2, 0),
+    ];
     let mut sides = [false; 2];
     for (seed, present, others, attempt) in cases {
         let f = fixture(seed, present, others, attempt);
@@ -164,15 +181,29 @@ fn invalid_steps_are_refused() {
     };
     bad.hop.amount_out = constant_product_output(w.hop.amount_in, r_in, r_out, 0).unwrap();
     let mut s = honest.clone();
-    take_out(&mut s, w.hop.in_is_a, bad.hop.amount_out as i64 - w.hop.amount_out as i64);
+    take_out(
+        &mut s,
+        w.hop.in_is_a,
+        bad.hop.amount_out as i64 - w.hop.amount_out as i64,
+    );
     let (witness, _) = hints(&bad, &f.r_prev, &f.public);
-    seen.push(refused(&p, "fee not the policy's", &witness, forged(&bad, &f.r_prev, &s, &f.public)));
+    seen.push(refused(
+        &p,
+        "fee not the policy's",
+        &witness,
+        forged(&bad, &f.r_prev, &s, &f.public),
+    ));
 
     // 5: a generation that skips.
     let mut s = honest.clone();
     s.generation += 1;
     let (witness, _) = hints(w, &f.r_prev, &f.public);
-    seen.push(refused(&p, "generation skips", &witness, forged(w, &f.r_prev, &s, &f.public)));
+    seen.push(refused(
+        &p,
+        "generation skips",
+        &witness,
+        forged(w, &f.r_prev, &s, &f.public),
+    ));
 
     // 4: reserves that do not move by the amounts.
     let mut s = honest.clone();
@@ -181,21 +212,40 @@ fn invalid_steps_are_refused() {
     } else {
         s.reserve_b += 1;
     }
-    seen.push(refused(&p, "reserve in off by one", &witness, forged(w, &f.r_prev, &s, &f.public)));
+    seen.push(refused(
+        &p,
+        "reserve in off by one",
+        &witness,
+        forged(w, &f.r_prev, &s, &f.public),
+    ));
 
     // 8: the relationship leaf claimed absent while the tree holds it.
     let mut bad = w.clone();
     bad.relationship_present = false;
     let (witness, _) = hints(&bad, &f.r_prev, &f.public);
-    seen.push(refused(&p, "present leaf claimed absent", &witness, forged(&bad, &f.r_prev, &honest, &f.public)));
+    seen.push(refused(
+        &p,
+        "present leaf claimed absent",
+        &witness,
+        forged(&bad, &f.r_prev, &honest, &f.public),
+    ));
 
     // 8: a path that does not fold to R_prev, each leaf's, the attacker's R_next from it.
     for which in ["state", "relationship"] {
         let mut bad = w.clone();
-        let path = if which == "state" { &mut bad.state_path } else { &mut bad.relationship_path };
+        let path = if which == "state" {
+            &mut bad.state_path
+        } else {
+            &mut bad.relationship_path
+        };
         path[200][3] ^= 1;
         let (witness, _) = hints(&bad, &f.r_prev, &f.public);
-        seen.push(refused(&p, &format!("{which} path"), &witness, forged(&bad, &f.r_prev, &honest, &f.public)));
+        seen.push(refused(
+            &p,
+            &format!("{which} path"),
+            &witness,
+            forged(&bad, &f.r_prev, &honest, &f.public),
+        ));
     }
 
     // 8: the wrong level for where the two keys part.
@@ -242,12 +292,24 @@ fn invalid_steps_are_refused() {
     let mut later = f.public.clone();
     let base = successor_base_key(&w.vault_id, &f.r_prev);
     later.attempt_key = h(TAG_SUCC_ATTEMPT, &[&base, &0u64.to_be_bytes()]);
-    seen.push(refused(&p, "attempt 0 without the zero flag", &witness, cells(&later.digest())));
+    seen.push(refused(
+        &p,
+        "attempt 0 without the zero flag",
+        &witness,
+        cells(&later.digest()),
+    ));
 
     // Every lie whose run leaves a trace was refused by the verifier, not only by the honest prover.
     let traced = seen.iter().filter(|r| matches!(r, Refusal::Verifier)).count();
-    let untraced: Vec<_> = seen.iter().filter_map(|r| if let Refusal::NoTrace(e) = r { Some(e) } else { None }).collect();
-    eprintln!("VERIFIER REFUSED {traced} of {} lies; no trace for {}: {untraced:?}", seen.len(), untraced.len());
+    let untraced: Vec<_> = seen
+        .iter()
+        .filter_map(|r| if let Refusal::NoTrace(e) = r { Some(e) } else { None })
+        .collect();
+    eprintln!(
+        "VERIFIER REFUSED {traced} of {} lies; no trace for {}: {untraced:?}",
+        seen.len(),
+        untraced.len()
+    );
     assert_eq!(traced, seen.len(), "a lie the malicious prover could not even commit");
     assert_eq!(seen.len(), 15);
 }
@@ -261,7 +323,10 @@ fn consistent(bad: &mut StepWitness, post: &VaultStateLeaf) -> (D32, StepPublic)
     tree.insert(state_key, vault_state_leaf_value(&bad.state));
     let rel_key = relationship_key(&bad.trader_genesis, &bad.trader_device_id, &bad.vault_id);
     if bad.relationship_present {
-        tree.insert(rel_key, vault_relationship_leaf_value(&bad.trader_genesis, &bad.trader_device_id, &bad.relationship_base));
+        tree.insert(
+            rel_key,
+            vault_relationship_leaf_value(&bad.trader_genesis, &bad.trader_device_id, &bad.relationship_base),
+        );
     }
     bad.state_path = tree.path(&state_key);
     bad.relationship_path = tree.path(&rel_key);
@@ -293,7 +358,11 @@ fn closes_and_releases_prove() {
             Kind::Release(r) => r.terms.len(),
             _ => 0,
         };
-        eprintln!("TERMINAL {release:?} terms={size}B cycles={} prove_ms={:.0}", stats.cycles, t.elapsed().as_secs_f64() * 1e3);
+        eprintln!(
+            "TERMINAL {release:?} terms={size}B cycles={} prove_ms={:.0}",
+            stats.cycles,
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
 }
 
@@ -325,13 +394,21 @@ fn terminal_lies_are_refused() {
         let retired = retire_vault_post(&r.witness.state).unwrap();
         let mut bad = r.witness.clone();
         bad.trader_device_id[7] ^= 1;
-        lie(&format!("{terms:?} release to a trader the branch does not pay"), bad, retired.clone());
+        lie(
+            &format!("{terms:?} release to a trader the branch does not pay"),
+            bad,
+            retired.clone(),
+        );
         let mut bad = r.witness.clone();
         if let Kind::Release(rel) = &mut bad.kind {
             let view = decode_escrow(&rel.terms).unwrap();
             rel.outcome = view.branches.iter().find(|b| b.0 != rel.outcome).unwrap().0.clone();
         }
-        lie(&format!("{terms:?} release naming another branch's outcome"), bad, retired.clone());
+        lie(
+            &format!("{terms:?} release naming another branch's outcome"),
+            bad,
+            retired.clone(),
+        );
         let mut bad = r.witness.clone();
         bad.state.reserve_b = 1;
         let post = retire_vault_post(&bad.state).unwrap();

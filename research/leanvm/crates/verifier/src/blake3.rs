@@ -77,16 +77,22 @@ mod tests {
         let seq: Vec<u8> = (0u8..128).collect();
         assert_eq!(
             compress(&IV, &block(&seq[..64]), counter, len, flags),
-            [0x4171ed4e, 0xd45c4aea, 0x6b6088b7, 0xe2463fd2, 0xac9caf12, 0x7ddcaceb, 0xc76d4c1f, 0x981b51f2]
+            [
+                0x4171ed4e, 0xd45c4aea, 0x6b6088b7, 0xe2463fd2, 0xac9caf12, 0x7ddcaceb, 0xc76d4c1f, 0x981b51f2
+            ]
         );
         assert_eq!(
             compress(&IV, &[0; 16], counter, len, flags),
-            [0x7669004d, 0x96866a63, 0x30a609d9, 0xad1a08a4, 0xf8507c4d, 0x04eefd1a, 0x50f00b02, 0x556aab86]
+            [
+                0x7669004d, 0x96866a63, 0x30a609d9, 0xad1a08a4, 0xf8507c4d, 0x04eefd1a, 0x50f00b02, 0x556aab86
+            ]
         );
         let cv = compress(&IV, &block(&seq[..64]), 0, 64, 1);
         assert_eq!(
             compress(&cv, &block(&seq[64..]), 0, 64, 2 | 8),
-            [0x05577ef1, 0x7865b264, 0xf4b73bc3, 0x39f54346, 0xdf054b62, 0x1fc8761a, 0x48d5ac30, 0xef454bc4]
+            [
+                0x05577ef1, 0x7865b264, 0xf4b73bc3, 0x39f54346, 0xdf054b62, 0x1fc8761a, 0x48d5ac30, 0xef454bc4
+            ]
         );
     }
 }

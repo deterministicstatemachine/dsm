@@ -82,6 +82,7 @@
 //! witness bits. Pinning them to a caller's values is the embedding
 //! protocol's job, via PCS openings at fixed indices.
 
+use crate::compat::pack::{LOG_PACKING, PACKING_WIDTH};
 use crate::gf2::{
     ADD3_BITS, CARRY_BITS_PER_ADD, MatrixSide, WireWord, back_add, back_add3_fused, walk_add, walk_add3_fused,
     wire_from_const, wire_from_slot_base, wire_rotl, wire_rotr, wire_xor,
@@ -91,7 +92,6 @@ use crate::witness::{
     BitRecord, add_carry_parts, add3_fused_parts, drive_witness_packed_and_lincheck, or_bit_at,
     write_lin_word_ab_packed,
 };
-use crate::compat::pack::{LOG_PACKING, PACKING_WIDTH};
 use pcs::RingSwitchOpen;
 use primitives::field::F128;
 
@@ -685,7 +685,9 @@ pub fn generate_witness_with_ab_packed_and_lincheck(
         Some(&padding),
         n_blocks_log,
         K_LOG,
-        |&(ref h, ref m, t, f0, f1, ref xyw), z, a, b| build_block_witness_ab_packed_into(h, m, t, f0, f1, xyw, z, a, b),
+        |&(ref h, ref m, t, f0, f1, ref xyw), z, a, b| {
+            build_block_witness_ab_packed_into(h, m, t, f0, f1, xyw, z, a, b)
+        },
     )
 }
 
@@ -932,9 +934,7 @@ mod tests {
     #[test]
     fn constrained_rows_tile_the_layout() {
         let mut rng = Rng::new(0x7113D);
-        let w: Vec<F128> = (0..K)
-            .map(|_| F128::new(rng.next_u64(), rng.next_u64()))
-            .collect();
+        let w: Vec<F128> = (0..K).map(|_| F128::new(rng.next_u64(), rng.next_u64())).collect();
         let (va, vb) = row_values_walk(&w);
         let mut expected = vec![false; K];
         let mut claim = |base: usize, len: usize| {

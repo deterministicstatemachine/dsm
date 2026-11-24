@@ -120,12 +120,18 @@ pub type Witness = Vec<(String, Vec<Vec<F128>>)>;
 fn length_split(n: usize) -> Vec<F128> {
     let q = (n - 1) / 64;
     let l = n - 64 * q;
-    [q % 16, q / 16, l % 16, l / 16].into_iter().map(|e| gp(e as u64)).collect()
+    [q % 16, q / 16, l % 16, l / 16]
+        .into_iter()
+        .map(|e| gp(e as u64))
+        .collect()
 }
 
 /// A byte string's nibble digits, low nibble first, zero-padded to `len` nibbles.
 fn nibble_digits(bytes: &[u8], len: usize) -> Vec<F128> {
-    let mut out: Vec<F128> = bytes.iter().flat_map(|b| [gp(u64::from(b & 15)), gp(u64::from(b >> 4))]).collect();
+    let mut out: Vec<F128> = bytes
+        .iter()
+        .flat_map(|b| [gp(u64::from(b & 15)), gp(u64::from(b >> 4))])
+        .collect();
     out.resize(len, gp(0));
     out
 }
@@ -145,7 +151,11 @@ fn release_hints(r: &Release, put: &mut impl FnMut(&'static str, Vec<F128>)) {
     put("vs_olen", vec![gp((lo % 16) as u64), gp((lo / 16) as u64)]);
     put("vs_outcome", nibble_digits(&r.outcome, 128));
     let view = decode_escrow(&r.terms).expect("terms that decode");
-    let j = view.branches.iter().position(|b| b.0 == r.outcome).expect("the outcome's branch");
+    let j = view
+        .branches
+        .iter()
+        .position(|b| b.0 == r.outcome)
+        .expect("the outcome's branch");
     put("vs_branch", vec![gp(j as u64)]);
     if r.terms[1] == CLASS_ESCROW_TERMS as u8 {
         let q = TAG_ESCROW_OUTCOME_TABLE.len() + 1 + view.table.len();

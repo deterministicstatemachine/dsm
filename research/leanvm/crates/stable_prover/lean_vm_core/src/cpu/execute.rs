@@ -549,8 +549,15 @@ fn run(
         .then(|| vec![0u64; program.prog.len()]);
 
     let mut bytecode_count: Vec<u32> = vec![0; program.prog.len()];
-    let (mut xor, mut mul, mut set, mut deref, mut jump, mut keccak, mut blake3) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut xor, mut mul, mut set, mut deref, mut jump, mut keccak, mut blake3) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
     let (mut pc, mut fp) = (0u32, 0u32);
     let mut steps = 0usize;
     loop {
@@ -657,29 +664,29 @@ fn run(
                 };
                 let a3 = at(fp, o3)?;
                 if let Some(a2) = a2 {
-                match mode {
-                    // `m[a2] = m[a3]`: carry a written side to the other (`put` checks it when both are), or
-                    // link two unwritten sides until either is written. A range-check touch may leave both
-                    // unwritten for good: only the validity of `a2` matters there.
-                    DerefMode::Cell => {
-                        if m.written(a2) {
-                            m.put(a3, m.get(a2)).map_err(fail)?;
-                        } else if m.written(a3) {
-                            m.put(a2, m.get(a3)).map_err(fail)?;
-                        } else {
-                            m.link(a2, a3);
+                    match mode {
+                        // `m[a2] = m[a3]`: carry a written side to the other (`put` checks it when both are), or
+                        // link two unwritten sides until either is written. A range-check touch may leave both
+                        // unwritten for good: only the validity of `a2` matters there.
+                        DerefMode::Cell => {
+                            if m.written(a2) {
+                                m.put(a3, m.get(a2)).map_err(fail)?;
+                            } else if m.written(a3) {
+                                m.put(a2, m.get(a3)).map_err(fail)?;
+                            } else {
+                                m.link(a2, a3);
+                            }
+                        }
+                        // The return target and the frame base are stored as addresses, which JUMP reads back.
+                        DerefMode::Pc => {
+                            g.note(pc as usize + 2);
+                            m.put(a2, F128::from(g.pow(pc as usize + 2))).map_err(fail)?;
+                        }
+                        DerefMode::Fp => {
+                            g.note(fp as usize);
+                            m.put(a2, F128::from(g.pow(fp as usize))).map_err(fail)?;
                         }
                     }
-                    // The return target and the frame base are stored as addresses, which JUMP reads back.
-                    DerefMode::Pc => {
-                        g.note(pc as usize + 2);
-                        m.put(a2, F128::from(g.pow(pc as usize + 2))).map_err(fail)?;
-                    }
-                    DerefMode::Fp => {
-                        g.note(fp as usize);
-                        m.put(a2, F128::from(g.pow(fp as usize))).map_err(fail)?;
-                    }
-                }
                 }
                 deref.push(Drow {
                     pc,

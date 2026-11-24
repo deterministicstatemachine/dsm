@@ -18,8 +18,8 @@
 //! Storage: 256 × ell bytes (16 KB at k=6, 32 KB at k=7), which fits in L1.
 //! Lookups per row: n_chunks (= ell/8), each load is `ell` contiguous bytes.
 
-use crate::compat::ntt::AdditiveNttGf8;
 use crate::compat::gf8::F8;
+use crate::compat::ntt::AdditiveNttGf8;
 
 #[derive(Clone, Debug)]
 pub struct InvNttTableByteSingleGf8 {

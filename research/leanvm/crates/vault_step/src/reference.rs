@@ -168,7 +168,10 @@ pub fn terms_address_of(bytes: &[u8]) -> D32 {
 
 /// `derive::vault_id`: `H(vault-id/v1 ‖ G_o ‖ DevID_o ‖ u64be(p_create))`.
 pub fn vault_id(owner_genesis: &D32, owner_device_id: &D32, create_position: u64) -> D32 {
-    h(TAG_VAULT_ID, &[owner_genesis, owner_device_id, &create_position.to_be_bytes()])
+    h(
+        TAG_VAULT_ID,
+        &[owner_genesis, owner_device_id, &create_position.to_be_bytes()],
+    )
 }
 
 /// Escrow terms as a release reads them (`EscrowKind::decode`, `verdict_cell_of` / `match_cell_of`, `recipient`):
@@ -320,7 +323,10 @@ pub struct Release {
 
 /// This research build's digest of what a release names: `H(vault-release-op ‖ K_verdict ‖ u32be(|o|) ‖ o)`.
 pub fn release_op_digest(verdict_cell: &D32, outcome: &[u8]) -> D32 {
-    h(TAG_RELEASE_OP, &[verdict_cell, &(outcome.len() as u32).to_be_bytes(), outcome])
+    h(
+        TAG_RELEASE_OP,
+        &[verdict_cell, &(outcome.len() as u32).to_be_bytes(), outcome],
+    )
 }
 
 /// The operation a step is (`SettlementBody`'s three branches): a swap hop, the owner's full close, or an escrow
@@ -341,7 +347,10 @@ pub fn vault_state_leaf_value(leaf: &VaultStateLeaf) -> D32 {
     h(TAG_VAULT_LEAF_STATE, &[&leaf.encode()])
 }
 pub fn vault_relationship_leaf_value(genesis: &D32, device_id: &D32, leaf: &D32) -> D32 {
-    h(TAG_VAULT_LEAF_STATE, &[&vault_relationship_leaf_bytes(genesis, device_id, leaf)])
+    h(
+        TAG_VAULT_LEAF_STATE,
+        &[&vault_relationship_leaf_bytes(genesis, device_id, leaf)],
+    )
 }
 pub fn relationship_key(genesis: &D32, device_id: &D32, vault_id: &D32) -> D32 {
     h(TAG_REL_KEY, &[genesis, device_id, vault_id])
@@ -440,8 +449,7 @@ fn subtree(depth: usize, entries: &[&FoldEntry]) -> Result<(D32, D32), &'static 
     }
     let (low_pre, low_post) = subtree(depth + 1, low)?;
     let (high_pre, high_post) = subtree(depth + 1, high)?;
-    if low.iter().any(|e| sibling_at(e, depth) != high_pre) || high.iter().any(|e| sibling_at(e, depth) != low_pre)
-    {
+    if low.iter().any(|e| sibling_at(e, depth) != high_pre) || high.iter().any(|e| sibling_at(e, depth) != low_pre) {
         return Err("InconsistentPath");
     }
     Ok((econ_node(&low_pre, &high_pre), econ_node(&low_post, &high_post)))
@@ -471,7 +479,9 @@ pub fn constant_product_output(input: u64, reserve_in: u64, reserve_out: u64, fe
         return None;
     }
     let after_fee = u128::from(input).checked_mul(u128::from(BPS_DENOMINATOR - fee_bps))?;
-    let denom = u128::from(reserve_in).checked_mul(u128::from(BPS_DENOMINATOR))?.checked_add(after_fee)?;
+    let denom = u128::from(reserve_in)
+        .checked_mul(u128::from(BPS_DENOMINATOR))?
+        .checked_add(after_fee)?;
     let num = u128::from(reserve_out).checked_mul(after_fee)?;
     let out = num / denom;
     if out == 0 {
@@ -509,7 +519,11 @@ pub fn swap_vault_post(state: &VaultStateLeaf, fee_bps: u32, hop: &Hop) -> Resul
         return Err("reserve out");
     }
     let generation = state.generation.checked_add(1).ok_or("vault generation")?;
-    let (reserve_a, reserve_b) = if hop.in_is_a { (new_in, new_out) } else { (new_out, new_in) };
+    let (reserve_a, reserve_b) = if hop.in_is_a {
+        (new_in, new_out)
+    } else {
+        (new_out, new_in)
+    };
     Ok(VaultStateLeaf {
         generation,
         reserve_a,

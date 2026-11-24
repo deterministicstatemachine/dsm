@@ -46,7 +46,10 @@ pub(super) fn is_sorted(claims: &AggregateClaims) -> bool {
 
 impl AggregateProof {
     pub fn to_bytes(&self) -> Vec<u8> {
-        encode(&[&self.bytecode_point[..], &self.matrix_point].concat(), &self.proof.to_bytes())
+        encode(
+            &[&self.bytecode_point[..], &self.matrix_point].concat(),
+            &self.proof.to_bytes(),
+        )
     }
 
     /// Decode a proof, `None` if the bytes are not one. This does not verify: call [`Self::verify`].

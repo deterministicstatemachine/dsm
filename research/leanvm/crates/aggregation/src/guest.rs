@@ -17,15 +17,28 @@ pub(super) fn guest_source() -> &'static str {
     static SOURCE: OnceLock<String> = OnceLock::new();
     SOURCE.get_or_init(|| {
         let vs = vault_step::program::SOURCE;
-        let defs_at = vs.find("\n# ======================================================================== tables").expect("tables");
-        let main_at = vs.find("\n# ================================================================== main").expect("main");
+        let defs_at = vs
+            .find("\n# ======================================================================== tables")
+            .expect("tables");
+        let main_at = vs
+            .find("\n# ================================================================== main")
+            .expect("main");
         let shared = ["from snark_lib", "Y_TOWER =", "B3_IV0 =", "B3_IV1 ="];
-        let consts: String =
-            vs[..defs_at].lines().filter(|l| !shared.iter().any(|s| l.starts_with(s))).map(|l| format!("{l}\n")).collect();
+        let consts: String = vs[..defs_at]
+            .lines()
+            .filter(|l| !shared.iter().any(|s| l.starts_with(s)))
+            .map(|l| format!("{l}\n"))
+            .collect();
         let anchor = "B3_IV1 = B3_IV1_PLACEHOLDER\n";
         let at = NODE_SOURCE.find(anchor).expect("the node's IV") + anchor.len();
         let main = NODE_SOURCE.find("\ndef main():").expect("the node's main");
-        format!("{}{consts}{}{}\n{}", &NODE_SOURCE[..at], &NODE_SOURCE[at..main], &vs[defs_at..main_at], &NODE_SOURCE[main..])
+        format!(
+            "{}{consts}{}{}\n{}",
+            &NODE_SOURCE[..at],
+            &NODE_SOURCE[at..main],
+            &vs[defs_at..main_at],
+            &NODE_SOURCE[main..]
+        )
     })
 }
 

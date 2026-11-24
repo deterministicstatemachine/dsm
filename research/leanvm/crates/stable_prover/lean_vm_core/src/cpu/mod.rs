@@ -256,7 +256,13 @@ fn prove_execution(
     // with the same map as q_keccak's.
     let flock_offset = w.layout.placements[QFLOCK].offset;
     let flock_ring = crate::stage!("Flock reduction", || w.flock_reduction.prove(&mut ps, flock_offset));
-    crate::stage!("PCS open", || pcs::open(&mut ps, committed, w.q, &slots, &[ring, flock_ring]));
+    crate::stage!("PCS open", || pcs::open(
+        &mut ps,
+        committed,
+        w.q,
+        &slots,
+        &[ring, flock_ring]
+    ));
     Ok((ps.into_proof(), stats))
 }
 
@@ -518,7 +524,11 @@ mod tests {
         let jumping = program(Op::Jump { oc: 1, od: 2, of: 1 });
         let exec = execute(&jumping, &[], pi).expect("the run halts in the final state");
         assert_eq!(exec.cycles, 5, "three SETs and both JUMPs, the last slot's included");
-        assert_eq!(exec.rows(), [0, 0, 3, 0, 2, 0, 0], "XOR, MUL, SET, DEREF, JUMP, KECCAK, BLAKE3");
+        assert_eq!(
+            exec.rows(),
+            [0, 0, 3, 0, 2, 0, 0],
+            "XOR, MUL, SET, DEREF, JUMP, KECCAK, BLAKE3"
+        );
         let (proof, _) = prove(&jumping, &[], pi, crate::pcs::TEST_LOG_INV_RATE).unwrap();
         verify(&jumping, &pi, &proof).expect("the verifier accepts the run");
 

@@ -406,7 +406,12 @@ fn flushes_blake3() -> Flushes {
                  ("md", "o_md", 0), ("x0", "o_x", 0), ("x1", "o_x", 1), ("y0", "o_y", 0), ("y1", "o_y", 1),
                  ("w0", "o_w", 0), ("w1", "o_w", 1)];
     for (cell, operand, exponent) in cells {
-        let names = [operand, &format!("cnt_{cell}"), &format!("{cell}_lo"), &format!("{cell}_hi")];
+        let names = [
+            operand,
+            &format!("cnt_{cell}"),
+            &format!("{cell}_lo"),
+            &format!("{cell}_hi"),
+        ];
         let [address, count, lo, hi] = cols(BLAKE3_COLUMNS, names);
         flushes.memory_cols(prod(fp, address, exponent), count, &[lo, hi]);
     }

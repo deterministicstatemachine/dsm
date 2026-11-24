@@ -298,7 +298,12 @@ fn forged_flock_hints_are_rejected() {
     )
     .expect("the child verifies");
     let flock = summary.flock_scalars;
-    for at in [flock.start, flock.start + 70, (flock.start + flock.end) / 2, flock.end - 1] {
+    for at in [
+        flock.start,
+        flock.start + 70,
+        (flock.start + flock.end) / 2,
+        flock.end - 1,
+    ] {
         assert_forgery_rejected(
             Box::new(move |hints: &mut Hints| hints.entry_mut("stream", 0)[at] += F128::ONE),
             std::slice::from_ref(&child),
@@ -866,7 +871,11 @@ fn malformed_raw_signatures_are_errors() {
 fn vault_nodes(steps: &[vault_step::fixture::Fixture]) -> Vec<(AggregateClaims, AggregateProof, isa::Stats)> {
     let mut nodes: Vec<(AggregateClaims, AggregateProof, isa::Stats)> = Vec::new();
     for f in steps {
-        let children: Vec<_> = nodes.last().map(|(c, p, _)| (c.clone(), p.clone())).into_iter().collect();
+        let children: Vec<_> = nodes
+            .last()
+            .map(|(c, p, _)| (c.clone(), p.clone()))
+            .into_iter()
+            .collect();
         let step = VaultStep {
             witness: f.witness.clone(),
             r_prev: f.r_prev,
@@ -918,7 +927,15 @@ fn vault_steps_chain() {
         witness: steps[2].witness.clone(),
         r_prev: steps[2].r_prev,
     };
-    let err = aggregate_with_vault::<StableProver>(&[child.clone()], vec![], vec![], None, OutputClaims::All, 1, Some(&skip));
+    let err = aggregate_with_vault::<StableProver>(
+        &[child.clone()],
+        vec![],
+        vec![],
+        None,
+        OutputClaims::All,
+        1,
+        Some(&skip),
+    );
     assert_eq!(err.err(), Some(AggregateError::ProvingFailed), "a step that skips one");
     // Another vault's step onto this chain.
     let other = vault_step::fixture::chain(12, 1);
@@ -926,7 +943,8 @@ fn vault_steps_chain() {
         witness: other[0].witness.clone(),
         r_prev: other[0].r_prev,
     };
-    let err = aggregate_with_vault::<StableProver>(&[child], vec![], vec![], None, OutputClaims::All, 1, Some(&foreign));
+    let err =
+        aggregate_with_vault::<StableProver>(&[child], vec![], vec![], None, OutputClaims::All, 1, Some(&foreign));
     assert_eq!(err.err(), Some(AggregateError::ProvingFailed), "another vault's step");
 }
 
@@ -968,7 +986,11 @@ fn vault_bench() {
     times.sort_by(f64::total_cmp);
     let hwm = std::fs::read_to_string("/proc/self/status")
         .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM:")).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmHWM:"))
+                .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
         .unwrap_or_default();
     println!(
         "VAULT-NODE cycles={} committed={} memory={} blake3_rows={} keccak_rows={} prove_median_ms={:.1} verify_ms={verify_ms:.2} proof_kib={:.1} {hwm}",
@@ -993,7 +1015,10 @@ fn write_lean_vault_vectors() {
     let path = std::env::var("LEAN_VAULT_VECTORS").expect("LEAN_VAULT_VECTORS: where to write the Lean vectors");
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     let cells_hex = |cells: &[F128]| {
-        hex(&cells.iter().flat_map(|c| [c.c0.to_le_bytes(), c.c1.to_le_bytes()].concat()).collect::<Vec<u8>>())
+        hex(&cells
+            .iter()
+            .flat_map(|c| [c.c0.to_le_bytes(), c.c1.to_le_bytes()].concat())
+            .collect::<Vec<u8>>())
     };
     let bool_lean = |b: bool| if b { "true" } else { "false" };
     let mut out = String::from(
@@ -1108,7 +1133,9 @@ fn write_lean_vault_vectors() {
         generation: 0xfedc_ba98_7654_3210,
         external_commitment: f.public.external_commitment,
         attempt_key: f.public.attempt_key,
-        op_digest: vault_step::fixture::terminal(5, Some(vault_step::fixture::Terms::Computed), true, 1).public.op_digest,
+        op_digest: vault_step::fixture::terminal(5, Some(vault_step::fixture::Terms::Computed), true, 1)
+            .public
+            .op_digest,
     };
     writeln!(
         out,
@@ -1153,7 +1180,10 @@ fn vault_routes_closes_and_releases() {
         constant_product_output(b.witness.hop.amount_in, r_in, r_out, b.witness.fee_bps).expect("a priced hop");
     b.public = step(&b.witness, &b.r_prev).expect("hop 2 is valid");
     let route = [a, b];
-    let nodes: Vec<_> = route.iter().map(|f| vault_nodes(std::slice::from_ref(f)).remove(0)).collect();
+    let nodes: Vec<_> = route
+        .iter()
+        .map(|f| vault_nodes(std::slice::from_ref(f)).remove(0))
+        .collect();
     for (f, (claims, proof, _)) in route.iter().zip(&nodes) {
         let chain = claims.vault.expect("a vault chain");
         assert_eq!(chain.vault_id, f.witness.vault_id);
@@ -1163,7 +1193,11 @@ fn vault_routes_closes_and_releases() {
     assert_ne!(nodes[0].0.vault.unwrap().vault_id, nodes[1].0.vault.unwrap().vault_id);
 
     // A close and the largest signed release, each a node's step.
-    for (release, seed) in [(None, 31), (Some(Terms::Signed { branches: 16 }), 32), (Some(Terms::Computed), 33)] {
+    for (release, seed) in [
+        (None, 31),
+        (Some(Terms::Signed { branches: 16 }), 32),
+        (Some(Terms::Computed), 33),
+    ] {
         let f = terminal(seed, release, false, 2);
         let (claims, proof, _) = vault_nodes(std::slice::from_ref(&f)).remove(0);
         let chain = claims.vault.expect("a vault chain");

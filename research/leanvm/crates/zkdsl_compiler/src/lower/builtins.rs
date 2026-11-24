@@ -87,12 +87,21 @@ impl FnLower<'_> {
             Ok(CellRun::Stack { base, len: 2 }) => base,
             _ => self.fail(format!("blake3's `{what}` must be a two-cell StackBuf run")),
         };
-        let (a, b, cv, out) = (run(&args[0], "a"), run(&args[1], "b"), run(&args[2], "cv"), run(&args[4], "out"));
+        let (a, b, cv, out) = (
+            run(&args[0], "a"),
+            run(&args[1], "b"),
+            run(&args[2], "cv"),
+            run(&args[4], "out"),
+        );
         let mut opt = |key: &str| kwargs.get(key).map(|e| run(e, key));
         let (x, y, w) = (opt("x"), opt("y"), opt("w"));
         let md = self.expr(&args[3]);
         // An omitted input is two zero cells: the scope's shared padding run holds four from +1.
-        let zero = if x.is_none() || y.is_none() || w.is_none() { self.keccak_pad_run() + 1 } else { 0 };
+        let zero = if x.is_none() || y.is_none() || w.is_none() {
+            self.keccak_pad_run() + 1
+        } else {
+            0
+        };
         self.emit(LOp::Blake3 {
             m: [a, a + 1, b, b + 1],
             cv,

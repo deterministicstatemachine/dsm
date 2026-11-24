@@ -76,12 +76,18 @@ pub(super) fn vault_cells(vault: &Option<claims::VaultChain>) -> Vec<F128> {
         let digit = (v.generation >> (4 * k)) & 15;
         acc + F128::from(u128::from(digit)) * F128::from(primitives::field::g_pow(4 * k))
     });
-    [cells(&v.vault_id), cells(&v.r_first), cells(&v.r_last), cells(&v.external_commitment), cells(&v.attempt_key)]
-        .into_iter()
-        .flatten()
-        .chain([generation, F128::from(1u128)])
-        .chain(cells(&v.op_digest))
-        .collect()
+    [
+        cells(&v.vault_id),
+        cells(&v.r_first),
+        cells(&v.r_last),
+        cells(&v.external_commitment),
+        cells(&v.attempt_key),
+    ]
+    .into_iter()
+    .flatten()
+    .chain([generation, F128::from(1u128)])
+    .chain(cells(&v.op_digest))
+    .collect()
 }
 
 /// A plain hash over cells: what the guest gets from `keccak_cells` over the same cells.
@@ -107,5 +113,11 @@ pub(super) fn statement_digest(claims: &AggregateClaims, defer: &DeferredClaim) 
         claim_list_digest(claims.lean_sphincs.iter().map(lean_sphincs_claim_cells)),
         hash_to_scalars(&verifier::da::digest(claims.da_commitment)),
     ];
-    cell_hash(header.into_iter().flatten().chain(vault_cells(&claims.vault)).chain(defer.cells()))
+    cell_hash(
+        header
+            .into_iter()
+            .flatten()
+            .chain(vault_cells(&claims.vault))
+            .chain(defer.cells()),
+    )
 }

@@ -32,10 +32,13 @@
 
 use std::sync::OnceLock;
 
-use crate::compat::ntt::InvNttTableByteSingleGf8;
 use crate::compat::bits::bit_transpose_64bytes;
 use crate::compat::gf8::gf8_reduce;
-use {crate::compat::{F8, PHI_8_TABLE, phi8}, primitives::field::F128};
+use crate::compat::ntt::InvNttTableByteSingleGf8;
+use {
+    crate::compat::{F8, PHI_8_TABLE, phi8},
+    primitives::field::F128,
+};
 
 #[cfg(test)]
 use super::univariate_skip::pack_bits;
@@ -285,8 +288,8 @@ unsafe fn fused_apply_one_k<const K: i32>(
     acc3_lo: &mut core::arch::aarch64::uint16x8_t,
     acc3_hi: &mut core::arch::aarch64::uint16x8_t,
 ) {
-    use core::arch::aarch64::*;
     use crate::compat::gf8::neon::gf8_mul_vec16;
+    use core::arch::aarch64::*;
     unsafe {
         // `π_b(i') = i' ⊕ 8b` is a chunk-index XOR by `b >> 1`, which is a free
         // load offset, and for odd `b` a swap of each chunk's two 8-byte halves.
@@ -373,8 +376,8 @@ fn shift_reduce_inner_ab_fused_neon(
     b_med: usize,
     out: &mut [u8; 64],
 ) {
-    use core::arch::aarch64::*;
     use crate::compat::gf8::neon::gf8_reduce_vec16;
+    use core::arch::aarch64::*;
 
     let byte_base_b = chunk_byte_base + b_med * N_CHUNKS * 8;
     let table_base = inv_table.data_ptr();
@@ -1050,9 +1053,9 @@ pub fn round1_shift_reduce_extract_c_packed_padded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zerocheck::univariate_skip::round1_naive;
     use crate::compat::ntt::AdditiveNttGf8;
     use crate::compat::test_rng::Rng;
+    use crate::zerocheck::univariate_skip::round1_naive;
 
     /// The convert stage against the table definition, over full and boundary windows.
     #[test]

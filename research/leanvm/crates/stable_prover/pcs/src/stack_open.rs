@@ -108,7 +108,10 @@ pub fn open(
     for ring in rings {
         let region = 1usize << ring.qkeccak_vars();
         assert!(ring.offset.is_multiple_of(region), "a ring region is aligned");
-        assert!(ring.offset + region <= stack.len(), "a ring region lies inside the stack");
+        assert!(
+            ring.offset + region <= stack.len(),
+            "a ring region lies inside the stack"
+        );
         assert!(
             ring.points.iter().all(|point| point.len() == ring.qkeccak_vars()),
             "every ring claim spans its region"
@@ -263,8 +266,14 @@ mod tests {
                     }
                 }
 
-                let (terms, a) =
-                    basis::initial_basis(lane_vars + LANE_ROUNDS, lane_vars, &claims, &lambdas, &[offset; 2], &rings);
+                let (terms, a) = basis::initial_basis(
+                    lane_vars + LANE_ROUNDS,
+                    lane_vars,
+                    &claims,
+                    &lambdas,
+                    &[offset; 2],
+                    &rings,
+                );
                 let mut lanes = LaneRounds::new(stack.clone(), terms, a);
                 let context =
                     format!("lane_vars={lane_vars}, lanes={lanes_count}, qkeccak_vars={qkeccak_vars}, offset={offset}");

@@ -32,7 +32,10 @@
 #[cfg(test)]
 use crate::compat::ntt::AdditiveNttGf8;
 use crate::compat::ntt::InvNttTableByteSingleGf8;
-use {crate::compat::{F8, phi8}, primitives::field::F128};
+use {
+    crate::compat::{F8, phi8},
+    primitives::field::F128,
+};
 
 // ---------------------------------------------------------------------------
 // Live helpers.

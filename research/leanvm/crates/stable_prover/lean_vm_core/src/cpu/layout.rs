@@ -5,12 +5,12 @@ use super::*;
 use verifier::layout::{GLOBAL_COLUMN_BASES, TABLE_WIDTHS};
 
 // The program is public: it rides the bytecode blocks as `Coord::Public`, and only its execution counts are committed.
-/// The Keccak reduction's committed states `q_keccak`, `2^(SLOT_LOG + τ)` words for `2^τ` steps: the one copy of the
-/// `KECCAK` input lanes, whose columns are virtual ([`keccak_value`]).
-pub use verifier::layout::QKECCAK;
 /// Flock's witness of every `BLAKE3` instance, slot-major ([`crate::blake3flock`]): the one copy of the `BLAKE3` value
 /// limbs, whose columns are virtual (`verifier::layout::qflock_slot`).
 pub use verifier::layout::QFLOCK;
+/// The Keccak reduction's committed states `q_keccak`, `2^(SLOT_LOG + τ)` words for `2^τ` steps: the one copy of the
+/// `KECCAK` input lanes, whose columns are virtual ([`keccak_value`]).
+pub use verifier::layout::QKECCAK;
 
 /// Every column, the shared ones then each table's, at [`GLOBAL_COLUMN_BASES`].
 pub(crate) const N_COLUMNS: usize = GLOBAL_COLUMN_BASES[tables::N_TABLES - 1] + TABLE_WIDTHS[tables::N_TABLES - 1];

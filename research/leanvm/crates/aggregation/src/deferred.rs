@@ -123,7 +123,11 @@ impl FreshFlockClaim {
             .map(|col| {
                 let mut w = self.s[col % verifier::layout::K_BITS];
                 for (j, &rj) in self.rs.iter().enumerate() {
-                    w *= if (col >> (k - 1 - j)) & 1 == 1 { rj } else { F128::ONE + rj };
+                    w *= if (col >> (k - 1 - j)) & 1 == 1 {
+                        rj
+                    } else {
+                        F128::ONE + rj
+                    };
                 }
                 w
             })
@@ -473,7 +477,11 @@ fn matrix_batch(
     // A fresh claim's value is its bilinear form: the hint the guest took is this.
     for (t, f) in fresh.iter().enumerate() {
         let (u, (ma, mb)) = (&us[2 * t], &ms[2 * t]);
-        let form: F128 = u.iter().zip(ma.iter().zip(mb)).map(|(&u, (&a, &b))| u * (a + f.alpha * b)).sum();
+        let form: F128 = u
+            .iter()
+            .zip(ma.iter().zip(mb))
+            .map(|(&u, (&a, &b))| u * (a + f.alpha * b))
+            .sum();
         assert_eq!(form, f.matrix, "a child's fresh matrix claim is its bilinear form");
     }
     let mut challenges = Vec::new();
@@ -505,12 +513,25 @@ fn matrix_batch(
     for _ in 0..k {
         let (a1, ai) = round_msg(&acol, &wa);
         let (b1, bi) = round_msg(&bcol, &wb);
-        let r = absorb_round(transcript, &mut messages, &mut challenges, &mut claim, (a1 + b1, ai + bi));
+        let r = absorb_round(
+            transcript,
+            &mut messages,
+            &mut challenges,
+            &mut claim,
+            (a1 + b1, ai + bi),
+        );
         for table in [&mut acol, &mut bcol, &mut wa, &mut wb] {
             fold_lsb(table, r);
         }
     }
     let (a, b) = (acol[0], bcol[0]);
     assert_eq!(claim, a * wa[0] + b * wb[0], "the matrix batch's terminal");
-    (messages, DeferredMatrixClaim { point: challenges, a, b })
+    (
+        messages,
+        DeferredMatrixClaim {
+            point: challenges,
+            a,
+            b,
+        },
+    )
 }

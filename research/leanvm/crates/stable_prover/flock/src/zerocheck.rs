@@ -28,13 +28,13 @@ pub mod multilinear;
 pub mod univariate_skip;
 pub mod univariate_skip_optimized;
 
+use crate::compat::multilinear::lagrange_weights_naive;
 use bit_fold::BitFold;
 use multilinear::{
     PackedWitness, bit_round_materialize, bit_round_pair, fold_and_compute_round_pair_into,
     fold_and_compute_round_single_into, fold_in_place_pair, fold_in_place_single, interpolate_at_z_combined,
     round_pair_naive, round_single_naive,
 };
-use crate::compat::multilinear::lagrange_weights_naive;
 use univariate_skip_optimized::{
     c_s, medium_challenges, round1_shift_reduce_extract_c_packed_padded, small_challenges,
 };

@@ -7,7 +7,9 @@
 //! on one is a claim on its slot of `q_flock` (`verifier::layout::qflock_slot`). Flock's reduction leaves the 64 bit
 //! slices of its witness at one point, which ring switching binds in the one opening.
 
-use flock::hash::{Blake2sSetup, Compression, SliceClaim, blake2s_compress, generate_witness_with_ab_packed_and_lincheck};
+use flock::hash::{
+    Blake2sSetup, Compression, SliceClaim, blake2s_compress, generate_witness_with_ab_packed_and_lincheck,
+};
 use pcs::RingSwitchOpen;
 use primitives::field::{F64, F128};
 use primitives::transcript::ProverState;
@@ -58,7 +60,15 @@ pub(crate) fn compression(cells: &[F128; N_CELLS]) -> Compression {
 /// The operands of a `BLAKE3` instruction, in bytecode slot order.
 pub(crate) fn operands(op: &crate::cpu::Op) -> [u32; N_OPERANDS] {
     match *op {
-        crate::cpu::Op::Blake3 { m, cv, out, md, x, y, w } => [m[0], m[1], m[2], m[3], cv, out, md, x, y, w],
+        crate::cpu::Op::Blake3 {
+            m,
+            cv,
+            out,
+            md,
+            x,
+            y,
+            w,
+        } => [m[0], m[1], m[2], m[3], cv, out, md, x, y, w],
         op => unreachable!("not a BLAKE3: {op:?}"),
     }
 }
@@ -144,7 +154,11 @@ mod tests {
             F128::new(limb(2 * k), limb(2 * k + 1))
         };
         let hex = |cells: &[F128]| {
-            cells.iter().flat_map(|c| [c.c0.to_le_bytes(), c.c1.to_le_bytes()].concat()).map(|x| format!("{x:02x}")).collect::<String>()
+            cells
+                .iter()
+                .flat_map(|c| [c.c0.to_le_bytes(), c.c1.to_le_bytes()].concat())
+                .map(|x| format!("{x:02x}"))
+                .collect::<String>()
         };
         let mut out = String::from(
             "import Statement.VaultStep\n\n/-!\n# Research build: the `BLAKE3` instruction's vectors, from the Rust\n\n\
@@ -178,7 +192,10 @@ mod tests {
                 cells[c] = F128::ZERO;
             }
             let h = output(&compression(&cells));
-            let input: Vec<F128> = (0..N_CELLS).filter(|c| !OUT_CELLS.contains(c)).map(|c| cells[c]).collect();
+            let input: Vec<F128> = (0..N_CELLS)
+                .filter(|c| !OUT_CELLS.contains(c))
+                .map(|c| cells[c])
+                .collect();
             writeln!(
                 out,
                 "def input{n} : Fin 13 → E := fun c ↦ cellAt \"{}\" c.val\n\
@@ -193,7 +210,10 @@ mod tests {
             .unwrap();
             if n == 0 {
                 // The one-block hash of the message is BLAKE3's of those 64 bytes: the vault step's `blake3`.
-                let msg: Vec<u8> = cells[..4].iter().flat_map(|c| [c.c0.to_le_bytes(), c.c1.to_le_bytes()].concat()).collect();
+                let msg: Vec<u8> = cells[..4]
+                    .iter()
+                    .flat_map(|c| [c.c0.to_le_bytes(), c.c1.to_le_bytes()].concat())
+                    .collect();
                 writeln!(
                     out,
                     "#guard blake3 ((hexBytes \"{}\")) == wordBytes (compressCells input0).toList\n",

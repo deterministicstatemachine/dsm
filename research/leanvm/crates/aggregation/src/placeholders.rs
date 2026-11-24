@@ -237,7 +237,9 @@ fn constants(ph: &mut Placeholders) {
     // Flock's verifier constants (verifier::flock), as the guest's literals.
     let lift = |e: verifier::E| lean_vm_core::cpu::from_scalar(e);
     let flock_fixed: Vec<F128> = verifier::flock::fixed_challenges().into_iter().map(lift).collect();
-    let flock_phi: Vec<F128> = (0..2 * verifier::layout::K_BITS).map(|v| lift(verifier::flock::phi(v))).collect();
+    let flock_phi: Vec<F128> = (0..2 * verifier::layout::K_BITS)
+        .map(|v| lift(verifier::flock::phi(v)))
+        .collect();
     let flock_den128 = lift(verifier::flock::window_denominator(2 * verifier::layout::K_BITS));
     let flock_den64 = lift(verifier::flock::window_denominator(verifier::layout::K_BITS));
     let constants: &[(&str, &dyn Literal)] = &[
@@ -250,7 +252,10 @@ fn constants(ph: &mut Placeholders) {
         ("FLOCK_LC_ROUNDS", &verifier::layout::FLOCK_NUM_LINCHECK_ROUNDS),
         ("FLOCK_N_FIXED", &verifier::flock::N_FIXED_CHALLENGES),
         ("FLOCK_PIN", &verifier::layout::BLAKE3_CONSTANT_COLUMN),
-        ("FLOCK_ROUNDS_CAP", &(verifier::layout::BLAKE3_R1CS_LOG_SIZE + verifier::MAX_TABLE_LOG + 1)),
+        (
+            "FLOCK_ROUNDS_CAP",
+            &(verifier::layout::BLAKE3_R1CS_LOG_SIZE + verifier::MAX_TABLE_LOG + 1),
+        ),
         ("FLOCK_FIXED", &flock_fixed),
         ("FLOCK_PHI", &flock_phi),
         ("FLOCK_DEN128", &flock_den128),
@@ -478,12 +483,14 @@ fn claim_placeholders(ph: &mut Placeholders, pool: &[ClaimSite], kbc: usize) {
         .map(|site| match *site {
             ClaimSite::Framework { column, source } => (POINT_BUF_ZETA, compact_col(column), 0, 0, source),
             // A table column's claim is at its table's chi[..tau].
-            ClaimSite::TableColumn { column, table } => match (keccak_value(column), verifier::layout::qflock_slot(column)) {
-                (_, Some(slot)) => (POINT_BUF_QFLOCK_RHO, qflock, 0, slot, (2 + table, 0)),
-                (None, None) => (POINT_BUF_RHO, compact_col(column), 0, 0, (2 + table, 0)),
-                (Some(KeccakLane::Slot(slot)), _) => (POINT_BUF_QKECCAK_RHO, qkeccak, slot, 0, (2 + table, 0)),
-                (Some(KeccakLane::Output(_)), _) => (POINT_BUF_KECCAK_OUT, qkeccak, 0, 0, (2 + table, 0)),
-            },
+            ClaimSite::TableColumn { column, table } => {
+                match (keccak_value(column), verifier::layout::qflock_slot(column)) {
+                    (_, Some(slot)) => (POINT_BUF_QFLOCK_RHO, qflock, 0, slot, (2 + table, 0)),
+                    (None, None) => (POINT_BUF_RHO, compact_col(column), 0, 0, (2 + table, 0)),
+                    (Some(KeccakLane::Slot(slot)), _) => (POINT_BUF_QKECCAK_RHO, qkeccak, slot, 0, (2 + table, 0)),
+                    (Some(KeccakLane::Output(_)), _) => (POINT_BUF_KECCAK_OUT, qkeccak, 0, 0, (2 + table, 0)),
+                }
+            }
             ClaimSite::MemoryLimb { column } => (POINT_BUF_PI, compact_col(column), 0, 0, (1, 0)),
         })
         .map(|(buffer, column, qkeccak_slot, qflock_slot, source)| ClaimDescriptor {

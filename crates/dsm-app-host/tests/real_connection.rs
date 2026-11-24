@@ -1003,7 +1003,6 @@ async fn connect_over_the_real_relay() {
             min_amount_out: 1,
             // The account fills in its vaults' witnesses as it signs the
             // request (SoFi Amendment S24); the application asks for none.
-            vault_witnesses: Vec::new(),
         }),
     )
     .await;
@@ -1063,7 +1062,6 @@ async fn connect_over_the_real_relay() {
             token_out: wild.to_vec(),
             amount_in: 100,
             min_amount_out: 1,
-            vault_witnesses: Vec::new(),
         }),
     )
     .await;
@@ -1095,7 +1093,6 @@ async fn connect_over_the_real_relay() {
             token_out: wild.to_vec(),
             amount_in: 100,
             min_amount_out: 1,
-            vault_witnesses: Vec::new(),
         })
     };
     let (mine, theirs) = futures::future::join(

@@ -129,7 +129,10 @@ pub fn chain(seed: u64, steps: usize) -> Vec<Fixture> {
     tree.insert(state_key, vault_state_leaf_value(&state));
     for _ in 0..4 {
         let (g, d, base) = (d32(&mut rng), d32(&mut rng), d32(&mut rng));
-        tree.insert(relationship_key(&g, &d, &vault_id), vault_relationship_leaf_value(&g, &d, &base));
+        tree.insert(
+            relationship_key(&g, &d, &vault_id),
+            vault_relationship_leaf_value(&g, &d, &base),
+        );
     }
     // The first trader, and its leaf once it has one.
     let (first_g, first_d) = (d32(&mut rng), d32(&mut rng));
@@ -182,8 +185,15 @@ pub fn chain(seed: u64, steps: usize) -> Vec<Fixture> {
         let post = swap_vault_post(&state, fee_bps, &witness.hop).unwrap();
         tree.insert(state_key, vault_state_leaf_value(&post));
         let next = relationship_leaf_next(&relationship_base, &witness.external_commitment);
-        tree.insert(rel_key, vault_relationship_leaf_value(&trader_genesis, &trader_device_id, &next));
-        assert_eq!(tree.root(), public.r_next, "the step's R_next is the tree's after its writes");
+        tree.insert(
+            rel_key,
+            vault_relationship_leaf_value(&trader_genesis, &trader_device_id, &next),
+        );
+        assert_eq!(
+            tree.root(),
+            public.r_next,
+            "the step's R_next is the tree's after its writes"
+        );
         if (trader_genesis, trader_device_id) == (first_g, first_d) {
             first_leaf = Some(next);
         }
@@ -223,7 +233,14 @@ pub fn signed_terms(token: &D32, y: &D32, branches: &[(Vec<u8>, Vec<[u8; SPX256F
 
 /// Computed escrow terms' bytes (`ComputedEscrowTerms::encode`): the table's program, setup digest, two session
 /// keys and two start commitments, then the three branches' recipients.
-pub fn computed_terms(token: &D32, y: &D32, table: [&D32; 2], keys: [[u8; SPX256F_KEY]; 2], starts: [&D32; 2], recipients: [(D32, D32); 3]) -> Vec<u8> {
+pub fn computed_terms(
+    token: &D32,
+    y: &D32,
+    table: [&D32; 2],
+    keys: [[u8; SPX256F_KEY]; 2],
+    starts: [&D32; 2],
+    recipients: [(D32, D32); 3],
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend(CLASS_ESCROW_COMPUTED_TERMS.to_be_bytes());
     out.extend(SCHEMA_V2.to_be_bytes());
@@ -252,7 +269,9 @@ pub fn computed_terms(token: &D32, y: &D32, table: [&D32; 2], keys: [[u8; SPX256
 #[derive(Clone, Copy, Debug)]
 pub enum Terms {
     /// Signed terms with this many branches, each with up to four signers and labels of up to 64 bytes.
-    Signed { branches: usize },
+    Signed {
+        branches: usize,
+    },
     Computed,
 }
 
@@ -319,7 +338,14 @@ pub fn terminal(seed: u64, release: Option<Terms>, present: bool, others: usize)
                     let r: [(D32, D32); 3] = std::array::from_fn(|_| (d32(&mut rng), d32(&mut rng)));
                     recipients = r.to_vec();
                     let keys: [[u8; SPX256F_KEY]; 2] = std::array::from_fn(|_| std::array::from_fn(|_| rng.random()));
-                    computed_terms(&token, &y, [&d32(&mut rng), &d32(&mut rng)], keys, [&d32(&mut rng), &d32(&mut rng)], r)
+                    computed_terms(
+                        &token,
+                        &y,
+                        [&d32(&mut rng), &d32(&mut rng)],
+                        keys,
+                        [&d32(&mut rng), &d32(&mut rng)],
+                        r,
+                    )
                 }
             };
             let view = decode_escrow(&bytes).expect("fixture terms decode");
@@ -341,11 +367,17 @@ pub fn terminal(seed: u64, release: Option<Terms>, present: bool, others: usize)
     tree.insert(state_key, vault_state_leaf_value(&state));
     let rel_key = relationship_key(&trader_genesis, &trader_device_id, &vault_id);
     if present {
-        tree.insert(rel_key, vault_relationship_leaf_value(&trader_genesis, &trader_device_id, &relationship_base));
+        tree.insert(
+            rel_key,
+            vault_relationship_leaf_value(&trader_genesis, &trader_device_id, &relationship_base),
+        );
     }
     for _ in 0..others {
         let (g, d, base) = (d32(&mut rng), d32(&mut rng), d32(&mut rng));
-        tree.insert(relationship_key(&g, &d, &vault_id), vault_relationship_leaf_value(&g, &d, &base));
+        tree.insert(
+            relationship_key(&g, &d, &vault_id),
+            vault_relationship_leaf_value(&g, &d, &base),
+        );
     }
     let r_prev = tree.root();
     let witness = StepWitness {
@@ -401,7 +433,12 @@ mod tests {
             (2, Some(Terms::Computed)),
             (3, Some(Terms::Signed { branches: 1 })),
             (4, Some(Terms::Signed { branches: 3 })),
-            (5, Some(Terms::Signed { branches: ESCROW_MAX_BRANCHES })),
+            (
+                5,
+                Some(Terms::Signed {
+                    branches: ESCROW_MAX_BRANCHES,
+                }),
+            ),
         ] {
             let f = terminal(seed, release, seed % 2 == 0, 2);
             assert_eq!(f.public.generation, f.witness.state.generation + 1);
@@ -439,7 +476,10 @@ mod tests {
             tree.insert(vault_state_key(&w.vault_id), vault_state_leaf_value(&post));
             let next = relationship_leaf_next(&w.relationship_base, &w.external_commitment);
             let rel_key = relationship_key(&w.trader_genesis, &w.trader_device_id, &w.vault_id);
-            tree.insert(rel_key, vault_relationship_leaf_value(&w.trader_genesis, &w.trader_device_id, &next));
+            tree.insert(
+                rel_key,
+                vault_relationship_leaf_value(&w.trader_genesis, &w.trader_device_id, &next),
+            );
             let mut rng = StdRng::seed_from_u64(seed ^ 0x5eed);
             // Re-draw the other traders exactly as the fixture did.
             let _: (u64, u64, u64, bool, u64) = (

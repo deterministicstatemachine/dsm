@@ -34,13 +34,16 @@
 //! verifier reconstructs `G(0)` from the running claim via
 //! `current_claim = (1+r_now)·G(0) + r_now·G(1)`.
 
+use crate::compat::stream::Stream;
 use crate::zerocheck::PaddingSpec;
 use crate::zerocheck::bit_fold::{BLOCK, BitFold};
 #[cfg(test)]
 use crate::zerocheck::univariate_skip::pack_bits;
 use crate::zerocheck::univariate_skip::{SplitEq, build_eq};
-use {primitives::field::{F128, F128Unreduced}, crate::compat::PHI_8_TABLE};
-use crate::compat::stream::Stream;
+use {
+    crate::compat::PHI_8_TABLE,
+    primitives::field::{F128, F128Unreduced},
+};
 
 /// Four independent products. Tuples keep the scalar and NEON paths in registers, while AVX-512 uses the batched helper.
 #[inline(always)]
@@ -935,11 +938,11 @@ mod tests {
     /// sum with the AB half, so this is what pins that half on its own.
     #[test]
     fn c_eval_from_round1_c_matches_direct_fold() {
+        use crate::compat::F8;
+        use crate::compat::ntt::{AdditiveNttGf8, InvNttTableByteSingleGf8};
         use crate::zerocheck::univariate_skip_optimized::{
             c_s, medium_challenges, round1_shift_reduce_extract_c_packed_padded, small_challenges,
         };
-        use crate::compat::ntt::{AdditiveNttGf8, InvNttTableByteSingleGf8};
-        use crate::compat::F8;
 
         const K_SKIP: usize = 6;
         const N_INNER: usize = 7;

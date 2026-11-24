@@ -87,11 +87,11 @@
 //!   `byte_idx` and apply it across all `i_inner` with one lookup + one XOR
 //!   per byte.
 
-use fiat_shamir::grinding_bits;
-use primitives::transcript::ProverState;
-use primitives::field::dot as inner_product_ext;
-use primitives::field::F128;
 use crate::compat::multilinear::{eq_table as build_eq, lagrange_weights_naive};
+use fiat_shamir::grinding_bits;
+use primitives::field::F128;
+use primitives::field::dot as inner_product_ext;
+use primitives::transcript::ProverState;
 
 // ---------------------------------------------------------------------------
 // LincheckCircuit: the per-block linear structure lincheck consumes
@@ -1110,8 +1110,8 @@ pub fn prove_padded_capture_s_hat_v(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use primitives::field::F64;
     use crate::compat::test_rng::Rng;
+    use primitives::field::F64;
 
     /// Test shim for the old dense-prove entry: the capture variant with a
     /// dense block and the captured `s_hat_v` discarded.

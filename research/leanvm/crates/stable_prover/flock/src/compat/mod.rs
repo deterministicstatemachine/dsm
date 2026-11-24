@@ -107,7 +107,10 @@ pub mod multilinear {
 
     /// The one barycentric denominator a power-of-two `phi_8` window has, inverted: `prod_(k != 0) PHI[k]`.
     pub fn window_denominator(size: usize) -> F128 {
-        PHI_8_TABLE[1..size].iter().fold(F128::ONE, |acc, &node| acc * node).inv()
+        PHI_8_TABLE[1..size]
+            .iter()
+            .fold(F128::ONE, |acc, &node| acc * node)
+            .inv()
     }
 
     /// The barycentric weights of an aligned `phi_8` window `nodes` at `p`.

@@ -128,7 +128,11 @@ fn digest_cells(h: &[u32; 8]) -> [F128; 2] {
 }
 
 /// Prove, verify, and check the proof is of `n_blake3` instructions.
-fn prove_and_verify(program: &Program, public: [F128; 2], n_blake3: usize) -> (lean_vm_core::cpu::Proof, verifier::Summary) {
+fn prove_and_verify(
+    program: &Program,
+    public: [F128; 2],
+    n_blake3: usize,
+) -> (lean_vm_core::cpu::Proof, verifier::Summary) {
     let t = std::time::Instant::now();
     let (proof, stats) = prove(program, &[], public, 1).expect("honest run proves");
     let prove_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -154,7 +158,12 @@ fn one_block_hash_is_blake3() {
     let flags = CHUNK_START | CHUNK_END | ROOT;
     let h = compress(&IV, &m, 0, 64, flags);
     // blake3(0..64), the `blake3` crate's digest.
-    assert_eq!(h, [0x4171ed4e, 0xd45c4aea, 0x6b6088b7, 0xe2463fd2, 0xac9caf12, 0x7ddcaceb, 0xc76d4c1f, 0x981b51f2]);
+    assert_eq!(
+        h,
+        [
+            0x4171ed4e, 0xd45c4aea, 0x6b6088b7, 0xe2463fd2, 0xac9caf12, 0x7ddcaceb, 0xc76d4c1f, 0x981b51f2
+        ]
+    );
     let p = program(
         ONE,
         &[
@@ -190,7 +199,12 @@ fn two_block_chunk_chains_as_blake3() {
     let mid = compress(&IV, &m1, 0, 64, CHUNK_START);
     let h = compress(&mid, &m2, 0, 64, CHUNK_END | ROOT);
     // blake3(0..128), the `blake3` crate's digest.
-    assert_eq!(h, [0x05577ef1, 0x7865b264, 0xf4b73bc3, 0x39f54346, 0xdf054b62, 0x1fc8761a, 0x48d5ac30, 0xef454bc4]);
+    assert_eq!(
+        h,
+        [
+            0x05577ef1, 0x7865b264, 0xf4b73bc3, 0x39f54346, 0xdf054b62, 0x1fc8761a, 0x48d5ac30, 0xef454bc4
+        ]
+    );
     let p = program(
         TWO,
         &[
@@ -253,7 +267,10 @@ fn chain(n: usize, tamper: bool) {
         for at in positions {
             let mut bad = proof.clone();
             bad.stream[at] = verifier::E::new(bad.stream[at].c0 ^ 1, bad.stream[at].c1);
-            assert!(verify(&p, &public, &bad).is_err(), "stream position {at} tampered ({flock:?})");
+            assert!(
+                verify(&p, &public, &bad).is_err(),
+                "stream position {at} tampered ({flock:?})"
+            );
         }
     }
 }
@@ -273,7 +290,10 @@ fn chain_of_300_and_tampering() {
 #[test]
 #[ignore]
 fn bench_chain() {
-    let n: usize = std::env::var("BLAKE3_N").ok().and_then(|v| v.parse().ok()).unwrap_or(2020);
+    let n: usize = std::env::var("BLAKE3_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2020);
     let flags = CHUNK_START | CHUNK_END | ROOT;
     let x0: [u32; 8] = std::array::from_fn(|i| 0x0101_0101u32.wrapping_mul(i as u32 + 1));
     let mut x = x0;
@@ -328,8 +348,14 @@ fn bench_chain() {
 #[test]
 fn fixed_zerocheck_coordinates_agree() {
     use flock::zerocheck::univariate_skip_optimized::{medium_challenges, small_challenges};
-    let prover: Vec<(u64, u64)> =
-        small_challenges().iter().chain(medium_challenges().iter()).map(|c| (c.c0, c.c1)).collect();
-    let verifier: Vec<(u64, u64)> = verifier::flock::fixed_challenges().iter().map(|c| (c.c0, c.c1)).collect();
+    let prover: Vec<(u64, u64)> = small_challenges()
+        .iter()
+        .chain(medium_challenges().iter())
+        .map(|c| (c.c0, c.c1))
+        .collect();
+    let verifier: Vec<(u64, u64)> = verifier::flock::fixed_challenges()
+        .iter()
+        .map(|c| (c.c0, c.c1))
+        .collect();
     assert_eq!(prover, verifier);
 }

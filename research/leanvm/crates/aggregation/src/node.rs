@@ -5,7 +5,8 @@ use super::cells::count;
 use super::child::gen_verify;
 use super::coverage::plan_coverage;
 use super::deferred::{
-    DeferredBytecodeClaim, DeferredClaim, DeferredMatrixClaim, FreshFlockClaim, aggregate_deferred_claims, bytecode_sums,
+    DeferredBytecodeClaim, DeferredClaim, DeferredMatrixClaim, FreshFlockClaim, aggregate_deferred_claims,
+    bytecode_sums,
 };
 use super::error::AggregateError;
 use super::guest::{fs_seed, unified_guest};
@@ -48,7 +49,15 @@ pub fn aggregate<P: Prover>(
     output: OutputClaims,
     log_inv_rate: usize,
 ) -> Result<(AggregateClaims, AggregateProof, Stats), AggregateError> {
-    aggregate_with_vault::<P>(children, raw_lean_xmss, raw_lean_sphincs, blobs, output, log_inv_rate, None)
+    aggregate_with_vault::<P>(
+        children,
+        raw_lean_xmss,
+        raw_lean_sphincs,
+        blobs,
+        output,
+        log_inv_rate,
+        None,
+    )
 }
 
 /// Research build: one SoFi vault step a node proves, from the tree root `r_prev`.
@@ -115,7 +124,11 @@ pub fn aggregate_with_vault<P: Prover>(
     let raw_lean_xmss_claims = sorted_claims(&mut raw_lean_xmss);
     let raw_lean_sphincs_claims = sorted_claims(&mut raw_lean_sphincs);
     let cover = plan_coverage(&raw_lean_xmss_claims, &raw_lean_sphincs_claims, children, declare)?;
-    if cover.lean_xmss.signers.is_empty() && cover.lean_sphincs.signers.is_empty() && da_root.is_none() && vault.is_none() {
+    if cover.lean_xmss.signers.is_empty()
+        && cover.lean_sphincs.signers.is_empty()
+        && da_root.is_none()
+        && vault.is_none()
+    {
         return Err(AggregateError::InvalidInput("nothing to publish"));
     }
 

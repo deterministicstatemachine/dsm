@@ -927,7 +927,10 @@ pub async fn resolve_pending_position(
     // device's trade, proven and published on a thread of its own (SoFi
     // Amendment S36), never on the position's path.
     for post in advanced.vault_generations() {
-        match verifier.vault_genesis(post.vault_id()).map_err(verifier_error)? {
+        match verifier
+            .vault_genesis(post.vault_id())
+            .map_err(verifier_error)?
+        {
             dsm::sofi::resolve::VaultGenesis::Accepted(vault_genesis) => {
                 crate::sdk::vault_proof_io::established(
                     set,
@@ -939,7 +942,9 @@ pub async fn resolve_pending_position(
             other => {
                 return Err(storage(
                     "vault proof",
-                    format!("the genesis of a vault this trade advanced is not accepted: {other:?}"),
+                    format!(
+                        "the genesis of a vault this trade advanced is not accepted: {other:?}"
+                    ),
                 ))
             }
         }
