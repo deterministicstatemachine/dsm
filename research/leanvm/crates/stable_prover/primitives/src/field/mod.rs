@@ -48,7 +48,8 @@ pub fn powers(x: F128, n: usize) -> Vec<F128> {
 
 /// `[g^0, g^1, …, g^{n-1}]`, built in parallel by [`isa::g_pow`].
 pub fn g_powers(n: usize) -> Vec<F64> {
-    assert!(n <= 1 << 32, "a g-power index fits in 32 bits");
+    // Widened first, so the bound also compiles on 32-bit targets.
+    assert!(n as u64 <= 1 << 32, "a g-power index fits in 32 bits");
     parallel::map_collect(n, |i| F64(isa::g_pow(i as u32)))
 }
 
