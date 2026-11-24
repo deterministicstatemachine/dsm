@@ -1264,12 +1264,6 @@ mod tests {
         assert_eq!(resolve_position(&realized(&refuted)), Ok(Resolution::Void));
     }
 
-    /// A genesis accepted as the fixture owner's creation.
-    fn accepted_genesis() -> crate::sofi::lineage::AcceptedVaultGenesis {
-        use crate::sofi::lineage::genesis_acceptance::{accept, valid};
-        accept(&valid()).expect("the fixture's genesis is accepted")
-    }
-
     /// A leg that consumed its canonical parent on this operation's E.
     fn good_leg() -> LegFacts {
         LegFacts {

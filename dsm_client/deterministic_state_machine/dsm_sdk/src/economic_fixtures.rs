@@ -114,6 +114,10 @@ pub fn point_sdk_at(members: &[(String, String, [u8; 32])], ca_pem: &[u8]) -> Fl
     // tests point no device at a node set.
     #[cfg(test)]
     crate::sdk::final_reads::forget_everything();
+    // Nor any proof started or generation established on it: a fresh fleet
+    // holds no record, and the same vault ids recur across tests.
+    #[cfg(test)]
+    crate::sdk::vault_proof_io::forget_everything();
     let config_path =
         std::env::temp_dir().join(format!("dsm_sdk_fleet_{}.toml", std::process::id()));
     let ca_pem = std::str::from_utf8(ca_pem).expect("the fleet's CA is PEM");

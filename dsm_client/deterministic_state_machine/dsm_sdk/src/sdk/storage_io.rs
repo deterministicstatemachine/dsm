@@ -228,13 +228,24 @@ async fn judged_candidates(
     let asked = &candidates[..candidates.len().min(budget + 1)];
     let mut judged = Vec::with_capacity(asked.len());
     // Each candidate is its own object: a few are asked for at once, and
-    // their answers are taken in candidate order.
+    // their answers are taken in candidate order. An object this process
+    // read `Stored` is its bytes for good, and is not asked for again; one
+    // the members show `Stored` now is kept so.
     for some in asked.chunks(CANDIDATE_READS_AT_ONCE) {
-        let reads =
-            futures::future::join_all(some.iter().map(|addr| client.get_immutable(addr))).await;
-        for (addr, reads) in some.iter().zip(reads) {
-            judged.push(dsm::sofi::storage::judge(addr, &reads));
-        }
+        let reads = futures::future::join_all(some.iter().map(|addr| async move {
+            match crate::sdk::final_reads::stored_object(addr) {
+                Some(bytes) => dsm::sofi::storage::Candidate::Stored(bytes),
+                None => {
+                    let judged = dsm::sofi::storage::judge(addr, &client.get_immutable(addr).await);
+                    if let dsm::sofi::storage::Candidate::Stored(bytes) = &judged {
+                        crate::sdk::final_reads::keep_stored_object(addr, bytes);
+                    }
+                    judged
+                }
+            }
+        }))
+        .await;
+        judged.extend(reads);
     }
     Ok(judged)
 }

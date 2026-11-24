@@ -140,11 +140,12 @@ async fn proven_at(
     set: &StorageSet,
     genesis: &AcceptedVaultGenesis,
     generation: u64,
+    read: &mut Read,
 ) -> Result<Option<(ProvenVaultHead, Vec<u8>)>, DsmError> {
     let vault_id = genesis.vault_id();
     // A record whose proof does not verify is passed over (DSM Amendment
     // A15: discovery carries no authority).
-    for bytes in records_at(set, vault_id, generation).await? {
+    for bytes in read.at(set, vault_id, generation).await? {
         match vault_proof::verify_record(&bytes, vault_id, genesis.genesis_root()) {
             Ok(head) => return Ok(Some((head, bytes))),
             Err(why) => {
@@ -164,6 +165,7 @@ async fn proven_at(
 async fn newest(
     set: &StorageSet,
     genesis: &AcceptedVaultGenesis,
+    read: &mut Read,
 ) -> Result<Option<(u64, Vec<u8>)>, DsmError> {
     let vault_id = genesis.vault_id();
     let hint = sofi_vault_head::head(vault_id)
@@ -171,7 +173,7 @@ async fn newest(
         .map_or(0, |head| head.generation);
     let mut found: Option<(u64, Vec<u8>)> = None;
     if hint > 0 {
-        if let Some((_, bytes)) = proven_at(set, genesis, hint).await? {
+        if let Some((_, bytes)) = proven_at(set, genesis, hint, read).await? {
             found = Some((hint, bytes));
         }
     }
@@ -179,7 +181,7 @@ async fn newest(
     let mut step = 1;
     let high = loop {
         let at = low + step;
-        match proven_at(set, genesis, at).await? {
+        match proven_at(set, genesis, at, read).await? {
             Some((_, bytes)) => {
                 found = Some((at, bytes));
                 low = at;
@@ -191,7 +193,7 @@ async fn newest(
     let mut high = high;
     while high - low > 1 {
         let mid = low + (high - low) / 2;
-        match proven_at(set, genesis, mid).await? {
+        match proven_at(set, genesis, mid, read).await? {
             Some((_, bytes)) => {
                 found = Some((mid, bytes));
                 low = mid;
@@ -216,19 +218,42 @@ pub(crate) async fn candidates(
         return records_at_root(set, vault_id, root).await;
     }
     let mut out = Vec::new();
-    if let Some((generation, verified)) = newest(set, genesis).await? {
+    let read = &mut Read::default();
+    if let Some((generation, verified)) = newest(set, genesis, read).await? {
         out.push(verified.clone());
         out.extend(
-            records_at(set, vault_id, generation)
+            read.at(set, vault_id, generation)
                 .await?
                 .into_iter()
                 .filter(|bytes| *bytes != verified),
         );
         if generation > 1 {
-            out.extend(records_at(set, vault_id, generation - 1).await?);
+            out.extend(read.at(set, vault_id, generation - 1).await?);
         }
     }
     Ok(out)
+}
+
+/// The records one lookup read at each generation: a search that reads a
+/// generation's index reads it once.
+#[derive(Default)]
+struct Read(BTreeMap<u64, Vec<Vec<u8>>>);
+
+impl Read {
+    /// `vault_id`'s records at `generation`, unverified, read once.
+    async fn at(
+        &mut self,
+        set: &StorageSet,
+        vault_id: &D32,
+        generation: u64,
+    ) -> Result<Vec<Vec<u8>>, DsmError> {
+        if let Some(records) = self.0.get(&generation) {
+            return Ok(records.clone());
+        }
+        let records = records_at(set, vault_id, generation).await?;
+        self.0.insert(generation, records.clone());
+        Ok(records)
+    }
 }
 
 /// The generations this process's walks established, by vault and
@@ -317,6 +342,26 @@ static PROVING: Mutex<Vec<(ProofKey, std::thread::JoinHandle<Result<(), DsmError
 static STARTED: Mutex<std::collections::BTreeSet<ProofKey>> =
     Mutex::new(std::collections::BTreeSet::new());
 
+/// Forget every proof started and every generation established, where a test
+/// stands in for a fresh start ([`crate::sdk::final_reads::forget_everything`]):
+/// a fresh fleet holds no record. A proof still running finishes on its own
+/// thread against the fleet it started on.
+#[cfg(test)]
+pub(crate) fn forget_everything() {
+    match PROVING.lock() {
+        Ok(mut proving) => proving.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+    match STARTED.lock() {
+        Ok(mut started) => started.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+    match ESTABLISHED.lock() {
+        Ok(mut established) => established.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+}
+
 fn forget_started(key: &ProofKey) -> Result<(), DsmError> {
     STARTED
         .lock()
@@ -398,8 +443,9 @@ async fn prove_up_to(
     let mut pending: Vec<VaultPostState> = Vec::new();
     let mut at = generation;
     let mut base: Option<ProvenVaultHead> = None;
+    let read = &mut Read::default();
     while at > 0 {
-        if let Some((head, _)) = proven_at(set, genesis, at).await? {
+        if let Some((head, _)) = proven_at(set, genesis, at, read).await? {
             base = Some(head);
             break;
         }

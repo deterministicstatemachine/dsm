@@ -4593,6 +4593,11 @@ async fn a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realiz
     .await;
     assert_eq!(resolve(&p).await, (q, void));
     realized_trade(&p, &m, 10).await;
+    // A reader starts at the vault's newest proof record (SoFi Amendment
+    // S36): the trades' records are published first.
+    crate::sdk::vault_proof_io::settled()
+        .await
+        .expect("the trades' proofs are published");
     forget_the_vault(&p.a, &m.vault_id);
     let (own_a, parents_a) = standing_of(&p.a);
     let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
@@ -6750,7 +6755,12 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
 
     // Each vault's next key: the first attempt key at the generation this
     // position's exercise produced, open, as a verifier that has read
-    // nothing yet finds it.
+    // nothing yet finds it. A reader starts at a vault's newest proof
+    // record (SoFi Amendment S36): the position's own records are published
+    // first.
+    crate::sdk::vault_proof_io::settled()
+        .await
+        .expect("the position's proofs are published");
     let (own, parents) = standing_of(&p.b);
     let reading = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = reading.verifier();
@@ -6793,6 +6803,22 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
                 )
             })
         })
+        .collect();
+    // A vault's proof-record locators are discovery too (SoFi Amendment
+    // S36): a newer record may land under one at any time, so each walk of
+    // the vault reads them afresh.
+    let probes: std::collections::BTreeSet<String> = probes
+        .into_iter()
+        .chain([one, two].into_iter().flat_map(|vault_id| {
+            (0..=64u64).map(move |generation| {
+                format!(
+                    "GET /api/v2/index/{}",
+                    crate::util::text_id::encode_base32_crockford(
+                        &dsm::sofi::vault_proof::generation_locator(&vault_id, generation)
+                    )
+                )
+            })
+        }))
         .collect();
     // A final cell is read, then read afresh for its proof's check.
     let allowed = |request: &str| {

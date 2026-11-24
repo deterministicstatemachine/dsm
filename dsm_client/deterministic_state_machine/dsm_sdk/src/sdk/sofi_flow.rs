@@ -1632,6 +1632,9 @@ pub struct OwnedVault {
 /// whose head is not established is an error: the list would not be the
 /// owner's vaults as they stand.
 pub async fn owned_vaults(core: &CoreSDK, set: &StorageSet) -> Result<Vec<OwnedVault>, DsmError> {
+    // This device's trades' proof records are published first: a walk of
+    // the vaults starts at each one's newest record (SoFi Amendment S36).
+    crate::sdk::vault_proof_io::settled().await?;
     let accepted = &AcceptedGeneses::default();
     let standing = standing(core)?;
     let ctx = standing.context(set, accepted)?;

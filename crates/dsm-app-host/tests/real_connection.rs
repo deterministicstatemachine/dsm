@@ -1001,8 +1001,6 @@ async fn connect_over_the_real_relay() {
             token_out: wild.to_vec(),
             amount_in: 500,
             min_amount_out: 1,
-            // The account fills in its vaults' witnesses as it signs the
-            // request (SoFi Amendment S24); the application asks for none.
         }),
     )
     .await;
@@ -1048,11 +1046,9 @@ async fn connect_over_the_real_relay() {
     )
     .await;
 
-    // A second swap, now that the vault has moved: the account signs and
-    // publishes its baseline at the generation it established and hands the
-    // wallet its witness inside the request (SoFi Amendment S24). The wallet
-    // already holds the vault, so it walks on from what it holds; the
-    // request still carries, signs and decodes as it must.
+    // A second swap, now that the vault has moved: the wallet starts at the
+    // vault's newest proof record, its own first swap's (SoFi Amendment
+    // S36), and its trade leaves the next record.
     let era_before = wallet.holds("ERA").await;
     let again = ask(
         &game,
@@ -1073,11 +1069,21 @@ async fn connect_over_the_real_relay() {
         swapped.reason
     );
     assert_eq!(wallet.holds("ERA").await, era_before - 100);
-    assert!(
-        game.logged()
-            .contains("published the baseline at generation"),
-        "the account signed and published its baseline for the second swap"
-    );
+    let wallet_ref = &wallet;
+    until(
+        "the second swap's proof record is published",
+        || async move {
+            if wallet_ref
+                .logged()
+                .contains("published generation 2 of vault")
+            {
+                Ok(())
+            } else {
+                Err("the wallet has not published generation 2's record yet".to_string())
+            }
+        },
+    )
+    .await;
 
     // Two wallets swap through the one vault at once. Both read its head and
     // can race for its next key: the loser's position resolves Void, provable

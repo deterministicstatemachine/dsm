@@ -161,6 +161,11 @@ async fn backup_loop_woken() -> bool {
 #[tokio::test]
 #[serial_test::serial]
 async fn only_a_change_the_activity_mark_reads_wakes_the_backup_loop() {
+    // A backup loop another test of this binary started waits on the same
+    // wake and would take it: no loop runs, and none starts, while this test
+    // listens.
+    let _hold = inbox_poller::hold_off_for_two_device_harness().await;
+    wallet_backup_flow::stop_for_test();
     crate::economic_fixtures::use_test_storage_dir();
     crate::storage::client_db::reset_database_for_tests();
     crate::storage::client_db::init_database().expect("the device database");

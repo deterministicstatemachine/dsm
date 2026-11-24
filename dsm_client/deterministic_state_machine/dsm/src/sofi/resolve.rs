@@ -775,6 +775,11 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     /// What this verifier's walks replaced in this device's record of a
     /// vault ([`Verifier::replaced_records`]).
     replaced: std::sync::Mutex<Vec<ReplacedRecord>>,
+    /// Each vault's state at a proof record's root, Core verified, by vault
+    /// and root: what a newer record's last link reads at its parent when
+    /// this device holds nothing of the vault. Held for the verification
+    /// alone; never recorded as a generation this device holds.
+    proven_states: std::sync::Mutex<BTreeMap<(D32, D32), VaultStateLeaf>>,
     /// Each vault's chain as this verifier's walks established it, for this
     /// operation: where its next walk of the vault resumes. A chain only
     /// grows, so one established earlier in the operation is a start no
@@ -834,6 +839,7 @@ impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
             programs: ProgramRegistry::new(),
             proven: ProvenFinals::default(),
             replaced: std::sync::Mutex::new(Vec::new()),
+            proven_states: std::sync::Mutex::new(BTreeMap::new()),
             walked: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
@@ -1998,8 +2004,16 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
+        let proven = self
+            .proven_states
+            .lock()
+            .map_err(|e| VerifierFailure::Read(format!("the proven states: {e}")))?
+            .get(&(*vault_id, pre_root))
+            .cloned();
         let state = if *genesis.genesis_root() == pre_root {
             genesis.state().clone()
+        } else if let Some(state) = proven {
+            state
         } else {
             match self.reads.vault_state_at(vault_id, &pre_root)? {
                 Some(state) => state,
@@ -2540,6 +2554,22 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         continue;
                     }
                 };
+            // The last link reads the vault's state at the parent: the
+            // record whose root is the parent holds it, Core verified, and
+            // this verification holds it for that read alone.
+            for parent in &candidates {
+                if let Ok(below) =
+                    super::vault_proof::verify_record(parent, vault_id, genesis.genesis_root())
+                {
+                    if below.root() == head.r_prev() {
+                        self.proven_states
+                            .lock()
+                            .map_err(|e| VerifierFailure::Read(format!("the proven states: {e}")))?
+                            .insert((*vault_id, *below.root()), below.tree().state.clone());
+                        break;
+                    }
+                }
+            }
             // The record's trade consumed its parent: read from its own
             // objects as the last link (SoFi Amendment S34), none of them a
             // trader's lineage, so the chain starts at the record's root and
