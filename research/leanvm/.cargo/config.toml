@@ -1,0 +1,11 @@
+[alias]
+testall = ["test", "--release", "--workspace"]
+clippyall = ["clippy", "--release", "--workspace", "--all-targets", "--", "-D", "warnings"]
+docall = ["doc", "--release", "--workspace", "--no-deps"]
+leanvm-bench = ["run", "--release", "-p", "leanvm-bench", "--"]
+
+[build]
+rustdocflags = ["-D", "warnings"]
+
+[target.'cfg(all())']
+rustflags = ["-C", "target-cpu=native"]

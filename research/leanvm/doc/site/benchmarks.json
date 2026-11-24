@@ -1,0 +1,54 @@
+{
+  "commit": "29077b733",
+  "proof_kib": { "aggregation": 209, "recursion": 303 },
+  "machines": [
+    {
+      "name": "MacBook Pro M4 Max",
+      "cpu": "Apple M4 Max",
+      "cores": 16,
+      "threads": 16,
+      "memory": "48 GB LPDDR5X, unified",
+      "simd": "NEON",
+      "results": {
+        "aggregation": { "4": { "time": 1.149, "ram": 5.04 }, "8": { "time": 0.817, "ram": 5.14 }, "full": { "time": 0.748, "ram": 5.19 } },
+        "recursion": { "4": { "time": 1.229, "ram": 4.88 }, "8": { "time": 0.894, "ram": 5.01 }, "full": { "time": 0.829, "ram": 5.03 } }
+      }
+    },
+    {
+      "name": "Hetzner AX42",
+      "cpu": "AMD Ryzen 7 PRO 8700GE",
+      "cores": 8,
+      "threads": 16,
+      "memory": "64 GB DDR5-5200, 2 × 32 GB Samsung",
+      "simd": "AVX-512",
+      "results": {
+        "aggregation": { "4": { "time": 1.754, "ram": 3.43 }, "8": { "time": 1.124, "ram": 3.50 }, "full": { "time": 1.121, "ram": 3.50 } },
+        "recursion": { "4": { "time": 1.945, "ram": 3.54 }, "8": { "time": 1.322, "ram": 3.58 }, "full": { "time": 1.333, "ram": 3.58 } }
+      }
+    },
+    {
+      "name": "Hetzner EX63",
+      "cpu": "Intel Core Ultra 7 265",
+      "cores": 20,
+      "threads": 20,
+      "memory": "64 GB DDR5-5600, 2 × 32 GB Crucial",
+      "simd": "AVX2",
+      "results": {
+        "aggregation": { "4": { "time": 1.978, "ram": 3.22 }, "8": { "time": 1.134, "ram": 3.29 }, "full": { "time": 0.871, "ram": 3.40 } },
+        "recursion": { "4": { "time": 2.257, "ram": 3.10 }, "8": { "time": 1.358, "ram": 3.12 }, "full": { "time": 1.047, "ram": 3.23 } }
+      }
+    },
+    {
+      "name": "Cherry Servers EPYC 9355P",
+      "cpu": "AMD EPYC 9355P",
+      "cores": 32,
+      "threads": 64,
+      "memory": "192 GB DDR5-6400 RDIMM, 12 × 16 GB SK Hynix",
+      "simd": "AVX-512",
+      "results": {
+        "aggregation": { "4": { "time": 1.077, "ram": 3.44 }, "8": { "time": 0.567, "ram": 3.50 }, "full": { "time": 0.242, "ram": 3.69 } },
+        "recursion": { "4": { "time": 1.245, "ram": 3.55 }, "8": { "time": 0.706, "ram": 3.56 }, "full": { "time": 0.366, "ram": 3.74 } }
+      }
+    }
+  ]
+}

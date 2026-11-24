@@ -1,0 +1,117 @@
+module
+
+public import FORS.LazyRun.Rows
+
+@[expose] public section
+
+/-! Original-cost instrumentation for the common hidden-coordinate comparison. Virtual
+honest work has an explicit natural-number cost; ordinary raw queries each cost one, while
+private draws and privileged disclosures are free. Every monitor can inspect this same trace.
+
+An honest read (the third summand, inputs in `H`, read as the raw input `HonestInputs.toInput h`)
+is a raw query the honest parties make: the comparison answers it like the raw query, but it costs
+nothing and is not recorded, so a budget bounds the other parties' queries only. `H` defaults to
+`Empty`: a computation without honest reads. -/
+
+open OracleComp OracleSpec
+namespace FORS.Security.HiddenCost
+
+variable [Params]
+set_option backward.isDefEq.respectTransparency false
+set_option maxRecDepth 10000
+attribute [local instance] Classical.propDecidable
+
+/-- The raw input an honest read stands for. -/
+class HonestInputs (H D : Type) where
+  toInput : H → D
+
+instance (D : Type) : HonestInputs Empty D := ⟨Empty.elim⟩
+
+/-- An honest read of the raw input itself. -/
+instance (D : Type) : HonestInputs D D := ⟨id⟩
+
+abbrev SourceCostSpec (D R ι : Type) (H : Type := Empty) :=
+  HiddenRows.SourceSpec D R ι + ((Nat →ₒ Unit) + (H →ₒ R))
+abbrev Entry (D : Type) := D ⊕ Nat
+
+def sourceCost {D R ι H : Type} : (SourceCostSpec D R ι H).Domain → Nat
+  | .inl (.inr (.inl _)) => 1
+  | .inr (.inl amount) => amount
+  | _ => 0
+
+def recorded {D R ι H : Type} : (SourceCostSpec D R ι H).Domain → List (Entry D)
+  | .inl (.inr (.inl input)) => [.inl input]
+  | .inr (.inl amount) => [.inr amount]
+  | _ => []
+
+def entryCost {D : Type} : Entry D → Nat
+  | .inl _ => 1
+  | .inr amount => amount
+
+def traceCost {D : Type} (entries : List (Entry D)) : Nat := (entries.map entryCost).sum
+
+theorem traceCost_append {D : Type} (left right : List (Entry D)) :
+    traceCost (left ++ right) = traceCost left + traceCost right := by simp [traceCost]
+
+theorem recorded_cost {D R ι H : Type} (input : (SourceCostSpec D R ι H).Domain) :
+    traceCost (recorded input) = sourceCost input := by
+  cases input with
+  | inl input => cases input with
+    | inl draw => rfl
+    | inr input => cases input <;> rfl
+  | inr input => cases input with
+    | inl amount => simp [traceCost, recorded, entryCost, sourceCost]
+    | inr honest => rfl
+
+def tick {D R ι H : Type} (amount : Nat) : OracleComp (SourceCostSpec D R ι H) Unit :=
+  liftM ((SourceCostSpec D R ι H).query (.inr (.inl amount)))
+
+def reveal {D R ι H : Type} (coordinate : ι) : OracleComp (SourceCostSpec D R ι H) Digest :=
+  liftM ((SourceCostSpec D R ι H).query (.inl (.inr (.inr coordinate))))
+
+/-- An honest read of `honest`: answered as the raw query `HonestInputs.toInput honest`, free. -/
+def honestRead {D R ι H : Type} (honest : H) : OracleComp (SourceCostSpec D R ι H) R :=
+  liftM ((SourceCostSpec D R ι H).query (.inr (.inr honest)))
+
+def eraseQuery {D R ι H : Type} [HonestInputs H D] :
+    QueryImpl (SourceCostSpec D R ι H) (OracleComp (HiddenRows.SourceSpec D R ι))
+  | .inl input => liftM ((HiddenRows.SourceSpec D R ι).query input)
+  | .inr (.inl _) => pure ()
+  | .inr (.inr honest) =>
+      liftM ((HiddenRows.SourceSpec D R ι).query (.inr (.inl (HonestInputs.toInput honest))))
+
+def erase {D R ι H α : Type} [HonestInputs H D] (computation : OracleComp (SourceCostSpec D R ι H) α) :
+    OracleComp (HiddenRows.SourceSpec D R ι) α := simulateQ eraseQuery computation
+
+def trace {D R ι H α : Type} (computation : OracleComp (SourceCostSpec D R ι H) α) :
+    OracleComp (SourceCostSpec D R ι H) (α × List (Entry D)) :=
+  OracleComp.construct (fun value => pure (value, []))
+    (fun input _ next => do
+      let value ← liftM ((SourceCostSpec D R ι H).query input)
+      let result ← next value
+      return (result.1, recorded input ++ result.2)) computation
+
+theorem trace_pure {D R ι H α : Type} (value : α) :
+    trace (pure value : OracleComp (SourceCostSpec D R ι H) α) = pure (value, []) := rfl
+
+theorem trace_query_bind {D R ι H α : Type} (input : (SourceCostSpec D R ι H).Domain)
+    (next : (SourceCostSpec D R ι H).Range input → OracleComp (SourceCostSpec D R ι H) α) :
+    trace (liftM ((SourceCostSpec D R ι H).query input) >>= next) =
+      (liftM ((SourceCostSpec D R ι H).query input) >>= fun value =>
+        (fun result => (result.1, recorded input ++ result.2)) <$> trace (next value)) := by
+  rw [trace, OracleComp.construct_query_bind]
+  simp only [map_eq_bind_pure_comp]
+  rfl
+
+/-- A weighted cap stops before any query or compressed honest-work tick exceeds the
+remaining original budget. This is used on the common comparison execution. -/
+def cap {D R ι H α : Type} (computation : OracleComp (SourceCostSpec D R ι H) α) :
+    Nat → OracleComp (SourceCostSpec D R ι H) (Option α) :=
+  OracleComp.construct (fun value _ => pure (some value))
+    (fun input _ next budget =>
+      if sourceCost input ≤ budget then do
+        let value ← liftM ((SourceCostSpec D R ι H).query input)
+        next value (budget - sourceCost input)
+      else pure none) computation
+
+end FORS.Security.HiddenCost

@@ -1,0 +1,118 @@
+/-
+  LeanVM.Protocol.Whir.Params.Check
+
+  The deployed WHIR parameters' rows other than the fold rounds, checked on every admissible
+  shape by kernel evaluation: the ladder's geometry, the list bounds, the batching, out-of-domain
+  and query rows.
+-/
+
+module
+
+public import LeanVM.Protocol.ToArkLib.Whir.AffineCombinerDeployedTable
+public import LeanVM.Parameters.Whir
+
+/-!
+# The deployed parameters' check
+
+The levels of a shape are the fold certificate's (`AffineCombiner.foldTable`: `(κ, R, k, Aend,
+rounds)` per level, exported from the Rust's `derive_config_with_log_inv_rate`). `shapeOK μ R`
+checks, in natural numbers, everything the round-by-round analysis takes of them besides the
+fold rounds' own check (`AffineCombiner.levelOK`, which it includes):
+
+* the levels are the statement's ladder (`Whir.ladder μ R`): folds, rates, and `κ_i + k_i =
+  κ_(i−1)` with `κ_(−1) = μ`; `κ + R ≤ 64`, `1 ≤ R`, `1 ≤ k ≤ 2^κ`, `k < Aend`;
+* the list each level starts on, at the level's degree `d = 2^κ − 1 + k` (every round is analysed
+  at it), is defined (`n d < A₀²`) and its bound `jlStart` is `jl n A₀ d`;
+* each level's queries: `((Aend − 1)/n)^t ≤ 2^-(125 − q)` (`afterGrind q`), i.e. `2^-125` after the
+  `q`-bit grind, `q = Whir.queryGrindingBits`;
+* each level with a next one: its query message, which also draws the next level's batching `λ`,
+  `((Aend − 1)/n)^t + (t + 1) L'/|E| ≤ 2^-(125 − q)`, as
+  `(Aend − 1)^t 2^128 + (t + 1) L' n^t ≤ n^t 2^(q + 3)` (`countBits q`), and the
+  next level's out-of-domain point, `C(L', 2) κ ≤ 2^(countBits o)` (`2^-125` after its grind of
+  `o = Whir.oodGrindingBits` bits), with `1 ≤ κ`;
+* level `0`: its rate is the shape's and it folds the `2^6` lanes (`k₀ = 6`), the threshold exceeds the degree (`d₀ < A₀`),
+  its list bound is at most `166`, the stacked opening's batching with the ring's map,
+  `(maxStackedClaims + 1) L₀ ≤ 2^(countBits b)`, `b = Whir.batchGrindingBits`, and the commitment's
+  out-of-domain sample, `C(L₀, 2) μ ≤ 2^(countBits o)`.
+
+`shapeOK_all`: every admissible shape passes, by kernel evaluation.
+-/
+
+namespace LeanVM.Protocol.Whir.Params
+
+open LeanVM.Parameters LeanVM.Protocol.Whir.AffineCombiner
+
+@[expose] public section
+
+/-- The error exponent a message may keep before its grind of `g` bits: `2^-securityBits` is `2^-g`
+times `2^-afterGrind g`. -/
+def afterGrind (g : ℕ) : ℕ := LeanVM.Protocol.Compile.securityBits - g
+
+/-- The bits a count over `|E| = 2^128` may take before a grind of `g` bits: `g + 128 - securityBits`. -/
+def countBits (g : ℕ) : ℕ := g + 128 - LeanVM.Protocol.Compile.securityBits
+
+theorem countBits_eq (g : ℕ) : countBits g = g + 3 := by
+  unfold countBits LeanVM.Protocol.Compile.securityBits
+  omega
+
+/-- A level of the fold certificate: `(κ, R, k, Aend, rounds)`. -/
+abbrev Lv : Type := ℕ × ℕ × ℕ × ℕ × List (ℕ × ℕ × ℕ)
+
+/-- The levels of a shape. -/
+def levelsOf (μ R : ℕ) : List Lv := (foldTable.getD (R - 1) []).getD (μ - 16) []
+
+/-- The threshold a level starts on, `A₀ = Aend − k`. -/
+def thrStart (lv : Lv) : ℕ := lv.2.2.2.1 - lv.2.2.1
+
+/-- Level 0's threshold of a shape. -/
+def thr0Of (μ R : ℕ) : ℕ := thrStart ((levelsOf μ R).headD (0, 1, 0, 1, []))
+
+/-- The degree every round of a level is analysed at, `d = 2^κ − 1 + k`. -/
+def degOf (lv : Lv) : ℕ := 2 ^ lv.1 - 1 + lv.2.2.1
+
+/-- The list bound a level starts on, `jl(n, A₀, d)`. -/
+def jlStart (lv : Lv) : ℕ := jl (2 ^ (lv.1 + lv.2.1)) (lv.2.2.2.1 - lv.2.2.1) (degOf lv)
+
+/-- One level's checks against its ladder level, `κprev` the variables before its folds. -/
+def levelChecks (κprev : ℕ) (lv : Lv) (cfg : Whir.Level) : Bool :=
+  let κ := lv.1
+  let R := lv.2.1
+  let k := lv.2.2.1
+  let A := lv.2.2.2.1
+  decide (κ + k = κprev) && decide (cfg.fold = k) && decide (cfg.logInvRate = R) &&
+    decide (κ + R ≤ 64) && decide (1 ≤ R) && decide (1 ≤ k) && decide (k ≤ 2 ^ κ) &&
+    decide (k < A) && levelOK foldBudget lv &&
+    decide ((A - 1) ^ cfg.queries * 2 ^ afterGrind Whir.queryGrindingBits ≤ (2 ^ (κ + R)) ^ cfg.queries) &&
+    decide (2 ^ (κ + R) * (2 ^ κ - 1 + k) < (A - k) * (A - k))
+
+/-- The levels' checks, and between consecutive levels the query message with the next batching
+and the out-of-domain rows. -/
+def chainChecks : ℕ → List Lv → List Whir.Level → Bool
+  | κprev, [lv], [cfg] => levelChecks κprev lv cfg
+  | κprev, lv :: lv' :: rest, cfg :: cfg' :: crest =>
+    levelChecks κprev lv cfg &&
+      decide ((lv.2.2.2.1 - 1) ^ cfg.queries * 2 ^ 128 +
+          (cfg.queries + 1) * jlStart lv' * (2 ^ (lv.1 + lv.2.1)) ^ cfg.queries ≤
+        (2 ^ (lv.1 + lv.2.1)) ^ cfg.queries * 2 ^ countBits Whir.queryGrindingBits) &&
+      decide ((jlStart lv').choose 2 * lv.1 ≤ 2 ^ countBits Whir.oodGrindingBits) && decide (1 ≤ lv.1) &&
+      chainChecks lv.1 (lv' :: rest) (cfg' :: crest)
+  | _, _, _ => false
+
+/-- **The check of a shape.** -/
+def shapeOK (μ R : ℕ) : Bool :=
+  match Whir.ladder μ R, levelsOf μ R with
+  | some cfg, lv :: rest =>
+    chainChecks μ (lv :: rest) cfg && decide (lv.2.1 = R) && decide (lv.2.2.1 = 6) &&
+      decide (degOf lv < lv.2.2.2.1 - lv.2.2.1) && decide (jlStart lv ≤ 166) &&
+      decide ((LeanVM.Protocol.Verifier.maxStackedClaims + 1) * jlStart lv ≤
+        2 ^ countBits Whir.batchGrindingBits) &&
+      decide ((jlStart lv).choose 2 * μ ≤ 2 ^ countBits Whir.oodGrindingBits)
+  | _, _ => false
+
+/-- **Every admissible shape passes.** -/
+theorem shapeOK_all : ∀ μ < Whir.maxLogStack + 1, ∀ R < 5, Whir.Admissible μ R →
+    shapeOK μ R = true := by
+  decide +kernel
+
+end
+end LeanVM.Protocol.Whir.Params

@@ -1,0 +1,60 @@
+name = "lean-sphincs-security"
+version = "0.1.0"
+defaultTargets = ["Sphincs", "FORS"]
+
+[leanOptions]
+warningAsError = true
+# Every module of `FORS` carries the `[Params]` instance (the height, the layers, the FORS shape),
+# which some of its declarations do not use.
+weak.linter.unusedSectionVars = false
+# `[Params]` has no free variables, which `linter.concreteInstances` would reject.
+weak.linter.concreteInstances = false
+
+# The statement: definitions and end statements only (`Statement/`).
+[[require]]
+name = "statement"
+path = "../Statement"
+
+# The proofs shared by the projects: the random-permutation model's indifferentiability and
+# transfers, the duplex lemma.
+[[require]]
+name = "common"
+path = "../common"
+
+# Pinned as the statement pins it, ahead of VCVio's inherited one.
+[[require]]
+name = "CompPoly"
+git = "https://github.com/Verified-zkEVM/CompPoly"
+rev = "afb9b1363984a70f10e24bd597f6ff40ebc8afbb"
+
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "v4.36.0"
+
+[[require]]
+name = "VCVio"
+git = "https://github.com/Verified-zkEVM/VCVio.git"
+rev = "f1e63c780de398fb62206dd5890f27e1ad64e0e6"
+
+[[require]]
+name = "PolyFun"
+git = "https://github.com/Verified-zkEVM/PolyFun"
+rev = "528b3b1fda285487e55704409bd1b058dc18fcad"
+
+# The bridge from upstream's model to the statement, and the end theorem.
+[[lean_lib]]
+name = "Sphincs"
+
+[[lean_lib]]
+name = "FORS"
+# `FORS.lean` imports every module; `FORS/Axioms.lean` checks their axioms.
+roots = ["FORS", "FORS.Axioms"]
+
+# The crates' known answers (EthLib vectors, leanSPHINCS's KAT) against the statement's key
+# generation, signer and verifier, compiled (cli/SignatureKat.lean); not a default target.
+[[lean_exe]]
+name = "signature-kat"
+root = "SignatureKat"
+srcDir = "cli"
