@@ -60,10 +60,18 @@ html[data-skin="modern"] .b0x-panel {
 }
 html[data-skin="modern"] .b0x-panel * { font-family: inherit !important; }
 html[data-skin="modern"] .b0x-panel .b0x-head { border-bottom: 1px solid var(--s-line) !important; }
-html[data-skin="modern"] .b0x-panel .b0x-head strong { font-size: 16px !important; font-weight: 900; }
+/* Text in the Modern weights and sizes: the title and amounts heavy, the
+   section labels bold and small, the detail lines muted, never monospace. */
+html[data-skin="modern"] .b0x-panel .b0x-title { font-size: 20px !important; font-weight: 900; letter-spacing: -0.3px; }
+html[data-skin="modern"] .b0x-panel .b0x-section {
+  font-size: 12px !important; font-weight: 800; letter-spacing: 0.04em !important; color: var(--s-muted); opacity: 1 !important;
+}
+html[data-skin="modern"] .b0x-panel .b0x-amount { font-size: 17px !important; font-weight: 900; }
+html[data-skin="modern"] .b0x-panel .b0x-detail { font-size: 13px !important; font-weight: 600; color: var(--s-muted); opacity: 1 !important; }
+html[data-skin="modern"] .b0x-panel .b0x-empty { font-size: 15px !important; font-weight: 700; color: var(--s-muted); opacity: 1 !important; }
 html[data-skin="modern"] .b0x-panel .b0x-close { border: none !important; border-radius: 50% !important; background: var(--s-surface-2) !important; }
 html[data-skin="modern"] .b0x-panel .b0x-item {
-  border: none !important; border-radius: 12px; background: var(--s-surface-2) !important;
+  border: none !important; border-radius: 14px; background: var(--s-surface-2) !important; padding: 12px 14px !important;
 }
 
 /* The info badge: a small round "i" in the Modern colours. */
