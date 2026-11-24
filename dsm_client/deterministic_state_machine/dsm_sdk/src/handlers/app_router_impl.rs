@@ -1147,22 +1147,24 @@ impl AppRouterImpl {
         }
         drop(door);
 
-        // Tripwire preflight: the parent tip may be consumed only once.
+        // Tripwire preflight: the parent tip may be consumed only once. Nothing
+        // is mutated or sent before this point, so a tip that moved since this
+        // send read it is the relationship advancing under it (its own
+        // finality checkpoint, a step received): this send consumed nothing,
+        // and is refused to be made again from the new tip. Nothing diverged,
+        // so nothing is marked for reconcile — as a lifecycle step refuses a
+        // moved tip (`relationship_lifecycle`).
         match crate::storage::client_db::contact_chain_tip_matches_expected(
             &to_device_id,
             &chain_tip_arr,
         ) {
             Ok(true) => {}
             Ok(false) => {
-                let marked =
-                    crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id)
-                        .err()
-                        .map(|e| format!("; marking the contact for reconciliation failed: {e}"))
-                        .unwrap_or_default();
-                return OnlineSent::NotDebited(err(format!(
-                    "wallet.send: ParentConsumed - relationship tip changed before send; online \
-                     reconciliation required{marked}"
-                )));
+                return OnlineSent::NotDebited(err(
+                    "wallet.send: ParentConsumed - the relationship tip moved while this send \
+                     was prepared; nothing was sent: send again"
+                        .to_string(),
+                ));
             }
             Err(e) => {
                 return OnlineSent::NotDebited(err(format!(
