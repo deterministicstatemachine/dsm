@@ -26,7 +26,7 @@ These four lines are the ones the newcomer check (`make first-run`) runs on a cl
 Download the release's install script, then run it:
 
 ```bash
-curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.1-beta.4/install.sh
+curl -fsSLO https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.1-beta.5/install.sh
 sh install.sh
 ```
 
@@ -41,17 +41,17 @@ It downloads the release's `SHA256SUMS`, then the app host built for your machin
 What it printed on a Mac:
 
 ```text
-DSM 0.1.1-beta.4 for macos-arm64, from …
-  verified  dsm-app-host-0.1.1-beta.4-macos-arm64.tar.gz  sha256 bfaebcc172e33f0a519bd4e50d42968bb7d67cee2a73eed78712a62c9af4f3eb
-  verified  dsm-developer-0.1.1-beta.4.tar.gz  sha256 7ecc867880f1c6feeb82d7b1f48d7c840a58bb6bcfb6593e26360a3afe2cf40e
+DSM 0.1.1-beta.5 for macos-arm64, from …
+  verified  dsm-app-host-0.1.1-beta.5-macos-arm64.tar.gz  sha256 bfaebcc172e33f0a519bd4e50d42968bb7d67cee2a73eed78712a62c9af4f3eb
+  verified  dsm-developer-0.1.1-beta.5.tar.gz  sha256 7ecc867880f1c6feeb82d7b1f48d7c840a58bb6bcfb6593e26360a3afe2cf40e
 
 installed:
-  ~/.local/bin/dsm-app-host        dsm-app-host 0.1.1-beta.4
+  ~/.local/bin/dsm-app-host        dsm-app-host 0.1.1-beta.5
   ~/.local/bin/dsm-app
   ~/.local/bin/dsm-dev-wallet
   ~/.local/bin/dsm-connect-starter
   the clients, to install into your app:
-    ~/.local/share/dsm/clients/dsm-app-client-0.1.1-beta.4.tgz
+    ~/.local/share/dsm/clients/dsm-app-client-0.1.1-beta.5.tgz
     ~/.local/share/dsm/clients/dsm_app_client-0.1.1b4-py3-none-any.whl
 note: ~/.local/bin is not on your PATH; add it (and the same line to your shell's profile):
   export PATH="$HOME/.local/bin:$PATH"
@@ -74,7 +74,7 @@ dsm-app-host --version
 ```
 
 ```text
-dsm-app-host 0.1.1-beta.4
+dsm-app-host 0.1.1-beta.5
 ```
 
 ## 4. A folder for your app

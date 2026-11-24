@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "dsm"
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 dependencies = [
  "aes-gcm",
  "aggregation",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "dsm_sdk"
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 dependencies = [
  "aes-gcm",
  "android_logger",

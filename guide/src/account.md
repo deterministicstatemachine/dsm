@@ -106,7 +106,7 @@ Here is the first call in TypeScript and in Python: open the local account, and 
 
 ```bash
 npm init -y
-npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.1-beta.4.tgz
+npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.1-beta.5.tgz
 ```
 
 `npm init -y` makes a `package.json` if your folder has none. The client's types are inside the package, so nothing is compiled. Then:

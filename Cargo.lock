@@ -1142,7 +1142,7 @@ checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
 name = "dsm"
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 dependencies = [
  "aes-gcm",
  "aggregation",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "dsm-app-host"
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 dependencies = [
  "axum",
  "axum-server",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "dsm-dev-net"
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 dependencies = [
  "dsm",
  "dsm_storage_node",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "dsm_sdk"
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 dependencies = [
  "aes-gcm",
  "android_logger",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "dsm_storage_node"
-version = "0.1.1-beta.4"
+version = "0.1.1-beta.5"
 dependencies = [
  "anyhow",
  "axum",

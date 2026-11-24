@@ -5,13 +5,13 @@ Plug your app into DSM: a client for a `dsm-app-host`'s local ingress, which is 
 Its protobuf types (`src/generated/dsm_app_pb.ts`) are committed, so it builds with `tsc` alone and no protoc. Install it into your app from npm, at the version of the `dsm-app-host` you run:
 
 ```bash
-npm install dsm-app-client@0.1.1-beta.4
+npm install dsm-app-client@0.1.1-beta.5
 ```
 
 From a release, `install.sh` also puts the package in `~/.local/share/dsm/clients`, for a machine that has run it:
 
 ```bash
-npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.1-beta.4.tgz
+npm install ~/.local/share/dsm/clients/dsm-app-client-0.1.1-beta.5.tgz
 ```
 
 From the repo root, `make clients` runs `npm ci` and `tsc`; after a change to `proto/dsm_app.proto`, `make client-types` regenerates the types, and CI fails when they differ (`ci/client_types_check.sh`).
