@@ -10,7 +10,7 @@
 import React, { useEffect, useState } from 'react';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { getMoneyWaiting } from '../dsm/moneyWaiting';
-import { mailChameleonOf } from '../hooks/useThemeAssets';
+import { envelopeOf, mailChameleonOf } from '../hooks/useThemeAssets';
 import logger from '../utils/logger';
 
 /** Where he hangs: off the top-left edge of the screen. */
@@ -52,22 +52,6 @@ let plays = 0;
 /** Where the tongue is: the animation loading, on its way out, held out. */
 type Reach = 'loading' | 'reaching' | 'holding';
 
-/** An envelope with an exclamation mark, in the screen's two inks, a 20 × 13 pixel grid. */
-function Envelope(): React.JSX.Element {
-  const ink = { fill: 'var(--text-dark)' };
-  const paper = { fill: 'var(--bg)' };
-  const flap = [[1, 1], [2, 1], [3, 2], [4, 2], [5, 2], [6, 3], [7, 3], [8, 4], [9, 4], [10, 4], [11, 4], [12, 3], [13, 3], [14, 2], [15, 2], [16, 2], [17, 1], [18, 1]];
-  return (
-    <svg viewBox="0 0 20 13" width="40" height="26" shapeRendering="crispEdges">
-      <rect x="0" y="0" width="20" height="13" style={ink} />
-      <rect x="1" y="1" width="18" height="11" style={paper} />
-      {flap.map(([x, y]) => <rect key={`${x}-${y}`} x={x} y={y} width="1" height="1" style={ink} />)}
-      <rect x="9" y="6" width="2" height="3" style={ink} />
-      <rect x="9" y="10" width="2" height="1" style={ink} />
-    </svg>
-  );
-}
-
 function MailChameleon({ src, waiting, onError, onOpenInbox }: {
   src: string;
   waiting: number;
@@ -97,7 +81,7 @@ function MailChameleon({ src, waiting, onError, onOpenInbox }: {
       />
       {reach === 'holding' && (
         <button type="button" className="home-mail-envelope" aria-label={label} title={label} onClick={onOpenInbox}>
-          <Envelope />
+          <img src={envelopeOf(src)} alt="" width={40} height={26} />
         </button>
       )}
     </div>

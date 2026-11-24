@@ -101,6 +101,14 @@ const dsmLogoMap: Record<ThemeName, string> = {
  */
 export const mailChameleonOf = (loop: string) => loop.replace(/\.gif$/i, '-mail.gif');
 
+/**
+ * The envelope he holds out, beside each theme's loop: a 20 × 13 sprite in the
+ * colours of the coin in that loop (its dark for the outline, its light for the
+ * paper, its body tone for the flap and the exclamation mark), so it is his,
+ * as the coin was, and stands out from the screen in every theme.
+ */
+export const envelopeOf = (loop: string) => loop.replace(/\.gif$/i, '-envelope.png');
+
 const themeChameleon = (t: ThemeName) => chameleonMap[t] || 'images/vaulthunters/chameleon.gif';
 const themeIntroGif = (t: ThemeName) => introGifMap[t] || 'images/cutscenes/stateboy.gif';
 export const themeEraToken = (t: ThemeName) => eraTokenMap[t] || 'images/logos/era_token_gb.gif';

@@ -847,7 +847,7 @@ html, body {
   animation: homeMailSpit 220ms ease-out, homeMailSway 1.4s ease-in-out 220ms infinite alternate;
 }
 
-.home-mail-envelope svg {
+.home-mail-envelope img {
   display: block;
   image-rendering: pixelated;
 }
