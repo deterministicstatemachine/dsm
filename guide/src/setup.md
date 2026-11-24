@@ -52,7 +52,7 @@ installed:
   ~/.local/bin/dsm-connect-starter
   the clients, to install into your app:
     ~/.local/share/dsm/clients/dsm-app-client-0.1.1-beta.5.tgz
-    ~/.local/share/dsm/clients/dsm_app_client-0.1.1b4-py3-none-any.whl
+    ~/.local/share/dsm/clients/dsm_app_client-0.1.1b5-py3-none-any.whl
 note: ~/.local/bin is not on your PATH; add it (and the same line to your shell's profile):
   export PATH="$HOME/.local/bin:$PATH"
 ```

@@ -175,10 +175,10 @@ if (login.fact === "signed") console.log(`${player.peer} signed in`);
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.1b4-py3-none-any.whl
+pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.1b5-py3-none-any.whl
 ```
 
-The same package is on PyPI, for a machine `install.sh` has not run on: `pip install dsm-app-client==0.1.1b4`. From a clone, `pip install -e clients/python` instead.
+The same package is on PyPI, for a machine `install.sh` has not run on: `pip install dsm-app-client==0.1.1b5`. From a clone, `pip install -e clients/python` instead.
 
 ```python
 from dsm_app_client import local_app, grant, ask

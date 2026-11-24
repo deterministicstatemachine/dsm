@@ -131,7 +131,7 @@ The Python client goes into a virtual environment, from its package beside the T
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.1b4-py3-none-any.whl
+pip install ~/.local/share/dsm/clients/dsm_app_client-0.1.1b5-py3-none-any.whl
 python3 ~/.local/share/dsm/examples/account_status.py
 ```
 
