@@ -2018,17 +2018,53 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             match self.reads.vault_state_at(vault_id, &pre_root)? {
                 Some(state) => state,
                 // A root this device did not establish a generation at: the
-                // state leaf the core states there, read by its value
-                // (SoFi Amendment S26). The core's path binds that value to
-                // the root, which validation folds.
-                None => match self.published_state(core)? {
+                // vault's state there from the proof record whose root it is,
+                // Core verified (SoFi Amendment S36); or the state leaf the
+                // core states there, read by its value (SoFi Amendment S26).
+                // The core's path binds either to the root, which validation
+                // folds.
+                None => match self.recorded_state(vault_id, &genesis, &pre_root)? {
                     Some(state) => state,
-                    None => return Ok(None),
+                    None => match self.published_state(core)? {
+                        Some(state) => state,
+                        None => return Ok(None),
+                    },
                 },
             }
         };
         vault_leaves.extend(vault_leaves_from_core(core, &state));
         Ok(Some(state))
+    }
+
+    /// `vault_id`'s state at `root` from a proof record whose root is
+    /// `root`, Core verified back to the accepted `genesis`, held for this
+    /// verification; `None` where no such record verifies.
+    fn recorded_state(
+        &self,
+        vault_id: &D32,
+        genesis: &AcceptedVaultGenesis,
+        root: &D32,
+    ) -> Result<Option<VaultStateLeaf>, VerifierFailure> {
+        for bytes in self
+            .reads
+            .proof_record_candidates(genesis, Some(root))?
+            .iter()
+            .take(PROOF_RECORDS_TRIED)
+        {
+            if let Ok(head) =
+                super::vault_proof::verify_record(bytes, vault_id, genesis.genesis_root())
+            {
+                if head.root() == root {
+                    let state = head.tree().state.clone();
+                    self.proven_states
+                        .lock()
+                        .map_err(|e| VerifierFailure::Read(format!("the proven states: {e}")))?
+                        .insert((*vault_id, *root), state.clone());
+                    return Ok(Some(state));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The state leaf a vault core states at its pre-root, read from the
