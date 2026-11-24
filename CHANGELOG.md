@@ -34,7 +34,53 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   same for every application. The wallet finds the connection in its own record
   (`connect.connectedBy`, a new query) and fetches nothing the link names.
 
+- **The wallet backs up after every transaction, or by hand (owner,
+  2026-11-24).** Settings, in both skins, has the choice: every transaction,
+  the default, or by hand, which puts a small Back up button on the Send
+  screen that says what came of it (`wallet.backupNow`). Rust keeps the
+  setting and acts on it. A backup after a transaction is taken once the
+  transaction's rows have landed, 1.5 s later, where it waited for 20 s of
+  quiet; a transaction landing while a backup is written cancels that write,
+  as the database itself reports, and the next backup follows it. On the rig
+  (2026-11-24) a backup by hand took 4.0–4.4 s, and a send's automatic backup
+  was written 5.3 s after its delivery.
+
+- **The Modern wallet has the inbox.** The received transfers not yet looked
+  at, as Rust counts them, and what is waiting on the storage nodes were drawn
+  only by the DGen wallet screen. The Modern wallet shows the same inbox on
+  every view, with its count as a badge.
+
+- **The new ERA symbol, the hexagonal E, in both skins.**
+
 ### Fixed
+
+- **A wallet that holds nothing of a vault can check a payer's trade through
+  it (SoFi Amendment S36).** Checking a two-hop trade needs each leg's vault
+  state at its parent root, and only the vault being walked had its parent's
+  proof record read: on the rig (2026-11-24) a receiver held a payment for
+  "its route evidence: VaultLeaf". A vault's state at a root not established
+  on the device is now read from the proof record whose root it is, verified
+  back to the accepted genesis, before the published-state read.
+
+- **A send whose relationship moved while it was prepared is refused, and
+  nothing is marked.** The background poller can apply the relationship's own
+  checkpoint between the send reading its tip and the check of that tip. The
+  check read the move as a consumed parent and marked the contact for online
+  reconciliation, which no sync clears, so every later send to that contact
+  was refused ("Relationship state diverged and needs repair"). Nothing is
+  changed or sent before that check, so the send is refused with "nothing was
+  sent: send again" and the contact is left as it is.
+
+- **A vault's head is read without waiting on this device's own proof
+  records, and a chain asked for at a vault's genesis root is its genesis.**
+  The wait made one side of an escrow find no head of the other side's vault.
+
+- **A quote or a trade reads each final cell fresh once, and another trader's
+  unresolved position once.** Every verifier an operation built read the same
+  cells again. On a Galaxy A16 a one-hop quote went from 13.4 s to 6.6 s, and a
+  trade's route reads from 52 to 28. A route search that cannot establish a
+  vault's head now names the vault and the reason, where it said only that
+  some liquidity could not be reached.
 
 - **Each device keeps one wallet backup on the nodes, written over each time
   (DSM Amendment A40; owner, 2026-11-23).** A backup used to go to new cells
