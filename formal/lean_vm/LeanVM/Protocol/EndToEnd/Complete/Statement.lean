@@ -71,8 +71,8 @@ theorem completenessError_eq (fuel : ℕ) :
 /-- **Completeness in the statement's experiment.** For a valid execution whose committed size
 is at most `2^30`, at an inverse rate `2^ρ` with `1 ≤ ρ ≤ 4`, and a fuel of at most `2^64`
 nonces: the verifier rejects the honest prover's proof with probability at most
-`completenessError fuel`. -/
-theorem completeness_le {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
+`completenessError fuel`. Research build: under `hF` and `hfc`, named hypotheses, not proved. -/
+theorem completeness_le (hF : Flock.FlockWalk) (hfc : FlockComplete) {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
     (hv : ValidExecution prog input t) (hbudget : t.committedSize ≤ 2 ^ 30) {ρ : ℕ}
     (hρ : 1 ≤ ρ ∧ ρ ≤ 4) {fuel : ℕ} (hfuel : fuel ≤ 2 ^ 64) :
     Pr{let z ← LeanVM.experiment (honestProverRom prog input t ρ fuel)}[z.rejected] ≤
@@ -81,7 +81,7 @@ theorem completeness_le {prog : LeanIsaProgram} {input : PublicInput} {t : Execu
       verifierComp (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
         (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input)) :=
     funext fun π ↦ (verifierComp_leanVm _ _ π).symm
-  have h := romComplete_leanVm hv hbudget hρ hfuel
+  have h := romComplete_leanVm hF hfc hv hbudget hρ hfuel
   rw [← hV, ← completenessError_eq] at h
   have e := prEvent_map (LeanVM.experiment (honestProverRom prog input t ρ fuel))
     (fun z ↦ (z.1, z.2.1)) (fun z ↦ z.1.2 = false)
@@ -97,12 +97,14 @@ theorem statement_completenessError_le :
     LeanVM.completenessError (2 ^ 35) ≤ (2 : ℝ≥0∞)⁻¹ ^ 257 :=
   completenessError_two_pow_35_le
 
-/-- **Completeness holds**, with the honest prover `honestComp` (which always makes a proof). -/
-theorem completeness_holds : LeanVM.CompletenessRom :=
+/-- **Completeness holds**, with the honest prover `honestComp` (which always makes a proof).
+Research build: conditional on `hF : Flock.FlockWalk` and `hfc : FlockComplete`, named hypotheses
+that are NOT proved. -/
+theorem completeness_holds (hF : Flock.FlockWalk) (hfc : FlockComplete) : LeanVM.CompletenessRom :=
   ⟨fun prog input t ρ fuel ↦ some <$> honestComp prog input t ρ fuel,
     fun _ _ _ _ _ hv hbudget hρ hfuel ↦ by
       simp only [Functor.map_map, Option.getD_some]
-      exact completeness_le hv hbudget hρ hfuel⟩
+      exact completeness_le hF hfc hv hbudget hρ hfuel⟩
 
 end
 end LeanVM.Protocol.EndToEnd.Complete

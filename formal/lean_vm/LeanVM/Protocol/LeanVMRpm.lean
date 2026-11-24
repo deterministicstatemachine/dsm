@@ -233,7 +233,8 @@ theorem rpm_le_of_rom (X : OracleComp KeccakCalls Proof) (V : Proof → OracleCo
 /-- **Completeness in the random-permutation model, at a witness**: the specification's honest
 prover at an honest witness `w` at the sizes `s` (`HonestFor`), then the verifier, at a fuel of at
 most `2^64` nonces. -/
-theorem completenessRpm_at {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
+theorem completenessRpm_at (hF : Protocol.Flock.FlockWalk) (hfc : EndToEnd.Complete.FlockComplete)
+    {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
     {ρ : ℕ}
     {w : Air.Flat.EnsembleWitness (Arithmetization.leanIsaEnsemble prog t.logMemorySize)} {s : LeanIsa.Sizes}
     (hw : EndToEnd.Complete.HonestFor prog input t ρ w s) {fuel : ℕ} (hfuel : fuel ≤ 2 ^ 64) :
@@ -244,17 +245,18 @@ theorem completenessRpm_at {prog : LeanIsaProgram} {input : PublicInput} {t : Ex
             verifierWithHash callKeccak256 callKeccakF1600 prog input proof)).run' []}[v = false] ≤
       completenessError fuel + rpmError (completenessPermCalls fuel) := by
   refine rpm_le_of_rom _ _ ((duplexVm_romHonestComp prog input _ fuel).bind fun proof ↦
-    duplexVm_verifier prog input proof) (isWeightBound_romHonest hw fuel) ?_
+    duplexVm_verifier prog input proof) (isWeightBound_romHonest hF hfc hw fuel) ?_
   have hV : verifierWithHash callKeccak256 callKeccakF1600 prog input =
       LeanVM.Protocol.Compile.Rom.verifierComp (leanVmSeed (bytecodeWords prog) (publicInputDigest input))
         (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input)) :=
     funext fun π ↦ (verifierComp_leanVm _ _ π).symm
   rw [hV, completenessError_eq]
-  exact EndToEnd.Complete.romComplete_at hw hfuel
+  exact EndToEnd.Complete.romComplete_at hF hfc hw hfuel
 
 /-- **Completeness in the random-permutation model**, for the honest prover
 `LeanVM.Protocol.EndToEnd.Complete.honestComp`. -/
-theorem completenessRpm {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
+theorem completenessRpm (hF : Protocol.Flock.FlockWalk) (hfc : EndToEnd.Complete.FlockComplete)
+    {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
     (hv : ValidExecution prog input t) (hbudget : t.committedSize ≤ 2 ^ 30) {ρ : ℕ}
     (hρ : 1 ≤ ρ ∧ ρ ≤ 4) {fuel : ℕ} (hfuel : fuel ≤ 2 ^ 64) :
     Pr{let v ← verifierCompletenessExperimentWithHash
@@ -272,7 +274,7 @@ theorem completenessRpm {prog : LeanIsaProgram} {input : PublicInput} {t : Execu
   rw [e0]
   unfold EndToEnd.Complete.honestComp
   simp only [hex, ↓reduceDIte]
-  exact completenessRpm_at hex.choose_spec.choose_spec hfuel
+  exact completenessRpm_at hF hfc hex.choose_spec.choose_spec hfuel
 
 /-! ## The numbers -/
 

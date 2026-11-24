@@ -41,8 +41,11 @@ theorem KnowledgeSoundness.of_imp {E₁ E₂ : StraightLineExtractor}
   (prEvent_mono _ _ _ fun _ ho ↦ ⟨ho.1, fun ⟨t, ht, hv⟩ ↦ ho.2 ⟨t, h _ _ _ _ _ ht, hv⟩⟩).trans
     (h₁ A Q hQ hcap)
 
-/-- **Knowledge soundness holds** (in the random-permutation model), for `transcriptExtractor`. -/
-theorem knowledgeSoundness_holds : KnowledgeSoundness transcriptExtractor :=
+/-- **Knowledge soundness holds** (in the random-permutation model), for `transcriptExtractor`.
+Research build: conditional on `hfl : FlockSound`, Flock's soundness, a named hypothesis that is
+NOT proved. -/
+theorem knowledgeSoundness_holds (hfl : Protocol.EndToEnd.Front.FlockSound) :
+    KnowledgeSoundness transcriptExtractor :=
   KnowledgeSoundness.of_imp (fun prog input T π t h ↦ by
     have h1 : transcriptExtractorASC Protocol.Whir.Sound.newtonValsDecoder prog input T π = some t := by
       rw [transcriptExtractorASC_eq]; exact h
@@ -51,7 +54,7 @@ theorem knowledgeSoundness_holds : KnowledgeSoundness transcriptExtractor :=
     show Extraction.AS.extractL prog input (permutationQueries T) π = some t
     rw [Extraction.AS.extractL_eq, Extraction.AS.extractP_eq, Extraction.AS.extractC_eq,
       Extraction.AS.extractA_eq]
-    exact h3) (knowledgeSoundnessAS_holds Protocol.Whir.Sound.newtonNearDecoder)
+    exact h3) (knowledgeSoundnessAS_holds hfl Protocol.Whir.Sound.newtonNearDecoder)
 
 end
 

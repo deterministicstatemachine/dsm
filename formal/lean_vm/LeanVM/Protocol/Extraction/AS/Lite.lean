@@ -34,10 +34,10 @@ open LeanVM.Protocol.EndToEnd.Complete (publicInputDigest refNConstraints)
 attribute [local instance] lexOrd
 
 /-- The tables' widths. -/
-def tableWidthsL : List ℕ := [13, 13, 7, 14, 14, 92]
+def tableWidthsL : List ℕ := [13, 13, 7, 14, 14, 92, 58]
 
 /-- The tables' push counts. -/
-def pushCountsL : List ℕ := [5, 5, 3, 5, 5, 28]
+def pushCountsL : List ℕ := [5, 5, 3, 5, 5, 28, 17]
 
 theorem tableWidthsL_eq : tables.map Table.width = tableWidthsL := by decide +kernel
 
@@ -54,7 +54,7 @@ theorem skTables_take (k : ℕ) : skTables (tables.take k) = skTablesL k := by
 /-- The table phase's skeleton. -/
 def skTablePhaseL (heights : List ℕ) : List Op :=
   skGrind (grindingBits (2 + nTrees - 1)) ++ [.sample] ++
-    (skSum 4 (List.replicate (heights.foldl max 0) false) ++ skTablesL (min heights.length 6))
+    (skSum 4 (List.replicate (heights.foldl max 0) false) ++ skTablesL (min heights.length 7))
 
 theorem skTablePhase_eq (heights : List ℕ) : skTablePhase heights = skTablePhaseL heights := by
   unfold skTablePhase skTablePhaseL skTableSumcheck
@@ -82,21 +82,24 @@ theorem logRows_pushBlocks : ∀ (ts : List Table) (hs ns : List ℕ), hs.length
 def skBodyL (lay : LayoutLite) (ρ : ℕ) : List Op :=
   skCommitStack lay.stackLog ρ ++ skOod lay.stackLog ++
     (skBus (pushDepthL lay.logMemory lay.logBytecode lay.tableLogHeights) ++
-      skTablePhaseL lay.tableLogHeights ++ [.sample] ++ skKeccak (kLen lay.tableLogHeights)) ++
+      skTablePhaseL lay.tableLogHeights ++ [.sample] ++ skKeccak (kLen lay.tableLogHeights) ++
+      skFlock (lay.tableLogHeights.getD opBlake3 0)) ++
     skRing ++ ([.sample] ++ skWhir lay.stackLog ρ)
 
 /-- The body's skeleton before the opening's trace, on the lite layout. -/
 def skBodyHeadL (lay : LayoutLite) (ρ : ℕ) : List Op :=
   skCommitStack lay.stackLog ρ ++ skOod lay.stackLog ++
     (skBus (pushDepthL lay.logMemory lay.logBytecode lay.tableLogHeights) ++
-      skTablePhaseL lay.tableLogHeights ++ [.sample] ++ skKeccak (kLen lay.tableLogHeights)) ++
+      skTablePhaseL lay.tableLogHeights ++ [.sample] ++ skKeccak (kLen lay.tableLogHeights) ++
+      skFlock (lay.tableLogHeights.getD opBlake3 0)) ++
     skRing ++ [.sample]
 
 /-- A layout built by `buildLayout`: its push side is its blocks'. -/
 theorem skFront_built {bytecode : List K} {lm : ℕ} {rows : List ℕ} {layout : Layout}
     (h : buildLayout bytecode lm rows = some layout) :
     skFront layout = skBus (pushDepthL layout.logMemory layout.logBytecode layout.tableLogHeights) ++
-      skTablePhaseL layout.tableLogHeights ++ [.sample] ++ skKeccak (kLen layout.tableLogHeights) := by
+      skTablePhaseL layout.tableLogHeights ++ [.sample] ++ skKeccak (kLen layout.tableLogHeights) ++
+      skFlock (layout.tableLogHeights.getD opBlake3 0) := by
   unfold buildLayout at h
   split at h
   · exact absurd h (by simp)

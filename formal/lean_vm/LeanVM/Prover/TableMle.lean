@@ -209,10 +209,10 @@ theorem evalCubic_tableCubic_active (e : List E) (m : ℕ) (eqm : Array E) (h : 
       w * ((1 + e.getD m 0 + X) * evalQuad (activeQuad terms F eqm (2 ^ m)) X) := by
   simp only [tableCubic, not_le.mpr hh, ↓reduceIte, evalCubic, evalQuad]; ring
 
-/-- The round's message evaluates as the sum of the six tables' contributions. -/
+/-- The round's message evaluates as the sum of the seven tables' contributions. -/
 theorem polyEval_tableRound (e : List E) (logs : List ℕ) (terms : Array (List (List ℕ × E)))
     (sigma : Array E) (st : TableState) (X : E) :
-    polyEval (tableRound e logs terms sigma st) X = ∑ t ∈ range 6,
+    polyEval (tableRound e logs terms sigma st) X = ∑ t ∈ range 7,
       evalCubic (tableCubic e (st.free - 1) (eqTable (e.take (st.free - 1))) (logs.getD t 0)
         (st.weights.getD t 0) (sigma.getD t 0) (terms.getD t []) (st.cols.getD t #[])) X := by
   have key : ∀ c : Cubic, polyEval [c.1, c.2.1, c.2.2.1, c.2.2.2] X = evalCubic c X := by
@@ -267,14 +267,14 @@ theorem evaluate_jumpTerms (cp : List E) (hcp : 2 ≤ cp.length) (ev : List E) :
   ring
 
 /-- **A table's polynomial** is the verifier's constraints and forms. -/
-theorem evaluate_rowTerms (cp fp : List E) (hcp : 2 ≤ cp.length) (bus : BusResult) (t : Fin 6)
+theorem evaluate_rowTerms (cp fp : List E) (hcp : 2 ≤ cp.length) (bus : BusResult) (t : Fin 7)
     (ev : List E) :
     (Form.mk (rowTerms cp fp bus.forms t)).evaluate (ev.getD · 0) =
       consPart cp t ev + formPart fp bus t ev := by
   rw [rowTerms, evaluate_append, evaluate_formTerms, consPart, formPart]
   by_cases ht : t = 4
   · subst ht
-    rw [ite_eq_left (show ((4 : Fin 6) : ℕ) = 4 from rfl), ite_eq_left (rfl : (4 : Fin 6) = 4),
+    rw [ite_eq_left (show ((4 : Fin 7) : ℕ) = 4 from rfl), ite_eq_left (rfl : (4 : Fin 7) = 4),
       evaluate_jumpTerms cp hcp]
   · have ht' : (t : ℕ) ≠ 4 := fun h ↦ ht (Fin.ext h)
     rw [ite_eq_right ht', ite_eq_right ht]

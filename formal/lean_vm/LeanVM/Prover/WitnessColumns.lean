@@ -102,18 +102,18 @@ theorem rowsInv_trace (hv : ValidExecution prog input t) :
 
 /-- The rows of the opcode tables of `skelWitness`. -/
 theorem tableAt_skelWitness {κ : ℕ} (img : MemoryImage κ) (S : List Skel) (hκ : κ ≤ maxLogMem)
-    (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) (j : Fin 6) :
+    (hrows : ∀ op, Skel.count op S ≤ 2 ^ maxLogRows) (j : Fin 7) :
     (tableAt (skelWitness prog input img S hκ hrows) ⟨j, by omega⟩).table =
       Arithmetization.opRows img (skelRows img S) (tableOpcode j) := by
   rw [skelWitness_tableAt_table]
   fin_cases j <;> rfl
 
 /-- The table of the opcode of table `j` is `j`. -/
-theorem tableOf_tableOpcode (j : Fin 6) : opTableIdx (tableOpcode j) = j := by
+theorem tableOf_tableOpcode (j : Fin 7) : opTableIdx (tableOpcode j) = j := by
   fin_cases j <;> rfl
 
 /-- **The pass's tables are the witness's opcode tables.** -/
-theorem tabs_trace (hv : ValidExecution prog input t) (hb : TraceBounds t) (j : Fin 6) :
+theorem tabs_trace (hv : ValidExecution prog input t) (hb : TraceBounds t) (j : Fin 7) :
     ((traceRows t).tabs.getD j #[]).toList =
       (tableAt (traceWitness prog input t) ⟨j, by omega⟩).table := by
   have h := (rowsInv_trace hv).tabs (tableOpcode j)
@@ -157,7 +157,7 @@ theorem logMem_trace (hv : ValidExecution prog input t) (hb : TraceBounds t) :
   exact traceWitness_logSize hb
 
 /-- The row counts are the pass's tables' sizes. -/
-theorem rows_trace (hv : ValidExecution prog input t) (hb : TraceBounds t) (j : Fin 6) :
+theorem rows_trace (hv : ValidExecution prog input t) (hb : TraceBounds t) (j : Fin 7) :
     (traceSizes prog input t).rows j = ((traceRows t).tabs.getD j #[]).size := by
   rw [traceSizes_eq hv hb, ← Array.length_toList, tabs_trace hv hb j]
   rfl
@@ -168,7 +168,7 @@ theorem rowsList_trace (hv : ValidExecution prog input t) (hb : TraceBounds t) :
   have h6 := (rowsInv_trace hv).tabs_size
   apply List.ext_getElem (by simp [h6])
   intro i h1 h2
-  have hi : i < 6 := by simpa [h6] using h1
+  have hi : i < 7 := by simpa [h6] using h1
   rw [List.getElem_map, List.getElem_ofFn, rows_trace hv hb ⟨i, hi⟩, Array.getElem_toList]
   simp [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem (h6 ▸ hi)]
 
@@ -215,7 +215,7 @@ theorem outStates_getD (R : Array (Array K)) (h x : ℕ) (hx : x < 2 ^ h) :
 
 /-- The memory block's cells. -/
 theorem memCell_trace (hb : TraceBounds t) (x : ℕ) (hx : x < 2 ^ t.logMemorySize) (k : ℕ) :
-    cellOf (tableAt (traceWitness prog input t) 6) x k =
+    cellOf (tableAt (traceWitness prog input t) 7) x k =
       (#[(t.memory ⟨x, hx⟩).limb 0, (t.memory ⟨x, hx⟩).limb 1, addressOfIndex x,
         g ^ skelMemFin t.memory t.runSkels (addressOfIndex x)][k]?).getD 0 := by
   rw [cellOf, traceWitness_eq hb, skelWitness_tableAt_table]
@@ -226,7 +226,7 @@ theorem memCell_trace (hb : TraceBounds t) (x : ℕ) (hx : x < 2 ^ t.logMemorySi
 
 /-- The bytecode block's finalize counts. -/
 theorem bcCell_trace (hb : TraceBounds t) (x : ℕ) (hx : x < 2 ^ prog.logSize) :
-    cellOf (tableAt (traceWitness prog input t) 7) x 1 = g ^ skelBcFin t.runSkels (addressOfIndex
+    cellOf (tableAt (traceWitness prog input t) 8) x 1 = g ^ skelBcFin t.runSkels (addressOfIndex
         x) := by
   rw [cellOf, traceWitness_eq hb, skelWitness_tableAt_table]
   show ((List.ofFn fun i : Fin (2 ^ prog.logSize) ↦ rawRow (bytecodeRowOf prog i

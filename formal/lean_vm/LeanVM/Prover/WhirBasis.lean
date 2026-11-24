@@ -192,21 +192,21 @@ theorem ringWeight_boolPoint {point f g : List E} {v : ℕ} (hlen : point.length
   refine sum_congr rfl fun k _ ↦ ?_
   rw [Front.eqAt_frob, ← Front.eqEval_boolPoint_eqAt, List.length_map, hlen]
 
-/-- **The ring claim's weight on the cube**: `Φ(eq(point, ·))` on the block of `q_keccak`. -/
-theorem ringSwitchClaim_boolPoint {layout : Layout} {target : E} {point f g : List E} {μ y : ℕ}
-    (hlen : point.length = (layout.placement qkeccak).variableCount)
-    (hv : (layout.placement qkeccak).variableCount ≤ μ) (hf : f.length = 8) (hg : g.length = 8)
+/-- **The ring claim's weight on the cube**: `Φ(eq(point, ·))` on the block of its region (`q_keccak` or `q_flock`). -/
+theorem ringSwitchClaim_boolPoint {layout : Layout} {region : ℕ} {target : E} {point f g : List E} {μ y : ℕ}
+    (hlen : point.length = (layout.placement region).variableCount)
+    (hv : (layout.placement region).variableCount ≤ μ) (hf : f.length = 8) (hg : g.length = 8)
     (hy : y < 2 ^ μ) :
-    (ringSwitchClaim layout target fun rPrime ↦ ringWeight point rPrime (ringCoefficients f g)).1
+    (ringSwitchClaim layout region target fun rPrime ↦ ringWeight point rPrime (ringCoefficients f g)).1
         (boolPoint μ y) =
-      if blockOff μ (layout.placement qkeccak).variableCount (layout.placement qkeccak).index ≤ y ∧
-          y < blockOff μ (layout.placement qkeccak).variableCount (layout.placement qkeccak).index +
-            2 ^ (layout.placement qkeccak).variableCount then
+      if blockOff μ (layout.placement region).variableCount (layout.placement region).index ≤ y ∧
+          y < blockOff μ (layout.placement region).variableCount (layout.placement region).index +
+            2 ^ (layout.placement region).variableCount then
         ringPhi f g ((eqKernel point).getD
-          (y - blockOff μ (layout.placement qkeccak).variableCount (layout.placement
-              qkeccak).index) 0)
+          (y - blockOff μ (layout.placement region).variableCount (layout.placement
+              region).index) 0)
       else 0 := by
-  set pl := layout.placement qkeccak with hpl
+  set pl := layout.placement region with hpl
   rw [← block_ite pl.index (fun j ↦ ringPhi f g ((eqKernel point).getD j 0))]
   simp only [ringSwitchClaim, Placement.eqAbove, ← hpl, length_boolPoint,
     Front.selectorPoint_eq_boolPoint, Nat.shiftRight_eq_div_pow, Front.drop_boolPoint]
@@ -235,13 +235,13 @@ theorem addClaim_spec {μ : ℕ} (s : E) (d : ClaimDesc) (acc : Array E) (hs : a
         size_eqTable, hlen, mul_ite, mul_zero, getD_eqTable_eqKernel]
     · obtain ⟨h1, h2⟩ := addFull_spec μ (ClaimDesc.column layout c).denote.1 s acc
       exact ⟨by rw [h1, hs], fun y hy ↦ h2 y (by rw [hs]; exact hy)⟩
-  | ring layout target point f g =>
+  | ring layout region target point f g =>
     simp only [addClaim]
     split
     · rename_i h
       obtain ⟨hlen, hv, hf, hg⟩ := h
-      obtain ⟨h1, h2⟩ := addSlice_spec (blockOff μ (layout.placement qkeccak).variableCount
-        (layout.placement qkeccak).index) ((eqTable point).map (ringPhi f g)) s
+      obtain ⟨h1, h2⟩ := addSlice_spec (blockOff μ (layout.placement region).variableCount
+        (layout.placement region).index) ((eqTable point).map (ringPhi f g)) s
         ((eqTable point).map (ringPhi f g)).size acc
       refine ⟨by rw [h1, hs], fun y hy ↦ ?_⟩
       rw [h2 y (by rw [hs]; exact hy), ClaimDesc.denote,
@@ -250,7 +250,7 @@ theorem addClaim_spec {μ : ℕ} (s : E) (d : ClaimDesc) (acc : Array E) (hs : a
       split_ifs with hb
       · rw [getD_map_of_lt _ _ _ 0 _ (by rw [size_eqTable, hlen]; omega), getD_eqTable_eqKernel]
       · rfl
-    · obtain ⟨h1, h2⟩ := addFull_spec μ (ClaimDesc.ring layout target point f g).denote.1 s acc
+    · obtain ⟨h1, h2⟩ := addFull_spec μ (ClaimDesc.ring layout region target point f g).denote.1 s acc
       exact ⟨by rw [h1, hs], fun y hy ↦ h2 y (by rw [hs]; exact hy)⟩
   | ood z value =>
     simp only [addClaim]

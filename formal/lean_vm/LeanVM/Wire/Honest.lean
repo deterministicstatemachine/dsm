@@ -48,19 +48,19 @@ variable {m : Type → Type} [Monad m] (H : Bytes → m Digest) (F : KeccakState
 /-- **The honest prover is the specification's** at the execution's witness, in any monad: on a
 valid execution within the cap at a valid rate, `proveWithHash` is `proveM` with the strategy
 `leanVmProver` from the seed. -/
-theorem proveWithHash_eq_proveM (hv : ValidExecution prog input t)
+theorem proveWithHash_eq_proveM (hF : Protocol.Flock.FlockWalk) (hv : ValidExecution prog input t)
     (hcap : t.committedSize ≤ 2 ^ 30) (hρ : 1 ≤ ρ ∧ ρ ≤ 4) (fuel : ℕ) :
     proveWithHash H F prog input t ρ fuel =
       seedWithHash H F (bytecodeWords prog) (publicInputDigest input) >>= fun seed ↦
         proveM H F (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input))
           (leanVmProver prog (traceSizes prog input t) ρ
             (stackOf prog (traceSizes prog input t) (traceWitness prog input t))) seed fuel := by
-  obtain ⟨W, hW, hspec⟩ := witness?_spec hv hcap
+  obtain ⟨W, hW, hspec⟩ := witness?_spec hF hv hcap
   simp only [proveWithHash, hW, hρ, and_self, ↓reduceIte]
   refine congrArg (fun k : KeccakState → m (Option Proof) ↦
     seedWithHash H F (bytecodeWords prog) (publicInputDigest input) >>= k)
     (funext fun seed ↦ ?_)
-  rw [runScript_corr H F fuel _ (corr_honestScript hv hcap hρ hspec) seed, runScript_eq_proveM]
+  rw [runScript_corr H F fuel _ (corr_honestScript hF hv hcap hρ hspec) seed, runScript_eq_proveM]
   rfl
 
 /-- **Otherwise the honest prover makes no proof.** -/
@@ -90,7 +90,8 @@ use, on a valid execution within the cap at a valid rate: the strategy wins ever
 with well-shaped words, the program's openings are within the wire bounds, and its cost is at
 most `leanVmCost`. Stated for any program equal to the verifier's, so that the proofs below work
 on an abstract program (unfolding the concrete one is costly). -/
-theorem leanVm_honest_facts {prog : LeanIsaProgram} {input : PublicInput}
+theorem leanVm_honest_facts (hF : Protocol.Flock.FlockWalk)
+    (hfc : Protocol.EndToEnd.Complete.FlockComplete) {prog : LeanIsaProgram} {input : PublicInput}
     {t : Execution prog} {ρ : ℕ} (hv : ValidExecution prog input t)
     (hcap : t.committedSize ≤ 2 ^ 30) (hρ : 1 ≤ ρ ∧ ρ ≤ 4) :
     ∃ P, P = leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input) ∧
@@ -101,10 +102,11 @@ theorem leanVm_honest_facts {prog : LeanIsaProgram} {input : PublicInput}
           (stackOf prog (traceSizes prog input t) (traceWitness prog input t))) chal) ∧
       Wired P [] wireMaxPhases (fun _ _ _ ↦ True) ∧ P.CostLE costHeight leanVmCost := by
   obtain ⟨⟨-, hw, hs, hadm, -⟩, -⟩ := childFor_trace hv hcap hρ
-  have hq := m3Honest_stackOf hw hs
+  have hq := m3Honest_stackOf hF hw hs
   -- The run's two parts are taken only once the program is abstract: under 4.35 a local of type
   -- `shapedI` on the concrete program makes the elaborator unfold it.
-  have hr := fun chal ↦ runI_leanVmProgram (input := input) hadm hρ hq chal
+  have hr := fun chal ↦ runI_leanVmProgram (input := input) hfc hadm hρ hq
+    (flockColumnHonest_stackOf hF hw hs) chal
   have hwi := wired_leanVmProgram (bytecodeWords prog) (publicInputDigest input)
   have hc := costLE_leanVmProgram (bytecodeWords prog) (publicInputDigest input)
   generalize hP : leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input) = P
@@ -115,7 +117,7 @@ theorem id_run_eq {α : Type} (x : Id α) : Id.run x = x := rfl
 
 /-- **The honest prover at `Id` is the pure prover** `prove` with the strategy `leanVmProver`,
 from the seed. -/
-theorem proveWithHash_id_eq_prove (h : Bytes → Digest) (F : KeccakState → KeccakState)
+theorem proveWithHash_id_eq_prove (hF : Protocol.Flock.FlockWalk) (h : Bytes → Digest) (F : KeccakState → KeccakState)
     {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog} {ρ : ℕ}
     (hv : ValidExecution prog input t) (hcap : t.committedSize ≤ 2 ^ 30) (hρ : 1 ≤ ρ ∧ ρ ≤ 4)
     (fuel : ℕ) :
@@ -125,7 +127,7 @@ theorem proveWithHash_id_eq_prove (h : Bytes → Digest) (F : KeccakState → Ke
           (stackOf prog (traceSizes prog input t) (traceWitness prog input t)))
         (F (seedInput (h (versionTag ++ (bytecodeWords prog).flatMap K.toBytes))
           (publicInputDigest input))) fuel := by
-  rw [proveWithHash_eq_proveM (m := Id) h F hv hcap hρ fuel]
+  rw [proveWithHash_eq_proveM (m := Id) h F hF hv hcap hρ fuel]
   change Id.run (_ >>= _) = _
   rw [Id.run_bind, proveM_id, id_run_eq]
   rfl
@@ -153,14 +155,16 @@ theorem prove_wireDecodable (h1 : ∀ chal, runI P S chal = some true)
 
 end Abstract
 
-/-- **The honest prover's proofs are decodable** with the hash they were proved with. -/
-theorem proveWithHash_wireDecodable {h : Bytes → Digest} {F : KeccakState → KeccakState}
+/-- **The honest prover's proofs are decodable** with the hash they were proved with. Research
+build: under `hF` and `hfc`, named hypotheses, not proved. -/
+theorem proveWithHash_wireDecodable (hF : Protocol.Flock.FlockWalk)
+    (hfc : Protocol.EndToEnd.Complete.FlockComplete) {h : Bytes → Digest} {F : KeccakState → KeccakState}
     {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog} {ρ fuel : ℕ} {p : Proof}
     (hp : Prover.proveWithHash (m := Id) h F prog input t ρ fuel = some p) : WireDecodable h p := by
   by_cases hcond : ValidExecution prog input t ∧ t.committedSize ≤ 2 ^ 30 ∧ 1 ≤ ρ ∧ ρ ≤ 4
   · obtain ⟨hv, hcap, hρ⟩ := hcond
-    rw [proveWithHash_id_eq_prove h F hv hcap hρ fuel] at hp
-    obtain ⟨P, hP, h1, h2, hw, hc⟩ := leanVm_honest_facts hv hcap hρ
+    rw [proveWithHash_id_eq_prove hF h F hv hcap hρ fuel] at hp
+    obtain ⟨P, hP, h1, h2, hw, hc⟩ := leanVm_honest_facts hF hfc hv hcap hρ
     rw [← hP] at hp
     exact prove_wireDecodable h1 h2 hw hc hp
   · rw [proveWithHash_eq_none (m := Id) h F hcond fuel] at hp

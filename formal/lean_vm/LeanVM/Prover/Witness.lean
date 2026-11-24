@@ -53,7 +53,7 @@ theorem skelOk_runSkels (hv : ValidExecution prog input t) :
   exact skAt_ok hv.2 (List.mem_range.mp hk)
 
 /-- The specification witness's opcode tables hold the run's rows. -/
-theorem length_traceWitness (hb : TraceBounds t) (j : Fin 6) :
+theorem length_traceWitness (hb : TraceBounds t) (j : Fin 7) :
     (tableAt (traceWitness prog input t) ⟨j, by omega⟩).table.length =
       Skel.count (tableOpcode j) t.runSkels := by
   rw [traceWitness_eq hb, tableAt_skelWitness, opRows, List.length_map, skelRows,
@@ -104,7 +104,7 @@ theorem childFor_trace (hv : ValidExecution prog input t)
   rw [traceSizes_eq hv hb] at hs0 ⊢
   have hmem : (witnessSizes (traceWitness prog input t) (traceWitness_pos hv hb)).logMem = t.logMemorySize :=
     hrep.κ_eq
-  have hr : ∀ j : Fin 6,
+  have hr : ∀ j : Fin 7,
       (witnessSizes (traceWitness prog input t) (traceWitness_pos hv hb)).rows j =
         t.opcodeCount (tableOpcode j) :=
     fun j ↦ (length_traceWitness hb j).trans ((t.count_runSkels _).trans (hcount _).symm)
@@ -112,16 +112,18 @@ theorem childFor_trace (hv : ValidExecution prog input t)
       (witnessSizes (traceWitness prog input t) (traceWitness_pos hv hb))).total =
       t.committedSize := by
     have e : tableOpcode 0 = .xor ∧ tableOpcode 1 = .mulNative ∧ tableOpcode 2 = .setConstant ∧
-        tableOpcode 3 = .deref ∧ tableOpcode 4 = .jump ∧ tableOpcode 5 = .keccak := by decide
+        tableOpcode 3 = .deref ∧ tableOpcode 4 = .jump ∧ tableOpcode 5 = .keccak ∧
+        tableOpcode 6 = .blake3 := by decide
     rw [blocks_total_eq, hmem, pow_add 2 _ 6]
     simp only [Sizes.τ, hr, e, Execution.committedSize]
-    have f0 : tableLogFloors.getD ((0 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f1 : tableLogFloors.getD ((1 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f2 : tableLogFloors.getD ((2 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f3 : tableLogFloors.getD ((3 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f4 : tableLogFloors.getD ((4 : Fin 6) : ℕ) 0 = 0 := rfl
-    have f5 : tableLogFloors.getD ((5 : Fin 6) : ℕ) 0 = 9 := rfl
-    simp only [f0, f1, f2, f3, f4, f5, Nat.max_zero]
+    have f0 : tableLogFloors.getD ((0 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f1 : tableLogFloors.getD ((1 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f2 : tableLogFloors.getD ((2 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f3 : tableLogFloors.getD ((3 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f4 : tableLogFloors.getD ((4 : Fin 7) : ℕ) 0 = 0 := rfl
+    have f5 : tableLogFloors.getD ((5 : Fin 7) : ℕ) 0 = 9 := rfl
+    have f6 : tableLogFloors.getD ((6 : Fin 7) : ℕ) 0 = 0 := rfl
+    simp only [f0, f1, f2, f3, f4, f5, f6, Nat.max_zero]
     ring
   refine ⟨⟨hρ, hw, hs0, ⟨?_, ?_, fun j ↦ (hr j).trans_le (by rw [hcount]; exact hrows _),
     leanIsaμ_le_of_total_le (htotal ▸ hbudget)⟩, hrep⟩, htotal⟩
@@ -137,7 +139,7 @@ witness (`traceSizes`), the verifier's layout of its sizes, every column of the 
 its stack by the verifier's column number, the stack's cells, and the announcement. -/
 structure WitnessSpec (prog : LeanIsaProgram) (input : PublicInput) (t : Execution prog)
     (W : Witness) : Prop where
-  /-- The six row counts. -/
+  /-- The seven row counts. -/
   rows : W.rows = List.ofFn (traceSizes prog input t).rows
   /-- The verifier's layout. -/
   layout : W.layout = verifierLayout prog (traceSizes prog input t)
@@ -150,33 +152,64 @@ structure WitnessSpec (prog : LeanIsaProgram) (input : PublicInput) (t : Executi
     (stackOf prog (traceSizes prog input t) (traceWitness prog input t)).values.toArray
   /-- The announced sizes and rate. -/
   announce : ∀ ρ, W.announce ρ = LeanVM.Protocol.EndToEnd.Front.announce (traceSizes prog input t) ρ
+  /-- Flock's instances (research build): the specification witness's `BLAKE3` rows', then the
+  padding instance. -/
+  flock : W.flock = flockInsts prog (traceSizes prog input t) (traceWitness prog input t)
 
 /-- The fields of the data built at a layout. -/
 theorem buildWitness_fields {κ : ℕ} (img : MemoryImage κ) (acc : Rows) (layout : Layout) :
     (buildWitness img acc layout).layout = layout ∧
-      (buildWitness img acc layout).cols = colsOf img acc layout.tableLogHeights ∧
+      (buildWitness img acc layout).cols = colsOf img acc layout.tableLogHeights
+        (Flock.instancesOf (acc.tabs.getD 6 #[]) (layout.tableLogHeights.getD 6 0)) ∧
       (buildWitness img acc layout).stack =
-        stackArray layout (colsOf img acc layout.tableLogHeights) :=
-  ⟨rfl, by simp only [buildWitness], by simp only [buildWitness]⟩
+        stackArray layout (colsOf img acc layout.tableLogHeights
+          (Flock.instancesOf (acc.tabs.getD 6 #[]) (layout.tableLogHeights.getD 6 0))) ∧
+      (buildWitness img acc layout).flock =
+        Flock.instancesOf (acc.tabs.getD 6 #[]) (layout.tableLogHeights.getD 6 0) :=
+  ⟨rfl, by simp only [buildWitness], by simp only [buildWitness], rfl⟩
 
 /-- The verifier's layout's log-heights are the tables'. -/
 theorem verifierLayout_tableLogHeights (s : Sizes) :
     (verifierLayout prog s).tableLogHeights = tableLogs s := rfl
 
-/-- **The data built from a valid run at the verifier's layout is the specification's.** -/
-theorem buildWitness_spec (hv : ValidExecution prog input t) (hcap : t.committedSize ≤ 2 ^ 30) :
+/-- The pass's `BLAKE3` rows' instances are the specification witness's. -/
+theorem instancesOf_trace (hv : ValidExecution prog input t) (hb : TraceBounds t) :
+    Flock.instancesOf ((traceRows t).tabs.getD 6 #[]) ((tableLogs (traceSizes prog input t)).getD 6 0)
+      = flockInsts prog (traceSizes prog input t) (traceWitness prog input t) := by
+  rw [traceSizes_eq hv hb]
+  have hR : (traceRows t).tabs.getD 6 #[] =
+      ((tableAt (traceWitness prog input t) 6).table.take
+        ((witnessSizes (traceWitness prog input t) (traceWitness_pos hv hb)).rows 6)).toArray := by
+    apply Array.toList_inj.mp
+    rw [tabs_trace' hv hb 6 (by omega), List.toList_toArray]
+    exact (List.take_of_length_le (le_of_eq rfl)).symm
+  have h6 : (tableLogs (witnessSizes (traceWitness prog input t) (traceWitness_pos hv hb))).getD 6 0 =
+      (witnessSizes (traceWitness prog input t) (traceWitness_pos hv hb)).τ 6 := by
+    rw [tableLogs, List.getD_eq_getElem?_getD, List.getElem?_ofFn]
+    simp
+  rw [hR, h6]
+
+/-- **The data built from a valid run at the verifier's layout is the specification's**, when
+Flock's walk computes the compression and keeps its inputs (`hF`, a named hypothesis: the
+`BLAKE3` value limbs are read off `QFLOCK`). -/
+theorem buildWitness_spec (hF : Flock.FlockWalk) (hv : ValidExecution prog input t)
+    (hcap : t.committedSize ≤ 2 ^ 30) :
     WitnessSpec prog input t
       (buildWitness t.memory (traceRows t) (verifierLayout prog (traceSizes prog input t))) := by
   have hb := traceBounds_of hv hcap
-  obtain ⟨hL, hC, hS⟩ := buildWitness_fields t.memory (traceRows t)
+  obtain ⟨⟨-, hw, hs, -, -⟩, -⟩ := childFor_trace hv hcap (ρ := 1) ⟨le_rfl, by decide⟩
+  obtain ⟨hL, hC, hS, hF'⟩ := buildWitness_fields t.memory (traceRows t)
     (verifierLayout prog (traceSizes prog input t))
-  rw [verifierLayout_tableLogHeights] at hC hS
+  rw [verifierLayout_tableLogHeights] at hC hS hF'
   have hsize :
-      (colsOf t.memory (traceRows t) (tableLogs (traceSizes prog input t))).size = 158 := by
+      (colsOf t.memory (traceRows t) (tableLogs (traceSizes prog input t))
+        (Flock.instancesOf ((traceRows t).tabs.getD 6 #[])
+          ((tableLogs (traceSizes prog input t)).getD 6 0))).size = 217 := by
     unfold colsOf; exact Array.size_ofFn
-  refine ⟨rowsList_trace hv hb, hL, fun c ↦ by rw [hC]; exact cols_trace hv hb c, ?_, fun ρ ↦ ?_⟩
+  refine ⟨rowsList_trace hv hb, hL, fun c ↦ by rw [hC]; exact cols_trace hF hv hb hw hs c, ?_,
+    fun ρ ↦ ?_, by rw [hF']; exact instancesOf_trace hv hb⟩
   · rw [hS]
-    refine stackArray_eq prog _ _ _ hsize (cols_trace hv hb) fun x hx h ↦ ?_
+    refine stackArray_eq prog _ _ _ hsize (cols_trace hF hv hb hw hs) fun x hx h ↦ ?_
     exact Blocks.stackAt_getElem_of_total_le _ _ _ hx h
   · show (((traceSizes prog input t).logMem :: (traceRows t).tabs.toList.map (·.size)) ++
       [ρ]).map eOfNat = _
@@ -209,9 +242,10 @@ theorem witness?_eq (hv : ValidExecution prog input t) (hcap : t.committedSize �
   exact congrArg (Option.map _) (buildLayout_trace hv hcap)
 
 /-- **The executable witness** of a valid execution within the cap meets `WitnessSpec`. -/
-theorem witness?_spec (hv : ValidExecution prog input t) (hcap : t.committedSize ≤ 2 ^ 30) :
+theorem witness?_spec (hF : Flock.FlockWalk) (hv : ValidExecution prog input t)
+    (hcap : t.committedSize ≤ 2 ^ 30) :
     ∃ W, witness? prog input t = some W ∧ WitnessSpec prog input t W :=
-  ⟨_, witness?_eq hv hcap, buildWitness_spec hv hcap⟩
+  ⟨_, witness?_eq hv hcap, buildWitness_spec hF hv hcap⟩
 
 /-- `witness?` returns only where `checkTrace` holds. -/
 theorem checkTrace_of_isSome (h : (witness? prog input t).isSome = true) :

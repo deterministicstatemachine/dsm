@@ -75,7 +75,7 @@ variable (prog : LeanIsaProgram) (s : Sizes) (q : LeanVM.Protocol.Column (leanIs
 /-- **The state's invariant** after the challenges `pre`. -/
 def TInv (bus : BusResult) (pre : List E) (st : TableState) : Prop :=
   pre.length ≤ nRounds s ∧ st.free = nRounds s - pre.length ∧
-  ∀ t : Fin 6, st.weights.getD t 0 = preWeight s bus t pre ∧
+  ∀ t : Fin 7, st.weights.getD t 0 = preWeight s bus t pre ∧
     (st.cols.getD t #[]).size = width (opIdx t) ∧
     ∀ i : Fin (width (opIdx t)),
       ((st.cols.getD t #[]).getD i #[]).size = 2 ^ min (s.τ t) st.free ∧
@@ -106,12 +106,12 @@ theorem getD_of_size_le {α : Type} (a : Array α) (i : ℕ) (d : α) (h : a.siz
   rfl
 
 /-- An honest evaluation of table `t` past its width is `0`. -/
-theorem getD_evalsAt_of_le (t : Fin 6) (r : List E) (i : ℕ) (hi : width (opIdx t) ≤ i) :
+theorem getD_evalsAt_of_le (t : Fin 7) (r : List E) (i : ℕ) (hi : width (opIdx t) ≤ i) :
     (evalsAt prog s q t r).getD i 0 = 0 :=
   List.getD_eq_default _ _ (by simp [evalsAt, hi])
 
 /-- An honest evaluation of table `t` within its width. -/
-theorem getD_evalsAt (t : Fin 6) (r : List E) (i : ℕ) (hi : i < width (opIdx t)) :
+theorem getD_evalsAt (t : Fin 7) (r : List E) (i : ℕ) (hi : i < width (opIdx t)) :
     (evalsAt prog s q t r).getD i 0 = multilinearEval (tableColList prog s q t ⟨i, hi⟩)
       (r.take (s.τ t)) := by
   rw [List.getD_eq_getElem _ _ (by simp [evalsAt, hi])]
@@ -125,8 +125,8 @@ variable {prog s q}
 theorem tableRound_eq {bus : BusResult} (hb : BusGood prog s q bus) (cp fp : List E)
     (hcp : 2 ≤ cp.length) (logs : List ℕ) (hlogs : logs = tableLogs s)
     (terms : Array (List (List ℕ × E)))
-    (hterms : ∀ t : Fin 6, terms.getD t [] = rowTerms cp fp bus.forms t) (sigma : Array E)
-    (hsigma : ∀ t : Fin 6, s.τ t < nRounds s → sigma.getD t 0 = waitSum prog s q cp fp bus t)
+    (hterms : ∀ t : Fin 7, terms.getD t [] = rowTerms cp fp bus.forms t) (sigma : Array E)
+    (hsigma : ∀ t : Fin 7, s.τ t < nRounds s → sigma.getD t 0 = waitSum prog s q cp fp bus t)
     (pre : List E) (st : TableState) (hI : TInv prog s q bus pre st)
     (hk : pre.length < nRounds s) (X : E) :
     polyEval (tableRound bus.point logs terms sigma st) X =
@@ -244,7 +244,7 @@ theorem tableFold_inv (bus : BusResult) (logs : List ℕ) (hlogs : logs = tableL
 /-- A table's column, lifted, read off the instance's columns. -/
 theorem getD_tableInit (cols : Array (Array K))
     (hcols : ∀ c : Col, cols.getD (refCol c) #[] = ((inst prog s).column q c).values.toArray)
-    (t : Fin 6) (i : Fin (width (opIdx t))) :
+    (t : Fin 7) (i : Fin (width (opIdx t))) :
     ((tableInit cols).getD t #[]).getD i #[] =
       (((inst prog s).column q ⟨opIdx t, i⟩).values.toArray).map ofK := by
   have hwi : (i : ℕ) < (tables.getD t default).width := by rw [← width_opIdx]; exact i.isLt
@@ -255,7 +255,7 @@ theorem getD_tableInit (cols : Array (Array K))
   rfl
 
 /-- A table's size, read off the instance's columns. -/
-theorem size_tableInit (cols : Array (Array K)) (t : Fin 6) :
+theorem size_tableInit (cols : Array (Array K)) (t : Fin 7) :
     ((tableInit cols).getD t #[]).size = width (opIdx t) := by
   simp only [tableInit]
   rw [ofFn_getD _ t t.isLt _, Array.size_ofFn, width_opIdx]
@@ -264,7 +264,7 @@ theorem size_tableInit (cols : Array (Array K)) (t : Fin 6) :
 theorem tableInit_inv (cols : Array (Array K))
     (hcols : ∀ c : Col, cols.getD (refCol c) #[] = ((inst prog s).column q c).values.toArray)
     (bus : BusResult) :
-    TInv prog s q bus [] ⟨tableInit cols, Array.replicate 6 1, nRounds s⟩ := by
+    TInv prog s q bus [] ⟨tableInit cols, Array.replicate 7 1, nRounds s⟩ := by
   refine ⟨by simp, by simp, fun t ↦ ⟨?_, size_tableInit cols t, fun i ↦ ?_⟩⟩
   · simp [preWeight, Array.getD, t.isLt]
   · have hlist : (((inst prog s).column q ⟨opIdx t, i⟩).values.toArray.map ofK).toList =
@@ -281,7 +281,7 @@ theorem tableInit_inv (cols : Array (Array K))
 /-- **The end**: once every coordinate is bound, each table's evaluations are the honest ones at
 the point. -/
 theorem finalEvals_eq (bus : BusResult) (pre : List E) (st : TableState)
-    (hI : TInv prog s q bus pre st) (hlen : pre.length = nRounds s) (t : Fin 6) :
+    (hI : TInv prog s q bus pre st) (hlen : pre.length = nRounds s) (t : Fin 7) :
     finalEvals (st.cols.getD t #[]) = evalsAt prog s q t pre.reverse := by
   obtain ⟨_, hfree, hI⟩ := hI
   obtain ⟨_, hsize, hcol⟩ := hI t
@@ -307,7 +307,7 @@ theorem two_le_cpOf (xi : E) : 2 ≤ (cpOf xi).length := by
   omega
 
 /-- The tables' batched polynomials. -/
-theorem tableTermsOf_getD (xi : E) (bus : BusResult) (t : Fin 6) :
+theorem tableTermsOf_getD (xi : E) (bus : BusResult) (t : Fin 7) :
     (tableTermsOf xi bus).getD t [] = rowTerms (cpOf xi) (fpOf xi) bus.forms t := by
   rw [tableTermsOf, ofFn_getD _ t t.isLt _]
   rfl
@@ -315,7 +315,7 @@ theorem tableTermsOf_getD (xi : E) (bus : BusResult) (t : Fin 6) :
 /-- The waiting tables' sums. -/
 theorem tableSigmas_getD (cols : Array (Array K))
     (hcols : ∀ c : Col, cols.getD (refCol c) #[] = ((inst prog s).column q c).values.toArray)
-    {bus : BusResult} (hb : BusGood prog s q bus) (xi : E) (t : Fin 6) (ht : s.τ t < nRounds s) :
+    {bus : BusResult} (hb : BusGood prog s q bus) (xi : E) (t : Fin 7) (ht : s.τ t < nRounds s) :
     (tableSigmas bus.point (tableLogs s) (tableTermsOf xi bus) (tableInit cols)).getD t 0 =
       waitSum prog s q (cpOf xi) (fpOf xi) bus t := by
   rw [tableSigmas, ofFn_getD _ t t.isLt _]
@@ -351,14 +351,14 @@ theorem tableSigmas_getD (cols : Array (Array K))
 theorem tableEvals_eq (bus : BusResult) (pre : List E) (st : TableState)
     (hI : TInv prog s q bus pre st) (hlen : pre.length = nRounds s) :
     tableEvals st = (pairsAt prog s q bus pre.reverse).flatMap (·.2) := by
-  have hfin : ∀ t (ht : t < 6), finalEvals (st.cols.getD t #[]) =
+  have hfin : ∀ t (ht : t < 7), finalEvals (st.cols.getD t #[]) =
       evalsAt prog s q ⟨t, ht⟩ pre.reverse := fun t ht ↦
     finalEvals_eq bus pre st hI hlen ⟨t, ht⟩
-  have hr : List.range 6 = [0, 1, 2, 3, 4, 5] := rfl
+  have hr : List.range 7 = [0, 1, 2, 3, 4, 5, 6] := rfl
   rw [tableEvals, hr]
   simp only [List.flatMap_cons, List.flatMap_nil]
   rw [hfin 0 (by norm_num), hfin 1 (by norm_num), hfin 2 (by norm_num), hfin 3 (by norm_num),
-    hfin 4 (by norm_num), hfin 5 (by norm_num)]
+    hfin 4 (by norm_num), hfin 5 (by norm_num), hfin 6 (by norm_num)]
   rfl
 
 /-- **The executable table phase makes the specification's moves**: from the instance's columns
@@ -373,7 +373,7 @@ theorem corr_tableFast (cols : Array (Array K))
       (sumcheckBy (tableRound bus.point (tableLogs s) (tableTermsOf xi bus)
           (tableSigmas bus.point (tableLogs s) (tableTermsOf xi bus) (tableInit cols)))
         (tableFold bus.point (tableLogs s)) (List.replicate (nRounds s) none)
-        ⟨tableInit cols, Array.replicate 6 1, nRounds s⟩).bind fun r ↦
+        ⟨tableInit cols, Array.replicate 7 1, nRounds s⟩).bind fun r ↦
       Script.sendList (tableEvals r.2))
     (Script.sampleE.bind fun xi ↦
       (hSumcheck 4 (claimOf prog s q (cpOf xi) (fpOf xi) bus) (List.replicate (nRounds s) none)
@@ -385,7 +385,7 @@ theorem corr_tableFast (cols : Array (Array K))
       ((sumcheckBy (tableRound bus.point (tableLogs s) (tableTermsOf xi bus)
           (tableSigmas bus.point (tableLogs s) (tableTermsOf xi bus) (tableInit cols)))
         (tableFold bus.point (tableLogs s)) (List.replicate (nRounds s) none)
-        ⟨tableInit cols, Array.replicate 6 1, nRounds s⟩).bind fun r ↦
+        ⟨tableInit cols, Array.replicate 7 1, nRounds s⟩).bind fun r ↦
       Script.sendList (tableEvals r.2))
       ((hSumcheck 4 (claimOf prog s q (cpOf xi) (fpOf xi) bus) (List.replicate (nRounds s) none)
         []).bind fun r ↦
@@ -417,7 +417,7 @@ theorem corr_tableFast (cols : Array (Array K))
         (tableSigmas bus.point (tableLogs s) (tableTermsOf xi bus) (tableInit cols)))
       (tableFold bus.point (tableLogs s)) (TInv prog s q bus) (nRounds s)
       hround hfold (List.replicate (nRounds s) none) []
-      ⟨tableInit cols, Array.replicate 6 1, nRounds s⟩ hinit hlen0
+      ⟨tableInit cols, Array.replicate 7 1, nRounds s⟩ hinit hlen0
     have hk : ∀ (a : List E × TableState) (b : List E × E),
         (a.1 = b.1 ∧ a.1.length = (List.replicate (nRounds s) (none : Option E)).length ∧
           TInv prog s q bus ([] ++ a.1) a.2 ∧

@@ -103,6 +103,20 @@ theorem keccakRow_toArray {F : Type} (r : KeccakRow F) : (toElements r).toArray 
   repeat rw [Vector.toList_append]
   simp [vec4_toList, Vector.toList_push, Vector.toList_toArray]
 
+theorem blake3Row_toArray {F : Type} (r : Blake3Row F) : (toElements r).toArray =
+    #[r.pc, r.fp, r.om[0], r.om[1], r.om[2], r.om[3], r.ocv, r.oout, r.omd, r.ox, r.oy, r.ow,
+      r.m0[0], r.m0[1], r.m1[0], r.m1[1], r.m2[0], r.m2[1], r.m3[0], r.m3[1], r.out0[0], r.out0[1],
+      r.out1[0], r.out1[1], r.cv0[0], r.cv0[1], r.cv1[0], r.cv1[1], r.md[0], r.md[1], r.x0[0],
+      r.x0[1], r.x1[0], r.x1[1], r.y0[0], r.y0[1], r.y1[0], r.y1[1], r.w0[0], r.w0[1], r.w1[0],
+      r.w1[1]] ++ r.cnt.toArray ++ #[r.rbc] := by
+  obtain ⟨pc, fp, om, ocv, oout, omd, ox, oy, ow, m0, m1, m2, m3, out0, out1, cv0, cv1, md, x0, x1,
+    y0, y1, w0, w1, cnt, rbc⟩ := r
+  simp [circuit_norm, explicit_provable_type, ProvableStruct.toComponents]
+  apply Array.toList_inj.mp
+  rw [Vector.toList_toArray]
+  repeat rw [Vector.toList_append]
+  simp [vec4_toList, vec2_toList, Vector.toList_push, Vector.toList_toArray]
+
 theorem memRow_toArray {F : Type} (r : MemRow F) : (toElements r).toArray =
     #[r.m[0], r.m[1], r.idx, r.cntFin] := by
   obtain ⟨m, idx, cntFin⟩ := r
@@ -144,7 +158,10 @@ theorem limbsIn_powIndex (hκ : κ < 64) (img : MemoryImage κ) :
 /-- The cells an instruction reads, through the index, are `readAddrs`. -/
 theorem addrsIn_powIndex (hκ : κ < 64) (img : MemoryImage κ) (fp : K) (ins : LeanIsaInstruction) :
     addrsIn (powIndex κ) img fp ins = readAddrs img fp ins := by
-  cases ins <;> first | (simp only [addrsIn, readAddrs, limbsIn_powIndex hκ]; done) | rfl
+  cases ins <;> first
+    | (simp only [addrsIn, readAddrs, limbsIn_powIndex hκ]; done)
+    | (simp only [addrsIn, readAddrs, blake3FlushAddresses, pow_zero, pow_one, one_mul]; done)
+    | rfl
 
 /-- The cells a `KECCAK` reads, through the index, are `keccakInputCells`. -/
 theorem keccakInputIn_powIndex (hκ : κ < 64) (img : MemoryImage κ) (fp : K) (om : Fin 4 → K)
@@ -155,6 +172,7 @@ theorem keccakInputIn_powIndex (hκ : κ < 64) (img : MemoryImage κ) (fp : K) (
   unfold keccakInputIn keccakInputCells
   rw [readIn_powIndex hκ]
 
+set_option maxHeartbeats 1000000 in
 /-- **The raw row through the index is `rowOf`.** -/
 theorem rowIn_powIndex (hκ : κ < 64) (img : MemoryImage κ) (pc fp : K) (c : ℕ → K) (rbc : K)
     (ins : LeanIsaInstruction) : rowIn (powIndex κ) img pc fp c rbc ins = rowOf img pc fp c rbc
@@ -177,6 +195,9 @@ theorem rowIn_powIndex (hκ : κ < 64) (img : MemoryImage κ) (pc fp : K) (c : �
       keccakInputIn_powIndex hκ]
     simp [laneK, freeLimb]
     rfl
+  | blake3 om ocv oout omd ox oy ow =>
+    simp only [rowIn, rowOf, rawRow, blake3Row_toArray, blake3RowOf, limbsIn_powIndex hκ]
+    simp [blake3FlushAddresses]
 
 /-! ## The counters -/
 
@@ -250,15 +271,15 @@ theorem mkRows_concat (img : MemoryImage κ) (S : List Skel) (sk : Skel) :
 /-- What the pass has built after the steps of the skeletons `S`: each table's rows are the raw
 rows of `S`'s rows of its opcode, and the counters are `g` to the reads so far. -/
 structure RowsInv (img : MemoryImage κ) (logSize : ℕ) (acc : Rows) (S : List Skel) : Prop where
-  tabs_size : acc.tabs.size = 6
+  tabs_size : acc.tabs.size = 7
   tabs : ∀ op, (acc.tabs.getD (opTableIdx op) #[]).toList =
     ((mkRows img (fun _ ↦ 0) (fun _ ↦ 0) S).filter fun r ↦ r.sk.ins.opcode = op).map
       (PRow.raw img)
   mem : CtrOk κ (readBump (fun _ ↦ 0) (S.flatMap fun sk ↦ readAddrs img sk.fp sk.ins)) acc.mem
   bc : CtrOk logSize (readBump (fun _ ↦ 0) (S.map (·.pc))) acc.bc
 
-/-- The table index of an opcode is below six. -/
-theorem tableOf_lt (op : Opcode) : opTableIdx op < 6 := by cases op <;> decide
+/-- The table index of an opcode is below seven. -/
+theorem tableOf_lt (op : Opcode) : opTableIdx op < 7 := by cases op <;> decide
 
 /-- Distinct opcodes have distinct tables. -/
 theorem tableOf_inj {op op' : Opcode} (h : opTableIdx op = opTableIdx op') : op = op' := by
@@ -266,7 +287,7 @@ theorem tableOf_inj {op op' : Opcode} (h : opTableIdx op = opTableIdx op') : op 
 
 /-- The pass starts from the invariant. -/
 theorem rowsInv_init (img : MemoryImage κ) (logSize : ℕ) :
-    RowsInv img logSize ⟨Array.replicate 6 #[], Array.replicate (2 ^ κ) 1,
+    RowsInv img logSize ⟨Array.replicate 7 #[], Array.replicate (2 ^ κ) 1,
       Array.replicate (2 ^ logSize) 1⟩ [] := by
   refine ⟨by simp, fun op ↦ ?_, ⟨by simp, fun i h ↦ ?_⟩, ⟨by simp, fun i h ↦ ?_⟩⟩
   · have := tableOf_lt op

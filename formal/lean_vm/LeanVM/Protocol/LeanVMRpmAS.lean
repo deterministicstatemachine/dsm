@@ -80,7 +80,7 @@ def BreaksASWithHash (D : NearDecoder) (z : ExperimentOutcomeWithHash) : Prop :=
 namespace Rpm
 
 /-- Coins do not help against the agreement-set extractor in the random-oracle model. -/
-theorem knowledgeSoundnessAS_coins (D : NearDecoder)
+theorem knowledgeSoundnessAS_coins (hfl : EndToEnd.Front.FlockSound) (D : NearDecoder)
     {B : OracleComp (unifSpec + KeccakCalls) (ProgramAndInput × Proof)} {Q : ℕ}
     (hB : Common.QueryCostAtMost B hashCalls Q) :
     Pr{let z ← experimentCoins B}[Breaks (extractorAS D) z] ≤ soundnessErrorAS Q := by
@@ -88,7 +88,7 @@ theorem knowledgeSoundnessAS_coins (D : NearDecoder)
       let (verdict, cache) ←
         (simulateQ KeccakCalls.randomOracle (verifierWithHash callKeccak256 callKeccakF1600 p.1.1.1 p.1.1.2 p.1.2)).run p.2
       return ((p.1, verdict), cache, p.2)) (Breaks (extractorAS D)) B Q hB ∅
-  exact hle.trans (knowledgeSoundnessRomAS D hA)
+  exact hle.trans (knowledgeSoundnessRomAS hfl D hA)
 
 /-- **The random-oracle game of the transfer is bounded by the random-oracle experiment** of the
 transfer's adversary, for the agreement-set extractor: the transcript's evaluations are the
@@ -143,7 +143,8 @@ theorem romGame_leAS (D : NearDecoder) (A : DetAdversary) :
 
 /-- **Knowledge soundness in the random-permutation model, for the agreement-set extractor**, for
 a deterministic adversary of at most `Q` queries to `π` and `π⁻¹`. -/
-theorem knowledgeSoundnessRpmAS (D : NearDecoder) {A : DetAdversary} {Q : ℕ}
+theorem knowledgeSoundnessRpmAS (hfl : EndToEnd.Front.FlockSound) (D : NearDecoder)
+    {A : DetAdversary} {Q : ℕ}
     (hA : A.IsTotalQueryBound Q) :
     Pr{let z ← detExperiment A}[BreaksASWithHash D z] ≤
       soundnessErrorAS Q + rpmError (Q + verifierPermCalls) := by
@@ -152,24 +153,26 @@ theorem knowledgeSoundnessRpmAS (D : NearDecoder) {A : DetAdversary} {Q : ℕ}
     (fun _ z ↦ duplex_postR z) (Q + verifierPermCalls) (isWeightBound_game hA)
     (BreaksASWithHash D)
   refine h1.trans (add_le_add ((romGame_leAS D A).trans ?_) le_rfl)
-  exact knowledgeSoundnessAS_coins D (isWeightBound_romAdv hA)
+  exact knowledgeSoundnessAS_coins hfl D (isWeightBound_romAdv hA)
 
 /-- The same, for an adversary with coins. -/
-theorem knowledgeSoundnessRpmAS_coins (D : NearDecoder) {B : RandomPermutationAdversary} {Q : ℕ}
+theorem knowledgeSoundnessRpmAS_coins (hfl : EndToEnd.Front.FlockSound) (D : NearDecoder)
+    {B : RandomPermutationAdversary} {Q : ℕ}
     (hB : Common.QueryCostAtMost B Common.permutationCallCost Q) :
     Pr{let z ← soundnessExperimentWithHash B}[BreaksASWithHash D z] ≤
       soundnessErrorAS Q + rpmError (Q + verifierPermCalls) := by
   obtain ⟨A, hA, hle⟩ := rpmExperiment_le_det hB (BreaksASWithHash D)
-  exact hle.trans (knowledgeSoundnessRpmAS D hA)
+  exact hle.trans (knowledgeSoundnessRpmAS hfl D hA)
 
 end Rpm
 
 /-- **Knowledge soundness holds for the agreement-set extractor** (in the random-permutation
-model), over any near-tuple decoder, with the end statement's bound. -/
-theorem knowledgeSoundnessAS_holds (D : NearDecoder) :
+model), over any near-tuple decoder, with the end statement's bound. Research build: conditional
+on `hfl : FlockSound`, Flock's soundness, a named hypothesis that is NOT proved. -/
+theorem knowledgeSoundnessAS_holds (hfl : Protocol.EndToEnd.Front.FlockSound) (D : NearDecoder) :
     KnowledgeSoundness (transcriptExtractorAS D) := by
   intro A Q hQ hcap
-  have := (Rpm.knowledgeSoundnessRpmAS_coins D hQ).trans (soundnessRpmAS_le_statement hcap)
+  have := (Rpm.knowledgeSoundnessRpmAS_coins hfl D hQ).trans (soundnessRpmAS_le_statement hcap)
   rw [← map_soundnessExperiment, prEvent_map] at this
   exact this
 

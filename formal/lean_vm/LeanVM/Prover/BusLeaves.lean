@@ -138,7 +138,7 @@ theorem mleK_col (hcols : ColsOk prog s q cols) (c : Col) (z : List E) :
   rfl
 
 /-- **A table's row read off the arrays** is the instance's row. -/
-theorem rowOf_eq (hcols : ColsOk prog s q cols) (t : Fin 6) {x : ℕ} (hx : x < 2 ^ s.τ t) :
+theorem rowOf_eq (hcols : ColsOk prog s q cols) (t : Fin 7) {x : ℕ} (hx : x < 2 ^ s.τ t) :
     busRowOf cols (globalColumnBases.getD t 0) (tables.getD t default).width x =
       rowAt prog s q t x := by
   have h := rowAt_eq prog s q t ⟨x, hx⟩
@@ -156,7 +156,7 @@ theorem rowOf_eq (hcols : ColsOk prog s q cols) (t : Fin 6) {x : ℕ} (hx : x < 
     simp only [hi, hi', ↓reduceDIte, ↓reduceIte]
 
 /-- **A table block's leaves.** -/
-theorem toList_tableTabA (hcols : ColsOk prog s q cols) (β : E) (w : List E) (t : Fin 6)
+theorem toList_tableTabA (hcols : ColsOk prog s q cols) (β : E) (w : List E) (t : Fin 7)
     (cs : List Form) :
     (tableTabA cols β w ⟨s.τ t, s.rows t, cs, t⟩).toList =
       tableTab prog s q β w ⟨s.τ t, s.rows t, cs, t⟩ := by
@@ -170,7 +170,7 @@ theorem toList_tableTabA (hcols : ColsOk prog s q cols) (β : E) (w : List E) (t
 
 /-- A block of a side owned by a table. -/
 theorem toList_tableTabA_owned (hcols : ColsOk prog s q cols) (β : E) (w : List E)
-    {blk : BusBlock} (hb : ∃ t : Fin 6, blk = ⟨s.τ t, s.rows t, blk.coordinates, t⟩) :
+    {blk : BusBlock} (hb : ∃ t : Fin 7, blk = ⟨s.τ t, s.rows t, blk.coordinates, t⟩) :
     (tableTabA cols β w blk).toList = tableTab prog s q β w blk := by
   obtain ⟨t, ht⟩ := hb
   rw [ht]

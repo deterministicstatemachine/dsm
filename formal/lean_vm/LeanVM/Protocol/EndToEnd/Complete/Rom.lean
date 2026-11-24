@@ -127,8 +127,9 @@ theorem honestComp_eq_getD (σ : Seed) (P : VerifierProgram Bool) (S : Strategy)
 
 /-- **Completeness in the random-oracle model, at a witness.** For an honest witness `w` at the
 sizes `s` (`HonestFor`) and a fuel of at most `2^64` nonces, the verifier rejects the proof of the
-specification's honest prover at that witness with probability at most `completenessError fuel`. -/
-theorem romComplete_at {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog} {ρ : ℕ}
+specification's honest prover at that witness with probability at most `completenessError fuel`.
+Research build: under `hF` and `hfc`, named hypotheses, not proved. -/
+theorem romComplete_at (hF : Flock.FlockWalk) (hfc : FlockComplete) {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog} {ρ : ℕ}
     {w : EnsembleWitness (leanIsaEnsemble prog t.logMemorySize)} {s : Sizes}
     (hw : HonestFor prog input t ρ w s)
     {fuel : ℕ} (hfuel : fuel ≤ 2 ^ 64) :
@@ -140,8 +141,8 @@ theorem romComplete_at {prog : LeanIsaProgram} {input : PublicInput} {t : Execut
           (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input)))}[z.1.2 = false] ≤
       completenessError fuel := by
   obtain ⟨hρ, hw', hs', hadm', -⟩ := hw
-  have hq := m3Honest_stackOf hw' hs'
-  have hrun := runI_leanVmProgram hadm' hρ hq
+  have hq := m3Honest_stackOf hF hw' hs'
+  have hrun := runI_leanVmProgram hfc hadm' hρ hq (flockColumnHonest_stackOf hF hw' hs')
   -- Unifying through the strategy unfolds it under Lean 4.35: name it first.
   generalize leanVmProver prog s ρ (stackOf prog s w) = S at hrun ⊢
   have h := Rom.romComplete (leanVmVerifierProgram (bytecodeWords prog) (publicInputDigest input)) _
@@ -155,8 +156,9 @@ theorem romComplete_at {prog : LeanIsaProgram} {input : PublicInput} {t : Execut
 
 /-- **Completeness in the random-oracle model.** For a valid execution whose committed size is at
 most `2^30`, at a valid rate, and a fuel of at most `2^64` nonces, the verifier rejects the honest
-prover's proof with probability at most `completenessError fuel`. -/
-theorem romComplete_leanVm {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
+prover's proof with probability at most `completenessError fuel`. Research build: under `hF` and
+`hfc`, named hypotheses, not proved. -/
+theorem romComplete_leanVm (hF : Flock.FlockWalk) (hfc : FlockComplete) {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
     {ρ : ℕ}
     (hv : ValidExecution prog input t) (hbudget : t.committedSize ≤ 2 ^ completeMu)
     (hρ : validRate ρ) {fuel : ℕ} (hfuel : fuel ≤ 2 ^ 64) :
@@ -168,7 +170,7 @@ theorem romComplete_leanVm {prog : LeanIsaProgram} {input : PublicInput} {t : Ex
   have hex : ∃ w s, HonestFor prog input t ρ w s := ⟨w, s, hρ, hw, hs, hadm, hrep⟩
   unfold honestComp
   simp only [hex, ↓reduceDIte]
-  exact romComplete_at hex.choose_spec.choose_spec hfuel
+  exact romComplete_at hF hfc hex.choose_spec.choose_spec hfuel
 
 /-- **The numbers**: at a fuel of `2^35` nonces per proof of work, the completeness error is
 below `2^-257`: at most `2^52` queries, each missing a proof of work of at most `27` bits with

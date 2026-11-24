@@ -35,24 +35,24 @@ open LeanVM.Protocol.EndToEnd.Complete
 variable (prog : LeanIsaProgram) (s : Sizes) (q : LeanVM.Protocol.Column (leanIsaμ prog s))
 
 /-- Table `t`'s constraints and forms at the evaluations `ev`. -/
-def rowPart (cp fp : List E) (bus : BusResult) (t : Fin 6) (ev : List E) : E :=
+def rowPart (cp fp : List E) (bus : BusResult) (t : Fin 7) (ev : List E) : E :=
   consPart cp t ev + formPart fp bus t ev
 
 /-- The product of table `t`'s weight's factors at the challenges `pre`, the last binding the
 lowest bound coordinate. -/
-def preWeight (bus : BusResult) (t : Fin 6) (pre : List E) : E :=
+def preWeight (bus : BusResult) (t : Fin 7) (pre : List E) : E :=
   ∏ i ∈ range pre.length,
     weightFactor bus.point (s.τ t) (nRounds s - pre.length + i) (pre.reverse.getD i 0)
 
 /-- Table `t`'s rows summed against the equality weights of the bus point's first `τ_t`
 coordinates. -/
-def waitSum (cp fp : List E) (bus : BusResult) (t : Fin 6) : E :=
+def waitSum (cp fp : List E) (bus : BusResult) (t : Fin 7) : E :=
   ∑ y : Fin (2 ^ s.τ t), eqEval (bus.point.take (s.τ t)) (boolPoint (s.τ t) y) *
     rowPart cp fp bus t (rowEvals prog s q t y)
 
 /-- The weight of table `t` at `boolPoint m x ++ X :: pre.reverse`, split at the coordinate `m`
 `X` binds. -/
-theorem weight_split (bus : BusResult) (t : Fin 6) (pre : List E) (hk : pre.length < nRounds s)
+theorem weight_split (bus : BusResult) (t : Fin 7) (pre : List E) (hk : pre.length < nRounds s)
     (x : ℕ) (X : E) :
     (tableWeights (tableLogs s) bus.point
         (boolPoint (nRounds s - pre.length - 1) x ++ X :: pre.reverse)).getD t 0 =
@@ -89,7 +89,7 @@ theorem weight_split (bus : BusResult) (t : Fin 6) (pre : List E) (hk : pre.leng
 /-- **The running claim, split table by table.** -/
 theorem claimOf_snoc_split {bus : BusResult} (hb : BusGood prog s q bus) (cp fp : List E)
     (pre : List E) (hk : pre.length < nRounds s) (X : E) :
-    claimOf prog s q cp fp bus (pre ++ [X]) = ∑ t : Fin 6, preWeight s bus t pre *
+    claimOf prog s q cp fp bus (pre ++ [X]) = ∑ t : Fin 7, preWeight s bus t pre *
       (if s.τ t ≤ nRounds s - pre.length - 1 then X * waitSum prog s q cp fp bus t
       else (1 + bus.point.getD (nRounds s - pre.length - 1) 0 + X) *
         ∑ x ∈ range (2 ^ (nRounds s - pre.length - 1)),

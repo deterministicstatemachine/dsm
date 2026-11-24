@@ -61,18 +61,21 @@ open Air.Flat (EnsembleWitness)
 
 /-! ## The stacked size -/
 
-/-- The committed columns, by table: three of the memory, `BYTECODE_FINAL_COUNTERS`, `QKECCAK`, then those of the
-six opcode tables (`13, 13, 7, 14, 14` and `28` for `KECCAK`, whose fifty value lanes are
-`q_keccak`'s or derived and whose columns `0 … 13` ride `q_keccak`'s spare slots). -/
+/-- The committed columns, by table: three of the memory, `BYTECODE_FINAL_COUNTERS`, `QKECCAK`,
+`QFLOCK`, then those of the seven opcode tables (`13, 13, 7, 14, 14`, `28` for `KECCAK`, whose fifty
+value lanes are `q_keccak`'s or derived and whose columns `0 … 13` ride `q_keccak`'s spare slots,
+and `28` for `BLAKE3`, whose thirty value limbs are `q_flock`'s words). -/
 theorem committedColumns_tables : committedColumns.map (fun c ↦ c.1) =
-    List.replicate 3 0 ++ [1, 2] ++ List.replicate 13 3 ++ List.replicate 13 4 ++
-      List.replicate 7 5 ++ List.replicate 14 6 ++ List.replicate 14 7 ++ List.replicate 28 8 := by
+    List.replicate 3 0 ++ [1, 2, 3] ++ List.replicate 13 4 ++ List.replicate 13 5 ++
+      List.replicate 7 6 ++ List.replicate 14 7 ++ List.replicate 14 8 ++ List.replicate 28 9 ++
+      List.replicate 28 10 := by
   decide +kernel
 
 /-- **The stacked size**: every committed column at its table's height. -/
 theorem blocks_total_eq (prog : LeanIsaProgram) (s : Sizes) : (LeanIsa.blocks prog s).total =
-    3 * 2 ^ s.logMem + 2 ^ prog.logSize + 2 ^ (s.τ 5 + 6) + 13 * 2 ^ s.τ 0 + 13 * 2 ^ s.τ 1 +
-      7 * 2 ^ s.τ 2 + 14 * 2 ^ s.τ 3 + 14 * 2 ^ s.τ 4 + 28 * 2 ^ s.τ 5 := by
+    3 * 2 ^ s.logMem + 2 ^ prog.logSize + 2 ^ (s.τ 5 + 6) + 2 ^ (s.τ 6 + 8) + 13 * 2 ^ s.τ 0 +
+      13 * 2 ^ s.τ 1 + 7 * 2 ^ s.τ 2 + 14 * 2 ^ s.τ 3 + 14 * 2 ^ s.τ 4 + 28 * 2 ^ s.τ 5 +
+      28 * 2 ^ s.τ 6 := by
   rw [Blocks.total_eq_sum]
   have h1 : ∑ b : Fin (LeanIsa.blocks prog s).n, 2 ^ (LeanIsa.blocks prog s).size b =
       ((LeanIsa.stackOrder prog s).map fun c ↦ 2 ^ kappa prog s c).sum :=
@@ -132,8 +135,9 @@ theorem exists_admissible_witness {prog : LeanIsaProgram} {input : PublicInput} 
     (hlen j).trans (hcount _).symm
   have htotal : (LeanIsa.blocks prog (witnessSizes w hpos)).total = t.committedSize := by
     have e : tableOpcode 0 = .xor ∧ tableOpcode 1 = .mulNative ∧ tableOpcode 2 = .setConstant ∧
-        tableOpcode 3 = .deref ∧ tableOpcode 4 = .jump ∧ tableOpcode 5 = .keccak := by decide
-    rw [blocks_total_eq, hmem, pow_add 2 _ 6]
+        tableOpcode 3 = .deref ∧ tableOpcode 4 = .jump ∧ tableOpcode 5 = .keccak ∧
+        tableOpcode 6 = .blake3 := by decide
+    rw [blocks_total_eq, hmem, pow_add 2 _ 6, pow_add 2 _ 8]
     simp only [Sizes.τ, hr, e, Execution.committedSize]
     have f0 : tableLogFloors.getD ((0 : Fin 7) : ℕ) 0 = 0 := rfl
     have f1 : tableLogFloors.getD ((1 : Fin 7) : ℕ) 0 = 0 := rfl
@@ -141,7 +145,8 @@ theorem exists_admissible_witness {prog : LeanIsaProgram} {input : PublicInput} 
     have f3 : tableLogFloors.getD ((3 : Fin 7) : ℕ) 0 = 0 := rfl
     have f4 : tableLogFloors.getD ((4 : Fin 7) : ℕ) 0 = 0 := rfl
     have f5 : tableLogFloors.getD ((5 : Fin 7) : ℕ) 0 = 9 := rfl
-    simp only [f0, f1, f2, f3, f4, f5, Nat.max_zero]
+    have f6 : tableLogFloors.getD ((6 : Fin 7) : ℕ) 0 = 0 := rfl
+    simp only [f0, f1, f2, f3, f4, f5, f6, Nat.max_zero]
     ring
   refine ⟨?_, ?_, fun j ↦ (hr j).trans_le (by rw [hcount]; exact hrows _), ?_⟩
   · rw [hmem]
@@ -173,8 +178,9 @@ noncomputable def honestProofOf (H : Bytes → Digest) (F : KeccakState → Kecc
   else none
 
 /-- **The honest proof is accepted**, for every hash function and permutation: whenever the
-honest prover outputs a proof, the verifier accepts it. -/
-theorem verify_honestProofOf (H : Bytes → Digest) (F : KeccakState → KeccakState) {prog :
+honest prover outputs a proof, the verifier accepts it. Research build: under `hF` and `hfc`,
+named hypotheses, not proved. -/
+theorem verify_honestProofOf (hF : Flock.FlockWalk) (hfc : FlockComplete) (H : Bytes → Digest) (F : KeccakState → KeccakState) {prog :
     LeanIsaProgram}
     {input : PublicInput} {t : Execution prog} {ρ fuel : ℕ} {proof : Proof}
     (h : honestProofOf H F prog input t ρ fuel = some proof) :
@@ -182,8 +188,8 @@ theorem verify_honestProofOf (H : Bytes → Digest) (F : KeccakState → KeccakS
   unfold honestProofOf at h
   split_ifs at h with hc
   obtain ⟨hρ, hw, hs, hadm, -⟩ := hc.choose_spec.choose_spec
-  have hq := m3Honest_stackOf hw hs
-  have hrun := runI_leanVmProgram hadm hρ hq
+  have hq := m3Honest_stackOf hF hw hs
+  have hrun := runI_leanVmProgram hfc hadm hρ hq (flockColumnHonest_stackOf hF hw hs)
   -- Unifying through the strategy unfolds it under Lean 4.35: name it first.
   generalize leanVmProver prog _ ρ (stackOf prog _ hc.choose) = S at h hrun
   exact runProof_prove H F _ _ _ fuel (Sound.grindThenSample_leanVmProgram _ _)
@@ -209,7 +215,7 @@ theorem honestProofOf_isSome {prog : LeanIsaProgram} {input : PublicInput} {t : 
 /-- **Completeness within the budget.** A valid execution whose committed size is at most `2^30`,
 at a valid rate: when every proof-of-work search succeeds below `fuel`, the honest prover outputs
 a proof, and the verifier accepts it, for every hash function and permutation. -/
-theorem complete_of_budget {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
+theorem complete_of_budget (hF : Flock.FlockWalk) (hfc : FlockComplete) {prog : LeanIsaProgram} {input : PublicInput} {t : Execution prog}
     {ρ : ℕ}
     (hv : ValidExecution prog input t) (hbudget : t.committedSize ≤ 2 ^ completeMu)
     (hρ : validRate ρ) (H : Bytes → Digest) (F : KeccakState → KeccakState) (fuel : ℕ)
@@ -220,7 +226,7 @@ theorem complete_of_budget {prog : LeanIsaProgram} {input : PublicInput} {t : Ex
       verifyWithHash (m := Id) H F (bytecodeWords prog) (publicInputDigest input) proof = true := by
   obtain ⟨proof, h⟩ := Option.isSome_iff_exists.mp
     (honestProofOf_isSome hv hbudget hρ H F fuel hpow)
-  exact ⟨proof, h, verify_honestProofOf H F h⟩
+  exact ⟨proof, h, verify_honestProofOf hF hfc H F h⟩
 
 end
 end LeanVM.Protocol.EndToEnd.Complete

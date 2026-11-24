@@ -106,7 +106,9 @@ def SpecOnValid (A : HonestProverWithHash)
 /-- **Completeness for a prover that is the specification at an honest witness**: the body of
 `LeanVM.Completeness` for `A`. No proof is a rejection, as the empty proof's is
 (`noProof_evalDistEq`). -/
-theorem completeness_of_spec (A : HonestProverWithHash) (hA : SpecOnValid A HonestFor) :
+theorem completeness_of_spec (hF : Protocol.Flock.FlockWalk)
+    (hfc : Protocol.EndToEnd.Complete.FlockComplete) (A : HonestProverWithHash)
+    (hA : SpecOnValid A HonestFor) :
     ∀ (prog : LeanIsaProgram) (input : PublicInput) (t : Execution prog) (ρ : ℕ),
       ValidExecution prog input t → t.committedSize ≤ 2 ^ 30 → 1 ≤ ρ ∧ ρ ≤ 4 →
       Pr{let v ← verifierCompletenessExperimentWithHash A prog input t ρ (2 ^ 35)}[v = false] ≤
@@ -116,7 +118,7 @@ theorem completeness_of_spec (A : HonestProverWithHash) (hA : SpecOnValid A Hone
   refine le_of_eq_of_le ((noProof_evalDistEq keccakCallsOverRandomPermutation _ _ _
     (verifierWithHash_empty _ _ prog input) []).prEvent_eq (· = false)) ?_
   rw [hAw, ← honestComp_eq_getD]
-  exact (Rpm.completenessRpm_at hw (by norm_num)).trans Rpm.completenessRpm_le
+  exact (Rpm.completenessRpm_at hF hfc hw (by norm_num)).trans Rpm.completenessRpm_le
 
 end LeanVM.Prover
 

@@ -38,7 +38,7 @@ theorem cellOf_of_le {t : Air.Flat.Table K} {x : ℕ} (h : t.table.length ≤ x)
   simp [cellOf, List.getElem?_eq_none h]
 
 /-- The opcode table of a column of table `opIdx j`. -/
-theorem opIdx_inj {j j' : Fin 6} (h : opIdx j = opIdx j') : j = j' := by
+theorem opIdx_inj {j j' : Fin 7} (h : opIdx j = opIdx j') : j = j' := by
   have := congrArg Fin.val h
   simp only [opIdx] at this
   exact Fin.ext (by omega)
@@ -91,7 +91,7 @@ theorem column_getElem_spare (c : Col) (h : IsSpare c) (x : ℕ)
     ((leanIsaInstance prog (witnessSizes w hp)).column (stackOf prog (witnessSizes w hp) w)
         c).values[x]'(by
           show x < 2 ^ kappa prog (witnessSizes w hp) c
-          rw [kappa_of_isVirtual prog _ h.isVirtual]; exact hx) =
+          rw [kappa_of_isKVirtual prog _ h.isKVirtual]; exact hx) =
       cellOf (tableAt w 5) x c.2 := by
   obtain ⟨h50, hcol⟩ := qSlot_spare h
   have h1 := column_spare prog (witnessSizes w hp) (stackOf prog (witnessSizes w hp) w) c h
@@ -138,16 +138,19 @@ theorem column_getElem_out (l : Fin 25) (x : ℕ) (hx : x < 2 ^ (witnessSizes w 
   rw [hin] at h1
   exact h1
 
-/-- **A column of an opcode table that is no output lane** is the table's cells, a padding row
-zero. -/
-theorem column_toArray_table (j : Fin 6) (i : Fin (width (opIdx j)))
-    (hout : ¬ IsOut ⟨opIdx j, i⟩) :
+/-- **A column of an opcode table that is no output lane and no `BLAKE3` value limb** is the
+table's cells, a padding row zero. -/
+theorem column_toArray_table (j : Fin 7) (i : Fin (width (opIdx j)))
+    (hout : ¬ IsOut ⟨opIdx j, i⟩) (hlimb : ¬ IsLimb ⟨opIdx j, i⟩) :
     ((leanIsaInstance prog (witnessSizes w hp)).column (stackOf prog (witnessSizes w hp) w)
         ⟨opIdx j, i⟩).values.toArray =
       Array.ofFn (n := 2 ^ (witnessSizes w hp).τ j) fun x ↦
         cellOf (tableAt w ⟨j, by omega⟩) x i := by
   by_cases hv : IsVirtual ⟨opIdx j, i⟩
-  · obtain rfl : j = 5 := opIdx_inj hv.1
+  · rcases hv with hv | hv
+    swap
+    · exact absurd hv hlimb
+    obtain rfl : j = 5 := opIdx_inj hv.1
     rcases hv.lane_or_spare with hl | hs
     · have h13 : 15 ≤ i.val := hl.2.1
       have h38 : i.val < 40 := Nat.lt_of_not_le fun h ↦ hout ⟨rfl, h, hl.2.2⟩
@@ -165,6 +168,26 @@ theorem column_toArray_table (j : Fin 6) (i : Fin (width (opIdx j)))
       rw [Array.getElem_ofFn, Vector.getElem_toArray]
       exact column_getElem_spare w hp _ hs x hx
   · exact (column_toArray_committed w hp _ hv).trans rfl
+
+/-- **A `BLAKE3` value limb of the stack** of a witness satisfying the constraint system, when
+Flock's walk computes the compression and keeps its inputs (`hF`, a named hypothesis): the
+table's cells, the padding row's past its rows. -/
+theorem column_toArray_limb (hF : Flock.FlockWalk) {input : PublicInput}
+    (h : SatisfiedBy prog input w) (hs : Sizes.ofWitness w = some (witnessSizes w hp))
+    (i : Fin (width (opIdx 6))) :
+    ((leanIsaInstance prog (witnessSizes w hp)).column (stackOf prog (witnessSizes w hp) w)
+        ⟨opIdx 6, i⟩).values.toArray =
+      Array.ofFn (n := 2 ^ (witnessSizes w hp).τ 6) fun x ↦
+        if x.val < (witnessSizes w hp).rows 6 then cellOf (tableAt w 6) x i
+        else padRow (opIdx 6) i := by
+  have hA := agrees_stackOf hF h hs
+  have hP := paddingHonest_stackOf hF hs
+  refine Array.ext (by simp only [Vector.size_toArray, Array.size_ofFn]; rfl) fun x h1 h2 ↦ ?_
+  have hx : x < 2 ^ (witnessSizes w hp).τ 6 := by simpa using h2
+  rw [Array.getElem_ofFn, Vector.getElem_toArray]
+  split_ifs with hr
+  · exact (hA.cells 6 ⟨x, hr⟩ i).symm
+  · exact congrFun (hP (opIdx 6) ⟨x, hx⟩ (Nat.le_of_not_lt hr)) i
 
 end
 

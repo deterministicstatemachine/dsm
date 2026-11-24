@@ -391,12 +391,25 @@ theorem tableLogHeights_verifierLayout (s : Sizes) :
 theorem getD_tableLogs_keccak (s : Sizes) : (tableLogs s).getD opKeccak 0 = s.τ 5 := by
   simp [tableLogs, opKeccak]
 
-attribute [local irreducible] Corr Script.bind Script.NoQuery Script.alongside hBus hTable hPub
+theorem getD_tableLogs_blake3 (s : Sizes) : (tableLogs s).getD opBlake3 0 = s.τ 6 := by
+  simp [tableLogs, opBlake3]
+
+/-- The executable opening claims of the two ring results are the specification's
+`ringStackClaims` of their claims. -/
+theorem map_denote_ringClaims (layout : Layout) (r : List RingOut) :
+    (List.zipWith (fun r region ↦ r.claim layout region) r [qkeccak, qflock]).map
+        ClaimDesc.denote = ringStackClaims layout (r.map RingOut.spec) := by
+  rcases r with _ | ⟨r1, _ | ⟨r2, rest⟩⟩ <;>
+    simp [RingOut.claim, ClaimDesc.denote, RingOut.spec, ringStackClaims,
+      Protocol.Ring.verifier_ringCoefficients]
+
+attribute [local irreducible] Corr Script.bind Script.NoQuery hBus hTable hPub
   hKeccakPhase hRing honestOpening busFast tableFast KeccakGkr.keccakPhaseProve ringFast
-  openingFast hOod oodFast in
+  openingFast hOod oodFast Flock.prove in
 /-- **The honest script makes the specification's moves** at the execution's witness, its
 sizes and its stack. -/
-theorem corr_honestScript (hv : ValidExecution prog input t) (hcap : t.committedSize ≤ 2 ^ 30)
+theorem corr_honestScript (hF : Flock.FlockWalk) (hv : ValidExecution prog input t)
+    (hcap : t.committedSize ≤ 2 ^ 30)
     {ρ : ℕ} (hρ : validRate ρ) {W : Witness} (hW : WitnessSpec prog input t W) :
     Corr (fun _ _ ↦ True) (honestScript W ρ (publicInputDigest input))
       (LeanVM.Protocol.EndToEnd.Complete.honestProver prog (traceSizes prog input t) ρ
@@ -404,14 +417,14 @@ theorem corr_honestScript (hv : ValidExecution prog input t) (hcap : t.committed
         (leanVmPhases prog (traceSizes prog input t)
           (stackOf prog (traceSizes prog input t) (traceWitness prog input t)))) := by
   obtain ⟨⟨-, hw, hs, hadm, -⟩, -⟩ := childFor_trace hv hcap hρ
-  obtain ⟨-, hWL, hWcols, hWstack, hWann⟩ := hW
+  obtain ⟨-, hWL, hWcols, hWstack, hWann, hWflock⟩ := hW
   unfold honestScript
-  rw [hWL]
+  rw [hWL, hWflock, ← flockInstancesOf_stackOf hF hw hs]
   generalize traceSizes prog input t = s at hWcols hWstack hWann hw hs hadm ⊢
   generalize traceWitness prog input t = w at hWcols hWstack hw hs ⊢
-  have hq := m3Honest_stackOf hw hs
+  have hq := m3Honest_stackOf hF hw hs
   generalize stackOf prog s w = q at hWcols hWstack hq ⊢
-  have hP := leanVmPhases_honest hadm hq
+  have hD : busDepth prog s < 64 := by have := busDepth_le hadm; omega
   have hμ : leanIsaμ prog s ≤ 64 := by have := hadm.2.2.2; unfold maxMu at this; omega
   have hcols : ColsOk prog s q W.cols := hWcols
   have hl : Claims.LayoutOk (verifierLayout prog s) :=
@@ -426,10 +439,11 @@ theorem corr_honestScript (hv : ValidExecution prog input t) (hcap : t.committed
   -- the bus, beside `verifyBusBalance`
   refine Corr.bind (fun _ bus hb ↦ ?_) _ _ (corr_alongside _ _ _ [] (noQuery_hBus prog s q)
     (corr_busFast hcols) (follows_and_allRet _ _ _
-      (follows_retOK _ _ _ (hP.bus []) (retOK_busColumns _)) (Claims.allRet_verifyBusBalance _ _)))
+      (follows_retOK _ _ _ (follows_verifyBusBalance hD hq []) (retOK_busColumns _))
+      (Claims.allRet_verifyBusBalance _ _)))
   obtain ⟨_, ⟨⟨-, rfl, hbg⟩, hbcol⟩, hbok⟩ := hb
   -- the table sumcheck, beside `tablePhase`
-  have htab := hP.table bus hbg []
+  have htab := follows_tablePhase hq.1 bus hbg []
   rw [Claims.tablePhaseClaims_eq] at htab
   refine Corr.bind (fun rows cl hc ↦ ?_) _ _ (corr_alongside _ _ _ [] (noQuery_hTable prog s q bus)
     (corr_tableFast W.cols hcols _ (tableLogHeights_verifierLayout s) bus hbg)
@@ -449,7 +463,7 @@ theorem corr_honestScript (hv : ValidExecution prog input t) (hcap : t.committed
     have h := lanes_point_length hbcol hpcol z hz
     rw [hlanes] at h
     exact h
-  have hk := hP.keccak _ (trueClaims_append htrue hpub) z
+  have hk := follows_keccakPhase prog s q hq.1 (trueClaims_append htrue hpub) z
     (lanesOf_honest prog s q hbcol hpcol z hz) []
   rw [Claims.keccakPhaseClaims_eq hbok.2 hpmem hrows] at hk
   rw [tableLogHeights_verifierLayout, getD_tableLogs_keccak]
@@ -458,18 +472,22 @@ theorem corr_honestScript (hv : ValidExecution prog input t) (hcap : t.committed
     (KeccakGkr.corr_keccakPhase prog s q W.cols hcols _ rows hlanes hlen)
     (follows_of_bind_ret _ _ _ hk))
   obtain ⟨_, -, rfl, -⟩ := hk'
-  -- ring switching, then the opening
-  refine Corr.bind (fun r rs hr ↦ ?_) _ _ (corr_ringFast kr.2.1 kr.2.2)
-  obtain ⟨rfl, -, -, -⟩ := hr
-  have hcl : ∀ L : List ColumnClaim, (RingOut.claim r (verifierLayout prog s) ::
-      L.map (ClaimDesc.column (verifierLayout prog s)) ++ [ClaimDesc.ood ood.1 ood.2]).map
-        ClaimDesc.denote =
-      openingClaims prog s (r.target, fun rPrime ↦ ringWeight r.point rPrime
-        (Protocol.Ring.ringCoefficients r.f r.g)) L (fun x ↦ eqEval ood.1 x, ood.2) := by
+  -- Flock's phase (research build): the same script on both sides
+  rw [getD_tableLogs_blake3]
+  refine Corr.bind (fun fr fr' hfr ↦ ?_) _ _ (Corr.refl _)
+  subst hfr
+  -- ring switching over the two regions, then the opening
+  refine Corr.bind (fun r rs hr ↦ ?_) _ _ (corr_ringFast _)
+  obtain ⟨rfl, -⟩ := hr
+  have hcl : ∀ L : List ColumnClaim,
+      (List.zipWith (fun r region ↦ r.claim (verifierLayout prog s) region) r [qkeccak, qflock] ++
+        L.map (ClaimDesc.column (verifierLayout prog s)) ++ [ClaimDesc.ood ood.1 ood.2]).map
+          ClaimDesc.denote =
+      openingClaims prog s (r.map RingOut.spec) L (fun x ↦ eqEval ood.1 x, ood.2) := by
     intro L
-    simp only [openingClaims, RingOut.claim, ClaimDesc.denote, List.map_cons, List.map_append,
-      List.map_map, Function.comp_def, Protocol.Ring.verifier_ringCoefficients, List.map_nil,
-      List.cons_append]
+    rw [List.map_append, List.map_append, map_denote_ringClaims]
+    simp only [openingClaims, ClaimDesc.denote, List.map_map, Function.comp_def, List.map_cons,
+      List.map_nil]
     rfl
   rw [← hcl, ← Script.bind_ret (openingFast _ _ _ _)]
   exact Corr.bind (fun _ _ _ ↦ by unfold Corr; trivial) _ _ (corr_openingFast ρ q _)

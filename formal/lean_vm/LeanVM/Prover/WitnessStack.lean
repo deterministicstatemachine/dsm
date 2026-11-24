@@ -99,8 +99,9 @@ theorem placements_getD_some (c : Col) (h : ¬ IsOut c) :
       some ((verifierLayout prog s).placement (refCol c)) := by
   have hno : refCol c ∉ keccakOutputColumns := (mem_keccakOutputColumns_pyCol c).not.mpr h
   unfold Verifier.Layout.placement
-  rw [placements_getD, keccakSlot_pyCol]
-  split_ifs <;> rfl
+  rw [placements_getD]
+  rcases keccakSlot (refCol c) with _ | a <;> rcases flockSlot (refCol c) with _ | b <;>
+    simp [hno]
 
 /-- A cell of a column read off the stack, as an entry of the stack's array. -/
 theorem getElem?_column {q : Column (leanIsaμ prog s)} {c : Col} {i y : ℕ}
@@ -113,7 +114,7 @@ theorem getElem?_column {q : Column (leanIsaμ prog s)} {c : Col} {i y : ℕ}
   exact congrArg some e
 
 /-- A column with a slot is the stack's cells at its slot of `QKECCAK`. -/
-theorem column_slot (q : Column (leanIsaμ prog s)) (c : Col) (h : IsVirtual c ∧ ¬ IsOut c)
+theorem column_slot (q : Column (leanIsaμ prog s)) (c : Col) (h : IsKVirtual c ∧ ¬ IsOut c)
     (i : ℕ) (hi : i < 2 ^ s.τ 5) :
     i + 2 ^ s.τ 5 * (qSlot c).val + (blocks prog s).offset (keccakBlock prog s) <
         2 ^ leanIsaμ prog s ∧
@@ -128,7 +129,7 @@ theorem column_slot (q : Column (leanIsaμ prog s)) (c : Col) (h : IsVirtual c �
   have hx : i + 2 ^ s.τ 5 * (qSlot c).val + (blocks prog s).offset (keccakBlock prog s) <
       2 ^ leanIsaμ prog s := by omega
   refine ⟨hx, ?_⟩
-  have hk : i < 2 ^ kappa prog s c := by rw [kappa_of_isVirtual prog s h.1]; exact hi
+  have hk : i < 2 ^ kappa prog s c := by rw [kappa_of_isKVirtual prog s h.1]; exact hi
   refine getElem?_column prog s hk hx ?_
   rcases c with ⟨j, k⟩
   obtain ⟨hj, -⟩ := h.1
@@ -150,6 +151,28 @@ theorem column_slot (q : Column (leanIsaμ prog s)) (c : Col) (h : IsVirtual c �
     simp only [hq]
     exact column_inCol_stack prog s q l ⟨i, hi⟩
 
+/-- A `BLAKE3` value limb is the stack's cells at its slot of `QFLOCK`. -/
+theorem column_flockSlot (q : Column (leanIsaμ prog s)) (c : Col) (h : IsLimb c)
+    (i : ℕ) (hi : i < 2 ^ s.τ 6) :
+    i + 2 ^ s.τ 6 * (fSlot c).val + (blocks prog s).offset (flockBlock prog s) <
+        2 ^ leanIsaμ prog s ∧
+      ((inst prog s).column q c).values.toArray[i]? =
+        q.values.toArray[i + 2 ^ s.τ 6 * (fSlot c).val +
+          (blocks prog s).offset (flockBlock prog s)]? := by
+  have hfit := blocks_fits prog s
+  have hoff := (blocks prog s).offset_add_pow_le_total (flockBlock prog s)
+  rw [size_flockBlock] at hoff
+  have hcube : i + 2 ^ s.τ 6 * (fSlot c).val < 2 ^ (s.τ 6 + 8) :=
+    fslot_lt (⟨i, hi⟩ : Fin (2 ^ s.τ 6)) (fSlot c).val (fSlot c).isLt
+  have hx : i + 2 ^ s.τ 6 * (fSlot c).val + (blocks prog s).offset (flockBlock prog s) <
+      2 ^ leanIsaμ prog s := by omega
+  refine ⟨hx, ?_⟩
+  have hk : i < 2 ^ kappa prog s c := by rw [kappa_of_isLimb prog s h]; exact hi
+  refine getElem?_column prog s hk hx ?_
+  have e := column_limb prog s q c h ⟨i, hi⟩
+  rw [word_flockColumn prog s q _ (fSlot c).isLt ⟨i, hi⟩] at e
+  exact e
+
 /-- **A column at its placement is the stack's cells there**: cell `i` of a column but an output
 lane is the stack's cell `i` past its placement's index. -/
 theorem column_at_placement (q : Column (leanIsaμ prog s)) (c : Col) (h : ¬ IsOut c) (i : ℕ)
@@ -157,12 +180,18 @@ theorem column_at_placement (q : Column (leanIsaμ prog s)) (c : Col) (h : ¬ Is
     ((verifierLayout prog s).placement (refCol c)).index + i < 2 ^ leanIsaμ prog s ∧
       ((inst prog s).column q c).values.toArray[i]? =
         q.values.toArray[((verifierLayout prog s).placement (refCol c)).index + i]? := by
-  by_cases hv : IsVirtual c
-  · rw [placement_slot prog s c ⟨hv, h⟩]
-    have e := column_slot prog s q c ⟨hv, h⟩ i (kappa_of_isVirtual prog s hv ▸ hi)
+  by_cases hkv : IsKVirtual c
+  · rw [placement_slot prog s c ⟨hkv, h⟩]
+    have e := column_slot prog s q c ⟨hkv, h⟩ i (kappa_of_isKVirtual prog s hkv ▸ hi)
     rwa [show (blocks prog s).offset (keccakBlock prog s) + (qSlot c).val * 2 ^ s.τ 5 + i =
       i + 2 ^ s.τ 5 * (qSlot c).val + (blocks prog s).offset (keccakBlock prog s) by ring]
-  · rw [placement_committed prog s c hv]
+  by_cases hl : IsLimb c
+  · rw [placement_limb prog s c hl]
+    have e := column_flockSlot prog s q c hl i (kappa_of_isLimb prog s hl ▸ hi)
+    rwa [show (blocks prog s).offset (flockBlock prog s) + (fSlot c).val * 2 ^ s.τ 6 + i =
+      i + 2 ^ s.τ 6 * (fSlot c).val + (blocks prog s).offset (flockBlock prog s) by ring]
+  · have hv : ¬ IsVirtual c := fun hv ↦ hv.elim hkv hl
+    rw [placement_committed prog s c hv]
     dsimp only
     have hfit := blocks_fits prog s
     have hoff := (blocks prog s).offset_add_pow_le_total (blockOf c hv)
@@ -174,16 +203,16 @@ theorem column_at_placement (q : Column (leanIsaμ prog s)) (c : Col) (h : ¬ Is
 
 /-- The writes of the prover's stack: the placements of the instance's columns, with their
 arrays. -/
-theorem mem_zip_placements {cols : Array (Array K)} (hsize : cols.size = 158) :
+theorem mem_zip_placements {cols : Array (Array K)} (hsize : cols.size = 217) :
     ∀ a, a ∈ (verifierLayout prog s).placements.zip cols.toList ↔ ∃ c : Col,
       a = ((verifierLayout prog s).placements.getD (refCol c) none, cols.getD (refCol c) #[]) := by
-  have hlen : (verifierLayout prog s).placements.length = 158 := by
-    show (placementsOf (refKappas prog s)).1.length = 158
+  have hlen : (verifierLayout prog s).placements.length = 217 := by
+    show (placementsOf (refKappas prog s)).1.length = 217
     rw [placementsOf_pyKappas]
     simp [length_pyKappas]
-  have hz : ((verifierLayout prog s).placements.zip cols.toList).length = 158 := by
+  have hz : ((verifierLayout prog s).placements.zip cols.toList).length = 217 := by
     simp [hlen, hsize]
-  have hget : ∀ i (hi : i < 158),
+  have hget : ∀ i (hi : i < 217),
       ((verifierLayout prog s).placements.zip cols.toList)[i]'(hz ▸ hi) =
         ((verifierLayout prog s).placements.getD i none, cols.getD i #[]) := by
     intro i hi
@@ -204,7 +233,7 @@ theorem mem_zip_placements {cols : Array (Array K)} (hsize : cols.size = 158) :
 /-- **The stack the prover writes is the stack its columns are read off**: given each column's
 array is the instance's column of `q`, and `q` is zero past the blocks. -/
 theorem stackArray_eq (q : Column (leanIsaμ prog s)) (cols : Array (Array K))
-    (hsize : cols.size = 158)
+    (hsize : cols.size = 217)
     (hcols : ∀ c : Col, cols.getD (refCol c) #[] = ((inst prog s).column q c).values.toArray)
     (hzero : ∀ x (hx : x < 2 ^ leanIsaμ prog s), (blocks prog s).total ≤ x → q.values[x] = 0) :
     stackArray (verifierLayout prog s) cols = q.values.toArray := by
