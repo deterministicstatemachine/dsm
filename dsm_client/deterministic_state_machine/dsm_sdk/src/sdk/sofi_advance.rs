@@ -923,6 +923,27 @@ pub async fn resolve_pending_position(
         &leaves,
         &set.id(),
     )?;
+    // The position is committed: each vault generation it made is this
+    // device's trade, proven and published on a thread of its own (SoFi
+    // Amendment S36), never on the position's path.
+    for post in advanced.vault_generations() {
+        match verifier.vault_genesis(post.vault_id()).map_err(verifier_error)? {
+            dsm::sofi::resolve::VaultGenesis::Accepted(vault_genesis) => {
+                crate::sdk::vault_proof_io::established(
+                    set,
+                    &vault_genesis,
+                    post,
+                    Some((genesis, device_id)),
+                )?;
+            }
+            other => {
+                return Err(storage(
+                    "vault proof",
+                    format!("the genesis of a vault this trade advanced is not accepted: {other:?}"),
+                ))
+            }
+        }
+    }
     // A realized route is the event the wallet shows: its history row, and
     // the projection of every token it moved rebuilt from the installed
     // head. A void route moved nothing and has none.
