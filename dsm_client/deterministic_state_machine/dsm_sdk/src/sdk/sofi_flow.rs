@@ -1510,6 +1510,9 @@ pub async fn find_route(
         }
     }
     let at_heads = heads_at_once(set, &verifier, &unique).await;
+    // The vaults whose heads the reads did not establish, and why: the
+    // search names them as it names the geneses it did not accept.
+    let mut unreached: Vec<String> = Vec::new();
     for (vault_id, at_head) in unique.iter().zip(at_heads) {
         match at_head {
             Ok((head, ..)) => {
@@ -1518,7 +1521,13 @@ pub async fn find_route(
                 }
             }
             // A head the reads did not establish may be the best route.
-            Err(DsmError::Storage { .. }) => search = Search::Partial,
+            Err(unread @ DsmError::Storage { .. }) => {
+                unreached.push(format!(
+                    "{}: {unread}",
+                    crate::util::text_id::encode_base32_crockford(&vault_id[..5])
+                ));
+                search = Search::Partial;
+            }
             // A head refused is no vault to trade through.
             Err(..) => {}
         }
@@ -1590,6 +1599,13 @@ pub async fn find_route(
         Some(chosen) => priced.swap_remove(chosen).1,
         None => Vec::new(),
     };
+    if !unreached.is_empty() {
+        log::info!(
+            "[sofi] route search: {} head(s) not established: {}",
+            unreached.len(),
+            unreached.join("; ")
+        );
+    }
     let ends = route_ends(&hops)?;
     Ok(RouteFound { hops, search, ends })
 }
