@@ -1224,3 +1224,58 @@ label.sb-btn.is-disabled { opacity: 0.45; pointer-events: none; }
 }
 .sb-switch[aria-checked='true']::after { transform: translateX(12px); }
 .sb-switch:focus-visible { outline: 2px solid var(--text-dark); outline-offset: 1px; }
+
+/* The Game Boy home screen's chameleon, with mail waiting (HomeChameleon):
+   the envelope sits in the curl of the chameleon's tongue
+   (frame 17 of his animation, tongue tip near 436,360 of the 688 × 405 frame,
+   drawn 260 px wide), spat out of his mouth, and sways there until it is
+   tapped. The button is larger than the envelope, for a finger. */
+.home-mail-envelope {
+  position: absolute;
+  left: 137px;
+  top: 102px;
+  width: 56px;
+  height: 42px;
+  box-sizing: border-box;
+  padding: 8px;
+  margin: 0;
+  border: none;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-tap-highlight-color: transparent;
+  line-height: 0;
+  cursor: pointer;
+  transform-origin: 50% 34px;
+  animation: homeMailSpit 220ms ease-out, homeMailSway 1.4s ease-in-out 220ms infinite alternate;
+}
+
+.home-mail-envelope img {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.home-mail-envelope:focus-visible {
+  outline: 2px solid var(--text-dark);
+  outline-offset: 0;
+}
+
+/* Spat out: the envelope leaves his mouth small (frame 17, the lips near
+   350,260 of the frame) as his tongue shoots out, runs down the tongue and
+   lands in its curl. Offsets are from where it rests, corrected for scaling
+   about the button's bottom centre. */
+@keyframes homeMailSpit {
+  0% { transform: translate(-33px, -35px) scale(0.25); }
+  45% { transform: translate(-16px, -11px) scale(0.6); }
+  85% { transform: translate(0, 1px) scale(1.06); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+@keyframes homeMailSway {
+  from { transform: rotate(-7deg); }
+  to { transform: rotate(7deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-mail-envelope { animation: none; }
+}
