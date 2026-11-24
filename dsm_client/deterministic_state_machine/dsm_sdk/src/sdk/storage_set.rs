@@ -2,7 +2,7 @@
 
 //! Canonical storage-set identity and the local catalog that resolves it.
 //!
-//! A quorum argument ("2 of 3") is only meaningful over ONE stable set of
+//! A storage fact ("three of five") is only meaningful over ONE stable set of
 //! DISTINCT members. URLs are not identity (a URL can change; two catalog
 //! entries can point at one physical node), and the local node list is not
 //! protocol identity (two devices can be configured differently). So:
@@ -10,7 +10,8 @@
 //! * a **`StorageSet`** is a validated, sorted list of distinct member
 //!   identities (the storage node's own configured `node.id`) with the
 //!   endpoint that currently reaches each one; its **id** is the canonical
-//!   digest of the member identities alone — never of endpoints;
+//!   digest of its members' `(member id, register incarnation)` pairs — never
+//!   of endpoints;
 //! * a **`StorageSetCatalog`** is the device's local knowledge of sets. It
 //!   never chooses a set: an authenticated `storage_set_id` (from a vault's
 //!   signed birth anchor, or frozen on a publication artifact) is RESOLVED
@@ -21,12 +22,12 @@
 //!
 //! Beta: the catalog holds exactly the one configured fleet, and that set is
 //! immutable for the lifetime of every vault born under it. Membership change
-//! is an explicit handover protocol (follow-up), not a config edit.
+//! is the handover of storage spec §12.5, not a config edit.
 //!
 //! "Distinct members" is executable, not administrative: member ids must be
-//! unique, endpoints must be injective within a set, and (see
-//! `storage_io::put_bytes_to_all_members`) an acceptance counts only when the
-//! node echoes the configured id the catalog says lives at that endpoint.
+//! unique, endpoints must be injective within a set, and each member is
+//! reached only under a certificate naming its member id, issued by that
+//! member's own CA.
 
 use dsm::types::error::DsmError;
 

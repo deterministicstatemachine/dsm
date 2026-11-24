@@ -25,7 +25,7 @@ pub fn relationship_nonce_hash(relationship_key: &[u8; 32], nonce: &[u8]) -> [u8
 }
 
 /// Whether `nonce` is spent in the relationship `relationship_key`, read
-/// INSIDE the single full-state apply transaction (§16.6 single-commit apply).
+/// INSIDE the single full-state apply transaction (single-commit apply).
 /// `&rusqlite::Transaction` derefs to `&Connection`, so pass `&tx`.
 pub fn is_nonce_spent_with_conn(
     conn: &rusqlite::Connection,
@@ -89,7 +89,7 @@ mod tests {
     const TIP_B: [u8; 32] = [0xB7; 32];
 
     /// The nonce the next transfer of `amount` ERA carries in a relationship
-    /// whose chain tip is `tip`, as the SDK derives it (§4.1).
+    /// whose chain tip is `tip`, as the SDK derives it.
     fn next_nonce(tip: &[u8; 32], amount: u64) -> Vec<u8> {
         crate::handlers::app_router_impl::transfer_nonce(tip, amount, "ERA", &[0xD1; 32])
     }

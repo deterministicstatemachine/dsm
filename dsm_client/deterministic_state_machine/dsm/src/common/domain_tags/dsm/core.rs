@@ -143,8 +143,8 @@ pub const TAG_MERKLE_NODE: TaggedHashDomain<'static> = crate::tagged_domain!(b"D
 pub const TAG_MERKLE_LEAF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/merkle-leaf");
 // Device Tree (standard Merkle) — see Issue #182 Finding #2 for the
 // open spec ambiguity between §2.2 (`merkle-node`/`merkle-leaf`) and
-// §16.3 (`dev-merkle`/`dev-empty`). Implementation continues to use
-// the §16.3 ("normative") tags pending Brandon's resolution.
+// (`dev-merkle`/`dev-empty`). Implementation continues to use
+// the "normative" tags pending Brandon's resolution.
 pub const TAG_DEV_MERKLE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dev-merkle");
 pub const TAG_DEV_LEAF: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/dev-leaf");
 pub const TAG_DEV_EMPTY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dev-empty");

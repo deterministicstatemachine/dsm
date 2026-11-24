@@ -4,20 +4,19 @@
 \* online DSM; it exists to show which structure is load bearing.
 \*
 \* What this model deletes, relative to DSM:
-\*   (1) Derived keys (paper Rule 2, Def 27/33). Here `key` is a FREE field a
+\*   (1) Derived keys (paper Rule 2, Def 28/34). Here `key` is a FREE field a
 \*       candidate simply carries, so two candidates can share a key while
 \*       claiming different successors. In DSM the key is derived from the
 \*       committed (relationship, parent): every relationship is its own
 \*       straight hash chain and a parent under one relationship is not
-\*       replayable under another (paper Sec 6).
+\*       replayable under another (paper Sec 7).
 \*   (2) The bilateral single-receiver topology. Here TWO independent
 \*       receivers each accept candidates for the same parent. Online DSM has
 \*       no such thing: a relationship step has exactly one receiver, the
 \*       counterparty of that relationship. Presenting one spendable object
 \*       to multiple distinct receivers exists only in offline bearer mode,
-\*       which is governed by the fused anchor, the Def 56 pending lock, the
-\*       offline anchor design's co-signed precommit, and reconciliation
-\*       (paper Sec 29, Thm 14). That is a different mechanism with its own
+\*       which is governed by the fused anchor, the Def 58 pending lock and
+\*       the offline anchor design (paper Sec 30). That is a different mechanism with its own
 \*       model and is out of scope here.
 \*
 \* With both deletions, TLC finds the fork: receiver A realizes s1 and

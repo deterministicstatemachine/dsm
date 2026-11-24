@@ -39,7 +39,8 @@ specs/
 └── requirements/
     ├── MASTER_REQUIREMENTS.md
     ├── CONFORMANCE_GAPS.md
-    └── VERIFICATION_MATRIX.md
+    ├── VERIFICATION_MATRIX.md
+    └── … proof and claim records (below)
 ```
 
 - **`DSM_High_Level_Explainer.md`** is the **overarching DSM architectural specification**. It defines the common state model, invariants, acceptance structure, authority boundaries, safety assumptions, liveness boundaries, and protocol concepts that subsystem specifications refine.
@@ -47,7 +48,7 @@ specs/
 - **`dBTC_Native_Specification.md`** is the normative subsystem specification for DSM-native Bitcoin-backed state, origin admission, dBTC transfer, withdrawal burns, DLV fulfillment, constrained Bitcoin execution, and successor vaults.
 - **`DSM_Storage_Node_Specification.md`** is the normative subsystem specification for storage nodes: the storage contract, keyed cells and finality, storage sets and roles, member succession and loss, the operator registry, and storage economics. Items it marks **Open** are undecided and are not requirements.
 
-Emissions, recovery, and dedicated offline/hardware subsystems are **out of scope for this round**. If one of the three current specifications imports such machinery as substrate, record the dependency boundary only; do not expand the current checklist into a full audit of that subsystem.
+Emissions, recovery, and dedicated offline/hardware subsystems are **out of scope for this round**. If one of the four current specifications imports such machinery as substrate, record the dependency boundary only; do not expand the current checklist into a full audit of that subsystem.
 
 Storage-node requirements are defined by `DSM_Storage_Node_Specification.md`, which refines the DSM storage architecture and states the storage contract SoFi and dBTC rely on. Extract its **Open** items as open questions, never as requirements.
 
@@ -81,18 +82,15 @@ Required files:
 - **`specs/requirements/CONFORMANCE_GAPS.md`** — comparison of those requirements against the real backend: missing mechanisms, wrong authority boundaries, stand-ins, partial skeletons, obsolete code, and conformance status.
 - **`specs/requirements/VERIFICATION_MATRIX.md`** — maps security-critical requirements to implementation loci, tests, mutation controls, and formal artifacts where applicable.
 
+The subtree also holds the proof and claim records CI checks: `PUBLISHED_CLAIMS.md` and `CLAIM_TRACE.tsv` (`scripts/check_claim_trace.py`), `LEAN_AXIOM_LEDGER.tsv` and `LEAN_DECLARED_ASSUMPTIONS.tsv` (`scripts/lean_axiom_audit.py`), `DSM_MODULAR_PROOF_MAP.md` and the `SPHINCS_*` documents with `SPHINCS_REFINEMENT_MAP.tsv` and `SPHINCS_CALLERS.tsv` (`scripts/sphincs_source_map.py`), and `INTENT_MANIFEST.tsv` with `INTENT_PINS.tsv` (`ci/intent_pins.py`).
+
 These files are derived artifacts. They are **not independent sources of protocol truth**.
 
 The repository is evidence of implementation state, **not evidence of protocol intent**. Existing code may satisfy, violate, partially implement, or be unrelated to a requirement; it does not create a normative requirement by itself.
 
 ## Agent instruction files
 
-Repository-wide agent operating instructions live at the repository root:
-
-```text
-CLAUDE.md
-AGENTS.md
-```
+Agent operating instructions, where used, are local and untracked (`CLAUDE.md`, `AGENTS.md` at the repository root are gitignored).
 
 These files contain operating instructions only: how agents should work, which specifications to read, how to handle conflicts, and where derived artifacts belong.
 

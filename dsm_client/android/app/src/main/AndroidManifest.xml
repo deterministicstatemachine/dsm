@@ -19,7 +19,8 @@
         tools:targetApi="s"/>
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
 
-    <!-- USB host (OTG) for the sender phone -> Pico raw-SPI passthrough (offline-bearer H2).
+    <!-- USB host (OTG) for the phone's own DSM Anchor board, on the payer's side and the receiver's:
+         an opaque framed byte transport.
          Optional so non-OTG devices still install; the Pico link is only needed to hold an anchor. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
 

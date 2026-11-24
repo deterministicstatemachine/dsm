@@ -111,7 +111,7 @@ impl Executed {
     }
 
     /// A payment whose debit is committed and whose delivery is not yet
-    /// done: it was made, and the sweep carries it forward (§16.6).
+    /// done: it was made, and the sweep carries it forward.
     fn paid_undelivered(why: impl std::fmt::Display) -> Self {
         Self {
             outcome: generated::ConnectOutcome::CarriedOut,
@@ -1316,7 +1316,7 @@ impl AppRouterImpl {
                 .await;
                 match sent {
                     // A committed debit is paid, delivered or not: it stands
-                    // and the sweep carries it forward (§16.6), so it counts
+                    // and the sweep carries it forward, so it counts
                     // against the grant (SA-19).
                     OnlineSent::Delivered(_) => Executed::carried_out(None),
                     OnlineSent::Undelivered { why, .. } | OnlineSent::Stranded { why, .. } => {

@@ -20,8 +20,9 @@
 //!
 //! Value received offline (owner, 2026-11-07: an offline payment needs a board on both sides, and
 //! the money received lands in the receiver's own offline balance) sits in its own leaf, apart from
-//! the loaded allocation: no spend draws from it, and it leaves only by its unload, which a contact
-//! takes once the payer's own online history shows the spend.
+//! the loaded allocation: no spend draws from it, and it leaves only by its unload, checked by
+//! reading the payer's origin cells, from the account the payer's boundary left through the cell
+//! the payment starts from, each final; the payer is not needed (DSM Amendment A39).
 //!
 //! The counter leaf is the authority for offline progression (DSM §68, §69):
 //! `u_{i+1} = u_i + 1` is committed into authenticated state, and the anchor's
@@ -127,7 +128,7 @@ pub enum OfflineAccountStep {
     /// A canonical load: `amount` of `asset` enters the account. `boundary_id` is
     /// the economic operation id of the load. The account's board signs it at
     /// its next counter, as it signs a spend, so the counter and the frontier
-    /// advance with it in the same write set (DSM Amendment A39 draft, option B).
+    /// advance with it in the same write set (DSM Amendment A39).
     Load {
         asset: [u8; 32],
         amount: u64,
@@ -162,7 +163,7 @@ pub enum OfflineAccountStep {
     },
     /// The unload of a payment received offline: `amount` of `asset` leaves what the account holds
     /// received, for the online balance. Signed by the board at its next counter, as every step of
-    /// the account is (DSM Amendment A39 draft, option B), so the counter and the frontier advance
+    /// the account is (DSM Amendment A39), so the counter and the frontier advance
     /// with it.
     Settle {
         asset: [u8; 32],

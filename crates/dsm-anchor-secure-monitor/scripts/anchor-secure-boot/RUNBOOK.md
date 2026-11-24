@@ -417,10 +417,13 @@ dsm-board-stamp genkey            # ~/.dsm-board-stamp/stamp-key.enc; its public
 
 For each board, after Step 9c and before Step 10:
 
-1. Read its identity, nothing written: `OP_BOARD_IDENTITY` answers `anchor_id`, `pk_host` (the one its
-   install will bind), `pk_chip` and its install kind. A trial image's identity is never stamped.
-2. Sign it: `dsm-board-stamp stamp --anchor-id <hex> --pk-host <hex> --pk-chip <hex> --out <file>`.
-3. Have the board keep it: `OP_STAMP` with the stamp after the request. The board keeps only a stamp that
+1. Read its identity, nothing written: `used-chip-bench --port <serial> --board-identity <id-file>`
+   (`OP_BOARD_IDENTITY` answers `anchor_id`, `pk_host` (the one its install will bind), `pk_chip` and
+   its install kind). A trial image's identity is never stamped.
+2. Sign it: `dsm-board-stamp stamp --identity <id-file> --out <stamp-file>`; check it with
+   `dsm-board-stamp verify --identity <id-file> --stamp <stamp-file>`.
+3. Have the board keep it: `used-chip-bench --port <serial> --keep-stamp <stamp-file>` (`OP_STAMP` with
+   the stamp after the request). The board keeps only a stamp that
    verifies under the stamp keys its signed firmware carries, over its own identity, and only before its
    install; it answers with the identity and the stamp it now keeps.
 

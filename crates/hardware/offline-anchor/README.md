@@ -5,7 +5,7 @@
 
 This guide covers building the hardware anchor that DSM uses for offline bearer transfer. The appliance has two parts: an RP2350 microcontroller (on a Raspberry Pi Pico 2 W) and a TROPIC01 secure element (on a MIKROE Secure Tropic Click). They are joined by six wires and fit together in a 3D-printed case about the size of a key fob. The appliance plugs into a phone over USB-OTG.
 
-The appliance proves **device identity only**. Transfer uniqueness is a software property of the DSM state machine, and the firmware is not the transfer authority. See `crates/dsm-anchor-core` (the appliance and the anchor's states) for the authority model, and see [`docs/bench-proofs/`](../../../docs/bench-proofs/) for the silicon proof logs.
+The appliance proves **device identity only**. Transfer uniqueness is a software property of the DSM state machine, and the firmware is not the transfer authority. See `crates/dsm-anchor-core` (the appliance and the anchor's states) for the authority model, and [`docs/bench-proofs/`](../../../docs/bench-proofs/) for the July 2026 counter log, made on an earlier design in which the receiver read the chip's counter; today's on-silicon record is the secure-boot RUNBOOK's "What has run on silicon".
 
 | Sheet | Contents |
 |---|---|
@@ -124,6 +124,8 @@ cd ../dsm-anchor-bench && cargo build --release
 **Every board goes through the try-run before anything is burned on it.** The trial image goes through an install on this board and this chip with the permanent parts substituted, reports each step and how long it took, and says what an install would make permanent. Do not go on unless every step says `ok`.
 
 A production image does nothing to its chip until the board's sealed secret is in OTP (the secure-boot runbook below), and says so over USB. A started appliance stays unprovisioned, and connecting it to a phone changes nothing: the DSM app offers its try-run, shows what an install makes permanent, and installs only when told to.
+
+**A board pays or is paid offline only under the owner's stamp** (DSM Amendment A38). The wallet installs for good only a stamped board, and receivers refuse an unstamped one; a board assembled from this guide can run the trial image and its try-run, and nothing more, until the owner has set it up and stamped it (the RUNBOOK's Step 9d).
 
 When it's working, the appliance enumerates over USB-CDC as **"DSM Anchor"** (VID `0x1209`, PID `0xD5A1`). The DSM Android app finds it by that ID (`dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/LocalPicoUsb.kt`), and its debug build's USB filter (`dsm_client/android/app/src/debug/res/xml/pico_device_filter.xml`) matches it when the appliance is plugged into a phone over USB-OTG.
 

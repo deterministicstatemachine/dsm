@@ -129,7 +129,7 @@ fn record_restored_lineage(
 /// Why `operation` may not move value out of this device now, if it may not:
 /// identity recovery is in progress (spec R3), or the operation's egress
 /// asset is held `LockedRecovery` until its own verified frontier reconciles
-/// (spec §0.4 P5). Fail-closed: an unreadable state refuses. An operation
+///. Fail-closed: an unreadable state refuses. An operation
 /// that moves no value out is never refused here.
 ///
 /// The canonical advance checks this under the state-machine lock, atomic
@@ -410,7 +410,7 @@ impl CoreSDK {
     /// recorded, and the unfenced head takes the trader balances that root
     /// holds — all in the one admission transaction, so the head and the
     /// admitted root cannot disagree about what this device holds. The vault
-    /// heads are the advance's own (spec §44.4), so a head and the position
+    /// heads are the advance's own, so a head and the position
     /// that chose it cannot disagree either.
     pub(crate) fn admit_resolved_sofi_position(
         &self,
@@ -1058,8 +1058,8 @@ impl CoreSDK {
         }
         // The unload of the payment received (owner, 2026-11-07): out of what this device's own
         // offline account holds received, into its online balance.
-        // Its board signed the unload over the device roots it previewed (DSM Amendment A39 draft,
-        // option B): the head must still stand where it did.
+        // Its board signed the unload over the device roots it previewed (DSM Amendment A39):
+        // the head must still stand where it did.
         let settled = head.settle_offline_receipt(
             &receipt.receiver_bundle,
             &receipt.asset,
@@ -1193,7 +1193,7 @@ impl CoreSDK {
         // A connected application's request this task is carrying out is
         // bound to the advance in this same transaction (SA-60).
         crate::sdk::connect::operations::bind_in_tx(&tx, outcome)?;
-        // §16.6: caller-injected full-state-consumption work (nonce consumption +
+        // caller-injected full-state-consumption work (nonce consumption +
         // canonical apply record for the incoming-transfer apply). Same tx — an
         // Err here rolls back the state persistence too.
         if let Some(extra) = in_tx_extra {
@@ -1214,7 +1214,7 @@ impl CoreSDK {
     /// `bcr_device_heads` cache needs a row so restore / reader paths can
     /// locate the device. The `genesis_hash` argument is the canonical
     /// `G_A` digest from the genesis state — it populates `DeviceState.genesis`
-    /// (§2.2) and is also used as the legacy SMT-root anchor for the
+    /// and is also used as the legacy SMT-root anchor for the
     /// initial head so `verify_state` checks against the genesis hash work
     /// before any relationship advance has fired.
     ///
@@ -1624,7 +1624,7 @@ impl CoreSDK {
         Ok(())
     }
 
-    /// Execute a DSM operation on a specific relationship chain (§2.2, §4.2).
+    /// Execute a DSM operation on a specific relationship chain.
     ///
     /// Returns `(State, AdvanceOutcome)` where the `State` is a compatibility
     /// view derived from the AdvanceOutcome's DeviceState + chain state. The
@@ -1848,7 +1848,7 @@ impl CoreSDK {
                 &dsm::types::device_state::AdvanceOutcome,
             ) -> Result<(), DsmError>,
         >,
-        // §16.6 staged advance: runs AFTER the pure prepare and BEFORE the
+        // staged advance: runs AFTER the pure prepare and BEFORE the
         // durable write opens its transaction. This is the only window in
         // which a caller may do work that itself touches the database (e.g.
         // per-step EK signing, which reads cert heads) — inside the write
@@ -1985,10 +1985,10 @@ impl CoreSDK {
         // for the local lineage; A-side authority is enforced upstream in
         // `apply_incoming_transfer_full_state`.
         // The accepted-state index is bumped ATOMICALLY inside this transaction
-        // (spec §5.1) — a frontier-changing transition can never persist without
+        // — a frontier-changing transition can never persist without
         // the capsule being marked dirty. `in_tx_extra` (nonce consumption +
         // canonical apply record on the incoming-transfer path) runs in the SAME
-        // transaction (§16.6 full-state consumption).
+        // transaction (full-state consumption).
         // Staged artifact build (signing, envelope construction) — outside the
         // write transaction, so DB reads here cannot deadlock. Failing now
         // means nothing was persisted and nothing became deliverable.
@@ -2513,7 +2513,7 @@ impl CoreSDK {
     /// that hasn't committed yet.
     ///
     /// Used by the BLE sender in `send_bilateral_confirm` to build the
-    /// stitched receipt (§4.2) with the real post-advance SMT roots + proofs
+    /// stitched receipt with the real post-advance SMT roots + proofs
     /// *before* the sender advances canonical state — the canonical commit
     /// happens when the anchor commits, in `commit_released_bearer_step`, via
     /// `execute_on_relationship_for_bilateral`, which re-runs prepare and
@@ -2585,7 +2585,7 @@ pub struct OfflineMove {
     pub amount: u64,
 }
 
-/// What a board signed for a step that is no payment (DSM Amendment A39 draft, option B): the
+/// What a board signed for a step that is no payment (DSM Amendment A39): the
 /// frontier it advanced to, and the device roots before and after it signed over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoardSigned {
@@ -3143,8 +3143,8 @@ impl CoreSDK {
         })
     }
 
-    /// The board's signature of a load or an unload of its account (DSM Amendment A39 draft,
-    /// option B): the boundary's transition `t`, built from its operation id, prepared over the
+    /// The board's signature of a load or an unload of its account (DSM Amendment A39):
+    /// the boundary's transition `t`, built from its operation id, prepared over the
     /// device roots before and after it, committed and emitted, with the offline-state proofs
     /// attached. A board that already committed exactly this transition (a crash after its counter
     /// moved and before the boundary was durable) emits that release again; a board holding any
@@ -3659,7 +3659,7 @@ impl CoreSDK {
     }
 
     /// The ONE production canonical apply for an inbound online transfer —
-    /// STAGED (§16.6 defect zero, recipient side).
+    /// STAGED (defect zero, recipient side).
     ///
     /// ```text
     /// lookup (Duplicate/Conflict return HERE, nothing built)
@@ -3679,7 +3679,7 @@ impl CoreSDK {
     ///
     /// `sender_transition_entropy` is the receipt's canonical field 21: the one
     /// value Core derived inside the sender's `advance` (Part VII step 3). It is
-    /// what `C_pre` is computed over here (§39.3), and it lets this side
+    /// what `C_pre` is computed over here, and it lets this side
     /// recompute the sender's `child_tip` from `parent_tip`, the signed
     /// operation and that value — a receipt whose child is not that successor
     /// is refused before anything is built.
@@ -3782,8 +3782,8 @@ impl CoreSDK {
         // NEVER derived or compared here (cross-space comparison was the
         // AWYPCNK8 false-conflict bug). C_pre is bound to the signed parent
         // and takes the sender's transition entropy — the one value of the
-        // transition (§39.3) — never the transfer nonce, which stays in the
-        // operation bytes where it is already hashed (§39.4).
+        // transition — never the transfer nonce, which stays in the
+        // operation bytes where it is already hashed.
         let parent_tip = signed_parent_tip;
         let child_tip = signed_child_tip;
         let precommit_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
@@ -3840,7 +3840,7 @@ impl CoreSDK {
             &local_arr,
             &sender_arr,
         );
-        // §16.6 A-side head pin (the space-correct successor check).
+        // A-side head pin (the space-correct successor check).
         // The recipient cannot recompute the sender's child — chain tips are
         // per-device values — but it CAN pin the sender's asymmetric head and
         // require the signed parent to be exactly it. Before any transition has
@@ -4078,7 +4078,7 @@ pub(crate) fn addressed_to(to_device_id: &[u8], this_device: &[u8; 32]) -> bool 
 
 /// The child tip a receipt must sign for a step: the v2 successor of the
 /// signed parent under the signed operation (signature included) and the
-/// sender's transition entropy (§39.3). The ingestion boundary binds a
+/// sender's transition entropy. The ingestion boundary binds a
 /// receipt to its transfer with it; the canonical apply checks it again.
 pub(crate) fn successor_child_tip(
     relationship_key: &[u8; 32],

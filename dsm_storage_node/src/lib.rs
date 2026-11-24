@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The storage node: its state, the storage contract's routes (storage spec
-//! Part II §12), the b0x spool, and the one assembly the binary serves.
+//! §5–§7), the b0x spool, and the one assembly the binary serves.
 #![deny(warnings)]
 
 use axum::Extension;
@@ -18,7 +18,7 @@ pub struct AppState {
     /// The protocol identity EXACTLY as configured (`[node] id`): the string
     /// the storage set names, the value the identity echo layer emits, and
     /// the `member_id` of every ByteCommit and arrival record this node
-    /// signs for.
+    /// emits.
     pub configured_member_id: String,
     /// `configured_member_id` as the header value the echo layer sends.
     member_id_header: axum::http::HeaderValue,
@@ -230,14 +230,14 @@ impl AppState {
     }
 }
 
-/// The four operations of the storage contract (Part II §12) — put object,
-/// put at a key, append to an index, get — as ONE assembly, used by the
-/// binary and by the contract suites, so what the suites drive is what the
-/// binary serves.
+/// The four operations of the storage contract (storage spec §5–§7) — put object, put at a key, append to an index, get — as ONE
+/// assembly, used by the binary and by the contract suites, so what the
+/// suites drive is what the binary serves.
 ///
-/// No write authorization on any of them: a member never checks who carries
-/// the bytes, because every object carries its own authority and derived
-/// objects need none.
+/// A member never checks who delivers the bytes. It keeps a write at a cell
+/// one party owns only when it passes the owner check of storage spec §6
+/// rule 6; a cell several parties write by protocol takes a write with no
+/// proof.
 pub fn storage_contract_router(state: Arc<AppState>) -> axum::Router<()> {
     api::cells::create_router(state.clone())
         .merge(api::backup::create_router(state.clone()))
@@ -275,7 +275,7 @@ mod storage_set_tests {
 
     /// THE REFUSAL THIS MECHANISM EXISTS FOR.
     ///
-    /// A node that lost and rebuilt its register still owns its identity key
+    /// A node that lost and rebuilt its register still holds its TLS key
     /// and its configured id, so every check that looks at identity alone
     /// passes. What it no longer has is the register history the set names.
     /// Startup is where that becomes loud: the configured incarnation is what
@@ -590,11 +590,13 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
                 move || health(state)
             }),
         )
-        // The storage contract's four operations (Part II §12): no write
-        // authorization, content-blind.
+        // The storage contract's four operations (storage spec §5–§7): the
+        // one owner check of §6 rule 6 on a put, and nothing read of what a
+        // value means.
         .merge(crate::storage_contract_router(state.clone()))
-        // The b0x spool (storage spec §8): no writer or reader authorization,
-        // envelopes never opened.
+        // The b0x spool (storage spec §8): a write is stored only when the
+        // key its inbox address is bound to granted and signed it; no reader
+        // authorization; envelopes never opened.
         .merge(crate::api::transport::b0x::router(state.clone()))
         .merge(doorbells)
         .layer(RequestBodyLimitLayer::new(limits.body_limit_bytes))

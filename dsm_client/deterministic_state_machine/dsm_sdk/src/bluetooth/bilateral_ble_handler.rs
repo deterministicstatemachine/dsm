@@ -2,10 +2,11 @@
 
 //! BLE Bilateral Transaction Handler
 //!
-//! Implements the complete offline bilateral transaction protocol over Bluetooth Low Energy:
-//! 1. Prepare phase: Create pre-commitments
-//! 2. Accept phase: Counterparty accepts/rejects the commitment
-//! 3. Commit phase: Both parties finalize with dual signatures
+//! Implements the offline step between two contacts over Bluetooth Low Energy: the payer
+//! proposes; the receiver accepts; the payer's board signs the release and the payer confirms
+//! with it; the receiver's board checks the payment and commits the receive; the receiver's
+//! acknowledgement commits the payer's side (Prepared → Accepted → Releasing → ConfirmPending →
+//! Receiving → Committed).
 //!
 //! All messages use protobuf envelopes for deterministic serialization.
 
@@ -54,7 +55,7 @@ fn sdk_send_status_from_router_status(
     }
 }
 
-/// This device's Device Tree commitment `R_G` (§2.3), as genesis persisted it
+/// This device's Device Tree commitment `R_G`, as genesis persisted it
 /// in the app state. A device without one has no identity to sign receipts
 /// under; no root is derived in its place.
 fn local_device_tree_commitment(
@@ -66,7 +67,7 @@ fn local_device_tree_commitment(
 
 /// Which side of a bilateral receipt the local device is signing.
 ///
-/// In whitepaper §11.1 per-step EK signing, both parties to a bilateral
+/// In per-step EK signing, both parties to a bilateral
 /// transition stamp their own per-step EK certificate + signature on the
 /// stitched receipt. `A` is the sender's side (initiates the transfer) and
 /// `B` is the receiver's side (counter-signs after acceptance).
@@ -108,7 +109,7 @@ pub struct BilateralBleHandler {
     sessions: SessionStore,
     device_id: [u8; 32],
     event_callback: Option<BilateralEventCallback>,
-    /// Per-Device SMT for relationship chain tips (§2.2, §4.3).
+    /// Per-Device SMT for relationship chain tips.
     /// Shared singleton — same instance is used by both BLE and online transfer paths.
     per_device_smt: Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>>,
     /// Application-layer settlement delegate.  Handles all token- and
@@ -315,7 +316,7 @@ pub(crate) fn disclosed_anchor(
 
 /// Stage `operation`, a bearer transfer to `counterparty_device_id` opened by `terms`, on this
 /// device's anchor under the receiver's challenge `receiver_challenge`, and build its account
-/// spend. The operation's asset is resolved independently from the token `terms` name (§9.5)
+/// spend. The operation's asset is resolved independently from the token `terms` name
 /// and must be the asset the operation signs.
 pub(crate) fn stage_bearer_spend(
     router: &dyn crate::bridge::AppRouter,
@@ -660,7 +661,7 @@ impl BilateralBleHandler {
         Ok(())
     }
 
-    /// Apply per-step EK signing (whitepaper §11.1) to an unsigned bilateral
+    /// Apply per-step EK signing to an unsigned bilateral
     /// receipt. Looks up the counterparty's Kyber pubkey from the contact
     /// record, takes this device's AK keypair `ak` (the root of the chain on a
     /// relationship's first step), fetches the chain-head wrap key for SK
@@ -672,7 +673,7 @@ impl BilateralBleHandler {
     /// this transition — the session-level precommit that BOTH the
     /// per-step EK derivation context (HKDF "DSM/ek" salt input) AND the
     /// receipt challenge-response target (BLAKE3 "DSM/receipt-bind-session"
-    /// preimage, whitepaper §11.1 Item 7) bind to. The whitepaper uses
+    /// preimage) bind to. The protocol uses
     /// the symbol `C_pre` for this same value at the protocol layer; we
     /// use `commitment_hash` here to make the session-equivalence
     /// name-evident at the call sites and avoid future refactor drift.
@@ -803,7 +804,7 @@ impl BilateralBleHandler {
 
     /// Create a handler with an explicit Per-Device SMT instance.
     ///
-    /// Each physical device maintains its own Per-Device SMT (§2.2).  In
+    /// Each physical device maintains its own Per-Device SMT.  In
     /// production the process-wide singleton is correct because one process = one
     /// device.  In integration tests where two "devices" run in the same process,
     /// each handler MUST receive its own SMT so that leaf updates on device A do
@@ -1599,7 +1600,7 @@ impl BilateralBleHandler {
             .await
     }
 
-    /// A_NEW side initiate (spec §0.5 bilateral re-establish). After identity recovery, call this
+    /// A_NEW side initiate (bilateral re-establish). After identity recovery, call this
     /// — with an active BLE session to `counterparty_device_id` (a recovered contact) — to build
     /// the recovery-establish operation over C's REAL `(A_old,C)` frontier and start the ordinary
     /// bilateral prepare carrying it. The returned `(envelope_bytes, commitment_hash)` is sent
@@ -1828,7 +1829,7 @@ impl BilateralBleHandler {
             ));
         }
 
-        // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
+        // recovery re-establish accept-guard (gate 1 of the two-gate model). If this
         // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
         // co-signing — that A_new acts under the recovery authority A_old anchored and that the
         // carry-forward commitment bridges C's REAL CURRENT (A_old,C) frontier. This blocks a
@@ -3073,7 +3074,7 @@ impl BilateralBleHandler {
         }
 
         // 4. Build sender SMT proofs via a prepare-only simulation of the
-        // canonical advance (§2.2). No canonical state mutation yet — that
+        // canonical advance. No canonical state mutation yet — that
         // happens when the anchor commits, inside `commit_released_bearer_step`.
         // Identical inputs produce an identical outcome there, so the
         // receipt proofs built here are byte-exact with the eventual advance.
@@ -3130,7 +3131,7 @@ impl BilateralBleHandler {
         // its first step, so no seeding stands between the two).
         let pre_root = sim_outcome.transition.pre_root();
         let sender_smt_root = sim_outcome.child_r_a;
-        // 6. The stitched receipt proves the step's whole write set (§4.2), and
+        // 6. The stitched receipt proves the step's whole write set, and
         // the sender holds it to the state rules HERE, before the appliance's
         // irreversible COMMIT below: a receipt that cannot hold never spends a
         // counter step. Its canonical bytes do not depend on the release. For
@@ -3171,7 +3172,7 @@ impl BilateralBleHandler {
                 "offline-bearer release refused before the anchor commits: {e}"
             ))
         })?;
-        // 6b. Per-step EK signing (whitepaper §11.1). Sign the receipt
+        // 6b. Per-step EK signing. Sign the receipt
         // commitment with a freshly-derived per-step EK, generate the cert
         // chaining it back to AK, and include the Kyber ciphertext for
         // the recipient to recover identical k_step. Sender stamps the
@@ -4853,7 +4854,7 @@ impl BilateralBleHandler {
         // The payer's steps this payment was carried with, from the account the payer's boundary
         // left that this device recorded, through the payment's own step: each a write at the
         // payer's origin cell of the root it starts from. This device writes them and settles from
-        // the cells; the payer is never needed (DSM Amendment A39 draft).
+        // the cells; the payer is never needed (DSM Amendment A39).
         let offline_origin = {
             let recorded = bearer_origin.recorded.as_ref().ok_or_else(|| {
                 DsmError::invalid_operation(
@@ -5540,7 +5541,7 @@ impl BilateralBleHandler {
         &self.bilateral_tx_manager
     }
 
-    /// Per-Device SMT for relationship chain tips (§18.1)
+    /// Per-Device SMT for relationship chain tips
     pub fn per_device_smt(
         &self,
     ) -> &Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>> {

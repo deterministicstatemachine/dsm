@@ -1008,8 +1008,9 @@ class MainActivity : AppCompatActivity() {
             bleBackgroundService = null
         }
         if (!isChangingConfigurations && hasIdentityViaRust()) {
-            // Rust owns the entire backgrounding decision (stop the poller, or keep
-            // polling because a §16.6 transfer is still settling) and returns ONE
+            // Rust owns the entire backgrounding decision (stop the inbox poller, or
+            // keep it running while a settlement step is owed, a contact can send to
+            // this device, or an application is connected) and returns ONE
             // directive. Kotlin relays it and performs no protocol reasoning.
             val keepServiceAlive = try {
                 Unified.onAppBackgrounded()
@@ -1169,9 +1170,9 @@ class MainActivity : AppCompatActivity() {
                     else -> "UNKNOWN_ERROR"
                 }
                 val helpMessage = when (errType) {
-                    "ASSET_NOT_FOUND" -> "The configuration file is missing from app assets. Reinstall the app or check BETA_DEVICE_PREPARATION.md"
+                    "ASSET_NOT_FOUND" -> "The configuration file is missing from app assets. Reinstall the app"
                     "IO_ERROR" -> "Cannot write configuration file. Check device storage space and app permissions."
-                    else -> "See logs for details or consult BETA_QUICK_TROUBLESHOOTING.md"
+                    else -> "See logs for details, or open a thread as SUPPORT.md describes"
                 }
                 // Payload: UTF-8 "type|message|help"
                 val msg = "Failed to load configuration: ${lastErr?.message ?: "unknown"}"
@@ -1401,7 +1402,7 @@ class MainActivity : AppCompatActivity() {
                     Log.e(tag, "initDsmAndSignalReady: No env config found; cannot initialize DSM")
                     try { Unified.setSessionFatalError("Configuration file not found.") } catch (_: Throwable) {}
                     dispatchDsmEventOnUi("dsm-env-config-error",
-                        "MISSING_CONFIG|Configuration file not found. Please ensure dsm_env_config.toml is deployed to app assets before launching.|See BETA_DEVICE_PREPARATION.md for configuration deployment instructions.".toByteArray(Charsets.UTF_8))
+                        "MISSING_CONFIG|Configuration file not found. Please ensure dsm_env_config.toml is deployed to app assets before launching.|Reinstall the app: the configuration ships inside it.".toByteArray(Charsets.UTF_8))
                     publishSessionState("envMissing")
                     // Don't proceed with SDK initialization if config is missing
                     return@Thread

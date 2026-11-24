@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! ShardCountSMT: proof-carrying global counts (emissions spec §3.5)
+//! ShardCountSMT: proof-carrying global counts
 //!
 //! A complete binary tree over shard prefixes up to depth `b`.
 //! Each node corresponds to a prefix `p` of length `k ≤ b` and stores
@@ -20,9 +20,7 @@
 //! # Domain Separation
 //!
 //! Currently uses the generic `DSM/smt-leaf` and `DSM/smt-node` domains.
-//! Future: add DJTE-specific domain separation (`DJTE/count-leaf`, `DJTE/count-node`)
-//! when parameterized domain support is implemented. This was discussed with Brandon
-//! and will be part of the broader domain parameterization effort.
+//! DJTE-specific domains (`DJTE/count-leaf`, `DJTE/count-node`) are not used.
 
 use crate::merkle::sparse_merkle_tree::{hash_smt_leaf, hash_smt_node};
 use crate::types::error::DsmError;

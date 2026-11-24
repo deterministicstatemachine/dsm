@@ -33,7 +33,7 @@ echo " DSM Storage Node Deployment (GCP)"
 echo "=============================================="
 echo "  Project:    ${GCP_PROJECT}"
 echo "  Region:     us-central1 (terraform/gcp/main.tf)"
-echo "  Nodes:      5 (quorum 3 of 5)"
+echo "  Nodes:      5 (one storage set)"
 echo "  SSH key:    ${SSH_KEY}"
 echo ""
 

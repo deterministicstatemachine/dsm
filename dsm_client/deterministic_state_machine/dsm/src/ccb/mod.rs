@@ -142,8 +142,8 @@ pub mod class {
     /// `0x002B` — an offline unload boundary body.
     pub const OFFLINE_UNLOAD_BOUNDARY_BODY: u16 = 0x002B;
     /// `0x002C` — an offline settlement body: a receiver's admission of value
-    /// it received offline, funded by the payer's spend its online history
-    /// exposed (SA-91). Promoted from reserved (`OFFLINE_SPEND_STEP_EVIDENCE`)
+    /// it received offline, funded by the payer's spend that is final at the
+    /// payer's origin cell (DSM Amendment A39). Promoted from reserved (`OFFLINE_SPEND_STEP_EVIDENCE`)
     /// with its field table.
     pub const OFFLINE_SETTLEMENT_BODY: u16 = 0x002C;
 
@@ -342,7 +342,7 @@ pub mod class {
     /// starts from only when it proves that from these bytes and folds.
     pub const OFFLINE_ORIGIN_WRITE: u16 = 0x0078;
     /// `0x0079` — a boundary's departure at an offline origin cell (DSM
-    /// Amendment A39 draft, option B): a load or an unload its account's board
+    /// Amendment A39): a load or an unload its account's board
     /// signed, with no steps carried, and the owner's genesis, online key and
     /// device. It occupies the cell of the root the boundary starts from only
     /// when the boundary folds there and its board signed it.

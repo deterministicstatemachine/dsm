@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Offline steps final at their origin cells (proposed, DSM Amendment A39 draft).
+//! Offline steps final at their origin cells (DSM Amendment A39).
 //!
 //! Every step an offline account's board signs starts from one account root. The
 //! origin cell of that root, `K_off = H(DSM/offline-origin/v1 ‖ B ‖ R_off)`, holds
@@ -183,7 +183,7 @@ const MAX_DEPARTURE_BYTES: usize = 64 * 1024;
 
 /// `0x0079 OfflineOriginDeparture` — a load or an unload of an offline account,
 /// as its board signed it, at the origin cell of the root it starts from (DSM
-/// Amendment A39 draft, option B): the boundary with no steps carried (each of
+/// Amendment A39): the boundary with no steps carried (each of
 /// those is at its own cell), and the owner's genesis, online key and device,
 /// which its operation id and its bundle bind.
 #[derive(Debug, Clone, PartialEq, Eq)]

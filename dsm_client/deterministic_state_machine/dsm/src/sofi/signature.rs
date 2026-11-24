@@ -16,8 +16,9 @@
 //! signature. That is not a detail of local bookkeeping: the same `F` reaches
 //! storage as bare object bytes with no operation around them, and every
 //! reader verifies `m_F` there — Core's recognizer, when it reads the cell or
-//! the index (`publication::recognize_fulfillment`); the member verifies
-//! nothing (storage spec §9 rule 6). One object, one signature, verified
+//! the index (`publication::recognize_fulfillment`), and a member before it
+//! keeps a write at `K_ful(q)` (`registration::fulfillment_naming_cell`, DSM
+//! Amendment A41). One object, one signature, verified
 //! identically wherever it is read — a second rule at the operation layer
 //! would be a signature a reader of the bare object could not check and the
 //! trader would have to produce twice.

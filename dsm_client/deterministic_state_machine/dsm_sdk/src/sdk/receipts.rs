@@ -15,7 +15,7 @@ use dsm::verification::receipt_verification::BearerLeaves;
 #[cfg(test)]
 use dsm::verification::receipt_verification::{verify_per_step_ek_signing, BilateralSide};
 
-/// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1/§12 Eq.14).
+/// Inputs for per-step ephemeral SPHINCS+ key derivation.
 ///
 /// The signer's per-step EK is derived as:
 ///   `E_{n+1} = keyed-BLAKE3(Smaster, "DSM/ek/v1\0" || alg_id || chain_id || h_n || C_pre || k_step)`
@@ -30,14 +30,14 @@ pub struct PerStepEkContext {
     pub chain_id: [u8; 32],
     /// Current bilateral chain tip h_n (parent_tip of the receipt being built).
     pub h_n: [u8; 32],
-    /// Pre-commitment hash C_pre for this step (whitepaper §4.1).
+    /// Pre-commitment hash C_pre for this step.
     pub c_pre: [u8; 32],
     /// Kyber-derived step key: `BLAKE3("DSM/kyber-ss\0" || ss)` where ss
     /// is the Kyber shared secret for this step.
     pub k_step: [u8; 32],
 }
 
-/// Derive the per-step ephemeral SPHINCS+ keypair (whitepaper §11.1/§12 Eq.14).
+/// Derive the per-step ephemeral SPHINCS+ keypair.
 ///
 /// Wraps the underlying primitives `derive_ephemeral_seed` +
 /// `generate_ephemeral_keypair` from `dsm::crypto::ephemeral_key`. Returns
@@ -60,10 +60,10 @@ pub fn derive_per_step_ek(
 }
 
 /// Sender-side: derive `k_step` for the per-step EK by deterministically
-/// encapsulating against the recipient's Kyber public key (whitepaper §11).
+/// encapsulating against the recipient's Kyber public key.
 ///
 /// The encapsulation coins are derived from public chain context keyed by the
-/// device master seed `Smaster` (whitepaper §12):
+/// device master seed `Smaster`:
 ///   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
 ///             || recipient_kem_pub_hash || h_n || C_pre || DevID_sender)
 ///
@@ -108,7 +108,7 @@ pub fn derive_kyber_k_step_for_send(
 
 /// Inputs to the high-level per-step EK signing helper.
 ///
-/// The helper handles the full whitepaper §11.1 per-step signing flow:
+/// The helper handles the full per-step signing flow:
 /// loading the prior chain head SK (or the root AK at relationship genesis), deriving a
 /// fresh `EK_{n+1}` keypair, signing the cert, answering the receipt challenge,
 /// and returning all artifacts. The Local head moves to the new EK only in
@@ -120,10 +120,10 @@ pub struct PerStepSigningInputs<'a> {
     pub commitment: &'a [u8; 32],
     /// Parent tip h_n — the bilateral chain tip before this transition.
     pub h_n: [u8; 32],
-    /// Pre-commitment hash C_pre for this step (whitepaper §4.1).
+    /// Pre-commitment hash C_pre for this step.
     pub c_pre: [u8; 32],
     /// Local device ID — used in the deterministic Kyber `coins` derivation
-    /// per whitepaper §11 (DevID_sender input to coins).
+    /// (DevID_sender input to coins).
     pub devid_sender: [u8; 32],
     /// Per-Device SMT relationship key (used to look up chain head AND as the
     /// `chain_id` bound into the per-step EK seed).
@@ -134,13 +134,13 @@ pub struct PerStepSigningInputs<'a> {
     pub root_ak_keypair: Option<(&'a [u8], &'a [u8])>,
     /// Recipient's Kyber/ML-KEM public key. Required: the helper
     /// encapsulates against this to derive `k_step` deterministically per
-    /// whitepaper §11. Caller pulls this from the recipient contact's
+    /// Caller pulls this from the recipient contact's
     /// `kyber_public_key` field. An empty value causes the helper to
     /// fail-closed. Relationships must be
     /// established with peer Kyber pubkey before per-step EK signing
     /// can run.
     pub recipient_kyber_pk: &'a [u8],
-    /// Bilateral session binding (whitepaper §11.1 Item 7). The per-step EK
+    /// Bilateral session binding. The per-step EK
     /// signature is computed over a session-bound receipt challenge-response target:
     /// `BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
     /// commitment_hash)`.
@@ -174,14 +174,14 @@ pub struct PerStepSigningOutput {
 }
 
 /// Sign a receipt challenge target with a per-step ephemeral SPHINCS+ key, building
-/// the cert chain back to the device's AK in the process (whitepaper §11.1).
+/// the cert chain back to the device's AK in the process.
 ///
 /// Flow:
 /// 1. Choose the prior SK by Core's predecessor rule: the chain head's
 ///    (decrypted in memory), or at relationship genesis, where there is none,
 ///    `inputs.root_ak_keypair`'s.
 /// 2. Run deterministic Kyber encapsulation against
-///    `inputs.recipient_kyber_pk` to derive `k_step` per whitepaper §11
+///    `inputs.recipient_kyber_pk` to derive `k_step`
 ///    The recipient's Kyber pubkey is mandatory.
 /// 3. Derive `EK_{n+1}` from `(h_n, C_pre, k_step) keyed under Smaster`.
 /// 4. Sign `cert_{n+1} = Sign_{prior_SK}(BLAKE3("DSM/ek-cert\0" ||
@@ -382,7 +382,7 @@ mod tests {
         real_steps()[step].receipt.clone()
     }
 
-    // ── derive_per_step_ek (whitepaper §11.1) ──
+    // ── derive_per_step_ek ──
 
     fn ek_ctx() -> PerStepEkContext {
         PerStepEkContext {
@@ -463,7 +463,7 @@ mod tests {
         assert!(dsm::crypto::sphincs::sphincs_verify(&pk, msg, &sig).expect("verify"));
     }
 
-    // ── derive_kyber_k_step (whitepaper §11) ──
+    // ── derive_kyber_k_step ──
 
     /// Distinct chain context produces distinct `k_step` (per-step
     /// freshness property). Two consecutive steps in the same relationship

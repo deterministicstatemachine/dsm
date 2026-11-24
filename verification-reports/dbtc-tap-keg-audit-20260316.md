@@ -1,5 +1,12 @@
 # dBTC Tap/Keg Protocol-Path Compliance Audit
 
+> **Dated record.** This audit was made in March 2026 against the dBTC paper of that time. That
+> baseline is superseded by `specs/dBTC_Native_Specification.md`, which defines withdrawal as a DSM
+> consumption first and does not use the tap/keg/grid model. Since then the withdrawal preimage is
+> derived on demand and never stored (`dsm_sdk/src/storage/client_db/vault_records.rs`), the two
+> end-to-end tests named below no longer exist, and line numbers no longer line up. dBTC is being
+> replaced and does not function in this release. The findings are not re-assessed here.
+
 Date: 2026-03-16
 
 Primary baseline:

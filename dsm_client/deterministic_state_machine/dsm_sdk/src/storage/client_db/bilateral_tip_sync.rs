@@ -73,7 +73,7 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
     sync_projection_with_optional_acceptance(request, None)
 }
 
-/// §16.6: synchronize the `contacts.chain_tip` PROJECTION and insert the
+/// synchronize the `contacts.chain_tip` PROJECTION and insert the
 /// immutable `accepted_transition` marker in ONE client-db transaction.
 ///
 /// The name is deliberate — this is PROJECTION synchronization, not a second
@@ -352,7 +352,7 @@ pub(crate) fn sync_tip_projections_in_tx(
         }
     }
 
-    // §16.6 acceptance marker: SAME transaction, committing cases only (all
+    // acceptance marker: SAME transaction, committing cases only (all
     // non-committing outcomes returned early above). Idempotent for an
     // identical existing marker; a DIFFERENT existing marker for this consumed
     // parent errors — the wrapper then rolls the whole tx back (fail closed,

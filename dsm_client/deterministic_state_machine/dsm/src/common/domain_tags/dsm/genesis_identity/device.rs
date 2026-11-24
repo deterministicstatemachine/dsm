@@ -12,8 +12,8 @@ pub const TAG_DSM_DEVICE_FINGERPRINT: TaggedHashDomain<'static> =
 pub const TAG_DSM_DEVICE_ID_GEN: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/device-id-gen");
 pub const TAG_DSM_DEVID: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/devid");
-/// Canonical signing-payload domain for the GATE half of an `AddDeviceAdmission` (§16.3
-/// additional-device enrollment) — the existing authorized device signs this with its device key.
+/// Canonical signing-payload domain for the GATE half of an `AddDeviceAdmission`
+/// (additional-device enrollment) — the existing authorized device signs this with its device key.
 pub const TAG_DSM_ADD_DEVICE_ADMISSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/add-device-admission");
 /// Canonical signing-payload domain for the NEW-DEVICE self-attestation half of an

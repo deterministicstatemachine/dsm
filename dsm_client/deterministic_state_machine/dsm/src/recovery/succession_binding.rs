@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Cross-relationship succession evidence (spec §0.5).
+//! Cross-relationship succession evidence.
 //!
 //! Recovery does NOT migrate `(A_old,C)` in place — `rel_key` is device-pair-derived
 //! (`compute_smt_key`, §18.1), so `(A_old,C)` and `(A_new,C)` are different SMT leaves
@@ -163,7 +163,7 @@ pub fn verify_forward_ancestry(
     Ok(last)
 }
 
-/// C-SIDE accept-guard for a recovery re-establish (spec §0.5) — **gate 1 (identity
+/// C-SIDE accept-guard for a recovery re-establish — **gate 1 (identity
 /// succession) of the two-gate model; NOT a standalone anti-theft control.** When counterparty
 /// `C` receives a bilateral `CreateRelationship` "recovery-establish" proposal from `A_new`, it
 /// MUST run this BEFORE co-signing. It proves, from C's OWN local `(A_old,C)` chain plus A's
@@ -188,7 +188,7 @@ pub fn verify_forward_ancestry(
 /// unavoidable stolen-seed problem, not a defect of this guard. Double-spend safety against a
 /// recovering party (owner-with-stale-ring OR thief) replaying spent value comes from gate 2
 /// (P5 `LOCKED_RECOVERY` + per-asset frontier reconciliation against external truth), which is
-/// independent of this guard. See §0.4 (two-gate doctrine).
+/// independent of this guard. See the two-gate doctrine.
 ///
 /// `recovery_authority_pubkey` MUST be genesis-anchored to A's genesis by the caller (via the
 /// `RecoveryAuthorityAnchor` + device-tree quorum) before this is trusted. Fail-closed: any
@@ -283,7 +283,7 @@ pub fn verify_recovery_reestablish_request(
     Ok(())
 }
 
-/// One counterparty's complete cross-relationship recovery evidence (spec §0.5).
+/// One counterparty's complete cross-relationship recovery evidence.
 /// `counterparty_root` MUST be genesis-authenticated by the caller before use.
 #[derive(Clone, Debug)]
 pub struct CrossRelationshipSuccessionEvidence {
@@ -319,7 +319,7 @@ pub struct CrossRelationshipSuccessionEvidence {
 }
 
 impl CrossRelationshipSuccessionEvidence {
-    /// Verify the recovery-specific semantics (checks 1–5 of spec §0.5): device-pair
+    /// Verify the recovery-specific semantics (checks 1–5 of): device-pair
     /// `rel_key` derivation, successor proof, old-chain forward-ancestry, carry-forward
     /// commitment, and the first-state constraint. Pure — no SMT proofs needed.
     /// `recovery_authority_pubkey` MUST be genesis-anchored to G_A by the caller.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Recipient B-side acceptance-receipt orchestrator (§16.6).
+//! Recipient B-side acceptance-receipt orchestrator.
 //!
 //! The single authoritative recipient countersigning path, in three phases under
 //! one ASYNC relationship exclusion (see design doc): generate + journal WITH the
@@ -7,7 +7,7 @@
 //! `CanonicalApplyRecord` exists; never sign in recovery.
 //!
 //! Live sequence (accept path holds the tokio guard across all of it):
-//!   CoreSDK::apply_incoming_transfer_full_state(   // ONE staged full-state tx:
+//!   CoreSDK::apply_incoming_transfer_staged(       // ONE staged full-state tx:
 //!       build = generate_b_artifacts_from_inbound  //   pre-write, sees the exact
 //!               (…, outcome.relationship_pair()),  //   AdvanceOutcome, signs sig_b
 //!       write = journal_row(..) inserted in-tx     //   with nonce + apply record

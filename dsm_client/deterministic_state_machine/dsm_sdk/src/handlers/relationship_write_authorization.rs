@@ -5,8 +5,9 @@
 //! Each device has a write key of its own for each relationship it
 //! established, toward each counterparty: it comes back from the master seed,
 //! the relationship instance and the two device ids, so nothing secret is
-//! stored. Each device grants the other's key its inbox for that instance,
-//! signed by its AK. Everything rides with the messages establishment already
+//! stored. Each device holds a write lock for its inbox on the relationship,
+//! bound to the instance by its AK, and the lock signs the grant of the other
+//! device's key. Everything rides with the messages establishment already
 //! sends, so nobody waits for anything establishment does not already wait
 //! for:
 //!

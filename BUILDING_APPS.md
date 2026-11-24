@@ -10,7 +10,7 @@ This is DSM Connect (Amendment A11). The code is [crates/dsm-app-host/](crates/d
 
 ## What you can replace
 
-Everything below works today, on the path the check in this repo runs on every change (`make developer-path`).
+Everything below works today, on the path the check in this repo runs on every change to the core, the SDK or the storage node (`make developer-path`).
 
 | You run today | With DSM | Why it's better |
 |---|---|---|
@@ -29,16 +29,16 @@ Every request has two answers, and only one is evidence:
 
 | | Where it comes from | Use it for |
 |---|---|---|
-| **outcome** | the wallet's word: `carried_out`, `awaiting_approval`, `declined`, `failed` | what to show the player while you wait |
+| **outcome** | the wallet's word: `unanswered`, `carried_out`, `awaiting_approval`, `declined`, `failed` | what to show the player while you wait |
 | **fact** | what your own account established: `received`, `owns`, `signed`, `staked`, `collected`, ... | deciding anything: delivering the item, logging the player in, crediting the sale |
 
 ## Who pays for what
 
-Storage on DSM is paid for by the account that writes: a one-time entry payment (a flat rate to three storage operators), then credits consumed by each write, priced in token units by a network parameter. Nobody is billed per month or per user, and reading is free. That leaves you three ways to set things up:
+Storage on DSM is designed to be paid for by the account that writes: a one-time entry payment (a flat rate to three storage operators), then credits charged by the storage each write uses, at a fixed network price (storage spec §16–§17). Nobody is billed per month or per user, and reading is free. That payment is outside the beta (Amendment A2): in the beta nothing is charged for storage and no node refuses a write for payment. That leaves you three ways to set things up:
 
 1. **Players pay their own way.** Each player's wallet is their own account, on the public set. In the beta, the faucet funds every new wallet. Later they buy ERA like anything else. Your app pays only for its own account's writes. This is the setup `dsm-app up` gives you: your app's account on the beta network, funded by the same faucet.
 2. **Your app pays for its players.** `give` a player ERA when they connect; their wallet spends it on its own writes. What you give is theirs, and works anywhere on DSM, so this is a gift, not a subscription.
-3. **Your app runs the storage, and players pay nothing.** Run your own storage set ([dsm_storage_node/RUN_A_NODE.md](dsm_storage_node/RUN_A_NODE.md)) and point your players' wallets at it, the way `make phones-local` points them at your local set. A node may enforce the entry payment and credits, or not; on your own set, that is your call. You pay the hosting; accounts on your set are still their owners', and a wallet on your set reaches only your set.
+3. **Your app runs the storage, and players pay nothing.** Run your own storage set ([dsm_storage_node/RUN_A_NODE.md](dsm_storage_node/RUN_A_NODE.md)) and point your players' wallets at it, the way `make phones-local` points them at your local set. You pay the hosting; accounts on your set are still their owners', and a wallet on your set reaches only your set.
 
 What this replaces, in cost: a hardware key per user and its replacements; SMS codes per message; a processor's percentage on every payment; an escrow or marketplace provider. What you pay instead is your account's storage writes, in ERA, and hosting if you choose setup 3.
 
@@ -235,6 +235,8 @@ What an offer asks the player to let your app do without asking again:
 | `trade(a, b, caps)` | trade between two objects through your vaults, within caps | `ask.price`, `ask.trade`; a wallet receives only an object it added, so `ask.accept` your coin first |
 | `match(caps)` | take stakes in matches your app referees, within caps | `ask.match.stake`, `decide`, `ask.match.collect` |
 | `duel(programs, caps)` | take stakes in matches a pinned program decides | `ask.duel.*` |
+| `state()` | have the wallet sign and store a write at a cell your app names, as one of that cell's writers; spends nothing | `ask.state.write` |
+| `contribute(caps)` | have the wallet commit an amount to what your app names, the wallet's to take back at any time, within caps | `ask.contribution.commit`, `returnContribution`, `ask.contribution.takeBack` |
 
 `ask.login` and `ask.sign` are never in a grant: each waits for the player on the device. Requests that move nothing run without asking, up to the offer's `freeRequests` (default 64). Past that, each one waits for the player on the device, and holds every later request behind it. A payment inside the grant's caps keeps running past that count until one fails; from then on, every request waits for the player.
 
@@ -248,7 +250,7 @@ A **duel** is a contest a program decides from both players' signed moves, with 
 
 ## Offline
 
-Your app's own calls are all online. Offline transfers are the wallet's feature, between two wallets: a bearer transfer carries any object whose policy lets it move, from one wallet's offline account to another's. Today that needs a hardware board on both sides, it is available on Android (the iOS app has no board link yet, and fails closed), and a trade offline is two one-way transfers.
+Your app's own calls are all online. Offline transfers are the wallet's feature, between two wallets: a bearer transfer carries any object whose policy lets it move, from one wallet's offline account to another's. Today that needs a hardware board on both sides, each set up and stamped by DSM's owner (an unstamped board is refused), it is available on Android (the iOS app has no board link yet, and fails closed), and a trade offline is two one-way transfers.
 
 ## Your app's account
 
@@ -286,7 +288,7 @@ The first lines it logs name the relay and its certificate pin, the ingress, and
 
 - `dsm-dev-wallet up` runs a second account as a player's wallet, and `DSM_WALLET_NAME=wallet2 dsm-dev-wallet up` a third for matches. `dsm-dev-wallet ...` (and `DSM_WALLET_NAME=wallet2 dsm-dev-wallet ...`) drives them: `connect`, `connections`, `pending`, `approve`, `decline`, `log`, `disconnect`, `owned`.
 - `dsm-app ...` drives your app's account from the terminal: `offer`, `connections`, `send`, `owns`, `accept`, `login`, `contacts`, `result`, `issue`, `give`, `owned`, `vault`, `vaults`, `price`, `trade`, `stake`, `decide`, `collect`, `activity` (`dsm-app help` lists them with their arguments).
-- `make developer-path` first proves that the code the starter's page shows under each piece is the code the starter runs: every shown call, in TypeScript and in Python, is evaluated with the real client and compared with what the server hands it, and every shown program is checked against the client (`npm test` in `examples/connect-starter`). Then it runs every helper once against a local set (`make app-dev-local`, so CI depends on no hosted node): connect, send inside and over the grant, prove what is owned, sign in, issue and give an item, open a vault and trade, referee a match between two wallets, disconnect; then the Python client. CI runs it on every change.
+- `make developer-path` first proves that the code the starter's page shows under each piece is the code the starter runs: every shown call, in TypeScript and in Python, is evaluated with the real client and compared with what the server hands it, and every shown program is checked against the client (`npm test` in `examples/connect-starter`). Then it runs every helper once against a local set (`make app-dev-local`, so CI depends on no hosted node): connect, send inside and over the grant, prove what is owned, sign in, issue and give an item, open a vault and trade, referee a match between two wallets, disconnect; then the Python client. CI runs it on every change to the core, the SDK or the storage node.
 - `make first-run` is a newcomer's first run, proven: a clean Ubuntu (in Docker) with nothing on it but what the guide's setup page says to install (Node.js, Python's venv, curl: no git, no Rust, no protoc, no PostgreSQL, no storage node), no clone of this repo, and this page's commands alone, on the beta network: `install.sh` installs a release's files (a release passes its own; otherwise they are built from this commit, the host in a Linux container), then TypeScript (the starter's page, its buttons pressed in a real browser and its table read, after the client's package is installed into the app's folder) and Python (the wheel, `first_payment.py`), each to a wallet connected and its own request's payment received. The prerequisites are read out of the setup page, and every command it types is one this page shows, so the docs cannot drift from what works. A release runs it on the files it publishes.
 - On every pull request that touches them, `.github/workflows/app-host-binaries.yml` builds `dsm-app-host` for Linux x86-64 and ARM64 and macOS arm64 and x86-64, smoke-tests each on its own runner, packages the developer archive, writes `SHA256SUMS`, and runs `install.sh` on all four against those files.
 

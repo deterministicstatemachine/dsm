@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! In-flight withdrawal persistence (dBTC paper §13: execution metadata + final burn)
+//! In-flight withdrawal persistence (execution metadata + final burn)
 //!
 //! State machine:
 //!   Executing → Committed | Failed | Finalized | Refunded

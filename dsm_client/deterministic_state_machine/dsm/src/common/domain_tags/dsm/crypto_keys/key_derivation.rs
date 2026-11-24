@@ -6,14 +6,14 @@ use crate::crypto::domain::TaggedHashDomain;
 
 pub const TAG_DSM_CERT_CHAIN_SK_AEAD: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/cert-chain-sk-aead");
-/// Per-step ephemeral-key seed derivation (whitepaper §11.1/§12 Eq.14), keyed
+/// Per-step ephemeral-key seed derivation, keyed
 /// by Smaster: `keyed-BLAKE3(Smaster, "DSM/ek/v1" || alg_id || chain_id || h_n
 /// || C_pre || k_step)`.
 pub const TAG_DSM_EK_V1: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/ek/v1");
 pub const TAG_DSM_EK_CERT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/ek-cert");
 pub const TAG_DSM_HASH_MULTIPLE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/hash-multiple");
-/// Deterministic ML-KEM-768 encapsulation coins (whitepaper §12), keyed by
+/// Deterministic ML-KEM-768 encapsulation coins, keyed by
 /// Smaster: `keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1" || kyber_alg_id ||
 /// recipient_kem_pub_hash || h_n || C_pre || DevID)`.
 pub const TAG_DSM_KYBER_COINS_V1: TaggedHashDomain<'static> =

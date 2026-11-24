@@ -1187,8 +1187,9 @@ impl AppRouterImpl {
 /// contribute to either spendable online funds or offline allocation.").
 ///
 /// The value is read from the receipts held pending (§6.103), the rows
-/// `balance.list` never reads: it settles online once the payer's return
-/// online exposes its signed spend chain, and only then is it a balance.
+/// `balance.list` never reads: it settles online once the payer's origin
+/// cells hold the payment final (DSM Amendment A39), and only then is it a
+/// balance.
 pub(crate) fn pending_offline_value() -> Result<generated::PendingOfflineValueResponse, String> {
     let pending = crate::storage::client_db::offline_receipts::pending_offline_receipts()
         .map_err(|e| format!("the receipts held pending are unreadable: {e}"))?;

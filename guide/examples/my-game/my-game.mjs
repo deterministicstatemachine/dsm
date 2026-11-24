@@ -2,7 +2,7 @@
 //
 // My Game, plugged into DSM, in one file: a connect code, a wallet that
 // connects to it, a payment, gems handed over, and a sign-in. It talks to the
-// account `make app-dev` runs.
+// account `dsm-app up` runs (from the repo, `make app-dev`).
 //
 //   npm install
 //   node my-game.mjs
@@ -22,7 +22,7 @@ const offer = await app.offer({
 console.log(`connect code: ${offer.code}`);
 console.log("waiting for a wallet to connect to it...");
 
-// 2. A wallet connects: scanned on a phone, or `make dev-wallet-connect CODE=...`.
+// 2. A wallet connects: scanned on a phone, or `dsm-dev-wallet connect <code>`.
 let player;
 for (;;) {
   player = (await app.connections()).find((c) => c.connected && !before.has(c.id));

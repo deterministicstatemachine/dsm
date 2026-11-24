@@ -3,8 +3,8 @@
 //! # Bluetooth Bilateral Transaction Module
 //!
 //! Production BLE transport for offline bilateral transfers. Coordinates
-//! GATT server/client roles, MTU-aware frame chunking, and the 3-phase
-//! bilateral commit protocol over Bluetooth Low Energy.
+//! GATT server/client roles, the authenticated link session (DSM Amendment
+//! A27), MTU-aware frame chunking, and the offline step between contacts.
 
 pub mod anchor_accept;
 pub mod android_ble_bridge;

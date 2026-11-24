@@ -7,11 +7,11 @@
 //! # Why this exists
 //!
 //! The device-side gate only constrains what the holder's OWN device will produce; it does NOT
-//! bind the RECEIVER's release-of-goods decision. The receiver-side invariant is to PIN the
-//! fused anchor `{bundle B, anchor_id, enrolled_counter H₀, partition_pk, pk_chip}` at admission,
-//! then accept an offline-bearer release only if it verifies under the pinned material. A
-//! counterparty with no pinned fused anchor is rejected fail-closed (routes to online recovery).
-//! See the project memory `finding_receiver_must_pin_anchor`.
+//! bind the RECEIVER's release-of-goods decision. The receiver PINS a counterparty's anchor
+//! `{bundle B, anchor_id, enrolled_counter H₀, partition_pk, pk_chip}` at the first offline
+//! payment it accepts from that holder, only when `B` recomputes for the holder and the board
+//! carries the owner's stamp (DSM Amendments A24, A38), checks the stamp again on every payment,
+//! and never replaces the pin with a differing disclosure.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -217,9 +217,10 @@ pub fn pin_admit_decision(
 
 /// The pinned admission record for one counterparty's fused anchor.
 ///
-/// Filed under the counterparty's 32-byte DSM `device_id`. Populated ONLY through the normal
-/// authority/admission path — never implicitly from a received release (the anti-reprovision rule:
-/// a fresh self-provisioned anchor has no enrollment and is rejected).
+/// Filed under the counterparty's 32-byte DSM `device_id`. Pinned at the first offline payment
+/// accepted from the holder, from the anchor that payment discloses, only when its bundle
+/// recomputes for the holder and its board carries the owner's stamp; never replaced by a later
+/// disclosure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchorEnrollment {
     /// 32-byte DSM device id of the anchor holder (the key this enrollment is filed under).

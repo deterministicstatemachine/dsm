@@ -17,8 +17,8 @@ pub(crate) fn handle_generate_mnemonic_query() -> AppResult {
     }
 }
 
-/// system.createGenesisV2 — canonical mnemonic-rooted wallet creation (whitepaper §2.5,
-/// GenesisEntropyProfile::MnemonicV3). The BIP39 mnemonic is the sole root: derive `wallet_seed`,
+/// system.createGenesisV2 — canonical mnemonic-rooted wallet creation
+/// (GenesisEntropyProfile::MnemonicV3). The BIP39 mnemonic is the sole root: derive `wallet_seed`,
 /// cache it in the unlocked session, then run `create_genesis_v3_self_attested` and install the
 /// resulting GenesisState. Nothing is persisted but public values (no s0, no Smaster). Fails
 /// closed if the wallet seed cannot be derived/cached.
@@ -39,7 +39,7 @@ pub(crate) fn handle_create_genesis_v2(args: &[u8]) -> AppResult {
     }
     // A new identity is rooted only in a phrase this process generated from the OS CSPRNG
     // (24 words, 256 bits). A typed-in phrase proves nothing about its entropy; restoring an
-    // existing identity goes through the recovery path instead.
+    // existing identity is `system.restoreFromPhrase`.
     let generated_here =
         match crate::sdk::recovery_sdk::RecoverySDK::is_generated_mnemonic(&req.mnemonic) {
             Ok(here) => here,
@@ -176,7 +176,9 @@ pub(crate) fn handle_create_genesis_v2(args: &[u8]) -> AppResult {
 /// wallet's directory entry naming exactly that identity. Then its own register is re-verified from
 /// its activation root to its head and its leaves folded from every step's witness, so the wallet
 /// comes back at its last online balance; a register that does not reach its head rolls the
-/// identity back. Nothing the lost device held locally comes back.
+/// identity back. Its contacts come back from the latest backup taken at exactly the register's
+/// head, and each offline account from that backup advanced through its origin cells; Connect
+/// sessions, local history and anything since the last backup do not.
 pub(crate) async fn handle_restore_from_phrase(args: &[u8]) -> AppResult {
     const ROUTE: &str = "system.restoreFromPhrase";
     let pack = match generated::ArgPack::decode(args) {

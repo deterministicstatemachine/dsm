@@ -25,7 +25,6 @@ use zeroize::Zeroize;
 
 /// SPX256f: 256-bit post-quantum security, fast variant (49,856 byte signatures).
 /// Must match init.rs keypair derivation (SPX256f) and sphincs.rs default wrappers.
-/// BLE bilateral transfers compress the envelope before chunking.
 const DEFAULT_PARAMS: ParameterSet = ParameterSet::SPX256f;
 
 /// Signature bytes alias

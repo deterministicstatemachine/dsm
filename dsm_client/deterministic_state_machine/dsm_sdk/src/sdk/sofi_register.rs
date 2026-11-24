@@ -10,8 +10,9 @@
 //! seat of the route (storage spec §9). `C_q` is computed from the verified
 //! `P` and `F` and never caller-supplied, so no claim that disagrees with `F`
 //! can be `F`'s claim; the exercise carries the same signed bytes. A member
-//! stores bytes;
-//! it establishes nothing. Whether `F` registered is Core's conclusion from
+//! keeps at `K_root(q)` only the trader's signed claim and at `K_ful(q)` only
+//! the trader's signed `F`, delivered with the trader's genesis (DSM Amendment
+//! A41); it establishes nothing. Whether `F` registered is Core's conclusion from
 //! the cells' route chains (`FulfillmentRegistered`, rebuild step R10), read
 //! by the verifier (`dsm::sofi::resolve::Verifier::read_registration`), never
 //! a fact this module produces.

@@ -4,13 +4,14 @@
 //!
 //! Core implementation of quantum-resistant cryptographic vaults.
 //!
-//! ## Keg & Tap Vocabulary (§dBTC spec)
+//! ## Keg & Tap Vocabulary (Explainer §64)
 //!
-//! The whitepaper uses a "keg and tap" metaphor for the Bitcoin tap:
+//! The explainer uses a "keg and tap" metaphor for the Bitcoin tap (dBTC; not
+//! functional in this release):
 //!
 //! | Paper Term      | Code Type                      | Meaning                          |
 //! |-----------------|--------------------------------|----------------------------------|
-//! | Keg             | (Bitcoin blockchain)           | Global collateral pool           |
+//! | Keg             | (Bitcoin itself)               | where every tap's Bitcoin is locked; no tap is shared |
 //! | Tap             | `LimboVault` + `BitcoinHTLC`   | One HTLC-locked vault            |
 //! | Open Tap        | `open_tap()`                   | BTC → dBTC deposit               |
 //! | Draw Tap        | `draw_tap()`                   | Finalize deposit (mint or burn)  |
@@ -28,7 +29,7 @@ pub use dlv_manager::*;
 pub use fulfillment::*;
 pub use limbo_vault::*;
 
-/// Keg/Tap vocabulary aliases (§dBTC spec).
+/// Keg/Tap vocabulary aliases (Explainer §64).
 /// A `BitcoinTap` is a `LimboVault` with a `BitcoinHTLC` fulfillment mechanism —
 /// it connects Bitcoin collateral (the "keg") to DSM dBTC tokens.
 pub type BitcoinTap = LimboVault;

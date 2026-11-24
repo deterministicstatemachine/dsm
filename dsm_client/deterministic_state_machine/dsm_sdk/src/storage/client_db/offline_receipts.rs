@@ -10,7 +10,7 @@
 //! offline allocation, so it can be spent neither way. It is settled by an
 //! admitted economic transition of its own once the payer's origin cells hold
 //! the payment, final, from the account the payer's boundary left (DSM
-//! Amendment A39 draft; `economic_admission_flow::admitted_offline_settlement`),
+//! Amendment A39; `economic_admission_flow::admitted_offline_settlement`),
 //! which marks it settled in the transaction that makes the settlement
 //! durable. The payer's steps the payment was carried with are kept with it
 //! ([`OfflineOrigin`]), so this device writes them to the payer's cells itself.
@@ -273,7 +273,7 @@ mod tests {
 }
 
 /// The payer's steps a payment received offline was carried with (DSM Amendment
-/// A39 draft): the account the payer's boundary at `position` left, the root the
+/// A39): the account the payer's boundary at `position` left, the root the
 /// payment's own step starts from, and each step from that account through the
 /// payment as a write at the payer's origin cell of the root it starts from.
 #[derive(Debug, Clone, PartialEq, Eq)]

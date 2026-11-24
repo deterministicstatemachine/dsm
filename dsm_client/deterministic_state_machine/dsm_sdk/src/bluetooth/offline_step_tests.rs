@@ -2423,7 +2423,7 @@ async fn a_rejected_bearer_transfer_spends_no_counter_step_and_frees_the_relatio
 /// 10 in its offline account's received amount, shown as waiting, in neither its online balance nor
 /// its loaded allocation. With A never back online, B's one unload action writes A's steps it was
 /// carried to A's origin cells and moves each payment online by an admitted transition of its own,
-/// once — each proved from A's cells (DSM Amendment A39 draft). A comes back later and unloads what
+/// once — each proved from A's cells (DSM Amendment A39). A comes back later and unloads what
 /// is left; nothing is counted twice. A second unload of B's moves nothing more. B then spends the
 /// result online, and A takes it.
 /// MUTATION CONTROL: `wallet.pendingOffline` answering from the settled rows
@@ -2510,7 +2510,7 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_and_spend_
         "B spent online what it received offline before it was unloaded"
     );
     // A is not back online. B's unload writes A's steps it was carried to A's origin cells and
-    // settles both payments from the cells alone (DSM Amendment A39 draft).
+    // settles both payments from the cells alone (DSM Amendment A39).
     let moved = unload_received(&b).await;
     assert_eq!(
         (moved.moved, moved.waiting),
@@ -5503,7 +5503,7 @@ mod model_correspondence;
 /// The receiver's board: no board, a cut at each of its writes, and a forged acknowledgement.
 mod receiver_board;
 
-/// Offline steps final at their origin cells, on the five storage nodes (DSM Amendment A39 draft).
+/// Offline steps final at their origin cells, on the five storage nodes (DSM Amendment A39).
 mod origin_cells;
 
 /// DSM Amendment A27 (SA-35; the owner's requirement of 2026-11-01: "a

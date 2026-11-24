@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Offline steps final at their origin cells (DSM Amendment A39 draft,
+//! Offline steps final at their origin cells (DSM Amendment A39,
 //! prototype), on the five storage nodes: real wallets paying offline through
 //! their boards, and the payer's steps written to and read from the nodes'
 //! cells. The receiver writes the step its payer carried it — the bytes the
@@ -411,7 +411,7 @@ async fn a_restored_wallet_finds_its_account_from_the_nodes() {
 }
 
 /// A payer cannot unload what it already paid offline, even before its receiver has published
-/// anything (DSM Amendment A39 draft, option B; owner, 2026-11-19: "Don't allow any chance of
+/// anything (DSM Amendment A39; owner, 2026-11-19: "Don't allow any chance of
 /// robbing a receiver"). A loads 20 ERA — its board signs the load — and pays B 15 offline. B
 /// writes nothing. A's wallet is then restored from a backup taken before the payment, still on
 /// A's genuine board, and asks to unload all 20: the board, which signed the payment from that

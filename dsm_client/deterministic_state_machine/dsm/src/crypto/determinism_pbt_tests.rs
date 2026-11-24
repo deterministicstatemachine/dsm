@@ -33,7 +33,7 @@ mod tests {
 
         #[test]
         fn pbt_sphincs_seeded_keygen_is_deterministic(seed in any::<[u8;32]>()) {
-            // Use the canonical production variant per whitepaper §11.1
+            // Use the canonical production variant
             // (Cat-5, fast). Other variants are covered by `sphincs::tests`.
             let v = SphincsVariant::SPX256f;
             let kp1 = generate_keypair_from_seed(v, &seed).expect("seeded keygen must succeed");

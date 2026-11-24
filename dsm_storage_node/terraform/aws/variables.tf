@@ -10,7 +10,7 @@ variable "instance_type" {
 }
 
 variable "volume_size_gb" {
-  description = "Root EBS volume size in GB (gp3). Index-only storage; 20GB sufficient for beta."
+  description = "Root EBS volume size in GB (gp3). Holds the node's PostgreSQL: cells, objects and spools; 20GB sufficient for beta."
   type        = number
   default     = 20
 }

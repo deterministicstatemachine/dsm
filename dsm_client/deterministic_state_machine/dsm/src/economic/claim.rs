@@ -64,7 +64,7 @@ pub struct EconomicAdmissionManifest {
     /// credits.
     ///
     /// **Derived and non-authoritative.** This field is a publication and
-    /// durability index — the set of objects a quorum must be holding before
+    /// durability index — the set of objects that must be stored (three members return their exact bytes) before
     /// the admission is verifiable — and NOT a second description of
     /// provenance. The semantics live in the witness's inline credit sources;
     /// this must equal
@@ -256,9 +256,8 @@ impl EconomicRootClaimBody {
 /// missing object only after fetching, or worse, to treat the index as the
 /// authority on what provenance exists.
 ///
-/// `SameTransitionMove` contributes nothing here, by design: it is
-/// intra-transition and references no external object, so a transition funded
-/// entirely by internal moves has an empty index and that is correct.
+/// A transition whose sources reference no external object has an empty
+/// index.
 pub fn verify_manifest_provenance_index(
     manifest: &EconomicAdmissionManifest,
     witness: &EconomicTransitionWitness,

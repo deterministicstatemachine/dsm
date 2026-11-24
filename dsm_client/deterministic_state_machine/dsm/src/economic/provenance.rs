@@ -25,10 +25,6 @@
 //! Pairing a genuine validated root with an unrelated witness is refused
 //! separately: the witness's post-root must equal the validated root.
 //!
-//! [`CreditSource::SameTransitionMove`] is the deliberate exception. It is
-//! intra-transition by definition, verified atomically against the witness
-//! that carries it, and reaches nothing outside.
-//!
 //! ## Every `SourceId` is derived
 //!
 //! A caller never supplies one. Each is a hash over authenticated coordinates,
@@ -1080,9 +1076,9 @@ pub fn verify_credit_source(
         // identity, consumed below from ZERO.
         CreditSource::OfflineBoundaryDebit(_) => match ctx.offline_boundary {
             // An unload, funded by its own account debit; or a settlement of
-            // value received offline, funded by the payer's spend the payer's
-            // online history exposed, verified against it before the boundary
-            // was built (SA-91). Either consumes its own identity's source.
+            // value received offline, funded by the payer's spend its origin
+            // cells hold final (DSM Amendment A39). Either consumes its own
+            // identity's source.
             Some(b)
                 if matches!(
                     b.kind(),

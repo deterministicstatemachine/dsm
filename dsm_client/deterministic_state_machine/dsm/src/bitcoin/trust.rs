@@ -10,8 +10,9 @@
 //! It does **not** prove Bitcoin consensus from first principles. Instead it
 //! names the exact runtime predicates the Rust verifier is expected to enforce.
 //! On mainnet, runtime acceptance must imply the formal `RustVerifierAccepted`
-//! predicate. On signet/testnet, runtime behavior is intentionally weaker due
-//! to checkpoint and entry-anchor bypasses used for development/testing.
+//! predicate on every network. Only a build with the `bitcoin-testnet-bypass`
+//! feature, for development rigs, skips the checkpoint and entry-anchor checks
+//! on signet/testnet, and is then weaker than the formal predicate there.
 
 use super::types::BitcoinNetwork;
 

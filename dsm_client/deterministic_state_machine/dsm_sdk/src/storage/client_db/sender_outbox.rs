@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Durable sender outbox (§16.6 defect-zero): the record that makes an online
+//! Durable sender outbox (defect-zero): the record that makes an online
 //! send survivable.
 //!
 //! THE ORDERING RULE THIS TABLE EXISTS TO ENFORCE. A transfer becomes
@@ -244,7 +244,7 @@ pub fn insert_sender_outbox_with_conn(conn: &Connection, r: &SenderOutboxRecord)
     Ok(())
 }
 
-/// §16.6 defect zero — THE ATOMIC PRE-SUBMIT COMMIT.
+/// defect zero — THE ATOMIC PRE-SUBMIT COMMIT.
 ///
 /// Writes, in ONE transaction, every local record that must exist before the
 /// transfer becomes externally deliverable:
@@ -486,7 +486,7 @@ pub fn commit_send_prerequisites_with_conn(
     Ok(())
 }
 
-/// §16.6 DEFECT 1 — ATOMIC ACCEPTANCE-PROOF FINALIZATION.
+/// DEFECT 1 — ATOMIC ACCEPTANCE-PROOF FINALIZATION.
 ///
 /// Everything one verified acceptance authorises the sender to commit — the
 /// inputs of [`finalize_on_acceptance_atomically`], all read from the durable
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     // =====================================================================
-    // §16.6 DEFECT 1 — the finalization must be ONE transaction.
+    // DEFECT 1 — the finalization must be ONE transaction.
     //
     // These build a complete pre-finalization world (contact at the projection
     // parent, gate, proposal, pending Local EK head, submitted outbox row) and
@@ -1717,7 +1717,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // §16.6 DEFECT ZERO — the atomic pre-submit commit.
+    // DEFECT ZERO — the atomic pre-submit commit.
     //
     // The live hazard was: storage quorum accepted the transfer, a local write
     // then failed, and the sender rolled back its debit while the message

@@ -6,8 +6,9 @@
 //! with its AK — to its directory cell on every member of the set. To reach a
 //! contact, a sender reads that contact's cell from every member and keeps the
 //! entry that proves itself (`dsm::core::identity::directory::select_entry`).
-//! The node stores and serves bytes; it decides nothing about whose entry is
-//! whose.
+//! A member keeps a write at a directory cell only when the AK and AttA it
+//! carries hash to the device id the cell names and the AK signed it (DSM
+//! Amendment A41); a reader still keeps only the entry that proves itself.
 
 use dsm::core::identity::directory::{
     directory_cell_key, select_entry_proven_by, DirectoryEntry, DirectoryEntryBody,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! SPHINCS+ per-step ephemeral key chain (whitepaper §11.1/§12).
+//! SPHINCS+ per-step ephemeral key chain.
 //!
 //! The per-step seed is keyed BLAKE3 keyed by the device master seed `Smaster`
 //! (NOT HKDF — see §12 note on KDF primitives), over versioned, algorithm- and
@@ -15,20 +15,20 @@
 //! |-----|-------|
 //! | `DSM/ek/v1\0` | Per-step ephemeral key seed (keyed by Smaster) |
 //! | `DSM/kyber-coins/v1\0` | Deterministic ML-KEM-768 coins (keyed by Smaster) |
-//! | `DSM/ek-cert\0` | Per-step ephemeral-key certification (whitepaper §11.1) |
+//! | `DSM/ek-cert\0` | Per-step ephemeral-key certification |
 
 use crate::crypto::blake3::{dsm_domain_hasher, dsm_domain_hasher_keyed};
 use crate::crypto::sphincs::{generate_keypair_from_seed, sign, sphincs_verify, SphincsVariant};
 use crate::types::error::DsmError;
 
 /// Canonical per-step signature suite identifier (SPHINCS+ SPX256f), bound into
-/// the EK seed context as `alg_id` per whitepaper §11.1 Eq.14.
+/// the EK seed context as `alg_id`.
 pub const ALG_ID_SPX256F: &[u8] = b"SPX256f";
 /// Canonical KEM suite identifier (ML-KEM-768), bound into the coins context as
-/// `kyber_alg_id` per whitepaper §12.
+/// `kyber_alg_id`
 pub const KYBER_ALG_ID_MLKEM768: &[u8] = b"ML-KEM-768";
 
-/// Derive the per-step ephemeral key seed E_{n+1} (whitepaper §11.1/§12 Eq.14).
+/// Derive the per-step ephemeral key seed E_{n+1}.
 ///
 /// `E_{n+1} = keyed-BLAKE3(key = Smaster,
 ///            "DSM/ek/v1\0" || alg_id || chain_id || h_n || C_pre || k_step)`
@@ -73,7 +73,7 @@ pub fn derive_kyber_step_key(shared_secret: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-/// Derive deterministic coins for ML-KEM-768 encapsulation (whitepaper §12).
+/// Derive deterministic coins for ML-KEM-768 encapsulation.
 ///
 /// `coins = keyed-BLAKE3(key = Smaster,
 ///   "DSM/kyber-coins/v1\0" || kyber_alg_id || recipient_kem_pub_hash || h_n || C_pre || DevID)`
@@ -105,7 +105,7 @@ pub fn derive_kyber_coins(
 //
 // Whitepaper §11.1 (Ephemeral certification, normative):
 //
-//     cert_{n+1} = Sign_{SK_n}( BLAKE3-256("DSM/ek-cert\0" || EK_pk_{n+1} || h_n) )
+//     cert_{n+1} = Sign_{SK_n}( BLAKE3-256("DSM/ek-cert\0" || EK_pk_{n+1} || h_n))
 //
 // Each per-step ephemeral SPHINCS+ key is certified by the previous signer
 // (AK for n=0, else EK_n). Verification replays the chain back to AK_pk and

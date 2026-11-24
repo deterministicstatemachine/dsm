@@ -7,9 +7,7 @@
 //!
 //! A witness must commit **directly** to which source type funds which credit.
 //! If the sources were themselves content addresses, learning that mutation 3
-//! is funded by mutation 1 would require fetching another object — absurd for
-//! [`SameTransitionMove`], which is intra-transition by definition and refers
-//! only to indices the witness already carries.
+//! is funded by mutation 1 would require fetching another object.
 //!
 //! The descriptors are therefore small and inline, and the **heavy** proof
 //! material stays content-addressed behind them. That gives a verifier real
@@ -34,7 +32,7 @@
 //!
 //! ## No `Custom` arm
 //!
-//! The algebra is closed. A credit that names none of these three is unfunded,
+//! The algebra is closed. A credit that names none of these four is unfunded,
 //! and there is deliberately no escape hatch — an open arm would be where
 //! every future "just this once" credit went.
 //!
@@ -107,15 +105,17 @@ impl CcbObject for CreditSourceGenesisRelease {
     const SCHEMA: u16 = 1;
 }
 
-/// `0x0075` schema 1 — the online credit of an offline unload, funded by the
-/// equal debit of the device's own offline account.
+/// `0x0075` schema 1 — the online credit of an offline unload, or of a
+/// settlement of value received offline, funded by the equal debit of the
+/// device's own offline account.
 ///
 /// Deliberately carries NO asset, NO amount, NO source id and NO address:
 /// the unload body is the admission's substrate, which the manifest already
 /// names, and Core establishes the account debit, its asset and its amount
 /// by folding the body's account and device paths. The source id is derived
 /// from the boundary's own operation id, so one offline debit funds one online
-/// credit, once. Valid only when the admission's substrate is an unload.
+/// credit, once. Valid only when the admission's substrate is an unload or a
+/// settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreditSourceOfflineBoundaryDebit {
     pub credit_mutation_index: u32,

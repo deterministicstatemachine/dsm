@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! dBTC bearer-state frontier reconciliation (spec §0.4 P5 — dBTC pass).
+//! dBTC bearer-state frontier reconciliation (dBTC pass).
 //!
 //! Generic P5 ([`crate::recovery::bearer_lock`]) locks every recovered bearer asset
 //! `LockedRecovery` and EXCLUDES dBTC from the generic token path — dBTC stays
@@ -43,7 +43,7 @@ pub struct DbtcVaultOutcome {
 }
 
 /// Aggregate verified per-vault outcomes + the capsule-restored `hint_sats` into the dBTC
-/// token's bearer-asset lock state + spendable cap (spec §0.4 P5).
+/// token's bearer-asset lock state + spendable cap.
 ///
 /// - sums are CHECKED; any overflow → `(LockedRecovery, 0)` (fail-closed);
 /// - `spendable_sum > 0` → [`reconcile_token_frontier`] (`≥hint → Spendable`, else

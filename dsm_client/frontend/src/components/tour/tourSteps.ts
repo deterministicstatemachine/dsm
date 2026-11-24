@@ -184,7 +184,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'wallet',
     target: '.send-tab .sb-seg[aria-label="Transaction mode"]',
     title: 'Who you can pay offline',
-    body: 'Only someone you have already dealt with online, with no new contacts or tokens since you last saw them online: that way nothing counterfeit reaches you unseen. What you receive offline is reconciled online when you next connect. This time we send online.',
+    body: 'Only a contact whose board your phone already learned of the last time it synced online, and both boards must carry the owner\'s stamp. What you receive offline sits in your offline balance until you move it to your balance, which needs you online and not them. This time we send online.',
   },
   {
     id: 'double-check',
@@ -649,7 +649,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'contacts',
     target: '.my-contact .sb-card--hero',
     title: 'This is you',
-    body: "Someone scans this once and you're in their contacts. Every payment they send you after that goes to this device, whatever they call you.",
+    body: "Someone scans this to add you. Once you have added them too, they can pay this device, whatever they call you.",
   },
   {
     id: 'contact-code',
@@ -752,7 +752,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'lock_setup',
     target: '.lock-setup-screen',
     title: 'PIN or combo',
-    body: 'Choose a PIN or a sequence of the shell buttons, and enter it twice. You can have it lock whenever you leave the app, and pick how long it waits before locking. Too many wrong tries wait out a cooldown. In practice, saving is switched off.',
+    body: 'Choose a PIN or a sequence of the shell buttons, and enter it twice. You can have it lock whenever you leave the app, and pick how long it waits before locking. After three wrong tries only your recovery phrase opens it. In practice, saving is switched off.',
   },
   {
     id: 'replay',

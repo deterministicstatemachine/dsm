@@ -12,18 +12,21 @@ to real code lives in `tools/vertical_validation`:
   extended bounded profile plus the standalone bilateral liveness spec. This is
   opt-in and is intentionally **not** part of the fast CI path.
 - `cargo run -p dsm_vertical_validation -- property-tests ...` runs randomized
-  checks against the real `StateMachine`.
+  checks against the real device head (`DeviceState`) and the SPHINCS+
+  sign/verify functions.
 - `cargo run -p dsm_vertical_validation -- implementation-traces` runs fixed,
-  deterministic traces through the real `StateMachine`, `BilateralTransactionManager`,
-  `TokenStateManager`, and receipt verifier.
+  deterministic traces through the real `LiveDevice`, `BilateralTransactionManager`,
+  `DLVManager`, `DeviceState`, and receipt verifier.
 - `cargo run -p dsm_vertical_validation -- tla-check` also links the focused
   standard TLA specs to matching real-code traces, and now also replays a
   deterministic TLC-produced simulation trace into Rust 1:1, so the same report
   shows TLC, literal trace replay, and linked real-code enforcement together.
-- CI runs all three so the abstract model and the direct-code checks stay
-  enforced together.
+- `tla-check`, `property-tests` and `implementation-traces` run in the
+  manually dispatched `formal-validation` CI job and in `make release-preflight`.
+  The guarded-kernel and dBTC configs and the TLAPS modules are run by hand.
 
-Today the integration links `DSM.tla` configs and `DSM_Tripwire.tla` to
+Today the integration links `DSM.tla` configs, `DSM_Tripwire.tla`,
+`DSM_OfflineFinality.tla` and `DSM_NonInterference.tla` to
 implementation-backed traces covering state-machine execution, bilateral
 precommit/finalize behavior, DJTE emission verification, DLV manager state,
 token conservation, and receipt-level Tripwire enforcement. The same `tla-check`
@@ -41,33 +44,35 @@ kept out of the default suite to avoid slowing down the standard regression gate
   obligations over the current abstraction. They tighten what bounded TLC must
   preserve, but they remain bounded checks.
 - Post-quantum security assumptions stay **outside** the TLA abstraction.
-  SPHINCS+, ML-KEM, and Shor-related rationale are documented in the security
-  and cryptography books; the TLA specs assume those external guarantees hold.
+  SPHINCS+, ML-KEM, and Shor-related rationale are in the explainer's §80 and
+  `specs/requirements/SPHINCS_*.md`; the TLA specs assume those external
+  guarantees hold.
 - Apalache is a future follow-up, not part of the current toolchain. The models
   would need additional reshaping before symbolic checking is worth adopting.
 
 ## What this model *does* cover
 
 - Device membership under a genesis (`devices`), with no-duplicate-device invariant.
-- Symmetric bilateral relationship activation + a monotonically increasing `tip`.
-- Online message queuing (`pendingMsgs`) and processing.
-- A simple key-generation gate (`keys`) used as a precondition for “sign/encrypt”.
-- Offline session symmetry (`offlineSessions`) + a transfer step that increments tips.
+- The online relationship protocol between two devices: ESTABLISH and TERMINATE (DSM
+  Amendment A33), pins, admission, the send gates, crossing sends, the sender's outbox, the
+  recipient's journal of countersign deltas and the finality certificates (`online`, `outbox`,
+  `journal`, `certs`, `joins`), over an adversarial network bag (`net`).
+- Per-device SMT roots and leaves (`deviceRoots`, `smtState`), the accepted-receipt `ledger`,
+  and balances (`deviceBalance`).
+- A key-generation gate (`keys`) used as a precondition for "sign/encrypt".
+- Offline session symmetry (`offlineSessions`) and a transfer step that advances tips.
 - DLV ownership (`vaults` + `vaultState.owner`) and a trivial unlock predicate.
-- Storage node membership (`storageNodes`) with stub store/replicate actions.
-- DJTE counters (`activatedDevices`, `emissionIndex`, `shardTree`) in **placeholder** form.
+- Storage node membership (`storageNodes`).
+- DJTE: activations, the shard lists, spent activation digests and spent proofs, a finite
+  source, and exact-uniform winner selection by rejection sampling (`UniformIndex`).
 
 ## What this model *does NOT* cover
 
 - Canonical protobuf encodings, Base32, b0x addressing, replica placement.
 - SPHINCS+/Kyber algorithms, signature validation, proof objects, HKDF.
 - Explicit quantum attack simulation or Shor-style crypto-break modeling.
-- Per-device SMT replace semantics, tripwire consumption tracking.
-  (See `DSM_Tripwire.tla` for a focused model of these invariants).
-- DJTE proof-carrying winner selection, shard descent proofs, spent-proof SMT.
-	Winner selection in this model is deterministic and seed-based (k-th-min with
-	k = seed % |activatedDevices|). It is NOT proof-carrying and NOT exact-uniform;
-	modulo selection can introduce bias unless additional assumptions are modeled.
+- The storage nodes' cells and route chains (see `DSM_RouteChain.tla`), and resource-key
+  derivation (see `DSM_Guarded*.tla` and `lean4/DSMGuardedTripwire.lean`).
 
 If you need those, the model should be refined by introducing explicit structures
 (e.g., SMT/accumulator trees) and by replacing nondeterministic `CHOOSE` with
@@ -103,9 +108,10 @@ The two adversary actions `AttemptSecondPrepareSameOrigin` and
 `AttemptSecondCommitSameOrigin` are deliberately included and TLC proves them
 never enabled: the re-pin `o.u = H0 - physH` and the linearity guard
 `RecOrigin ∉ consumedOrigins` are load-bearing (removing either falsifies
-`NoTwoCommittedSameOrigin`). Six invariants hold — `NoTwoEmittedSameOrigin`,
+`NoTwoCommittedSameOrigin`). Seven invariants hold — `NoTwoEmittedSameOrigin`,
 `NoTwoCommittedSameOrigin`, `CounterSync`, `CommitAdvancesOrigin`,
-`SecondSameOriginFails`, `RecoveryIdempotence` — over 123 distinct states.
+`SecondSameOriginFails`, `RecoveryIdempotence`, `NoCommitWithoutDeliverableConfirm`;
+`_ReleaseBeforeReceipt` must violate the last.
 The universal counterpart is `lean4/DSMOfflineAnchorOrigin.lean`
 (`offline_anchor_origin_unique`, axiom-free), which ties the anchor origin to
 the general theorem via `keyOf_inj`. This is the v2 replacement for the
@@ -116,7 +122,7 @@ cd tla
 java -cp tla2tools.jar tlc2.TLC -config DSM_OfflineAnchorSingleAppliance.cfg DSM_OfflineAnchorSingleAppliance.tla
 ```
 
-### DSM_OfflineOriginCells.tla (proposed design, not yet in the code)
+### DSM_OfflineOriginCells.tla: offline steps final at their origin cells (DSM Amendment A39; `dsm/src/offline_origin.rs`)
 Offline steps final at their origin cells. One payer's offline account, its
 board, two receivers and one cell per account root. A cell's occupant is the
 first recognized write of a step that starts at that root, and anyone holding a
@@ -125,11 +131,12 @@ carries it. A receiver settles its payment once every cell on its path holds
 that path's own step, with no need for the payer to come back online. A payer
 whose phone is wiped resumes from the steps its board kept.
 
-The design config models the privacy split (a cell shows the board, the
-starting root and the signatures over a sealed digest of the rest), with a
-modified payer wallet, jamming and restore. It holds `NoCounterfeit`,
-`AcceptedIsCovered`, `NoHonestBlock`, `RestoreResumes` and `SettledWasAccepted`.
-`_Public` is the same with full cells. With a broken board (`_BrokenBoard`,
+`_Public` (full cells: every reader folds every write) is the design A39
+adopts; the base config models the sealed-cell alternative (a cell shows the
+board, the starting root and the signatures over a sealed digest of the rest).
+Both run with a modified payer wallet, jamming and restore, and hold
+`NoCounterfeit`, `AcceptedIsCovered`, `NoHonestBlock`, `RestoreResumes` and
+`SettledWasAccepted`. With a broken board (`_BrokenBoard`,
 `_BrokenBoardPublic`) nothing is created, but a twin can take an accepted
 payment's cell: with full cells only a twin the fold covers
 (`_ValidTwinBlocksPublic`), with sealed cells any twin
@@ -180,19 +187,21 @@ Instances and expected TLC outcomes:
 counterparty relationship is its own straight hash chain and the derived
 consumption key embeds the relationship identity, so a parent under one
 relationship is not replayable under another even when chains reuse node
-names (paper Sec 6, Def 27/33, Rule 2). Second, the topology is bilateral: a
+names (paper Sec 7, Def 28/34, Rule 2). Second, the topology is bilateral: a
 relationship step has exactly one receiver, the counterparty of that
 relationship, so each relationship is modeled with a single acceptance locus.
-Online acceptance is the receiver's own frontier and proof checks (Def 55);
+Online acceptance is the receiver's own check: it keeps each payer's last
+proven state and validates every step since, each from its own parent
+(paper Def 57; DSM Amendments A36, A14);
 no co-signing round is part of the online path. The WF instance deliberately
 includes an attempted same-parent conflict and TLC proves it cannot fork in
 any interleaving. The Fork instance is the structure-removed contrast: free
 keys and two independent receivers of one parent, neither of which exists in
 online DSM, and only then does the cross-receiver fork appear. The one
 setting where a spendable object is genuinely presented to multiple distinct
-receivers is offline bearer mode, governed by the fused anchor, the Def 56
-pending lock, the offline anchor design's co-signed precommit, and
-reconciliation (paper Sec 29, Thm 14), modeled separately.
+receivers is offline bearer mode: one release per anchor origin
+(`DSM_OfflineAnchorSingleAppliance.tla`), the step final at its origin cell
+(`DSM_OfflineOriginCells.tla`, Amendment A39), modeled separately.
 
 ```zsh
 cd tla
@@ -205,10 +214,7 @@ java -cp tla2tools.jar tlc2.TLC -config DSM_GuardedMC_BilateralFork.cfg DSM_Guar
 
 Note on `*_TTrace_*` files: TLC writes trace-exploration specs whenever a run
 reports a violation, so the two EXPECTED-violation configs above regenerate
-them on every run. They are disposable artifacts. The older
-`DSM_GuardedMC_Fork_TTrace_*.bin` files (June 30) came from the pre-merge
-falsification harness on the `feat/formalize-dsm-guarded-tripwire` branch and
-are superseded; they can be deleted.
+them on every run. They are disposable artifacts, and gitignored.
 
 ### DSM_dBTC_TrustReduction.tla
 A focused dBTC trust-boundary model. It makes the mainnet settlement predicate
@@ -287,9 +293,10 @@ loss rule, handover and retirement are outside beta.
 The configs state the five seats as a set (`Seats = {s1, …, s5}`; a `.cfg`
 cannot state a tuple, so the module chooses the route ordering) and set
 `CHECK_DEADLOCK FALSE`: a finished write has no successor, and that is not a
-deadlock. The model is finite and exhausts in about a second. It runs in CI
-through `dsm_vertical_validation tla-check` (`RouteChain` and its three
-falsifications).
+deadlock. The model is finite and exhausts in about a second. It runs through
+`dsm_vertical_validation tla-check` (`RouteChain` and its three
+falsifications), in the manually dispatched `formal-validation` job and in
+`make release-preflight`.
 
 ```
 java -cp tla2tools.jar tlc2.TLC -config DSM_RouteChain.cfg DSM_RouteChain.tla
@@ -398,8 +405,10 @@ lean4/DSMSofiStorage.lean         the STORAGE FACTS for objects and indexes (R1)
                                   to the address; wrong bytes, a wrong namespace and
                                   silence never count; under a locator only the candidate
                                   whose recomputed identity is the locator is kept; a scan
-                                  over budget is Unavailable, never None. Each theorem is a
-                                  Rust test of the same name in CORE/sofi/storage.rs
+                                  over budget is Unavailable, never None. The storage-fact
+                                  theorems have Rust tests of the same name in
+                                  CORE/sofi/storage.rs; the acquisition, publication and
+                                  discovery theorems do not
 
 tla/DSM_SofiSuccessorCells.tla    the MEMBERS, behind the recognition boundary: raw
                                   member storage takes any bytes from anyone in arrival
@@ -528,3 +537,21 @@ carry the full invariant set and must pass.
 | fulfillment | `_StaleLegNotSkipped` | arm (iii) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
 | fulfillment | `_TraderOnlyCompletion` | *P2:* completion by anyone (a write authorization) | `QuiescentFulfillmentResolved` |
 | fulfillment | `_VoidBeforeValidation` | Void requires RouteValidation = Valid | `ResolutionPermanent` |
+
+## Further models and proofs
+
+Modules and proofs in this tree that the sections above do not describe:
+
+- **TLA+:** `DSM_OfflineFinality.tla` (offline finality, with its configs, linked to the real-code
+  trace `bilateral_full_offline_finality`), `DSM_WriteLock.tla` (the inbox write lock, DSM
+  Amendments A34 and A37), `DSM_NonInterference.tla`, `DSM_dBTC_Abstract.tla`,
+  `DSM_dBTC_Concrete.tla` and `DSM_dBTC_TrustReduction.tla` (the dBTC design being replaced),
+  `DSM_InitProof.tla` (TLAPS: the concrete `Init` refines `DSM_ProtocolCore!Init`).
+- **`DSM.tla` falsification configs:** `DSM_CrossingSettles`, `DSM_RecipientSkipsAdmission`,
+  `DSM_RecipientSkipsAdmissionAndPin`, `DSM_SendBeforeEstablishment`, and the
+  `DSM_BilateralLiveness_*` reachability configs.
+- **Lean 4:** `DSMApplicationCell` (A35), `DSMCertChain`, `DSMCryptoBinding`,
+  `DSMNoCounterfeitValue`, `DSMNonInterference`, `DSMOfflineFinality`, `DSMRelationshipLifecycle`
+  (A33), `DSMRelationshipWriteLock` (A34, A37), `DSMRouteChain`, `DSMTokenIssuance`,
+  `DSM_dBTC_Conservation`, `DSM_dBTC_TrustReduction`, and the SPHINCS+ tree under `lean4/Sphincs/`
+  (see `specs/requirements/SPHINCS_PROOF_OVERVIEW.md`).

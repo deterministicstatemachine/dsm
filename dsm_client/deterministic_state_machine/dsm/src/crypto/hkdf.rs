@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn whitepaper_master_seed_shape_compiles() {
-        // Smoke test that the DSM whitepaper §11.1 eq.13 derivation
+        // Smoke test that the DSM eq.13 derivation
         // shape works through this module.
         let g = [0xAAu8; 32];
         let devid = [0xBBu8; 32];

@@ -5,9 +5,10 @@
 //! A member keeps what it is given. Every argument the client builds on a
 //! cell read assumes the same things of the store beneath it:
 //!
-//! 1. every value put at a key is held, in arrival order — nothing is
-//!    refused, replaced or compared, and an identical value put twice is
-//!    held twice;
+//! 1. every value put at a key is held, in arrival order — the store
+//!    refuses, replaces and compares nothing (admission, storage spec §6
+//!    rule 6, happens in the handler before the store is reached), and an
+//!    identical value put twice is held twice;
 //! 2. a key nothing was put under reads as an empty list, not an error;
 //! 3. the namespace scopes the key: one key under two namespaces is two cells;
 //! 4. an index is append-only and pages in append order from the last `seq`;

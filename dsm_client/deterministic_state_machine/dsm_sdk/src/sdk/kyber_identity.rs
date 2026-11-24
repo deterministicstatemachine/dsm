@@ -5,18 +5,17 @@
 //! The §11.1 per-step-EK online transfer encapsulates against the recipient's
 //! ML-KEM-768 public key, which must therefore already be in the recipient's
 //! contact record BEFORE any online send. A relationship paired purely online
-//! has no BLE history, so the Kyber key must travel through online contact
-//! establishment (the registry) rather than being populated lazily from a live
-//! bilateral prepare. Requiring a BLE prepare first is an accidental transport
-//! dependency, not a security property.
+//! has no BLE history: online, a contact's Kyber key comes from its
+//! self-proving directory entry, which its AK signs (DSM Amendment A18).
 //!
 //! The Kyber public key is bound to the device identity by a SPHINCS+ signature
 //! from the device's attestation key (AK) over
 //!   `domain_hash("DSM/kyber-identity-binding\0", device_id || genesis_hash || kyber_pk)`.
-//! A verifier that already trusts the peer's AK public key — registry-attested
-//! and itself bound to `device_id` + `genesis` — verifies this signature before
-//! persisting the Kyber key, closing any key-substitution path. The ~29 KB
-//! SPHINCS+ signature rides in the registry / device-info record, never the QR.
+//! This separate binding is carried in offline (BLE) messages: a verifier that
+//! already holds the peer's AK public key, bound to `device_id` + `genesis` by
+//! the peer's directory entry, verifies this signature before using the Kyber
+//! key, closing any key-substitution path. The SPHINCS+ signature never rides
+//! in the QR.
 //!
 //! The Kyber SECRET key is never transmitted or persisted here. It is also
 //! never read from storage — the one place a secret exists in this module is

@@ -293,8 +293,8 @@ pub fn served(state: std::sync::Arc<dsm_storage_node::AppState>) -> axum::Router
     )
 }
 
-/// The key these tests write under: the first write at each test address
-/// fixes it there (DSM Amendment A34).
+/// The key these tests write under: each test address is its route bound to
+/// this key (DSM Amendments A34, A37).
 pub fn write_key() -> &'static dsm::crypto::sphincs::SphincsKeyPair {
     static KEY: std::sync::OnceLock<dsm::crypto::sphincs::SphincsKeyPair> =
         std::sync::OnceLock::new();

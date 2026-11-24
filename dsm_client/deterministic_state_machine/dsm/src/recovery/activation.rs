@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Recovery activation (P4) — all-contact identity succession (spec §0.5).
+//! Recovery activation (P4) — all-contact identity succession.
 //!
 //! The successor device becomes spend-authoritative only after EVERY gate-set
 //! member's OWN online-posted, genesis-authenticated state proves the
@@ -8,7 +8,7 @@
 //! establish a new bilateral `(A_new,C)` whose first accepted state carries forward
 //! the old relationship's verified frontier — and the set of such proofs equals the
 //! gate-set EXACTLY (no omission / substitution / duplicate). `rel_key` is
-//! device-pair-derived (§18.1), so `(A_old,C)` and `(A_new,C)` are distinct leaves;
+//! device-pair-derived, so `(A_old,C)` and `(A_new,C)` are distinct leaves;
 //! in-place same-`rel_key` migration is impossible by construction.
 //!
 //! Per-counterparty evidence is verified by [`crate::recovery::succession_binding`]
@@ -19,7 +19,7 @@
 //! acceptance is hash adjacency only.
 //!
 //! Recovery authority is the counterparties' posted state, NOT the stolen device,
-//! the capsule, or the local contacts DB (spec §0.5). The `gate_set` supplied here
+//! the capsule, or the local contacts DB. The `gate_set` supplied here
 //! is the authoritative online-posted, value-capable relationship set under the
 //! genesis; this module enforces that the seal accounts for EXACTLY that set.
 
@@ -152,7 +152,7 @@ impl RecoveryActivationSeal {
     }
 }
 
-/// Validate the activation seal (spec §0.5 / P4).
+/// Validate the activation seal.
 ///
 /// - `gate_set`: the authoritative online-posted, value-capable relationship set
 ///   under the genesis (counterparty device ids).

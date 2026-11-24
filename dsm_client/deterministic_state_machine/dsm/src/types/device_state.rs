@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Device state: the canonical per-device head per whitepaper §2.2, §4, §8.
+//! Device state: the canonical per-device head
 //!
 //! This module defines [`DeviceState`] — the authoritative representation of a
 //! DSM device's state. It consists of:
 //!
-//! - Per-Device SMT whose root `r_A` is the device's head pointer (§2.2)
+//! - Per-Device SMT whose root `r_A` is the device's head pointer
 //! - Device-level fungible token balances keyed by CPTA `policy_commit` (§9)
-//! - Per-relationship chain tips + minimal acceptance material (§4.2)
+//! - Per-relationship chain tips + minimal acceptance material
 //!
 //! Advances take the device from `r_A → r'_A` via a single SMT leaf replace
-//! (§4.2). The design follows first-commit-wins semantics: each advance is an
+//!. The design follows first-commit-wins semantics: each advance is an
 //! atomic head update. Concurrency is structurally impossible at the head
 //! level — two attempted advances from the same `r_A` will each see the same
 //! parent root, build valid successors, and race at the caller's CAS step;
@@ -18,7 +18,7 @@
 //!
 //! Per §4.3, this module contains **no counters, no timestamps, no heights**
 //! in any acceptance predicate or canonical hash. Ordering is by hash
-//! adjacency (§2.1): each [`RelationshipChainState`] embeds its predecessor
+//! adjacency: each [`RelationshipChainState`] embeds its predecessor
 //! tip `h_{i-1}`. Per-transition entropy (§11) makes state identity unique
 //! even when balance values round-trip.
 
@@ -42,13 +42,13 @@ pub struct DeviceState {
     /// Genesis digest `G_A` (§2.4–§2.5). Immutable 32 bytes.
     genesis: [u8; 32],
 
-    /// Device identifier `DevID_A = BLAKE3("DSM/devid\0" ‖ pk ‖ att)` (§2.4).
+    /// Device identifier `DevID_A = BLAKE3("DSM/devid\0" ‖ pk ‖ att)`.
     devid: [u8; 32],
 
     /// Device's SPHINCS+ public key for receipt signatures.
     public_key: Vec<u8>,
 
-    /// Per-Device SMT (§2.2). Leaves: `rel_key → chain_tip`. Root is `r_A`.
+    /// Per-Device SMT. Leaves: `rel_key → chain_tip`. Root is `r_A`.
     smt: SparseMerkleTree,
 
     /// Device-level fungible token balances.
@@ -286,7 +286,7 @@ impl fmt::Debug for RealizedHead {
 }
 
 /// Canonical value-capability of a relationship, for recovery gate-set construction
-/// (spec §0.5 gap 13, R4 anti-shrink). This is the ONLY representation — there is no
+/// (anti-shrink). This is the ONLY representation — there is no
 /// legacy bool, no default-false, no `missing == No`.
 ///
 /// - `Yes` — PROVEN value-capable: a value-bearing op was observed. Sticky; never downgraded.
@@ -387,7 +387,7 @@ pub struct RelChainTip {
     /// tip falls back to the SMT-root derivation.
     pub tip_entropy: Vec<u8>,
 
-    /// Canonical value-capability (R4 anti-shrink). Witnessed-birth relationships are
+    /// Canonical value-capability (anti-shrink). Witnessed-birth relationships are
     /// `Yes`/`No`; imported/capsule-restored tips are `Unknown` until history proves
     /// otherwise. There is no legacy/default form — every tip carries this explicitly.
     pub value_capability: ValueCapability,
@@ -398,7 +398,7 @@ pub struct RelChainTip {
     pub lifecycle: RelationshipLifecycle,
 }
 
-/// One accepted state in a per-relationship straight hash chain (§2.1).
+/// One accepted state in a per-relationship straight hash chain.
 ///
 /// Replaces the old monolithic `State` for per-chain semantics. Carries
 /// adjacency material, the operation, entropy, a device-level balance
@@ -410,7 +410,7 @@ pub struct RelationshipChainState {
     pub rel_key: [u8; 32],
 
     /// Embedded parent hash `h_{i-1}` from the **same** relationship chain
-    /// (§2.1 eq. 1). For first-ever advances on a relationship this is the
+    ///. For first-ever advances on a relationship this is the
     /// spec-canonical initial tip derived from genesis + counterparty.
     pub embedded_parent: [u8; 32],
 
@@ -898,7 +898,7 @@ pub struct AdvanceOutcome {
 
     /// The new chain state for the advanced relationship. Signatures are
     /// `None` in this outcome — the caller attaches them via the stitched
-    /// receipt flow (§4.2) before CAS.
+    /// receipt flow before CAS.
     pub new_chain_state: RelationshipChainState,
 
     /// Every leaf the step wrote, with its path against `parent_r_a`, and
@@ -926,7 +926,7 @@ impl AdvanceOutcome {
     /// The one entropy of this transition, exactly as Core derived it inside
     /// `advance` (Part VII step 3). This is the value that sits in the
     /// relationship tip and that the SDK carries — unchanged — into both
-    /// receipt hashes, `C_pre` and the symmetric tip (§39.3).
+    /// receipt hashes, `C_pre` and the symmetric tip.
     pub fn transition_entropy(&self) -> [u8; 32] {
         self.transition_entropy
     }
@@ -1280,7 +1280,7 @@ impl DeviceState {
         *Self::device_tree(&tips, extra_leaves, offline_accounts).root()
     }
 
-    /// Current device head `r_A` — the Per-Device SMT root (§2.2).
+    /// Current device head `r_A` — the Per-Device SMT root.
     pub fn root(&self) -> [u8; 32] {
         *self.smt.root()
     }
@@ -1568,7 +1568,7 @@ impl DeviceState {
     /// # Errors
     ///
     /// - A relationship not established on this device
-    /// - Balance underflow or overflow (§8 eq. 10)
+    /// - Balance underflow or overflow
     /// - SMT replace failure
     ///
     /// # Concurrency
@@ -1589,7 +1589,7 @@ impl DeviceState {
         // A zero-effect transition is not a transition (MR-DSM-0201), online or
         // offline, refused before anything else is computed.
         self.refuse_zero_effect(&operation)?;
-        // The leaf a step moves is the one its two device ids name (§18.1),
+        // The leaf a step moves is the one its two device ids name,
         // whatever key the caller passed beside them.
         if rel_key
             != crate::core::bilateral_transaction_manager::compute_smt_key(
@@ -2084,8 +2084,7 @@ impl DeviceState {
 
     /// The operation id the boundary of `kind` would take from this head, and
     /// the counter and frontier its account stands at: what the board's
-    /// transition for it is built from before it is taken (DSM Amendment A39
-    /// draft, option B).
+    /// transition for it is built from before it is taken (DSM Amendment A39).
     pub fn offline_boundary_start(
         &self,
         bundle: &[u8; 32],
@@ -2225,7 +2224,7 @@ impl RealizedHead {
     /// online balance is credited by it. The credit is an admitted economic transition, funded by the
     /// payer's spend its origin cells hold (`economic::offline_boundary::OfflineSettlementBody`). The
     /// account's board signs the unload at its next counter, advancing to `next_frontier` (DSM
-    /// Amendment A39 draft, option B). Answers the head it leaves, with the account's step as the
+    /// Amendment A39). Answers the head it leaves, with the account's step as the
     /// witness the account's next boundary carries in its ancestry, and the device roots and
     /// offline-state proofs the board's release carries.
     pub fn settle_offline_receipt(
@@ -2295,7 +2294,7 @@ impl RealizedHead {
 }
 
 /// The unload of a payment received offline, taken: the head it leaves, the account's step as
-/// its witness, and what the board's release of it carries (DSM Amendment A39 draft, option B).
+/// its witness, and what the board's release of it carries (DSM Amendment A39).
 #[derive(Clone)]
 pub struct OfflineSettleOutcome {
     pub new_device_state: RealizedHead,
@@ -2313,8 +2312,8 @@ pub enum OfflineBoundaryKind {
     /// From the offline account back to the online balance.
     Unload,
     /// The unload of a payment received offline: its amount leaves what the receiver's offline
-    /// account holds received for its online balance, funded by the payer's spend the payer's
-    /// online history exposed (owner, 2026-11-07).
+    /// account holds received for its online balance, funded by the payer's spend that is final at
+    /// the payer's origin cell (DSM Amendment A39).
     Settle,
 }
 

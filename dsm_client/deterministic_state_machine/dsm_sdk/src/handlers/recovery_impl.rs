@@ -432,7 +432,7 @@ pub async fn execute_recovery_pipeline() -> Result<String, String> {
         &new_device_id_str[..new_device_id_str.len().min(16)]
     );
 
-    // 7b. P5 bearer-asset LOCKED_RECOVERY (spec §0.4): the capsule is a continuity hint,
+    // 7b. P5 bearer-asset LOCKED_RECOVERY: the capsule is a continuity hint,
     // NOT a balance oracle. Identity succession does NOT make recovered bearer assets
     // spendable — every restored bearer asset enters LockedRecovery and stays there until
     // its OWN verified frontier reconciles (generic tokens via reconcile_token_asset; dBTC

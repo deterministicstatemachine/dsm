@@ -20,9 +20,9 @@ type D32 = [u8; 32];
 /// One recovery object's cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryCell {
-    /// The recovery-authority anchor a genesis binds (§0.5 step 5).
+    /// The recovery-authority anchor a genesis binds.
     AuthorityAnchor { genesis: D32 },
-    /// A device's posted PDSMT heads (§0.5 gap 13).
+    /// A device's posted PDSMT heads.
     PdsmtHead { device_id: D32 },
     /// A device's posted PDSMT leaf set at one head.
     PdsmtLeaves {
@@ -62,8 +62,8 @@ impl RecoveryCell {
     }
 
     /// Whether `bytes` are an object of the kind this cell holds, naming the
-    /// cell's coordinates where the object carries them. Anyone can write a
-    /// cell, so a reader keeps nothing else (storage spec §9, route chains,
+    /// cell's coordinates where the object carries them. The owner's lock may
+    /// sign any bytes, so a reader keeps nothing else (storage spec §9, route chains,
     /// rule 3: bytes that are no recognized object naming the key never
     /// count). Whether the object verifies is the reader's to check.
     pub fn holds(&self, bytes: &[u8]) -> bool {

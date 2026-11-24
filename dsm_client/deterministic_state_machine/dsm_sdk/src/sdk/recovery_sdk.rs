@@ -341,7 +341,7 @@ impl RecoverySDK {
             .and_then(|g| g.clone())
     }
 
-    /// Build the genesis-anchored recovery-authority anchor (spec §0.5 step 5) for THIS
+    /// Build the genesis-anchored recovery-authority anchor for THIS
     /// device, ready to publish. Re-derives the device's genesis signing keypair
     /// deterministically (it is never persisted — `init::derive_device_signing_keypair`
     /// is the SOLE canonical derivation), uses the cached mnemonic-derived authority
@@ -760,7 +760,7 @@ impl RecoverySDK {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Relationship-state evidence postings (spec §0.5 Phase D prerequisite).
+    // Relationship-state evidence postings (Phase D prerequisite).
     //
     // PDSMT heads/leaves prove "what the current tip IS" + value-capability. These objects
     // prove HOW a relationship reached its tip (old-chain ancestry h_cap ->* T_old_current)
@@ -952,7 +952,7 @@ impl RecoverySDK {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // dBTC vault index (spec §0.4 P5 — dBTC enumeration). The healthy device posts a
+    // dBTC vault index (dBTC enumeration). The healthy device posts a
     // K_A-signed list of its dBTC vault ids; a recovering device fetches it as the candidate
     // set for reconcile_dbtc_asset. Availability-only; verified client-side. Enumeration
     // completeness is not a safety property (per-vault Bitcoin backing is the unlock gate).
@@ -1075,7 +1075,7 @@ impl RecoverySDK {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Producer endpoints (spec §0.5 Phase D step 2 — the bilateral re-establish side).
+    // Producer endpoints (Phase D step 2 — the bilateral re-establish side).
     //
     // These are the deterministic posting endpoints the interactive bilateral re-establish
     // transport calls; the transport (exchanging h_cap + co-signing the new (A_new,C) first
@@ -1353,7 +1353,7 @@ impl RecoverySDK {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Bilateral re-establish (spec §0.5 — the interactive successor-channel transport).
+    // Bilateral re-establish (the interactive successor-channel transport).
     //
     // After identity recovery, A_new must re-establish each prior `(A_old,C)` relationship as a
     // NEW `(A_new,C)` channel "born as a successor": its first state binds the carry-forward
@@ -1610,7 +1610,7 @@ impl RecoverySDK {
         )
     }
 
-    /// End-to-end recovery activation orchestration (spec §0.5 Phase D step 2).
+    /// End-to-end recovery activation orchestration (Phase D step 2).
     ///
     /// Fetches A_old's and every candidate counterparty's online-posted, genesis-authenticated
     /// state, assembles + verifies the per-counterparty cross-relationship succession evidence
@@ -1788,12 +1788,12 @@ impl RecoverySDK {
     /// Verify a recovery activation seal and, on success, RECORD activation so a
     /// recovered successor may egress value. This is the SOLE unlock chokepoint:
     /// `set_recovery_activated(true)` is reached only after the genesis-anchored
-    /// authority binding AND the core `validate_recovery_activation` pass (spec §0.5).
+    /// authority binding AND the core `validate_recovery_activation` pass.
     ///
     /// Recovery authority is the counterparties' OWN online-posted, genesis-authenticated
     /// state — NOT the stolen device, the capsule, or the local contacts DB. The
     /// authority pubkey that authenticates each counterparty's tombstone/succession is
-    /// itself bound to the genesis via `authority_anchor` (§0.5 step 5); `gate_set`,
+    /// itself bound to the genesis via `authority_anchor`; `gate_set`,
     /// `evidence`, and `genesis_signing_pubkey` are produced by the caller from the
     /// online-posted, quorum-verified records (storage = availability; verification =
     /// client-side).
@@ -1808,7 +1808,7 @@ impl RecoverySDK {
         genesis_signing_pubkey: &[u8],
         candidate_authority_pubkey: &[u8],
     ) -> Result<(), DsmError> {
-        // §0.5 step 5 — genesis-anchored recovery authority (HARD fail-closed): the
+        // step 5 — genesis-anchored recovery authority (HARD fail-closed): the
         // pubkey used to verify every counterparty's tombstone/succession is NOT taken
         // raw. It must match the genesis-chained authority anchor, whose genesis-binding
         // signature is verified against the OLD device's genesis-authenticated signing
@@ -1821,7 +1821,7 @@ impl RecoverySDK {
             candidate_authority_pubkey,
         )?;
 
-        // §0.5 evidence model: validate that every gate-set counterparty's posted
+        // evidence model: validate that every gate-set counterparty's posted
         // state proves the cross-relationship succession — retire (A_old,C), establish
         // a new bilateral (A_new,C) carrying forward the old frontier (structural
         // validation; unit-tested). Recovery authority is the counterparties' posted
@@ -1843,7 +1843,7 @@ impl RecoverySDK {
         //     tombstone for `A_old`.
         // Until those land, `recovery_activated` is not flipped and
         // `set_recovered_successor(true)` must stay unwired — so no live spend path
-        // depends on this unlock (spec §0.5).
+        // depends on this unlock.
         Err(DsmError::InvalidState(
             "recovery activation recording disabled: per-counterparty posted state is \
              not yet genesis-authenticated and the online-posted gate-set is not yet \

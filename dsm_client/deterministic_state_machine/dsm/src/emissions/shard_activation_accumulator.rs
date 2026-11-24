@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Shard Activation Accumulator / SAA (emissions spec §3.4)
+//! Shard Activation Accumulator / SAA
 //!
 //! Per-shard append-only accumulator whose leaves are activated identities:
 //!   `SAA_s: L_s[i] = H("DJTE.ACTIVE" || id_i)`
@@ -18,7 +18,7 @@
 //!
 //! # Domain Separation
 //!
-//! - Leaf values use `DJTE.ACTIVE` domain (per emissions spec §3.4)
+//! - Leaf values use `DJTE.ACTIVE` domain
 //! - Internal nodes currently use `DSM/djte-shard-merkle` domain
 //! - Future: use `DJTE/saa-node` when parameterized domains are implemented
 

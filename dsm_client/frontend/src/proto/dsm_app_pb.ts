@@ -237,8 +237,8 @@ proto3.util.setEnumType(AnchorEnforcement, "dsm.AnchorEnforcement", [
 ]);
 
 /**
- * Whether a vault's birth publication set has reached quorum on its birth
- * storage set (see `AmmVaultSummaryV1.publication_state`).
+ * Whether a vault's birth publication set is stored on its birth
+ * storage set (three members return each object's exact bytes) (see `AmmVaultSummaryV1.publication_state`).
  *
  * @generated from enum dsm.VaultPublicationState
  */
@@ -249,15 +249,15 @@ export enum VaultPublicationState {
   UNSPECIFIED = 0,
 
   /**
-   * Frozen in the funding transaction; not every birth object has reached
-   * quorum yet. Not market-active.
+   * Frozen in the funding transaction; not every birth object is stored
+   * yet. Not market-active.
    *
    * @generated from enum value: VAULT_PUBLICATION_STATE_PENDING = 1;
    */
   PENDING = 1,
 
   /**
-   * Every birth object accepted by a quorum of the vault's birth storage set.
+   * Every birth object stored on the vault's birth storage set.
    *
    * @generated from enum value: VAULT_PUBLICATION_STATE_PUBLISHED = 2;
    */
@@ -9138,8 +9138,8 @@ export class PeerTransferAcceptanceEvidenceV1 extends Message<PeerTransferAccept
  * admitted into validated R_econ: it is constructed and frozen in the accept
  * transaction (every field is an output of the build), HELD, and promoted to
  * deliverable in the SAME terminal transaction that records ECON_ADMITTED.
- * Sender finalization requires this release AND an independent quorum read of
- * the recipient's register cell at the named position (post-root + manifest
+ * Sender finalization requires this release AND an independent read of
+ * the recipient's register cell, final by its route chain, at the named position (post-root + manifest
  * address must match) — never the recipient's private "admitted" flag.
  *
  * @generated from message dsm.RecipientEconomicReleaseBodyV1
@@ -11985,7 +11985,7 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   expectedCounterpartyStateHash?: Hash32;
 
   /**
-   * Sender's SPHINCS+ SPX256s public key for offline verification
+   * Sender's SPHINCS+ SPX256f public key for offline verification
    *
    * @generated from field: bytes sender_signing_public_key = 7;
    */
@@ -12007,7 +12007,8 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
 
   /**
    * Sender's ML-KEM-768 encapsulation key (1184 bytes). The device Kyber keypair is
-   * derived from the wallet master secret ("DSM/kyber\0"). The receiver refuses the
+   * derived from the wallet master secret (keyed-BLAKE3(Smaster, "DSM/ml-kem-identity/v1"
+   * || 0x00 || "ML-KEM-768")). The receiver refuses the
    * prepare unless it equals the key pinned on the sender's contact record; nothing
    * sent is stored.
    *
@@ -12206,7 +12207,7 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
   localStateHash?: Hash32;
 
   /**
-   * SPHINCS+ SPX256s public key for bilateral verification (64 bytes)
+   * SPHINCS+ SPX256f public key for bilateral verification (64 bytes)
    * CRITICAL: This allows the sender to update their contact's signing key
    * when receiving the accept response, enabling session registration for future transfers.
    *
@@ -13524,7 +13525,7 @@ export class StepWriteOfflineReceive extends Message<StepWriteOfflineReceive> {
 /**
  * The unload of a payment received offline, as an offline account's step: the account as it stood
  * before, what it held received of the payment's asset, and the counter and frontier its board
- * signed the unload at (DSM Amendment A39 draft, option B). After is derived — less the payment's
+ * signed the unload at (DSM Amendment A39). After is derived — less the payment's
  * amount, the counter's step and the frontier's advance — by folding account_paths from
  * pre_account_root.
  *
@@ -19509,7 +19510,9 @@ export class SealedEnvelopeV1 extends Message<SealedEnvelopeV1> {
  * ===================== Device directory (owner, 2026-09-23) =====================
  * Each device writes its own entry, signed with its AK, to the keyed cell
  * H(DSM/device-directory-key/v1, genesis, device_id) under the namespace
- * DSM/device-directory/v1. Nodes store every entry and check nothing; a reader
+ * DSM/device-directory/v1. A member keeps an entry only when the write's AK and
+ * AttA hash to the device id its address names and the AK signed the write
+ * (DSM Amendment A41); a reader
  * keeps the entry whose AK hashes (with AttA) to the device id, whose
  * signature verifies and whose evidence proves, by P0-P6, its AK as the owner
  * authority of the device under its genesis (DSM Amendment A18), highest
@@ -23358,7 +23361,7 @@ export class ContactQrV3 extends Message<ContactQrV3> {
   genesisHash = new Uint8Array(0);
 
   /**
-   * SPHINCS+ SPX256s public key for bilateral verification
+   * SPHINCS+ SPX256f public key for bilateral verification
    *
    * @generated from field: bytes signing_public_key = 6;
    */
@@ -23934,7 +23937,7 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
   bleAddress = "";
 
   /**
-   * SPHINCS+ SPX256s public key for bilateral verification
+   * SPHINCS+ SPX256f public key for bilateral verification
    *
    * @generated from field: bytes signing_public_key = 12;
    */
@@ -24374,7 +24377,7 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
  * transition and both sides' canonical heads for it, signed by the sender's
  * per-step EK for that transition (the same key the recipient chained
  * `ek_pk_a` for). The sender's gate is released only once this artifact
- * reaches storage quorum; the recipient's next origination is released only
+ * is stored (three members return its exact bytes); the recipient's next origination is released only
  * once it verifies it. Method `relationship.finalized.v1`; deterministic id
  * derived from the artifact digest; frozen route = the recipient's route.
  *
@@ -24555,7 +24558,9 @@ export class RelationshipWriteKeyOfferV1 extends Message<RelationshipWriteKeyOff
  * and the key are public keys, the instance an opaque hash. `grant_id` is
  * BLAKE3 under DSM/relationship-write-grant-id/v1 over fields 1-4; the lock
  * signs BLAKE3 under DSM/relationship-write-grant/v1 over fields 1-5, in tag
- * order. A node checks it under the key an inbox's first write fixed.
+ * order. A node checks it under the key the inbox address is bound to: the
+ * writer's first-inbox lock at a first inbox (DSM Amendment A37), the
+ * recipient's write lock at every later one.
  *
  * @generated from message dsm.RelationshipWriteGrantV1
  */
@@ -25368,11 +25373,11 @@ export class OfflineAllocationView extends Message<OfflineAllocationView> {
 
 /**
  * One payment this device received offline and holds pending: its value
- * settles online only once the payer's return online exposes its signed spend
- * chain (CONFORMANCE §6.103). It is not part of `available` and not part of
+ * settles once the payer's origin cells hold its step final; the payer is not
+ * needed (DSM Amendment A39). It is not part of `available` and not part of
  * the offline allocation, and nothing spends it until it settles.
- * wallet.unloadReceived (owner, 2026-11-07): one action moves every payment received offline whose
- * payer has been back online out of the offline account's received amount into the online balance,
+ * wallet.unloadReceived (owner, 2026-11-07): one action moves every payment received offline that
+ * the payer's origin cells hold final out of the offline account's received amount into the online balance,
  * each as its own checked step (its settlement); the rest stay in the offline balance, waiting.
  *
  * @generated from message dsm.UnloadReceivedResponse

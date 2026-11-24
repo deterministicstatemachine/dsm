@@ -29,7 +29,7 @@ use std::hash::{Hash as StdHash, Hasher};
 /// Collects all required and optional inputs for constructing a new state node
 /// in the hash chain. Uses the builder-style `with_*` methods for optional fields.
 ///
-/// Per whitepaper §4.3, no counter/height/timestamp participates in acceptance
+/// Per, no counter/height/timestamp participates in acceptance
 /// predicates. State identity comes from hash adjacency (`prev_state_hash`) and
 /// per-transition entropy (§11 eq. 14), not a monotonic counter.
 #[derive(Clone, Debug)]
@@ -147,7 +147,7 @@ pub struct State {
     /// Unique identifier for this state (opaque label; not in hash).
     pub id: String,
 
-    /// Current entropy value, evolved deterministically as per whitepaper §11.
+    /// Current entropy value, evolved deterministically
     pub entropy: Vec<u8>,
 
     /// Cryptographic hash of this state
@@ -156,13 +156,13 @@ pub struct State {
     /// Hash of the previous state, creating the cryptographic chain as per Section 3.1
     pub prev_state_hash: [u8; 32],
 
-    /// Sparse index for efficient lookups as per whitepaper Section 3.2
+    /// Sparse index for efficient lookups
     pub sparse_index: SparseIndex,
 
     /// Operation performed in this state transition
     pub operation: Operation,
 
-    /// Kyber-encapsulated entropy for quantum resistance as per whitepaper Section 6
+    /// Kyber-encapsulated entropy for quantum resistance
     pub encapsulated_entropy: Option<Vec<u8>>,
 
     /// Device information
@@ -171,7 +171,7 @@ pub struct State {
     /// State flags for additional metadata
     pub flags: HashSet<StateFlag>,
 
-    /// Token balances integrated directly in state transition as per whitepaper Section 9
+    /// Token balances integrated directly in state transition
     /// Maps token identifiers to balances, format: "owner_id:token_id" -> Balance
     pub token_balances: HashMap<String, Balance>,
 
@@ -314,7 +314,7 @@ impl State {
 
     // add_metadata deleted: external_data field removed (zero callers).
 
-    /// Calculate the hash of this state, as specified in whitepaper Section 3.1
+    /// Calculate the hash of this state, as specified
     ///
     /// # Returns
     /// * `Result<[u8; 32], DsmError>` - The calculated hash or an error
@@ -329,7 +329,7 @@ impl State {
     /// Compute the canonical hash of this state per §4.2.1.
     ///
     /// Per §4.3, no counter/height/timestamp is included. Ordering is by hash
-    /// adjacency via `prev_state_hash` (§2.1 eq. 1). Per-transition entropy
+    /// adjacency via `prev_state_hash`. Per-transition entropy
     /// (§11 eq. 14) makes state identity unique even when field values
     /// round-trip.
     ///
@@ -390,7 +390,7 @@ impl State {
         Ok(hasher.finalize().as_bytes().to_vec())
     }
     /// Compute the verification hash that includes token balances for finalized verification
-    /// This implements the atomic state update with token integration as per whitepaper Section 9
+    /// This implements the atomic state update with token integration
     pub fn finalized_verification_hash(&self) -> Result<Vec<u8>, DsmError> {
         // Get the pre-finalization hash first
         let pre_hash = self.pre_finalization_hash()?;
@@ -437,7 +437,7 @@ impl State {
     /// Convert state to bytes for hashing and transmission.
     ///
     /// Per §4.3, no counter participates in canonical encoding. Ordering is
-    /// via `prev_state_hash` (§2.1 eq. 1).
+    /// via `prev_state_hash`.
     ///
     /// # Returns
     /// * `Result<Vec<u8>, DsmError>` - Serialized state bytes
@@ -502,7 +502,7 @@ mod tests {
     }
 
     fn test_state(n: u64) -> State {
-        // n seeds entropy only — NOT a counter for acceptance (§4.3)
+        // n seeds entropy only — NOT a counter for acceptance
         let mut entropy = vec![0xAA; 16];
         entropy.extend_from_slice(&n.to_le_bytes());
         State::new(StateParams::new(

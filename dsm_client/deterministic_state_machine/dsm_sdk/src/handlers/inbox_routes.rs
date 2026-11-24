@@ -78,7 +78,7 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("inbox.pull: b0x init failed: {e}")),
                 };
 
-                // §16.4: poll the per-contact rotated addresses — the same
+                // poll the per-contact rotated addresses — the same
                 // addresses storage.sync polls, so transfers and messages are
                 // both found.
                 let my_genesis = match self.core_sdk.local_genesis_hash().await {

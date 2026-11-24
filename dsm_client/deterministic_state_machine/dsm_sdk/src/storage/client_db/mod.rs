@@ -57,7 +57,7 @@ pub mod relationship_write_authorization;
 pub mod route_writes;
 pub mod sender_outbox;
 pub mod sender_proposal;
-pub mod sofi_vault_head; // the vault head and evidence store (spec §44.4)
+pub mod sofi_vault_head; // the vault head and evidence store
 pub mod storage_sync_runs;
 pub mod token_registry;
 mod tokens;
@@ -648,7 +648,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// contact is bound to (DSM Amendment A37). A database made at 48 is refused
 /// at open.
 ///
-/// Still 49, additively (DSM Amendment A39 draft): `pending_offline_origin`
+/// Still 49, additively (DSM Amendment A39): `pending_offline_origin`
 /// and `pending_offline_origin_write`, the payer's steps a payment received
 /// offline was carried with, and `offline_boundary_signing`, a load or unload
 /// its board is signing, are new tables a database made at 49 takes at its next

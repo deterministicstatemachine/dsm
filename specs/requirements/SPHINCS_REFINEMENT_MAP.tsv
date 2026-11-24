@@ -65,34 +65,34 @@ dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	51	sign	sign	eb
 dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	57	verify	verify	eb8d98a71c250712058f88e66fe24ccfda57027b
 dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	74	sphincs_sign	sign(.spx256f)	eb8d98a71c250712058f88e66fe24ccfda57027b
 dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	80	sphincs_verify	verify(.spx256f)	eb8d98a71c250712058f88e66fe24ccfda57027b
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	80	generate_from_entropy	entropy normalization; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	85	generate_from_entropy_with_params	H(DSM/sphincs-seed,entropy) then generateKeypair; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	115	sign	raw-byte forwarding; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	135	verify	raw-byte forwarding; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	186	sign_message_with_params	raw-byte forwarding; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	210	verify_message_with_params	raw-byte forwarding; unproved	17c3ba2571f0b70b062bc0b834d85c44c690d9b2
-dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	42	derive_ephemeral_seed	ekSeedInput (tested encoding)	0c72673052df00fa8cc5cfcf328e198b89500860
-dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	121	derive_ek_cert_hash	ekCertInput / cert_preimage_binding	0c72673052df00fa8cc5cfcf328e198b89500860
-dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	130	sign_ek_cert	sign(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
-dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	141	verify_ek_cert	verify(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	120	derive_ak_seed	KS1 Expand under PRK_d: akInfo_inj (C68); refinement unproved	e8fb6c371da0ba3bf00c833417b9a1dc5d1de6e6
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	131	derive_device_ak_keypair	seed-to-AK call path; unproved	e8fb6c371da0ba3bf00c833417b9a1dc5d1de6e6
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	146	derive_devid	devidInput / devid_preimage_binding	e8fb6c371da0ba3bf00c833417b9a1dc5d1de6e6
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	167	derive_smaster	KS1 Expand under PRK_s0: snode_info_inj (C68), modeled in ks1_forge_256f (C69), vectors executed by KeyScheduleChecks; refinement unproved	e8fb6c371da0ba3bf00c833417b9a1dc5d1de6e6
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	79	generate_from_entropy	entropy normalization; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	84	generate_from_entropy_with_params	H(DSM/sphincs-seed,entropy) then generateKeypair; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	114	sign	raw-byte forwarding; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	134	verify	raw-byte forwarding; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	185	sign_message_with_params	raw-byte forwarding; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	209	verify_message_with_params	raw-byte forwarding; unproved	cebdcfeec9f6fea5dee658e64f27dc4037f00490
+dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	42	derive_ephemeral_seed	ekSeedInput (tested encoding)	c41b7bea862fd715b7c8266c09db29ee9dfd7589
+dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	121	derive_ek_cert_hash	ekCertInput / cert_preimage_binding	c41b7bea862fd715b7c8266c09db29ee9dfd7589
+dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	130	sign_ek_cert	sign(.spx256f) on hash of ekCertInput	c41b7bea862fd715b7c8266c09db29ee9dfd7589
+dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	141	verify_ek_cert	verify(.spx256f) on hash of ekCertInput	c41b7bea862fd715b7c8266c09db29ee9dfd7589
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	120	derive_ak_seed	KS1 Expand under PRK_d: akInfo_inj (C68); refinement unproved	deaab4cabffb6fd148a1a3db8a51ba8bc41b1c68
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	131	derive_device_ak_keypair	seed-to-AK call path; unproved	deaab4cabffb6fd148a1a3db8a51ba8bc41b1c68
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	146	derive_devid	devidInput / devid_preimage_binding	deaab4cabffb6fd148a1a3db8a51ba8bc41b1c68
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	167	derive_smaster	KS1 Expand under PRK_s0: snode_info_inj (C68), modeled in ks1_forge_256f (C69), vectors executed by KeyScheduleChecks; refinement unproved	deaab4cabffb6fd148a1a3db8a51ba8bc41b1c68
 dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	19	binding_digest	identityBindingInput / identity_preimage_binding	0aa0f212cfa0c7a82277da2d1df5b1e9366c3462
 dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	33	verify_kyber_identity_binding	key width + verify; tested by existing suite, not proved	0aa0f212cfa0c7a82277da2d1df5b1e9366c3462
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	193	setup_signing_digest	domainInput + opaque CCB; unproved CCB refinement	d714e40fbc4b95c3ffd2c5bdcdca81fff31db667
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	211	precommit_signing_digest	domainInput + opaque CCB; unproved CCB refinement	d714e40fbc4b95c3ffd2c5bdcdca81fff31db667
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	226	fulfillment_signing_digest	domainInput + opaque CCB; unproved CCB refinement	d714e40fbc4b95c3ffd2c5bdcdca81fff31db667
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	259	resolution_claim_signing_digest	WrapperInjective.lean: resolution_claim_signing_injective (claim CCB, alg, key, AttA)	d714e40fbc4b95c3ffd2c5bdcdca81fff31db667
-dsm_client/deterministic_state_machine/dsm/src/economic/claim.rs	243	signing_digest	root claim canonical signing digest; unproved	ccbdd539736fde2955f218de0a258681bb076929
-dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	169	sign_economic_root_claim	claim auth + key binding; unproved	a145855f3959dc7a8eae6b8f45b4b9e3ab7e09ff
+dsm_client/deterministic_state_machine/dsm/src/economic/claim.rs	243	signing_digest	root claim canonical signing digest; unproved	318373d7c7031fa445585008ff0b347ae4d6fe27
+dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	171	sign_economic_root_claim	claim auth + key binding; unproved	4cab8e47a4b46c451505e6c1c1948c88e7f9e20f
 dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	102	substrate_signing_digest	substrate-bound digest; unproved	62dfe289f52a48a607313f2bd5138174cb832778
-dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2283	signing_bytes	operation-specific canonical signing bytes; unproved	5417b920de721d94e5edfb4cbe545d0c1fe1cb20
-dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	448	relationship_finalized_signing_target	finalized relationship digest; unproved	3bca22b63a1f10601978e4d9cba3d1727c5ffb49
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	901	process_envelope_v3	JNI → ingress; unproved	6343ec48197bf8df6f1b6c42b669ef4cbf999b49
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	207	dispatch_envelope_via_ingress	ingress dispatch; unproved	6343ec48197bf8df6f1b6c42b669ef4cbf999b49
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	966	Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3	JNI byte-array and unwind boundary; unproved	6343ec48197bf8df6f1b6c42b669ef4cbf999b49
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2288	signing_bytes	operation-specific canonical signing bytes; unproved	c01438c79b12637d9e915b7f5a151c4b2a0c5c61
+dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	448	relationship_finalized_signing_target	finalized relationship digest; unproved	0aa140ba880124a9f2375d18ad7e309c9ffb9188
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	901	process_envelope_v3	JNI → ingress; unproved	3d29a8cc22bba6d65df18927a2bc26af1cc2389e
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	207	dispatch_envelope_via_ingress	ingress dispatch; unproved	3d29a8cc22bba6d65df18927a2bc26af1cc2389e
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	966	Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3	JNI byte-array and unwind boundary; unproved	3d29a8cc22bba6d65df18927a2bc26af1cc2389e
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/core_bridge_adapters.rs	100	install_app_router_adapter	router installation; unproved	e8c13660a518419c200f790a980030300b4528ee
 dsm_client/deterministic_state_machine/dsm/src/connect.rs	114	statement	WrapperInjective.lean: connect_signing_injective / signing_domain_separation	9d10f603184127243bfd203ff9c4e45908f954da
 dsm_client/deterministic_state_machine/dsm/src/connect.rs	120	verify	sphincs_verify on statement; unproved	9d10f603184127243bfd203ff9c4e45908f954da

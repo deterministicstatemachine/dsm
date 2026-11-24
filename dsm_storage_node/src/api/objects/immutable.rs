@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Immutable content-addressed object store — Area 4, Rev 15 §15.3.
+//! Immutable content-addressed object store (storage spec §5).
 //!
 //! `PUT /api/v2/immutable/put` stores a `(namespace, payload)` tuple at
 //! `addr(N, P) = H(DSM/storage-object ‖ N_bytes ‖ H(N ‖ P))`, computed by the
 //! node from the input. **The node never accepts a caller-supplied address as
 //! the storage key**; the optional `x-expected-addr` header is a check, and a
-//! mismatch is a storage error (Req 15.2) — it catches a caller whose encoder
+//! mismatch is a storage error (storage spec §5 rule 2) — it catches a caller whose encoder
 //! disagrees with the registry.
 //!
 //! `GET /api/v2/immutable/{addr}` returns the payload with the namespace in
@@ -15,7 +15,7 @@
 //! corrupted or tampered row here rather than shipping it. The consumer
 //! re-hashes anyway: the node may be hostile, and a check performed by the
 //! party being verified is not a check. Node-side rehash is defence in depth;
-//! consumer-side rehash is the security boundary (Req 15.3).
+//! consumer-side rehash is the security boundary (storage spec §5 rule 5).
 //!
 //! ## The node is content-blind, and stays that way
 //!

@@ -22,8 +22,8 @@ fn create_tls_connector() -> MakeRustlsConnect {
 
 /// REFUSE TO RUN ON A SERVER THAT CANNOT KEEP WHAT IT ACKNOWLEDGES.
 ///
-/// The one-shot registers are safe only because a member that acknowledged a
-/// claim still holds it after a restart. `SET LOCAL synchronous_commit = on`
+/// A member's arrival order is safe only because a value it acknowledged is
+/// still held, in its place, after a restart (storage spec §3). `SET LOCAL synchronous_commit = on`
 /// makes each claim transaction flush its own commit, but two server-level
 /// settings can defeat that no matter what a transaction asks for: `fsync`
 /// off means the server never flushes at all, and `full_page_writes` off can
@@ -32,7 +32,7 @@ fn create_tls_connector() -> MakeRustlsConnect {
 /// whose acknowledgements it cannot keep.
 ///
 /// This is a startup gate, not a warning: an acknowledgement is a promise, and
-/// a node that cannot keep it should not be part of a quorum.
+/// a node that cannot keep it must not serve a seat.
 pub async fn require_durable_commit_posture(pool: &Pool) -> Result<()> {
     let client = pool.get().await?;
     let mut readings = Vec::with_capacity(REQUIRED_SERVER_SETTINGS.len());
@@ -168,12 +168,12 @@ mod durable_posture_tests {
 /// history, not of the node.
 ///
 /// Generated once, from the OS random source, and stored only here. It is
-/// deliberately not derivable from the node's signing key, its id, or any
-/// seed — a node that still holds its identity key but lost its register
+/// deliberately not derivable from the node's id, its TLS key, or any
+/// seed — a node that kept its id and certificate but lost its register
 /// database MUST come back with a different incarnation, because that is the
 /// fact a vault needs to know. Otherwise a rebuilt member can assert "no
-/// claim here" for a cell the real incarnation once held, and owning the
-/// identity key would be the whole test.
+/// claim here" for a cell the real incarnation once held, and holding the
+/// id and certificate would be the whole test.
 ///
 /// Write-once with a same-transaction read-back, like the registers it
 /// speaks for: two racing callers agree on one value rather than each
@@ -241,7 +241,8 @@ const SCHEMA_DDL: &str = r#"
     );
 
     -- Keyed cells: the member keeps EVERY value it is given for a key, in
-    -- arrival order, and never refuses, replaces or compares. Which value
+    -- arrival order, and never replaces or compares; admission (storage spec
+    -- §6 rule 6) happens in the handler before this table is reached. Which value
     -- counts is the reader's question. Each entry carries its per-key arrival
     -- index (from 1) and the member's running hash for the key after it, and,
     -- once a cycle closes over it, that cycle (storage spec §14).
@@ -741,7 +742,7 @@ pub async fn spool_append(pool: &Pool, device_id: &str, envelope: &[u8]) -> Resu
 }
 
 /// Every envelope in a spool from a sequence number on, in order, limited.
-/// The spool is append-only (storage spec §4): nothing is marked, hidden or
+/// The spool is append-only (storage spec §8): nothing is marked, hidden or
 /// removed after a write, and which messages a device has consumed is the
 /// device's own state.
 pub async fn spool_list_from_seq(

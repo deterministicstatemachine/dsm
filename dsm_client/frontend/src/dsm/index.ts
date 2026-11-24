@@ -13,7 +13,6 @@
 //   contacts      — Contact management (device IDs, metadata)
 //   wallet        — Balance queries, transaction history
 //   policies      — Token policy management (CPTA)
-//   dlv           — Deterministic Limbo Vaults (sovereign finance primitives)
 //   storage       — Storage node communication
 //   transactions  — Bilateral/unilateral transfer logic
 //   offlineCash   — moving a token between the online account and the offline allocation
@@ -26,12 +25,12 @@
 // CURATED FLAT NAMESPACE EXPORT (`dsmClient`):
 //   `dsmClient` exposes a curated, object-style API combining the modules
 //   that need name-collision-free access: identity, contacts, wallet,
-//   policies, dlv, storage, transactions, diagnostics.
+//   policies, storage, transactions, diagnostics.
 //   It intentionally OMITS `types` (too generic to flatten safely) and the
 //   bridge-helper re-exports above (imported by name).
 //
-// All exports ultimately call through WebViewBridge.ts (protobuf-only).
-// See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
+// All exports call through dsm/WebViewBridge/ (protobuf only). SoFi, escrow,
+// Connect and the anchor are separate modules, imported by name.
 // ============================================================================
 
 // Export core types

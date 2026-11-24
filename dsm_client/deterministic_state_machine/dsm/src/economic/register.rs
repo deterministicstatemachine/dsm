@@ -17,8 +17,12 @@
 //!
 //! ## Nodes stay dumb
 //!
-//! A member checks nothing (Part II §9, §12): it keeps every value it is
-//! given at `K_root(q)`, in arrival order, and decides nothing. The writer
+//! A member keeps a write at `K_root(q)` only when it is a route entry for
+//! that cell carrying a claim that proves its own authority for the key: the
+//! claim's coordinates derive the key, its key and AttA derive the trader's
+//! device, and that key signed it (`owned_cell::admit_cell_write`, DSM
+//! Amendment A41). Anyone may deliver it, and a member keeps such values in
+//! arrival order and decides nothing else. The writer
 //! and Core compute the cell's route from `s(q)` over the committed set
 //! ([`RootCell`]); the writer writes along it leader first, and Core
 //! evaluates the route chains from the raw reads (`route_chain`, storage
@@ -539,7 +543,7 @@ pub fn resolve_for_trader(
 
 /// What a register member observed at one position.
 ///
-/// Holding one of these means a quorum accepted these exact bytes. It means
+/// Holding one of these means this claim was read at its register cell. It means
 /// **nothing** about whether `post_economic_root` is the result of a valid
 /// transition — see [`super::lineage`], and note there is deliberately no
 /// conversion from this type into a validated one.

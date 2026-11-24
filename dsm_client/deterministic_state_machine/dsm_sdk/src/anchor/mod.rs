@@ -4,7 +4,8 @@
 //! The bilateral SENDER drives its board (`anchor_core::appliance::Appliance`)
 //! through PREPARE → COMMIT → EMIT to produce the `dsm.anchor.OfflineRelease` it then
 //! carries on the bilateral confirm (`BilateralConfirmRequest.offline_release`). The
-//! RECEIVER applies the 22-check predicate (`dsm_sdk::bluetooth::anchor_accept`),
+//! RECEIVER applies the acceptance predicate (`anchor_core::accept::accept_offline`, through
+//! `dsm_sdk::bluetooth::anchor_accept`),
 //! and its own board draws the challenge, checks the release and commits the receive.
 //!
 //! [`AnchorAppliance`] is the transport-agnostic interface. The Android build installs

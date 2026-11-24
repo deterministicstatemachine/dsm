@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 """My Game, plugged into DSM, in one file: a connect code, a wallet that
 connects to it, a payment, gems handed over, and a sign-in. It talks to the
-account `make app-dev` runs.
+account `dsm-app up` runs (from the repo, `make app-dev`).
 
-    python3 guide/examples/my_game.py
+    python3 my_game.py
 """
 
 import sys
@@ -24,7 +24,7 @@ def main() -> int:
     print(f"connect code: {offer.code}", flush=True)
     print("waiting for a wallet to connect to it...", flush=True)
 
-    # 2. A wallet connects: scanned on a phone, or `make dev-wallet-connect CODE=...`.
+    # 2. A wallet connects: scanned on a phone, or `dsm-dev-wallet connect <code>`.
     while True:
         new = [c for c in app.connections() if c.connected and c.id not in before]
         if new:
