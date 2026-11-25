@@ -2960,6 +2960,32 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         )
     }
 
+    /// The chains in `chains`, each as it decides the parent its leg of
+    /// `precommit` names: a chain from the genesis, or one that names that
+    /// root, is kept; one that starts above it, at a newer proof record
+    /// (SoFi Amendment S36), is asked for again up to that root. Kept as it
+    /// was, a leg whose parent sits below the vault's newest record read its
+    /// parent Unavailable, the route never read as consumed, and the
+    /// position stayed StorageNotFinal for good (found 2026-11-25).
+    fn chains_at_parents(
+        &self,
+        chains: &BTreeMap<D32, VaultChain>,
+        precommit: &TraderPrecommitBody,
+        depth: usize,
+    ) -> Result<BTreeMap<D32, VaultChain>, VerifierFailure> {
+        let mut at = chains.clone();
+        for leg in precommit.legs() {
+            let decides = at
+                .get(&leg.vault_id)
+                .is_none_or(|chain| chain.base() == 0 || chain.names(&leg.parent_root));
+            if !decides {
+                let chain = self.chain_to_depth(leg.vault_id, depth, Some(&leg.parent_root))?;
+                at.insert(leg.vault_id, chain);
+            }
+        }
+        Ok(at)
+    }
+
     /// Stage 9 of §31: what this verifier establishes about the trader's own
     /// exercise, read back from a leg's cell (`read_attempt_cell`) — how the
     /// device finds its own exercise again after a restart (R13) — over the
@@ -2980,6 +3006,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             );
             return Ok(Established::refuted(recognized, &refutation, registration));
         }
+        let at_parents =
+            self.chains_at_parents(chains, &recognized.precommit().body, CHAIN_DEPTH)?;
+        let chains = &at_parents;
         let read =
             match self.read_legs(chains, recognized, None, CHAIN_DEPTH, Some(registration))? {
                 Ok(read) => read,
@@ -3121,6 +3150,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         // held by an exercise whose pair was lost stayed unclassified for good
         // behind them (SA-83).
         let precommit = &exercise.precommit().body;
+        let at_parents = self.chains_at_parents(chains, precommit, depth)?;
+        let chains = &at_parents;
         let registration = match self.read_registration(
             precommit.genesis(),
             precommit.device_id(),

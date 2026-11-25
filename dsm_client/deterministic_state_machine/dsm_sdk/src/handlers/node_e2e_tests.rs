@@ -2948,6 +2948,14 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
         }),
     )
     .await;
+    // The record of the vault's next generation is published before B
+    // settles: B's chain to the head then starts above the genesis its trade
+    // was built on, and B settles over a chain to its leg's parent instead
+    // (found 2026-11-25: settled over the chain to the head, B's position
+    // stayed StorageNotFinal for good wherever the record landed first).
+    crate::sdk::vault_proof_io::settled()
+        .await
+        .expect("every proof the trades started is published");
     let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
         .expect("the vault prices the trade");
     assert_eq!(
