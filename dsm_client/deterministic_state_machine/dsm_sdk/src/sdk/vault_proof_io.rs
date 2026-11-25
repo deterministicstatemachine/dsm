@@ -138,15 +138,15 @@ pub(crate) async fn records_at_root(
 /// verifies, with its bytes.
 async fn proven_at(
     set: &StorageSet,
-    genesis: &AcceptedVaultGenesis,
+    vault_id: &D32,
+    genesis_root: &D32,
     generation: u64,
     read: &mut Read,
 ) -> Result<Option<(ProvenVaultHead, Vec<u8>)>, DsmError> {
-    let vault_id = genesis.vault_id();
     // A record whose proof does not verify is passed over (DSM Amendment
     // A15: discovery carries no authority).
     for bytes in read.at(set, vault_id, generation).await? {
-        match vault_proof::verify_record(&bytes, vault_id, genesis.genesis_root()) {
+        match vault_proof::verify_record(&bytes, vault_id, genesis_root) {
             Ok(head) => return Ok(Some((head, bytes))),
             Err(why) => {
                 log::info!("[vault proof] a record at generation {generation} passed over: {why}");
@@ -157,33 +157,33 @@ async fn proven_at(
     Ok(None)
 }
 
-/// The generation of `genesis`'s vault's newest record whose proof
-/// verifies, with that record, or `None` where none does: from the
-/// generation this device established last, forward by doubling steps while
-/// a record verifies, then by halves between the last that did and the
-/// first that did not.
+/// The generation of `vault_id`'s newest record whose proof verifies back
+/// to `genesis_root`, with that record verified, or `None` where none does:
+/// from the generation this device established last, forward by doubling
+/// steps while a record verifies, then by halves between the last that did
+/// and the first that did not.
 async fn newest(
     set: &StorageSet,
-    genesis: &AcceptedVaultGenesis,
+    vault_id: &D32,
+    genesis_root: &D32,
     read: &mut Read,
-) -> Result<Option<(u64, Vec<u8>)>, DsmError> {
-    let vault_id = genesis.vault_id();
+) -> Result<Option<(u64, ProvenVaultHead, Vec<u8>)>, DsmError> {
     let hint = sofi_vault_head::head(vault_id)
         .map_err(|e| storage("the vault head", e))?
         .map_or(0, |head| head.generation);
-    let mut found: Option<(u64, Vec<u8>)> = None;
+    let mut found: Option<(u64, ProvenVaultHead, Vec<u8>)> = None;
     if hint > 0 {
-        if let Some((_, bytes)) = proven_at(set, genesis, hint, read).await? {
-            found = Some((hint, bytes));
+        if let Some((head, bytes)) = proven_at(set, vault_id, genesis_root, hint, read).await? {
+            found = Some((hint, head, bytes));
         }
     }
-    let mut low = found.as_ref().map_or(0, |(generation, _)| *generation);
+    let mut low = found.as_ref().map_or(0, |(generation, ..)| *generation);
     let mut step = 1;
     let high = loop {
         let at = low + step;
-        match proven_at(set, genesis, at, read).await? {
-            Some((_, bytes)) => {
-                found = Some((at, bytes));
+        match proven_at(set, vault_id, genesis_root, at, read).await? {
+            Some((head, bytes)) => {
+                found = Some((at, head, bytes));
                 low = at;
                 step *= 2;
             }
@@ -193,15 +193,29 @@ async fn newest(
     let mut high = high;
     while high - low > 1 {
         let mid = low + (high - low) / 2;
-        match proven_at(set, genesis, mid, read).await? {
-            Some((_, bytes)) => {
-                found = Some((mid, bytes));
+        match proven_at(set, vault_id, genesis_root, mid, read).await? {
+            Some((head, bytes)) => {
+                found = Some((mid, head, bytes));
                 low = mid;
             }
             None => high = mid,
         }
     }
     Ok(found)
+}
+
+/// `vault_id`'s newest record whose proof verifies back to `genesis_root`,
+/// verified, or `None` where none does: what a route search ranks a vault by
+/// before its genesis is accepted (SoFi Amendment S37). A rank, never a
+/// head: the route the search takes is walked from its accepted genesis.
+pub(crate) async fn newest_proven(
+    set: &StorageSet,
+    vault_id: &D32,
+    genesis_root: &D32,
+) -> Result<Option<ProvenVaultHead>, DsmError> {
+    Ok(newest(set, vault_id, genesis_root, &mut Read::default())
+        .await?
+        .map(|(_, head, _)| head))
 }
 
 /// What a walk of `genesis`'s vault starts from: with `root`, the records
@@ -219,7 +233,9 @@ pub(crate) async fn candidates(
     }
     let mut out = Vec::new();
     let read = &mut Read::default();
-    if let Some((generation, verified)) = newest(set, genesis, read).await? {
+    if let Some((generation, _, verified)) =
+        newest(set, vault_id, genesis.genesis_root(), read).await?
+    {
         out.push(verified.clone());
         out.extend(
             read.at(set, vault_id, generation)
@@ -445,7 +461,9 @@ async fn prove_up_to(
     let mut base: Option<ProvenVaultHead> = None;
     let read = &mut Read::default();
     while at > 0 {
-        if let Some((head, _)) = proven_at(set, genesis, at, read).await? {
+        if let Some((head, _)) =
+            proven_at(set, genesis.vault_id(), genesis.genesis_root(), at, read).await?
+        {
             base = Some(head);
             break;
         }

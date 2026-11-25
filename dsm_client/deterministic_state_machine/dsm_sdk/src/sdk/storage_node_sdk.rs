@@ -761,16 +761,23 @@ impl MemberClient {
     /// The `(namespace, payload)` the member holds at `addr`, untrusted until
     /// the caller re-hashes it to `addr`.
     pub async fn get_immutable(&self, addr: &[u8; 32]) -> ObjectRead {
-        let response = match self
-            .client
-            .get(format!(
-                "{}/api/v2/immutable/{}",
-                self.endpoint,
-                encode_base32_crockford(addr)
-            ))
-            .send()
-            .await
-        {
+        let url = format!(
+            "{}/api/v2/immutable/{}",
+            self.endpoint,
+            encode_base32_crockford(addr)
+        );
+        // A connection the member closed while this client was not answering
+        // its pings (a process busy proving, a phone in the background) fails
+        // the first request sent on it, before the member sees it; the client
+        // opens a new connection for the next. A read changes nothing, so it
+        // is asked again once, on that new connection.
+        let sent = match self.client.get(&url).send().await {
+            Err(first) if first.is_request() || first.is_connect() => {
+                self.client.get(&url).send().await
+            }
+            sent => sent,
+        };
+        let response = match sent {
             Ok(response) => response,
             Err(e) => {
                 log::debug!("immutable get at {}: {e}", self.member_id);
