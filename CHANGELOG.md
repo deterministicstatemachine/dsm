@@ -54,6 +54,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Fixed
 
+- **A two-hop trade is judged after its other vault has moved on (SoFi
+  Amendment S36).** A vault's first trade taken as one leg of a two-hop route
+  names that vault's genesis root, and a chain read from the vault's newest
+  proof record starts above it. Once the vault had a newer record, no reader
+  could place that leg, the trade stayed undecided in the other vault, and
+  the next trade there took the following key and was held for good: on the
+  rig (2026-11-24) the green board's wallet was held at position 209 and
+  could trade nothing more. The other vault's chain is now asked for up to
+  the parent the leg names, and a chain asked for up to a genesis root is
+  the genesis. That trade resolved Void ("another trade won the race;
+  nothing moved") and the wallet trades again.
+
 - **A wallet that holds nothing of a vault can check a payer's trade through
   it (SoFi Amendment S36).** Checking a two-hop trade needs each leg's vault
   state at its parent root, and only the vault being walked had its parent's
