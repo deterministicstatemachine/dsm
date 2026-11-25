@@ -5687,13 +5687,16 @@ async fn a_walk_that_cannot_read_what_follows_is_not_complete_and_never_the_head
     );
 }
 
-/// SoFi Amendment S16: discovery carries no authority. Under ERA's vault
-/// token locator, beside A's real ERA/TKN vault, sit what anyone may append:
-/// bytes that are no genesis; the genesis of a vault B claims to own but
-/// never created; and the genesis of A's real TKN/TKB vault, which does not
-/// trade ERA. B's verifier keeps the one vault of ERA and passes over the
-/// rest, and its search is still complete: what it passed over was
-/// established, and refuted.
+/// SoFi Amendments S16 and S37: discovery carries no authority, and a
+/// ranking carries none either. Under ERA's vault token locator, beside A's
+/// real ERA/TKN vault, sit what anyone may append: bytes that are no
+/// genesis; the genesis of a vault B claims to own but never created; and
+/// the genesis of A's real TKN/TKB vault, which does not trade ERA. B is
+/// quoted ERA for TKN: the search may rank the forged vault beside the real
+/// one, but accepts a vault only when it tries a route through it, so the
+/// quote is through A's real vault, and complete. With a forged genesis at a
+/// position B's lineage has not reached, which B could still create, the
+/// quote is through A's vault all the same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
@@ -5701,7 +5704,6 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
     use dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR;
     use dsm::crypto::domain::TaggedHashDomain;
     use dsm::sofi::resolve::VaultGenesis;
-    use dsm::sofi::storage::Discovered;
 
     let p = Pair::boot(500, 200).await;
     let era = era();
@@ -5770,29 +5772,37 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
         5
     );
 
-    let found = verifier.vaults_of_token(&era).expect("the discovery reads");
-    let Discovered::Complete(found) = found else {
-        panic!("every candidate was established and refuted or kept: {found:?}")
+    adopt(&p.b, &tkn).await;
+    let request = generated::SofiFindRouteRequest {
+        token_in_policy_commit: era.to_vec(),
+        token_out_policy_commit: tkn.to_vec(),
+        amount_in_entered: entered(&p.b, &era, 10),
     };
+    let found = |r: &AppResult| match payload(r) {
+        Payload::SofiFindRouteResponse(r) => (
+            r.hops
+                .iter()
+                .map(|hop| hop.vault_id.clone())
+                .collect::<Vec<_>>(),
+            r.search,
+        ),
+        other => panic!("sofi.findRoute answered {other:?}"),
+    };
+    let complete = generated::SofiSearch::Complete as i32;
+    let (route, search) = found(&invoke(&p.b, "sofi.findRoute", args(&request)).await);
     assert_eq!(
-        found.iter().map(|v| *v.vault_id()).collect::<Vec<_>>(),
-        vec![first],
-        "the one vault of ERA"
+        route,
+        vec![first.to_vec()],
+        "through the one vault of ERA and TKN"
     );
-    // The TKN index names both of A's vaults, each a vault of TKN.
-    let Discovered::Complete(of_tkn) = verifier.vaults_of_token(&tkn).expect("the discovery reads")
-    else {
-        panic!("the TKN index was established")
-    };
-    let mut of_tkn: Vec<_> = of_tkn.iter().map(|v| *v.vault_id()).collect();
-    of_tkn.sort();
-    let mut both = vec![first, second];
-    both.sort();
-    assert_eq!(of_tkn, both);
+    assert_eq!(
+        search, complete,
+        "every vault the search tried was established, and anything else refuted"
+    );
 
     // A genesis naming a position B's lineage has not reached is not
-    // established: B could still create that very vault there. The search
-    // says it is partial, and still finds the vault of ERA.
+    // established: B could still create that very vault there. The quote is
+    // through A's vault all the same.
     let ahead = forge(reached + 5);
     crate::sdk::sofi_publish::publish(
         &set,
@@ -5803,14 +5813,11 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
     )
     .await
     .expect("anyone may publish a genesis");
-    let Discovered::Partial(found) = verifier.vaults_of_token(&era).expect("the discovery reads")
-    else {
-        panic!("a candidate the reads cannot decide leaves the discovery partial")
-    };
+    let (route, _) = found(&invoke(&p.b, "sofi.findRoute", args(&request)).await);
     assert_eq!(
-        found.iter().map(|v| *v.vault_id()).collect::<Vec<_>>(),
-        vec![first],
-        "and the vault of ERA is found all the same"
+        route,
+        vec![first.to_vec()],
+        "and the quote is through A's vault"
     );
 }
 
@@ -6622,12 +6629,11 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
 }
 
 /// A quote's verifiers read a vault's genesis from the network once. The
-/// rig's quote took minutes because discovery under each of the pair's
-/// tokens, the chain and the head each read the genesis again: a scan of its
-/// locator and a walk of its owner's lineage every time. B discovers A's
-/// vault under ERA and under TKN, walks its chain, and asks for its genesis
-/// once more; the owner's lineage is walked once, the locator is read each
-/// time, and the vault is still found under both tokens.
+/// rig's quote took minutes because each of a request's verifiers read the
+/// genesis again: a scan of its locator and a walk of its owner's lineage
+/// every time. B accepts A's vault's genesis twice, walks its chain, and
+/// asks for its genesis once more; the owner's lineage is walked once, and
+/// the locator is read each time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_request_reads_each_vaults_genesis_once() {
@@ -6654,14 +6660,12 @@ async fn a_request_reads_each_vaults_genesis_once() {
         None,
         dsm::sofi::resolve::AcceptedGeneses::default(),
     );
-    let found = |token: &[u8; 32]| match verifier.vaults_of_token(token) {
-        Ok(dsm::sofi::storage::Discovered::Complete(vaults)) => {
-            vaults.iter().map(|v| *v.vault_id()).collect::<Vec<_>>()
-        }
-        other => panic!("discovery under a token: {other:?}"),
-    };
-    assert_eq!(found(&m.era), vec![m.vault_id], "found under ERA");
-    assert_eq!(found(&m.tkn), vec![m.vault_id], "and under TKN");
+    for _ in 0..2 {
+        assert!(matches!(
+            verifier.vault_genesis(&m.vault_id),
+            Ok(dsm::sofi::resolve::VaultGenesis::Accepted(..))
+        ));
+    }
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
     assert!(chain.head().is_some(), "walked to its head");
     assert!(matches!(

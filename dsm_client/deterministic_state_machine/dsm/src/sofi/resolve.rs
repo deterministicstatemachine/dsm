@@ -340,9 +340,10 @@ pub trait SofiReads {
     ) -> Result<Discovered<(VaultGenesisPreimage, Vec<u8>)>, ReadFailure>;
     /// The vault named by every preimage published under token `t`'s vault
     /// token locator that decodes as a vault genesis preimage, in append
-    /// order (Amendment S16). Candidates only: [`Verifier::vaults_of_token`]
-    /// accepts each genesis and checks its market before it is a vault of
-    /// `t`.
+    /// order (Amendment S16). Candidates only: a route search ranks them by
+    /// what their published geneses and records state, and accepts the
+    /// genesis of a vault only when it tries a route through it (SoFi
+    /// Amendment S37).
     fn vault_token_candidates(&self, token: &D32) -> Result<Discovered<D32>, ReadFailure>;
     /// The vault named by every preimage published under verdict cell
     /// `verdict_cell`'s cell locator that decodes as a vault genesis
@@ -2166,59 +2167,6 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             Some(why) => Ok(VaultGenesis::Refused(format!("{why:?}"))),
             None => not_published(),
         }
-    }
-
-    /// Amendment S16: the vaults whose market pairs `token`, found under its
-    /// vault token locator, in the order the index names them.
-    ///
-    /// Discovery carries no authority. A candidate is kept only when its
-    /// genesis is accepted — bound to the owner's validated creation by
-    /// [`Self::vault_genesis`] — and the market that acceptance resolves
-    /// pairs `token`; anything else appended under the locator is passed
-    /// over. A candidate whose genesis or owner's lineage the reads do not
-    /// establish yet, or a scan that stopped short, makes the discovery
-    /// `Partial`: the vaults it kept are vaults of `token` all the same.
-    pub fn vaults_of_token(
-        &self,
-        token: &D32,
-    ) -> Result<Discovered<AcceptedVaultGenesis>, VerifierFailure> {
-        let (candidates, mut scan) = match self.reads.vault_token_candidates(token) {
-            Ok(Discovered::Complete(candidates)) => (candidates, ScanExtent::Whole),
-            Ok(Discovered::Partial(candidates)) => (candidates, ScanExtent::Short),
-            // The index read was not made: nothing established, and nothing
-            // refuted (storage §4).
-            Err(ReadFailure(..)) => (Vec::new(), ScanExtent::Short),
-        };
-        let mut examined = BTreeSet::new();
-        let mut vaults = Vec::new();
-        for vault_id in candidates {
-            if !examined.insert(vault_id) {
-                continue;
-            }
-            match self.vault_genesis(&vault_id) {
-                // A market that pairs `token`. An escrow vault has no market
-                // and is never a vault of a token (SoFi Amendment S21).
-                Ok(VaultGenesis::Accepted(accepted)) => {
-                    if let Some(market) = accepted.market() {
-                        if market.token_a() == token || market.token_b() == token {
-                            vaults.push(*accepted);
-                        }
-                    }
-                }
-                // Not a vault anyone created, or a genesis refused: not a
-                // vault of `token`.
-                Ok(VaultGenesis::NotPublished | VaultGenesis::Refused(_))
-                | Err(VerifierFailure::Refused(_)) => {}
-                // Not established yet: it may be a vault of `token`.
-                Ok(VaultGenesis::OwnerUnresolved(_)) | Err(VerifierFailure::Read(_)) => {
-                    scan = ScanExtent::Short
-                }
-            }
-        }
-        Ok(match scan {
-            ScanExtent::Whole => Discovered::Complete(vaults),
-            ScanExtent::Short => Discovered::Partial(vaults),
-        })
     }
 
     /// SoFi Amendment S21: the escrow vaults bound to `verdict_cell`, found

@@ -29,7 +29,7 @@ use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::conformance::{fulfillment_conformance, FulfillmentConformance};
 use dsm::sofi::resolve::{
     AcceptedGeneses, Acquired, ExerciseObjects, LocalLeaves, SofiReads, VaultGenesis, Verifier,
-    WALK_BUDGET,
+    VerifierFailure, WALK_BUDGET,
 };
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{
@@ -1226,8 +1226,7 @@ fn route_ends(hops: &[Hop]) -> Result<Option<RouteEnds>, DsmError> {
 const GENESES_AT_ONCE: usize = 16;
 
 /// What accepting vaults' geneses ahead came to: a report only. What a vault
-/// of a token is, is decided by `vaults_of_token`; what a vault of a cell is,
-/// by `vaults_of_cell`.
+/// of a cell is, is decided by `vaults_of_cell`.
 pub(crate) struct AcceptedAhead {
     candidates: usize,
     accepted: usize,
@@ -1722,11 +1721,25 @@ pub async fn find_route(
     let mut most: Option<(u64, Vec<Hop>)> = None;
     for index in route_order(&ranked, (&standing.genesis, &standing.device_id)) {
         let ids = &ranked[index].1;
-        let needed: Vec<D32> = ids
-            .iter()
-            .filter(|id| tried.insert(**id))
-            .copied()
-            .collect();
+        // The route's vaults are accepted first: only a genesis bound to its
+        // owner's creation is a vault to walk. One its owner's lineage does
+        // not decide yet may still be a vault, and the search says it is
+        // partial; one refused, or never published, is no vault, whatever
+        // was published under the index for it.
+        let mut needed: Vec<D32> = Vec::new();
+        for vault_id in ids.iter().filter(|id| tried.insert(**id)) {
+            match tokio::task::block_in_place(|| verifier.vault_genesis(vault_id)) {
+                Ok(VaultGenesis::Accepted(..)) => needed.push(*vault_id),
+                Ok(VaultGenesis::OwnerUnresolved(why)) => {
+                    unread(vault_id, &storage("vault genesis", why), &mut search)
+                }
+                Err(VerifierFailure::Read(why)) => {
+                    unread(vault_id, &storage("vault genesis", why), &mut search)
+                }
+                Ok(VaultGenesis::NotPublished | VaultGenesis::Refused(..))
+                | Err(VerifierFailure::Refused(..)) => {}
+            }
+        }
         for (vault_id, at_head) in needed
             .iter()
             .zip(heads_at_once(set, &verifier, &needed).await)
