@@ -9,6 +9,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- **A quote walks only the route it takes (SoFi Amendment S37; owner,
+  2026-11-24).** A route search walked every candidate vault of the two
+  tokens to its head before it priced any, so a quote's time grew with the
+  number of vaults of the pair: on the rig, green's one-hop ERA→GRN quote
+  accepted and walked 17 vaults and took 57–76 s. Each candidate is now
+  ranked by the genesis published for it and its newest proof record (one
+  locator scan, one record lookup and one proof check; no owner lineage, no
+  acceptance, no walk), and the routes are taken in the same order as before
+  (the best output's tolerance band, the fewest legs, the trader's own lane):
+  only the vaults of the route tried are accepted, walked to their heads and
+  priced there, and the first within the tolerance of the best ranked output
+  is the quote. On five nodes a quote over six vaults of a pair asks 719–734
+  requests, where the old search asked 9,939. A storage read that fails
+  before reaching a node (a connection the node closed while the wallet was
+  busy) is asked again once on a new connection.
+
 ## [0.1.1-beta.5] — 2026-11-24
 
 ### Added
