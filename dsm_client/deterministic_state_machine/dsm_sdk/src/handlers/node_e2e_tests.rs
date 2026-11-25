@@ -4704,6 +4704,111 @@ async fn small_trades_take_one_of_five_equal_vaults_and_large_ones_split() {
     );
 }
 
+/// A quote walks only the route it takes (owner, 2026-11-24: "Once it's
+/// satisfied, it could stop", searching "by price at the same time to
+/// double-filter it"; SoFi Amendment S37). A opens one vault of ERA against
+/// TKN and trades through it, and B is quoted 1 ERA; A opens five more of the
+/// pair and trades through each, and B is quoted again. Each candidate is
+/// ranked by the genesis published for it and its newest record, with no
+/// owner lineage read, no genesis accepted and no head walked; only the
+/// route taken is accepted and walked. The second quote asks the nodes no
+/// more than the first did for each vault it ranked and did not take.
+///
+/// MUTATION CONTROL: main's search before 2026-11-24, which accepted every
+/// candidate's genesis and walked every head before pricing any, asks 1,668
+/// requests more for each vault (run 2026-11-24: 1,595 over one vault, 9,939
+/// over six) and fails the bound below; this search asks 719 to 734 over six.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_quote_walks_only_the_route_it_takes() {
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let tkn = create_token(&p.a, "TKN", 1_000_000).await;
+    adopt(&p.b, &tkn).await;
+    let request = generated::SofiFindRouteRequest {
+        token_in_policy_commit: era.to_vec(),
+        token_out_policy_commit: tkn.to_vec(),
+        amount_in_entered: entered(&p.b, &era, 1),
+    };
+    let asked = |p: &Pair| -> usize {
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for node in &p.nodes.nodes {
+            for request in node.requests() {
+                let kind = request
+                    .split('/')
+                    .take(5)
+                    .map(|part| if part.len() > 24 { "<id>" } else { part })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                *kinds.entry(kind).or_insert(0) += 1;
+            }
+        }
+        println!("SCALE quote by kind: {kinds:?}");
+        kinds.values().sum()
+    };
+    let found = |r: &AppResult| match payload(r) {
+        Payload::SofiFindRouteResponse(r) => (r.hops, r.search),
+        other => panic!("sofi.findRoute answered {other:?}"),
+    };
+    let complete = generated::SofiSearch::Complete as i32;
+
+    // Each vault has a trade behind it and that trade's record: what a walk
+    // of its head checks.
+    let traded = |vault_id: [u8; 32]| {
+        args(&generated::SofiTradeRequest {
+            vault_id: vault_id.to_vec(),
+            token_in_policy_commit: era.to_vec(),
+            amount_in_entered: entered(&p.a, &era, 1),
+            min_amount_out_entered: entered(&p.a, &tkn, 1),
+            token_out_policy_commit: tkn.to_vec(),
+        })
+    };
+    let one = create_vault(&p.a, (era, 50), (tkn, 5_000)).await;
+    realized_through(&p.a, "sofi.trade", traded(one)).await;
+    crate::sdk::vault_proof_io::settled()
+        .await
+        .expect("the trade's record is published");
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let (route, search) = found(&invoke(&p.b, "sofi.findRoute", args(&request)).await);
+    let with_one = asked(&p);
+    assert_eq!(
+        (route.len(), search),
+        (1, complete),
+        "one hop, every vault seen"
+    );
+    assert_eq!(route[0].vault_id, one.to_vec());
+
+    for _ in 0..5 {
+        let vault_id = create_vault(&p.a, (era, 50), (tkn, 5_000)).await;
+        realized_through(&p.a, "sofi.trade", traded(vault_id)).await;
+    }
+    crate::sdk::vault_proof_io::settled()
+        .await
+        .expect("the trades' records are published");
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let (route, search) = found(&invoke(&p.b, "sofi.findRoute", args(&request)).await);
+    let with_six = asked(&p);
+    assert_eq!(
+        (route.len(), search),
+        (1, complete),
+        "one hop, every vault seen"
+    );
+    let per_vault = with_six.saturating_sub(with_one) / 5;
+    println!(
+        "SCALE quote: {with_one} requests over one vault, {with_six} over six, \
+         {per_vault} more for each vault ranked and not taken"
+    );
+    assert!(
+        per_vault * 2 < with_one,
+        "each vault the quote did not take asked {per_vault} requests, not well below \
+         the {with_one} of the quote that walked one vault to its head"
+    );
+}
+
 /// SoFi §30, Amendment S16 and storage §4: a route search over vaults the
 /// reads do not establish says so. B, never set up with A's vault, is quoted
 /// one hop ERA→TKN, found through the two tokens' indexes, the search
