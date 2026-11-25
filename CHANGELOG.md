@@ -54,6 +54,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Fixed
 
+- **A trade settles after its vault has moved on (SoFi Amendment S36).** A
+  wallet settling its own trade read each vault's chain to its head, which
+  starts at the vault's newest proof record. Where that record stood above
+  the state the trade was built on (a trade from the vault's genesis settled
+  after the next generation's record was published, or a trade that lost its
+  key to another), the trade's starting state read Unavailable and the
+  position stayed StorageNotFinal for good: the wallet could trade nothing
+  more. The wallet now settles over each vault's chain as far as the state
+  its leg names, as Core's own position resolution does, and Core takes the
+  chain up to a leg's parent itself wherever the chain in hand starts above
+  it. Found on five test nodes, where a record published before the settle
+  held the position for good.
+
 - **A two-hop trade is judged after its other vault has moved on (SoFi
   Amendment S36).** A vault's first trade taken as one leg of a two-hop route
   names that vault's genesis root, and a chain read from the vault's newest

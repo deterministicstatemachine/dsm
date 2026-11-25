@@ -821,10 +821,14 @@ pub async fn resolve_pending_position(
     };
 
     // What this verifier brings: its leaves, the position it resolved
-    // itself, and the canonical chain of each vault a leg names — walked
-    // forward by Core from the genesis or from the owner baseline this
-    // device adopted (MR-DSM-0331), so a parent past genesis is decided
-    // rather than deferred.
+    // itself, and the canonical chain of each vault a leg names, as far as
+    // the parent the leg names, as Core's own position facts take it. A
+    // chain to the head starts at the vault's newest proof record (SoFi
+    // Amendment S36), which stands above the leg's parent once the vault
+    // has moved on: the parent was then Unavailable, the route never read
+    // as consumed, and the position stayed StorageNotFinal for good (found
+    // 2026-11-25: a trade from the vault's genesis, settled after the
+    // record of the next generation was published).
     log::info!("[sofi settle] position {q}: its exercise read back");
     let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
     for leg in precommit.legs() {
@@ -833,10 +837,12 @@ pub async fn resolve_pending_position(
         }
         chains.insert(
             leg.vault_id,
-            verifier.chain(&leg.vault_id).map_err(verifier_error)?,
+            verifier
+                .chain_until(&leg.vault_id, &leg.parent_root)
+                .map_err(verifier_error)?,
         );
         log::info!(
-            "[sofi settle] position {q}: vault {} walked",
+            "[sofi settle] position {q}: vault {} walked to the leg's parent",
             short_id(&leg.vault_id)
         );
     }
