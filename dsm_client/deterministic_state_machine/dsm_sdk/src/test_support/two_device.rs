@@ -117,9 +117,12 @@ impl TestDevice {
         if !self.kyber_pk.is_empty() {
             crate::bridge::install_local_kyber_pubkey(self.kyber_pk.clone());
         }
-        // One process has one router: the entered device's.
+        // One process has one router: the entered device's, built for its
+        // identity, recorded as the full router as the app's startup records
+        // it (`init::install_full_app_router_self_config`).
         if let Some(router) = &self.router {
             crate::bridge::install_app_router(router.clone()).expect("install the router");
+            crate::bridge::mark_full_app_router_installed(self.device_id.to_vec());
         }
     }
 

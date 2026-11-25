@@ -30,9 +30,12 @@ use std::sync::{Mutex, MutexGuard};
 use prost::Message;
 
 use dsm::types::error::DsmError;
+use dsm::types::proto::PushService;
 
-/// This phone's push token, once the platform has one.
-static PUSH_TOKEN: Mutex<Option<String>> = Mutex::new(None);
+/// This phone's push service and token, once the platform has one: an
+/// Android app's Firebase registration token, or an iPhone's APNs device
+/// token (its bytes, Base32 Crockford).
+static PUSH_TOKEN: Mutex<Option<(PushService, String)>> = Mutex::new(None);
 
 /// Each member's doorbell as it was last put up: its token and its spools.
 static PUT_UP: once_cell::sync::Lazy<Mutex<HashMap<String, Doorbell>>> =
@@ -52,6 +55,7 @@ static MEMBERS_NEEDED: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// A doorbell as one member holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Doorbell {
+    service: PushService,
     push_token: String,
     spools: BTreeSet<String>,
 }
@@ -63,13 +67,27 @@ fn locked<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// The platform handed over this phone's push token (at start, and whenever
-/// it changes). The waiter puts the doorbells up again with it.
+/// Android handed over this app's Firebase registration token (at start, and
+/// whenever it changes). The waiter puts the doorbells up again with it.
 pub fn set_push_token(push_token: String) {
+    set_push(PushService::Fcm, push_token);
+}
+
+/// iOS handed over this phone's APNs device token (at start, and whenever it
+/// changes): its bytes, which the doorbells carry as Base32 Crockford.
+pub fn set_apns_device_token(device: &[u8]) {
+    set_push(
+        PushService::Apns,
+        crate::util::text_id::encode_base32_crockford(device),
+    );
+}
+
+fn set_push(service: PushService, push_token: String) {
     let changed = {
         let mut held = locked(&PUSH_TOKEN);
-        let changed = held.as_deref() != Some(push_token.as_str());
-        *held = Some(push_token);
+        let next = (service, push_token);
+        let changed = held.as_ref() != Some(&next);
+        *held = Some(next);
         changed
     };
     if changed {
@@ -78,8 +96,9 @@ pub fn set_push_token(push_token: String) {
     }
 }
 
-/// The platform has no push on this phone (no Google Play services, or no
-/// token could be had): the app keeps its waits and its foreground service.
+/// The platform has no push on this phone (no Google Play services, no APNs
+/// registration, or no token could be had): the app keeps its waits and, on
+/// Android, its foreground service.
 pub fn push_unavailable(why: &str) {
     log::warn!(
         "[inbox_doorbell] no push on this phone ({why}): the app keeps listening off screen \
@@ -96,6 +115,38 @@ pub fn on_push_wake() {
     log::info!("[inbox_doorbell] a node rang: syncing");
     ask_refresh();
     crate::sdk::inbox_poller::resume_poller();
+}
+
+/// What a push woke, as iOS reports it back to the system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushWake {
+    /// The wallet is not started in this process: the host starts it first.
+    NotStarted,
+    /// The sync the push woke ran to its end within the time given.
+    Synced,
+    /// The sync was started, and had not ended when the time given ran out.
+    Started,
+}
+
+/// A node pushed this phone, and the host may be suspended as soon as it
+/// answers (iOS): run [`on_push_wake`] and wait for the sync it starts, at
+/// most `limit`.
+pub fn on_push_wake_and_wait(limit: std::time::Duration) -> PushWake {
+    let started = crate::sdk::app_state::AppState::readable()
+        && crate::sdk::app_state::AppState::get_device_id().is_some()
+        && crate::bridge::full_app_router_installed();
+    if !started {
+        log::info!("[inbox_doorbell] a node rang before the wallet was started in this process");
+        return PushWake::NotStarted;
+    }
+    let before = crate::sdk::inbox_poller::cycles_completed();
+    on_push_wake();
+    crate::runtime::get_runtime().block_on(crate::sdk::inbox_poller::cycle_after(before, limit));
+    if crate::sdk::inbox_poller::cycles_completed() > before {
+        PushWake::Synced
+    } else {
+        PushWake::Started
+    }
 }
 
 /// Ask the waiter to put the doorbells up at every member at its next plan.
@@ -168,11 +219,12 @@ pub(crate) async fn put_up(
     refresh: Refresh,
 ) {
     MEMBERS_NEEDED.store(needed, Ordering::SeqCst);
-    let Some(push_token) = locked(&PUSH_TOKEN).clone() else {
+    let Some((service, push_token)) = locked(&PUSH_TOKEN).clone() else {
         uncovered();
         return;
     };
     let wanted = Doorbell {
+        service,
         push_token,
         spools: spools.clone(),
     };
@@ -231,7 +283,8 @@ pub(crate) async fn put_up(
 pub(crate) enum PutUp {
     /// It stands (`204`).
     Standing,
-    /// The member is not configured to push (`404`).
+    /// The member is not configured to push, or not through this phone's
+    /// service (`404`).
     NotPushing,
 }
 
@@ -246,6 +299,7 @@ pub(crate) async fn put_up_at(
         key: key.to_vec(),
         push_token: doorbell.push_token.clone(),
         addresses: doorbell.spools.iter().cloned().collect(),
+        service: doorbell.service.into(),
     };
     let url = format!("{}/api/v2/b0x/doorbell", endpoint.trim_end_matches('/'));
     let answer = client

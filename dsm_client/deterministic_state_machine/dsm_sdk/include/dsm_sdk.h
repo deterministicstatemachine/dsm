@@ -62,6 +62,11 @@
 #define MAX_COLLECTED_VAULTS 2
 
 /**
+ * The most contributions one request takes back.
+ */
+#define MAX_RELEASED_CONTRIBUTIONS 8
+
+/**
  * The longest display name an offer may carry.
  */
 #define MAX_DISPLAY_NAME 64
@@ -100,20 +105,20 @@
 
 /**
  * Canonical minimum confirmation depth for entry and exit anchors.
- * dBTC paper §6.4.1, §6.4.3, Definition 12.3, Remark 12.3:
+ * Definition 12.3, Remark 12.3:
  * "min_entry_confirmations = min_exit_confirmations = 100 is recommended."
  */
 #define DBTC_MIN_CONFIRMATIONS 100
 
 /**
  * Canonical successor lineage depth bound for dBTC fractional exits.
- * dBTC paper §12.1.1 recommends a small bounded integer (example: 5).
+ * recommends a small bounded integer (example: 5).
  */
 #define DBTC_MAX_SUCCESSOR_DEPTH 5
 
 /**
  * Canonical minimum vault remainder after fractional exit (satoshis).
- * dBTC paper §12.1.2 worked example uses 100,000 sats.
+ * worked example uses 100,000 sats.
  */
 #define DBTC_MIN_VAULT_BALANCE_SATS 100000
 
@@ -131,7 +136,7 @@
 
 /**
  * Conservative estimate of P2WSH sweep tx fee (vbytes * sat/vbyte).
- * dBTC paper §11.2: exit_amount >= dust_threshold + fee_sweep
+ * exit_amount >= dust_threshold + fee_sweep
  * A P2WSH HTLC claim tx is ~170 vbytes; at 10 sat/vbyte = 1700 sats.
  */
 #define DBTC_ESTIMATED_SWEEP_FEE_SATS 2000
@@ -143,7 +148,7 @@
 
 /**
  * Minimum exit amount: must cover dust + sweep fees.
- * dBTC paper §11.2, Invariant 11.2.
+ * Invariant 11.2.
  */
 #define DBTC_MIN_EXIT_SATS (DBTC_DUST_FLOOR_SATS + DBTC_ESTIMATED_SWEEP_FEE_SATS)
 
@@ -337,14 +342,12 @@
  * Amendment A14), so no frontier is kept and `peer_frontier` is no longer
  * created, read or written. A database made before keeps the table, unused.
  *
- * 29: the owner baseline (SoFi Amendment S24) adds
- * `sofi_vault_witness`, `sofi_vault_baseline`, `sofi_vault_owner_baseline`
- * and `sofi_vault_quarantine`, created on open; no existing table changes.
- * The same for `sofi_vault_label`, an account's own names for its vaults,
- * and for `sofi_vault_history_published`, how far an owner published a
- * vault's history (SoFi Amendment S26). A baseline record whose frontier
- * predates S26 is dropped when the database opens, and adopted or signed
- * again (`sofi_vault_head::drop_superseded_baselines`).
+ * 29: `sofi_vault_witness` and `sofi_vault_quarantine`, created on open; no
+ * existing table changes. The same for `sofi_vault_label`, an account's own
+ * names for its vaults. The owner baseline tables 29 also made
+ * (`sofi_vault_baseline`, `sofi_vault_owner_baseline`,
+ * `sofi_vault_history_published`) are dropped on open: a vault's state is
+ * read from its proof records (owner ruling 2026-11-22).
  *
  * 30: key schedule KS1 (Extract-then-Expand). Every identity secret, and so
  * every key, DevID and genesis this store records, comes from a new
@@ -441,9 +444,39 @@
  * receiver's board commits it, and `offline_acknowledgement` keeps each step's
  * acknowledgement, the receiver board's receive commit. A database made at 43
  * is refused at open. 45 adds `contact_relationship`, where each relationship
- * stands (DSM Amendment A33); a database made at 44 is refused at open.
+ * stands (DSM Amendment A33); a database made at 44 is refused at open. 46
+ * adds `relationship_write_authorization`, each relationship's write keys and
+ * grants (DSM Amendment A34); a database made at 45 is refused at open. 47
+ * adds `inbox_route`, the route digest and lock of each inbox address this
+ * device writes to (DSM Amendment A34); a database made at 46 is refused.
+ *
+ * v48: `peer_kept_state`, each state of a peer this receiver proved: a
+ * receiver keeps each payer's last proven state and checks the payer's steps
+ * from it forward (the owner's ruling of 2026-11-15, specs/README.md). A
+ * database made at 47 is refused at open.
+ *
+ * v49: `contact_first_inbox_lock`, the first-inbox lock each contact's
+ * directory entry publishes, which the relationship's first inbox from that
+ * contact is bound to (DSM Amendment A37). A database made at 48 is refused
+ * at open.
+ *
+ * Still 49, additively (DSM Amendment A39): `pending_offline_origin`
+ * and `pending_offline_origin_write`, the payer's steps a payment received
+ * offline was carried with, and `offline_boundary_signing`, a load or unload
+ * its board is signing, are new tables a database made at 49 takes at its next
+ * open, and `peer_offline_exposure` is dropped there. No version moves,
+ * so a wallet bound to a board opens as it is.
+ *
+ * Still 49, additively (DSM Amendment A41): `route_chain_write_proof`, the
+ * proof a recorded write's copies carry (a fulfillment cell's genesis), is a
+ * new table a database made at 49 takes at its next open.
+ *
+ * Still 49, additively (owner, 2026-11-21): `contact_added_tokens`, the
+ * tokens each contact has added, and `own_token_list`, the list this device
+ * last published, are new tables a database made at 49 takes at its next
+ * open. No version moves, so a wallet bound to a board opens as it is.
  */
-#define CLIENT_DB_SCHEMA_VERSION 45
+#define CLIENT_DB_SCHEMA_VERSION 49
 
 /**
  * The most frames whose chunks a startup keeps from a previous process.
@@ -773,9 +806,40 @@ struct DsmBytes dsm_ffi_balances_strict(void);
 /**
  * `onAppBackgrounded`: Rust stops the inbox poller unless something is still
  * owed or listening. Answers 1 when the host must keep running for it, 0
- * when it may stop.
+ * when it may stop: nothing is owed and nobody can send, or the nodes ring
+ * the phone when someone does.
  */
 int32_t dsm_ffi_on_app_backgrounded(void);
+
+/**
+ * `setApnsDeviceToken`: the APNs device token iOS handed over (at start,
+ * and whenever it changes), as its bytes. The waiter puts this device's
+ * doorbells up with it, so the storage nodes push the phone when something
+ * lands for it. Answers nothing, or why the token was not taken.
+ *
+ * # Safety
+ * `device` points at `len` readable bytes, or is null with `len` 0.
+ */
+struct DsmBytes dsm_ffi_set_apns_device_token(const uint8_t *device, size_t len);
+
+/**
+ * `pushUnavailable`: this phone has no push (APNs registration failed):
+ * the app keeps listening as it did before. `why` is the system's reason.
+ *
+ * # Safety
+ * `why` is a NUL-terminated UTF-8 string, or null.
+ */
+void dsm_ffi_push_unavailable(const char *why);
+
+/**
+ * `onPushWake`: a storage node pushed this phone. Runs the sync a wait's
+ * answer runs and waits for it, at most `wait_ms`, because iOS suspends the
+ * app once the host answers the push. 0: the wallet is not started in this
+ * process yet (iOS launched it for the push), and the host starts it and
+ * asks again; 1: the sync ran to its end; 2: it was started and had not
+ * ended within `wait_ms`.
+ */
+int32_t dsm_ffi_on_push_wake(uint32_t wait_ms);
 
 /**
  * `ensureAppRouterInstalled`: 1 when the full AppRouter is ready, else 0.

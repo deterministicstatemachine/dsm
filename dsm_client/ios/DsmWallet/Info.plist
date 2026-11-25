@@ -46,6 +46,12 @@
 	<string>DSM reads a contact's code or a token's code from a QR code.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>DSM links one phone contact you pick to a DSM contact, and reads nothing else of your contacts.</string>
+	<!-- The storage nodes' doorbell: a background push (APNs) wakes the wallet to
+	     read its inbox. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

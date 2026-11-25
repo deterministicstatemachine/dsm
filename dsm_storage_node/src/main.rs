@@ -60,9 +60,11 @@ struct ServerConfig {
     /// `endpoint` and `ca_cert` on `[[storage_set.members]]` — where each
     /// set-mate is reached for ByteCommit mirroring, and the CA it is known by.
     storage_set_mates: Vec<(String, String, Option<String>)>,
-    /// `[push.fcm]`: how this node pushes devices' phones when their spools
-    /// take an entry. Absent = it pushes no one and serves no doorbell.
+    /// `[push.fcm]`: how this node pushes Android phones when their spools
+    /// take an entry. `[push.apns]`: how it pushes iPhones. Both absent = it
+    /// pushes no one and serves no doorbell.
     push: Option<dsm_storage_node::push::FcmConfig>,
+    apns: Option<dsm_storage_node::push::ApnsConfig>,
 }
 
 /// One `[[storage_set.members]]` entry as the config states it: the member's
@@ -136,6 +138,43 @@ fn load_push_config(settings: &Config) -> Result<Option<dsm_storage_node::push::
         sts_endpoint: endpoint("push.fcm.sts_endpoint", GOOGLE_STS)?,
         iam_endpoint: endpoint("push.fcm.iam_endpoint", GOOGLE_IAM)?,
         fcm_endpoint: endpoint("push.fcm.fcm_endpoint", GOOGLE_FCM)?,
+        ca_cert_pem,
+    }))
+}
+
+/// `[push.apns]`, when the config has it: the app's bundle id and the
+/// provider certificate Apple issued for it are required; `endpoint` is
+/// Apple's production service unless it names another (its development
+/// service for a development build of the app).
+///
+///     [push.apns]
+///     topic = "<the app's bundle id>"
+///     client_cert_path = "/certs/apns-provider.crt"   # Apple's provider certificate (PEM)
+///     client_key_path = "/certs/apns-provider.key"    # its private key: TLS's alone
+fn load_apns_config(settings: &Config) -> Result<Option<dsm_storage_node::push::ApnsConfig>> {
+    use dsm_storage_node::push::{ApnsConfig, APPLE_APNS};
+    match settings.get_table("push.apns") {
+        Ok(_) => {}
+        Err(config::ConfigError::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e).context("`[push.apns]` is not a table"),
+    }
+    let endpoint = match settings.get_string("push.apns.endpoint") {
+        Ok(v) => v,
+        Err(config::ConfigError::NotFound(_)) => APPLE_APNS.to_string(),
+        Err(e) => return Err(e).context("`push.apns.endpoint` is not a string"),
+    };
+    let ca_cert_pem = match settings.get_string("push.apns.ca_cert_path") {
+        Ok(path) => Some(std::fs::read(&path).with_context(|| {
+            format!("`push.apns.ca_cert_path` names {path:?}, which is not readable")
+        })?),
+        Err(config::ConfigError::NotFound(_)) => None,
+        Err(e) => return Err(e).context("`push.apns.ca_cert_path` is not a string"),
+    };
+    Ok(Some(ApnsConfig {
+        topic: required(settings, "push.apns.topic")?,
+        client_cert_pem: read_named_file(settings, "push.apns.client_cert_path")?,
+        client_key_pem: read_named_file(settings, "push.apns.client_key_path")?,
+        endpoint,
         ca_cert_pem,
     }))
 }
@@ -250,6 +289,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     let bind_addr: SocketAddr = format!("{listen_ip}:{port}").parse()?;
     let node_id = required(&settings, "node.id")?;
     let push = load_push_config(&settings)?;
+    let apns = load_apns_config(&settings)?;
 
     Ok(ServerConfig {
         bind_addr,
@@ -267,6 +307,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         storage_set_members,
         storage_set_mates,
         push,
+        apns,
     })
 }
 
@@ -374,20 +415,40 @@ async fn async_main() -> Result<()> {
         );
     }
 
-    match server_config.push.clone() {
+    let fcm = match server_config.push.clone() {
         Some(push) => {
             let sender = dsm_storage_node::push::FcmSender::new(push)
                 .context("`[push.fcm]` does not describe a working push sender")?;
             log::info!(
-                "push configured: devices' doorbells are rung through Firebase Cloud Messaging"
+                "push configured: Android doorbells are rung through Firebase Cloud Messaging"
             );
-            state = state.with_doorbells(
-                dsm_storage_node::api::transport::doorbell::Doorbells::start(sender),
-            );
+            Some(sender)
         }
-        None => log::info!(
-            "no [push.fcm] configured: this node rings no doorbell, and devices keep their waits"
-        ),
+        None => {
+            log::info!("no [push.fcm] configured: this node rings no Android doorbell");
+            None
+        }
+    };
+    let apns = match server_config.apns.clone() {
+        Some(apns) => {
+            let sender = dsm_storage_node::push::ApnsSender::new(apns)
+                .context("`[push.apns]` does not describe a working push sender")?;
+            log::info!("push configured: iPhone doorbells are rung through APNs");
+            Some(sender)
+        }
+        None => {
+            log::info!("no [push.apns] configured: this node rings no iPhone doorbell");
+            None
+        }
+    };
+    if fcm.is_some() || apns.is_some() {
+        state = state.with_doorbells(
+            dsm_storage_node::api::transport::doorbell::Doorbells::start(
+                dsm_storage_node::push::Pusher { fcm, apns },
+            ),
+        );
+    } else {
+        log::info!("no push configured: this node rings no doorbell, and devices keep their waits");
     }
 
     let app_state = Arc::new(state.clone());

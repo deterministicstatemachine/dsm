@@ -78,7 +78,7 @@ impl Drop for GooglePush {
     }
 }
 
-fn issuer(name: &str) -> (rcgen::Issuer<'static, rcgen::KeyPair>, String) {
+pub(super) fn issuer(name: &str) -> (rcgen::Issuer<'static, rcgen::KeyPair>, String) {
     let key = match rcgen::KeyPair::generate() {
         Ok(key) => key,
         Err(e) => panic!("{name}'s key: {e}"),
@@ -103,7 +103,7 @@ fn issuer(name: &str) -> (rcgen::Issuer<'static, rcgen::KeyPair>, String) {
 }
 
 /// A certificate from `issuer` for `names`, and its key, as PEM.
-fn issued(
+pub(super) fn issued(
     issuer: &rcgen::Issuer<'static, rcgen::KeyPair>,
     names: Vec<String>,
     common_name: &str,
@@ -126,7 +126,7 @@ fn issued(
     (cert.pem(), key.serialize_pem(), cert.der().to_vec())
 }
 
-fn pem_certs(pem: &str) -> Vec<rustls::pki_types::CertificateDer<'static>> {
+pub(super) fn pem_certs(pem: &str) -> Vec<rustls::pki_types::CertificateDer<'static>> {
     use rustls::pki_types::pem::PemObject;
     match rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()).collect() {
         Ok(certs) => certs,

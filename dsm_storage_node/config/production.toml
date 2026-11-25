@@ -96,6 +96,11 @@ key_path  = "/certs/node.key"
 # service_account = "<name>@<project id>.iam.gserviceaccount.com"
 # client_cert_path = "/certs/push-client.crt"
 # client_key_path = "/certs/push-client.key"
+# [push.apns]                                  # iPhones: Apple's provider certificate (PEM)
+# topic = "com.dsm.wallet"
+# client_cert_path = "/certs/apns-provider.crt"
+# client_key_path = "/certs/apns-provider.key"
+# endpoint = "https://api.sandbox.push.apple.com"   # only for phones running a development build
 
 [database]
 url = "__DATABASE_URL__"
