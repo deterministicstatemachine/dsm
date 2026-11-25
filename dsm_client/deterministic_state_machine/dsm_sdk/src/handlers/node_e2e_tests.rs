@@ -5687,6 +5687,16 @@ async fn a_walk_that_cannot_read_what_follows_is_not_complete_and_never_the_head
     );
 }
 
+/// The market policy an accepted genesis commits; a test's vault is a market.
+fn market_of(
+    accepted: &dsm::sofi::lineage::AcceptedVaultGenesis,
+) -> &dsm::ccb::state::MarketPolicy {
+    match accepted.terms() {
+        dsm::sofi::lineage::GenesisTerms::Market(market) => market,
+        other => panic!("a market vault, not {other:?}"),
+    }
+}
+
 /// SoFi Amendments S16 and S37: discovery carries no authority, and a
 /// ranking carries none either. Under ERA's vault token locator, beside A's
 /// real ERA/TKN vault, sit what anyone may append: bytes that are no
@@ -5753,7 +5763,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
         &set,
         &Publication::VaultGenesis {
             preimage: &forged,
-            market: real.market().expect("a market vault"),
+            market: market_of(&real),
         },
     )
     .await
@@ -5763,7 +5773,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
     let other = accepted(&second);
     let other_addr = Publication::VaultGenesis {
         preimage: other.preimage(),
-        market: other.market().expect("a market vault"),
+        market: market_of(&other),
     }
     .address()
     .expect("an address");
@@ -5808,7 +5818,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
         &set,
         &Publication::VaultGenesis {
             preimage: &ahead,
-            market: real.market().expect("a market vault"),
+            market: market_of(&real),
         },
     )
     .await
