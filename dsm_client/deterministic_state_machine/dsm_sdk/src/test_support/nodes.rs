@@ -855,6 +855,32 @@ impl NodeSet {
         }
     }
 
+    /// Every member loses every index entry of each object indexed under
+    /// `locator` in `namespace`, under that locator and under any other: what
+    /// a set holds where those objects' indexes never landed. The objects and
+    /// everything else are untouched.
+    pub async fn erase_indexed(&self, namespace: &[u8], locator: &[u8; 32]) {
+        let mut scoped = namespace.to_vec();
+        scoped.push(0);
+        scoped.extend_from_slice(locator);
+        for node in &self.nodes {
+            let client = match node.state.db_pool.get().await {
+                Ok(client) => client,
+                Err(e) => panic!("node db connection: {e}"),
+            };
+            if let Err(e) = client
+                .execute(
+                    "DELETE FROM index_entries WHERE addr IN \
+                     (SELECT addr FROM index_entries WHERE locator = $1)",
+                    &[&scoped],
+                )
+                .await
+            {
+                panic!("{}: erase index entries: {e}", node.member_id);
+            }
+        }
+    }
+
     /// Every member loses every entry of the cell `key`: what a set whose
     /// stores all lost the cell holds. Nothing else is touched.
     pub async fn erase_cell(&self, key: &[u8; 32]) {

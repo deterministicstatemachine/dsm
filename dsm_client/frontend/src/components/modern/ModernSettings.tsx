@@ -3,9 +3,9 @@
 // email receipts, your card, the lock, every other setting, reporting a
 // problem, and the app's version.
 
-import React, { useState } from 'react';
-import { useAppRuntimeStore, type Scheme, type Skin, type Switch } from '../../runtime/appRuntimeStore';
-import { chooseScheme, chooseSkin, setSimpleMode, setSimpleOffline } from '../../runtime/skinPreferences';
+import React, { useEffect, useState } from 'react';
+import { useAppRuntimeStore, type BackupMode, type Scheme, type Skin, type Switch } from '../../runtime/appRuntimeStore';
+import { chooseScheme, chooseSkin, loadBackupMode, setBackupMode, setSimpleMode, setSimpleOffline } from '../../runtime/skinPreferences';
 import { versionLabel } from '../../appVersion';
 import { navigationStore } from '../../runtime/navigationStore';
 import { Icon } from './parts';
@@ -49,6 +49,13 @@ export default function ModernSettings(): React.JSX.Element {
     );
   };
 
+  useEffect(() => {
+    loadBackupMode().then(
+      () => undefined,
+      (e: unknown) => setSaid(`The backup setting was not read: ${e instanceof Error ? e.message : String(e)}`),
+    );
+  }, []);
+
   return (
     <>
       <h1 className="s-title">Settings</h1>
@@ -83,6 +90,20 @@ export default function ModernSettings(): React.JSX.Element {
             onPick={(v) => report(setSimpleOffline(v))}
           />
         ) : null}
+      </section>
+
+      <section className="s-card" aria-label="Backup">
+        <Seg<BackupMode>
+          label="Back up"
+          value={runtime.backupMode}
+          options={[{ id: 'auto', text: 'Every transaction' }, { id: 'manual', text: 'By hand' }]}
+          onPick={(v) => report(setBackupMode(v))}
+        />
+        <p className="s-hint">
+          {runtime.backupMode === 'manual'
+            ? 'The wallet backs up only when you press Back up on the Send screen.'
+            : 'The wallet backs up after every transaction.'}
+        </p>
       </section>
 
       <section className="s-card" aria-label="You">

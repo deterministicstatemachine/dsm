@@ -340,9 +340,10 @@ pub trait SofiReads {
     ) -> Result<Discovered<(VaultGenesisPreimage, Vec<u8>)>, ReadFailure>;
     /// The vault named by every preimage published under token `t`'s vault
     /// token locator that decodes as a vault genesis preimage, in append
-    /// order (Amendment S16). Candidates only: [`Verifier::vaults_of_token`]
-    /// accepts each genesis and checks its market before it is a vault of
-    /// `t`.
+    /// order (Amendment S16). Candidates only: a route search ranks them by
+    /// what their published geneses and records state, and accepts the
+    /// genesis of a vault only when it tries a route through it (SoFi
+    /// Amendment S37).
     fn vault_token_candidates(&self, token: &D32) -> Result<Discovered<D32>, ReadFailure>;
     /// The vault named by every preimage published under verdict cell
     /// `verdict_cell`'s cell locator that decodes as a vault genesis
@@ -2018,17 +2019,53 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             match self.reads.vault_state_at(vault_id, &pre_root)? {
                 Some(state) => state,
                 // A root this device did not establish a generation at: the
-                // state leaf the core states there, read by its value
-                // (SoFi Amendment S26). The core's path binds that value to
-                // the root, which validation folds.
-                None => match self.published_state(core)? {
+                // vault's state there from the proof record whose root it is,
+                // Core verified (SoFi Amendment S36); or the state leaf the
+                // core states there, read by its value (SoFi Amendment S26).
+                // The core's path binds either to the root, which validation
+                // folds.
+                None => match self.recorded_state(vault_id, &genesis, &pre_root)? {
                     Some(state) => state,
-                    None => return Ok(None),
+                    None => match self.published_state(core)? {
+                        Some(state) => state,
+                        None => return Ok(None),
+                    },
                 },
             }
         };
         vault_leaves.extend(vault_leaves_from_core(core, &state));
         Ok(Some(state))
+    }
+
+    /// `vault_id`'s state at `root` from a proof record whose root is
+    /// `root`, Core verified back to the accepted `genesis`, held for this
+    /// verification; `None` where no such record verifies.
+    fn recorded_state(
+        &self,
+        vault_id: &D32,
+        genesis: &AcceptedVaultGenesis,
+        root: &D32,
+    ) -> Result<Option<VaultStateLeaf>, VerifierFailure> {
+        for bytes in self
+            .reads
+            .proof_record_candidates(genesis, Some(root))?
+            .iter()
+            .take(PROOF_RECORDS_TRIED)
+        {
+            if let Ok(head) =
+                super::vault_proof::verify_record(bytes, vault_id, genesis.genesis_root())
+            {
+                if head.root() == root {
+                    let state = head.tree().state.clone();
+                    self.proven_states
+                        .lock()
+                        .map_err(|e| VerifierFailure::Read(format!("the proven states: {e}")))?
+                        .insert((*vault_id, *root), state.clone());
+                    return Ok(Some(state));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The state leaf a vault core states at its pre-root, read from the
@@ -2130,59 +2167,6 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             Some(why) => Ok(VaultGenesis::Refused(format!("{why:?}"))),
             None => not_published(),
         }
-    }
-
-    /// Amendment S16: the vaults whose market pairs `token`, found under its
-    /// vault token locator, in the order the index names them.
-    ///
-    /// Discovery carries no authority. A candidate is kept only when its
-    /// genesis is accepted — bound to the owner's validated creation by
-    /// [`Self::vault_genesis`] — and the market that acceptance resolves
-    /// pairs `token`; anything else appended under the locator is passed
-    /// over. A candidate whose genesis or owner's lineage the reads do not
-    /// establish yet, or a scan that stopped short, makes the discovery
-    /// `Partial`: the vaults it kept are vaults of `token` all the same.
-    pub fn vaults_of_token(
-        &self,
-        token: &D32,
-    ) -> Result<Discovered<AcceptedVaultGenesis>, VerifierFailure> {
-        let (candidates, mut scan) = match self.reads.vault_token_candidates(token) {
-            Ok(Discovered::Complete(candidates)) => (candidates, ScanExtent::Whole),
-            Ok(Discovered::Partial(candidates)) => (candidates, ScanExtent::Short),
-            // The index read was not made: nothing established, and nothing
-            // refuted (storage §4).
-            Err(ReadFailure(..)) => (Vec::new(), ScanExtent::Short),
-        };
-        let mut examined = BTreeSet::new();
-        let mut vaults = Vec::new();
-        for vault_id in candidates {
-            if !examined.insert(vault_id) {
-                continue;
-            }
-            match self.vault_genesis(&vault_id) {
-                // A market that pairs `token`. An escrow vault has no market
-                // and is never a vault of a token (SoFi Amendment S21).
-                Ok(VaultGenesis::Accepted(accepted)) => {
-                    if let Some(market) = accepted.market() {
-                        if market.token_a() == token || market.token_b() == token {
-                            vaults.push(*accepted);
-                        }
-                    }
-                }
-                // Not a vault anyone created, or a genesis refused: not a
-                // vault of `token`.
-                Ok(VaultGenesis::NotPublished | VaultGenesis::Refused(_))
-                | Err(VerifierFailure::Refused(_)) => {}
-                // Not established yet: it may be a vault of `token`.
-                Ok(VaultGenesis::OwnerUnresolved(_)) | Err(VerifierFailure::Read(_)) => {
-                    scan = ScanExtent::Short
-                }
-            }
-        }
-        Ok(match scan {
-            ScanExtent::Whole => Discovered::Complete(vaults),
-            ScanExtent::Short => Discovered::Partial(vaults),
-        })
     }
 
     /// SoFi Amendment S21: the escrow vaults bound to `verdict_cell`, found
@@ -2546,8 +2530,17 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         depth: usize,
         until: Option<&D32>,
     ) -> Result<VaultChain, VerifierFailure> {
-        let at_root = until.filter(|root| *root != genesis.genesis_root());
-        let candidates = self.reads.proof_record_candidates(genesis, at_root)?;
+        // A chain asked for until the genesis root is the accepted genesis:
+        // no record proves a step to it, and every record starts above it,
+        // so the chain from the newest record never names it. Started there,
+        // the first leg ever taken from this vault, one leg of a two-hop
+        // exercise, was Unavailable to every reader once the vault had a
+        // newer record, and the other vault's next key stayed held (rig,
+        // 2026-11-24).
+        if until == Some(genesis.genesis_root()) {
+            return Ok(VaultChain::from_genesis(genesis));
+        }
+        let candidates = self.reads.proof_record_candidates(genesis, until)?;
         for bytes in candidates.iter().take(PROOF_RECORDS_TRIED) {
             let head =
                 match super::vault_proof::verify_record(bytes, vault_id, genesis.genesis_root()) {
@@ -2881,13 +2874,32 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             {
                 continue;
             }
+            // The sibling's chain is asked for up to the parent this leg
+            // names. Its chain to the head starts at the newest proof record,
+            // which can stand above that parent once the sibling has moved
+            // on: the leg's parent is then below everything the chain
+            // establishes, and the exercise is never decided. Asked for up to
+            // the parent, the chain starts at the record whose root it is, or
+            // walks from the genesis to it (rig, 2026-11-24: a two-hop
+            // exercise held its vault's next key for good once the other
+            // vault had moved on).
+            //
             // POSITIVE evidence only for the RETRY decision: a sibling chain
             // that names the parent is new information and the walk is worth
             // repeating; one that does not name it changes no answer, so
             // repeating would read the same cells and stall the same way.
             // The chain is handed over either way — the resolver, not this
             // loop, decides what it means.
-            let sibling = self.chain_to_depth(leg.vault_id, depth - 1, None)?;
+            let sibling = self.chain_to_depth(leg.vault_id, depth - 1, Some(&leg.parent_root))?;
+            log::info!(
+                "[sofi chain] sibling vault {} for parent {}: chain from generation {} to {:?}, names it: {}, stopped: {:?}",
+                short_id(&leg.vault_id),
+                short_id(&leg.parent_root),
+                sibling.base(),
+                sibling.head().map(|(generation, root)| (generation, short_id(&root))),
+                sibling.names(&leg.parent_root),
+                sibling.not_complete()
+            );
             learned |= sibling.names(&leg.parent_root);
             chains.insert(leg.vault_id, sibling);
         }
@@ -3333,6 +3345,28 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                                 _ => break chunk,
                             }
                         };
+                        if let WalkOutcome::Unresolved { attempt: stalled } = chunk.outcome {
+                            let on = match chunk.unresolved_reading() {
+                                Some(read) => match read.exercise() {
+                                    Some(held) => {
+                                        let p = &held.precommit().body;
+                                        format!(
+                                            "{:?}, exercised by device {} at its position {}",
+                                            read.fact(),
+                                            short_id(p.device_id()),
+                                            p.position()
+                                        )
+                                    }
+                                    None => format!("{:?}, no exercise", read.fact()),
+                                },
+                                None => "not read".to_string(),
+                            };
+                            log::info!(
+                                "[sofi verifier] vault {} at parent {}: attempt {attempt} waits on attempt {stalled}: {on}",
+                                short_id(&leg.vault_id),
+                                short_id(&leg.parent_root)
+                            );
+                        }
                         let keys_below = usize::try_from(attempt).map_err(|e| {
                             VerifierFailure::Refused(format!("attempt {attempt}: {e}"))
                         })?;

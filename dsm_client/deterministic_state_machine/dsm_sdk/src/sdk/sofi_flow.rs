@@ -29,7 +29,7 @@ use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::conformance::{fulfillment_conformance, FulfillmentConformance};
 use dsm::sofi::resolve::{
     AcceptedGeneses, Acquired, ExerciseObjects, LocalLeaves, SofiReads, VaultGenesis, Verifier,
-    WALK_BUDGET,
+    VerifierFailure, WALK_BUDGET,
 };
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{
@@ -581,7 +581,31 @@ pub(crate) struct VaultAtHead {
 impl VaultAtHead {
     /// The market's policies; an escrow vault has no market to price by.
     fn market(&self) -> Result<&Policies, DsmError> {
-        match &self.terms {
+        self.priced().market()
+    }
+
+    /// What pricing reads of this vault at its head.
+    fn priced(&self) -> Priced<'_> {
+        Priced {
+            terms: &self.terms,
+            state: &self.state,
+        }
+    }
+}
+
+/// What pricing reads of a vault: its terms and its state, at a head
+/// witnessed for a trade, or as its newest proof record states it where a
+/// route search orders its candidates ([`Estimated`]).
+#[derive(Clone, Copy)]
+struct Priced<'a> {
+    terms: &'a VaultTerms,
+    state: &'a VaultStateLeaf,
+}
+
+impl<'a> Priced<'a> {
+    /// The market's policies; an escrow vault has no market to price by.
+    fn market(&self) -> Result<&'a Policies, DsmError> {
+        match self.terms {
             VaultTerms::Market(policies) => Ok(policies),
             VaultTerms::Escrow(..) | VaultTerms::Computed(..) => {
                 Err(refuse("an escrow vault has no market"))
@@ -951,14 +975,14 @@ fn other_token(terms: &VaultTerms, token_in: &D32) -> Option<(D32, bool)> {
 /// What a vault's head gives for `amount_in` of `token_in`: the other token
 /// of its pair, and the amount the one constant-product arithmetic prices.
 fn quote(
-    vault: &VaultAtHead,
+    vault: Priced<'_>,
     token_in: &D32,
     amount_in: u64,
     index: usize,
 ) -> Result<(D32, u64), DsmError> {
     // A vault without a market prices nothing, whatever token is offered.
     let fee_bps = vault.market()?.fee.fee_bps();
-    let (token_out, in_is_a) = other_token(&vault.terms, token_in)
+    let (token_out, in_is_a) = other_token(vault.terms, token_in)
         .ok_or_else(|| refuse(format!("hop {index}: the vault does not trade that token")))?;
     let (reserve_in, reserve_out) = if in_is_a {
         (vault.state.reserve_a, vault.state.reserve_b)
@@ -980,7 +1004,7 @@ pub(crate) fn price_hop(
     setup_ref: D32,
     index: usize,
 ) -> Result<(SwapHop, VaultStateLeaf), DsmError> {
-    let (token_out, amount_out) = quote(vault, &token_in, amount_in, index)?;
+    let (token_out, amount_out) = quote(vault.priced(), &token_in, amount_in, index)?;
     let hop = SwapHop {
         vault_id: vault.vault_id,
         parent_root: vault.root,
@@ -1017,9 +1041,9 @@ impl Planned {
 
 /// What `vault` gives for `amount_in` of `token_in` at its head: `None` for
 /// an amount too small to move it. Any other refusal is an error.
-fn leg_out(vault: &VaultAtHead, token_in: &D32, amount_in: u64) -> Result<Option<u64>, DsmError> {
+fn leg_out(vault: Priced<'_>, token_in: &D32, amount_in: u64) -> Result<Option<u64>, DsmError> {
     let fee_bps = vault.market()?.fee.fee_bps();
-    let (_, in_is_a) = other_token(&vault.terms, token_in)
+    let (_, in_is_a) = other_token(vault.terms, token_in)
         .ok_or_else(|| refuse("the vault does not trade that token"))?;
     let (reserve_in, reserve_out) = if in_is_a {
         (vault.state.reserve_a, vault.state.reserve_b)
@@ -1035,7 +1059,7 @@ fn leg_out(vault: &VaultAtHead, token_in: &D32, amount_in: u64) -> Result<Option
 
 /// The least input in `1..=max` that `vault` prices, by bisection: a larger
 /// input never gives less.
-fn least_priced(vault: &VaultAtHead, token_in: &D32, max: u64) -> Result<Option<u64>, DsmError> {
+fn least_priced(vault: Priced<'_>, token_in: &D32, max: u64) -> Result<Option<u64>, DsmError> {
     if leg_out(vault, token_in, max)?.is_none() {
         return Ok(None);
     }
@@ -1055,8 +1079,8 @@ fn least_priced(vault: &VaultAtHead, token_in: &D32, max: u64) -> Result<Option<
 /// priced at its own vault's head, the share searched over the inputs both
 /// legs price. `None` when no split prices both legs.
 fn plan_split(
-    one: &VaultAtHead,
-    two: &VaultAtHead,
+    one: Priced<'_>,
+    two: Priced<'_>,
     token_in: D32,
     token_out: D32,
     amount_in: u64,
@@ -1124,7 +1148,7 @@ fn plan_split(
 
 /// The hops through `vaults` in order, each feeding the next.
 fn plan_chain(
-    vaults: &[&VaultAtHead],
+    vaults: &[Priced<'_>],
     token_in: D32,
     amount_in: u64,
 ) -> Result<Vec<Planned>, DsmError> {
@@ -1132,7 +1156,7 @@ fn plan_chain(
     let mut amount = amount_in;
     let mut out = Vec::with_capacity(vaults.len());
     for (index, vault) in vaults.iter().enumerate() {
-        let (token_out, amount_out) = quote(vault, &token, amount, index)?;
+        let (token_out, amount_out) = quote(*vault, &token, amount, index)?;
         out.push(Planned {
             token_in: token,
             amount_in: amount,
@@ -1148,14 +1172,14 @@ fn plan_chain(
 /// A route through `vaults` at their heads (Amendment S19): split across
 /// them when there are two and both trade `token_in` for the same token,
 /// chained otherwise.
-fn plan(vaults: &[&VaultAtHead], token_in: D32, amount_in: u64) -> Result<Vec<Planned>, DsmError> {
+fn plan(vaults: &[Priced<'_>], token_in: D32, amount_in: u64) -> Result<Vec<Planned>, DsmError> {
     if let [one, two] = vaults {
         if let (Some((a, ..)), Some((b, ..))) = (
-            other_token(&one.terms, &token_in),
-            other_token(&two.terms, &token_in),
+            other_token(one.terms, &token_in),
+            other_token(two.terms, &token_in),
         ) {
             if a == b {
-                return plan_split(one, two, token_in, a, amount_in)?
+                return plan_split(*one, *two, token_in, a, amount_in)?
                     .map(Vec::from)
                     .ok_or_else(|| refuse("the amount does not split across the two vaults"));
             }
@@ -1202,8 +1226,7 @@ fn route_ends(hops: &[Hop]) -> Result<Option<RouteEnds>, DsmError> {
 const GENESES_AT_ONCE: usize = 16;
 
 /// What accepting vaults' geneses ahead came to: a report only. What a vault
-/// of a token is, is decided by `vaults_of_token`; what a vault of a cell is,
-/// by `vaults_of_cell`.
+/// of a cell is, is decided by `vaults_of_cell`.
 pub(crate) struct AcceptedAhead {
     candidates: usize,
     accepted: usize,
@@ -1224,32 +1247,6 @@ impl core::fmt::Display for AcceptedAhead {
         }
         Ok(())
     }
-}
-
-/// Accept the genesis of every vault published under `tokens`' indexes at
-/// once, through the verifier's own `vault_genesis`, which keeps each one it
-/// accepts for the rest of the operation. Each acceptance reads its owner's
-/// creation; one at a time, a token with many vaults cost a round trip per
-/// vault before a quote. Call from a thread that may block.
-fn accept_ahead(verifier: &Verifier<'_, LiveSofiReads<'_>>, tokens: &[D32]) -> AcceptedAhead {
-    use dsm::sofi::resolve::SofiReads as _;
-    let mut unread = Vec::new();
-    let mut vault_ids: Vec<D32> = Vec::new();
-    for token in tokens {
-        match verifier.reads.vault_token_candidates(token) {
-            Ok(Discovered::Complete(found) | Discovered::Partial(found)) => {
-                for vault_id in found {
-                    if !vault_ids.contains(&vault_id) {
-                        vault_ids.push(vault_id);
-                    }
-                }
-            }
-            Err(failure) => unread.push(format!("the token index: {failure}")),
-        }
-    }
-    let mut report = geneses_ahead(verifier, &vault_ids);
-    report.not_accepted.splice(0..0, unread);
-    report
 }
 
 /// Accept the genesis of every vault published under `verdict_cell`'s
@@ -1333,63 +1330,45 @@ pub(crate) fn geneses_ahead(
 /// tune it from the measured collision rate against the output given up.
 pub(crate) const ROUTE_TOLERANCE_BPS: u64 = 300;
 
-/// Which of a search's priced routes `(output, vault ids in hop order)` the
-/// trader takes (client policy): among those within
-/// [`ROUTE_TOLERANCE_BPS`] of the best output, the fewest legs, then the
+/// The order a search tries its routes in, each `(output, vault ids in hop
+/// order)` as ranked (client policy): first those within
+/// [`ROUTE_TOLERANCE_BPS`] of the best output, by the fewest legs, then the
 /// order the trader's own identity gives the routes' vaults —
 /// `H(DSM/sofi/route-lane/v1; G ‖ DevID ‖ sorted vault ids)` — then the
-/// lowest vault ids. Deterministic: the same candidates give one trader the
-/// same route, and different traders different vaults of a pair, so small
-/// trades spread across the pair's vaults instead of piling into the first;
-/// a split wins only when it beats every single vault by more than the
-/// tolerance. `None` for no route.
-fn choose_route(routes: &[(u64, Vec<D32>)], trader: (&D32, &D32)) -> Option<usize> {
-    let best = routes.iter().map(|(out, ..)| *out).max()?;
-    let floor = u128::from(best) * u128::from(10_000 - ROUTE_TOLERANCE_BPS);
-    routes
-        .iter()
-        .enumerate()
-        .filter(|(_, (out, ..))| u128::from(*out) * 10_000 >= floor)
-        .min_by_key(|(_, (_, vaults))| {
-            let mut sorted = vaults.clone();
-            sorted.sort();
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-                dsm::common::domain_tags::TAG_DSM_SOFI_ROUTE_LANE,
-            );
-            h.update(trader.0);
-            h.update(trader.1);
-            for vault in &sorted {
-                h.update(vault);
-            }
-            (vaults.len(), *h.finalize().as_bytes(), sorted)
-        })
-        .map(|(index, ..)| index)
-}
-
-/// The vaults whose market pairs `token`, from its token index (Amendment
-/// S16): accepted by Core, never taken from the index. A discovery that is
-/// not complete marks the search partial.
-fn vaults_of(
-    verifier: &Verifier<'_, LiveSofiReads<'_>>,
-    token: &D32,
-    search: &mut Search,
-) -> Result<Vec<Paired>, DsmError> {
-    let vaults = match verifier.vaults_of_token(token).map_err(verifier_error)? {
-        Discovered::Complete(vaults) => vaults,
-        Discovered::Partial(vaults) => {
-            *search = Search::Partial;
-            vaults
-        }
+/// lowest vault ids; then every other route, the most output first.
+/// Deterministic: the same candidates give one trader the same order, and
+/// different traders different vaults of a pair, so small trades spread
+/// across the pair's vaults instead of piling into the first; a split comes
+/// first only when it beats every single vault by more than the tolerance.
+fn route_order(routes: &[(u64, Vec<D32>)], trader: (&D32, &D32)) -> Vec<usize> {
+    let Some(best) = routes.iter().map(|(out, ..)| *out).max() else {
+        return Vec::new();
     };
-    Ok(vaults
-        .iter()
-        .filter_map(|accepted| {
-            accepted.market().map(|market| Paired {
-                vault_id: *accepted.vault_id(),
-                tokens: (*market.token_a(), *market.token_b()),
-            })
-        })
-        .collect())
+    let floor = u128::from(best) * u128::from(10_000 - ROUTE_TOLERANCE_BPS);
+    let lane = |vaults: &[D32]| {
+        let mut sorted = vaults.to_vec();
+        sorted.sort();
+        let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+            dsm::common::domain_tags::TAG_DSM_SOFI_ROUTE_LANE,
+        );
+        h.update(trader.0);
+        h.update(trader.1);
+        for vault in &sorted {
+            h.update(vault);
+        }
+        (vaults.len(), *h.finalize().as_bytes(), sorted)
+    };
+    let (mut near, mut far): (Vec<usize>, Vec<usize>) =
+        (0..routes.len()).partition(|index| u128::from(routes[*index].0) * 10_000 >= floor);
+    near.sort_by_key(|index| lane(&routes[*index].1));
+    far.sort_by_key(|index| {
+        (
+            core::cmp::Reverse(routes[*index].0),
+            lane(&routes[*index].1),
+        )
+    });
+    near.extend(far);
+    near
 }
 
 /// The vaults a route search walks to their heads: only those that can be in
@@ -1443,8 +1422,9 @@ fn route_legs(firsts: &[Paired], seconds: &[Paired], token_in: &D32, token_out: 
     walked
 }
 
-/// A vault of a token, with the two tokens its accepted genesis commits its
-/// market to: known before its chain is walked.
+/// A vault of a token, with the two tokens its published genesis commits
+/// its market to: known before any record of it is read and before its
+/// genesis is accepted.
 struct Paired {
     vault_id: D32,
     tokens: (D32, D32),
@@ -1463,85 +1443,232 @@ impl Paired {
     }
 }
 
+/// A candidate vault as the first genesis published for it that names it
+/// states it, carried forward by its newest record that verifies back to that
+/// genesis's root: what a route search ranks its candidates by (SoFi
+/// Amendment S37). Nothing here is accepted, neither the genesis nor its
+/// owner. Never what a trade is priced at: the route the search takes is
+/// walked to its heads from its accepted genesis, and priced there.
+struct Estimated {
+    vault_id: D32,
+    genesis_root: D32,
+    state: VaultStateLeaf,
+    terms: VaultTerms,
+}
+
+impl Estimated {
+    fn priced(&self) -> Priced<'_> {
+        Priced {
+            terms: &self.terms,
+            state: &self.state,
+        }
+    }
+
+    /// The two tokens its market pairs; an escrow vault pairs none.
+    fn paired(&self) -> Option<Paired> {
+        match &self.terms {
+            VaultTerms::Market(policies) => Some(Paired {
+                vault_id: self.vault_id,
+                tokens: (*policies.market.token_a(), *policies.market.token_b()),
+            }),
+            VaultTerms::Escrow(..) | VaultTerms::Computed(..) => None,
+        }
+    }
+}
+
+/// `vault_id` as the first genesis published for it that names it states:
+/// one locator scan and its terms' objects; no record, no walk, no head and
+/// no owner lineage.
+async fn published(
+    set: &StorageSet,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_id: &D32,
+) -> Result<Estimated, DsmError> {
+    let found =
+        match tokio::task::block_in_place(|| verifier.reads.vault_genesis_candidates(vault_id)) {
+            Ok(Discovered::Complete(found) | Discovered::Partial(found)) => found,
+            Err(failure) => return Err(storage("vault genesis", failure)),
+        };
+    let Some(preimage) = found
+        .iter()
+        .map(|(preimage, _)| preimage)
+        .find(|preimage| preimage.vault_id() == *vault_id)
+    else {
+        return Err(storage(
+            "vault genesis",
+            "no published genesis names this vault",
+        ));
+    };
+    let genesis_root = dsm::sofi::lineage::genesis_root(vault_id, &preimage.state)
+        .map_err(|e| refuse(format!("the published genesis: {e:?}")))?;
+    let terms = vault_terms(set, &preimage.state).await?;
+    Ok(Estimated {
+        vault_id: *vault_id,
+        genesis_root,
+        state: preimage.state.clone(),
+        terms,
+    })
+}
+
+/// `genesis` carried forward to its vault's newest record that verifies back
+/// to its root: one record lookup and one proof check. Where no record
+/// verifies, the vault is ranked as its genesis states it.
+async fn estimated(set: &StorageSet, genesis: Estimated) -> Result<Estimated, DsmError> {
+    let Some(head) =
+        crate::sdk::vault_proof_io::newest_proven(set, &genesis.vault_id, &genesis.genesis_root)
+            .await?
+    else {
+        return Ok(genesis);
+    };
+    let state = head.tree().state.clone();
+    let terms = vault_terms(set, &state).await?;
+    Ok(Estimated {
+        state,
+        terms,
+        ..genesis
+    })
+}
+
+/// The vaults named under `token`'s vault token locator (Amendment S16), in
+/// the order the index names them: candidates only, none accepted (SoFi
+/// Amendment S37). A scan that stopped short says so; one that could not be
+/// made says why.
+fn token_candidates(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    token: &D32,
+) -> Result<Discovered<D32>, String> {
+    tokio::task::block_in_place(|| verifier.reads.vault_token_candidates(token))
+        .map_err(|failure| format!("{failure}"))
+}
+
 /// §30 and the path search of `sofi.findRoute` (Amendment S16): the best
 /// route of one or two hops (the beta `ROUTE_MAX_LEGS`) from `token_in` to
 /// `token_out`. The vaults come from the two tokens' indexes — those that
 /// pair the tokens directly, and a vault of each that share their other
 /// token — and are not limited to the vaults this device is set up with; a
-/// quote needs no setup. Each hop is priced at its vault's walked head. A
-/// vault, or a head, that is not established is left out and makes the
-/// search `Partial`; over what was established, no route is an empty list.
+/// quote needs no setup. Routes are ranked by what each vault's newest proof
+/// record states, and taken in [`route_order`]; only the vaults of the route
+/// tried are walked to their heads, and the first route whose output there is
+/// within [`ROUTE_TOLERANCE_BPS`] of the best ranked is the quote (Amendment
+/// S37). A vault, or a head, that is not established is left out and makes
+/// the search `Partial`; over what was established, no route is an empty
+/// list.
 pub async fn find_route(
     core: &CoreSDK,
     set: &StorageSet,
     intent: &FindRouteIntent,
 ) -> Result<RouteFound, DsmError> {
-    // A wallet backup under way stops: the search's reads do not wait behind
-    // it (owner ruling 2026-11-24).
-    crate::sdk::wallet_backup_flow::quote_or_trade_starting();
     let accepted = &AcceptedGeneses::default();
     let standing = standing(core)?;
     let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let mut search = Search::Complete;
-    // Every vault of either token is accepted at once, so the discovery
-    // below finds each one already accepted for this operation.
-    let ahead = tokio::task::block_in_place(|| {
-        accept_ahead(
-            &verifier,
-            &[
-                intent.token_in_policy_commit,
-                intent.token_out_policy_commit,
-            ],
-        )
-    });
-    log::info!("[sofi] route search: {ahead}");
-    let firsts = vaults_of(&verifier, &intent.token_in_policy_commit, &mut search)?;
-    let seconds = vaults_of(&verifier, &intent.token_out_policy_commit, &mut search)?;
     let (token_in, token_out) = (
         intent.token_in_policy_commit,
         intent.token_out_policy_commit,
     );
-    let walked = route_legs(&firsts, &seconds, &token_in, &token_out);
-    let firsts: Vec<D32> = firsts.iter().map(|v| v.vault_id).collect();
-    let seconds: Vec<D32> = seconds.iter().map(|v| v.vault_id).collect();
-    let mut heads: BTreeMap<D32, VaultAtHead> = BTreeMap::new();
-    let mut unique: Vec<D32> = Vec::with_capacity(walked.len());
-    for vault_id in &walked {
+    // The vaults the search did not establish, and why: it names them as it
+    // names the vaults it could not rank.
+    let mut unreached: Vec<String> = Vec::new();
+    // Candidates from each token's index, none accepted: a vault is accepted
+    // only when a route through it is tried (SoFi Amendment S37).
+    let indexed =
+        |token: &D32, search: &mut Search, unreached: &mut Vec<String>| match token_candidates(
+            &verifier, token,
+        ) {
+            Ok(Discovered::Complete(found)) => found,
+            Ok(Discovered::Partial(found)) => {
+                *search = Search::Partial;
+                found
+            }
+            Err(why) => {
+                unreached.push(format!("the vault token index: {why}"));
+                *search = Search::Partial;
+                Vec::new()
+            }
+        };
+    let firsts = indexed(&token_in, &mut search, &mut unreached);
+    let seconds = indexed(&token_out, &mut search, &mut unreached);
+    let mut unique: Vec<D32> = Vec::with_capacity(firsts.len() + seconds.len());
+    for vault_id in firsts.iter().chain(&seconds) {
         if !unique.contains(vault_id) {
             unique.push(*vault_id);
         }
     }
-    let at_heads = heads_at_once(set, &verifier, &unique).await;
-    // The vaults whose heads the reads did not establish, and why: the
-    // search names them as it names the geneses it did not accept.
-    let mut unreached: Vec<String> = Vec::new();
-    for (vault_id, at_head) in unique.iter().zip(at_heads) {
-        match at_head {
-            Ok((head, ..)) => {
-                if head.state.status == VAULT_STATUS_ACTIVE {
-                    heads.insert(*vault_id, head);
-                }
+    // Each candidate's tokens, from the genesis published for it; then only
+    // the vaults a route can use are ranked by their records.
+    let geneses = futures::future::join_all(
+        unique
+            .iter()
+            .map(|vault_id| published(set, &verifier, vault_id)),
+    )
+    .await;
+    let mut kept: BTreeMap<D32, Estimated> = BTreeMap::new();
+    for (vault_id, genesis) in unique.iter().zip(geneses) {
+        match genesis {
+            Ok(genesis) => {
+                kept.insert(*vault_id, genesis);
             }
-            // A head the reads did not establish may be the best route.
-            Err(unread @ DsmError::Storage { .. }) => {
+            Err(why @ DsmError::Storage { .. }) => {
                 unreached.push(format!(
-                    "{}: {unread}",
+                    "{}: {why}",
                     crate::util::text_id::encode_base32_crockford(&vault_id[..5])
                 ));
                 search = Search::Partial;
             }
-            // A head refused is no vault to trade through.
             Err(..) => {}
         }
     }
-    // Every candidate route over the established heads: each vault of the
-    // input token alone, each chain through a vault of each token, and each
-    // split across two vaults of the pair (Amendment S19).
-    let mut candidates: Vec<Vec<&VaultAtHead>> = Vec::new();
+    let paired = |ids: &[D32]| -> Vec<Paired> {
+        ids.iter()
+            .filter_map(|id| kept.get(id).and_then(Estimated::paired))
+            .collect()
+    };
+    let walked = route_legs(&paired(&firsts), &paired(&seconds), &token_in, &token_out);
+    let mut unique: Vec<D32> = Vec::with_capacity(walked.len());
+    for vault_id in &walked {
+        if kept.contains_key(vault_id) && !unique.contains(vault_id) {
+            unique.push(*vault_id);
+        }
+    }
+    let estimates = futures::future::join_all(
+        unique
+            .iter()
+            .filter_map(|vault_id| kept.remove(vault_id).map(|genesis| estimated(set, genesis))),
+    )
+    .await;
+    let mut unread = |vault_id: &D32, why: &DsmError, search: &mut Search| {
+        unreached.push(format!(
+            "{}: {why}",
+            crate::util::text_id::encode_base32_crockford(&vault_id[..5])
+        ));
+        *search = Search::Partial;
+    };
+    let mut stated: BTreeMap<D32, Estimated> = BTreeMap::new();
+    for (vault_id, estimate) in unique.iter().zip(estimates) {
+        match estimate {
+            Ok(estimate) => {
+                if estimate.state.status == VAULT_STATUS_ACTIVE {
+                    stated.insert(*vault_id, estimate);
+                }
+            }
+            // A vault the reads did not establish may be the best route.
+            Err(why @ DsmError::Storage { .. }) => unread(vault_id, &why, &mut search),
+            // A vault refused is no vault to trade through.
+            Err(..) => {}
+        }
+    }
+    // Every candidate route over the stated vaults: each vault of the input
+    // token alone, each chain through a vault of each token, and each split
+    // across two vaults of the pair (Amendment S19).
+    let mut candidates: Vec<Vec<&Estimated>> = Vec::new();
     // A vault pairing the two tokens is direct whichever index found it (Amendment S16).
-    let mut direct: Vec<&VaultAtHead> = Vec::new();
-    for vault in firsts.iter().chain(&seconds).filter_map(|id| heads.get(id)) {
+    let mut direct: Vec<&Estimated> = Vec::new();
+    for vault in firsts
+        .iter()
+        .chain(&seconds)
+        .filter_map(|id| stated.get(id))
+    {
         if matches!(other_token(&vault.terms, &token_in), Some((t, ..)) if t == token_out)
             && !direct.iter().any(|known| known.vault_id == vault.vault_id)
         {
@@ -1554,14 +1681,14 @@ pub async fn find_route(
             candidates.push(vec![one, two]);
         }
     }
-    for first in firsts.iter().filter_map(|id| heads.get(id)) {
+    for first in firsts.iter().filter_map(|id| stated.get(id)) {
         let Some((middle, ..)) = other_token(&first.terms, &token_in) else {
             continue;
         };
         if middle == token_out {
             continue;
         }
-        for second in seconds.iter().filter_map(|id| heads.get(id)) {
+        for second in seconds.iter().filter_map(|id| stated.get(id)) {
             if second.vault_id != first.vault_id
                 && matches!(other_token(&second.terms, &middle), Some((t, ..)) if t == token_out)
             {
@@ -1569,18 +1696,80 @@ pub async fn find_route(
             }
         }
     }
-    // Every candidate that carries the amount, priced; a candidate that
-    // cannot is not a route, and no route leaves the list empty.
-    let mut priced: Vec<(u64, Vec<Hop>)> = Vec::new();
-    for vaults in candidates {
-        let Ok(planned) = plan(&vaults, token_in, intent.amount_in) else {
+    // Every candidate that carries the amount, priced as its records state
+    // it; a candidate that cannot is not a route.
+    let mut ranked: Vec<(u64, Vec<D32>)> = Vec::new();
+    for vaults in &candidates {
+        let refs: Vec<Priced<'_>> = vaults.iter().map(|vault| vault.priced()).collect();
+        let Ok(planned) = plan(&refs, token_in, intent.amount_in) else {
+            continue;
+        };
+        let (gives, out) = planned_out(&planned)?;
+        if gives == token_out {
+            ranked.push((out, vaults.iter().map(|vault| vault.vault_id).collect()));
+        }
+    }
+    let floor = ranked
+        .iter()
+        .map(|(out, ..)| u128::from(*out) * u128::from(10_000 - ROUTE_TOLERANCE_BPS))
+        .max();
+    let mut heads: BTreeMap<D32, VaultAtHead> = BTreeMap::new();
+    let mut tried: BTreeSet<D32> = BTreeSet::new();
+    let mut hops: Vec<Hop> = Vec::new();
+    // The most a route gave at its heads, where none came within the
+    // tolerance of the ranking: the market moved past every record.
+    let mut most: Option<(u64, Vec<Hop>)> = None;
+    for index in route_order(&ranked, (&standing.genesis, &standing.device_id)) {
+        let ids = &ranked[index].1;
+        // The route's vaults are accepted first: only a genesis bound to its
+        // owner's creation is a vault to walk. One its owner's lineage does
+        // not decide yet may still be a vault, and the search says it is
+        // partial; one refused, or never published, is no vault, whatever
+        // was published under the index for it.
+        let mut needed: Vec<D32> = Vec::new();
+        for vault_id in ids.iter().filter(|id| tried.insert(**id)) {
+            match tokio::task::block_in_place(|| verifier.vault_genesis(vault_id)) {
+                Ok(VaultGenesis::Accepted(..)) => needed.push(*vault_id),
+                Ok(VaultGenesis::OwnerUnresolved(why)) => {
+                    unread(vault_id, &storage("vault genesis", why), &mut search)
+                }
+                Err(VerifierFailure::Read(why)) => {
+                    unread(vault_id, &storage("vault genesis", why), &mut search)
+                }
+                Ok(VaultGenesis::NotPublished | VaultGenesis::Refused(..))
+                | Err(VerifierFailure::Refused(..)) => {}
+            }
+        }
+        for (vault_id, at_head) in needed
+            .iter()
+            .zip(heads_at_once(set, &verifier, &needed).await)
+        {
+            match at_head {
+                Ok((head, ..)) => {
+                    if head.state.status == VAULT_STATUS_ACTIVE {
+                        heads.insert(*vault_id, head);
+                    }
+                }
+                Err(why @ DsmError::Storage { .. }) => unread(vault_id, &why, &mut search),
+                Err(..) => {}
+            }
+        }
+        let Some(at_heads) = ids
+            .iter()
+            .map(|id| heads.get(id))
+            .collect::<Option<Vec<&VaultAtHead>>>()
+        else {
+            continue;
+        };
+        let refs: Vec<Priced<'_>> = at_heads.iter().map(|vault| vault.priced()).collect();
+        let Ok(planned) = plan(&refs, token_in, intent.amount_in) else {
             continue;
         };
         let (gives, out) = planned_out(&planned)?;
         if gives != token_out {
             continue;
         }
-        let hops = vaults
+        let route: Vec<Hop> = at_heads
             .iter()
             .zip(&planned)
             .map(|(vault, p)| Hop {
@@ -1592,16 +1781,19 @@ pub async fn find_route(
                 amount_out: p.amount_out,
             })
             .collect();
-        priced.push((out, hops));
+        if floor.is_some_and(|floor| u128::from(out) * 10_000 >= floor) {
+            hops = route;
+            break;
+        }
+        if most.as_ref().is_none_or(|(given, ..)| out > *given) {
+            most = Some((out, route));
+        }
     }
-    let routes: Vec<(u64, Vec<D32>)> = priced
-        .iter()
-        .map(|(out, hops)| (*out, hops.iter().map(|hop| hop.vault_id).collect()))
-        .collect();
-    let hops = match choose_route(&routes, (&standing.genesis, &standing.device_id)) {
-        Some(chosen) => priced.swap_remove(chosen).1,
-        None => Vec::new(),
-    };
+    if hops.is_empty() {
+        if let Some((_, route)) = most {
+            hops = route;
+        }
+    }
     if !unreached.is_empty() {
         log::info!(
             "[sofi] route search: {} head(s) not established: {}",
@@ -2665,7 +2857,7 @@ async fn check_route(
     for at_head in heads_at_once(set, &verifier, &intent.vault_ids).await {
         vaults.push(at_head?.0);
     }
-    let refs: Vec<&VaultAtHead> = vaults.iter().collect();
+    let refs: Vec<Priced<'_>> = vaults.iter().map(VaultAtHead::priced).collect();
     let (token, amount) = planned_out(&plan(
         &refs,
         intent.token_in_policy_commit,
@@ -2736,7 +2928,7 @@ pub(crate) async fn draft_trade(
     log::info!("[sofi] trade: walked {} vault heads", heads.len());
     // A chain, or a split across two vaults of the pair (Amendment S19),
     // planned again at the heads walked now.
-    let refs: Vec<&VaultAtHead> = heads.iter().collect();
+    let refs: Vec<Priced<'_>> = heads.iter().map(VaultAtHead::priced).collect();
     let planned = plan(&refs, intent.token_in_policy_commit, intent.amount_in)?;
     let (token, amount) = planned_out(&planned)?;
     received(core, intent, &token, amount)?;
@@ -2775,9 +2967,6 @@ pub async fn trade(
     set: &StorageSet,
     intent: &TradeIntent,
 ) -> Result<PositionOutcome, DsmError> {
-    // A wallet backup under way stops: the trade's reads and writes do not
-    // wait behind it (owner ruling 2026-11-24).
-    crate::sdk::wallet_backup_flow::quote_or_trade_starting();
     // This device's earlier trades' proof records are published first (owner
     // ruling 2026-11-22): the trade's own record folds the newest one, and a
     // reader of the vault starts at it.
@@ -3034,7 +3223,11 @@ mod tests {
         for t in 0..20 {
             let (g, d) = trader(t);
             let chosen = |candidates: &[(u64, Vec<[u8; 32]>)]| {
-                candidates[choose_route(candidates, (&g, &d)).expect("a route")].clone()
+                candidates[route_order(candidates, (&g, &d))
+                    .first()
+                    .copied()
+                    .expect("a route")]
+                .clone()
             };
             let reference = chosen(&routes);
             let mut reversed = routes.clone();
@@ -3074,7 +3267,10 @@ mod tests {
         for t in 0..20 {
             let (g, d) = trader(t);
             let spent = |candidates: &[(u64, Vec<[u8; 32]>)]| {
-                let chosen = choose_route(candidates, (&g, &d)).expect("a route");
+                let chosen = route_order(candidates, (&g, &d))
+                    .first()
+                    .copied()
+                    .expect("a route");
                 let mut legs = candidates[chosen].1.clone();
                 legs.sort();
                 legs
@@ -3101,14 +3297,17 @@ mod tests {
         let mut chosen = std::collections::BTreeSet::new();
         for t in 0..60 {
             let (g, d) = trader(t);
-            let pick = choose_route(&routes, (&g, &d)).expect("a route");
+            let pick = route_order(&routes, (&g, &d))
+                .first()
+                .copied()
+                .expect("a route");
             assert_eq!(
                 routes[pick].1.len(),
                 1,
                 "a single vault within the tolerance"
             );
             assert_eq!(
-                choose_route(&routes, (&g, &d)),
+                route_order(&routes, (&g, &d)).first().copied(),
                 Some(pick),
                 "one trader, one route"
             );
@@ -3128,13 +3327,13 @@ mod tests {
         let at_band = best * (10_000 - ROUTE_TOLERANCE_BPS) / 10_000;
         let inside = vec![(at_band, vec![lane(0)]), (best, vec![lane(0), lane(1)])];
         assert_eq!(
-            choose_route(&inside, (&g, &d)),
+            route_order(&inside, (&g, &d)).first().copied(),
             Some(0),
             "inside: fewer legs win"
         );
         let outside = vec![(at_band - 1, vec![lane(0)]), (best, vec![lane(0), lane(1)])];
         assert_eq!(
-            choose_route(&outside, (&g, &d)),
+            route_order(&outside, (&g, &d)).first().copied(),
             Some(1),
             "outside: the split wins"
         );
@@ -3150,10 +3349,10 @@ mod tests {
             (1_000, vec![lane(1)]),
             (1_100, vec![lane(0), lane(1)]),
         ];
-        assert_eq!(choose_route(&big, (&g, &d)), Some(2));
+        assert_eq!(route_order(&big, (&g, &d)).first().copied(), Some(2));
         let poor = vec![(900, vec![lane(0)]), (1_000, vec![lane(1)])];
-        assert_eq!(choose_route(&poor, (&g, &d)), Some(1));
-        assert_eq!(choose_route(&[], (&g, &d)), None);
+        assert_eq!(route_order(&poor, (&g, &d)).first().copied(), Some(1));
+        assert_eq!(route_order(&[], (&g, &d)).first().copied(), None);
     }
 
     /// An ERA vault of an unrelated pair, and a chain whose second leg is

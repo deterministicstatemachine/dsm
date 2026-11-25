@@ -15,6 +15,7 @@ import BluetoothIcon from '../../icons/BluetoothIcon';
 import { getAnchorStatus, type AnchorStatus } from '../../../dsm/anchor';
 import { OfflineFundingPopover } from './OfflineFundingPopover';
 import { AppliancePopover } from './AppliancePopover';
+import { BackupNowButton } from '../../common/BackupNowButton';
 import { applianceConnected, type ApplianceRead } from '../../applianceRead';
 import { useFx } from '../../fx/FxProvider';
 import { fxAmountLabel } from '../../fx/fxEngine';
@@ -426,6 +427,7 @@ function SendTabInner({
             {sendingTx ? 'Sending…' : 'Send'}
           </button>
         </div>
+        <BackupNowButton className="sb-field" />
       </form>
       <ConfirmModal
         visible={showSendConfirm}

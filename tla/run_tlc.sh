@@ -53,7 +53,7 @@ echo "dfid:   $TLC_DFID_DEPTH"
 # Use depth-first iterative deepening by default so local validation does not
 # depend on TLC's Java RMI FPSet path, which is blocked in sandboxed runs.
 # Set DSM_TLC_DFID_DEPTH to tune the bounded check depth for larger configs.
-java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC \
+java -XX:+UseParallelGC -Xss64m -cp "$JAR" tlc2.TLC \
   -dfid "$TLC_DFID_DEPTH" \
   -checkpoint 0 \
   -metadir "$WORKDIR" \

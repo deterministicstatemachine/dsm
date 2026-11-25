@@ -21,6 +21,13 @@ use crate::tla_trace_replay::{
     replay_trace_file, simulation_profile_for_spec, TlaTraceReplayResult,
 };
 
+/// The stack each TLC thread gets. The JVM's default differs by version and
+/// platform, and TLC evaluates recursive operators on that stack: on CI's
+/// Java 21 runner `WriteLock` overflowed it (`StackOverflowError`, release
+/// run 45540646999, 2026-11-25) where a desktop JVM had room. A fixed size
+/// makes every model check the same wherever it runs.
+const TLC_THREAD_STACK: &str = "-Xss64m";
+
 /// Configuration for a single TLA+ model check run.
 /// How many specs `standard_specs()` must register.
 ///
@@ -190,6 +197,7 @@ impl TlaRunner {
         let mut command = tokio::process::Command::new("java");
         command
             .arg("-XX:+UseParallelGC")
+            .arg(TLC_THREAD_STACK)
             .arg("-cp")
             .arg(&self.jar_path)
             .arg("tlc2.TLC");
@@ -245,6 +253,7 @@ impl TlaRunner {
 
         let output = tokio::process::Command::new("java")
             .arg("-XX:+UseParallelGC")
+            .arg(TLC_THREAD_STACK)
             .arg("-cp")
             .arg(&self.jar_path)
             .arg("tlc2.TLC")

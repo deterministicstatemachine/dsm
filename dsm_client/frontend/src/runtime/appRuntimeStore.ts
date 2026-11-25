@@ -16,6 +16,8 @@ export type Skin = 'modern' | 'dgen';
 export type Scheme = 'light' | 'dark';
 /** A switch the user sets: Simple mode, the offline appliance in it, email receipts. */
 export type Switch = 'on' | 'off';
+/** When the wallet backs up: after every transaction, or by hand. */
+export type BackupMode = 'auto' | 'manual';
 
 /** A look as the first-run picker shows it behind its box, before OK keeps it. */
 export type Look = { skin: Skin; scheme: Scheme; simpleMode: Switch };
@@ -35,6 +37,8 @@ type AppRuntimeSnapshot = {
   simpleMode: Switch;
   simpleOffline: Switch;
   receiptsEmail: Switch;
+  /** When the wallet backs up: after every transaction, or by hand from the send screen. */
+  backupMode: BackupMode;
   /** The look the picker is previewing; `null` when no picker is open. */
   lookPreview: Look | null;
   /** Whether this phone's user accepted the current beta agreement (read with the skin preferences). */
@@ -55,6 +59,7 @@ class AppRuntimeStore {
     simpleMode: 'off',
     simpleOffline: 'off',
     receiptsEmail: 'off',
+    backupMode: 'auto',
     lookPreview: null,
     agreement: 'not_accepted',
   };
@@ -138,6 +143,10 @@ class AppRuntimeStore {
 
   setReceiptsEmail = (receiptsEmail: Switch): void => {
     this.setState({ receiptsEmail });
+  };
+
+  setBackupMode = (backupMode: BackupMode): void => {
+    this.setState({ backupMode });
   };
 
   private setState(patch: Partial<AppRuntimeSnapshot>): void {
