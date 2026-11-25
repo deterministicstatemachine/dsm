@@ -2582,8 +2582,17 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         depth: usize,
         until: Option<&D32>,
     ) -> Result<VaultChain, VerifierFailure> {
-        let at_root = until.filter(|root| *root != genesis.genesis_root());
-        let candidates = self.reads.proof_record_candidates(genesis, at_root)?;
+        // A chain asked for until the genesis root is the accepted genesis:
+        // no record proves a step to it, and every record starts above it,
+        // so the chain from the newest record never names it. Started there,
+        // the first leg ever taken from this vault, one leg of a two-hop
+        // exercise, was Unavailable to every reader once the vault had a
+        // newer record, and the other vault's next key stayed held (rig,
+        // 2026-11-24).
+        if until == Some(genesis.genesis_root()) {
+            return Ok(VaultChain::from_genesis(genesis));
+        }
+        let candidates = self.reads.proof_record_candidates(genesis, until)?;
         for bytes in candidates.iter().take(PROOF_RECORDS_TRIED) {
             let head =
                 match super::vault_proof::verify_record(bytes, vault_id, genesis.genesis_root()) {
@@ -2917,13 +2926,32 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             {
                 continue;
             }
+            // The sibling's chain is asked for up to the parent this leg
+            // names. Its chain to the head starts at the newest proof record,
+            // which can stand above that parent once the sibling has moved
+            // on: the leg's parent is then below everything the chain
+            // establishes, and the exercise is never decided. Asked for up to
+            // the parent, the chain starts at the record whose root it is, or
+            // walks from the genesis to it (rig, 2026-11-24: a two-hop
+            // exercise held its vault's next key for good once the other
+            // vault had moved on).
+            //
             // POSITIVE evidence only for the RETRY decision: a sibling chain
             // that names the parent is new information and the walk is worth
             // repeating; one that does not name it changes no answer, so
             // repeating would read the same cells and stall the same way.
             // The chain is handed over either way — the resolver, not this
             // loop, decides what it means.
-            let sibling = self.chain_to_depth(leg.vault_id, depth - 1, None)?;
+            let sibling = self.chain_to_depth(leg.vault_id, depth - 1, Some(&leg.parent_root))?;
+            log::info!(
+                "[sofi chain] sibling vault {} for parent {}: chain from generation {} to {:?}, names it: {}, stopped: {:?}",
+                short_id(&leg.vault_id),
+                short_id(&leg.parent_root),
+                sibling.base(),
+                sibling.head().map(|(generation, root)| (generation, short_id(&root))),
+                sibling.names(&leg.parent_root),
+                sibling.not_complete()
+            );
             learned |= sibling.names(&leg.parent_root);
             chains.insert(leg.vault_id, sibling);
         }
@@ -3369,6 +3397,28 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                                 _ => break chunk,
                             }
                         };
+                        if let WalkOutcome::Unresolved { attempt: stalled } = chunk.outcome {
+                            let on = match chunk.unresolved_reading() {
+                                Some(read) => match read.exercise() {
+                                    Some(held) => {
+                                        let p = &held.precommit().body;
+                                        format!(
+                                            "{:?}, exercised by device {} at its position {}",
+                                            read.fact(),
+                                            short_id(p.device_id()),
+                                            p.position()
+                                        )
+                                    }
+                                    None => format!("{:?}, no exercise", read.fact()),
+                                },
+                                None => "not read".to_string(),
+                            };
+                            log::info!(
+                                "[sofi verifier] vault {} at parent {}: attempt {attempt} waits on attempt {stalled}: {on}",
+                                short_id(&leg.vault_id),
+                                short_id(&leg.parent_root)
+                            );
+                        }
                         let keys_below = usize::try_from(attempt).map_err(|e| {
                             VerifierFailure::Refused(format!("attempt {attempt}: {e}"))
                         })?;

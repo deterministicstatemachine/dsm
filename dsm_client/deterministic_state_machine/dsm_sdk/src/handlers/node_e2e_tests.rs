@@ -8590,6 +8590,91 @@ async fn two_hop_trades_in_a_row_over_one_pair_of_vaults_leave_both_tradable() {
     realized_through(&p.a, "sofi.trade", one_hop(&p.a)).await;
 }
 
+/// A two-hop trade is judged through its other vault's chain at the parent
+/// its leg there names, after that vault has moved on past it (rig,
+/// 2026-11-24). B trades two hops through FIRST into SECOND: the first trade
+/// either vault takes, so the leg in FIRST names FIRST's genesis root. FIRST
+/// alone then moves on, by B's trades and by A's, each proven by a record of
+/// its own, so FIRST's newest record starts well above its genesis. B's
+/// record of SECOND never lands. A then trades on SECOND: its verifier
+/// judges B's trade in full to establish SECOND's first generation, through
+/// FIRST's chain up to FIRST's genesis, drafts against B's post state, and
+/// realizes.
+///
+/// MUTATION CONTROL: with `proven_chain` asking for the newest record where
+/// the chain is asked for until the genesis root, or `establish_siblings`
+/// asking for FIRST's chain to its head (`chain_to_depth(.., None)`), FIRST's
+/// chain never names its genesis: B's first leg is Unavailable, SECOND stays
+/// at its genesis, and a trade drafted on it takes the next key there and is
+/// held (`AttemptLiveness`), as the green board's wallet was on the rig
+/// (position 209, 2026-11-24).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_two_hop_trade_is_judged_after_its_other_vault_moved_on() {
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let mid = create_token(&p.a, "MID", 1_000_000).await;
+    let far = create_token(&p.a, "FAR", 1_000_000).await;
+    let first = create_vault(&p.a, (era, 2_000), (mid, 200_000)).await;
+    let second = create_vault(&p.a, (mid, 100_000), (far, 5_000)).await;
+    adopt(&p.b, &mid).await;
+    adopt(&p.b, &far).await;
+    let on_first = |d: &TestDevice| {
+        args(&generated::SofiTradeRequest {
+            vault_id: first.to_vec(),
+            token_in_policy_commit: era.to_vec(),
+            amount_in_entered: entered(d, &era, 100),
+            min_amount_out_entered: entered(d, &mid, 1),
+            token_out_policy_commit: mid.to_vec(),
+        })
+    };
+    realized_through(
+        &p.b,
+        "sofi.route",
+        args(&generated::SofiRouteRequest {
+            vault_ids: vec![first.to_vec(), second.to_vec()],
+            token_in_policy_commit: era.to_vec(),
+            amount_in_entered: entered(&p.b, &era, 100),
+            min_amount_out_entered: entered(&p.b, &far, 1),
+            token_out_policy_commit: far.to_vec(),
+        }),
+    )
+    .await;
+    for _ in 0..3 {
+        realized_through(&p.b, "sofi.trade", on_first(&p.b)).await;
+        realized_through(&p.a, "sofi.trade", on_first(&p.a)).await;
+    }
+    // FIRST's newest record is published, so a reader's chain of FIRST
+    // starts at it, above FIRST's genesis.
+    crate::sdk::vault_proof_io::settled()
+        .await
+        .expect("every proof the trades started is published");
+
+    // SECOND's record of B's trade never landed: every member loses its
+    // index entries, and this process forgets what it read under them. A
+    // reader then establishes SECOND's first generation by judging B's trade
+    // in full, through FIRST's chain up to FIRST's genesis.
+    p.nodes
+        .erase_indexed(
+            dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_PROOF_GENERATION_LOCATOR.source_bytes(),
+            &dsm::sofi::vault_proof::generation_locator(&second, 1),
+        )
+        .await;
+    crate::sdk::final_reads::forget_everything();
+    realized_through(
+        &p.a,
+        "sofi.trade",
+        args(&generated::SofiTradeRequest {
+            vault_id: second.to_vec(),
+            token_in_policy_commit: mid.to_vec(),
+            amount_in_entered: entered(&p.a, &mid, 100),
+            min_amount_out_entered: entered(&p.a, &far, 1),
+            token_out_policy_commit: far.to_vec(),
+        }),
+    )
+    .await;
+}
+
 /// What one online payment asks of each storage node, by kind: `METHOD /path`
 /// with the path's variable tail left out. The sender's send and the
 /// receiver's sync that takes the payment up, nothing else.
