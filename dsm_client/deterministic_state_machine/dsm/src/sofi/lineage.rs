@@ -874,14 +874,6 @@ impl AcceptedVaultGenesis {
         &self.terms
     }
 
-    /// The market policy `V_0` commits; an escrow vault has none.
-    pub fn market(&self) -> Option<&crate::ccb::state::MarketPolicy> {
-        match &self.terms {
-            GenesisTerms::Market(market) => Some(market),
-            GenesisTerms::Escrow(..) | GenesisTerms::Computed(..) => None,
-        }
-    }
-
     /// The signed escrow terms `V_0` commits; a market vault and a computed
     /// escrow vault have none.
     pub fn escrow(&self) -> Option<&super::wire::EscrowTerms> {
@@ -2730,7 +2722,10 @@ pub(crate) mod genesis_acceptance {
         );
         assert_eq!(accepted.state(), &preimage.state);
         assert_eq!(
-            accepted.market().expect("a market vault").token_a(),
+            match accepted.terms() {
+                GenesisTerms::Market(market) => market.token_a(),
+                other => panic!("a market vault, not {other:?}"),
+            },
             &tokens()[0].0
         );
     }
@@ -3005,7 +3000,10 @@ pub(crate) mod genesis_acceptance {
         );
         let accepted = accept(&c).expect("accepted");
         assert_eq!(accepted.escrow(), Some(&terms));
-        assert_eq!(accepted.market(), None, "an escrow vault has no market");
+        assert!(
+            !matches!(accepted.terms(), GenesisTerms::Market(..)),
+            "an escrow vault has no market"
+        );
         assert_eq!(accepted.state().reserve_a, 2_500);
     }
 
@@ -3128,7 +3126,10 @@ pub(crate) mod genesis_acceptance {
             None,
             "computed terms are not signed terms"
         );
-        assert_eq!(accepted.market(), None, "an escrow vault has no market");
+        assert!(
+            !matches!(accepted.terms(), GenesisTerms::Market(..)),
+            "an escrow vault has no market"
+        );
 
         // The slots naming other bytes, a second reserve and a token that
         // forbids transfer are refused as for signed terms.
