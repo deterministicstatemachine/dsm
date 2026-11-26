@@ -262,6 +262,12 @@ impl TlaRunner {
             .arg("1")
             .arg("-checkpoint")
             .arg("0")
+            // Its own metadata directory: without one TLC names it from the
+            // current second, and two replays started in the same second
+            // collide ("TLC writes its files to a directory whose name is
+            // generated from the current time"), failing the second.
+            .arg("-metadir")
+            .arg(replay_dir.join("meta"))
             .arg("-depth")
             .arg(profile.depth.to_string())
             .arg("-simulate")
