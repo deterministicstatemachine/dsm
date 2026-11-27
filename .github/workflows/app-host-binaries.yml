@@ -192,7 +192,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
 
       - name: Package
         env:
@@ -272,7 +272,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
 
       - name: Install, from the release's own install.sh
         env:
