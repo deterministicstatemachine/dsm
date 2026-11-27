@@ -73,6 +73,14 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  storage-economics:
+    name: Commercial retention accounting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check exact accounting and retained liabilities
+        run: python3 -m unittest discover -s tools/storage_economics -v
+
   # --------------------------------------------------------------------------
   # Layer selection. ci/layers.toml is the dependency map; ci/select_layers.py
   # applies it: FULL trigger → multi-surface mapping → escalation closure,
