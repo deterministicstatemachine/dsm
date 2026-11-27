@@ -33,6 +33,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - '.nvmrc'
       - '.github/workflows/app-host-binaries.yml'
   workflow_dispatch:
   workflow_call:
@@ -59,8 +60,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.read.outputs.version }}
+      node_version: ${{ steps.read.outputs.node_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: ".nvmrc"
 
       - name: Read and agree
         id: read
@@ -68,6 +74,9 @@ jobs:
           ASKED: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          node_version="$(cat .nvmrc)"
+          [[ "$node_version" =~ ^[0-9]+$ ]] || { echo "::error::.nvmrc must name a Node major version"; exit 1; }
+          echo "node_version=$node_version" >> "$GITHUB_OUTPUT"
           host="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/dsm-app-host/Cargo.toml | head -1)"
           ts="$(node -p "require('./clients/typescript/package.json').version")"
           py="$(sed -n 's/^version = "\(.*\)"$/\1/p' clients/python/pyproject.toml | head -1)"
@@ -192,7 +201,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
 
       - name: Package
         env:
@@ -272,7 +281,8 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version: ${{ needs.version.outputs.node_version }}
+          package-manager-cache: false
 
       - name: Install, from the release's own install.sh
         env:

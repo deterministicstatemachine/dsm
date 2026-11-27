@@ -44,16 +44,17 @@ An app you plug into DSM gets its account on the same set (`make app-dev`, [Plug
 macOS:
 
 ```bash
-brew install git protobuf node
+brew install git protobuf node@24
+export PATH="$(brew --prefix node@24)/bin:$PATH"
 brew install --cask temurin@17
 ```
 
-Linux (Ubuntu/Debian; Ubuntu's own `nodejs` package is older than the Node.js 20 this repo needs, so Node comes from NodeSource):
+Linux (Ubuntu/Debian; use Node.js 24 for the repository's development and CI toolchain):
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential git curl protobuf-compiler openjdk-17-jdk python3-venv
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
 
@@ -79,6 +80,9 @@ Windows:
 git clone https://github.com/deterministicstatemachine/dsm.git
 cd dsm
 ```
+
+The repository declares Node.js 24 in `.nvmrc` and requires npm 11 or later.
+If you use nvm, run `nvm install` followed by `nvm use` from the repository root.
 
 ## One-Stop Setup
 

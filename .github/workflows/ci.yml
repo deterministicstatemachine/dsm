@@ -212,7 +212,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
           cache: npm
           cache-dependency-path: dsm_client/frontend/package-lock.json
 
@@ -316,12 +316,12 @@ jobs:
       # workspace in the dev profile.
       - name: Test
         # Cargo writes binary starts to stderr and test results to stdout.
-        # Merge before the runner captures them so evidence keeps their order.
+        # Merge the command group's stderr into tee so saved evidence keeps
+        # the binary starts as well as the test outcomes, in their order.
         run: |
-          exec 2>&1
           set -o pipefail
           { ${{ matrix.run }}
-          } | tee rust-test.log
+          } 2>&1 | tee rust-test.log
 
       # The conformance evidence job reads every test job's log.
       - name: Keep the test log
@@ -418,7 +418,6 @@ jobs:
       # share runs nothing instead.
       - name: Test (library, this shard)
         run: |
-          exec 2>&1
           set -o pipefail
           mapfile -t names < sdk-shard.txt
           if [ "${#names[@]}" -eq 0 ]; then
@@ -426,7 +425,7 @@ jobs:
             : > sdk-shard.log
             exit 0
           fi
-          cargo test --locked -p dsm_sdk --release --lib -- --exact --nocapture --test-threads=1 "${names[@]}" \
+          cargo test --locked -p dsm_sdk --release --lib -- --exact --nocapture --test-threads=1 "${names[@]}" 2>&1 \
             | tee sdk-shard.log
 
       - name: The shard ran exactly the tests it was given
@@ -435,11 +434,10 @@ jobs:
       - name: Test (integration and doc tests)
         if: matrix.shard == 1
         run: |
-          exec 2>&1
           set -o pipefail
           { cargo test --locked -p dsm_sdk --release --test '*' -- --nocapture --test-threads=1
             cargo test --locked -p dsm_sdk --release --doc -- --nocapture --test-threads=1
-          } | tee sdk-integration.log
+          } 2>&1 | tee sdk-integration.log
 
       # The conformance evidence job reads every test job's log.
       - name: Keep the test logs
@@ -612,7 +610,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
 
       - name: Install CI system deps
         run: bash "$GITHUB_WORKSPACE/ci/runner_dns.sh" && sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
@@ -697,7 +695,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
           cache: npm
           cache-dependency-path: dsm_client/frontend/package-lock.json
 
